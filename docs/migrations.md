@@ -15,6 +15,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v2      | Phase 8 prep | `sync_mappings` table added (composite PK only; no UNIQUE on external_id; FK `ON DELETE RESTRICT`).                                                                  |
 | v3      | Phase 8 (v1.8.0) | `sync_mappings` adds `UNIQUE(external_system, external_id)`, `external_url` column, `provider_metadata_json` column, FK flipped to `ON DELETE CASCADE`.        |
 | v4      | Git-backed events Phase A (v1.22.0) | `events.id` CHECK widened to accept hash-chained ids (`E-<12 hex>`); nullable `events.seq` column added (replay-assigned display order in git mode; NULL in local mode).      |
+| v5      | Non-feature task types (T015) | `tasks` adds `task_type TEXT NOT NULL DEFAULT 'feature'` so a brownfield PRD can describe bugfix / refactor / modify work. The DEFAULT backfills every existing row to `feature` (the pre-v5 meaning).      |
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
@@ -70,6 +71,21 @@ $ sqlite3 .fakoli-state/state.db "PRAGMA user_version;"
 4
 ```
 
+## Non-feature task types (T015) — v0–v4 → v5 auto-upgrade
+
+The v5 diff is **purely additive**: `tasks` gains a `task_type` column
+(`ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'feature'`,
+duplicate-column tolerant so a crashed upgrade can re-run). The `DEFAULT
+'feature'` backfills every pre-v5 row to the value that matches its original
+meaning, so no data is rewritten and the loop behaves identically for tasks
+that predate the column. New PRDs can declare `**Type:** bugfix` (or
+`refactor` / `modify`) per task; everything else defaults to `feature`.
+
+```bash
+$ sqlite3 .fakoli-state/state.db "PRAGMA user_version;"
+5
+```
+
 ## Explicit migration: `fakoli-state migrate state`
 
 The auto-upgrade described above runs **silently inside `initialize()`** on the
@@ -78,7 +94,7 @@ and un-backed-up. For operators who want the migration to be deliberate,
 `fakoli-state migrate state` promotes that same in-init migration to an
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the exact ordered, idempotent forward branches
-(`0/1→4`, `2→4`, `3→4`) that already live in
+(`0/1→5`, `2→5`, `3→5`, `4→5`) that already live in
 `SqliteBackend._check_schema_version`.
 
 ```bash

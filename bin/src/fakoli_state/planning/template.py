@@ -42,6 +42,7 @@ Expected PRD structure (must match docs/prd-template.md):
     ### T001: <Title>
     **Feature:** F001
     **Priority:** medium
+    **Type:** feature        (optional; feature|bugfix|refactor|modify)
     **Likely files:** path/to/foo.py
     **Acceptance criteria:**
     - <criterion>
@@ -65,6 +66,7 @@ from fakoli_state.state.models import (
     Task,
     TaskPriority,
     TaskStatus,
+    TaskType,
     Verification,
 )
 
@@ -534,6 +536,7 @@ def _parse_tasks(
         # Parse structured fields and description.
         feature_id: str = ""
         priority: TaskPriority = TaskPriority.medium
+        task_type: TaskType = TaskType.feature
         likely_files: list[str] = []
         acceptance_criteria: list[str] = []
         verification_commands: list[str] = []
@@ -570,6 +573,25 @@ def _parse_tasks(
                                 message=(
                                     f"Task '{task_id}' has unknown priority "
                                     f"'{val}' — defaulting to 'medium'."
+                                ),
+                            )
+                        )
+                elif key == "type":
+                    # T015: non-feature task types. Unknown values fall back
+                    # to 'feature' with a warning rather than aborting the
+                    # parse — same forgiving policy as **Priority:**.
+                    try:
+                        task_type = TaskType(val.lower())
+                    except ValueError:
+                        errors.append(
+                            ParseError(
+                                section="tasks",
+                                line=block_line,
+                                message=(
+                                    f"Task '{task_id}' has unknown type "
+                                    f"'{val}' — defaulting to 'feature'. "
+                                    "Valid types: feature, bugfix, refactor, "
+                                    "modify."
                                 ),
                             )
                         )
@@ -649,6 +671,7 @@ def _parse_tasks(
                 description=description,
                 status=TaskStatus.proposed,
                 priority=priority,
+                task_type=task_type,
                 scores=Score(),
                 acceptance_criteria=acceptance_criteria,
                 verification=Verification(commands=verification_commands),

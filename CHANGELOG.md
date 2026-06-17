@@ -10,6 +10,61 @@ _No unreleased changes._
 
 ---
 
+## [1.34.0] — 2026-06-17
+
+### Added
+
+- **Non-feature task types (bugfix / refactor / modify) through the
+  PRD-to-claims loop (T015/F005).** Tasks are no longer implicitly "features":
+  a new `TaskType` enum (`feature` / `bugfix` / `refactor` / `modify`) flows end
+  to end — `plan` → `score` → `claim` → work-packet → evidence — so a brownfield
+  or maintenance PRD can describe repairs and restructuring as first-class work
+  instead of dressing every item up as net-new capability.
+  - **`**Type:** feature|bugfix|refactor|modify` in the PRD task block.** The
+    template parser reads an optional `**Type:**` field (documented in
+    `docs/prd-template.md`); an unknown value falls back to `feature` with a
+    non-fatal parse warning rather than aborting the parse — the same forgiving
+    policy `**Priority:**` already uses.
+  - **`--type` filter on `list` and `next`.** `fakoli-state list --type bugfix`
+    and `fakoli-state next --type refactor` scope to a single type, pushed down
+    to SQL via a new `task_type` parameter threaded through
+    `Backend.list_tasks` / `SqliteBackend.list_tasks`,
+    `ClaimManager.next_claimable`, and the MCP `list_tasks` tool. The `list`
+    table and `--json` `filters` object both surface the type; omitting the flag
+    keeps the pre-T015 behaviour (all types eligible).
+  - **Score-routed lightweight work-packet variant.** A new pure
+    `is_lightweight(task)` predicate (`context/packets.py`) routes a task whose
+    six-dimension score puts *both* complexity and blast_radius at/below
+    conservative ceilings (`LIGHTWEIGHT_COMPLEXITY_MAX` = 2,
+    `LIGHTWEIGHT_BLAST_RADIUS_MAX` = 2) to a trimmed packet — the update-protocol
+    section collapses to the single submit line, dropping the heartbeat reminder
+    and status-flow walkthrough. Every load-bearing section (goal, acceptance
+    criteria, scope, verification, claim) is byte-for-byte identical in both
+    variants; an unscored or high-blast task always gets the full packet.
+    Routing is by *score*, never by type, so a high-blast `refactor` is treated
+    exactly like a high-blast `feature`. `WorkPacket` gains a `variant`
+    (`"lightweight"` / `"full"`) field, echoed into `json_data["variant"]` for
+    MCP consumers; the thresholds are parameters so T020 can later drive them
+    from config.
+  - **Schema v4 → v5 (auto-upgrade, purely additive).** `tasks` gains
+    `task_type TEXT NOT NULL DEFAULT 'feature'`; the `DEFAULT` backfills every
+    pre-v5 row to `feature` — exactly its original meaning — so no data
+    migration is required. The on-open upgrade path retrofits the column
+    idempotently across every legacy version (`0/1 → 5`, `2 → 5`, `3 → 5`,
+    `4 → 5`) via a new `_ensure_task_type_column` ALTER wrapped in
+    duplicate-column tolerance. `TaskCreatedPayload.task_type` defaults to
+    `feature` so a payload predating the enum (or any minimal hand-rolled
+    caller) deserialises unchanged, preserving the replay byte-equality
+    invariant.
+  - A bugfix PRD item now produces a typed task that claims, executes, and
+    submits evidence end-to-end. Covered by new cases in `tests/test_models.py`
+    (`-k task_type`), `tests/test_template.py`, `tests/test_context.py`,
+    `tests/test_sqlite.py`, `tests/test_mcp.py`, `tests/test_schema_version.py`,
+    and a new `tests/test_task_type_e2e.py`. `docs/cli-reference.md` and
+    `docs/migrations.md` document the `--type` filter and the v5 migration.
+
+---
+
 ## [1.33.1] — 2026-06-17
 
 ### Changed

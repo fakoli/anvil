@@ -14,7 +14,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fakoli_state.context.packets import WorkPacket, render_packet
+from fakoli_state.context.packets import (
+    WorkPacket,
+    is_lightweight,
+    render_packet,
+)
 from fakoli_state.state.models import (
     Claim,
     ClaimStatus,
@@ -26,6 +30,7 @@ from fakoli_state.state.models import (
     Task,
     TaskPriority,
     TaskStatus,
+    TaskType,
     Verification,
 )
 
@@ -45,6 +50,7 @@ def _make_task(
     description: str = "Build the feature end-to-end.",
     status: TaskStatus = TaskStatus.ready,
     priority: TaskPriority = TaskPriority.medium,
+    task_type: TaskType = TaskType.feature,
     acceptance_criteria: list[str] | None = None,
     implementation_notes: list[str] | None = None,
     verification_commands: list[str] | None = None,
@@ -60,6 +66,7 @@ def _make_task(
         description=description,
         status=status,
         priority=priority,
+        task_type=task_type,
         acceptance_criteria=acceptance_criteria or ["Tests pass.", "Docs updated."],
         implementation_notes=implementation_notes or [],
         verification=Verification(
@@ -485,3 +492,103 @@ class TestRenderPacketJSON:
         # Should not raise
         serialised = json.dumps(packet.json_data)
         assert serialised  # non-empty
+
+
+# ---------------------------------------------------------------------------
+# T015 — task_type in the packet + lightweight-variant routing by score
+# ---------------------------------------------------------------------------
+
+
+_LIGHT_SCORE = Score(
+    complexity=1,
+    parallelizability=4,
+    context_load=2,
+    blast_radius=1,
+    review_risk=2,
+    agent_suitability=5,
+)
+_HEAVY_SCORE = Score(
+    complexity=5,
+    parallelizability=2,
+    context_load=4,
+    blast_radius=5,
+    review_risk=5,
+    agent_suitability=1,
+)
+
+
+class TestTaskTypeInPacket:
+    def test_packet_header_shows_task_type(self) -> None:
+        """The work packet markdown renders the task's **Type:** line."""
+        task = _make_task(task_type=TaskType.bugfix)
+        packet = render_packet(task)
+        assert "**Type:** bugfix" in packet.markdown
+
+    def test_packet_json_carries_task_type(self) -> None:
+        """json_data['task']['task_type'] mirrors the model field."""
+        task = _make_task(task_type=TaskType.refactor)
+        packet = render_packet(task)
+        assert packet.json_data["task"]["task_type"] == "refactor"
+
+
+class TestLightweightPacketRouting:
+    def test_is_lightweight_true_for_low_complexity_low_blast(self) -> None:
+        task = _make_task(scores=_LIGHT_SCORE)
+        assert is_lightweight(task) is True
+
+    def test_is_lightweight_false_for_high_blast(self) -> None:
+        task = _make_task(scores=_HEAVY_SCORE)
+        assert is_lightweight(task) is False
+
+    def test_is_lightweight_false_when_unscored(self) -> None:
+        """An unscored task always takes the full packet (never trim blind)."""
+        task = _make_task(scores=Score())
+        assert is_lightweight(task) is False
+
+    def test_low_score_task_renders_lightweight_variant(self) -> None:
+        """A small low-blast task routes to the lightweight packet."""
+        task = _make_task(scores=_LIGHT_SCORE)
+        packet = render_packet(task)
+        assert packet.variant == "lightweight"
+        assert packet.json_data["variant"] == "lightweight"
+        # Lightweight trims the status-flow walkthrough.
+        assert "Status will transition" not in packet.markdown
+        assert "status_flow" not in packet.json_data["update_protocol"]
+        # But the load-bearing submit instruction is always present.
+        assert "fakoli-state submit" in packet.markdown
+
+    def test_high_blast_task_renders_full_variant(self) -> None:
+        """A high-blast task keeps the full packet even at low complexity."""
+        task = _make_task(scores=_HEAVY_SCORE)
+        packet = render_packet(task)
+        assert packet.variant == "full"
+        assert packet.json_data["variant"] == "full"
+        assert "Status will transition" in packet.markdown
+        assert "status_flow" in packet.json_data["update_protocol"]
+
+    def test_high_blast_refactor_is_not_lightweight(self) -> None:
+        """task_type is irrelevant to routing — a high-blast refactor is full."""
+        task = _make_task(task_type=TaskType.refactor, scores=_HEAVY_SCORE)
+        packet = render_packet(task)
+        assert packet.variant == "full"
+
+    def test_lightweight_override_forces_variant(self) -> None:
+        """An explicit lightweight=False keeps a low-score task on the full packet."""
+        task = _make_task(scores=_LIGHT_SCORE)
+        packet = render_packet(task, lightweight=False)
+        assert packet.variant == "full"
+        assert "Status will transition" in packet.markdown
+
+    def test_lightweight_and_full_share_load_bearing_sections(self) -> None:
+        """Both variants always carry goal + acceptance + verification + scope."""
+        light = render_packet(
+            _make_task(scores=_LIGHT_SCORE, likely_files=["src/a.py"])
+        )
+        full = render_packet(
+            _make_task(scores=_HEAVY_SCORE, likely_files=["src/a.py"])
+        )
+        for packet in (light, full):
+            assert "## Goal" in packet.markdown
+            assert "## Acceptance criteria" in packet.markdown
+            assert "## Verification" in packet.markdown
+            assert "## Scope (likely files)" in packet.markdown

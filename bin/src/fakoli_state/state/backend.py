@@ -101,8 +101,9 @@ class Backend(Protocol):
         *,
         status: str | None = None,
         feature_id: str | None = None,
+        task_type: str | None = None,
     ) -> list[Task]:
-        """Return tasks, optionally filtered by status and/or feature."""
+        """Return tasks, optionally filtered by status, feature, task_type."""
         ...
 
     def get_claim(self, claim_id: str) -> Claim | None:

@@ -27,7 +27,29 @@ if TYPE_CHECKING:
         Task,
     )
 
-__all__ = ["WorkPacket", "render_packet"]
+__all__ = [
+    "LIGHTWEIGHT_BLAST_RADIUS_MAX",
+    "LIGHTWEIGHT_COMPLEXITY_MAX",
+    "WorkPacket",
+    "is_lightweight",
+    "render_packet",
+]
+
+
+# ---------------------------------------------------------------------------
+# Lightweight-variant routing (T015) — score → packet shape.
+#
+# A task whose six-dimension score puts it at/below these complexity and
+# blast-radius ceilings is "small": the agent does not need the full
+# update-protocol prose or the status-flow walkthrough to execute it safely.
+# These are deliberately conservative built-in ceilings (a 1-2/5 task); T020
+# ("right-size process by score") layers config-driven thresholds on top of
+# this same predicate. Anything unscored, or above either ceiling, gets the
+# full packet — the safe default.
+# ---------------------------------------------------------------------------
+
+LIGHTWEIGHT_COMPLEXITY_MAX = 2
+LIGHTWEIGHT_BLAST_RADIUS_MAX = 2
 
 
 # ---------------------------------------------------------------------------
@@ -46,11 +68,19 @@ class WorkPacket:
                    or writing to ``.fakoli-state/packets/{task_id}.md``.
         json_data: Structured form returned by the MCP ``get_work_packet``
                    tool in Phase 6.  Keys mirror the markdown sections.
+        variant:   ``"lightweight"`` for small low-blast tasks (see
+                   :func:`is_lightweight`), else ``"full"``. The lightweight
+                   variant trims the multi-line update-protocol prose and the
+                   status-flow walkthrough to a single submit line; every
+                   load-bearing section (goal, acceptance criteria, scope,
+                   verification, claim) is always present. ``variant`` is also
+                   echoed into ``json_data["variant"]`` for MCP consumers.
     """
 
     task_id: str
     markdown: str
     json_data: dict[str, Any]
+    variant: str = "full"
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +102,34 @@ def _bullets(items: list[str], *, none_label: str = "None declared.") -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
+def is_lightweight(
+    task: Task,
+    *,
+    complexity_max: int = LIGHTWEIGHT_COMPLEXITY_MAX,
+    blast_radius_max: int = LIGHTWEIGHT_BLAST_RADIUS_MAX,
+) -> bool:
+    """Return True if *task*'s score routes it to the lightweight packet.
+
+    A task is lightweight when BOTH its complexity and blast_radius scores are
+    populated and at/below the respective ceilings. The conjunction is
+    deliberate: a 1/5-complexity change that nonetheless touches a 5/5
+    blast-radius surface (schema, config, public API) still earns the full
+    packet, and a task that has not been scored at all (either dimension
+    ``None``) always gets the full packet — we never trim context off a task
+    we have not assessed.
+
+    Pure — depends only on ``task.scores``; no I/O, no mutation. ``task_type``
+    is intentionally NOT part of the gate: the routing is by *score*, so a
+    high-blast ``refactor`` is treated exactly like a high-blast ``feature``.
+    The thresholds are parameters so T020 can drive them from config.
+    """
+    complexity = task.scores.complexity
+    blast_radius = task.scores.blast_radius
+    if complexity is None or blast_radius is None:
+        return False
+    return complexity <= complexity_max and blast_radius <= blast_radius_max
+
+
 def _render_markdown(
     task: Task,
     *,
@@ -80,6 +138,7 @@ def _render_markdown(
     dependencies_open: list[Task],
     related_decisions: list[Decision],
     active_claim: Claim | None,
+    lightweight: bool,
 ) -> str:
     """Build the full markdown string from the normalised inputs."""
     lines: list[str] = []
@@ -92,6 +151,7 @@ def _render_markdown(
         lines.append(f"**Feature:** {feature.id} — {feature.title}")
     lines.append(f"**Status:** {task.status.value}")
     lines.append(f"**Priority:** {task.priority.value}")
+    lines.append(f"**Type:** {task.task_type.value}")
     lines.append(
         f"**Agent suitability:** {_score_str(task.scores.agent_suitability)}"
     )
@@ -181,22 +241,33 @@ def _render_markdown(
         lines.append("")
 
     # --- Update protocol ---
+    # The lightweight variant (small, low-blast task) collapses this section to
+    # the one line the agent actually needs — the submit command — and drops
+    # the heartbeat reminder and the status-flow walkthrough. The full variant
+    # keeps all three so a higher-stakes task documents the whole lifecycle.
     lines.append("## Update protocol")
     lines.append("")
-    if active_claim is not None:
+    if lightweight:
         lines.append(
-            f"- Heartbeat your claim every 5 minutes via"
-            f" `fakoli-state renew {active_claim.id}`"
+            f"- On completion, submit evidence via"
+            f" `fakoli-state submit {task.id}"
+            f" --commands ... --files-changed ...`"
         )
-    lines.append(
-        f"- On completion, submit evidence via"
-        f" `fakoli-state submit {task.id}"
-        f" --commands ... --files-changed ...`"
-    )
-    lines.append(
-        "- Status will transition"
-        " `claimed → in_progress → needs_review → accepted → done`"
-    )
+    else:
+        if active_claim is not None:
+            lines.append(
+                f"- Heartbeat your claim every 5 minutes via"
+                f" `fakoli-state renew {active_claim.id}`"
+            )
+        lines.append(
+            f"- On completion, submit evidence via"
+            f" `fakoli-state submit {task.id}"
+            f" --commands ... --files-changed ...`"
+        )
+        lines.append(
+            "- Status will transition"
+            " `claimed → in_progress → needs_review → accepted → done`"
+        )
 
     # Strip any trailing blank line the loop may have accumulated.
     return "\n".join(lines).rstrip() + "\n"
@@ -210,6 +281,7 @@ def _render_json(
     dependencies_open: list[Task],
     related_decisions: list[Decision],
     active_claim: Claim | None,
+    lightweight: bool,
 ) -> dict[str, Any]:
     """Build the structured JSON dict that mirrors the markdown sections."""
     task_data: dict[str, Any] = json.loads(task.model_dump_json())
@@ -229,18 +301,23 @@ def _render_json(
         json.loads(active_claim.model_dump_json()) if active_claim is not None else None
     )
 
+    # The lightweight variant carries only the submit command — the same trim
+    # the markdown renderer applies — so an MCP consumer sees the identical
+    # right-sized protocol. The full variant carries the status flow and (when
+    # claimed) the renew command.
     update_protocol: dict[str, str] = {
         "submit_command": (
             f"fakoli-state submit {task.id} --commands ... --files-changed ..."
         ),
-        "status_flow": (
-            "claimed → in_progress → needs_review → accepted → done"
-        ),
     }
-    if active_claim is not None:
-        update_protocol["renew_command"] = (
-            f"fakoli-state renew {active_claim.id}"
+    if not lightweight:
+        update_protocol["status_flow"] = (
+            "claimed → in_progress → needs_review → accepted → done"
         )
+        if active_claim is not None:
+            update_protocol["renew_command"] = (
+                f"fakoli-state renew {active_claim.id}"
+            )
 
     return {
         "task_id": task.id,
@@ -251,6 +328,7 @@ def _render_json(
         "decisions": decisions_data,
         "active_claim": claim_data,
         "update_protocol": update_protocol,
+        "variant": "lightweight" if lightweight else "full",
     }
 
 
@@ -267,6 +345,7 @@ def render_packet(
     dependencies_open: list[Task] | None = None,
     related_decisions: list[Decision] | None = None,
     active_claim: Claim | None = None,
+    lightweight: bool | None = None,
 ) -> WorkPacket:
     """Render a Task plus its surrounding context into a WorkPacket.
 
@@ -293,14 +372,26 @@ def render_packet(
             If present, the packet documents the claim's lease and branch so
             the agent knows the boundary it is working within, and the update
             protocol section includes the exact ``renew`` command.
+        lightweight:
+            Force the lightweight / full variant. ``None`` (the default) lets
+            the renderer decide from the task's score via :func:`is_lightweight`
+            — a small, low-blast task gets a trimmed update protocol. Pass a
+            bool to override (e.g. a config-driven caller in T020). The header,
+            goal, acceptance criteria, scope, decisions, verification, and
+            claim sections are identical in both variants — only the update
+            protocol prose is right-sized.
 
     Returns:
-        A :class:`WorkPacket` with both ``markdown`` (human/Claude-paste form)
-        and ``json_data`` (structured form for the MCP layer).
+        A :class:`WorkPacket` with ``markdown`` (human/Claude-paste form),
+        ``json_data`` (structured form for the MCP layer), and ``variant``
+        (``"lightweight"`` or ``"full"``).
     """
     resolved_deps_completed: list[Task] = dependencies_completed or []
     resolved_deps_open: list[Task] = dependencies_open or []
     resolved_decisions: list[Decision] = related_decisions or []
+    resolved_lightweight: bool = (
+        is_lightweight(task) if lightweight is None else lightweight
+    )
 
     markdown = _render_markdown(
         task,
@@ -309,6 +400,7 @@ def render_packet(
         dependencies_open=resolved_deps_open,
         related_decisions=resolved_decisions,
         active_claim=active_claim,
+        lightweight=resolved_lightweight,
     )
     json_data = _render_json(
         task,
@@ -317,10 +409,12 @@ def render_packet(
         dependencies_open=resolved_deps_open,
         related_decisions=resolved_decisions,
         active_claim=active_claim,
+        lightweight=resolved_lightweight,
     )
 
     return WorkPacket(
         task_id=task.id,
         markdown=markdown,
         json_data=json_data,
+        variant="lightweight" if resolved_lightweight else "full",
     )

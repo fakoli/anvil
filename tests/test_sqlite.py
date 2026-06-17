@@ -1098,12 +1098,13 @@ def _make_task_payload(
     description: str = "A test task.",
     status: str = "proposed",
     priority: str = "medium",
+    task_type: str | None = None,
     acceptance_criteria: list[str] | None = None,
     verification_commands: list[str] | None = None,
     likely_files: list[str] | None = None,
     now: datetime = _T0,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": task_id,
         "feature_id": feature_id,
         "title": title,
@@ -1125,6 +1126,89 @@ def _make_task_payload(
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }
+    # Only set task_type when explicitly requested so the default-omitted path
+    # (a payload that predates the field) is also exercised by callers.
+    if task_type is not None:
+        payload["task_type"] = task_type
+    return payload
+
+
+class TestTaskTypePersistence:
+    """T015: task_type flows through task.created → SQLite → list filter."""
+
+    def test_non_feature_task_type_persists_through_event_pipeline(
+        self, tmp_path: Path
+    ) -> None:
+        """A task.created with task_type=bugfix round-trips to the Task model."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            b.append(_make_event(
+                "feature.created", _make_feature_payload(feat_id="F001"),
+                event_id="E000010", target_kind="feature", target_id="F001",
+            ))
+            b.append(_make_event(
+                "task.created",
+                _make_task_payload(task_id="T001", task_type="bugfix"),
+                event_id="E000011", target_kind="task", target_id="T001",
+            ))
+            task = b.get_task("T001")
+            assert task is not None
+            assert task.task_type.value == "bugfix"
+        finally:
+            b.close()
+
+    def test_task_type_omitted_payload_defaults_to_feature(
+        self, tmp_path: Path
+    ) -> None:
+        """A task.created payload with NO task_type key persists as 'feature'."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            b.append(_make_event(
+                "feature.created", _make_feature_payload(feat_id="F001"),
+                event_id="E000010", target_kind="feature", target_id="F001",
+            ))
+            payload = _make_task_payload(task_id="T001")
+            assert "task_type" not in payload  # truly absent
+            b.append(_make_event(
+                "task.created", payload,
+                event_id="E000011", target_kind="task", target_id="T001",
+            ))
+            task = b.get_task("T001")
+            assert task is not None
+            assert task.task_type.value == "feature"
+        finally:
+            b.close()
+
+    def test_list_tasks_filter_by_task_type(self, tmp_path: Path) -> None:
+        """list_tasks(task_type=...) scopes the result to that kind."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            b.append(_make_event(
+                "feature.created", _make_feature_payload(feat_id="F001"),
+                event_id="E000010", target_kind="feature", target_id="F001",
+            ))
+            for tid, ttype, ev in [
+                ("T001", "feature", "E000011"),
+                ("T002", "bugfix", "E000012"),
+                ("T003", "refactor", "E000013"),
+            ]:
+                b.append(_make_event(
+                    "task.created",
+                    _make_task_payload(task_id=tid, task_type=ttype),
+                    event_id=ev, target_kind="task", target_id=tid,
+                ))
+
+            bugfixes = b.list_tasks(task_type="bugfix")
+            assert [t.id for t in bugfixes] == ["T002"]
+            refactors = b.list_tasks(task_type="refactor")
+            assert [t.id for t in refactors] == ["T003"]
+            # No filter → all three.
+            assert len(b.list_tasks()) == 3
+        finally:
+            b.close()
 
 
 class TestErrorPaths:
@@ -4998,16 +5082,17 @@ class TestSyncMappingHandler:
 
 
 class TestSchemaVersionPhase8:
-    """The bump from SCHEMA_VERSION=1 → 2 → 3 signals Phase 8; 4 is v1.22.0.
+    """The bump from SCHEMA_VERSION=1 → 2 → 3 signals Phase 8; 4 is v1.22.0;
+    5 is T015 (non-feature task types — tasks.task_type column).
 
-    v4 is the shipping git-backed-events Phase A schema (nullable events.seq
-    column + widened events.id CHECK); v0/v1/v2/v3 are auto-upgraded on first
-    open (see TestSchemaAutoUpgrade below and docs/migrations.md).
+    v5 adds ``tasks.task_type TEXT NOT NULL DEFAULT 'feature'`` on top of the
+    v4 git-backed-events Phase A schema; v0/v1/v2/v3/v4 are auto-upgraded on
+    first open (see TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_four(self) -> None:
-        """The v1.22.0 git-backed-events ship floor is SCHEMA_VERSION == 4."""
-        assert SCHEMA_VERSION == 4
+    def test_schema_version_is_five(self) -> None:
+        """The T015 non-feature-task-types ship floor is SCHEMA_VERSION == 5."""
+        assert SCHEMA_VERSION == 5
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -5029,7 +5114,7 @@ class TestSchemaVersionPhase8:
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 4
+            assert v == 5
         finally:
             b.close()
 
@@ -5278,27 +5363,28 @@ class TestGetSyncMappingExternalSystemKwarg:
 
 
 class TestSchemaAutoUpgrade:
-    """SF-6: v0 / v1 / v2 / v3 → v4 auto-upgrade on initialize().
+    """SF-6: v0 / v1 / v2 / v3 / v4 → v5 auto-upgrade on initialize().
 
     Pre-Phase-8 dbs are upgraded purely additively — the new sync_mappings
     columns are nullable and the new UNIQUE cannot be violated by any
     pre-existing row. The v4 step (v1.22.0 git-backed events) adds only the
-    nullable events.seq column.
+    nullable events.seq column; the v5 step (T015) adds only the
+    DEFAULT-backfilled tasks.task_type column.
     """
 
-    def test_fresh_init_yields_v4(self, tmp_path: Path) -> None:
-        """A brand-new initialize() lands on v4 directly (no upgrade fired)."""
+    def test_fresh_init_yields_v5(self, tmp_path: Path) -> None:
+        """A brand-new initialize() lands on v5 directly (no upgrade fired)."""
         b = _make_backend(tmp_path)
         try:
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 4
+            assert v == 5
         finally:
             b.close()
 
-    def test_v1_db_auto_upgrades_to_v4(self, tmp_path: Path) -> None:
-        """A db marked user_version=1 (no sync_mappings rows) upgrades to v4."""
+    def test_v1_db_auto_upgrades_to_v5(self, tmp_path: Path) -> None:
+        """A db marked user_version=1 (no sync_mappings rows) upgrades to v5."""
         db_path = str(tmp_path / "state.db")
         events_path = str(tmp_path / "events.jsonl")
         Path(events_path).touch()
@@ -5312,7 +5398,7 @@ class TestSchemaAutoUpgrade:
         conn.execute("PRAGMA user_version = 1")
         conn.commit()
         conn.close()
-        # Step 3: reopen — auto-upgrade must fire and bump back to 4.
+        # Step 3: reopen — auto-upgrade must fire and bump back to 5.
         clock2 = _make_clock()
         b2 = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock2)
         b2.initialize()
@@ -5320,12 +5406,12 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(db_path)
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 4
+            assert v == 5
         finally:
             b2.close()
 
-    def test_v2_db_auto_upgrades_to_v4(self, tmp_path: Path) -> None:
-        """A db marked user_version=2 upgrades to v4 without losing data."""
+    def test_v2_db_auto_upgrades_to_v5(self, tmp_path: Path) -> None:
+        """A db marked user_version=2 upgrades to v5 without losing data."""
         db_path = str(tmp_path / "state.db")
         events_path = str(tmp_path / "events.jsonl")
         Path(events_path).touch()
@@ -5348,14 +5434,14 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(db_path)
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 4
+            assert v == 5
             proj = b2.get_project()
             assert proj is not None
             assert proj.id == "proj-1"
         finally:
             b2.close()
 
-    def test_v3_db_auto_upgrades_to_v4_adding_seq_column(
+    def test_v3_db_auto_upgrades_to_v5_adding_seq_column(
         self, tmp_path: Path
     ) -> None:
         """A db marked user_version=3 gains the nullable events.seq column.
@@ -5372,14 +5458,15 @@ class TestSchemaAutoUpgrade:
         b.initialize()
         b.append(_make_project_event(event_id="E000001"))
         b.close()
-        # Forge to v3 AND drop the seq column to simulate a real v3 table
-        # (the fresh DDL above already created the v4 shape).
+        # Forge to v3 AND drop the seq + task_type columns to simulate a real
+        # v3 table (the fresh DDL above already created the v5 shape).
         conn = sqlite3.connect(db_path)
         conn.execute("ALTER TABLE events DROP COLUMN seq")
+        conn.execute("ALTER TABLE tasks DROP COLUMN task_type")
         conn.execute("PRAGMA user_version = 3")
         conn.commit()
         conn.close()
-        # Reopen — the v3→v4 branch must re-add seq and bump.
+        # Reopen — the v3→v5 branch must re-add seq + task_type and bump.
         clock2 = _make_clock()
         b2 = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock2)
         b2.initialize()
@@ -5389,10 +5476,66 @@ class TestSchemaAutoUpgrade:
             row = conn.execute(
                 "SELECT seq FROM events WHERE id = 'E000001'"
             ).fetchone()
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
             conn.close()
-            assert v == 4
+            assert v == 5
             assert row is not None
             assert row[0] is None, "pre-v4 event rows must keep seq NULL"
+            assert "task_type" in cols, "v5 must add tasks.task_type"
+        finally:
+            b2.close()
+
+    def test_v4_db_auto_upgrades_to_v5_adding_task_type_column(
+        self, tmp_path: Path
+    ) -> None:
+        """A db marked user_version=4 gains tasks.task_type, backfilled to feature.
+
+        v4 (v1.22.0) is the immediate predecessor of v5 (T015). The DEFAULT
+        'feature' backfills every existing task row to its pre-v5 meaning, so
+        the upgrade is purely additive and loses no data.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        Path(events_path).touch()
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()
+        b.append(_make_project_event(event_id="E000001"))
+        b.close()
+        # Forge to v4 AND drop the task_type column to simulate a real v4 table
+        # (the fresh DDL above already created the v5 shape). Seed a task row
+        # the old way so we can confirm the DEFAULT backfill.
+        conn = sqlite3.connect(db_path)
+        conn.execute("ALTER TABLE tasks DROP COLUMN task_type")
+        conn.execute(
+            "INSERT INTO features (id, title, description) "
+            "VALUES ('F001', 'F', 'd')"
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, feature_id, title, description, "
+            "created_at, updated_at) "
+            "VALUES ('T001', 'F001', 'T', 'd', '2026-01-01T00:00:00+00:00', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        conn.execute("PRAGMA user_version = 4")
+        conn.commit()
+        conn.close()
+        # Reopen — the v4→v5 branch must add task_type and bump.
+        clock2 = _make_clock()
+        b2 = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock2)
+        b2.initialize()
+        try:
+            conn = sqlite3.connect(db_path)
+            v = conn.execute("PRAGMA user_version").fetchone()[0]
+            tt = conn.execute(
+                "SELECT task_type FROM tasks WHERE id = 'T001'"
+            ).fetchone()
+            conn.close()
+            assert v == 5
+            assert tt is not None
+            assert tt[0] == "feature", "pre-v5 rows backfill to 'feature'"
         finally:
             b2.close()
 
@@ -5426,7 +5569,7 @@ class TestSchemaAutoUpgrade:
             b._conn.execute("PRAGMA user_version = 1")  # noqa: SLF001
             b.initialize()  # takes early-return; _check_schema_version sees v1
             v = b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
-            assert v == 4
+            assert v == 5
         finally:
             b.close()
 
@@ -6293,9 +6436,9 @@ class TestV2ToV3MigrationAppliesColumnAdditions:
             # Default values for previously-absent columns: NULL.
             assert row[0] is None
             assert row[1] is None
-            # user_version is now the current SCHEMA_VERSION (4).
+            # user_version is now the current SCHEMA_VERSION (5).
             v = b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
-            assert v == 4
+            assert v == 5
         finally:
             b.close()
 

@@ -38,6 +38,7 @@ __all__ = [
     "FeatureStatus",
     "TaskStatus",
     "TaskPriority",
+    "TaskType",
     "ClaimType",
     "ClaimStatus",
     "ReviewTargetKind",
@@ -122,6 +123,33 @@ class TaskPriority(enum.StrEnum):
     medium = "medium"
     high = "high"
     critical = "critical"
+
+
+class TaskType(enum.StrEnum):
+    """What kind of change a task represents.
+
+    The default ``feature`` preserves backward compatibility — every task
+    created before this enum existed deserialises as ``feature`` (the column
+    default and the model default both point at it), so the loop behaves
+    exactly as it did before for greenfield feature work.
+
+    The non-feature kinds let a brownfield / maintenance PRD describe work that
+    is not net-new capability:
+
+    - ``bugfix``  — repair incorrect behaviour in existing code.
+    - ``refactor`` — restructure without changing observable behaviour.
+    - ``modify``  — change existing behaviour (tweak, extend, re-tune).
+
+    The kind flows through plan → score → claim → work-packet → evidence. It is
+    advisory: a small ``modify`` is allowed to ride the lightweight work-packet
+    variant (see :func:`fakoli_state.context.packets.is_lightweight`), while a
+    high-blast-radius ``refactor`` still gets the full packet.
+    """
+
+    feature = "feature"
+    bugfix = "bugfix"
+    refactor = "refactor"
+    modify = "modify"
 
 
 class ClaimType(enum.StrEnum):
@@ -326,6 +354,10 @@ class Task(BaseModel):
     description: str
     status: TaskStatus = TaskStatus.proposed
     priority: TaskPriority = TaskPriority.medium
+    # task_type defaults to ``feature`` so every pre-existing task (and any
+    # caller that omits it) keeps its original meaning — full backward
+    # compatibility. See :class:`TaskType`.
+    task_type: TaskType = TaskType.feature
     dependencies: list[TaskID] = Field(default_factory=list)
     conflict_groups: list[str] = Field(default_factory=list)
     scores: Score = Field(default_factory=Score)

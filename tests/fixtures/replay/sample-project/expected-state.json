@@ -145,6 +145,7 @@
         "review_risk": null
       },
       "status": "done",
+      "task_type": "feature",
       "title": "Task T001",
       "updated_at": "2026-05-24T18:30:00Z",
       "verification": {
@@ -175,6 +176,7 @@
         "review_risk": null
       },
       "status": "ready",
+      "task_type": "feature",
       "title": "Task T002",
       "updated_at": "2026-05-24T20:35:00Z",
       "verification": {
@@ -205,6 +207,7 @@
         "review_risk": null
       },
       "status": "ready",
+      "task_type": "feature",
       "title": "Task T003",
       "updated_at": "2026-05-24T18:00:00Z",
       "verification": {

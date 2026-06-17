@@ -1,6 +1,6 @@
 """schema_version exposure tests (T007/B11).
 
-The existing SCHEMA_VERSION (=4) is surfaced to tooling through:
+The existing SCHEMA_VERSION (=5) is surfaced to tooling through:
 - a public accessor ``schema.get_schema_version()``;
 - a backend accessor ``SqliteBackend.get_schema_version()`` (the DB's stamped
   ``PRAGMA user_version``);
@@ -41,9 +41,9 @@ def _init(tmp_path: Path) -> None:
 
 
 def test_get_schema_version_matches_constant() -> None:
-    """The public accessor returns the SCHEMA_VERSION constant (==4)."""
+    """The public accessor returns the SCHEMA_VERSION constant (==5)."""
     assert get_schema_version() == SCHEMA_VERSION
-    assert get_schema_version() == 4
+    assert get_schema_version() == 5
 
 
 def test_backend_get_schema_version_matches_constant(tmp_path: Path) -> None:

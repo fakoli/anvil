@@ -40,6 +40,7 @@ from fakoli_state.state.models import (
     Task,
     TaskPriority,
     TaskStatus,
+    TaskType,
     Verification,
 )
 
@@ -274,6 +275,55 @@ class TestTaskDefaults:
         """Task.priority defaults to 'medium'."""
         task = _make_task()
         assert task.priority == TaskPriority.medium
+
+    def test_task_default_task_type_feature(self) -> None:
+        """Task.task_type defaults to 'feature' for backward compatibility."""
+        task = _make_task()
+        assert task.task_type == TaskType.feature
+
+
+# ---------------------------------------------------------------------------
+# TaskType enum (T015 — non-feature task types)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskTypeEnum:
+    def test_task_type_enum_values(self) -> None:
+        """TaskType has exactly feature / bugfix / refactor / modify."""
+        assert {t.value for t in TaskType} == {
+            "feature",
+            "bugfix",
+            "refactor",
+            "modify",
+        }
+
+    def test_task_type_is_str(self) -> None:
+        """TaskType values are plain strings (StrEnum)."""
+        assert isinstance(TaskType.bugfix, str)
+        assert TaskType.bugfix == "bugfix"
+
+    def test_task_type_accepts_non_feature_kinds(self) -> None:
+        """A Task can be constructed with each non-feature task_type."""
+        for kind in (TaskType.bugfix, TaskType.refactor, TaskType.modify):
+            task = _make_task(task_type=kind)
+            assert task.task_type == kind
+
+    def test_task_type_round_trip_preserves_kind(self) -> None:
+        """task_type survives a model_dump → model_validate round trip."""
+        original = _make_task(task_type=TaskType.refactor)
+        restored = Task.model_validate(original.model_dump(mode="json"))
+        assert restored.task_type == TaskType.refactor
+        assert restored == original
+
+    def test_task_type_rejects_unknown_value(self) -> None:
+        """An unknown task_type string is a ValidationError (extra='forbid' enum)."""
+        with pytest.raises(ValidationError):
+            _make_task(task_type="chore")
+
+    def test_task_type_default_serializes_to_feature(self) -> None:
+        """A task built without task_type serialises the 'feature' default."""
+        dumped = _make_task().model_dump(mode="json")
+        assert dumped["task_type"] == "feature"
 
 
 # ---------------------------------------------------------------------------

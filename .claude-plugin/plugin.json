@@ -1,6 +1,6 @@
 {
   "name": "fakoli-state",
-  "version": "1.33.1",
+  "version": "1.34.0",
   "description": "Local-first, runtime-neutral project state for humans and AI coding agents — turn PRDs into lockable, evidence-backed work packets.",
   "author": {
     "name": "Sekou Doumbouya",

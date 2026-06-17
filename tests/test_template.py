@@ -514,6 +514,117 @@ Implement the main logic.
         assert len(task.acceptance_criteria) == 2
         assert len(task.verification.commands) == 2
 
+    def test_task_type_field_parsed(self) -> None:
+        """### T001 with **Type:** bugfix sets task_type=bugfix (T015)."""
+        prd = """\
+# Project: Type Parse Test
+
+## Summary
+
+Tests task_type parsing.
+
+## Goals
+
+- Fix bugs.
+
+## Requirements
+
+- R001: Requirement.
+
+## Features
+
+### F001: Feature One
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Fix the off-by-one
+
+**Feature:** F001
+**Type:** bugfix
+
+Repair the boundary check.
+"""
+        result = parse_prd(prd)
+        assert not result.errors, f"Unexpected errors: {result.errors}"
+        assert result.tasks[0].task_type.value == "bugfix"
+
+    def test_task_type_default_feature(self) -> None:
+        """Task without **Type:** defaults to feature (backward compat)."""
+        prd = """\
+# Project: Type Default
+
+## Summary
+
+Tests default task_type.
+
+## Goals
+
+- Build features.
+
+## Requirements
+
+- R001: Requirement.
+
+## Features
+
+### F001: Feature One
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Build a thing
+
+**Feature:** F001
+
+A task with no explicit type.
+"""
+        result = parse_prd(prd)
+        assert not result.errors, f"Unexpected errors: {result.errors}"
+        assert result.tasks[0].task_type.value == "feature"
+
+    def test_task_type_unknown_value_warns_and_defaults(self) -> None:
+        """An unknown **Type:** emits a ParseError and falls back to feature."""
+        prd = """\
+# Project: Type Unknown
+
+## Summary
+
+Tests unknown task_type.
+
+## Goals
+
+- Do work.
+
+## Requirements
+
+- R001: Requirement.
+
+## Features
+
+### F001: Feature One
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Mystery task
+
+**Feature:** F001
+**Type:** chore
+
+An unknown type.
+"""
+        result = parse_prd(prd)
+        # Non-fatal: the task is still produced, defaulted to feature, and a
+        # warning is recorded (parse_prd never raises).
+        assert result.tasks[0].task_type.value == "feature"
+        assert any(
+            "unknown type" in e.message.lower() for e in result.errors
+        ), f"expected an unknown-type warning, got {result.errors}"
+
     def test_task_priority_default_medium(self) -> None:
         """Task without **Priority:** defaults to medium."""
         prd = """\

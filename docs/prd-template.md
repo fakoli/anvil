@@ -378,6 +378,7 @@ IDs must be zero-padded to three digits: `T001`, `T002`, etc. Subtask IDs (`T001
 |---|---|---|
 | `**Feature:**` | `F001` (bare ID) | empty |
 | `**Priority:**` | `low`, `medium`, `high`, or `critical` | `medium` |
+| `**Type:**` | `feature`, `bugfix`, `refactor`, or `modify` | `feature` |
 | `**Likely files:**` | comma-separated relative paths | empty list |
 | `**Dependencies:**` | comma-separated TaskIDs (e.g. `T001, T002`) | empty list |
 | `**Acceptance criteria:**` | bulleted list on subsequent lines | empty list |

@@ -818,8 +818,14 @@ class SqliteBackend:
         *,
         status: str | None = None,
         feature_id: str | None = None,
+        task_type: str | None = None,
     ) -> list[Task]:
-        """Return tasks, optionally filtered by status and/or feature_id."""
+        """Return tasks, optionally filtered by status, feature_id, task_type.
+
+        ``task_type`` (T015) pushes a ``task_type = ?`` clause to SQL so the
+        ready queue / list surfaces can scope to feature / bugfix / refactor /
+        modify work. Omitting it keeps the pre-T015 behaviour (all types).
+        """
         conn = self._require_conn()
         clauses: list[str] = []
         params: list[str] = []
@@ -829,6 +835,9 @@ class SqliteBackend:
         if feature_id is not None:
             clauses.append("feature_id = ?")
             params.append(feature_id)
+        if task_type is not None:
+            clauses.append("task_type = ?")
+            params.append(task_type)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(f"SELECT * FROM tasks {where}", params).fetchall()
         return [self._row_to_task(row, conn) for row in rows]
@@ -1165,26 +1174,31 @@ class SqliteBackend:
         """Raise SchemaMismatch if on-disk version is incompatible with SCHEMA_VERSION.
 
         Auto-upgrade behaviour (Phase 8 SF-6, refined by P1-3; v4 added in
-        v1.22.0 for git-backed events Phase A):
+        v1.22.0 for git-backed events Phase A; v5 added by T015 for
+        non-feature task types):
 
-        - ``v0 / v1 → v4``: ``sync_mappings`` never existed pre-v2, so the
+        - ``v0 / v1 → v5``: ``sync_mappings`` never existed pre-v2, so the
           IF NOT EXISTS DDL created the current-shaped table from scratch;
-          only the v4 ``events.seq`` column must be retrofitted onto the
-          pre-existing ``events`` table.
-        - ``v2 → v4``: NOT purely additive. The v2 db has a real
+          only the v4 ``events.seq`` and v5 ``tasks.task_type`` columns must
+          be retrofitted onto the pre-existing tables.
+        - ``v2 → v5``: NOT purely additive. The v2 db has a real
           ``sync_mappings`` table that ``CREATE TABLE IF NOT EXISTS``
           cannot retroactively modify — we must explicitly ALTER it to
           add ``external_url``, ``provider_metadata_json``, and the v3
           UNIQUE(external_system, external_id) index. Pre-fix this branch
           was a no-op stamp; queries against the new columns raised
           ``OperationalError`` until the v3 ALTERs landed. The v4
-          ``events.seq`` ALTER rides along.
-        - ``v3 → v4``: purely additive for local mode — ``events`` gains the
-          nullable ``seq`` display-order column. The legacy table's strict
-          id CHECK (``E[0-9]*``) is deliberately left in place: SQLite
+          ``events.seq`` and v5 ``tasks.task_type`` ALTERs ride along.
+        - ``v3 → v5``: retrofit the nullable ``events.seq`` (v4) and
+          ``tasks.task_type`` (v5) columns. The legacy table's strict
+          events id CHECK (``E[0-9]*``) is deliberately left in place: SQLite
           cannot ALTER a CHECK, local mode never writes a hash id, and the
           git-mode entry path (``migrate-events`` → projection rebuild)
-          recreates the table from the v4 DDL with the widened CHECK.
+          recreates the table from the current DDL with the widened CHECK.
+        - ``v4 → v5``: purely additive — ``tasks`` gains
+          ``task_type TEXT NOT NULL DEFAULT 'feature'``. The DEFAULT
+          backfills every existing row to ``'feature'`` (the pre-v5
+          meaning), so no data migration is required.
 
         ``pre_ddl_version`` carries the user_version that was on disk
         BEFORE ``_apply_ddl`` re-stamped it. Required for every upgrade
@@ -1192,7 +1206,7 @@ class SqliteBackend:
         equal to SCHEMA_VERSION) and the migration branches would never
         fire.
 
-        Future gaps (e.g. a v4 db opened by code that expects v5) still
+        Future gaps (e.g. a v5 db opened by code that expects v6) still
         raise. See docs/migrations.md.
         """
         conn = self._require_conn()
@@ -1206,15 +1220,16 @@ class SqliteBackend:
             on_disk = row[0] if row else 0
         if on_disk == SCHEMA_VERSION:
             return
-        if on_disk in (0, 1) and SCHEMA_VERSION == 4:
-            # v0/v1 → v4: no sync_mappings existed pre-v2, so the DDL above
+        if on_disk in (0, 1) and SCHEMA_VERSION == 5:
+            # v0/v1 → v5: no sync_mappings existed pre-v2, so the DDL above
             # created the current-shaped table directly. Retrofit events.seq
-            # and bump.
+            # (v4) and tasks.task_type (v5), then bump.
             self._ensure_events_seq_column(conn)
+            self._ensure_task_type_column(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             return
-        if on_disk == 2 and SCHEMA_VERSION == 4:
-            # v2 → v4: add the three v3 sync_mappings additions that the
+        if on_disk == 2 and SCHEMA_VERSION == 5:
+            # v2 → v5: add the three v3 sync_mappings additions that the
             # IF NOT EXISTS DDL cannot retroactively apply to the v2 table.
             # Each ALTER is wrapped because re-running the migration (e.g.
             # crash-recovery) must remain idempotent — a "duplicate column"
@@ -1244,13 +1259,23 @@ class SqliteBackend:
                 "ON sync_mappings (external_system, external_id)"
             )
             self._ensure_events_seq_column(conn)
+            self._ensure_task_type_column(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             return
-        if on_disk == 3 and SCHEMA_VERSION == 4:
-            # v3 → v4 (v1.22.0 git-backed events): retrofit the nullable
-            # events.seq column and bump. See the docstring for why the
-            # legacy strict id CHECK stays.
+        if on_disk == 3 and SCHEMA_VERSION == 5:
+            # v3 → v5: retrofit the nullable events.seq column (v4) and the
+            # tasks.task_type column (v5), then bump. See the docstring for
+            # why the legacy strict events id CHECK stays.
             self._ensure_events_seq_column(conn)
+            self._ensure_task_type_column(conn)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            return
+        if on_disk == 4 and SCHEMA_VERSION == 5:
+            # v4 → v5 (T015 non-feature task types): purely additive —
+            # tasks gains task_type TEXT NOT NULL DEFAULT 'feature'. The
+            # DEFAULT backfills every existing row to 'feature', which is
+            # exactly the pre-v5 meaning, so no data migration is needed.
+            self._ensure_task_type_column(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             return
         raise SchemaMismatch(
@@ -1268,6 +1293,25 @@ class SqliteBackend:
         """
         try:
             conn.execute("ALTER TABLE events ADD COLUMN seq INTEGER")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+    @staticmethod
+    def _ensure_task_type_column(conn: sqlite3.Connection) -> None:
+        """ALTER tasks ADD COLUMN task_type if it is missing (v5, idempotent).
+
+        The DEFAULT 'feature' backfills every pre-v5 row to the value that
+        matches its original meaning, so the column is purely additive.
+        Wrapped in duplicate-column tolerance so re-running the migration
+        after a crash (or a v4-DDL table that already grew the column from
+        the current ``CREATE TABLE``) is a silent no-op.
+        """
+        try:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN "
+                "task_type TEXT NOT NULL DEFAULT 'feature'"
+            )
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise
@@ -3854,14 +3898,14 @@ class SqliteBackend:
             """
             INSERT INTO tasks
                 (id, feature_id, title, description, status, priority,
-                 dependencies, conflict_groups, scores, acceptance_criteria,
-                 implementation_notes, verification, likely_files,
-                 parent_task_id, created_at, updated_at)
+                 task_type, dependencies, conflict_groups, scores,
+                 acceptance_criteria, implementation_notes, verification,
+                 likely_files, parent_task_id, created_at, updated_at)
             VALUES
                 (:id, :feature_id, :title, :description, :status, :priority,
-                 :dependencies, :conflict_groups, :scores, :acceptance_criteria,
-                 :implementation_notes, :verification, :likely_files,
-                 :parent_task_id, :created_at, :updated_at)
+                 :task_type, :dependencies, :conflict_groups, :scores,
+                 :acceptance_criteria, :implementation_notes, :verification,
+                 :likely_files, :parent_task_id, :created_at, :updated_at)
             ON CONFLICT(id) DO UPDATE SET
                 feature_id           = excluded.feature_id,
                 title                = excluded.title,
@@ -3875,6 +3919,7 @@ class SqliteBackend:
                 -- PR #38; the fix is to let status be managed by its
                 -- dedicated transition handler only.
                 priority             = excluded.priority,
+                task_type            = excluded.task_type,
                 dependencies         = excluded.dependencies,
                 conflict_groups      = excluded.conflict_groups,
                 scores               = excluded.scores,
@@ -3892,6 +3937,7 @@ class SqliteBackend:
                 "description": data["description"],
                 "status": data["status"],
                 "priority": data["priority"],
+                "task_type": data["task_type"],
                 "dependencies": json.dumps(data["dependencies"]),
                 "conflict_groups": json.dumps(data["conflict_groups"]),
                 "scores": json.dumps(data["scores"]),

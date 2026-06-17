@@ -132,7 +132,7 @@ class ClaimManager:
     # Main flow
     # ------------------------------------------------------------------
 
-    def next_claimable(self) -> Task | None:
+    def next_claimable(self, *, task_type: str | None = None) -> Task | None:
         """Pick the highest-priority claimable Task.
 
         Ordering: priority desc (critical > high > medium > low),
@@ -145,9 +145,15 @@ class ClaimManager:
           - have an active claim (any claim with status='active') by any actor
           - belong to a conflict_group that already has an active claim
 
+        ``task_type`` (T015): when given, restrict the candidate pool to that
+        type (feature / bugfix / refactor / modify). Omitting it keeps the
+        pre-T015 behaviour (all types eligible).
+
         Returns None if no task is claimable.
         """
-        ready_tasks = self._backend.list_tasks(status=TaskStatus.ready)
+        ready_tasks = self._backend.list_tasks(
+            status=TaskStatus.ready, task_type=task_type
+        )
         if not ready_tasks:
             return None
 

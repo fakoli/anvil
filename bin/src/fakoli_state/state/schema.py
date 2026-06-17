@@ -27,11 +27,16 @@ Version history
   additive (ALTER ADD seq); pre-v4 tables keep their strict id CHECK, which
   is harmless because local mode never writes hash ids and git mode always
   enters via a full projection rebuild that recreates the table from this DDL.
+- v5: non-feature task types (T015) — tasks gains a ``task_type`` column
+  (TEXT, NOT NULL DEFAULT 'feature') so a brownfield PRD can describe
+  bugfix / refactor / modify work alongside greenfield feature tasks.
+  Auto-upgrade is purely additive (ALTER ADD task_type with a DEFAULT, which
+  backfills every existing row to 'feature' — exactly the pre-v5 meaning).
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 4
+SCHEMA_VERSION: int = 5
 
 
 def get_schema_version() -> int:
@@ -109,6 +114,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     description          TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'proposed',
     priority             TEXT NOT NULL DEFAULT 'medium',
+    task_type            TEXT NOT NULL DEFAULT 'feature',
     dependencies         TEXT NOT NULL DEFAULT '[]',
     conflict_groups      TEXT NOT NULL DEFAULT '[]',
     scores               TEXT NOT NULL DEFAULT '{}',
@@ -217,7 +223,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
     reason   TEXT NOT NULL
 );
 
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 """
 
 

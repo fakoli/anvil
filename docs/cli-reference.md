@@ -447,8 +447,8 @@ fakoli-state review tasks
 
 ### `fakoli-state list` { #list }
 
-**Synopsis:** List tasks with optional status and feature filters. Prints a
-table with columns: TaskID, Title, Status, Priority, Score
+**Synopsis:** List tasks with optional status, feature, and type filters.
+Prints a table with columns: TaskID, Title, Status, Priority, Type, Score
 (`complexity/agent_suitability` or `unscored`), Feature.
 
 **Flags:**
@@ -456,6 +456,8 @@ table with columns: TaskID, Title, Status, Priority, Score
 - `--status TEXT` *(optional)* — filter by task status (e.g. `ready`,
   `drafted`, `reviewed`, `in_progress`, `needs_review`, `done`).
 - `--feature TEXT` *(optional)* — filter by feature id (e.g. `F001`).
+- `--type TEXT` *(optional)* — filter by task type: `feature` (default),
+  `bugfix`, `refactor`, or `modify`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -468,6 +470,7 @@ table with columns: TaskID, Title, Status, Priority, Score
 fakoli-state list
 fakoli-state list --status ready
 fakoli-state list --feature F001 --status drafted
+fakoli-state list --type bugfix
 ```
 
 **See also:** [`fakoli-state show`](#show) for the per-task detail;
@@ -518,6 +521,8 @@ recommendation. Reaps any stale claims (expired leases) before recommending.
 
 - `--actor TEXT` *(optional)* — actor identity; defaults to `$USER` or
   `agent`. Used to scope the "claimable by me" filter when implemented.
+- `--type TEXT` *(optional)* — only recommend tasks of this type: `feature`,
+  `bugfix`, `refactor`, or `modify`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -528,6 +533,7 @@ recommendation. Reaps any stale claims (expired leases) before recommending.
 
 ```bash
 fakoli-state next
+fakoli-state next --type bugfix
 ```
 
 **See also:** [`fakoli-state claim`](#claim) to actually pick up the task;

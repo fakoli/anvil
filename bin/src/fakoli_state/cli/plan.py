@@ -1193,6 +1193,11 @@ def list_tasks(
         "--feature",
         help="Filter by feature ID (e.g. F001).",
     ),
+    task_type: str | None = typer.Option(  # noqa: B008
+        None,
+        "--type",
+        help="Filter by task type (feature, bugfix, refactor, modify).",
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1201,9 +1206,9 @@ def list_tasks(
         hidden=True,
     ),
 ) -> None:
-    """List tasks with optional status and feature filters.
+    """List tasks with optional status, feature, and type filters.
 
-    Prints a table: TaskID | Title | Status | Priority | Score | Feature.
+    Prints a table: TaskID | Title | Status | Priority | Type | Score | Feature.
     With ``--json`` emits ``{"ok": true, "command": "list", "data":
     {"tasks": [...], "count": N, "filters": {...}}}``.
     """
@@ -1212,7 +1217,9 @@ def list_tasks(
 
     backend = _open_backend(state_dir)
     try:
-        tasks = backend.list_tasks(status=status, feature_id=feature)
+        tasks = backend.list_tasks(
+            status=status, feature_id=feature, task_type=task_type
+        )
     finally:
         backend.close()
 
@@ -1222,7 +1229,11 @@ def list_tasks(
             {
                 "tasks": dump_models(tasks),
                 "count": len(tasks),
-                "filters": {"status": status, "feature": feature},
+                "filters": {
+                    "status": status,
+                    "feature": feature,
+                    "task_type": task_type,
+                },
             },
         )
         return
@@ -1233,6 +1244,8 @@ def list_tasks(
             filters.append(f"status={status}")
         if feature:
             filters.append(f"feature={feature}")
+        if task_type:
+            filters.append(f"type={task_type}")
         filter_str = " (" + ", ".join(filters) + ")" if filters else ""
         typer.echo(f"No tasks found{filter_str}.")
         return
@@ -1242,6 +1255,7 @@ def list_tasks(
     title_w = min(40, max(len("Title"), max(len(t.title) for t in tasks)))
     status_w = max(len("Status"), max(len(t.status.value) for t in tasks))
     priority_w = max(len("Priority"), max(len(t.priority.value) for t in tasks))
+    type_w = max(len("Type"), max(len(t.task_type.value) for t in tasks))
     feature_w = max(len("Feature"), max(len(t.feature_id) for t in tasks))
 
     header = (
@@ -1249,6 +1263,7 @@ def list_tasks(
         f"{'Title':<{title_w}}  "
         f"{'Status':<{status_w}}  "
         f"{'Priority':<{priority_w}}  "
+        f"{'Type':<{type_w}}  "
         f"{'Score':>13}  "
         f"{'Feature':<{feature_w}}"
     )
@@ -1269,6 +1284,7 @@ def list_tasks(
             f"{title_display:<{title_w}}  "
             f"{task.status.value:<{status_w}}  "
             f"{task.priority.value:<{priority_w}}  "
+            f"{task.task_type.value:<{type_w}}  "
             f"{score_str:>13}  "
             f"{task.feature_id:<{feature_w}}"
         )

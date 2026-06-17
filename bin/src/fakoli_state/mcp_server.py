@@ -465,16 +465,20 @@ def list_tasks(
     status: str | None = None,
     feature_id: str | None = None,
     claimed_by: str | None = None,
+    task_type: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return tasks filtered by status, feature_id, and/or claimed_by.
+    """Return tasks filtered by status, feature_id, task_type, and/or claimed_by.
 
-    status and feature_id are pushed to SQL. claimed_by is an in-memory
-    filter applied after retrieval (joins active claims).
+    status, feature_id, and task_type are pushed to SQL. claimed_by is an
+    in-memory filter applied after retrieval (joins active claims).
+    ``task_type`` (T015) scopes to feature / bugfix / refactor / modify.
     """
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
-        tasks = backend.list_tasks(status=status, feature_id=feature_id)
+        tasks = backend.list_tasks(
+            status=status, feature_id=feature_id, task_type=task_type
+        )
 
         if claimed_by is not None:
             # Cross-reference active claims to filter by actor.

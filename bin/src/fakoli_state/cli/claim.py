@@ -503,6 +503,12 @@ def next(  # noqa: A001
         "--actor",
         help="Actor identity; defaults to $USER or 'agent'.",
     ),
+    task_type: str | None = typer.Option(  # noqa: B008
+        None,
+        "--type",
+        help="Only recommend tasks of this type "
+        "(feature, bugfix, refactor, modify).",
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -514,7 +520,8 @@ def next(  # noqa: A001
     """Pick the highest-priority claimable task without claiming it.
 
     Prints the recommended task ID and title.  Run `fakoli-state claim TASK_ID`
-    to acquire the lease after reviewing the recommendation.
+    to acquire the lease after reviewing the recommendation. ``--type`` scopes
+    the recommendation to a single task type.
 
     With ``--json`` emits ``{"ok": true, "command": "next", "data":
     {"task": {...} | null}}`` — ``task`` is null when nothing is claimable
@@ -535,7 +542,7 @@ def next(  # noqa: A001
         _reap_stale_claims(backend)
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)
-        task = manager.next_claimable()
+        task = manager.next_claimable(task_type=task_type)
     finally:
         backend.close()
 

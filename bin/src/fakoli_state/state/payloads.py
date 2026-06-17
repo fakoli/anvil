@@ -127,6 +127,9 @@ class TaskCreatedPayload(BaseModel):
     description: str = ""
     status: str = "proposed"
     priority: str = "medium"
+    # T015: defaults to 'feature' so a payload that predates non-feature task
+    # types (or any minimal hand-rolled caller) deserialises unchanged.
+    task_type: str = "feature"
     dependencies: list[Any] = []
     conflict_groups: list[Any] = []
     scores: dict[str, Any] | None = None

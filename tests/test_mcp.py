@@ -163,6 +163,7 @@ def _add_task(
     title: str = "Test Task",
     status: str = "ready",
     priority: str = "medium",
+    task_type: str = "feature",
     dependencies: list[str] | None = None,
     conflict_groups: list[str] | None = None,
     scores: dict[str, Any] | None = None,
@@ -174,11 +175,11 @@ def _add_task(
     conn = sqlite3.connect(db_path)
     conn.execute(
         """INSERT OR REPLACE INTO tasks
-        (id, feature_id, title, description, status, priority,
+        (id, feature_id, title, description, status, priority, task_type,
          dependencies, conflict_groups, scores, acceptance_criteria,
          implementation_notes, verification, likely_files,
          parent_task_id, created_at, updated_at)
-        VALUES (?, ?, ?, 'A test task.', ?, ?,
+        VALUES (?, ?, ?, 'A test task.', ?, ?, ?,
          ?, ?, ?, '["Tests pass."]', '[]', '{}', ?,
          ?, ?, ?)""",
         (
@@ -187,6 +188,7 @@ def _add_task(
             title,
             status,
             priority,
+            task_type,
             json.dumps(dependencies or []),
             json.dumps(conflict_groups or []),
             json.dumps(scores or {}),
@@ -471,6 +473,25 @@ class TestListTasks:
 
         tasks = _run(run())
         assert tasks == []
+
+    def test_filter_by_task_type(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """list_tasks(task_type=...) scopes to that kind (T015)."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", task_type="feature")
+        _add_task(state_dir, task_id="T002", task_type="bugfix")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool("list_tasks", {"task_type": "bugfix"})
+                )
+
+        tasks = _run(run())
+        assert len(tasks) == 1
+        assert tasks[0]["id"] == "T002"
+        assert tasks[0]["task_type"] == "bugfix"
 
 
 # ===========================================================================
