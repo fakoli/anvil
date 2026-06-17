@@ -177,3 +177,73 @@ def create_branch_for_task(
 
     warning = "renamed due to collision" if renamed else None
     return BranchResult(branch, True, warning)
+
+
+def use_named_branch(
+    name: str,
+    *,
+    cwd: Path,
+    base: str | None = None,
+) -> BranchResult:
+    """Attach a claim to a caller-supplied / existing branch *name* (T027).
+
+    Unlike :func:`create_branch_for_task`, this does NOT generate an
+    ``agent/<task>-<slug>`` name — it meets the user where their git workflow
+    already is by checking out a branch they name directly.
+
+    Behavior:
+    - If git not available OR not a git repo → BranchResult(None, False, reason)
+      (the CLI warns but does NOT fail the claim, same contract as
+      create_branch_for_task).
+    - If a local branch *name* already exists → ``git checkout <name>`` and
+      return BranchResult(name, True, "checked out existing branch").
+    - Otherwise → ``git checkout -b <name>`` (optionally off *base*) and return
+      BranchResult(name, True, None).
+    - On git error → BranchResult(None, False, str(error)).
+
+    The branch name is used verbatim (no slugging), so the caller controls the
+    exact ref. Git itself rejects invalid ref names, which surfaces as a
+    created=False warning.
+
+    Args:
+        name: Exact branch name to attach to (existing or to-be-created).
+        cwd:  Directory in which to run git commands.
+        base: Optional base ref to branch off when creating a NEW branch.
+              Ignored when the branch already exists.
+
+    Returns:
+        BranchResult describing what happened (or why it was skipped).
+    """
+    if not is_git_available():
+        return BranchResult(None, False, "git not available on PATH")
+
+    if not is_git_repo(cwd):
+        return BranchResult(None, False, "not a git repository")
+
+    already_exists = _branch_exists(name, cwd)
+
+    if already_exists:
+        cmd = ["git", "checkout", name]
+    else:
+        cmd = ["git", "checkout", "-b", name]
+        if base is not None:
+            cmd.append(base)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return BranchResult(
+            None, False, f"git checkout timed out after {_GIT_TIMEOUT_SECONDS}s"
+        )
+    if result.returncode != 0:
+        error_msg = (result.stderr or result.stdout or "unknown git error").strip()
+        return BranchResult(None, False, error_msg)
+
+    reason = "checked out existing branch" if already_exists else None
+    return BranchResult(name, True, reason)

@@ -281,6 +281,7 @@ class ClaimManager:
         expected_files: list[str] | None = None,
         claim_type: ClaimType = ClaimType.task,
         force: bool = False,
+        branch: str | None = None,
     ) -> ClaimResult:
         """Atomically claim a task.
 
@@ -295,7 +296,9 @@ class ClaimManager:
 
         On success:
           Emits claim.created event + task.status_changed event (ready → claimed).
-          Returns ClaimResult with the new Claim (branch=None at this layer).
+          Returns ClaimResult with the new Claim. ``branch`` is None unless a
+          caller-supplied branch name is passed (T027), in which case it is
+          recorded on the Claim and persisted to the claims row.
 
         Event payloads (for welder's SQL handlers):
 
@@ -329,6 +332,10 @@ class ClaimManager:
             expected_files: Files this claim intends to modify (used for conflict detection).
             claim_type:     Type of claim (default: ClaimType.task).
             force:          If True, proceed despite file-overlap or group conflicts.
+            branch:         Optional caller-supplied branch name to record on the
+                            claim (T027). When None (default) the claim carries no
+                            branch at this layer — git_ops/the CLI may attach an
+                            auto-generated branch separately.
 
         Returns:
             ClaimResult with the new Claim and the updated Task.
@@ -426,6 +433,7 @@ class ClaimManager:
             expected_files=files,
             claim_type=claim_type,
             now=now,
+            branch=branch,
         )
 
         # Emit claim.created event.
@@ -471,7 +479,7 @@ class ClaimManager:
         return ClaimResult(
             claim=claim,
             task=task,
-            branch=None,
+            branch=branch,
             worktree_path=None,
         )
 
@@ -745,6 +753,7 @@ class ClaimManager:
         expected_files: list[str],
         claim_type: ClaimType,
         now: datetime.datetime,
+        branch: str | None = None,
     ) -> Claim:
         """Construct a Claim Pydantic model from the current timestamp and params."""
         lease_expires = now + datetime.timedelta(minutes=self._default_lease)
@@ -754,7 +763,7 @@ class ClaimManager:
             claimed_by=self._actor,
             claim_type=claim_type,
             status=ClaimStatus.active,
-            branch=None,
+            branch=branch,
             worktree_path=None,
             expected_files=expected_files,
             created_at=now,

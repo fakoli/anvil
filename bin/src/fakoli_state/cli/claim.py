@@ -55,6 +55,17 @@ def claim(
             "built-in 60)."
         ),
     ),
+    branch: str | None = typer.Option(  # noqa: B008
+        None,
+        "--branch",
+        help=(
+            "Attach the claim to an existing or caller-named branch instead "
+            "of generating the default agent/<task>-<slug> name. If the branch "
+            "exists it is checked out; otherwise it is created. The branch name "
+            "is recorded on the claim. Without this flag the default "
+            "auto-generated branch is used (behavior unchanged)."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -76,7 +87,7 @@ def claim(
 
     from fakoli_state.claims.manager import ClaimError, ClaimManager, ConflictWarning
     from fakoli_state.clock import SystemClock
-    from fakoli_state.git_ops.branch import create_branch_for_task
+    from fakoli_state.git_ops.branch import create_branch_for_task, use_named_branch
     from fakoli_state.git_ops.worktree import create_worktree_for_task
 
     resolved_actor = actor or os.environ.get("USER") or "agent"
@@ -199,8 +210,33 @@ def claim(
                         err=True,
                     )
 
+        # T027: a caller-supplied --branch attaches the claim to an existing or
+        # named branch instead of generating agent/<task>-<slug>. We resolve the
+        # branch FIRST (git checkout / checkout -b) so the resolved name can be
+        # recorded on the claim itself. The default (auto-generated) path is
+        # unchanged: the branch is created AFTER the claim and is not stored on
+        # the claim row (it is reported in the JSON envelope / human output).
+        recorded_branch: str | None = None
+        if branch is not None:
+            branch_result = use_named_branch(branch, cwd=resolved_cwd)
+            if branch_result.created and branch_result.branch:
+                # Record the branch on the claim so state reflects the user's
+                # own git workflow (the whole point of T027).
+                recorded_branch = branch_result.branch
+            elif not branch_result.created:
+                # git unavailable / not a repo / invalid name — fall back to
+                # recording the requested name on the claim so the intent is
+                # preserved even when the working tree is not a git repo. The
+                # branch warning is surfaced below exactly like the default path.
+                recorded_branch = branch
+
         try:
-            result = manager.claim(task_id, expected_files=expected_files, force=force)
+            result = manager.claim(
+                task_id,
+                expected_files=expected_files,
+                force=force,
+                branch=recorded_branch,
+            )
         except ClaimError as exc:
             if json_output:
                 fail("claim", str(exc), code="claim_error")
@@ -213,14 +249,18 @@ def claim(
         # `agent/` everywhere. Reuses the config loaded up front (cfg);
         # falls back to the default prefix when config.yaml is missing or
         # failed to load (cfg is None).
-        branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
+        #
+        # T027: when --branch was supplied the branch was already resolved
+        # above (branch_result is set); skip auto-generation.
+        if branch is None:
+            branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
 
-        branch_result = create_branch_for_task(
-            task_id,
-            task.title,
-            cwd=resolved_cwd,
-            branch_prefix=branch_prefix,
-        )
+            branch_result = create_branch_for_task(
+                task_id,
+                task.title,
+                cwd=resolved_cwd,
+                branch_prefix=branch_prefix,
+            )
         if branch_result.created and branch_result.reason:
             if json_output:
                 warnings.append(f"branch: {branch_result.reason}")
@@ -265,12 +305,20 @@ def claim(
     finally:
         backend.close()
 
+    # T027: prefer the branch recorded on the claim (set when --branch is
+    # supplied) so the reported branch reflects what state actually holds, even
+    # when git is unavailable. Falls back to the auto-generated branch from the
+    # checkout result for the default path (claim_obj.branch is None there).
+    reported_branch = claim_obj.branch or (
+        branch_result.branch if branch_result.created else None
+    )
+
     if json_output:
         emit_success(
             "claim",
             {
                 "claim": dump_model(claim_obj),
-                "branch": branch_result.branch if branch_result.created else None,
+                "branch": reported_branch,
                 "worktree": worktree_path,
                 "warnings": warnings,
             },
@@ -281,8 +329,8 @@ def claim(
     typer.echo(f"Claimed task '{task_id}' as '{resolved_actor}'.")
     typer.echo(f"  Claim ID:    {claim_obj.id}")
     typer.echo(f"  Lease until: {claim_obj.lease_expires_at.isoformat()}")
-    if branch_result.created and branch_result.branch:
-        typer.echo(f"  Branch:      {branch_result.branch}")
+    if reported_branch:
+        typer.echo(f"  Branch:      {reported_branch}")
     if worktree_path:
         typer.echo(f"  Worktree:    {worktree_path}")
     typer.echo("")

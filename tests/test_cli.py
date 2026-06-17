@@ -1808,6 +1808,32 @@ def _get_first_ready_task_id(tmp_path: Path) -> str | None:
     return row[0] if row else None
 
 
+def _get_claim_branch(tmp_path: Path, task_id: str) -> str | None:
+    """Return the recorded branch for the active claim on task_id (or None)."""
+    import sqlite3 as _sqlite3
+    db_path = tmp_path / ".fakoli-state" / "state.db"
+    conn = _sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT branch FROM claims WHERE task_id=? AND status='active'",
+        (task_id,),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def _git_current_branch(tmp_path: Path) -> str:
+    """Return the name of the currently checked-out git branch in tmp_path."""
+    import subprocess as _subprocess
+    out = _subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
 # ---------------------------------------------------------------------------
 # Phase 4 — claim command
 # ---------------------------------------------------------------------------
@@ -1954,6 +1980,155 @@ class TestClaimCommand:
         assert "dependency(ies) that are not yet" not in combined, (
             f"--force should silence the dep warning; got: {combined}"
         )
+
+
+# ---------------------------------------------------------------------------
+# T027 — claim --branch (caller-supplied / existing-branch claims)
+# ---------------------------------------------------------------------------
+
+
+class TestClaimBranchOption:
+    """T027: `claim --branch <name>` attaches the claim to a caller-named or
+    existing branch instead of generating agent/<task>-<slug>, and records that
+    branch on the claim. Default (no --branch) behavior is unchanged.
+    """
+
+    def test_claim_branch_existing_records_named_branch(
+        self, tmp_path: Path
+    ) -> None:
+        """Claiming with --branch <existing> records the claim against that
+        existing branch and checks it out (research #232 adoption lever)."""
+        import subprocess as _subprocess
+
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None, "No ready task found after setup"
+
+        # Pre-create an existing feature branch the user already works on.
+        _subprocess.run(
+            ["git", "branch", "existing-feature"],
+            cwd=str(tmp_path),
+            check=True,
+            capture_output=True,
+        )
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["claim", task_id, "--actor", "agent-test", "--branch", "existing-feature"],
+        )
+        assert result.exit_code == 0, f"claim --branch failed: {result.output}"
+
+        # The claim is recorded against the named branch.
+        assert _get_claim_branch(tmp_path, task_id) == "existing-feature", (
+            "claim should record the caller-supplied branch"
+        )
+        # The existing branch is checked out (no agent/<task>-<slug> generated).
+        assert _git_current_branch(tmp_path) == "existing-feature"
+        # No auto-generated agent/ branch was created.
+        branches = _subprocess.run(
+            ["git", "branch", "--list"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "agent/" not in branches, (
+            f"--branch must not generate an agent/ branch; got:\n{branches}"
+        )
+
+    def test_claim_branch_new_name_creates_and_records(
+        self, tmp_path: Path
+    ) -> None:
+        """--branch with a name that does not exist yet creates it and records
+        it on the claim."""
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["claim", task_id, "--actor", "agent-test", "--branch", "feature/my-thing"],
+        )
+        assert result.exit_code == 0, f"claim --branch failed: {result.output}"
+
+        assert _get_claim_branch(tmp_path, task_id) == "feature/my-thing"
+        assert _git_current_branch(tmp_path) == "feature/my-thing"
+
+    def test_claim_branch_default_generates_branch_name(
+        self, tmp_path: Path
+    ) -> None:
+        """Without --branch, the default auto-generated agent/<task>-<slug>
+        branch is still produced (backward compatibility)."""
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "agent-test"]
+        )
+        assert result.exit_code == 0, f"claim failed: {result.output}"
+
+        # The checked-out branch follows the auto-generated agent/<task>- shape.
+        current = _git_current_branch(tmp_path)
+        assert current.startswith(f"agent/{task_id.lower()}-"), (
+            f"default claim should generate agent/<task>-<slug>; got: {current}"
+        )
+
+    def test_claim_branch_json_envelope_reports_branch(
+        self, tmp_path: Path
+    ) -> None:
+        """--json envelope reports the caller-supplied branch and the embedded
+        claim object carries it too (v1.24 envelope convention)."""
+        import json as _json
+        import subprocess as _subprocess
+
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        _subprocess.run(
+            ["git", "branch", "existing-feature"],
+            cwd=str(tmp_path),
+            check=True,
+            capture_output=True,
+        )
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "claim",
+                task_id,
+                "--actor",
+                "agent-test",
+                "--branch",
+                "existing-feature",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, f"claim --branch --json failed: {result.output}"
+
+        payload = _json.loads(result.output)
+        assert payload["ok"] is True
+        assert payload["command"] == "claim"
+        assert payload["data"]["branch"] == "existing-feature"
+        assert payload["data"]["claim"]["branch"] == "existing-feature"
+
+    def test_claim_branch_without_git_still_records_intent(
+        self, tmp_path: Path
+    ) -> None:
+        """Without a git repo, --branch cannot check anything out, but the
+        requested branch name is still recorded on the claim (intent preserved)
+        and the claim succeeds (non-blocking git contract)."""
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["claim", task_id, "--actor", "agent-test", "--branch", "my-branch"],
+        )
+        assert result.exit_code == 0, f"claim --branch (no git) failed: {result.output}"
+        assert _get_claim_branch(tmp_path, task_id) == "my-branch"
 
 
 # ---------------------------------------------------------------------------

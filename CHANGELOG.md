@@ -10,6 +10,43 @@ _No unreleased changes._
 
 ---
 
+## [1.33.0] — 2026-06-17
+
+### Added
+
+- **`fakoli-state claim --branch NAME` — caller-supplied / existing-branch
+  claims (T027).** A claim can now attach to a branch the user names directly
+  instead of always generating the default `agent/<task>-<slug>` name, so the
+  engine meets an agent or human where their own git workflow already is rather
+  than forcing every claim onto a synthesized branch.
+  - **New `--branch` flag on `claim`.** When supplied, the branch is resolved
+    *before* the claim is recorded: an existing local branch is checked out
+    (`git checkout NAME`), and a non-existent one is created
+    (`git checkout -b NAME`). The name is used verbatim — no slugging — so the
+    caller controls the exact ref; git itself rejects invalid ref names, which
+    surfaces as a non-fatal branch warning rather than a failed claim.
+  - **The resolved branch is recorded on the claim.** Unlike the default path
+    (where the auto-generated branch is reported but not stored), a
+    `--branch` name is persisted on the `Claim` and the claims row, so project
+    state reflects the branch the work actually lives on. `ClaimManager.claim()`
+    gains an optional `branch` parameter threaded into the constructed `Claim`;
+    the `ClaimResult` carries it back.
+  - **Non-git working trees are tolerated.** If git is unavailable or the
+    directory is not a repo, the claim still succeeds — the requested branch
+    name is recorded on the claim to preserve intent, and a branch warning is
+    surfaced exactly like the default path (same no-fail contract as
+    `create_branch_for_task`).
+  - **Default path is byte-for-byte unchanged.** Without `--branch`, the
+    auto-generated `agent/<task>-<slug>` branch is created *after* the claim and
+    reported (not stored) as before. The CLI now prefers the branch recorded on
+    the claim when emitting both the `--json` envelope and human output, falling
+    back to the checkout result for the default path.
+  - New `use_named_branch()` in `git_ops/branch.py` (checkout-or-create against a
+    verbatim name, optional `base` ref). Covered by new cases in
+    `tests/test_cli.py`.
+
+---
+
 ## [1.32.0] — 2026-06-17
 
 ### Added
