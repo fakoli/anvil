@@ -10,6 +10,34 @@ _No unreleased changes._
 
 ---
 
+## [1.25.1] — 2026-06-17
+
+### Added
+
+- **Token-footprint CI budget gate (T013/F003).** A self-audit that enforces an
+  explicit token budget on the plugin's skill surface, so the always-on context
+  tax cannot creep up unnoticed. `tests/test_token_budget.py` measures, against a
+  documented baseline-plus-headroom budget, (1) the combined **always-loaded skill
+  frontmatter** — the command surface Claude Code injects into the system prompt on
+  *every* turn whether or not a skill fires — capped at
+  `ALWAYS_LOADED_FRONTMATTER_BUDGET` (1000 tok, baseline ~688); (2) any single
+  `SKILL.md` body via `PER_SKILL_FULL_CEILING` (6000 tok, largest `plan` ~5097); and
+  (3) all bodies combined via `TOTAL_FULL_BUDGET` (40000 tok, baseline ~33200).
+  - **No tokenizer dependency** — counts use the deterministic `ceil(chars / 4)`
+    heuristic rather than pulling in `tiktoken`, so the gate is stable across
+    machines and Python versions and needs no network fetch. It catches *relative
+    growth* (a skill quietly doubling) without flapping on ordinary edits.
+  - **Reports every offender, not just the first** — a single failing CI run prints
+    per-skill token counts so all the trimming work is named at once.
+  - **Doc and gate can't silently drift** — `docs/context-budget.md` is the
+    human-readable contract (budgets, baseline table, "changing a budget" guidance),
+    and `test_budget_is_documented` asserts the doc exists and names every budget
+    knob. Raising a budget requires updating both in the same change.
+  - `docs/architecture.md` cross-references the budget and the gate from the skills
+    section.
+
+---
+
 ## [1.25.0] — 2026-06-17
 
 ### Added

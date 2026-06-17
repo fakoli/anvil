@@ -496,6 +496,12 @@ start-prd, prd, plan, claim, execute, finish, state-ops. Verification is
 delegated to `fakoli-flow:verify` and `fakoli-crew:sentinel` rather than a
 plugin-local verify skill (intentional — see README rationale).
 
+Skill frontmatter is always loaded into the model's context (it is the
+plugin's command surface), so the combined skill footprint is kept under an
+explicit token budget enforced in CI — see
+[`context-budget.md`](context-budget.md) and
+[`tests/test_token_budget.py`](../tests/test_token_budget.py).
+
 ### Plugin agents (5)
 
 Defined in [`agents/*.md`](../agents/):
