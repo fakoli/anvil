@@ -3920,3 +3920,157 @@ class TestDoctorStateRootEnv:
         assert env["ok"] is False
         assert env["command"] == "doctor"
         assert env["error"]["code"] == "state_root_invalid"
+
+
+# ---------------------------------------------------------------------------
+# graph command (T019) — Mermaid dependency/state diagram
+# ---------------------------------------------------------------------------
+
+
+def _seed_graph_tasks(tmp_path: Path) -> None:
+    """Seed a deterministic feature + 4 tasks with a known dependency chain.
+
+    Layout (edges are dep --> dependent task):
+
+        T001 (done)  --> T002 (ready)
+        T002 (ready) --> T003 (ready)
+        T004 (blocked) — no deps
+
+    Inserts directly via SQLite (the idiom used across the CLI/MCP test
+    suites) so the graph state is fixed regardless of planner behaviour —
+    making the rendered diagram byte-deterministic for assertions.
+    """
+    _do_init(tmp_path, name="Graph Test Project")
+    db_path = tmp_path / ".fakoli-state" / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT OR IGNORE INTO features "
+        "(id, title, description, status, requirements, tasks) "
+        "VALUES ('F001', 'Graph Feature', 'desc', 'proposed', '[]', '[]')"
+    )
+
+    def _add(task_id: str, status: str, deps: list[str]) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO tasks
+            (id, feature_id, title, description, status, priority, task_type,
+             dependencies, conflict_groups, scores, acceptance_criteria,
+             implementation_notes, verification, likely_files,
+             parent_task_id, created_at, updated_at)
+            VALUES (?, 'F001', ?, 'desc', ?, 'medium', 'feature',
+             ?, '[]', '{}', '["x"]', '[]', '{}', '[]',
+             NULL, '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00')""",
+            (task_id, f"Title {task_id}", status, json.dumps(deps)),
+        )
+
+    _add("T001", "done", [])
+    _add("T002", "ready", ["T001"])
+    _add("T003", "ready", ["T002"])
+    _add("T004", "blocked", [])
+    conn.commit()
+    conn.close()
+
+
+class TestGraphMermaid:
+    """``fakoli-state graph --format mermaid`` (backlog T019)."""
+
+    def test_graph_mermaid_contains_expected_edges_and_statuses(
+        self, tmp_path: Path
+    ) -> None:
+        """The Mermaid diagram has the expected dependency edges and node statuses."""
+        _seed_graph_tasks(tmp_path)
+        result = _invoke_cmd(tmp_path, ["graph", "--format", "mermaid"])
+        assert result.exit_code == 0, f"graph --format mermaid failed: {result.output}"
+        out = result.output
+
+        # A valid Mermaid flowchart header.
+        assert out.lstrip().startswith("graph LR"), out
+
+        # Every task is a node, with its status reflected in the label.
+        for tid, status in [
+            ("T001", "done"),
+            ("T002", "ready"),
+            ("T003", "ready"),
+            ("T004", "blocked"),
+        ]:
+            assert f"{tid}[" in out, f"missing node {tid}: {out}"
+            assert f"({status})" in out, f"missing status {status}: {out}"
+
+        # The two dependency edges (dep --> dependent) are present.
+        assert "T001 --> T002" in out
+        assert "T002 --> T003" in out
+        # T004 has no deps and nothing depends on it → no edge.
+        assert "--> T004" not in out
+        assert "T004 -->" not in out
+
+        # Status is also encoded as a class assignment for colouring.
+        assert "class T001 done;" in out
+        assert "class T004 blocked;" in out
+
+    def test_graph_mermaid_is_deterministic(self, tmp_path: Path) -> None:
+        """Two runs over the same state produce byte-identical Mermaid output."""
+        _seed_graph_tasks(tmp_path)
+        first = _invoke_cmd(tmp_path, ["graph", "--format", "mermaid"])
+        second = _invoke_cmd(tmp_path, ["graph", "--format", "mermaid"])
+        assert first.exit_code == 0
+        assert second.exit_code == 0
+        assert first.output == second.output
+
+    def test_graph_mermaid_json_envelope_includes_diagram(
+        self, tmp_path: Path
+    ) -> None:
+        """``graph --json --format mermaid`` emits the v1.24 envelope with the diagram."""
+        _seed_graph_tasks(tmp_path)
+        result = _invoke_cmd(
+            tmp_path, ["graph", "--json", "--format", "mermaid"]
+        )
+        assert result.exit_code == 0, result.output
+        env = json.loads(result.stdout.strip())
+        assert env["ok"] is True
+        assert env["command"] == "graph"
+        data = env["data"]
+        assert data["format"] == "mermaid"
+        # Structured graph mirrors the diagram.
+        ids = {n["id"] for n in data["nodes"]}
+        assert ids == {"T001", "T002", "T003", "T004"}
+        assert {"from": "T001", "to": "T002"} in data["edges"]
+        assert {"from": "T002", "to": "T003"} in data["edges"]
+        # ready_to_claim: T002 (dep T001 done); NOT T003 (dep T002 not done).
+        assert data["ready_to_claim"] == ["T002"]
+        # The rendered Mermaid text is carried under data.diagram.
+        assert data["diagram"] is not None
+        assert "graph LR" in data["diagram"]
+        assert "T001 --> T002" in data["diagram"]
+
+    def test_graph_mermaid_scope_task_restricts_to_transitive_deps(
+        self, tmp_path: Path
+    ) -> None:
+        """scope=task renders the target plus its transitive dependencies only."""
+        _seed_graph_tasks(tmp_path)
+        result = _invoke_cmd(
+            tmp_path,
+            ["graph", "--format", "mermaid", "--scope", "task", "--target", "T002"],
+        )
+        assert result.exit_code == 0, result.output
+        out = result.output
+        # T002 and its dep T001 are in scope.
+        assert "T001[" in out
+        assert "T002[" in out
+        assert "T001 --> T002" in out
+        # T003 (depends ON T002, not a dependency of it) and unrelated T004 are out.
+        assert "T003[" not in out
+        assert "T004[" not in out
+
+    def test_graph_mermaid_empty_project_is_valid(self, tmp_path: Path) -> None:
+        """``graph --format mermaid`` on a project with no tasks is still valid Mermaid."""
+        _do_init(tmp_path, name="Empty Graph Project")
+        result = _invoke_cmd(tmp_path, ["graph", "--format", "mermaid"])
+        assert result.exit_code == 0, result.output
+        assert result.output.lstrip().startswith("graph LR")
+
+    def test_graph_mermaid_scope_task_requires_target(self, tmp_path: Path) -> None:
+        """scope=task without --target is a bad-request error, not a crash."""
+        _seed_graph_tasks(tmp_path)
+        result = _invoke_cmd(
+            tmp_path, ["graph", "--format", "mermaid", "--scope", "task"]
+        )
+        assert result.exit_code != 0

@@ -10,6 +10,37 @@ _No unreleased changes._
 
 ---
 
+## [1.35.0] — 2026-06-17
+
+### Added
+
+- **`graph --format mermaid` dependency/state diagram (T019/F008).** A new
+  read-only `fakoli-state graph` command renders the persisted task graph as a
+  copy-pasteable diagram. `--format mermaid` emits a deterministic Mermaid
+  `graph LR` flowchart whose nodes are tasks (labelled with ID, title, and
+  status, and coloured per status via `classDef`) and whose edges are
+  dependencies oriented `dep --> task` — the same node/edge/ready-to-claim view
+  the MCP `get_dependency_graph` tool exposes, so the two surfaces never drift.
+  - **Three output formats.** `--format text` (default) prints a short
+    human-readable summary (node count, edge count, by-status breakdown,
+    ready-to-claim list); `--format mermaid` prints the flowchart; `--json` (or
+    `--format json`) emits the v1.24 envelope under `data` with `nodes`,
+    `edges`, `ready_to_claim`, and — when `--format mermaid` is requested — the
+    rendered `diagram` string alongside the structured graph.
+  - **Scoping.** `--scope all` (default) renders the whole project,
+    `--scope feature --target F001` narrows to one feature, and
+    `--scope task --target T007` renders a task plus its transitive
+    dependencies — mirroring the MCP tool's scope semantics exactly.
+  - **Deterministic, pipe-safe rendering.** Nodes are emitted in task-ID order
+    and edges in `(from, to)` order so identical state always produces
+    byte-identical output. Subtask IDs like `T001.1` are sanitised to
+    Mermaid-safe node IDs, labels are HTML-escaped, and an empty scope still
+    yields a valid (renderable) diagram rather than a broken block. Invalid
+    `--scope`/`--format` values and a bad `FAKOLI_STATE_ROOT` still return a
+    parseable error envelope under `--json`.
+
+---
+
 ## [1.34.0] — 2026-06-17
 
 ### Added

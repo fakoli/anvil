@@ -13,6 +13,7 @@ from fakoli_state.cli.claim import claim, next, release, renew
 from fakoli_state.cli.describe import describe
 from fakoli_state.cli.doctor import doctor
 from fakoli_state.cli.drift import drift
+from fakoli_state.cli.graph import graph
 from fakoli_state.cli.hooks import hook_app
 from fakoli_state.cli.init_status import init, status
 from fakoli_state.cli.migrate import migrate_app, migrate_events
@@ -84,6 +85,7 @@ app.command()(status)
 app.command()(describe)
 app.command()(scan)
 app.command()(drift)
+app.command()(graph)
 app.command()(doctor)
 app.command()(plan)
 app.command()(score)
