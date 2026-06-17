@@ -70,6 +70,35 @@
     `sync` / `sync github` / `sync provider` when one or more tasks parked
     awaiting `manual_merge` resolution.
 
+### Global-config layer { #global-config-layer }
+
+Configuration is resolved from up to four layers, lowest precedence to
+highest:
+
+1. **Built-in defaults** — the dataclass defaults baked into the engine (e.g.
+   a 60-minute lease).
+2. **Global config** — `~/.config/fakoli-state/config.yaml`. User-wide
+   defaults that every project on the machine inherits, so settings need not
+   be copied into each project. The location honours `$XDG_CONFIG_HOME`
+   (`$XDG_CONFIG_HOME/fakoli-state/config.yaml`) and can be pinned outright
+   with the `FAKOLI_STATE_GLOBAL_CONFIG` environment variable. This file is
+   optional — most projects never need one.
+3. **Project config** — `.fakoli-state/config.yaml`. Per-project overrides.
+   Any key set here wins over the same key in the global config. The project
+   config is the one that must carry the required `project_name` /
+   `project_id` (though the global layer *may* supply a default
+   `project_name`). `db_path` / `events_path` always resolve next to the
+   project config, never under `~/.config`.
+4. **Explicit CLI flag** — e.g. `claim --lease 15`. Always wins.
+
+So a global default lease of `45` is overridden to `30` by a project
+`config.yaml` and to `15` by `claim --lease 15`. The same precedence applies
+to `FAKOLI_STATE_ROOT` (which selects *which* project's `.fakoli-state/` the
+merge reads) and every other config key. A broken or missing global config
+never blocks a command: a missing/empty file means "no global defaults", and
+a malformed one surfaces a warning while the command proceeds on the
+remaining layers.
+
 ## Global flags
 
 These appear on the root `fakoli-state` invocation, before any subcommand.
@@ -526,6 +555,10 @@ worktree at `../wt-<task_id>/`.
   after listing every conflicting claim.
 - `--actor TEXT` *(optional)* — claim actor; defaults to `$USER` or
   `agent`.
+- `--lease FLOAT` *(optional)* — lease duration in minutes for this claim.
+  Overrides `default_lease_minutes` from config. Lease precedence: this flag
+  > project `config.yaml` > global `config.yaml` > built-in `60` (see
+  [Global-config layer](#global-config-layer)).
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -542,6 +575,7 @@ worktree at `../wt-<task_id>/`.
 fakoli-state claim T001
 fakoli-state claim T001 --worktree --actor "alex"
 fakoli-state claim T001 --force            # override conflict warnings
+fakoli-state claim T001 --lease 15         # 15-minute lease (overrides config)
 ```
 
 **See also:**
@@ -597,6 +631,9 @@ to prevent the stale-claim reaper from reclaiming the task mid-flight.
 
 - `--actor TEXT` *(optional)* — actor identity; defaults to `$USER` or
   `agent`.
+- `--lease FLOAT` *(optional)* — lease extension in minutes. Overrides
+  `default_lease_minutes` from config (same precedence as
+  [`claim --lease`](#claim)).
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -609,6 +646,7 @@ to prevent the stale-claim reaper from reclaiming the task mid-flight.
 
 ```bash
 fakoli-state renew C001
+fakoli-state renew C001 --lease 30   # extend by 30 minutes
 ```
 
 **See also:** [`fakoli-state claim`](#claim), [`fakoli-state release`](#release).

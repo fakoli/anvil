@@ -291,6 +291,14 @@ def _load_config_optional(state_dir: Path) -> Config | None:
     config emits a stderr warning so the user notices without a hard error.
     Mirrors ``cli/plan.py::_load_config_optional`` but lives here so command
     modules (claim, renew, …) can reuse it without importing a sibling.
+
+    T016/B17 — the global-config layer
+    (``~/.config/fakoli-state/config.yaml``) is merged UNDER the project
+    config: a project key overrides the same global key, a global-only key
+    supplies a default, and a key in neither falls through to the dataclass
+    default. The project config must still exist for this command to read a
+    config at all (returning a Config requires project_name/project_id, which
+    the global layer is not required to carry).
     """
     import yaml
 
@@ -298,9 +306,9 @@ def _load_config_optional(state_dir: Path) -> Config | None:
     if not config_path.exists():
         return None
     try:
-        from fakoli_state.config import load_config
+        from fakoli_state.config import load_merged_config
 
-        return load_config(config_path)
+        return load_merged_config(config_path)
     except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
         typer.echo(
             f"Warning: config.yaml load failed "
@@ -311,7 +319,11 @@ def _load_config_optional(state_dir: Path) -> Config | None:
         return None
 
 
-def _lease_manager_kwargs(config: Config | None) -> dict[str, float]:
+def _lease_manager_kwargs(
+    config: Config | None,
+    *,
+    lease_override: float | None = None,
+) -> dict[str, float]:
     """Return ClaimManager lease kwargs from *config*, or empty for defaults.
 
     BUG 2: the CLI claim/renew commands previously built ClaimManager without
@@ -321,13 +333,25 @@ def _lease_manager_kwargs(config: Config | None) -> dict[str, float]:
     When *config* is None (no/broken config.yaml) we return an empty dict so
     ClaimManager keeps its own 60/5 defaults — preserving prior behaviour for
     projects without a config.
+
+    T016/B17 — lease precedence: explicit CLI arg > project config > global
+    config > built-in default. *config* is the already-merged
+    project-over-global config (see :func:`_load_config_optional`), so it
+    collapses the middle two levels. *lease_override* is the explicit
+    ``--lease`` CLI flag; when not None it wins over both the configured lease
+    AND, when *config* is None, the ClaimManager default — so ``--lease`` works
+    even in a project without a config.yaml.
     """
-    if config is None:
+    if config is None and lease_override is None:
         return {}
-    return {
-        "default_lease_minutes": config.default_lease_minutes,
-        "default_heartbeat_minutes": config.default_heartbeat_minutes,
-    }
+
+    kwargs: dict[str, float] = {}
+    if config is not None:
+        kwargs["default_lease_minutes"] = config.default_lease_minutes
+        kwargs["default_heartbeat_minutes"] = config.default_heartbeat_minutes
+    if lease_override is not None:
+        kwargs["default_lease_minutes"] = lease_override
+    return kwargs
 
 
 # ---------------------------------------------------------------------------

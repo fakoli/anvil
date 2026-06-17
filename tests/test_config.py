@@ -21,7 +21,9 @@ import yaml
 from fakoli_state.config import (
     Config,
     config_template,
+    global_config_path,
     load_config,
+    load_merged_config,
     read_events_storage,
     write_default_config,
 )
@@ -666,3 +668,290 @@ class TestReadEventsStorage:
         )
         with pytest.raises(ValueError, match="events_storage"):
             read_events_storage(config_path)
+
+
+# ---------------------------------------------------------------------------
+# Global-config layer (T016/B17 — ~/.config/fakoli-state with project override)
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalConfigPath:
+    """`global_config_path()` resolution precedence:
+
+        FAKOLI_STATE_GLOBAL_CONFIG (explicit file)
+            > $XDG_CONFIG_HOME/fakoli-state/config.yaml
+            > ~/.config/fakoli-state/config.yaml
+    """
+
+    def test_global_config_default_under_dot_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With neither env var set, falls back to ~/.config/fakoli-state."""
+        monkeypatch.delenv("FAKOLI_STATE_GLOBAL_CONFIG", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        p = global_config_path()
+        assert p == (Path.home() / ".config" / "fakoli-state" / "config.yaml").resolve()
+
+    def test_global_config_honours_xdg_config_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$XDG_CONFIG_HOME relocates the default global-config location."""
+        monkeypatch.delenv("FAKOLI_STATE_GLOBAL_CONFIG", raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        p = global_config_path()
+        assert p == (tmp_path / "fakoli-state" / "config.yaml").resolve()
+
+    def test_global_config_explicit_override_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAKOLI_STATE_GLOBAL_CONFIG points at an explicit file and wins
+        over XDG_CONFIG_HOME."""
+        explicit = tmp_path / "custom-global.yaml"
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(explicit))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ignored"))
+        assert global_config_path() == explicit.resolve()
+
+
+class TestLoadMergedGlobalConfig:
+    """`load_merged_config()` merges the global layer UNDER the project config.
+
+    Precedence (lowest → highest):
+        built-in dataclass default
+          < global config (~/.config/fakoli-state/config.yaml)
+          < project config (.fakoli-state/config.yaml)
+          < explicit CLI arg  (exercised in TestGlobalConfigLeasePrecedence)
+    """
+
+    def _project(self, tmp_path: Path, body: str = "") -> Path:
+        return _write_config(tmp_path / "config.yaml", _minimal_yaml() + body)
+
+    def test_global_config_supplies_defaults_when_project_omits_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A key set only in the global config supplies the value for a
+        project that omits it (global default, no project override)."""
+        global_path = tmp_path / "global.yaml"
+        _write_config(global_path, "default_lease_minutes: 45\n")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+
+        project = self._project(tmp_path)  # no lease key
+        cfg = load_merged_config(project)
+        assert cfg.default_lease_minutes == 45
+
+    def test_global_config_project_overrides_global_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The project config overrides the same key in the global config."""
+        global_path = tmp_path / "global.yaml"
+        _write_config(global_path, "default_lease_minutes: 45\n")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+
+        project = self._project(tmp_path, "default_lease_minutes: 30\n")
+        cfg = load_merged_config(project)
+        assert cfg.default_lease_minutes == 30
+
+    def test_global_config_falls_through_to_builtin_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A key set in neither layer falls through to the dataclass default."""
+        global_path = tmp_path / "global.yaml"
+        _write_config(global_path, "branch_prefix: feature\n")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+
+        cfg = load_merged_config(self._project(tmp_path))
+        # branch_prefix supplied by global; lease falls through to default 60.
+        assert cfg.branch_prefix == "feature"
+        assert cfg.default_lease_minutes == 60
+
+    def test_global_config_missing_file_uses_project_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-existent global config is fine — project config loads alone,
+        identical to the pre-T016 single-file behaviour (back-compat)."""
+        monkeypatch.setenv(
+            "FAKOLI_STATE_GLOBAL_CONFIG", str(tmp_path / "does-not-exist.yaml")
+        )
+        project = self._project(tmp_path, "default_lease_minutes: 30\n")
+        merged = load_merged_config(project)
+        single = load_config(project)
+        assert merged.default_lease_minutes == single.default_lease_minutes == 30
+
+    def test_global_config_supplies_required_project_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Required identity fields resolve against the MERGED mapping: a
+        global config MAY supply project_name for a project that omits it."""
+        global_path = tmp_path / "global.yaml"
+        _write_config(global_path, "project_name: 'Org Default'\n")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+
+        # Project supplies only project_id; project_name comes from global.
+        project = _write_config(tmp_path / "config.yaml", "project_id: 'p-1'\n")
+        cfg = load_merged_config(project)
+        assert cfg.project_name == "Org Default"
+        assert cfg.project_id == "p-1"
+
+    def test_global_config_missing_required_in_both_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When neither layer supplies a required field, the same ValueError
+        as the single-file path is raised against the merged mapping."""
+        global_path = tmp_path / "global.yaml"
+        _write_config(global_path, "default_lease_minutes: 45\n")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+
+        project = _write_config(tmp_path / "config.yaml", "project_id: 'p-1'\n")
+        with pytest.raises(ValueError, match="project_name"):
+            load_merged_config(project)
+
+    def test_global_config_paths_resolve_against_project_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """db_path/events_path always resolve next to the PROJECT config, even
+        when supplied by the global layer — per-project state never lands in
+        ~/.config."""
+        global_dir = tmp_path / "global"
+        global_dir.mkdir()
+        global_path = global_dir / "config.yaml"
+        _write_config(global_path, "db_path: shared.db\n")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        project = _write_config(project_dir / "config.yaml", _minimal_yaml())
+        cfg = load_merged_config(project)
+        # Resolves under the project dir, NOT the global dir.
+        assert cfg.db_path == str((project_dir / "shared.db").resolve())
+
+    def test_global_config_missing_project_file_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """The PROJECT config is still required to exist."""
+        with pytest.raises(FileNotFoundError):
+            load_merged_config(tmp_path / "nope.yaml")
+
+    def test_global_config_default_path_used_when_arg_omitted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a global_path argument, load_merged_config consults
+        global_config_path() (here pinned via FAKOLI_STATE_GLOBAL_CONFIG)."""
+        global_path = tmp_path / "global.yaml"
+        _write_config(global_path, "branch_prefix: fix\n")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        cfg = load_merged_config(self._project(tmp_path))
+        assert cfg.branch_prefix == "fix"
+
+    def test_global_config_explicit_arg_overrides_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit global_path argument beats the env-resolved default."""
+        env_global = tmp_path / "env-global.yaml"
+        _write_config(env_global, "branch_prefix: fromenv\n")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(env_global))
+
+        arg_global = tmp_path / "arg-global.yaml"
+        _write_config(arg_global, "branch_prefix: fromarg\n")
+
+        cfg = load_merged_config(self._project(tmp_path), global_path=arg_global)
+        assert cfg.branch_prefix == "fromarg"
+
+    def test_global_config_empty_file_is_no_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty global config file means 'no global defaults', not an error."""
+        global_path = tmp_path / "global.yaml"
+        global_path.write_text("", encoding="utf-8")
+        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        cfg = load_merged_config(self._project(tmp_path))
+        assert cfg.default_lease_minutes == 60  # dataclass default
+
+
+class TestGlobalConfigLeasePrecedence:
+    """The headline T016/B17 acceptance scenario, end to end through the CLI
+    lease helper: a global default lease of 45 is overridden to 30 by a
+    project config and to 15 by a CLI flag.
+
+    Precedence: explicit CLI arg > project config > global config > built-in.
+    """
+
+    def _setup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        global_lease: str | None,
+        project_lease: str | None,
+    ) -> Path:
+        if global_lease is not None:
+            global_path = tmp_path / "global.yaml"
+            _write_config(global_path, f"default_lease_minutes: {global_lease}\n")
+            monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        else:
+            monkeypatch.delenv("FAKOLI_STATE_GLOBAL_CONFIG", raising=False)
+            monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-such-xdg"))
+
+        body = (
+            f"default_lease_minutes: {project_lease}\n"
+            if project_lease is not None
+            else ""
+        )
+        return _write_config(tmp_path / "config.yaml", _minimal_yaml() + body)
+
+    def test_global_config_lease_used_when_no_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Global lease 45, no project lease, no CLI flag → 45."""
+        from fakoli_state.cli._helpers import _lease_manager_kwargs
+
+        project = self._setup(
+            tmp_path, monkeypatch, global_lease="45", project_lease=None
+        )
+        cfg = load_merged_config(project)
+        kwargs = _lease_manager_kwargs(cfg, lease_override=None)
+        assert kwargs["default_lease_minutes"] == 45
+
+    def test_global_config_project_overrides_to_30(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Global lease 45 overridden to 30 by the project config."""
+        from fakoli_state.cli._helpers import _lease_manager_kwargs
+
+        project = self._setup(
+            tmp_path, monkeypatch, global_lease="45", project_lease="30"
+        )
+        cfg = load_merged_config(project)
+        kwargs = _lease_manager_kwargs(cfg, lease_override=None)
+        assert kwargs["default_lease_minutes"] == 30
+
+    def test_global_config_cli_flag_overrides_to_15(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Global 45 → project 30 → CLI --lease 15 wins (full precedence)."""
+        from fakoli_state.cli._helpers import _lease_manager_kwargs
+
+        project = self._setup(
+            tmp_path, monkeypatch, global_lease="45", project_lease="30"
+        )
+        cfg = load_merged_config(project)
+        kwargs = _lease_manager_kwargs(cfg, lease_override=15)
+        assert kwargs["default_lease_minutes"] == 15
+
+    def test_global_config_cli_flag_overrides_with_no_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--lease still wins when there is no config at all (override beats
+        the built-in ClaimManager default even with config=None)."""
+        from fakoli_state.cli._helpers import _lease_manager_kwargs
+
+        monkeypatch.delenv("FAKOLI_STATE_GLOBAL_CONFIG", raising=False)
+        kwargs = _lease_manager_kwargs(None, lease_override=15)
+        assert kwargs["default_lease_minutes"] == 15
+
+    def test_global_config_no_override_no_config_is_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No config and no flag → empty kwargs (ClaimManager keeps its own
+        60-min default — preserves pre-T016 behaviour)."""
+        from fakoli_state.cli._helpers import _lease_manager_kwargs
+
+        assert _lease_manager_kwargs(None, lease_override=None) == {}

@@ -10,6 +10,54 @@ _No unreleased changes._
 
 ---
 
+## [1.31.0] — 2026-06-17
+
+### Added
+
+- **Global-config layer `~/.config/fakoli-state/config.yaml` with project
+  override (T016/F006).** A user-wide config now supplies defaults that any
+  individual project can override, so settings like `default_lease_minutes`,
+  `llm_tier`, or `auto_expand_threshold` can be set once per machine instead of
+  re-declared in every project's `.fakoli-state/config.yaml`.
+  - **Strict precedence, lowest → highest:** built-in dataclass default <
+    global config (`~/.config/fakoli-state/config.yaml`) < project config
+    (`.fakoli-state/config.yaml`) < explicit CLI flag. A key set in the project
+    config wins over the same key in the global config; a global-only key
+    supplies the value; a key in neither falls through to the dataclass default.
+  - **New `load_merged_config()` and `global_config_path()` in `config.py`.**
+    The merge is a shallow project-over-global overlay validated against the
+    MERGED mapping, so a global config MAY supply a default `project_name` /
+    `project_id` that a project overrides — but it is never *required* to carry
+    them, and a project missing them still raises the same `ValueError` when the
+    global layer does not supply them either. Per-project paths (`db_path` /
+    `events_path`) always resolve relative to the PROJECT config's directory,
+    never `~/.config`. `load_config()` stays a single-file load (no merge) for
+    callers that want it; the single-file YAML parse and Config construction are
+    factored into shared `_read_yaml_mapping` / `_build_config` helpers so both
+    paths validate identically.
+  - **Global-path resolution honours XDG.** `global_config_path()` resolves
+    `FAKOLI_STATE_GLOBAL_CONFIG` (explicit file override, for tests / unusual
+    installs) > `$XDG_CONFIG_HOME/fakoli-state/config.yaml` > the documented
+    `~/.config/fakoli-state/config.yaml` default. A missing or empty global
+    config means "no global defaults" rather than an error; a *broken* global
+    config the user explicitly wrote raises the same loud `ValueError` /
+    `YAMLError` as a broken project config.
+  - **CLI consumers now load the merged config.** `claim`, `renew`, and `plan`
+    read through `load_merged_config()`, so global planning/lease defaults apply
+    everywhere the project config used to be the only source.
+  - **New `--lease` flag on `claim` and `renew`.** An explicit `--lease N`
+    (minutes) overrides the merged project>global `default_lease_minutes`, and
+    works even in a project with no `config.yaml` at all — closing the top of the
+    lease precedence chain (flag > project > global > built-in 60).
+  - `docs/cli-reference.md` documents the global layer, the precedence order,
+    and the `--lease` flag. Covered by new cases in `tests/test_config.py`
+    (`TestGlobalConfigPath`, `TestLoadMergedGlobalConfig`,
+    `TestGlobalConfigLeasePrecedence`), including the acceptance scenario where a
+    global default lease of 45 is overridden to 30 by a project config and to 15
+    by the CLI flag.
+
+---
+
 ## [1.30.0] — 2026-06-17
 
 ### Added

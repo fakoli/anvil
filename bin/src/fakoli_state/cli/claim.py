@@ -45,6 +45,16 @@ def claim(
         "--actor",
         help="Claim actor; defaults to $USER or 'agent'.",
     ),
+    lease_minutes: float | None = typer.Option(  # noqa: B008
+        None,
+        "--lease",
+        help=(
+            "Lease duration in minutes for this claim. Overrides "
+            "default_lease_minutes from project/global config.yaml "
+            "(precedence: this flag > project config > global config > "
+            "built-in 60)."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -86,8 +96,12 @@ def claim(
     # instead of always falling back to the 60-min ClaimManager default
     # (BUG 2 — the MCP path wired these; the CLI did not). The same loaded
     # config also supplies branch_prefix below.
+    #
+    # T016/B17 — lease precedence: an explicit ``--lease`` flag wins over the
+    # configured (project>global merged) lease, which wins over the built-in
+    # 60-min default.
     cfg = _load_config_optional(state_dir)
-    lease_kwargs = _lease_manager_kwargs(cfg)
+    lease_kwargs = _lease_manager_kwargs(cfg, lease_override=lease_minutes)
 
     backend = _open_backend(state_dir)
     try:
@@ -362,6 +376,15 @@ def renew(
         "--actor",
         help="Actor identity; defaults to $USER or 'agent'.",
     ),
+    lease_minutes: float | None = typer.Option(  # noqa: B008
+        None,
+        "--lease",
+        help=(
+            "Lease extension in minutes. Overrides default_lease_minutes "
+            "from project/global config.yaml (precedence: this flag > "
+            "project config > global config > built-in 60)."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -388,8 +411,11 @@ def renew(
     # BUG 2: renew must also honour config.yaml default_lease_minutes —
     # renew() extends the lease by default_lease_minutes, so without this the
     # CLI would always extend by 60 min regardless of config.
+    #
+    # T016/B17 — same lease precedence as claim: explicit --lease flag wins
+    # over the merged project>global config, which wins over the 60-min default.
     cfg = _load_config_optional(state_dir)
-    lease_kwargs = _lease_manager_kwargs(cfg)
+    lease_kwargs = _lease_manager_kwargs(cfg, lease_override=lease_minutes)
 
     backend = _open_backend(state_dir)
     try:

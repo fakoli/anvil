@@ -242,6 +242,10 @@ class Config:
 def load_config(path: str | Path) -> Config:
     """Parse config.yaml at *path* and return a Config instance.
 
+    Single-file load: does NOT merge the global-config layer. Use
+    :func:`load_merged_config` when you want global defaults
+    (``~/.config/fakoli-state/config.yaml``) merged under the project config.
+
     Raises
     ------
     FileNotFoundError
@@ -259,18 +263,151 @@ def load_config(path: str | Path) -> Config:
             "Run `fakoli-state init` to create one."
         )
 
+    data = _read_yaml_mapping(resolved)
+    _validate_required(data, resolved)
+    return _build_config(data, resolved)
+
+
+# T016/B17 — global-config layer.
+#
+# Resolution of the global config path honours XDG_CONFIG_HOME (the standard
+# Linux/macOS config root) and falls back to ``~/.config``. A dedicated
+# FAKOLI_STATE_GLOBAL_CONFIG override exists so tests (and power users with a
+# non-standard layout) can point at an explicit file without disturbing the
+# whole XDG_CONFIG_HOME tree.
+_GLOBAL_CONFIG_ENV: Final[str] = "FAKOLI_STATE_GLOBAL_CONFIG"
+_XDG_CONFIG_HOME_ENV: Final[str] = "XDG_CONFIG_HOME"
+_GLOBAL_CONFIG_SUBPATH: Final[str] = "fakoli-state/config.yaml"
+
+
+def global_config_path() -> Path:
+    """Return the resolved path to the user's global config.yaml.
+
+    Precedence:
+
+    1. ``FAKOLI_STATE_GLOBAL_CONFIG`` env var — an explicit file path. Used
+       verbatim (after ``~`` expansion); takes priority so tests and unusual
+       installs can pin a location.
+    2. ``$XDG_CONFIG_HOME/fakoli-state/config.yaml`` when ``XDG_CONFIG_HOME``
+       is set (and non-empty).
+    3. ``~/.config/fakoli-state/config.yaml`` — the documented default.
+
+    The file is NOT required to exist; callers (:func:`load_merged_config`)
+    treat a missing global config as "no global defaults".
+    """
+    import os
+
+    override = os.environ.get(_GLOBAL_CONFIG_ENV)
+    if override is not None and override.strip() != "":
+        return Path(override).expanduser().resolve()
+
+    xdg = os.environ.get(_XDG_CONFIG_HOME_ENV)
+    if xdg is not None and xdg.strip() != "":
+        return (Path(xdg).expanduser() / _GLOBAL_CONFIG_SUBPATH).resolve()
+
+    return (Path.home() / ".config" / _GLOBAL_CONFIG_SUBPATH).resolve()
+
+
+def load_merged_config(
+    path: str | Path,
+    *,
+    global_path: str | Path | None = None,
+) -> Config:
+    """Load the project config with the global-config layer merged underneath.
+
+    Precedence (lowest → highest): built-in dataclass default < global config
+    (``~/.config/fakoli-state/config.yaml``) < project config (*path*). A key
+    present in the project config overrides the same key in the global config;
+    a key present only in the global config supplies the value; a key present
+    in neither falls through to the dataclass default.
+
+    Required identity fields (``project_name`` / ``project_id``) are resolved
+    against the MERGED mapping, so a global config MAY supply a default
+    ``project_name`` that an individual project overrides — but the global
+    config is never *required* to carry them, and a project that omits them
+    still raises the same ``ValueError`` as :func:`load_config` when the global
+    layer does not supply them either.
+
+    Paths (``db_path`` / ``events_path``) always resolve relative to the
+    PROJECT config's directory, never the global one — per-project state must
+    live next to the project, not in ``~/.config``.
+
+    Parameters
+    ----------
+    path:
+        The project ``config.yaml`` (must exist).
+    global_path:
+        Explicit global-config path. ``None`` → :func:`global_config_path`.
+        A non-existent global path is treated as "no global defaults"
+        (the common case: most users never write one).
+
+    Raises
+    ------
+    FileNotFoundError
+        If the PROJECT config does not exist. A missing GLOBAL config is fine.
+    ValueError
+        If the merged mapping is missing required fields, or any field has an
+        invalid value (same validation as :func:`load_config`).
+    """
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {resolved}. "
+            "Run `fakoli-state init` to create one."
+        )
+
+    gpath = (
+        Path(global_path).expanduser().resolve()
+        if global_path is not None
+        else global_config_path()
+    )
+
+    global_data: dict[str, object] = {}
+    if gpath.exists():
+        # The global layer is optional defaults only — it is NOT required to
+        # carry project_name/project_id, and a broken global config raises the
+        # same loud ValueError/YAMLError as a broken project config (the user
+        # explicitly wrote it, so a silent skip would hide their typo).
+        global_data = _read_yaml_mapping(gpath)
+
+    project_data = _read_yaml_mapping(resolved)
+
+    # Shallow merge: project keys win over global keys. config.yaml is a flat
+    # mapping of scalars plus the single nested ``sync`` block; a project that
+    # sets ``sync`` replaces the global ``sync`` wholesale (we do not deep-merge
+    # provider lists — an explicit project ``sync.providers`` is an explicit
+    # override of the global one, matching the documented project>global rule).
+    merged: dict[str, object] = {**global_data, **project_data}
+
+    _validate_required(merged, resolved)
+    return _build_config(merged, resolved)
+
+
+def _read_yaml_mapping(resolved: Path) -> dict[str, object]:
+    """Parse *resolved* as YAML and return it, requiring a top-level mapping."""
     with resolved.open(encoding="utf-8") as fh:
         raw: object = yaml.safe_load(fh)
+
+    # An empty file (``yaml.safe_load`` → None) is treated as an empty mapping
+    # so an empty global config means "no global defaults" rather than an error.
+    if raw is None:
+        return {}
 
     if not isinstance(raw, dict):
         raise ValueError(
             f"Config file {resolved} must be a YAML mapping, got {type(raw).__name__!r}."
         )
+    return raw
 
-    data: dict[str, object] = raw
-    _validate_required(data, resolved)
 
-    # Resolve paths relative to the config file's directory.
+def _build_config(data: dict[str, object], resolved: Path) -> Config:
+    """Build a validated :class:`Config` from an already-merged mapping.
+
+    *data* is the (possibly global-merged) raw mapping; *resolved* is the
+    PROJECT config path, used both for error messages and to resolve relative
+    ``db_path`` / ``events_path`` values against the project directory.
+    """
+    # Resolve paths relative to the project config file's directory.
     config_dir = resolved.parent
     db_path = _resolve_path(data.get("db_path", "state.db"), config_dir)
     events_path = _resolve_path(data.get("events_path", "events.jsonl"), config_dir)

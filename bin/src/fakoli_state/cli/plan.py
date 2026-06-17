@@ -55,14 +55,19 @@ def _load_config_optional(state_dir: Path) -> Config | None:
     v1.17.0: load failures used to be silent; we now emit a warning naming
     the exception class + message so misconfigs surface during plan rather
     than during the next CLI invocation.
+
+    T016/B17: the global-config layer (``~/.config/fakoli-state/config.yaml``)
+    is merged UNDER the project config so user-wide planning defaults (e.g.
+    ``llm_tier`` / ``auto_expand_threshold``) apply here too, with the project
+    config overriding them.
     """
     config_path = state_dir / "config.yaml"
     if not config_path.exists():
         return None
     try:
-        from fakoli_state.config import load_config
+        from fakoli_state.config import load_merged_config
 
-        return load_config(config_path)
+        return load_merged_config(config_path)
     except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
         # Catch the four expected failure modes explicitly:
         #   - FileNotFoundError / OSError — disappeared between the
