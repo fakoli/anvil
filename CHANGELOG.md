@@ -10,6 +10,45 @@ _No unreleased changes._
 
 ---
 
+## [1.38.0] — 2026-06-17
+
+### Added
+
+- **Structured acceptance grammar (EARS / Gherkin) in the PRD parser
+  (T028/F007).** Acceptance criteria can now carry machine-readable intent: a
+  new public `parse_acceptance_grammar` helper in `planning/template.py`
+  decomposes each criterion into a structured `AcceptanceClause`
+  (`text`, `kind`, `clauses`) when an EARS or Gherkin grammar is present, and
+  falls back to a `freeform` clause otherwise — so the same loop that already
+  reads a PRD's bullet criteria can now act on *why*/*when*/*then* structure,
+  not just opaque strings.
+  - **EARS recognition (single-line).** Handles the conditional forms
+    `WHEN <trigger> THEN <response>`, `WHEN <trigger>, THE SYSTEM SHALL
+    <response>`, plus `WHILE`/`WHERE`/`IF` preconditions (including a nested
+    `WHILE x, WHEN y, the system shall z`), and the ubiquitous
+    `THE SYSTEM SHALL <response>` form. A conditional clause is only classified
+    as EARS when it actually yields a response, so an ordinary sentence merely
+    *starting* with "When" is not misclassified — it falls through to freeform.
+  - **Gherkin recognition (single- and multi-line).** Parses
+    `Given <context> When <event> Then <outcome>` whether written inline or as
+    separate Given/When/Then bullets in the same criteria block; `And`/`But`
+    continuations fold into the nearest preceding keyword, and structural noise
+    lines (`Scenario:`, `Feature:`, `Background:`) are skipped. A minimal viable
+    scenario requires at least a `When` and a `Then`.
+  - **Purely additive — never raises, never does I/O.** The canonical
+    `Task.acceptance_criteria` list of raw strings is unchanged; callers opt in
+    to the structured view, and a freeform PRD parses exactly as before. The
+    raw criterion text is always preserved verbatim on the clause (multi-line
+    Gherkin blocks collapse several input strings into one clause, joined by
+    newlines). `AcceptanceClause` and `parse_acceptance_grammar` are exported
+    from `planning.template`.
+  - Covered by `tests/test_parser.py` (`-k acceptance_grammar`, 20 cases)
+    spanning EARS when/then/shall/while/where/if, inline and multi-line Gherkin,
+    freeform fallback, and the round-trip that a PRD with structured criteria
+    parses into clauses while a freeform PRD still parses unchanged.
+
+---
+
 ## [1.37.0] — 2026-06-17
 
 ### Added

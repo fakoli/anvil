@@ -75,8 +75,10 @@ if TYPE_CHECKING:
     from fakoli_state.planning.llm import LLMProvider
 
 __all__ = [
+    "AcceptanceClause",
     "ParseError",
     "ParseResult",
+    "parse_acceptance_grammar",
     "parse_prd",
 ]
 
@@ -121,6 +123,30 @@ class ParseResult:
     errors: list[ParseError]
 
 
+class AcceptanceClause(NamedTuple):
+    """A single acceptance criterion, optionally decomposed into a structured grammar.
+
+    ``kind`` is one of:
+        - ``"ears"``     — EARS-style "WHEN <trigger> THEN <response>" (and the
+          related WHILE/WHERE/IF preconditions, plus the ubiquitous-form
+          "THE SYSTEM SHALL <response>").
+        - ``"gherkin"``  — Gherkin "Given <context> When <event> Then <outcome>".
+        - ``"freeform"`` — no structured grammar detected; ``clauses`` is empty
+          and ``text`` is the criterion verbatim.
+
+    ``text`` always holds the original criterion text (re-joined for the
+    multi-line Gherkin form).  ``clauses`` maps the recognised keyword (e.g.
+    ``"when"``, ``"then"``, ``"given"``, ``"while"``, ``"if"``, ``"where"``,
+    ``"shall"``) to its captured fragment.  The structured form is purely
+    additive — callers that only want the raw strings keep using
+    ``Task.acceptance_criteria`` unchanged.
+    """
+
+    text: str
+    kind: str
+    clauses: dict[str, str]
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -142,6 +168,54 @@ _BULLET_RE = re.compile(r"^-\s+(.*)")
 _REQ_ID_RE = re.compile(r"^(R\d+)\s*:?\s*(.*)", re.IGNORECASE)
 _FEAT_ID_RE = re.compile(r"^(F\d{3,})", re.IGNORECASE)
 _TASK_ID_RE = re.compile(r"^(T\d{3,})", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Structured acceptance grammar (EARS / Gherkin) — T028
+# ---------------------------------------------------------------------------
+#
+# Two optional grammars are recognised inside acceptance criteria.  Detection
+# is best-effort and never raises; anything that doesn't match falls back to a
+# ``freeform`` clause so the raw text is always preserved.
+#
+# EARS (Easy Approach to Requirements Syntax) — single-line forms:
+#   "WHEN <trigger>, THE SYSTEM SHALL <response>"
+#   "WHEN <trigger> THEN <response>"
+#   "WHILE <state>, WHEN <trigger>, THE SYSTEM SHALL <response>"
+#   "IF <condition>, THEN <response>"
+#   "WHERE <feature>, THE SYSTEM SHALL <response>"
+#   "THE SYSTEM SHALL <response>"            (ubiquitous form)
+#
+# Gherkin — single-line OR multi-line forms:
+#   "Given <context> When <event> Then <outcome>"
+#   (or each keyword on its own bullet line within the same criteria block)
+#
+# The leading optional Gherkin clause keywords (Scenario:, And, But) are
+# tolerated and folded into the nearest preceding keyword's fragment.
+
+# A leading "the system shall" / "system shall" / "it shall" response phrase.
+_EARS_SHALL_RE = re.compile(
+    r"\b(?:the\s+system\s+shall|the\s+system\s+must|system\s+shall|it\s+shall)\b\s*",
+    re.IGNORECASE,
+)
+# WHEN ... [THEN | , (the system) shall] ... response.
+_EARS_WHEN_RE = re.compile(r"^\s*when\b\s+(.*)$", re.IGNORECASE | re.DOTALL)
+_EARS_WHILE_RE = re.compile(r"^\s*while\b\s+(.*)$", re.IGNORECASE | re.DOTALL)
+_EARS_IF_RE = re.compile(r"^\s*if\b\s+(.*)$", re.IGNORECASE | re.DOTALL)
+_EARS_WHERE_RE = re.compile(r"^\s*where\b\s+(.*)$", re.IGNORECASE | re.DOTALL)
+# Split a trigger fragment on a THEN / ", the system shall" boundary.
+_EARS_THEN_RE = re.compile(r"\bthen\b\s*", re.IGNORECASE)
+
+# Gherkin keyword at the start of a (sub)clause.  "And"/"But" continue the
+# previous keyword; "Scenario"/"Feature"/"Background" are structural noise we
+# skip.
+_GHERKIN_KEYWORD_RE = re.compile(
+    r"^\s*(given|when|then|and|but)\b\s*:?\s*(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_GHERKIN_NOISE_RE = re.compile(
+    r"^\s*(scenario|feature|background|scenario\s+outline|examples)\b",
+    re.IGNORECASE,
+)
 
 
 def _strip_html_comments(text: str) -> str:
@@ -736,6 +810,237 @@ def _parse_tasks(
             tasks[idx] = task.model_copy(update={"dependencies": cleaned_deps})
 
     return tasks
+
+
+# ---------------------------------------------------------------------------
+# Structured acceptance grammar parsing (T028) — pure, additive, never raises
+# ---------------------------------------------------------------------------
+
+
+def _freeform_clause(text: str) -> AcceptanceClause:
+    """Wrap a criterion as a freeform clause (no structured grammar)."""
+    return AcceptanceClause(text=text.strip(), kind="freeform", clauses={})
+
+
+def _split_then(fragment: str) -> tuple[str, str | None]:
+    """Split an EARS trigger on a THEN / ", the system shall" boundary.
+
+    Returns ``(trigger, response_or_None)``.  A trailing comma on the trigger
+    is trimmed.  ``response`` is ``None`` when no boundary is found.
+    """
+    # Prefer an explicit "shall" boundary (most specific EARS form), then a
+    # bare "then" keyword.
+    m_shall = _EARS_SHALL_RE.search(fragment)
+    if m_shall:
+        trigger = fragment[: m_shall.start()].rstrip().rstrip(",").strip()
+        response = fragment[m_shall.end():].strip()
+        return trigger, response or None
+    m_then = _EARS_THEN_RE.search(fragment)
+    if m_then:
+        trigger = fragment[: m_then.start()].rstrip().rstrip(",").strip()
+        response = fragment[m_then.end():].strip()
+        return trigger, response or None
+    return fragment.strip().rstrip(",").strip(), None
+
+
+def _parse_ears(text: str) -> AcceptanceClause | None:
+    """Parse a single-line EARS criterion, or return None if it isn't EARS.
+
+    Recognises the WHEN / WHILE / IF / WHERE preconditions plus the
+    ubiquitous "the system shall" form.  Requires a response clause (a THEN or
+    a "shall") for the conditional forms so that an ordinary sentence merely
+    *starting* with "When" but lacking a response is not misclassified.
+    """
+    stripped = text.strip()
+
+    # Conditional forms must yield a response to count as EARS.
+    for keyword, regex in (
+        ("while", _EARS_WHILE_RE),
+        ("if", _EARS_IF_RE),
+        ("when", _EARS_WHEN_RE),
+        ("where", _EARS_WHERE_RE),
+    ):
+        m = regex.match(stripped)
+        if not m:
+            continue
+        rest = m.group(1)
+        trigger, response = _split_then(rest)
+
+        # WHILE/WHERE often nest a WHEN: "WHILE x, WHEN y, the system shall z".
+        clauses: dict[str, str] = {}
+        nested_when = re.search(r"\bwhen\b\s*", trigger, re.IGNORECASE)
+        if keyword in ("while", "where") and nested_when:
+            inner = trigger[nested_when.end():]
+            inner_trigger, inner_response = _split_then(inner)
+            # The pre-WHEN portion is the precondition for the keyword.
+            pre = trigger[: nested_when.start()].rstrip().rstrip(",").strip()
+            clauses[keyword] = pre
+            clauses["when"] = inner_trigger
+            if inner_response is not None:
+                response = inner_response
+        else:
+            clauses[keyword] = trigger
+
+        if response is None:
+            # No response clause → not a well-formed EARS requirement.
+            return None
+        clauses["then"] = response
+        return AcceptanceClause(text=stripped, kind="ears", clauses=clauses)
+
+    # Ubiquitous form: "THE SYSTEM SHALL <response>" with no precondition.
+    m_shall = _EARS_SHALL_RE.match(stripped)
+    if m_shall:
+        response = stripped[m_shall.end():].strip()
+        if response:
+            return AcceptanceClause(
+                text=stripped,
+                kind="ears",
+                clauses={"shall": response, "then": response},
+            )
+
+    return None
+
+
+def _parse_gherkin_inline(text: str) -> AcceptanceClause | None:
+    """Parse a single-line "Given ... When ... Then ..." criterion.
+
+    Returns None unless the text *starts* with a Gherkin keyword (Given / When)
+    and contains at least a When and a Then (the minimal viable scenario).
+    Anchoring on the leading keyword keeps ordinary prose that merely contains
+    the words "when"/"then" mid-sentence out of the structured bucket — that
+    prose falls back to a freeform clause.
+    """
+    if not _GHERKIN_KEYWORD_RE.match(text) or re.match(
+        r"^\s*(?:and|but)\b", text, re.IGNORECASE
+    ):
+        # Must lead with given/when/then (not a bare And/But continuation).
+        return None
+    if not re.match(r"^\s*(?:given|when)\b", text, re.IGNORECASE):
+        return None
+    lowered = text.lower()
+    # Find keyword positions in order of appearance.
+    positions: list[tuple[int, str]] = []
+    for kw in ("given", "when", "then", "and", "but"):
+        for m in re.finditer(rf"\b{kw}\b", lowered):
+            positions.append((m.start(), kw))
+    if not positions:
+        return None
+    positions.sort()
+
+    clauses: dict[str, str] = {}
+    last_real_kw: str | None = None
+    for idx, (start, kw) in enumerate(positions):
+        end = positions[idx + 1][0] if idx + 1 < len(positions) else len(text)
+        # Slice the fragment after the keyword token itself.
+        frag = text[start:end]
+        # Drop the leading keyword word from the fragment.
+        frag = re.sub(rf"^\s*{kw}\b\s*:?\s*", "", frag, flags=re.IGNORECASE).strip()
+        if kw in ("and", "but"):
+            target = last_real_kw
+            if target is None:
+                continue
+            if frag:
+                clauses[target] = (clauses.get(target, "") + " and " + frag).strip()
+            continue
+        last_real_kw = kw
+        if frag:
+            clauses[kw] = frag
+
+    if "when" in clauses and "then" in clauses:
+        return AcceptanceClause(text=text.strip(), kind="gherkin", clauses=clauses)
+    return None
+
+
+def parse_acceptance_grammar(criteria: list[str]) -> list[AcceptanceClause]:
+    """Decompose acceptance criteria into structured EARS/Gherkin clauses.
+
+    Pure and total — never raises, never performs I/O.  For each criterion the
+    parser tries, in order:
+
+    1. EARS single-line ("WHEN ... THEN ...", "THE SYSTEM SHALL ...", etc.).
+    2. Gherkin single-line ("Given ... When ... Then ...").
+    3. Multi-line Gherkin: consecutive criteria written as separate
+       Given/When/Then bullets are merged into one ``gherkin`` clause.
+    4. Freeform fallback — the criterion is preserved verbatim.
+
+    This is *additive*: the canonical ``Task.acceptance_criteria`` list of raw
+    strings is unchanged.  Callers that want structured intent (e.g. richer
+    scoring or planning) opt in by calling this helper; everything else keeps
+    working exactly as before.
+
+    Args:
+        criteria: The raw acceptance-criteria strings from a parsed Task / PRD.
+
+    Returns:
+        One ``AcceptanceClause`` per logical criterion.  Multi-line Gherkin
+        blocks collapse several input strings into a single clause, so the
+        output length may be shorter than the input length.
+    """
+    if not criteria:
+        return []
+
+    out: list[AcceptanceClause] = []
+    i = 0
+    n = len(criteria)
+    while i < n:
+        raw = criteria[i]
+        text = raw.strip()
+        if not text:
+            i += 1
+            continue
+
+        # Structural Gherkin noise lines (Scenario:, Feature:) are skipped —
+        # they carry no acceptance content of their own.
+        if _GHERKIN_NOISE_RE.match(text):
+            i += 1
+            continue
+
+        ears = _parse_ears(text)
+        if ears is not None:
+            out.append(ears)
+            i += 1
+            continue
+
+        inline_gherkin = _parse_gherkin_inline(text)
+        if inline_gherkin is not None:
+            out.append(inline_gherkin)
+            i += 1
+            continue
+
+        # Multi-line Gherkin: a "Given"/"When" bullet followed by sibling
+        # And/But/When/Then bullets.  Greedily consume the contiguous run.
+        m_kw = _GHERKIN_KEYWORD_RE.match(text)
+        if m_kw and m_kw.group(1).lower() in ("given", "when"):
+            block: list[str] = [text]
+            j = i + 1
+            while j < n:
+                nxt = criteria[j].strip()
+                if not nxt:
+                    j += 1
+                    continue
+                nm = _GHERKIN_KEYWORD_RE.match(nxt)
+                if nm and nm.group(1).lower() in ("given", "when", "then", "and", "but"):
+                    block.append(nxt)
+                    j += 1
+                    continue
+                break
+            merged = _parse_gherkin_inline(" ".join(block))
+            if merged is not None:
+                # Preserve the original multi-line text joined by newlines.
+                out.append(
+                    AcceptanceClause(
+                        text="\n".join(block),
+                        kind="gherkin",
+                        clauses=merged.clauses,
+                    )
+                )
+                i = j
+                continue
+
+        out.append(_freeform_clause(text))
+        i += 1
+
+    return out
 
 
 # ---------------------------------------------------------------------------

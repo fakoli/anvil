@@ -442,7 +442,7 @@ fakoli-state is the durable, runtime-neutral state-of-record for AI-and-human so
 ### T028: Structured acceptance grammar (EARS/Gherkin) in the PRD parser
 **Feature:** F007
 **Priority:** low
-**Likely files:** bin/src/fakoli_state/planning/parser.py, bin/src/fakoli_state/planning/inference.py, bin/src/fakoli_state/planning/scoring.py, bin/tests/test_parser.py
+**Likely files:** bin/src/fakoli_state/planning/parser.py, bin/src/fakoli_state/planning/inference.py, bin/src/fakoli_state/planning/scoring.py, tests/test_parser.py
 **Dependencies:**
 
 **Acceptance criteria:**
@@ -451,4 +451,4 @@ fakoli-state is the durable, runtime-neutral state-of-record for AI-and-human so
 - Tested: a PRD with EARS/Gherkin acceptance criteria parses into structured clauses; a freeform PRD still parses unchanged.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_parser.py -k acceptance_grammar -q`
+- `cd bin && uv run pytest ../tests/test_parser.py -k acceptance_grammar -q`
