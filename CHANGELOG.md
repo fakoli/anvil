@@ -6,7 +6,38 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **Surface prior unresolved review findings on file overlap (T017).** When a
+  reviewer rejects a task or requests changes at the finish gate, that verdict
+  is recorded as a `reject` / `needs_changes` review whose notes carry the
+  finding. A later task that intends to touch one of those same files no longer
+  starts blind: its work packet now surfaces the outstanding finding so the
+  agent can address it or explicitly carry it forward.
+  - **Two pure helpers in `review/gates.py`.** A new frozen `DeferredFinding`
+    dataclass plus `deferred_findings(reviews, tasks, evidence)` and
+    `deferred_findings_for_files(..., expected_files)`. The first derives one
+    finding per task-targeted `reject` / `needs_changes` review — its touched
+    files being the union of the reviewed task's `likely_files` and the
+    `files_changed` of any evidence submitted on it (approvals and
+    non-task-targeted reviews are ignored). The second filters those to the ones
+    overlapping an incoming claim's files and annotates each with the exact
+    overlapping subset. Both are I/O-free and deterministic; they are re-exported
+    from `review/__init__.py`.
+  - **Wired into both surfaces.** `fakoli-state packet` (CLI) and the
+    `generate_work_packet` MCP tool now compute overlap against the active
+    claim's `expected_files` (falling back to the task's planner-populated
+    `likely_files` before a claim exists) and pass the findings to the renderer.
+  - **Rendered in both packet formats.** `render_packet` / `fast_lane_packet`
+    gain a `deferred_findings` parameter (defaults to none — fully
+    back-compatible). When non-empty the markdown packet grows a "Prior
+    unresolved review findings (overlapping files)" section and the JSON packet
+    grows a `deferred_findings` array; when empty, neither is rendered.
+  - **Import-cycle fix.** `state/transitions.py` now imports `evidence_complete`
+    lazily at call time so `review.gates` can be the import entry point (e.g.
+    running `tests/test_review.py` standalone) without re-entering a
+    partially-initialized module.
+  - Covered by `tests/test_review.py`.
 
 ---
 

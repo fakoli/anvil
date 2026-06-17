@@ -10,9 +10,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fakoli_state.review.gates import _contains_test_keyword, evidence_complete
+from fakoli_state.review.gates import (
+    DeferredFinding,
+    _contains_test_keyword,
+    deferred_findings,
+    deferred_findings_for_files,
+    evidence_complete,
+)
 from fakoli_state.state.models import (
     Evidence,
+    Review,
+    ReviewDecision,
+    ReviewTargetKind,
     Score,
     Task,
     TaskPriority,
@@ -326,3 +335,425 @@ class TestContainsTestKeywordCollectionOnly:
 
     def test_cargo_test_color_NOT_rejected(self) -> None:
         assert _contains_test_keyword("cargo test --color=auto")
+
+
+# ===========================================================================
+# T017 — Surface deferred / failed-review evidence on file overlap.
+#
+# A reviewer rejecting (or requesting changes on) a task records a Review row
+# whose ``notes`` carry the finding and whose ``target_id`` is the task. The
+# files that finding touched are the task's ``likely_files`` plus any submitted
+# evidence's ``files_changed``. A later task whose incoming files overlap those
+# files should surface the prior unresolved finding in its work packet.
+# ===========================================================================
+
+
+def _make_review(
+    *,
+    review_id: str,
+    target_id: str,
+    decision: ReviewDecision,
+    notes: str | None = "needs work on the auth path",
+    target_kind: ReviewTargetKind = ReviewTargetKind.task,
+) -> Review:
+    return Review(
+        id=review_id,
+        target_kind=target_kind,
+        target_id=target_id,
+        reviewed_by="reviewer-bob",
+        decision=decision,
+        notes=notes,
+        created_at=_T0,
+    )
+
+
+def _make_task_with_files(
+    *,
+    task_id: str,
+    likely_files: list[str],
+) -> Task:
+    return Task(
+        id=task_id,
+        feature_id="F001",
+        title=f"Task {task_id}",
+        description="A task.",
+        status=TaskStatus.drafted,
+        priority=TaskPriority.medium,
+        acceptance_criteria=[],
+        implementation_notes=[],
+        verification=Verification(),
+        likely_files=likely_files,
+        scores=Score(),
+        created_at=_T0,
+        updated_at=_T0,
+    )
+
+
+def _make_evidence_for(
+    *,
+    evidence_id: str,
+    task_id: str,
+    files_changed: list[str],
+) -> Evidence:
+    return Evidence(
+        id=evidence_id,
+        task_id=task_id,
+        claim_id=f"C-{task_id}",
+        commands_run=["pytest -q"],
+        files_changed=files_changed,
+        submitted_at=_T0,
+        submitted_by="agent-alpha",
+    )
+
+
+class TestDeferredFindings:
+    """Pure derivation of deferred / failed-review findings linked to files."""
+
+    def test_rejected_review_becomes_a_finding_linked_to_task_files(self) -> None:
+        task = _make_task_with_files(task_id="T001", likely_files=["src/auth.py"])
+        review = _make_review(
+            review_id="RV-E5", target_id="T001", decision=ReviewDecision.reject
+        )
+        findings = deferred_findings([review], [task], [])
+        assert len(findings) == 1
+        f = findings[0]
+        assert isinstance(f, DeferredFinding)
+        assert f.review_id == "RV-E5"
+        assert f.task_id == "T001"
+        assert f.decision == "reject"
+        assert f.notes == "needs work on the auth path"
+        # File linkage comes from the reviewed task's likely_files.
+        assert f.files == ["src/auth.py"]
+
+    def test_needs_changes_review_is_also_a_finding(self) -> None:
+        task = _make_task_with_files(task_id="T001", likely_files=["src/db.py"])
+        review = _make_review(
+            review_id="RV-E7",
+            target_id="T001",
+            decision=ReviewDecision.needs_changes,
+        )
+        findings = deferred_findings([review], [task], [])
+        assert [f.decision for f in findings] == ["needs_changes"]
+
+    def test_approved_review_is_not_a_finding(self) -> None:
+        task = _make_task_with_files(task_id="T001", likely_files=["src/auth.py"])
+        review = _make_review(
+            review_id="RV-E9", target_id="T001", decision=ReviewDecision.approve
+        )
+        assert deferred_findings([review], [task], []) == []
+
+    def test_finding_files_union_task_likely_and_evidence_changed(self) -> None:
+        task = _make_task_with_files(task_id="T001", likely_files=["src/auth.py"])
+        ev = _make_evidence_for(
+            evidence_id="EV1",
+            task_id="T001",
+            files_changed=["src/auth.py", "src/session.py"],
+        )
+        review = _make_review(
+            review_id="RV-E5", target_id="T001", decision=ReviewDecision.reject
+        )
+        findings = deferred_findings([review], [task], [ev])
+        # Union of likely_files and evidence files_changed, sorted + de-duped.
+        assert findings[0].files == ["src/auth.py", "src/session.py"]
+
+    def test_non_task_review_target_ignored(self) -> None:
+        review = _make_review(
+            review_id="RV-E2",
+            target_id="proj-1",
+            decision=ReviewDecision.reject,
+            target_kind=ReviewTargetKind.prd,
+        )
+        assert deferred_findings([review], [], []) == []
+
+
+class TestDeferredFindingsForFiles:
+    """Filtering deferred findings by an incoming claim/task's expected files."""
+
+    def test_deferred_overlap_surfaces_prior_finding(self) -> None:
+        # A prior finding deferred on src/auth.py ...
+        prior_task = _make_task_with_files(
+            task_id="T001", likely_files=["src/auth.py"]
+        )
+        review = _make_review(
+            review_id="RV-E5", target_id="T001", decision=ReviewDecision.reject
+        )
+        # ... and a later task that intends to touch the SAME file.
+        overlapping = deferred_findings_for_files(
+            [review], [prior_task], [], expected_files=["src/auth.py"]
+        )
+        assert len(overlapping) == 1
+        assert overlapping[0].review_id == "RV-E5"
+        assert overlapping[0].overlapping_files == ["src/auth.py"]
+
+    def test_deferred_overlap_excludes_non_overlapping_finding(self) -> None:
+        prior_task = _make_task_with_files(
+            task_id="T001", likely_files=["src/auth.py"]
+        )
+        review = _make_review(
+            review_id="RV-E5", target_id="T001", decision=ReviewDecision.reject
+        )
+        # A later task touching a DIFFERENT file → no surfaced findings.
+        assert (
+            deferred_findings_for_files(
+                [review], [prior_task], [], expected_files=["src/unrelated.py"]
+            )
+            == []
+        )
+
+    def test_empty_expected_files_yields_no_findings(self) -> None:
+        prior_task = _make_task_with_files(
+            task_id="T001", likely_files=["src/auth.py"]
+        )
+        review = _make_review(
+            review_id="RV-E5", target_id="T001", decision=ReviewDecision.reject
+        )
+        assert (
+            deferred_findings_for_files(
+                [review], [prior_task], [], expected_files=[]
+            )
+            == []
+        )
+
+    def test_overlap_via_evidence_files_changed(self) -> None:
+        # The reviewed task declared no likely_files, but the agent's evidence
+        # touched src/session.py; a later task on src/session.py must still see
+        # the prior finding.
+        prior_task = _make_task_with_files(task_id="T001", likely_files=[])
+        ev = _make_evidence_for(
+            evidence_id="EV1",
+            task_id="T001",
+            files_changed=["src/session.py"],
+        )
+        review = _make_review(
+            review_id="RV-E5", target_id="T001", decision=ReviewDecision.reject
+        )
+        overlapping = deferred_findings_for_files(
+            [review], [prior_task], [ev], expected_files=["src/session.py"]
+        )
+        assert len(overlapping) == 1
+        assert overlapping[0].overlapping_files == ["src/session.py"]
+
+
+class TestWorkPacketSurfacesDeferredFindings:
+    """The rendered work packet (markdown + json) surfaces overlapping findings."""
+
+    def test_packet_markdown_and_json_include_deferred_finding(self) -> None:
+        from fakoli_state.context.packets import render_packet
+
+        prior_task = _make_task_with_files(
+            task_id="T001", likely_files=["src/auth.py"]
+        )
+        review = _make_review(
+            review_id="RV-E5",
+            target_id="T001",
+            decision=ReviewDecision.reject,
+            notes="auth path leaks the token on error",
+        )
+        # The new task we are rendering a packet for touches the same file.
+        new_task = _make_task_with_files(
+            task_id="T002", likely_files=["src/auth.py"]
+        )
+
+        findings = deferred_findings_for_files(
+            [review], [prior_task, new_task], [], expected_files=new_task.likely_files
+        )
+        assert findings, "precondition: overlap must produce a finding"
+
+        packet = render_packet(new_task, deferred_findings=findings)
+
+        # Markdown surfaces the finding section and the note.
+        assert "Prior unresolved review findings" in packet.markdown
+        assert "RV-E5" in packet.markdown
+        assert "auth path leaks the token on error" in packet.markdown
+        assert "src/auth.py" in packet.markdown
+
+        # JSON carries a structured, machine-readable array.
+        df = packet.json_data["deferred_findings"]
+        assert len(df) == 1
+        assert df[0]["review_id"] == "RV-E5"
+        assert df[0]["task_id"] == "T001"
+        assert df[0]["decision"] == "reject"
+        assert df[0]["overlapping_files"] == ["src/auth.py"]
+
+    def test_packet_without_findings_omits_section_backcompat(self) -> None:
+        from fakoli_state.context.packets import render_packet
+
+        new_task = _make_task_with_files(
+            task_id="T002", likely_files=["src/auth.py"]
+        )
+        # Default (no deferred_findings passed) → no section, empty json array.
+        packet = render_packet(new_task)
+        assert "Prior unresolved review findings" not in packet.markdown
+        assert packet.json_data["deferred_findings"] == []
+
+
+# ===========================================================================
+# T017 end-to-end (CLI): deferring a finding on file X then rendering a later
+# task touching file X surfaces the finding in the actual `packet` command.
+# Mirrors tests/test_strict_evidence.py: Typer CliRunner + chdir(tmp_path).
+# ===========================================================================
+
+# Two tasks that BOTH touch src/app/converter.py. T002 depends on T001 so the
+# deterministic --no-llm planner keeps them ordered, but the file overlap is
+# what drives the surfaced finding.
+_OVERLAP_PRD = """\
+# Project: Deferred Overlap Test Project
+
+## Summary
+
+A project exercising deferred-finding surfacing on file overlap.
+
+## Goals
+
+- Convert files correctly.
+
+## Requirements
+
+- R001: Accept file input.
+
+## Features
+
+### F001: File Conversion
+
+Convert input files to output format.
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Implement converter core
+
+**Feature:** F001
+**Priority:** high
+**Likely files:** src/app/converter.py
+
+**Acceptance criteria:**
+
+- Conversion succeeds for valid input.
+
+**Verification:**
+
+- `pytest tests/test_converter.py -v`
+
+### T002: Harden converter error handling
+
+**Feature:** F001
+**Priority:** high
+**Likely files:** src/app/converter.py
+**Dependencies:** T001
+
+**Acceptance criteria:**
+
+- Errors are reported, not swallowed.
+
+**Verification:**
+
+- `pytest tests/test_converter.py -v`
+"""
+
+
+class TestDeferredOverlapEndToEnd:
+    def test_deferred_overlap_finding_appears_in_later_task_packet(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        import json as _json
+        import os
+        import sqlite3 as _sqlite3
+
+        from typer.testing import CliRunner
+
+        from fakoli_state.cli import app
+
+        runner = CliRunner()
+
+        def _invoke(cmd: list[str]):  # type: ignore[no-untyped-def]
+            original_cwd = os.getcwd()
+            os.chdir(tmp_path)
+            try:
+                return runner.invoke(app, cmd, catch_exceptions=False)
+            finally:
+                os.chdir(original_cwd)
+
+        # 1. Plan the two-task project.
+        assert _invoke(["init", "--name", "Deferred Overlap Test Project"]).exit_code == 0
+        (tmp_path / ".fakoli-state" / "prd.md").write_text(
+            _OVERLAP_PRD, encoding="utf-8"
+        )
+        assert _invoke(["prd", "parse"]).exit_code == 0
+        assert _invoke(["prd", "review"]).exit_code == 0
+        assert _invoke(["prd", "review", "--approve"]).exit_code == 0
+        assert _invoke(["plan", "--no-llm"]).exit_code == 0
+        assert _invoke(["score"]).exit_code == 0
+        assert _invoke(["review", "tasks"]).exit_code == 0
+
+        # 2. Claim T001, submit evidence (→ needs_review), then REJECT with a
+        #    finding note. The reject is the "deferred / failed review".
+        assert _invoke(["claim", "T001", "--actor", "agent-test"]).exit_code == 0
+        sub = _invoke(
+            [
+                "submit",
+                "T001",
+                "--commands",
+                "pytest tests/ -v",
+                "--files-changed",
+                "src/app/converter.py",
+                "--actor",
+                "agent-test",
+            ]
+        )
+        assert sub.exit_code == 0, sub.output
+
+        rej = _invoke(
+            [
+                "apply",
+                "T001",
+                "--reject",
+                "--reason",
+                "converter swallows malformed-input errors silently",
+            ]
+        )
+        assert rej.exit_code == 0, rej.output
+
+        # The finding is persisted as a queryable review row on src/app/converter.py.
+        db_path = tmp_path / ".fakoli-state" / "state.db"
+        conn = _sqlite3.connect(str(db_path))
+        try:
+            review_row = conn.execute(
+                "SELECT decision, notes FROM reviews "
+                "WHERE target_kind='task' AND target_id='T001'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert review_row is not None
+        assert review_row[0] == "rejected"
+        assert "swallows malformed-input errors" in review_row[1]
+
+        # 3. Render the packet for T002 — which touches the SAME file. The prior
+        #    deferred finding must surface, in both markdown and json.
+        md_res = _invoke(["packet", "T002", "--format", "md"])
+        assert md_res.exit_code == 0, md_res.output
+        md = (tmp_path / ".fakoli-state" / "packets" / "T002.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Prior unresolved review findings" in md
+        assert "converter swallows malformed-input errors silently" in md
+        assert "src/app/converter.py" in md
+
+        json_res = _invoke(["packet", "T002", "--format", "json"])
+        assert json_res.exit_code == 0, json_res.output
+        data = _json.loads(
+            (tmp_path / ".fakoli-state" / "packets" / "T002.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        findings = data["deferred_findings"]
+        assert len(findings) == 1
+        assert findings[0]["task_id"] == "T001"
+        # The reviews table stores the raw task.applied outcome "rejected"; when
+        # read back via list_reviews() it surfaces as the canonical
+        # ReviewDecision "needs_changes" (a rejected task auto-reopens for
+        # rework — see _row_to_review / _TASK_OUTCOME_TO_REVIEW_DECISION). Either
+        # way the finding is a deferred/failed review and must surface.
+        assert findings[0]["decision"] in ("reject", "needs_changes")
+        assert findings[0]["overlapping_files"] == ["src/app/converter.py"]
+        assert "swallows malformed-input errors" in findings[0]["notes"]

@@ -13,10 +13,178 @@ Design:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 
-from fakoli_state.state.models import Evidence, Task
+from fakoli_state.state.models import Evidence, Review, ReviewDecision, Task
 
-__all__ = ["evidence_complete"]
+__all__ = [
+    "DeferredFinding",
+    "deferred_findings",
+    "deferred_findings_for_files",
+    "evidence_complete",
+]
+
+
+# ---------------------------------------------------------------------------
+# T017 — Surface deferred / failed-review evidence on file overlap.
+#
+# When a reviewer rejects (or requests changes on) a task at the finish gate,
+# that verdict is recorded as a ``Review`` row (``reject`` / ``needs_changes``)
+# whose ``notes`` carry the finding text and whose ``target_id`` is the task.
+# The files that finding touched are the reviewed task's ``likely_files`` plus
+# the ``files_changed`` of whatever evidence the agent submitted on it.
+#
+# A later task that intends to modify one of those same files should not start
+# blind: the prior unresolved finding is exactly the context an agent needs.
+# These functions are PURE (no I/O, no DB) — the CLI / MCP layer reads the
+# ``reviews`` / ``tasks`` / ``evidence`` rows from the backend and hands them in;
+# the work-packet renderer (``context.packets``) surfaces the returned findings
+# whose touched files overlap the incoming claim's ``expected_files``.
+# ---------------------------------------------------------------------------
+
+# A review whose decision is one of these is an unresolved (deferred / failed)
+# finding worth surfacing. ``approve`` is excluded — an approved task carries no
+# outstanding finding. ``reject`` auto-reopens the task for rework (it lands at
+# ``drafted``), so its finding stays live until the rework is re-reviewed.
+_DEFERRED_DECISIONS: frozenset[str] = frozenset(
+    {ReviewDecision.reject.value, ReviewDecision.needs_changes.value}
+)
+
+
+@dataclass(frozen=True)
+class DeferredFinding:
+    """A deferred / failed-review finding linked to the files it touched.
+
+    Attributes:
+        review_id:   The originating ``Review`` row id (stable, deterministic).
+        task_id:     The task the finding was raised against.
+        decision:    The review decision (``reject`` or ``needs_changes``).
+        notes:       The reviewer's finding text (may be ``None``).
+        files:       Sorted, de-duplicated files the finding touched — the
+                     reviewed task's ``likely_files`` plus any submitted
+                     evidence's ``files_changed``.
+        overlapping_files:
+                     When produced by :func:`deferred_findings_for_files`, the
+                     subset of ``files`` that overlapped the queried
+                     ``expected_files`` (sorted). Empty otherwise.
+    """
+
+    review_id: str
+    task_id: str
+    decision: str
+    notes: str | None
+    files: list[str]
+    overlapping_files: list[str] = field(default_factory=list)
+
+
+def deferred_findings(
+    reviews: list[Review],
+    tasks: list[Task],
+    evidence: list[Evidence],
+) -> list[DeferredFinding]:
+    """Build queryable deferred / failed-review findings linked to their files.
+
+    Pure: derives findings from already-loaded engine rows — no I/O.
+
+    For every task-targeted review whose decision is ``reject`` or
+    ``needs_changes`` (see :data:`_DEFERRED_DECISIONS`), the finding's files are
+    the union of the reviewed task's ``likely_files`` and the ``files_changed``
+    of every Evidence submitted on that task. Reviews on non-task targets (PRD,
+    feature) and approvals are ignored.
+
+    Args:
+        reviews:  All ``Review`` rows (e.g. ``backend.list_reviews()``).
+        tasks:    All ``Task`` rows (used to resolve a finding's likely_files).
+        evidence: All ``Evidence`` rows (used to resolve files_changed).
+
+    Returns:
+        One :class:`DeferredFinding` per qualifying review, in ``reviews`` order
+        (which the backend returns deterministically by id). ``overlapping_files``
+        is empty on each — use :func:`deferred_findings_for_files` to filter and
+        annotate by an incoming claim's expected files.
+    """
+    tasks_by_id: dict[str, Task] = {t.id: t for t in tasks}
+    # task_id -> set of files touched by any evidence submitted on that task.
+    evidence_files_by_task: dict[str, set[str]] = {}
+    for ev in evidence:
+        if ev.files_changed:
+            evidence_files_by_task.setdefault(ev.task_id, set()).update(
+                ev.files_changed
+            )
+
+    findings: list[DeferredFinding] = []
+    for review in reviews:
+        if review.target_kind.value != "task":
+            continue
+        if review.decision.value not in _DEFERRED_DECISIONS:
+            continue
+
+        task_id = review.target_id
+        files: set[str] = set()
+        task = tasks_by_id.get(task_id)
+        if task is not None:
+            files.update(task.likely_files)
+        files.update(evidence_files_by_task.get(task_id, set()))
+
+        findings.append(
+            DeferredFinding(
+                review_id=review.id,
+                task_id=task_id,
+                decision=review.decision.value,
+                notes=review.notes,
+                files=sorted(files),
+            )
+        )
+
+    return findings
+
+
+def deferred_findings_for_files(
+    reviews: list[Review],
+    tasks: list[Task],
+    evidence: list[Evidence],
+    expected_files: list[str],
+) -> list[DeferredFinding]:
+    """Return deferred findings whose touched files overlap ``expected_files``.
+
+    This is the surface T017 wires into the work packet / claim response: when a
+    new task is claimed or planned, the caller passes the incoming claim's
+    ``expected_files`` (or the task's ``likely_files``) and gets back every prior
+    unresolved finding that touched one of those same files, annotated with the
+    exact overlapping subset.
+
+    Pure: no I/O. Deterministic for fixed inputs.
+
+    Args:
+        reviews:        All ``Review`` rows.
+        tasks:          All ``Task`` rows.
+        evidence:       All ``Evidence`` rows.
+        expected_files: The files the incoming claim / task intends to touch.
+
+    Returns:
+        The subset of :func:`deferred_findings` whose ``files`` intersect
+        ``expected_files``, each with ``overlapping_files`` populated (sorted).
+        Empty when ``expected_files`` is empty or nothing overlaps.
+    """
+    if not expected_files:
+        return []
+
+    wanted = set(expected_files)
+    out: list[DeferredFinding] = []
+    for finding in deferred_findings(reviews, tasks, evidence):
+        overlap = sorted(wanted & set(finding.files))
+        if overlap:
+            out.append(
+                DeferredFinding(
+                    review_id=finding.review_id,
+                    task_id=finding.task_id,
+                    decision=finding.decision,
+                    notes=finding.notes,
+                    files=finding.files,
+                    overlapping_files=overlap,
+                )
+            )
+    return out
 
 
 def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:

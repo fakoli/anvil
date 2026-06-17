@@ -127,6 +127,24 @@ def packet(
                 active_claim = claim
                 break
 
+        # T017 — surface prior deferred / failed-review findings whose files
+        # overlap this task's files. The concrete claim (if any) carries the
+        # agent's declared ``expected_files``; before a claim exists we fall back
+        # to the planner-populated ``likely_files`` overlap hint on the task.
+        from fakoli_state.review.gates import deferred_findings_for_files
+
+        overlap_files = (
+            active_claim.expected_files
+            if active_claim is not None and active_claim.expected_files
+            else task.likely_files
+        )
+        deferred = deferred_findings_for_files(
+            backend.list_reviews(),
+            backend.list_tasks(),
+            backend.list_evidence(),
+            overlap_files,
+        )
+
         # T020 — route the fast-lane from the project's config thresholds when a
         # config is available; fall back to the renderer's built-in defaults
         # (via render_packet) when there is no/broken config.yaml.
@@ -140,6 +158,7 @@ def packet(
                 dependencies_open=dependencies_open,
                 related_decisions=None,  # Phase 6+ wiring
                 active_claim=active_claim,
+                deferred_findings=deferred,
             )
         else:
             work_packet = render_packet(
@@ -149,6 +168,7 @@ def packet(
                 dependencies_open=dependencies_open,
                 related_decisions=None,  # Phase 6+ wiring
                 active_claim=active_claim,
+                deferred_findings=deferred,
             )
     finally:
         backend.close()

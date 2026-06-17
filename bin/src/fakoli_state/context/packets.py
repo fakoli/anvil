@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fakoli_state.config import Config
+    from fakoli_state.review.gates import DeferredFinding
     from fakoli_state.state.models import (
         Claim,
         Decision,
@@ -180,6 +181,36 @@ def _required_evidence_for(
     return declared[:fast_lane_required_evidence_max]
 
 
+def _deferred_finding_lines(findings: list[DeferredFinding]) -> list[str]:
+    """Render the 'Prior unresolved review findings' section (T017).
+
+    Each finding names the originating review, the task it was raised against,
+    the decision, the overlapping files (the reason it surfaced here), and the
+    reviewer's note. Pure formatting; empty list yields no lines so the section
+    header is omitted entirely when there is nothing to surface.
+    """
+    if not findings:
+        return []
+    lines: list[str] = [
+        "## Prior unresolved review findings (overlapping files)",
+        "",
+        (
+            "A prior task touching one of this task's files was deferred or "
+            "failed review. Address or explicitly carry forward these findings:"
+        ),
+        "",
+    ]
+    for f in findings:
+        overlap = ", ".join(f.overlapping_files) or "—"
+        note = f.notes.strip() if f.notes else "(no note recorded)"
+        lines.append(
+            f"- **{f.review_id}** on {f.task_id} ({f.decision}) — "
+            f"overlaps `{overlap}`: {note}"
+        )
+    lines.append("")
+    return lines
+
+
 def _render_markdown(
     task: Task,
     *,
@@ -189,6 +220,7 @@ def _render_markdown(
     related_decisions: list[Decision],
     active_claim: Claim | None,
     lightweight: bool,
+    deferred_findings: list[DeferredFinding] | None = None,
     fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> str:
     """Build the full markdown string from the normalised inputs."""
@@ -259,6 +291,9 @@ def _render_markdown(
         for dec in related_decisions:
             lines.append(f"- {dec.id}: {dec.title} — {dec.decision}")
         lines.append("")
+
+    # --- Prior unresolved review findings (T017) ---
+    lines.extend(_deferred_finding_lines(deferred_findings or []))
 
     # --- Verification ---
     lines.append("## Verification")
@@ -347,6 +382,7 @@ def _render_json(
     related_decisions: list[Decision],
     active_claim: Claim | None,
     lightweight: bool,
+    deferred_findings: list[DeferredFinding] | None = None,
     fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> dict[str, Any]:
     """Build the structured JSON dict that mirrors the markdown sections."""
@@ -396,6 +432,19 @@ def _render_json(
         fast_lane_required_evidence_max=fast_lane_required_evidence_max,
     )
 
+    # T017 — prior unresolved review findings that touch this task's files.
+    deferred_findings_data: list[dict[str, Any]] = [
+        {
+            "review_id": f.review_id,
+            "task_id": f.task_id,
+            "decision": f.decision,
+            "notes": f.notes,
+            "files": list(f.files),
+            "overlapping_files": list(f.overlapping_files),
+        }
+        for f in (deferred_findings or [])
+    ]
+
     return {
         "task_id": task.id,
         "task": task_data,
@@ -404,6 +453,7 @@ def _render_json(
         "dependencies_open": deps_open_data,
         "decisions": decisions_data,
         "active_claim": claim_data,
+        "deferred_findings": deferred_findings_data,
         "required_evidence": rendered_required_evidence,
         "update_protocol": update_protocol,
         "variant": "lightweight" if lightweight else "full",
@@ -424,6 +474,7 @@ def render_packet(
     related_decisions: list[Decision] | None = None,
     active_claim: Claim | None = None,
     lightweight: bool | None = None,
+    deferred_findings: list[DeferredFinding] | None = None,
     fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> WorkPacket:
     """Render a Task plus its surrounding context into a WorkPacket.
@@ -459,6 +510,16 @@ def render_packet(
             goal, acceptance criteria, scope, decisions, and claim sections are
             identical in both variants; the lightweight variant right-sizes the
             update-protocol prose AND the required-evidence checklist.
+        deferred_findings:
+            T017 — prior unresolved review findings (``reject`` /
+            ``needs_changes``) whose touched files overlap this task's incoming
+            files, as produced by
+            :func:`fakoli_state.review.gates.deferred_findings_for_files`. When
+            non-empty, the packet surfaces a "Prior unresolved review findings"
+            section (markdown) and a ``deferred_findings`` array (json) so an
+            agent picking up a task that touches a previously-deferred file sees
+            the outstanding finding instead of starting blind. Defaults to none
+            (no section rendered) — fully back-compatible with existing callers.
         fast_lane_required_evidence_max:
             T020 — the maximum number of ``required_evidence`` items the
             lightweight (fast-lane) packet renders, in declaration order
@@ -477,6 +538,7 @@ def render_packet(
     resolved_deps_completed: list[Task] = dependencies_completed or []
     resolved_deps_open: list[Task] = dependencies_open or []
     resolved_decisions: list[Decision] = related_decisions or []
+    resolved_findings: list[DeferredFinding] = deferred_findings or []
     resolved_lightweight: bool = (
         is_lightweight(task) if lightweight is None else lightweight
     )
@@ -489,6 +551,7 @@ def render_packet(
         related_decisions=resolved_decisions,
         active_claim=active_claim,
         lightweight=resolved_lightweight,
+        deferred_findings=resolved_findings,
         fast_lane_required_evidence_max=fast_lane_required_evidence_max,
     )
     json_data = _render_json(
@@ -499,6 +562,7 @@ def render_packet(
         related_decisions=resolved_decisions,
         active_claim=active_claim,
         lightweight=resolved_lightweight,
+        deferred_findings=resolved_findings,
         fast_lane_required_evidence_max=fast_lane_required_evidence_max,
     )
 
@@ -519,6 +583,7 @@ def fast_lane_packet(
     dependencies_open: list[Task] | None = None,
     related_decisions: list[Decision] | None = None,
     active_claim: Claim | None = None,
+    deferred_findings: list[DeferredFinding] | None = None,
 ) -> WorkPacket:
     """Render a work packet, routing the fast-lane from *config* thresholds.
 
@@ -553,4 +618,5 @@ def fast_lane_packet(
         related_decisions=related_decisions,
         active_claim=active_claim,
         lightweight=lightweight,
+        deferred_findings=deferred_findings,
     )

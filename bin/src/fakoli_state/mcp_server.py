@@ -840,6 +840,23 @@ def generate_work_packet(
 
         active_claim = _find_active_claim_for_task(backend, task_id)
 
+        # T017 — surface prior deferred / failed-review findings whose files
+        # overlap this task's files (the active claim's expected_files when
+        # claimed, else the planner's likely_files hint).
+        from fakoli_state.review.gates import deferred_findings_for_files
+
+        overlap_files = (
+            active_claim.expected_files
+            if active_claim is not None and active_claim.expected_files
+            else task.likely_files
+        )
+        deferred = deferred_findings_for_files(
+            backend.list_reviews(),
+            backend.list_tasks(),
+            backend.list_evidence(),
+            overlap_files,
+        )
+
         # T020 — route the fast-lane from the project's config thresholds when a
         # config can be loaded; fall back to the renderer's built-in defaults
         # otherwise. A broken config never blocks packet generation.
@@ -853,6 +870,7 @@ def generate_work_packet(
                 dependencies_open=dependencies_open,
                 related_decisions=None,
                 active_claim=active_claim,
+                deferred_findings=deferred,
             )
         else:
             packet = render_packet(
@@ -862,6 +880,7 @@ def generate_work_packet(
                 dependencies_open=dependencies_open,
                 related_decisions=None,
                 active_claim=active_claim,
+                deferred_findings=deferred,
             )
 
         if format == "json":

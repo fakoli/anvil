@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import datetime
 
-from fakoli_state.review.gates import evidence_complete
 from fakoli_state.state.models import (
     PRD,
     Claim,
@@ -185,6 +184,15 @@ def _evidence_complete(task: Task, evidence: Evidence) -> None:
 
     Raises TransitionError with gate_name='evidence_gate' on failure.
     """
+    # Imported lazily (not at module top) to break an import cycle:
+    # ``review.gates`` imports ``state.models``, whose package ``__init__``
+    # eagerly imports this ``transitions`` module. A top-level
+    # ``from fakoli_state.review.gates import evidence_complete`` here would
+    # re-enter a partially-initialized ``review.gates`` whenever ``review.gates``
+    # is the import entry point (e.g. ``pytest tests/test_review.py`` run
+    # standalone). The deferred import resolves cleanly at call time.
+    from fakoli_state.review.gates import evidence_complete
+
     passed, missing = evidence_complete(task, evidence)
     if not passed:
         raise TransitionError(
