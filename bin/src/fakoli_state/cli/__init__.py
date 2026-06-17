@@ -10,6 +10,7 @@ import typer
 
 from fakoli_state import __version__
 from fakoli_state.cli.claim import claim, next, release, renew
+from fakoli_state.cli.doctor import doctor
 from fakoli_state.cli.drift import drift
 from fakoli_state.cli.hooks import hook_app
 from fakoli_state.cli.init_status import init, status
@@ -74,6 +75,7 @@ app.command()(init)
 app.command()(status)
 app.command()(scan)
 app.command()(drift)
+app.command()(doctor)
 app.command()(plan)
 app.command()(score)
 app.command()(expand)

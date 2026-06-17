@@ -10,6 +10,54 @@ _No unreleased changes._
 
 ---
 
+## [1.28.0] — 2026-06-17
+
+### Added
+
+- **`fakoli-state doctor` one-shot health diagnosis (T010/F002).** A read-only
+  triage command that answers "is this project's state healthy?" in a single
+  pass, emitting a list of severity-tagged findings (`ok`/`info`/`warning`/`error`)
+  and **exiting non-zero when ANY finding is ERROR-level** — a real health gate,
+  unlike `drift`'s always-0 report. Five probes:
+  - **state.db reachability + schema version** — reads the TRUE on-disk
+    `PRAGMA user_version` *before* open (so a re-stamp on open can't mask drift)
+    and reports it against the engine-targeted `SCHEMA_VERSION`. An
+    un-migratable / unknown schema is the canonical "your install needs
+    migration" signal — an ERROR. A migrated-on-open db is healthy with an
+    `info` note.
+  - **config parse status + effective lease/heartbeat** — does `config.yaml`
+    parse, and what lease/heartbeat would a claim actually use? A broken config
+    is a WARNING (the CLI falls back to the built-in 60/5-minute defaults), not
+    a hard error; a missing config is `info`.
+  - **active / stale claim counts** — counts active claims and how many have an
+    expired lease (work silently wedged until a mutating command reaps it).
+    Read-only: it compares leases against the clock WITHOUT reaping. A stale
+    claim is an ERROR.
+  - **replay integrity** — rebuilds canonical state from `events.jsonl` into a
+    scratch db via the same `replay_from_empty` engine `replay` uses, then
+    byte-compares it against the live `state.db` through the `serialize_state`
+    snapshot the SL-1 replay-equivalence test uses. A mismatch (the event log no
+    longer reproduces the projection) is an ERROR.
+  - **reconciliation drift summary** — the local INTENT/STATE/FS/GIT drift
+    `drift` reports (orphan branches/worktrees/packets, missing expected files),
+    reusing `ReconciliationEngine.scan()` with no providers. A non-empty drift
+    set is a WARNING (a report, not a gate); stale claims are not re-escalated
+    here since the claims probe already counts them as an ERROR.
+  - **Degrades gracefully.** Every probe is wrapped so one failed check (corrupt
+    config, unreadable db) produces a finding rather than a traceback, and the
+    rest of the report still runs. When the backend can't open (schema mismatch),
+    replay/reconciliation are reported as skipped `info` findings — but the
+    stale-claim probe falls back to a narrow read-only SELECT against the
+    version-stable `claims` columns, so a project with BOTH an injected stale
+    claim and a schema mismatch lists BOTH findings, not just the schema one.
+  - Honors the v1.24 `--json` envelope (`{"ok": true, "command": "doctor",
+    "data": {"healthy", "worst_severity", "findings": [...]}}`) and the
+    `FAKOLI_STATE_ROOT` / `--cwd` resolution precedence. Covered by
+    `tests/test_cli.py` (11 cases, incl. the healthy-clean-exit and
+    stale-claim-plus-schema-mismatch acceptance scenarios).
+
+---
+
 ## [1.27.0] — 2026-06-17
 
 ### Added

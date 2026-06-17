@@ -3190,3 +3190,276 @@ class TestReplayCommand:
         assert "not found" in combined.lower() or str(missing) in combined, (
             f"error should name the missing file; got: {combined}"
         )
+
+
+# ---------------------------------------------------------------------------
+# doctor command (backlog T010) — health diagnosis
+# ---------------------------------------------------------------------------
+
+
+def _doctor_open_backend(tmp_path: Path):  # type: ignore[no-untyped-def]
+    """Open an initialized backend rooted at tmp_path's .fakoli-state/."""
+    from fakoli_state.cli._helpers import _open_backend
+
+    return _open_backend(tmp_path / ".fakoli-state")
+
+
+def _doctor_seed_ready_task(
+    tmp_path: Path, *, task_id: str = "T001", feature_id: str = "F001"
+) -> None:
+    """Seed a feature + a ready task (precursor for a claim)."""
+    import datetime as _dt
+
+    from fakoli_state.state.models import EventDraft
+
+    now = _dt.datetime(2026, 5, 25, 12, 0, 0, tzinfo=_dt.UTC)
+    b = _doctor_open_backend(tmp_path)
+    try:
+        b.append(EventDraft(
+            timestamp=now, actor="test", action="feature.created",
+            target_kind="feature", target_id=feature_id,
+            payload_json={
+                "id": feature_id, "title": "F", "description": "",
+                "status": "proposed", "requirements": [], "tasks": [],
+            },
+        ))
+        b.append(EventDraft(
+            timestamp=now, actor="test", action="task.created",
+            target_kind="task", target_id=task_id,
+            payload_json={
+                "id": task_id, "feature_id": feature_id, "title": "T",
+                "description": "d", "status": "ready", "priority": "medium",
+                "dependencies": [], "conflict_groups": [], "scores": {},
+                "acceptance_criteria": ["ok"], "implementation_notes": [],
+                "verification": {
+                    "commands": ["pytest"], "manual_steps": [],
+                    "required_evidence": [],
+                },
+                "likely_files": [], "parent_task_id": None,
+                "created_at": now.isoformat(), "updated_at": now.isoformat(),
+            },
+        ))
+    finally:
+        b.close()
+
+
+def _doctor_seed_stale_claim(
+    tmp_path: Path, *, claim_id: str = "C001", task_id: str = "T001"
+) -> None:
+    """Insert an active claim whose lease already expired (stale)."""
+    import datetime as _dt
+
+    from fakoli_state.state.models import EventDraft
+
+    now = _dt.datetime(2026, 5, 25, 12, 0, 0, tzinfo=_dt.UTC)
+    b = _doctor_open_backend(tmp_path)
+    try:
+        b.append(EventDraft(
+            timestamp=now, actor="test", action="claim.created",
+            target_kind="claim", target_id=claim_id,
+            payload_json={
+                "id": claim_id, "task_id": task_id, "claimed_by": "agent-x",
+                "claim_type": "task", "status": "active", "branch": None,
+                "worktree_path": None, "expected_files": [],
+                "created_at": now.isoformat(),
+                # Lease expired two hours before _NOW (and well before real
+                # "now"), so it is unambiguously stale.
+                "lease_expires_at": (now - _dt.timedelta(hours=2)).isoformat(),
+                "last_heartbeat_at": now.isoformat(),
+            },
+        ))
+    finally:
+        b.close()
+
+
+def _doctor_stamp_user_version(tmp_path: Path, version: int) -> None:
+    """Force PRAGMA user_version on the project's state.db (out of band)."""
+    conn = sqlite3.connect(str(tmp_path / ".fakoli-state" / "state.db"))
+    try:
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _doctor_json(result) -> dict:  # type: ignore[no-untyped-def]
+    return json.loads(result.stdout.strip())
+
+
+class TestDoctorHealthy:
+    """A healthy project: doctor exits 0 with no ERROR-level findings."""
+
+    def test_doctor_clean_project_exits_zero(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        result = _invoke_cmd(tmp_path, ["doctor"])
+        assert result.exit_code == 0, result.output
+        assert "healthy" in result.output.lower()
+        # Every probe ran and none is ERROR.
+        assert "[ERROR]" not in result.output
+
+    def test_doctor_clean_json_envelope(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        result = _invoke_cmd(tmp_path, ["doctor", "--json"])
+        assert result.exit_code == 0, result.output
+        env = _doctor_json(result)
+        assert env["ok"] is True
+        assert env["command"] == "doctor"
+        assert env["data"]["healthy"] is True
+        assert env["data"]["worst_severity"] in ("ok", "info")
+        checks = {f["check"] for f in env["data"]["findings"]}
+        # All five required diagnostics are present.
+        assert checks == {
+            "state_db", "config", "claims", "replay", "reconciliation"
+        }
+
+    def test_doctor_reports_schema_and_lease_values(self, tmp_path: Path) -> None:
+        """The state_db and config findings carry schema + lease/heartbeat."""
+        from fakoli_state.state.schema import get_schema_version
+
+        _do_init(tmp_path)
+        env = _doctor_json(_invoke_cmd(tmp_path, ["doctor", "--json"]))
+        by_check = {f["check"]: f for f in env["data"]["findings"]}
+        assert (
+            by_check["state_db"]["detail"]["code_schema_version"]
+            == get_schema_version()
+        )
+        cfg_detail = by_check["config"]["detail"]
+        assert cfg_detail["effective_lease_minutes"] == 60.0
+        assert cfg_detail["effective_heartbeat_minutes"] == 5.0
+
+    def test_doctor_verifies_replay_integrity(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        _doctor_seed_ready_task(tmp_path)
+        env = _doctor_json(_invoke_cmd(tmp_path, ["doctor", "--json"]))
+        replay = next(
+            f for f in env["data"]["findings"] if f["check"] == "replay"
+        )
+        assert replay["severity"] == "ok"
+        assert env["data"]["healthy"] is True
+
+
+class TestDoctorUnhealthy:
+    """A project with an injected stale claim PLUS a schema mismatch.
+
+    T010 AC: doctor exits non-zero and BOTH findings are listed.
+    """
+
+    def test_doctor_stale_claim_and_schema_mismatch_human(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        _doctor_seed_ready_task(tmp_path)
+        _doctor_seed_stale_claim(tmp_path)
+        _doctor_stamp_user_version(tmp_path, 99)
+
+        result = _invoke_cmd(tmp_path, ["doctor"])
+        assert result.exit_code == 1, result.output
+        out = result.output
+        # Both findings present and flagged ERROR.
+        assert "[ERROR] state_db" in out
+        assert "[ERROR] claims" in out
+        assert "99" in out  # the mismatched schema version
+        assert "UNHEALTHY" in out
+
+    def test_doctor_stale_claim_and_schema_mismatch_json(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        _doctor_seed_ready_task(tmp_path)
+        _doctor_seed_stale_claim(tmp_path)
+        _doctor_stamp_user_version(tmp_path, 99)
+
+        result = _invoke_cmd(tmp_path, ["doctor", "--json"])
+        assert result.exit_code == 1, result.output
+        env = _doctor_json(result)
+        assert env["ok"] is True  # the COMMAND succeeded; the project is unhealthy
+        assert env["data"]["healthy"] is False
+        assert env["data"]["worst_severity"] == "error"
+        errors = {
+            f["check"]
+            for f in env["data"]["findings"]
+            if f["severity"] == "error"
+        }
+        # BOTH the schema mismatch and the stale claim are listed as errors.
+        assert "state_db" in errors
+        assert "claims" in errors
+        claims = next(
+            f for f in env["data"]["findings"] if f["check"] == "claims"
+        )
+        assert claims["detail"]["stale"] == 1
+
+    def test_doctor_stale_claim_only_exits_nonzero(self, tmp_path: Path) -> None:
+        """A stale claim alone (schema healthy) still fails the gate."""
+        _do_init(tmp_path)
+        _doctor_seed_ready_task(tmp_path)
+        _doctor_seed_stale_claim(tmp_path)
+
+        result = _invoke_cmd(tmp_path, ["doctor", "--json"])
+        assert result.exit_code == 1, result.output
+        env = _doctor_json(result)
+        assert env["data"]["healthy"] is False
+        claims = next(
+            f for f in env["data"]["findings"] if f["check"] == "claims"
+        )
+        assert claims["severity"] == "error"
+        assert claims["detail"]["stale"] == 1
+        # Schema is fine, reconciliation also surfaces the stale claim as drift.
+        state_db = next(
+            f for f in env["data"]["findings"] if f["check"] == "state_db"
+        )
+        assert state_db["severity"] in ("ok", "info")
+
+
+class TestDoctorNotInitialized:
+    def test_doctor_uninitialized_human(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app, ["doctor", "--cwd", str(tmp_path)], catch_exceptions=False
+        )
+        assert result.exit_code == 1
+        combined = result.output + (getattr(result, "stderr", "") or "")
+        assert "not initialized" in combined.lower()
+
+    def test_doctor_uninitialized_json_envelope(self, tmp_path: Path) -> None:
+        result = runner.invoke(
+            app, ["doctor", "--json", "--cwd", str(tmp_path)],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 1
+        env = json.loads(result.stdout.strip())
+        assert env["ok"] is False
+        assert env["command"] == "doctor"
+        assert env["error"]["code"] == "not_initialized"
+
+
+class TestDoctorStateRootEnv:
+    def test_doctor_honors_state_root_env(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """FAKOLI_STATE_ROOT points doctor at the project from elsewhere."""
+        proj = tmp_path / "proj"
+        elsewhere = tmp_path / "elsewhere"
+        proj.mkdir()
+        elsewhere.mkdir()
+        _do_init(proj)
+
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv("FAKOLI_STATE_ROOT", str(proj))
+        result = runner.invoke(app, ["doctor", "--json"], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        env = json.loads(result.stdout.strip())
+        assert env["data"]["healthy"] is True
+
+    def test_doctor_state_root_invalid_json_envelope(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A FAKOLI_STATE_ROOT with no .fakoli-state/ → parseable error envelope."""
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("FAKOLI_STATE_ROOT", str(empty))
+        result = runner.invoke(app, ["doctor", "--json"], catch_exceptions=False)
+        assert result.exit_code != 0
+        env = json.loads(result.stdout.strip())
+        assert env["ok"] is False
+        assert env["command"] == "doctor"
+        assert env["error"]["code"] == "state_root_invalid"
