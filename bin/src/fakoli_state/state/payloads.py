@@ -76,6 +76,29 @@ class PrdApprovedPayload(BaseModel):
     approver: str
 
 
+class PrdDecisionResolvedPayload(BaseModel):
+    """Payload for 'prd.decision_resolved' (T018 — decision back-propagation).
+
+    Audit-only: the event row IS the record of a decision being answered and
+    written back into ``prd.md``. No SQLite table is mutated — the PRD is
+    refreshed by a later ``prd parse`` — so replay treats this as a no-op.
+    The ``before``/``after`` fields capture the exact span the back-propagation
+    rewrote, so the log is a self-describing audit trail of what changed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    decision_id: str
+    decision_kind: str
+    prd_ref: str
+    resolution: str
+    resolved_by: str
+    section: str = ""
+    before: str = ""
+    after: str = ""
+
+
 class FeatureCreatedPayload(BaseModel):
     """Payload for 'feature.created' — forwarded to Feature.model_validate."""
 
@@ -792,6 +815,7 @@ __all__ = [
     "FeatureCreatedPayload",
     "FileChangedPayload",
     "PrdApprovedPayload",
+    "PrdDecisionResolvedPayload",
     "PrdParsedPayload",
     "PrdReviewedPayload",
     "ProgressNotedPayload",

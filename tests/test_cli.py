@@ -910,6 +910,130 @@ class TestPrdFindDecisions:
 
 
 # ---------------------------------------------------------------------------
+# prd resolve-decision command (T018 — decision back-propagation)
+# ---------------------------------------------------------------------------
+
+
+def _prd_text(tmp_path: Path) -> str:
+    return (tmp_path / ".fakoli-state" / "prd.md").read_text(encoding="utf-8")
+
+
+def _events_text(tmp_path: Path) -> str:
+    return (tmp_path / ".fakoli-state" / "events.jsonl").read_text(encoding="utf-8")
+
+
+class TestPrdResolveDecisionBackprop:
+    def test_backprop_marker_updates_prd_and_records_event(
+        self, tmp_path: Path
+    ) -> None:
+        """Resolving a [NEEDS DECISION] marker rewrites the linked requirement
+        in prd.md AND appends a prd.decision_resolved event to the log."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "resolve-decision", "ND-001", "--resolution", "JSON"],
+        )
+        assert result.exit_code == 0, f"resolve-decision failed: {result.output}"
+
+        # PRD updated: marker gone, resolution prose written back.
+        prd_text = _prd_text(tmp_path)
+        assert "[NEEDS DECISION: which format?]" not in prd_text
+        assert "serialize inputs JSON." in prd_text
+        # The OTHER marker and unrelated content are preserved.
+        assert "Ship v1 [NEEDS DECISION]" in prd_text
+        assert "R001: System works." in prd_text
+
+        # Event recorded in the append-only log, visible and additive.
+        events = _events_text(tmp_path)
+        assert "prd.decision_resolved" in events
+        # The event payload carries the audit detail.
+        lines = [json.loads(line) for line in events.splitlines() if line.strip()]
+        resolved = [e for e in lines if e["action"] == "prd.decision_resolved"]
+        assert len(resolved) == 1
+        payload = resolved[0]["payload_json"]
+        assert payload["decision_id"] == "ND-001"
+        assert payload["decision_kind"] == "needs_decision"
+        assert payload["resolution"] == "JSON"
+        assert payload["prd_ref"].startswith("line:")
+
+    def test_backprop_json_envelope(self, tmp_path: Path) -> None:
+        """--json emits the v1.24 success envelope with the resolution detail."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "prd",
+                "resolve-decision",
+                "OQ001",
+                "--resolution",
+                "99.9% monthly",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is True
+        assert envelope["command"] == "prd resolve-decision"
+        data = envelope["data"]
+        assert data["decision_id"] == "OQ001"
+        assert data["decision_kind"] == "open_question"
+        assert data["event_id"]
+        # The open question moved into a ## Decisions section in the file.
+        assert "## Decisions" in _prd_text(tmp_path)
+        assert "99.9% monthly" in _prd_text(tmp_path)
+
+    def test_backprop_reparse_clears_resolved_marker(self, tmp_path: Path) -> None:
+        """After back-propagating both markers, find-decisions no longer
+        reports them (the PRD source was actually updated)."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+
+        # Resolve ND-002 first (line anchors stay valid since we resolve by id).
+        r2 = _invoke_cmd(
+            tmp_path,
+            ["prd", "resolve-decision", "ND-002", "--resolution", "yes"],
+        )
+        assert r2.exit_code == 0, r2.output
+        r1 = _invoke_cmd(
+            tmp_path,
+            ["prd", "resolve-decision", "ND-001", "--resolution", "JSON"],
+        )
+        assert r1.exit_code == 0, r1.output
+
+        # Re-run find-decisions: no NEEDS_DECISION markers remain.
+        find = _invoke_cmd(tmp_path, ["prd", "find-decisions"])
+        assert find.exit_code == 0
+        assert "0 NEEDS_DECISION" in find.output
+
+    def test_backprop_unknown_decision_id_exits_one(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "resolve-decision", "ND-999", "--resolution", "x", "--json"],
+        )
+        assert result.exit_code == 1
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "not_found"
+
+    def test_backprop_without_init_exits_one(self, tmp_path: Path) -> None:
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "resolve-decision", "ND-001", "--resolution", "x"],
+        )
+        assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
 # plan command
 # ---------------------------------------------------------------------------
 

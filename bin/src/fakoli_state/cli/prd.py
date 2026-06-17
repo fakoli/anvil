@@ -429,3 +429,215 @@ def prd_find_decisions(
         f"{len(by_kind[DecisionKind.open_question])} open questions, "
         f"{len(by_kind[DecisionKind.missing_field])} missing fields."
     )
+
+
+# ---------------------------------------------------------------------------
+# prd resolve-decision (T018 — decision back-propagation)
+# ---------------------------------------------------------------------------
+
+
+@prd_app.command("resolve-decision")
+def prd_resolve_decision(
+    decision_id: str = typer.Argument(  # noqa: B008
+        ...,
+        metavar="DECISION_ID",
+        help=(
+            "The decision to resolve, as reported by `prd find-decisions` "
+            "(e.g. ND-001, OQ001, MF-T012-AC)."
+        ),
+    ),
+    resolution: str = typer.Option(  # noqa: B008
+        ...,
+        "--resolution",
+        "-r",
+        help="The answer to write back into the referenced PRD span.",
+    ),
+    resolved_by: str = typer.Option(  # noqa: B008
+        "human",
+        "--by",
+        help="Identity recorded as the resolver in the event log.",
+    ),
+    file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--file",
+        help=(
+            "Path to the PRD markdown file. "
+            "Defaults to .fakoli-state/prd.md in the current directory."
+        ),
+    ),
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the current working directory.",
+        hidden=True,
+    ),
+) -> None:
+    """Back-propagate a resolved decision into the PRD and record it (T018).
+
+    Locates DECISION_ID via the same detector `prd find-decisions` uses,
+    writes ``--resolution`` into the referenced PRD span *without overwriting
+    unrelated content*, saves ``prd.md``, and appends an additive
+    ``prd.decision_resolved`` event to the log. Resolving a ``[NEEDS DECISION]``
+    marker rewrites the linked requirement inline; an open question moves to a
+    ``## Decisions`` section; a missing field is added under its task block.
+
+    The PRD source is edited on disk — re-run ``prd parse`` afterwards to
+    refresh state.db. The event is the immutable audit fact that the decision
+    was answered.
+    """
+    from fakoli_state.clock import SystemClock
+    from fakoli_state.planning.decisions import (
+        ResolutionError,
+        apply_decision_to_markdown,
+        find_unresolved_decisions,
+    )
+    from fakoli_state.planning.template import parse_prd
+    from fakoli_state.state.transitions import (
+        TransitionError,
+        prd_decision_resolved,
+    )
+
+    cmd = "prd resolve-decision"
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command=cmd, json_output=json_output)
+
+    prd_path = file if file is not None else state_dir / _PRD_FILENAME
+    if not prd_path.exists():
+        if json_output:
+            fail(
+                cmd,
+                f"PRD file not found at {prd_path}.",
+                code="not_found",
+            )
+        typer.echo(f"Error: PRD file not found at {prd_path}.", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        markdown = prd_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        if json_output:
+            fail(cmd, f"cannot read {prd_path}: {exc}", code="io_error")
+        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    result = parse_prd(markdown, prd_id="prd")
+    if result.errors:
+        msg = f"PRD parse failed with {len(result.errors)} error(s)."
+        if json_output:
+            fail(cmd, msg, code="parse_error")
+        typer.echo(f"Error: {msg} Fix prd.md and re-run.", err=True)
+        raise typer.Exit(code=1)
+
+    # Pull tasks from the backend so MF-* decisions can be located.
+    backend = _open_backend(state_dir)
+    try:
+        backend_tasks = backend.list_tasks()
+        tasks_or_none = backend_tasks or None
+        decisions = find_unresolved_decisions(
+            markdown,
+            prd=result.prd,
+            tasks=tasks_or_none,
+        )
+
+        target = next((d for d in decisions if d.id == decision_id), None)
+        if target is None:
+            available = ", ".join(d.id for d in decisions) or "(none)"
+            msg = (
+                f"decision {decision_id!r} not found. "
+                f"Run `fakoli-state prd find-decisions`. Available: {available}"
+            )
+            if json_output:
+                fail(cmd, msg, code="not_found")
+            typer.echo(f"Error: {msg}", err=True)
+            raise typer.Exit(code=1)
+
+        # Validate the recorded transition BEFORE touching the file, so a bad
+        # PRD status or empty input fails without a partial write.
+        clock = SystemClock()
+        now = clock.now()
+        project_id = _get_project_id(backend)
+        prd_model = backend.get_prd() or result.prd
+
+        try:
+            transition_payload = prd_decision_resolved(
+                prd_model,
+                decision_id=target.id,
+                prd_ref=target.prd_ref,
+                resolution=resolution,
+                resolved_by=resolved_by,
+                now=now,
+            )
+        except TransitionError as exc:
+            if json_output:
+                fail(cmd, exc.message, code=exc.code)
+            typer.echo(f"Error: {exc.message}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        # Back-propagate into the markdown (surgical, non-destructive).
+        try:
+            resolution_result = apply_decision_to_markdown(
+                markdown, decision=target, resolution=resolution
+            )
+        except ResolutionError as exc:
+            if json_output:
+                fail(cmd, str(exc), code="resolution_failed")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        # Write the file first, then record the event. If the write fails we
+        # never record a transition that does not match the file.
+        try:
+            prd_path.write_text(resolution_result.markdown, encoding="utf-8")
+        except OSError as exc:
+            if json_output:
+                fail(cmd, f"cannot write {prd_path}: {exc}", code="io_error")
+            typer.echo(f"Error: cannot write {prd_path}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        payload: dict[str, object] = {
+            "project_id": project_id,
+            "decision_id": target.id,
+            "decision_kind": target.kind.value,
+            "prd_ref": transition_payload["prd_ref"],
+            "resolution": transition_payload["resolution"],
+            "resolved_by": resolved_by,
+            "section": resolution_result.section,
+            "before": resolution_result.before,
+            "after": resolution_result.after,
+        }
+        draft = EventDraft(
+            timestamp=now,
+            actor="fakoli-state-cli",
+            action="prd.decision_resolved",
+            target_kind="prd",
+            target_id=project_id,
+            payload_json=payload,
+        )
+        event = backend.append(draft)
+    finally:
+        backend.close()
+
+    if json_output:
+        emit_success(
+            cmd,
+            {
+                "prd_source": str(prd_path),
+                "decision_id": target.id,
+                "decision_kind": target.kind.value,
+                "prd_ref": target.prd_ref,
+                "section": resolution_result.section,
+                "before": resolution_result.before,
+                "after": resolution_result.after,
+                "event_id": event.id if event is not None else None,
+            },
+        )
+        return
+
+    typer.echo(f"Resolved {target.id} ({target.kind.value}) in {prd_path}.")
+    typer.echo(f"  section:  {resolution_result.section}")
+    typer.echo(f"  before:   {_truncate(resolution_result.before)}")
+    typer.echo(f"  after:    {_truncate(resolution_result.after)}")
+    if event is not None:
+        typer.echo(f"  recorded: {event.id} (prd.decision_resolved)")
+    typer.echo("Run `fakoli-state prd parse` to refresh state.db.")

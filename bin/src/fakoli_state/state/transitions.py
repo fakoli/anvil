@@ -33,6 +33,7 @@ __all__ = [
     "prd_draft_to_reviewed",
     "prd_reviewed_to_approved",
     "prd_to_rejected",
+    "prd_decision_resolved",
     # Task transitions
     "task_proposed_to_drafted",
     "task_drafted_to_reviewed",
@@ -288,6 +289,85 @@ def prd_to_rejected(
             "open_questions": updated_questions,
         }
     )
+
+
+def prd_decision_resolved(
+    prd: PRD,
+    *,
+    decision_id: str,
+    prd_ref: str,
+    resolution: str,
+    resolved_by: str,
+    now: datetime.datetime,
+) -> dict[str, object]:
+    """Record the resolution of a PRD decision as an additive transition (T018).
+
+    Unlike the lifecycle transitions above, resolving a decision does NOT move
+    the PRD between statuses — the PRD source is edited in place and re-parsed
+    later. This function's role is the *recorded transition*: it validates the
+    inputs against the current PRD and returns the canonical event payload the
+    backend appends to the log (action ``prd.decision_resolved``). The append
+    is purely additive — no prior event or PRD field is overwritten — so the
+    decision and its answer become a permanent, replayable audit fact.
+
+    Keeping it here (rather than inline in the CLI) means the transition rule
+    lives with every other state-machine transition: one greppable table of
+    what the engine is allowed to record about the PRD.
+
+    Args:
+        prd:         The current PRD. A decision can be resolved at any PRD
+                     status except ``rejected`` (a rejected PRD is not an
+                     active document to back-propagate into).
+        decision_id: The detector's stable id (e.g. ``ND-001`` / ``OQ001`` /
+                     ``MF-T012-AC``) — recorded so the event correlates with
+                     the ``find-decisions`` output.
+        prd_ref:     The anchor that was rewritten (``line:<N>`` /
+                     ``open_question:<pos>`` / ``task:<ID>:<field>``).
+        resolution:  The human answer that was written back into the PRD.
+        resolved_by: Who resolved it.
+        now:         Current UTC timestamp.
+
+    Returns:
+        The event payload dict for a ``prd.decision_resolved`` event.
+
+    Raises:
+        TransitionError: The PRD is ``rejected`` (``code="wrong_status"``), or
+                         a required field is blank (``code="invalid_input"``).
+    """
+    if prd.status is PRDStatus.rejected:
+        raise TransitionError(
+            code="wrong_status",
+            current_status=prd.status.value,
+            message=(
+                "Cannot resolve a decision on a rejected PRD. "
+                "Re-open the PRD before back-propagating decisions."
+            ),
+        )
+    if not decision_id.strip():
+        raise TransitionError(
+            code="invalid_input",
+            current_status=prd.status.value,
+            message="decision_id must not be empty.",
+        )
+    if not prd_ref.strip():
+        raise TransitionError(
+            code="invalid_input",
+            current_status=prd.status.value,
+            message="prd_ref must not be empty — nothing to back-propagate.",
+        )
+    if not resolution.strip():
+        raise TransitionError(
+            code="invalid_input",
+            current_status=prd.status.value,
+            message="resolution must not be empty.",
+        )
+    return {
+        "decision_id": decision_id.strip(),
+        "prd_ref": prd_ref.strip(),
+        "resolution": resolution.strip(),
+        "resolved_by": resolved_by,
+        "resolved_at": now.isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------

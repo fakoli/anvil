@@ -68,6 +68,7 @@ from fakoli_state.state.payloads import (
     FeatureDeletedPayload,
     FileChangedPayload,
     PrdApprovedPayload,
+    PrdDecisionResolvedPayload,
     PrdParsedPayload,
     PrdReviewedPayload,
     ProgressNotedPayload,
@@ -1743,6 +1744,14 @@ class SqliteBackend:
             ),
             "prd.approved": ActionSpec(
                 PrdApprovedPayload, self._check_prd_approved, self._write_prd_approved
+            ),
+            # T018 — decision back-propagation. Audit-only: the PRD source is
+            # edited on disk and refreshed by a later prd.parsed; this event is
+            # the immutable record that a decision was answered and written back.
+            "prd.decision_resolved": ActionSpec(
+                PrdDecisionResolvedPayload,
+                self._check_audit_only,
+                self._write_audit_only,
             ),
             "feature.created": ActionSpec(
                 FeatureCreatedPayload,

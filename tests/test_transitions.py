@@ -31,6 +31,7 @@ from fakoli_state.state.models import (
 )
 from fakoli_state.state.transitions import (
     TransitionError,
+    prd_decision_resolved,
     prd_draft_to_reviewed,
     prd_reviewed_to_approved,
     prd_to_rejected,
@@ -219,6 +220,82 @@ class TestPRDTransitions:
         with pytest.raises(TransitionError) as exc_info:
             prd_to_rejected(prd, reviewer="carol", reason="again", now=_T1)
         assert exc_info.value.code == "wrong_status"
+
+
+# ---------------------------------------------------------------------------
+# PRD transition — decision back-propagation (T018)
+# ---------------------------------------------------------------------------
+
+
+class TestPrdDecisionResolved:
+    def test_backprop_records_payload(self) -> None:
+        prd = _make_prd(status=PRDStatus.reviewed)
+        payload = prd_decision_resolved(
+            prd,
+            decision_id="ND-001",
+            prd_ref="line:5",
+            resolution="UTF-8 only",
+            resolved_by="alice",
+            now=_T1,
+        )
+        assert payload["decision_id"] == "ND-001"
+        assert payload["prd_ref"] == "line:5"
+        assert payload["resolution"] == "UTF-8 only"
+        assert payload["resolved_by"] == "alice"
+        assert payload["resolved_at"] == _T1.isoformat()
+
+    def test_backprop_does_not_change_prd_status(self) -> None:
+        """Decision resolution is additive — the PRD status is untouched."""
+        prd = _make_prd(status=PRDStatus.draft)
+        prd_decision_resolved(
+            prd,
+            decision_id="OQ001",
+            prd_ref="open_question:1",
+            resolution="MessagePack",
+            resolved_by="bob",
+            now=_T1,
+        )
+        # Function returns a payload, not a PRD — the original is unmodified.
+        assert prd.status == PRDStatus.draft
+
+    def test_backprop_on_rejected_prd_raises(self) -> None:
+        prd = _make_prd(status=PRDStatus.rejected)
+        with pytest.raises(TransitionError) as exc_info:
+            prd_decision_resolved(
+                prd,
+                decision_id="ND-001",
+                prd_ref="line:5",
+                resolution="x",
+                resolved_by="alice",
+                now=_T1,
+            )
+        assert exc_info.value.code == "wrong_status"
+
+    def test_backprop_empty_resolution_raises(self) -> None:
+        prd = _make_prd(status=PRDStatus.approved)
+        with pytest.raises(TransitionError) as exc_info:
+            prd_decision_resolved(
+                prd,
+                decision_id="ND-001",
+                prd_ref="line:5",
+                resolution="   ",
+                resolved_by="alice",
+                now=_T1,
+            )
+        assert exc_info.value.code == "invalid_input"
+
+    def test_backprop_empty_prd_ref_raises(self) -> None:
+        prd = _make_prd(status=PRDStatus.approved)
+        with pytest.raises(TransitionError) as exc_info:
+            prd_decision_resolved(
+                prd,
+                decision_id="ND-001",
+                prd_ref="",
+                resolution="x",
+                resolved_by="alice",
+                now=_T1,
+            )
+        assert exc_info.value.code == "invalid_input"
 
 
 # ---------------------------------------------------------------------------

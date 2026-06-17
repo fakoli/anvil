@@ -10,6 +10,44 @@ _No unreleased changes._
 
 ---
 
+## [1.32.0] — 2026-06-17
+
+### Added
+
+- **`fakoli-state prd resolve-decision` — decision back-propagation into the
+  PRD (T018).** Closes the loop opened by `prd find-decisions`: an answered
+  decision can now be written back into `prd.md` itself, not just tracked in a
+  reviewer's head, so the PRD stays the single source of truth instead of
+  drifting from the conversation that resolved its open questions.
+  - **Resolves a decision by its detector id.** Takes a `DECISION_ID` exactly as
+    `prd find-decisions` reports it (`ND-001` / `OQ001` / `MF-T012-AC`) plus a
+    `--resolution` answer, locates the referenced PRD span via the **same**
+    `find_unresolved_decisions` detector (no second, drift-prone parser), and
+    edits only that span.
+  - **Kind-aware back-propagation, never a blind overwrite.** A `[NEEDS
+    DECISION]` marker is rewritten inline on its linked requirement; an open
+    question is moved into a `## Decisions` section; a missing acceptance/
+    verification field is added under its task block. Unrelated PRD content is
+    left byte-for-byte intact — the new `apply_decision_to_markdown` engine in
+    `planning/decisions.py` rewrites the targeted span and nothing else, and
+    raises `ResolutionError` rather than guessing when the anchor no longer
+    matches.
+  - **Recorded as an additive, replayable audit fact.** A new
+    `prd.decision_resolved` event (payload `PrdDecisionResolvedPayload`,
+    transition `prd_decision_resolved`) is appended to the log capturing the
+    decision id, kind, PRD ref, resolution, resolver, and the exact
+    `before`/`after` span that changed. It is **audit-only** — it mutates no
+    SQLite table and replays as a no-op — so the immutable event log records
+    *that* a decision was answered while the PRD source itself remains the
+    canonical text (refresh `state.db` with a later `prd parse`). The transition
+    refuses to resolve a decision on a `rejected` PRD (`wrong_status`) and
+    rejects blank ids/refs/resolutions (`invalid_input`).
+  - Honors the v1.24 `--json` envelope and `--by` / `--file` / `--cwd`
+    resolution. Covered by new cases in `tests/test_decisions.py`,
+    `tests/test_transitions.py`, and `tests/test_cli.py`.
+
+---
+
 ## [1.31.0] — 2026-06-17
 
 ### Added
