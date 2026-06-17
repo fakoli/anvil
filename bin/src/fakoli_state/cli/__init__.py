@@ -10,6 +10,7 @@ import typer
 
 from fakoli_state import __version__
 from fakoli_state.cli.claim import claim, next, release, renew
+from fakoli_state.cli.describe import describe
 from fakoli_state.cli.doctor import doctor
 from fakoli_state.cli.drift import drift
 from fakoli_state.cli.hooks import hook_app
@@ -63,7 +64,14 @@ def main(
 ) -> None:
     """fakoli-state — local-first project state engine."""
     if version:
-        typer.echo(f"fakoli-state {__version__}")
+        # Report engine version AND the SQLite schema version (T012): a host
+        # pinning behaviour needs both — ``__version__`` identifies the build,
+        # ``schema N`` identifies the on-disk state format the engine speaks.
+        # The first token stays ``fakoli-state {__version__}`` for backward
+        # compatibility with existing parsers / tests.
+        from fakoli_state.state.schema import get_schema_version
+
+        typer.echo(f"fakoli-state {__version__} (schema {get_schema_version()})")
         raise typer.Exit()
 
 
@@ -73,6 +81,7 @@ def main(
 
 app.command()(init)
 app.command()(status)
+app.command()(describe)
 app.command()(scan)
 app.command()(drift)
 app.command()(doctor)

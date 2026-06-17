@@ -10,6 +10,49 @@ _No unreleased changes._
 
 ---
 
+## [1.29.0] — 2026-06-17
+
+### Added
+
+- **`fakoli-state describe` self-describing command surface + `--version` schema
+  reporting (T012/F003).** The engine now exposes a machine-readable manifest of
+  its own public surface so a non-Claude host (Codex/Cursor/CI/another agent) can
+  discover what it can do without parsing `--help` text or hard-coding a tool list.
+  - **`fakoli-state --version` now reports engine AND schema version** —
+    `fakoli-state 1.29.0 (schema 4)`. The first token stays
+    `fakoli-state {__version__}` for backward compatibility with existing parsers;
+    the `(schema N)` suffix identifies the on-disk state format the engine speaks,
+    which a host pinning behaviour needs alongside the build id.
+  - **New `describe` command** emits the standard `{"ok": true, "command":
+    "describe", "data": {...}}` envelope by default (it is inherently
+    machine-readable), carrying `api_version`, `engine_version`, `schema_version`,
+    `envelope`, the sorted list of every CLI subcommand (grouped commands rendered
+    as their full invocation path, e.g. `prd parse`), and the sorted list of every
+    MCP tool name — each with a `count`. `--human` prints a readable summary;
+    `--json` is an accepted no-op for flag symmetry. Needs no project: it never
+    opens a backend and works from any directory, even before `init`.
+  - **Stable `api_version` to pin against.** `__version__` bumps on every release
+    (often metadata-only), but the shape of the command surface changes far less
+    often. `api_version` (currently `"1"`) only changes when the surface changes
+    in a way consumers must react to — a CLI command or MCP tool added, renamed,
+    or removed, or the `--json` envelope shape changing — so a host can pin the
+    contract without re-pinning on every patch release.
+  - **No drift, no hand-maintained list.** The manifest is introspected live from
+    the registered Typer app (via `typer.main.get_command`) and the FastMCP
+    instance (via `mcp.list_tools()`) at call time, so the described surface is
+    generated from the exact objects the CLI and MCP server actually expose —
+    including `describe`/`describe_surface` themselves.
+  - **New MCP tool `describe_surface` (tool 23)** is the agent-facing counterpart:
+    it returns the identical manifest dict by reusing the CLI's `build_manifest`
+    (single source of truth), so an MCP-only host gets the same self-description
+    without shelling out to the CLI.
+  - Covered by `tests/test_cli.py::TestDescribe` (7 cases), which asserts the
+    described CLI commands match the registered Typer commands and the described
+    MCP tools match the live FastMCP registry — so CI fails if a command or tool
+    is added or renamed without the surface staying coherent.
+
+---
+
 ## [1.28.0] — 2026-06-17
 
 ### Added

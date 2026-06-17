@@ -457,6 +457,164 @@ class TestVersion:
         assert result.exit_code == 0
         assert "fakoli-state" in result.output
 
+    def test_version_reports_engine_and_schema(self) -> None:
+        """--version reports the engine version AND the SQLite schema version (T012).
+
+        A host pinning behaviour needs both: ``__version__`` identifies the
+        build, ``schema N`` identifies the on-disk state format. The first token
+        stays ``fakoli-state {__version__}`` for backward compatibility.
+        """
+        from fakoli_state import __version__
+        from fakoli_state.state.schema import get_schema_version
+
+        result = runner.invoke(app, ["--version"], catch_exceptions=False)
+        assert result.exit_code == 0
+        out = result.output
+        # Backward-compatible engine token still present and first.
+        assert f"fakoli-state {__version__}" in out
+        # Schema version is now also surfaced.
+        assert "schema" in out.lower()
+        assert str(get_schema_version()) in out
+
+
+# ---------------------------------------------------------------------------
+# describe — self-describing command surface (T012)
+# ---------------------------------------------------------------------------
+
+
+def _expected_cli_command_names() -> list[str]:
+    """Independently enumerate the live Typer app's leaf command paths.
+
+    Deliberately re-derived from the Typer app here (NOT via the describe
+    module's own helper) so the drift assertion has a second, independent
+    witness: if describe ever hand-maintained or stale-cached its list, this
+    comparison would catch the divergence.
+    """
+    import click
+    from typer.main import get_command
+
+    root = get_command(app)
+
+    def walk(group: click.Group, prefix: str) -> list[str]:
+        names: list[str] = []
+        for name, sub in group.commands.items():
+            full = f"{prefix}{name}"
+            if isinstance(sub, click.Group):
+                names.extend(walk(sub, full + " "))
+            else:
+                names.append(full)
+        return names
+
+    assert isinstance(root, click.Group)
+    return sorted(walk(root, ""))
+
+
+def _expected_mcp_tool_names() -> list[str]:
+    """Independently enumerate the live FastMCP server's registered tools."""
+    import asyncio
+
+    from fakoli_state.mcp_server import mcp
+
+    tools = asyncio.run(mcp.list_tools())
+    return sorted(t.name for t in tools)
+
+
+class TestDescribe:
+    def test_describe_emits_success_envelope_with_versions(self) -> None:
+        """describe emits the standard envelope carrying the stable api_version,
+        the engine version, and the schema version."""
+        from fakoli_state import __version__
+        from fakoli_state.cli.describe import API_VERSION
+        from fakoli_state.state.schema import get_schema_version
+
+        result = runner.invoke(app, ["describe"], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+
+        env = json.loads(result.stdout.strip())
+        assert env["ok"] is True
+        assert env["command"] == "describe"
+        data = env["data"]
+        assert data["api_version"] == API_VERSION
+        assert data["engine_version"] == __version__
+        assert data["schema_version"] == get_schema_version()
+
+    def test_describe_works_without_a_project(self, tmp_path: Path) -> None:
+        """describe needs no init — it never opens a backend (runs anywhere)."""
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, ["describe"], catch_exceptions=False)
+        finally:
+            os.chdir(original_cwd)
+        assert result.exit_code == 0, result.output
+        env = json.loads(result.stdout.strip())
+        assert env["ok"] is True
+
+    def test_described_cli_surface_matches_registered_commands(self) -> None:
+        """The described CLI surface MUST equal the live Typer command set.
+
+        This is the anti-drift guard: a command added/renamed/removed without
+        the surface staying coherent fails CI here.
+        """
+        result = runner.invoke(app, ["describe"], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())["data"]
+
+        described = data["cli"]["commands"]
+        expected = _expected_cli_command_names()
+        assert described == expected
+        assert data["cli"]["count"] == len(expected)
+        # describe itself is part of the surface it reports.
+        assert "describe" in described
+
+    def test_described_mcp_surface_matches_registered_tools(self) -> None:
+        """The described MCP surface MUST equal the live FastMCP tool set."""
+        result = runner.invoke(app, ["describe"], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())["data"]
+
+        described = data["mcp"]["tools"]
+        expected = _expected_mcp_tool_names()
+        assert described == expected
+        assert data["mcp"]["count"] == len(expected)
+        # The MCP self-describe capability is itself in the surface.
+        assert "describe_surface" in described
+
+    def test_describe_json_flag_is_a_noop(self) -> None:
+        """--json is accepted (flag symmetry) and yields the same envelope."""
+        default = runner.invoke(app, ["describe"], catch_exceptions=False)
+        explicit = runner.invoke(app, ["describe", "--json"], catch_exceptions=False)
+        assert default.exit_code == explicit.exit_code == 0
+        assert json.loads(default.stdout.strip()) == json.loads(
+            explicit.stdout.strip()
+        )
+
+    def test_describe_human_is_readable(self) -> None:
+        """--human prints a readable summary, not the JSON envelope."""
+        result = runner.invoke(app, ["describe", "--human"], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        # Not a JSON envelope.
+        assert not result.stdout.strip().startswith("{")
+        assert "CLI commands" in result.output
+        assert "MCP tools" in result.output
+
+    def test_mcp_describe_surface_matches_cli_describe(self) -> None:
+        """The MCP describe_surface tool returns the IDENTICAL manifest the CLI
+        emits — one source of truth, two surfaces."""
+        import asyncio
+
+        from fakoli_state.cli.describe import build_manifest
+        from fakoli_state.mcp_server import mcp
+
+        cli_manifest = build_manifest()
+
+        async def _call() -> dict:  # type: ignore[type-arg]
+            res = await mcp.call_tool("describe_surface", {})
+            return res.structured_content  # type: ignore[no-any-return]
+
+        mcp_manifest = asyncio.run(_call())
+        assert mcp_manifest == cli_manifest
+
 
 # ---------------------------------------------------------------------------
 # Phase 3 CLI test helpers

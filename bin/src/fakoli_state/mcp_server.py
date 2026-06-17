@@ -1,4 +1,4 @@
-"""FastMCP (stdio) server — 22 agent-facing tools for fakoli-state.
+"""FastMCP (stdio) server — 23 agent-facing tools for fakoli-state.
 
 Each tool opens a fresh SqliteBackend against the project's
 .fakoli-state/state.db. The server process cwd is fixed at startup — the
@@ -2608,6 +2608,33 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
         counts_by_kind=counts,
         total=len(entries),
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool 23: describe_surface (self-describing command surface — T012)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def describe_surface() -> dict[str, Any]:
+    """Return a machine-readable manifest of the fakoli-state command surface.
+
+    The MCP-side counterpart of ``fakoli-state describe``: lets an MCP-only host
+    discover, without a CLI, the exact CLI subcommands and MCP tool names this
+    engine exposes, plus the engine version, SQLite schema version, and a stable
+    ``api_version`` to pin against. Needs no project — it never opens a backend.
+
+    Returns the same manifest dict the CLI emits inside its ``data`` envelope
+    (``api_version``, ``engine_version``, ``schema_version``, ``envelope``,
+    ``cli.commands``/``cli.count``, ``mcp.tools``/``mcp.count``). The list is
+    introspected live from this very server, so it always matches reality —
+    including ``describe_surface`` itself.
+    """
+    # Imported lazily and reused so the CLI and MCP surfaces report the IDENTICAL
+    # manifest (single source of truth — no second hand-maintained list).
+    from fakoli_state.cli.describe import build_manifest
+
+    return build_manifest()
 
 
 # ---------------------------------------------------------------------------
