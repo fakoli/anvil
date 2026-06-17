@@ -302,6 +302,142 @@ class TestNextClaimable:
 
 
 # ---------------------------------------------------------------------------
+# TestNextReadyExcludingActiveFiles (T014)
+# ---------------------------------------------------------------------------
+
+
+class TestNextReadyExcludingActiveFiles:
+    """next_ready_excluding_active_files adds file-overlap exclusion on top of
+    next_claimable's filters — the helper behind the finish/submit next_ready
+    field (T014)."""
+
+    def test_excludes_task_overlapping_another_agents_claim(
+        self, tmp_path: Path
+    ) -> None:
+        """A ready task whose likely_files overlap an active claim by another
+        actor is excluded; the next non-overlapping task is returned."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            # T001 is claimed by another agent, locking src/shared.py.
+            _insert_task_raw(conn, task_id="T001", status="claimed",
+                             likely_files=["src/shared.py"])
+            _insert_active_claim_raw(conn, claim_id="C001", task_id="T001",
+                                     actor="other-agent",
+                                     expected_files=["src/shared.py"])
+            # T002 (high) overlaps the locked file → excluded.
+            _insert_task_raw(conn, task_id="T002", status="ready",
+                             likely_files=["src/shared.py"])
+            conn.execute("UPDATE tasks SET priority = 'high' WHERE id = 'T002'")
+            # T003 (medium) touches a different file → eligible.
+            _insert_task_raw(conn, task_id="T003", status="ready",
+                             likely_files=["src/other.py"])
+            conn.commit()
+            conn.close()
+
+            m = _make_manager(b, actor="agent-test")
+            # next_claimable would pick T002 (higher priority, file overlap
+            # ignored); the stricter helper skips it for T003.
+            assert m.next_claimable().id == "T002"
+            picked = m.next_ready_excluding_active_files()
+            assert picked is not None
+            assert picked.id == "T003"
+        finally:
+            b.close()
+
+    def test_does_not_exclude_own_claim_files(self, tmp_path: Path) -> None:
+        """Files locked by the *acting* agent's own claim are not a conflict."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            # Our own agent holds a claim on src/shared.py.
+            _insert_task_raw(conn, task_id="T001", status="claimed",
+                             likely_files=["src/shared.py"])
+            _insert_active_claim_raw(conn, claim_id="C001", task_id="T001",
+                                     actor="agent-test",
+                                     expected_files=["src/shared.py"])
+            # T002 overlaps that file, but the lock is ours → still eligible.
+            _insert_task_raw(conn, task_id="T002", status="ready",
+                             likely_files=["src/shared.py"])
+            conn.commit()
+            conn.close()
+
+            m = _make_manager(b, actor="agent-test")
+            picked = m.next_ready_excluding_active_files()
+            assert picked is not None
+            assert picked.id == "T002"
+        finally:
+            b.close()
+
+    def test_returns_none_when_only_candidate_overlaps(
+        self, tmp_path: Path
+    ) -> None:
+        """When the sole ready task overlaps a foreign active claim, None."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(conn, task_id="T001", status="claimed",
+                             likely_files=["src/shared.py"])
+            _insert_active_claim_raw(conn, claim_id="C001", task_id="T001",
+                                     actor="other-agent",
+                                     expected_files=["src/shared.py"])
+            _insert_task_raw(conn, task_id="T002", status="ready",
+                             likely_files=["src/shared.py"])
+            conn.commit()
+            conn.close()
+
+            m = _make_manager(b, actor="agent-test")
+            assert m.next_ready_excluding_active_files() is None
+        finally:
+            b.close()
+
+    def test_matches_next_claimable_when_no_active_locks(
+        self, tmp_path: Path
+    ) -> None:
+        """With no foreign locks, the helper agrees with next_claimable."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(conn, task_id="T001", status="ready",
+                             likely_files=["src/a.py"])
+            _insert_task_raw(conn, task_id="T002", status="ready",
+                             likely_files=["src/b.py"])
+            conn.execute("UPDATE tasks SET priority = 'high' WHERE id = 'T002'")
+            conn.commit()
+            conn.close()
+
+            m = _make_manager(b)
+            assert m.next_ready_excluding_active_files().id == "T002"
+            assert m.next_claimable().id == "T002"
+        finally:
+            b.close()
+
+    def test_returns_none_when_no_ready_tasks(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            m = _make_manager(b)
+            assert m.next_ready_excluding_active_files() is None
+        finally:
+            b.close()
+
+
+# ---------------------------------------------------------------------------
 # TestClaim
 # ---------------------------------------------------------------------------
 

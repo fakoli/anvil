@@ -127,6 +127,20 @@ class ProgressResponse(BaseModel):
     recorded: bool
 
 
+class NextReadyTask(BaseModel):
+    """Compact descriptor of the next claimable task (T014).
+
+    Surfaced in finish/submit responses so the caller can chain straight into
+    the next piece of work. ``null`` when no task is claimable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    priority: str
+
+
 class EvidenceResponse(BaseModel):
     """Result of submit_completion_evidence."""
 
@@ -134,6 +148,9 @@ class EvidenceResponse(BaseModel):
 
     evidence_id: str
     task_status: str
+    # T014: name the next claimable task (deps/claims/conflict-group/file-overlap
+    # aware) so the agent can chain work; null when none is available.
+    next_ready: NextReadyTask | None = None
 
 
 class ConflictEntry(BaseModel):
@@ -299,6 +316,37 @@ def _find_active_claim_for_task(backend: Any, task_id: str) -> Any | None:
         if claim.task_id == task_id:
             return claim
     return None
+
+
+def _compute_next_ready(backend: Any, actor: str | None = None) -> dict[str, Any] | None:
+    """Return a thin descriptor of the next claimable task, or None.
+
+    Shared by the finish/submit surfaces (T014) so the response can name the
+    next ready task immediately after a task transitions out of the active set.
+    Reuses ``ClaimManager.next_ready_excluding_active_files`` so the suggestion
+    respects dependencies, active claims, conflict groups AND file-conflict
+    exclusions (a task whose files overlap an active claim is never named).
+
+    The descriptor is intentionally compact — {id, title, priority} — so the
+    field stays cheap on a hot path and stable across CLI/MCP. Returns None
+    when no task is claimable.
+    """
+    from fakoli_state.claims.manager import ClaimManager
+    from fakoli_state.clock import SystemClock
+
+    manager = ClaimManager(
+        backend,
+        SystemClock(),
+        actor=actor or "agent",
+    )
+    task = manager.next_ready_excluding_active_files()
+    if task is None:
+        return None
+    return {
+        "id": task.id,
+        "title": task.title,
+        "priority": task.priority.value,
+    }
 
 
 def _resolve_strict_evidence(strict: bool | None, state_dir: Path) -> bool:
@@ -897,7 +945,20 @@ def submit_completion_evidence(
         fresh_task = backend.get_task(task_id)
         task_status = fresh_task.status.value if fresh_task is not None else "needs_review"
 
-        return EvidenceResponse(evidence_id=evidence_id, task_status=task_status)
+        # T014: name the next claimable task now that this one has left the
+        # active set. The submitting actor's own (now-released) claim is
+        # excluded from file-conflict checks, so a follow-on task touching the
+        # same files this agent just finished is still eligible.
+        next_ready_raw = _compute_next_ready(backend, actor)
+        next_ready = (
+            NextReadyTask(**next_ready_raw) if next_ready_raw is not None else None
+        )
+
+        return EvidenceResponse(
+            evidence_id=evidence_id,
+            task_status=task_status,
+            next_ready=next_ready,
+        )
     finally:
         backend.close()
 
@@ -2320,6 +2381,9 @@ class ApplyReviewResponse(BaseModel):
     from_status: str
     to_status: str
     reviewer: str
+    # T014: name the next claimable task after this disposition (an approval
+    # that marks a task done may unblock dependents); null when none available.
+    next_ready: NextReadyTask | None = None
 
 
 @mcp.tool
@@ -2451,12 +2515,21 @@ def apply_review_decision(
         fresh = backend.get_task(task_id)
         to_status = fresh.status.value if fresh is not None else decision
 
+        # T014: name the next claimable task after this disposition. Use the
+        # reviewer as the actor (a human reviewer holds no active claims, so
+        # all foreign locks are honoured).
+        next_ready_raw = _compute_next_ready(backend, reviewer)
+        next_ready = (
+            NextReadyTask(**next_ready_raw) if next_ready_raw is not None else None
+        )
+
         return ApplyReviewResponse(
             task_id=task_id,
             decision=decision,
             from_status=from_status,
             to_status=to_status,
             reviewer=reviewer,
+            next_ready=next_ready,
         )
     finally:
         backend.close()

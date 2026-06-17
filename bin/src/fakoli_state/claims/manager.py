@@ -194,6 +194,86 @@ class ClaimManager:
         candidates.sort(key=_sort_key)
         return candidates[0]
 
+    def next_ready_excluding_active_files(self) -> Task | None:
+        """Pick the next claimable Task, also excluding file-conflict overlaps.
+
+        Identical to :meth:`next_claimable` (priority desc, complexity asc,
+        created_at asc; respecting status, dependencies, active claims, and
+        conflict_groups) with ONE additional exclusion: a candidate is skipped
+        when its declared ``likely_files`` overlap the ``expected_files`` of any
+        active claim held by another actor. (``Task`` carries only the
+        planner-populated ``likely_files`` hint; the concrete ``expected_files``
+        list lives on a ``Claim`` and does not exist until the task is claimed.)
+
+        This is the helper behind the ``next_ready`` field returned by the
+        finish/submit surfaces (T014): after an agent finishes task A, the
+        named "next ready" task must never be one whose files collide with
+        work another agent is already holding a claim on.
+
+        ``next_claimable`` deliberately keeps its narrower contract (it does
+        not file-exclude) because the ``next`` command pairs with a follow-up
+        ``check_conflicts`` / ``claim --force`` flow; this method is the
+        stricter variant used where we surface a single safe suggestion.
+
+        Returns None if no task is claimable.
+        """
+        base = self.next_claimable()
+        if base is None:
+            return None
+
+        active_claims = self._backend.list_active_claims()
+        # Files locked by an active claim, keyed by owning actor so we can skip
+        # our own claims (re-suggesting work we already hold is not a conflict).
+        locked_by_others: set[str] = set()
+        for claim in active_claims:
+            if claim.claimed_by == self._actor:
+                continue
+            locked_by_others.update(claim.expected_files)
+
+        if not locked_by_others:
+            # No foreign locks at all — the base pick is already safe.
+            return base
+
+        # Re-run the candidate scan so we can fall through to the next-best
+        # task when the top pick collides. Mirrors next_claimable's filters.
+        ready_tasks = self._backend.list_tasks(status=TaskStatus.ready)
+        if not ready_tasks:
+            return None
+
+        claimed_task_ids: set[str] = {c.task_id for c in active_claims}
+        all_tasks = self._backend.list_tasks()
+        done_task_ids: set[str] = {
+            t.id for t in all_tasks if t.status == TaskStatus.done
+        }
+        active_conflict_groups: set[str] = set()
+        for t in all_tasks:
+            if t.id in claimed_task_ids:
+                for cg_id in t.conflict_groups:
+                    active_conflict_groups.add(cg_id)
+
+        candidates: list[Task] = []
+        for task in ready_tasks:
+            if task.id in claimed_task_ids:
+                continue
+            if any(dep_id not in done_task_ids for dep_id in task.dependencies):
+                continue
+            if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
+                continue
+            if set(task.likely_files) & locked_by_others:
+                continue
+            candidates.append(task)
+
+        if not candidates:
+            return None
+
+        def _sort_key(t: Task) -> tuple[int, int, datetime.datetime]:
+            priority_rank = _PRIORITY_ORDER.get(t.priority, 0)
+            complexity = t.scores.complexity if t.scores.complexity is not None else 6
+            return (-priority_rank, complexity, t.created_at)
+
+        candidates.sort(key=_sort_key)
+        return candidates[0]
+
     def claim(
         self,
         task_id: str,

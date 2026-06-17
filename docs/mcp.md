@@ -514,12 +514,23 @@ Submits completion evidence for a task. Requires an active claim. Emits an
 ```json
 {
   "evidence_id": "EV3A9F1C2D",
-  "task_status": "needs_review"
+  "task_status": "needs_review",
+  "next_ready": {
+    "id": "T014",
+    "title": "Implement the converter",
+    "priority": "high"
+  }
 }
 ```
 
 `evidence_id` is an `"EV"` prefix followed by 8 uppercase hex characters, generated at
 call time.
+
+`next_ready` names the next claimable task now that this one has left the active set —
+respecting dependencies, active claims, conflict groups, and file-conflict exclusions
+(a task whose `likely_files` overlap another agent's active claim is never named). It is
+`null` when no task is claimable, letting the agent chain straight into the next piece of
+work without a second round-trip to `get_next_task`.
 
 **Failure modes**
 
@@ -881,11 +892,21 @@ to `drafted` for rework. Mirrors `fakoli-state apply TASK_ID --approve` and `--r
   "decision": "accepted",
   "from_status": "needs_review",
   "to_status": "done",
-  "reviewer": "alice"
+  "reviewer": "alice",
+  "next_ready": {
+    "id": "T002",
+    "title": "Implement the error handler",
+    "priority": "medium"
+  }
 }
 ```
 
 `to_status` reflects the backend's post-promotion status (typically `done` on approval).
+
+`next_ready` names the next claimable task after this disposition — an approval that marks
+a task `done` can unblock dependents — using the same dependency-, claim-, conflict-group-
+and file-overlap-aware selection as `submit_completion_evidence`. It is `null` when no task
+is claimable.
 
 **Failure modes**
 

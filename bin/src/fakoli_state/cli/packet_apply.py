@@ -43,6 +43,29 @@ def _resolve_strict_evidence(strict_flag: bool | None, state_dir: Path) -> bool:
         return False
     return config.strict_evidence
 
+
+def _compute_next_ready(backend: object, actor: str) -> dict[str, object] | None:
+    """Return a compact descriptor of the next claimable task, or None (T014).
+
+    Reuses ``ClaimManager.next_ready_excluding_active_files`` so the suggestion
+    respects dependencies, active claims, conflict groups AND file-conflict
+    exclusions. Shape mirrors the MCP ``next_ready`` field: {id, title,
+    priority}. Returns None when no task is claimable.
+    """
+    from fakoli_state.claims.manager import ClaimManager
+    from fakoli_state.clock import SystemClock
+
+    manager = ClaimManager(backend, SystemClock(), actor=actor)  # type: ignore[arg-type]
+    task = manager.next_ready_excluding_active_files()
+    if task is None:
+        return None
+    return {
+        "id": task.id,
+        "title": task.title,
+        "priority": task.priority.value,
+    }
+
+
 # ---------------------------------------------------------------------------
 # packet subcommand
 # ---------------------------------------------------------------------------
@@ -199,8 +222,12 @@ def submit(
     With ``--json`` emits ``{"ok": true, "command": "submit", "data":
     {"evidence_id": "...", "claim_id": "...", "submitted_by": "...",
     "commands_run": [...], "files_changed": [...], "task": {...},
-    "evidence_gate": {"passed": bool, "missing": [...]}}}``. A missing active
-    claim yields a ``{"ok": false, ...}`` envelope with exit 1.
+    "evidence_gate": {"passed": bool, "missing": [...]},
+    "next_ready": {"id", "title", "priority"} | null}}``. ``next_ready``
+    (T014) names the next claimable task — dependency-, claim-, conflict-group-
+    and file-overlap-aware — so the agent can chain straight into the next
+    piece of work, or null when none is available. A missing active claim
+    yields a ``{"ok": false, ...}`` envelope with exit 1.
     """
     import os
     import uuid
@@ -291,6 +318,13 @@ def submit(
 
         # Fetch the fresh task state and evidence for gates summary.
         fresh_task = backend.get_task(task_id)
+
+        # T014: compute the next claimable task while the backend is still open
+        # (the JSON envelope is emitted after the finally-block closes it). The
+        # suggestion is dep/claim/conflict-group/file-overlap aware, and the
+        # submitting actor's own (now-released) claim is excluded from the
+        # file-conflict check so chained work on the same files stays eligible.
+        next_ready = _compute_next_ready(backend, resolved_actor)
     finally:
         backend.close()
 
@@ -338,6 +372,7 @@ def submit(
                     if gate is not None
                     else None
                 ),
+                "next_ready": next_ready,
             },
         )
         return
@@ -419,7 +454,10 @@ def apply(
     With ``--json`` emits ``{"ok": true, "command": "apply", "data": {...}}``.
     Both modes return the SAME ``data`` key set so a consumer can read the
     outcome uniformly: ``{task_id, status, decision, reviewer, reason,
-    has_evidence, evidence_gate, task}``. In review-only mode (neither
+    has_evidence, evidence_gate, task, next_ready}``. ``next_ready`` (T014)
+    names the next claimable task — dependency-, claim-, conflict-group- and
+    file-overlap-aware — or null when none is available. In review-only mode
+    (neither
     --approve nor --reject) ``decision``/``reviewer``/``reason`` are null and
     ``status``/``task`` reflect the current needs_review task; with
     --approve/--reject ``decision``/``reviewer``/``reason`` are set and
@@ -486,6 +524,12 @@ def apply(
                     gate = None
 
             if json_output:
+                # T014: keep the unified key set — review-only mode reports the
+                # same next_ready field as decision mode (state is unchanged, so
+                # this is a read-only snapshot of the current next claimable task).
+                review_only_next_ready = _compute_next_ready(
+                    backend, resolved_reviewer
+                )
                 emit_success(
                     "apply",
                     {
@@ -495,6 +539,7 @@ def apply(
                         "reviewer": None,
                         "reason": None,
                         "has_evidence": evidence_obj is not None,
+                        "next_ready": review_only_next_ready,
                         "evidence_gate": (
                             {"passed": gate[0], "missing": gate[1]}
                             if gate is not None
@@ -662,6 +707,11 @@ def apply(
                 decision_gate = evidence_complete(task, decision_evidence)
             except Exception:  # noqa: BLE001
                 decision_gate = None
+
+        # T014: name the next claimable task after this disposition (approving a
+        # task to done can unblock dependents). Computed while the backend is
+        # open; the JSON envelope below is emitted after the finally closes it.
+        apply_next_ready = _compute_next_ready(backend, resolved_reviewer)
     finally:
         backend.close()
 
@@ -683,6 +733,7 @@ def apply(
                     else None
                 ),
                 "task": dump_model(result_task) if result_task is not None else None,
+                "next_ready": apply_next_ready,
             },
         )
         return

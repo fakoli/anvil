@@ -1012,6 +1012,138 @@ class TestSubmitCompletionEvidence:
 
 
 # ===========================================================================
+# T014: next_ready field in finish/submit responses
+# ===========================================================================
+
+class TestNextReadyField:
+    """The finish/submit surfaces name the next claimable task (T014).
+
+    Covers MCP submit_completion_evidence and apply_review_decision: the
+    next_ready field respects dependencies, active claims, conflict groups,
+    and — critically — file-conflict exclusion against active claims.
+    """
+
+    def test_submit_evidence_names_next_ready_task(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After finishing T001, the response names the next ready task."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="in_progress")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x")
+        # A second ready task with no conflicts — should be named as next.
+        _add_task(state_dir, task_id="T002", status="ready", priority="high")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("submit_completion_evidence", {
+                    "task_id": "T001",
+                    "actor": "agent-x",
+                    "commands_run": ["pytest -q"],
+                    "files_changed": ["src/foo.py"],
+                }))
+
+        resp = _run(run())
+        assert resp["task_status"] == "needs_review"
+        assert resp["next_ready"] is not None
+        assert resp["next_ready"]["id"] == "T002"
+        assert resp["next_ready"]["priority"] == "high"
+
+    def test_submit_evidence_next_ready_null_when_none_available(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """next_ready is null when no other claimable task exists."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="in_progress")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("submit_completion_evidence", {
+                    "task_id": "T001",
+                    "actor": "agent-x",
+                    "commands_run": ["pytest -q"],
+                    "files_changed": ["src/foo.py"],
+                }))
+
+        resp = _run(run())
+        assert resp["next_ready"] is None
+
+    def test_submit_evidence_next_ready_excludes_file_conflict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A task whose files overlap another agent's active claim is excluded;
+        the next non-overlapping task is named instead."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="in_progress")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x")
+        # Another agent holds an active claim on shared.py.
+        _add_task(state_dir, task_id="T099", status="in_progress")
+        _add_active_claim(
+            state_dir, claim_id="C099", task_id="T099",
+            claimed_by="agent-y", expected_files=["src/shared.py"],
+        )
+        # T002 (high) overlaps the active claim's file → must be excluded.
+        _add_task(
+            state_dir, task_id="T002", status="ready", priority="high",
+            likely_files=["src/shared.py"],
+        )
+        # T003 (medium) touches a different file → eligible.
+        _add_task(
+            state_dir, task_id="T003", status="ready", priority="medium",
+            likely_files=["src/other.py"],
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("submit_completion_evidence", {
+                    "task_id": "T001",
+                    "actor": "agent-x",
+                    "commands_run": ["pytest -q"],
+                    "files_changed": ["src/foo.py"],
+                }))
+
+        resp = _run(run())
+        assert resp["next_ready"] is not None
+        # T002 is higher priority but excluded by file overlap; T003 wins.
+        assert resp["next_ready"]["id"] == "T003"
+
+    def test_apply_review_decision_names_next_ready(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Approving a task surfaces the next claimable task in the response."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="approved")
+        _add_feature(state_dir)
+        # T001 in needs_review (with evidence) about to be approved.
+        _add_task(state_dir, task_id="T001", status="needs_review")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x")
+        _add_evidence(state_dir, evidence_id="EV0001", task_id="T001", claim_id="C001",
+                      commands_run=["pytest -q"], files_changed=["src/foo.py"])
+        # T002 ready and unblocked.
+        _add_task(state_dir, task_id="T002", status="ready", priority="medium")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("apply_review_decision", {
+                    "task_id": "T001",
+                    "approve": True,
+                    "reviewer": "human",
+                }))
+
+        resp = _run(run())
+        assert resp["decision"] == "accepted"
+        assert resp["next_ready"] is not None
+        assert resp["next_ready"]["id"] == "T002"
+
+
+# ===========================================================================
 # Tool 11: check_conflicts
 # ===========================================================================
 

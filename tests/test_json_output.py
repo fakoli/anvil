@@ -390,6 +390,7 @@ _APPLY_KEYS = {
     "has_evidence",
     "evidence_gate",
     "task",
+    "next_ready",  # T014
 }
 
 
@@ -468,6 +469,70 @@ class TestSubmitApplyJson:
         assert data["has_evidence"] is True
         assert data["task"]["id"] == "T001"
         assert data["task"]["status"] == "needs_review"
+
+    def test_submit_json_names_next_ready_task(self, tmp_path: Path) -> None:
+        """T014: submit --json carries a next_ready descriptor naming the
+        next claimable task (T002 here), or null when none is available."""
+        _planned_project(tmp_path)
+        assert _invoke(
+            tmp_path, ["claim", "T001", "--actor", "tester"]
+        ).exit_code == 0
+        res = _invoke(
+            tmp_path,
+            [
+                "submit",
+                "T001",
+                "--commands",
+                "pytest -v",
+                "--files-changed",
+                "src/app/converter.py",
+                "--actor",
+                "tester",
+                "--json",
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        data = _assert_success(_parse_envelope(res), "submit")
+        assert "next_ready" in data
+        assert data["next_ready"] is not None
+        assert data["next_ready"]["id"] == "T002"
+        assert set(data["next_ready"].keys()) == {"id", "title", "priority"}
+
+    def test_submit_json_next_ready_null_when_only_candidate_taken(
+        self, tmp_path: Path
+    ) -> None:
+        """T014: next_ready is null when the only other task is already
+        claimed (and its file locked) by another agent."""
+        _planned_project(tmp_path)
+        # Another agent claims T002; the claim's expected_files are derived
+        # from T002's likely_files (src/app/errors.py), locking that file.
+        assert _invoke(
+            tmp_path,
+            ["claim", "T002", "--actor", "other"],
+        ).exit_code == 0
+        # Now claim + submit T001 as tester.
+        assert _invoke(
+            tmp_path, ["claim", "T001", "--actor", "tester"]
+        ).exit_code == 0
+        res = _invoke(
+            tmp_path,
+            [
+                "submit",
+                "T001",
+                "--commands",
+                "pytest -v",
+                "--files-changed",
+                "src/app/converter.py",
+                "--actor",
+                "tester",
+                "--json",
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        data = _assert_success(_parse_envelope(res), "submit")
+        # T002 is the only other ready task, but it is claimed AND its file is
+        # locked by 'other' → no safe next_ready remains.
+        assert data["next_ready"] is None
 
     def test_submit_without_claim_is_error(self, tmp_path: Path) -> None:
         _planned_project(tmp_path)

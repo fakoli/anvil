@@ -10,6 +10,36 @@ _No unreleased changes._
 
 ---
 
+## [1.30.0] — 2026-06-17
+
+### Added
+
+- **`next_ready` field in finish/submit responses (CLI + MCP) (T014).** The
+  surfaces an agent hits when it *finishes* a task now hand back the next safe
+  task to pick up, so a multi-agent loop can chain finish → claim without a
+  separate `next` round-trip. Both response paths carry a `next_ready` object
+  (`{id, title, priority}`) or `null` when the ready queue is empty.
+  - **CLI `apply` `--json`** gains `next_ready` in **both** review-only and
+    decision modes, and the **submit** path emits it too — a stable key set
+    script authors can rely on regardless of which apply mode ran.
+  - **MCP `apply_review_decision` and `submit_completion_evidence`** return a
+    typed `NextReadyTask | None` field with the same shape, so the agent-facing
+    tools and the CLI stay in lockstep.
+  - **Suggestion is file-conflict-aware, not just the raw queue head.** Both
+    surfaces compute the field through the new
+    `ClaimManager.next_ready_excluding_active_files()` helper, which starts from
+    `next_claimable` (priority desc, complexity asc, created_at asc; honoring
+    status, dependencies, active claims, and conflict groups) and adds ONE
+    stricter exclusion: a candidate is skipped when its `likely_files` overlap
+    the `expected_files` of any active claim held by *another* actor. The named
+    "next ready" task can never be one whose files collide with work another
+    agent is already holding — and re-suggesting work the same actor already
+    holds is not treated as a conflict.
+  - `docs/mcp.md` documents the field on both tools. Covered by new cases in
+    `tests/test_claims.py`, `tests/test_json_output.py`, and `tests/test_mcp.py`.
+
+---
+
 ## [1.29.0] — 2026-06-17
 
 ### Added
