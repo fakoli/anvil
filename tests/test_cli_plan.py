@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -475,3 +476,240 @@ class TestExpandFormatHelp:
         # Reference both supported values so users discover them from --help.
         assert "text" in result.output
         assert "prd" in result.output
+
+
+# ---------------------------------------------------------------------------
+# batch_deps — `fakoli-state deps` batch dependency-edit primitive (T022/F007)
+# ---------------------------------------------------------------------------
+
+
+def _seed_dep_tasks(tmp_path: Path, ids_with_deps: list[tuple[str, list[str]]]) -> None:
+    """Seed a feature + tasks with explicit dependency lists via raw SQLite.
+
+    Mirrors the ``_seed_graph_tasks`` idiom in tests/test_cli.py: inserting
+    directly keeps the starting graph fixed regardless of planner behaviour, so
+    the batch-deps assertions are deterministic. Every task is created in
+    ``ready`` status so we can also assert status is preserved across the
+    dependency-only upserts the ``deps`` command emits.
+    """
+    _do_init(tmp_path, name="Deps Test Project")
+    db_path = tmp_path / ".fakoli-state" / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT OR IGNORE INTO features "
+        "(id, title, description, status, requirements, tasks) "
+        "VALUES ('F001', 'Deps Feature', 'desc', 'proposed', '[]', '[]')"
+    )
+    for task_id, deps in ids_with_deps:
+        conn.execute(
+            """INSERT OR REPLACE INTO tasks
+            (id, feature_id, title, description, status, priority, task_type,
+             dependencies, conflict_groups, scores, acceptance_criteria,
+             implementation_notes, verification, likely_files,
+             parent_task_id, created_at, updated_at)
+            VALUES (?, 'F001', ?, 'desc', 'ready', 'medium', 'feature',
+             ?, '[]', '{}', '["x"]', '[]', '{}', '[]',
+             NULL, '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00')""",
+            (task_id, f"Title {task_id}", json.dumps(deps)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _deps_of(tmp_path: Path, task_id: str) -> list[str]:
+    """Read a task's persisted dependency list straight from state.db."""
+    db_path = tmp_path / ".fakoli-state" / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT dependencies FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, f"task {task_id} not found"
+    return list(json.loads(row[0]))
+
+
+def _status_of(tmp_path: Path, task_id: str) -> str:
+    db_path = tmp_path / ".fakoli-state" / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return str(row[0])
+
+
+class TestBatchDepsApply:
+    """A batch of edges applies atomically (T022 acceptance: 10 edges at once)."""
+
+    def test_batch_deps_applies_ten_edges_atomically(self, tmp_path: Path) -> None:
+        """Ten add-edges across many tasks land in a single `deps` invocation."""
+        # 11 independent tasks, no starting deps.
+        ids = [f"T0{n:02d}" for n in range(1, 12)]
+        _seed_dep_tasks(tmp_path, [(tid, []) for tid in ids])
+
+        # Build a chain T002->T001, T003->T002, ... T011->T010 (10 edges).
+        add_args: list[str] = []
+        for n in range(2, 12):
+            add_args += ["--add", f"T0{n:02d}:T0{n - 1:02d}"]
+
+        result = _invoke_cmd(tmp_path, ["deps", *add_args, "--json"])
+        assert result.exit_code == 0, f"deps failed: {result.output}"
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is True
+        assert envelope["command"] == "deps"
+        # All 10 edges added; 10 tasks (T002..T011) changed.
+        assert len(envelope["data"]["added"]) == 10
+        assert len(envelope["data"]["changed"]) == 10
+
+        # Every edge persisted with the correct orientation (source depends on target).
+        for n in range(2, 12):
+            assert _deps_of(tmp_path, f"T0{n:02d}") == [f"T0{n - 1:02d}"]
+        # T001 (the sink) gained nothing and was not touched.
+        assert _deps_of(tmp_path, "T001") == []
+
+    def test_batch_deps_preserves_status_on_edited_tasks(self, tmp_path: Path) -> None:
+        """Dependency-only edits never regress task status (upsert omits status)."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        result = _invoke_cmd(tmp_path, ["deps", "--add", "T002:T001", "--json"])
+        assert result.exit_code == 0, result.output
+        assert _deps_of(tmp_path, "T002") == ["T001"]
+        # Seeded as 'ready'; the dependency edit must leave status untouched.
+        assert _status_of(tmp_path, "T002") == "ready"
+
+    def test_batch_deps_mixed_add_and_remove(self, tmp_path: Path) -> None:
+        """A single batch can both add and remove edges."""
+        _seed_dep_tasks(
+            tmp_path,
+            [("T001", []), ("T002", ["T001"]), ("T003", [])],
+        )
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "deps",
+                "--remove",
+                "T002:T001",
+                "--add",
+                "T003:T001",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["removed"] == [["T002", "T001"]]
+        assert data["added"] == [["T003", "T001"]]
+        assert _deps_of(tmp_path, "T002") == []
+        assert _deps_of(tmp_path, "T003") == ["T001"]
+
+
+class TestBatchDepsCycleRejected:
+    """A batch that introduces a cycle is rejected with NO partial application."""
+
+    def test_batch_deps_rejects_cycle_no_partial_apply(self, tmp_path: Path) -> None:
+        """T001->T002 + T002->T001 forms a 2-cycle → whole batch rejected."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "deps",
+                "--add",
+                "T001:T002",
+                "--add",
+                "T002:T001",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 1, f"expected rejection, got: {result.output}"
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "cycle"
+
+        # NO partial application: neither task gained a dependency.
+        assert _deps_of(tmp_path, "T001") == []
+        assert _deps_of(tmp_path, "T002") == []
+
+    def test_batch_deps_rejects_self_loop(self, tmp_path: Path) -> None:
+        """A self-dependency is rejected before any mutation."""
+        _seed_dep_tasks(tmp_path, [("T001", [])])
+        result = _invoke_cmd(
+            tmp_path, ["deps", "--add", "T001:T001", "--json"]
+        )
+        assert result.exit_code != 0
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "self_loop"
+        assert _deps_of(tmp_path, "T001") == []
+
+    def test_batch_deps_rejects_unknown_task(self, tmp_path: Path) -> None:
+        """An edge referencing a missing task rejects the whole batch."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "deps",
+                "--add",
+                "T002:T001",  # valid
+                "--add",
+                "T002:T999",  # T999 does not exist
+                "--json",
+            ],
+        )
+        assert result.exit_code != 0
+        envelope = json.loads(result.output)
+        assert envelope["error"]["code"] == "unknown_task"
+        # The valid edge in the same batch must NOT have been applied.
+        assert _deps_of(tmp_path, "T002") == []
+
+    def test_batch_deps_rejects_longer_cycle(self, tmp_path: Path) -> None:
+        """A 3-task cycle introduced by the batch is detected and rejected."""
+        _seed_dep_tasks(
+            tmp_path,
+            [("T001", []), ("T002", ["T001"]), ("T003", ["T002"])],
+        )
+        # Adding T001 depends on T003 closes the loop T001->T003->T002->T001.
+        result = _invoke_cmd(
+            tmp_path, ["deps", "--add", "T001:T003", "--json"]
+        )
+        assert result.exit_code == 1
+        envelope = json.loads(result.output)
+        assert envelope["error"]["code"] == "cycle"
+        assert _deps_of(tmp_path, "T001") == []
+
+
+class TestBatchDepsValidation:
+    """Edge-spec parsing and empty-batch guards."""
+
+    def test_batch_deps_no_edges_errors(self, tmp_path: Path) -> None:
+        """`deps` with neither --add nor --remove is a usage error."""
+        _seed_dep_tasks(tmp_path, [("T001", [])])
+        result = _invoke_cmd(tmp_path, ["deps", "--json"])
+        assert result.exit_code != 0
+        assert json.loads(result.output)["error"]["code"] == "bad_request"
+
+    def test_batch_deps_malformed_spec_errors(self, tmp_path: Path) -> None:
+        """A spec missing the SOURCE:TARGET separator is rejected."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        result = _invoke_cmd(tmp_path, ["deps", "--add", "T002T001", "--json"])
+        assert result.exit_code != 0
+        assert json.loads(result.output)["error"]["code"] == "bad_request"
+
+    def test_batch_deps_arrow_separator_accepted(self, tmp_path: Path) -> None:
+        """The 'SOURCE->TARGET' arrow form is accepted as well as the colon."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        result = _invoke_cmd(
+            tmp_path, ["deps", "--add", "T002->T001", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        assert _deps_of(tmp_path, "T002") == ["T001"]
+
+    def test_batch_deps_help_documents_options(self) -> None:
+        """`deps --help` surfaces --add and --remove."""
+        result = runner.invoke(app, ["deps", "--help"])
+        assert result.exit_code == 0
+        assert "--add" in result.output
+        assert "--remove" in result.output

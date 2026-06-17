@@ -10,6 +10,38 @@ _No unreleased changes._
 
 ---
 
+## [1.37.0] — 2026-06-17
+
+### Added
+
+- **Batch dependency-edit primitive — atomic, cycle-detecting (T022/F007).**
+  A new way to rewire task dependencies in bulk, exposed both as the
+  `fakoli-state deps` CLI command and the `edit_dependencies` MCP tool, so a
+  human or an agent can add and remove many dependency edges in a single
+  transaction instead of mutating tasks one at a time.
+  - **Edge model.** Each edge is `SOURCE:TARGET` (CLI) / `[source, target]`
+    (MCP), meaning *source depends on target*. `--add` / `--remove` (CLI) and
+    `add` / `remove` (MCP) are both repeatable and may be mixed in one call;
+    the CLI also accepts the arrow form `SOURCE->TARGET`.
+  - **Atomic, all-or-nothing.** The entire batch is planned and validated up
+    front. Any unknown task, self-dependency, or edit that would introduce a
+    dependency cycle rejects the WHOLE batch with zero events appended — there
+    is never a partial application. On success exactly one `task.created`
+    upsert is emitted per task whose dependency set actually changed (no-op
+    edges are skipped), and each task's status is preserved.
+  - **Structured results.** `--json` (CLI) and the tool response return
+    `changed` (tasks mutated) plus the `added` / `removed` edges that took
+    effect. Rejections carry a machine-readable `code` (`cycle`,
+    `unknown_task`, `self_loop`, `bad_request`); the CLI exits 1 on a rejected
+    batch and 2 on a malformed request.
+  - Implemented via new `planning/_plan_helpers.py` primitives
+    (`parse_dep_edge`, `plan_batch_dep_edits`, `emit_batch_dep_events`,
+    `DepEdge`, `BatchDepError`); the MCP server now exposes 24 agent-facing
+    tools. Covered by new tests in `tests/test_cli_plan.py` and
+    `tests/test_mcp.py`.
+
+---
+
 ## [1.36.0] — 2026-06-17
 
 ### Added

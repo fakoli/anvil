@@ -1312,6 +1312,88 @@ class TestGetDependencyGraph:
 
 
 # ===========================================================================
+# Tool 12b: edit_dependencies — batch dependency-edit primitive (T022/F007)
+# ===========================================================================
+
+def _deps_of(state_dir: Path, task_id: str) -> list[str]:
+    """Read a task's persisted dependency list directly from state.db."""
+    conn = sqlite3.connect(str(state_dir / "state.db"))
+    try:
+        row = conn.execute(
+            "SELECT dependencies FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return list(json.loads(row[0]))
+
+
+class TestEditDependencies:
+    def test_batch_add_applies_all_edges(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        for n in range(1, 6):
+            _add_task(state_dir, task_id=f"T00{n}", status="ready")
+        monkeypatch.chdir(tmp_path)
+
+        # Chain T002->T001, ..., T005->T004 (4 edges) in one call.
+        add = [[f"T00{n}", f"T00{n - 1}"] for n in range(2, 6)]
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("edit_dependencies", {
+                    "actor": "agent-x",
+                    "add": add,
+                }))
+
+        resp = _run(run())
+        assert len(resp["added"]) == 4
+        assert set(resp["changed"]) == {"T002", "T003", "T004", "T005"}
+        for n in range(2, 6):
+            assert _deps_of(state_dir, f"T00{n}") == [f"T00{n - 1}"]
+
+    def test_batch_cycle_rejected_no_partial_apply(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_task(state_dir, task_id="T002", status="ready")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("edit_dependencies", {
+                    "actor": "agent-x",
+                    "add": [["T001", "T002"], ["T002", "T001"]],
+                })
+
+        with pytest.raises(ToolError, match="cycle"):
+            _run(run())
+
+        # No partial application: neither task gained a dependency.
+        assert _deps_of(state_dir, "T001") == []
+        assert _deps_of(state_dir, "T002") == []
+
+    def test_unknown_task_rejects_whole_batch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_task(state_dir, task_id="T002", status="ready")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("edit_dependencies", {
+                    "actor": "agent-x",
+                    "add": [["T002", "T001"], ["T002", "T999"]],
+                })
+
+        with pytest.raises(ToolError):
+            _run(run())
+        # The valid edge in the rejected batch must NOT have applied.
+        assert _deps_of(state_dir, "T002") == []
+
+
+# ===========================================================================
 # Tool 13: update_task_status
 # ===========================================================================
 

@@ -18,7 +18,15 @@ from fakoli_state.cli.hooks import hook_app
 from fakoli_state.cli.init_status import init, status
 from fakoli_state.cli.migrate import migrate_app, migrate_events
 from fakoli_state.cli.packet_apply import apply, packet, submit
-from fakoli_state.cli.plan import expand, list_tasks, plan, review_app, score, show
+from fakoli_state.cli.plan import (
+    deps,
+    expand,
+    list_tasks,
+    plan,
+    review_app,
+    score,
+    show,
+)
 from fakoli_state.cli.prd import prd_app
 from fakoli_state.cli.replay import replay
 from fakoli_state.cli.scan import scan
@@ -90,6 +98,7 @@ app.command()(doctor)
 app.command()(plan)
 app.command()(score)
 app.command()(expand)
+app.command()(deps)
 app.command("list")(list_tasks)
 app.command()(show)
 app.command()(claim)

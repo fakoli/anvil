@@ -1,4 +1,4 @@
-"""FastMCP (stdio) server — 23 agent-facing tools for fakoli-state.
+"""FastMCP (stdio) server — 24 agent-facing tools for fakoli-state.
 
 Each tool opens a fresh SqliteBackend against the project's
 .fakoli-state/state.db. The server process cwd is fixed at startup — the
@@ -210,6 +210,21 @@ class StatusUpdateResponse(BaseModel):
 
     from_status: str
     to_status: str
+
+
+class EditDependenciesResponse(BaseModel):
+    """Result of edit_dependencies (batch dependency-edit primitive, T022).
+
+    ``changed`` lists every task whose dependency set was actually mutated;
+    ``added`` / ``removed`` are the ``[source, target]`` edges (source depends
+    on target) that took effect — no-op edges are excluded from both.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    changed: list[str]
+    added: list[list[str]]
+    removed: list[list[str]]
 
 
 # ---------------------------------------------------------------------------
@@ -1108,6 +1123,81 @@ def get_dependency_graph(
             nodes=nodes,
             edges=edges,
             ready_to_claim=sorted(ready_to_claim),
+        )
+    finally:
+        backend.close()
+
+
+# ---------------------------------------------------------------------------
+# Tool 12b: edit_dependencies — batch dependency-edit primitive (T022/F007)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def edit_dependencies(
+    actor: str,
+    add: list[list[str]] | None = None,
+    remove: list[list[str]] | None = None,
+) -> EditDependenciesResponse:
+    """Apply a batch of dependency edge edits atomically, rejecting cycles.
+
+    ``add`` / ``remove`` are lists of ``[source, target]`` pairs meaning
+    *source depends on target* (target is added to / removed from
+    source.dependencies). Multiple sources/targets and both ops are accepted in
+    one call. The WHOLE batch is validated up front: any unknown task,
+    self-dependency, or edit that would introduce a dependency cycle rejects the
+    ENTIRE batch (ToolError) with NO partial application. On success one
+    task.created upsert is emitted per task whose dependency set changed — task
+    status is preserved.
+    """
+    from fakoli_state.clock import SystemClock
+    from fakoli_state.planning._plan_helpers import (
+        BatchDepError,
+        DepEdge,
+        emit_batch_dep_events,
+        plan_batch_dep_edits,
+    )
+
+    add = add or []
+    remove = remove or []
+    if not add and not remove:
+        raise ToolError(
+            "no edges supplied; pass at least one add or remove pair."
+        )
+
+    def _to_edges(pairs: list[list[str]], op: str) -> list[DepEdge]:
+        out: list[DepEdge] = []
+        for pair in pairs:
+            if len(pair) != 2:
+                raise ToolError(
+                    f"invalid {op} edge {pair!r}: expected a [source, target] pair."
+                )
+            out.append(DepEdge(op=op, source=pair[0], target=pair[1]))
+        return out
+
+    edges = _to_edges(add, "add") + _to_edges(remove, "remove")
+
+    state_dir = _resolve_state_dir()
+    backend = _open_backend(state_dir)
+    try:
+        clock = SystemClock()
+        all_tasks = backend.list_tasks()
+        tasks_by_id = {t.id: t for t in all_tasks}
+
+        # Validate the WHOLE batch before emitting anything — a raised
+        # BatchDepError here means zero events were appended (no partial apply).
+        try:
+            batch_plan = plan_batch_dep_edits(all_tasks, edges)
+        except BatchDepError as exc:
+            raise ToolError(exc.message) from exc
+
+        changed = emit_batch_dep_events(
+            backend, tasks_by_id, batch_plan, actor=actor, clock=clock
+        )
+        return EditDependenciesResponse(
+            changed=changed,
+            added=[list(e) for e in batch_plan.added],
+            removed=[list(e) for e in batch_plan.removed],
         )
     finally:
         backend.close()

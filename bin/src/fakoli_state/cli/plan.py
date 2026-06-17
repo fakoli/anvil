@@ -1427,3 +1427,121 @@ def show(
             typer.echo(f"  [{ev_ts}] {ev_action}")
     else:
         typer.echo("  (none)")
+
+
+# ---------------------------------------------------------------------------
+# deps subcommand — batch dependency-edit primitive (backlog T022/F007)
+# ---------------------------------------------------------------------------
+
+
+def deps(
+    add: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--add",
+        help="Add a dependency edge 'SOURCE:TARGET' (source depends on "
+        "target). Repeatable; arrow form 'SOURCE->TARGET' also accepted.",
+    ),
+    remove: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--remove",
+        help="Remove a dependency edge 'SOURCE:TARGET'. Repeatable.",
+    ),
+    actor: str = typer.Option(  # noqa: B008
+        "fakoli-state-cli",
+        "--actor",
+        help="Actor recorded on the emitted events.",
+    ),
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the current working directory.",
+        hidden=True,
+    ),
+) -> None:
+    """Apply a batch of dependency edge edits atomically, rejecting cycles.
+
+    Accepts multiple ``--add`` and ``--remove`` edges (each ``SOURCE:TARGET``,
+    meaning *source depends on target*) and applies them as ONE transaction:
+    the whole batch is validated up front — unknown tasks, self-dependencies,
+    and any edit that would introduce a dependency cycle reject the entire batch
+    with NO partial application. On success one ``task.created`` upsert is
+    emitted per task whose dependency set changed (status is preserved).
+
+    With ``--json`` emits ``{"ok": true, "command": "deps", "data":
+    {"changed": [...], "added": [["S","T"], ...], "removed": [...]}}``. A
+    rejected batch yields ``{"ok": false, ... "error": {"code": "cycle" |
+    "unknown_task" | "self_loop" | "bad_request", ...}}`` and exit 1.
+    """
+    from fakoli_state.clock import SystemClock
+    from fakoli_state.planning._plan_helpers import (
+        BatchDepError,
+        emit_batch_dep_events,
+        parse_dep_edge,
+        plan_batch_dep_edits,
+    )
+
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command="deps", json_output=json_output)
+
+    add = add or []
+    remove = remove or []
+    if not add and not remove:
+        msg = "no edges supplied; pass at least one --add or --remove."
+        if json_output:
+            fail("deps", msg, code="bad_request")
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=2)
+
+    # Parse the edge specs first so a malformed spec fails before opening state.
+    try:
+        edges = [parse_dep_edge(raw, "add") for raw in add] + [
+            parse_dep_edge(raw, "remove") for raw in remove
+        ]
+    except BatchDepError as exc:
+        if json_output:
+            fail("deps", exc.message, code=exc.code)
+        typer.echo(f"Error: {exc.message}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    backend = _open_backend(state_dir)
+    try:
+        clock = SystemClock()
+        all_tasks = backend.list_tasks()
+        tasks_by_id = {t.id: t for t in all_tasks}
+
+        # Plan + validate the WHOLE batch before emitting anything. A raised
+        # BatchDepError here means zero events were appended → no partial apply.
+        try:
+            batch_plan = plan_batch_dep_edits(all_tasks, edges)
+        except BatchDepError as exc:
+            if json_output:
+                fail("deps", exc.message, code=exc.code)
+            typer.echo(f"Error: {exc.message}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        changed = emit_batch_dep_events(
+            backend, tasks_by_id, batch_plan, actor=actor, clock=clock
+        )
+    finally:
+        backend.close()
+
+    if json_output:
+        emit_success(
+            "deps",
+            {
+                "changed": changed,
+                "added": [list(e) for e in batch_plan.added],
+                "removed": [list(e) for e in batch_plan.removed],
+            },
+        )
+        return
+
+    typer.echo(
+        f"Applied {len(batch_plan.added)} add(s) and "
+        f"{len(batch_plan.removed)} remove(s) across {len(changed)} task(s)."
+    )
+    if changed:
+        typer.echo("Changed tasks: " + ", ".join(changed))
+    else:
+        typer.echo("No dependency changes (all edges were no-ops).")
