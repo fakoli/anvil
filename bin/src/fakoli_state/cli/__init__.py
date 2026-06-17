@@ -18,6 +18,7 @@ from fakoli_state.cli.packet_apply import apply, packet, submit
 from fakoli_state.cli.plan import expand, list_tasks, plan, review_app, score, show
 from fakoli_state.cli.prd import prd_app
 from fakoli_state.cli.replay import replay
+from fakoli_state.cli.scan import scan
 from fakoli_state.cli.sync import sync_app
 
 # ---------------------------------------------------------------------------
@@ -71,6 +72,7 @@ def main(
 
 app.command()(init)
 app.command()(status)
+app.command()(scan)
 app.command()(drift)
 app.command()(plan)
 app.command()(score)

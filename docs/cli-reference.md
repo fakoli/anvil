@@ -14,6 +14,7 @@
 - Project lifecycle
   - [`fakoli-state init`](#init)
   - [`fakoli-state status`](#status)
+  - [`fakoli-state scan`](#scan)
 - PRD authoring
   - [`fakoli-state prd parse`](#prd-parse)
   - [`fakoli-state prd review`](#prd-review)
@@ -99,6 +100,12 @@ the project row.
 - `--force` *(flag)* — overwrite an existing `.fakoli-state/` directory.
   Wipes `state.db` (including the `-wal` / `-shm` sidecars), `events.jsonl`,
   and `config.yaml`. Preserves `packets/` and `snapshots/` (user-generated).
+- `--with-sample` *(flag)* — seed a runnable toy project (sample `prd.md` +
+  parsed/planned/scored task graph) so `fakoli-state next` works immediately.
+- `--from-repo` *(flag)* — brownfield ingest: after scaffolding, run
+  [`fakoli-state scan`](#scan) on the existing working tree to persist a
+  re-scannable codebase model, write a draft `prd.md`, and seed an initial
+  feature/task graph offline. Mutually exclusive with `--with-sample`.
 
 **Exit codes:**
 
@@ -149,6 +156,48 @@ fakoli-state status --hook-format     # for SessionStart hooks
 
 **See also:** [`fakoli-state init`](#init) to create the directory;
 [`fakoli-state list`](#list) for the per-task view.
+
+### `fakoli-state scan` { #scan }
+
+**Synopsis:** Brownfield ingest of an existing repository. Walks the working
+tree (preferring `git ls-files`, which honours `.gitignore`; falling back to a
+pruned `os.walk`), persists a re-scannable **codebase model** in its own
+`.fakoli-state/scan.db` (kept separate from the event-sourced `state.db` so
+replay is never touched), and — on the **first** scan of a project with no PRD
+yet — synthesises a draft `prd.md` plus an initial feature/task graph by driving
+the same offline parse → plan → score → review pipeline that
+`init --with-sample` uses. Re-running `scan` reconciles against the persisted
+model and reports the **delta** (added / removed / changed files) instead of
+overwriting the seeded graph.
+
+**Flags:**
+
+- `--json` *(flag)* — emit the standard single-line envelope. `data` carries
+  `files_scanned`, `components`, `languages`, `first_scan`, `delta`
+  (`added` / `removed` / `changed` / `unchanged_count`), and `seeded`
+  (feature/task/ready counts on the run that seeded, else `null`).
+- `--force` *(flag)* — re-seed the draft PRD and task graph even when a PRD
+  already exists. Without it, a re-scan never clobbers an authored PRD.
+- `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
+
+**Exit codes:**
+
+- `0` — scan completed (first-seed or delta report).
+- `1` — `.fakoli-state/` does not exist (run `init` / `init --from-repo`
+  first), or `FAKOLI_STATE_ROOT` is set but invalid.
+
+**Example:**
+
+```bash
+fakoli-state init --from-repo     # scaffold + first scan in one step
+# ... edit code ...
+fakoli-state scan                 # refresh the model, see what changed
+fakoli-state scan --json | jq .data.delta
+```
+
+**See also:** [`fakoli-state init`](#init) (`--from-repo` runs scan for you);
+[`fakoli-state drift`](#drift) for intent↔state↔fs divergence on an active
+project.
 
 ---
 

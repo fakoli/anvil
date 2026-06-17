@@ -198,6 +198,38 @@ def seed_sample_pipeline(
     :class:`SampleSeedError` if the embedded PRD fails to parse — that would be
     a packaging bug, surfaced cleanly rather than as a traceback.
     """
+    return seed_pipeline_from_prd(
+        backend,
+        SAMPLE_PRD,
+        actor=actor,
+        parse_error_hint=(
+            "This is a fakoli-state packaging bug — please report it."
+        ),
+    )
+
+
+def seed_pipeline_from_prd(
+    backend: SqliteBackend,
+    prd_text: str,
+    *,
+    actor: str = "fakoli-state-cli",
+    review_notes: str = "auto-seeded",
+    parse_error_hint: str = "Fix the PRD and re-run.",
+) -> dict[str, Any]:
+    """Drive parse → plan → score → review offline for an *arbitrary* PRD text.
+
+    This is the generalised engine behind :func:`seed_sample_pipeline` and the
+    T008 brownfield ``scan`` command: given any PRD markdown that
+    ``planning.template.parse_prd`` accepts (with ``## Features`` / ``## Tasks``
+    sections carrying acceptance-criteria + verification), it appends the full
+    canonical event sequence so ``fakoli-state next`` returns a ready task — no
+    network, no LLM, no API key.
+
+    The seeding steps are identical to (and shared with) the sample path so the
+    brownfield path can never drift from the hand-run command sequence. Raises
+    :class:`SampleSeedError` (carrying *parse_error_hint*) if *prd_text* fails
+    to parse.
+    """
     from fakoli_state.clock import SystemClock
     from fakoli_state.planning.inference import infer_all
     from fakoli_state.planning.scoring import score_task
@@ -211,15 +243,15 @@ def seed_sample_pipeline(
 
     clock = SystemClock()
 
-    parsed = parse_prd(SAMPLE_PRD, prd_id="prd")
+    parsed = parse_prd(prd_text, prd_id="prd")
     if parsed.errors:
         detail = "; ".join(
             f"[{e.section}:{e.line}] {e.message}" for e in parsed.errors
         )
         raise SampleSeedError(
-            "the embedded sample PRD failed to parse "
+            "the PRD failed to parse "
             f"({len(parsed.errors)} error(s)): {detail}. "
-            "This is a fakoli-state packaging bug — please report it."
+            + parse_error_hint
         )
 
     project_id = backend.get_project().id  # type: ignore[union-attr]
@@ -266,7 +298,7 @@ def seed_sample_pipeline(
             payload_json={
                 "project_id": project_id,
                 "reviewer": actor,
-                "notes": "auto-seeded by init --with-sample",
+                "notes": review_notes,
             },
         )
     )
@@ -336,7 +368,7 @@ def seed_sample_pipeline(
                         "task_id": inferred.id,
                         "from": "proposed",
                         "to": "drafted",
-                        "reason": "init --with-sample: initial draft after inference",
+                        "reason": "seed: initial draft after inference",
                     },
                 )
             )
@@ -388,7 +420,7 @@ def seed_sample_pipeline(
                     "task_id": task.id,
                     "from": "drafted",
                     "to": "reviewed",
-                    "reason": "init --with-sample: gate passed",
+                    "reason": "seed: gate passed",
                 },
             )
         )
@@ -412,7 +444,7 @@ def seed_sample_pipeline(
                     "task_id": task.id,
                     "from": "reviewed",
                     "to": "ready",
-                    "reason": "init --with-sample: promoted to ready",
+                    "reason": "seed: promoted to ready",
                 },
             )
         )

@@ -60,6 +60,17 @@ def init(
             "Without this flag, init behaviour is unchanged."
         ),
     ),
+    from_repo: bool = typer.Option(  # noqa: B008
+        False,
+        "--from-repo",
+        help=(
+            "Brownfield ingest: after scaffolding, scan the existing working "
+            "tree (T008) to persist a re-scannable codebase model, write a "
+            "draft prd.md, and seed an initial feature/task graph offline. "
+            "Mutually exclusive with --with-sample. Without this flag, init "
+            "behaviour is unchanged."
+        ),
+    ),
 ) -> None:
     """Scaffold a .fakoli-state/ directory in the current working directory.
 
@@ -74,6 +85,17 @@ def init(
     ``fakoli-state next`` works immediately.
     """
     from fakoli_state.config import write_default_config
+
+    # --from-repo and --with-sample both own prd.md and seed the task graph;
+    # running both would double-seed. Refuse the combination up front.
+    if from_repo and with_sample:
+        typer.echo(
+            "Error: --from-repo and --with-sample are mutually exclusive. "
+            "Use --from-repo to ingest the existing repo, or --with-sample for "
+            "the toy quickstart.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     # MUST-FIX 1: resolve the project root the SAME way reads do
     # (FAKOLI_STATE_ROOT > cwd) so `init` and `status` never diverge. `init`
@@ -188,6 +210,40 @@ def init(
         )
         typer.echo("")
         typer.echo("Next step: run `fakoli-state next` to see your first ready task.")
+    elif from_repo:
+        # Brownfield ingest (T008): scaffold is done; now scan the existing
+        # working tree, persist the codebase model, write a draft prd.md, and
+        # seed the feature/task graph. Reuses the scan engine so init and the
+        # standalone `scan` command stay in lock-step.
+        from fakoli_state.cli.scan import run_scan_and_report
+
+        typer.echo("")
+        result = run_scan_and_report(state_dir, cwd, force=False)
+        seeded = result.get("seeded")
+        typer.echo(
+            f"Scanned {result['files_scanned']} file(s) into a codebase model."
+        )
+        if seeded is not None:
+            typer.echo(f"  {state_dir / 'prd.md'}")
+            typer.echo("")
+            typer.echo(
+                "Seeded draft project from repo: "
+                f"{seeded['features']} feature(s), "
+                f"{seeded['tasks']} task(s), "
+                f"{seeded['ready']} ready."
+            )
+            typer.echo("")
+            typer.echo(
+                "Draft PRD is a SEED — edit it to capture real intent, then "
+                "run `fakoli-state next` to see your first ready task."
+            )
+        else:
+            typer.echo("")
+            typer.echo(
+                "Next step: author your PRD at "
+                f"{state_dir / 'prd.md'}, "
+                "then run `fakoli-state prd parse`."
+            )
     else:
         typer.echo("")
         typer.echo(

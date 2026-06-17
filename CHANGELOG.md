@@ -10,6 +10,41 @@ _No unreleased changes._
 
 ---
 
+## [1.27.0] — 2026-06-17
+
+### Added
+
+- **`fakoli-state scan` brownfield ingest + `init --from-repo` (T008).** A new
+  command takes an *existing* repo from nothing to a ready-to-claim task graph
+  with no PRD authoring, no LLM, and no API key. `scan` walks the working tree,
+  persists a re-scannable **codebase model** in its own SQLite db
+  (`.fakoli-state/scan.db`), and — on the first scan of a project with no PRD yet
+  — synthesises a draft `prd.md` plus an initial feature/task graph by driving
+  the same offline parse → plan → score → review pipeline `init --with-sample`
+  uses. `init --from-repo` is the convenience entry point: it scaffolds
+  `.fakoli-state/` like a bare `init`, then immediately runs the scan.
+  - **Separate `scan.db` keeps the replay/audit guarantee intact.** The codebase
+    model lives in its own database, never in the event-sourced `state.db`, so
+    the canonical event log and its byte-equality replay invariant are untouched.
+  - **Re-scan reports a delta, never clobbers.** A second `scan` reconciles the
+    refreshed working tree against the persisted model and reports added /
+    removed / changed files instead of overwriting the seeded graph. An authored
+    or already-parsed `prd.md` is left alone unless `--force` is passed — only a
+    project with no PRD yet (the common brownfield first run) gets seeded.
+  - **Fully offline / no API key.** Seeding reuses the generalised
+    `cli._sample.seed_pipeline_from_prd` engine (extracted from the sample path)
+    so the brownfield seed drives the exact parse → plan → score → review modules
+    the per-command CLI bodies use and cannot drift from the hand-run sequence.
+    The generated draft PRD carries `## Features`/`## Tasks` sections with
+    non-empty acceptance-criteria + verification blocks, so the run ends with at
+    least one task in `ready` and `fakoli-state next` returns a first task.
+  - **`--from-repo` is mutually exclusive with `--with-sample`** (both own
+    `prd.md` and seed the graph; the combination is refused up front) and honours
+    the v1.24 conventions — `FAKOLI_STATE_ROOT` resolution via the shared helpers
+    and the single `--json` envelope. Covered by `tests/test_scan.py`.
+
+---
+
 ## [1.26.0] — 2026-06-17
 
 ### Added
