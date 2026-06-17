@@ -50,12 +50,28 @@ def init(
         "--force",
         help="Overwrite an existing .fakoli-state/ directory.",
     ),
+    with_sample: bool = typer.Option(  # noqa: B008
+        False,
+        "--with-sample",
+        help=(
+            "Seed a runnable sample project: write a valid sample prd.md and "
+            "run parse, plan, and score offline so `fakoli-state next` returns "
+            "a ready task with no further input. Requires no LLM / API key. "
+            "Without this flag, init behaviour is unchanged."
+        ),
+    ),
 ) -> None:
     """Scaffold a .fakoli-state/ directory in the current working directory.
 
     Creates the canonical project-state layout including config.yaml,
     state.db (SQLite), events.jsonl (append-only event log), and an
     empty packets/ subdirectory.
+
+    With ``--with-sample`` the scaffold is followed by a one-command
+    quickstart: a self-contained sample ``prd.md`` is written and the full
+    deterministic pipeline (parse → review → approve → plan → score →
+    review tasks) is run offline, leaving at least one task in ``ready`` so
+    ``fakoli-state next`` works immediately.
     """
     from fakoli_state.config import write_default_config
 
@@ -126,10 +142,27 @@ def init(
         config_path.unlink()
     write_default_config(config_path, project_name=project_name)
 
-    # Initialise state.db via SqliteBackend.
+    # Initialise state.db via SqliteBackend. When --with-sample is set, seed
+    # the full PRD→ready pipeline within the SAME backend session so we don't
+    # re-open the db and so the sample run is atomic with init.
+    seed_summary: dict[str, object] | None = None
     backend = _open_backend(state_dir)
     try:
         _apply_init_event(backend, project_name=project_name, project_id=project_id)
+
+        if with_sample:
+            from fakoli_state.cli._sample import (
+                SampleSeedError,
+                seed_sample_pipeline,
+                write_sample_prd,
+            )
+
+            write_sample_prd(state_dir)
+            try:
+                seed_summary = seed_sample_pipeline(backend)
+            except SampleSeedError as exc:
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
     finally:
         backend.close()
 
@@ -140,12 +173,28 @@ def init(
     typer.echo(f"  {state_dir / 'state.db'}")
     typer.echo(f"  {state_dir / 'events.jsonl'}")
     typer.echo(f"  {state_dir / 'packets'}/")
-    typer.echo("")
-    typer.echo(
-        "Next step: author your PRD at "
-        f"{state_dir / 'prd.md'}, "
-        "then run `fakoli-state prd parse`."
-    )
+
+    if seed_summary is not None:
+        # --with-sample: report the seeded pipeline and point straight at
+        # `next` (the whole reason for this flag is zero-to-next with no
+        # further input).
+        typer.echo(f"  {state_dir / 'prd.md'}")
+        typer.echo("")
+        typer.echo(
+            "Seeded sample project: "
+            f"{seed_summary['features']} feature(s), "
+            f"{seed_summary['tasks']} task(s), "
+            f"{seed_summary['ready']} ready."
+        )
+        typer.echo("")
+        typer.echo("Next step: run `fakoli-state next` to see your first ready task.")
+    else:
+        typer.echo("")
+        typer.echo(
+            "Next step: author your PRD at "
+            f"{state_dir / 'prd.md'}, "
+            "then run `fakoli-state prd parse`."
+        )
 
 
 def _apply_init_event(

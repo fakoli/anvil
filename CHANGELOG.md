@@ -10,6 +10,38 @@ _No unreleased changes._
 
 ---
 
+## [1.26.0] — 2026-06-17
+
+### Added
+
+- **`fakoli-state init --with-sample` one-command quickstart (T004).** A single
+  command now takes a brand-new user from nothing to a ready-to-claim task with
+  no PRD authoring, no LLM, and no API key. Passing `--with-sample` to `init`
+  scaffolds the `.fakoli-state/` directory as before, then writes a
+  self-contained sample `prd.md` (a fictional "Markdown Link Checker" CLI) and
+  runs the full deterministic pipeline offline — parse → review → approve →
+  plan → score → review tasks — leaving at least one task in `ready` so
+  `fakoli-state next` returns a first task immediately.
+  - **Fully offline / no API key.** The sample PRD already contains a `## Tasks`
+    section, so `plan` never reaches its LLM task-generation backstop. Seeding
+    drives the same engine modules the per-command CLI bodies use
+    (`planning.template.parse_prd`, `planning.inference.infer_all`,
+    `planning.scoring.score_task`, `state.transitions`) so the seeded path
+    cannot drift from the hand-run command path.
+  - **Every sample task carries non-empty `**Acceptance criteria:**` and
+    `**Verification:**` blocks** — exactly the gate `review tasks` enforces for
+    the `drafted → reviewed → ready` promotion — so the run actually ends with
+    ready tasks rather than an empty queue.
+  - **Atomic with `init`.** The seed runs inside the same backend session that
+    `init` opens, so the sample pipeline is applied in one shot. The sample PRD
+    is embedded as a module constant (`_sample.SAMPLE_PRD`) rather than a data
+    file, since the wheel only packages `src/fakoli_state`.
+  - **Opt-in and back-compatible.** Without the flag, `init` behaviour is
+    unchanged. The confirmation output reports the seeded feature/task/ready
+    counts and points straight at `fakoli-state next`.
+
+---
+
 ## [1.25.1] — 2026-06-17
 
 ### Added

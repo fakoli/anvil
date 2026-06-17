@@ -211,6 +211,107 @@ class TestInit:
 
 
 # ---------------------------------------------------------------------------
+# init --with-sample — one-command standalone quickstart (T004)
+# ---------------------------------------------------------------------------
+
+
+class TestInitWithSample:
+    """`fakoli-state init --with-sample` seeds a runnable PRD→next loop.
+
+    Names contain ``with_sample`` so ``pytest -k with_sample`` selects them
+    (per the T004 verification command).
+    """
+
+    def _run(self, app_args: list[str], tmp_path: Path) -> Result:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            return runner.invoke(app, app_args, catch_exceptions=False)
+        finally:
+            os.chdir(original_cwd)
+
+    def test_init_with_sample_seeds_ready_task_for_next(self, tmp_path: Path) -> None:
+        """init --with-sample makes `next` return a ready task with no input."""
+        init_result = self._run(["init", "--with-sample"], tmp_path)
+        assert init_result.exit_code == 0, f"init failed: {init_result.output}"
+
+        # Scaffold + sample prd.md present.
+        state_dir = tmp_path / ".fakoli-state"
+        assert (state_dir / "prd.md").exists(), "sample prd.md not written"
+        assert (state_dir / "state.db").exists()
+
+        # `next` returns a ready task — the whole point of the flag.
+        next_result = self._run(["next", "--json"], tmp_path)
+        assert next_result.exit_code == 0, next_result.output
+        payload = json.loads(next_result.output)
+        assert payload["ok"] is True
+        task = payload["data"]["task"]
+        assert task is not None, "no claimable task after init --with-sample"
+        assert task["status"] == "ready"
+
+    def test_init_with_sample_reports_seed_summary(self, tmp_path: Path) -> None:
+        """Human output names the sample seed and points at `next`."""
+        result = self._run(["init", "--with-sample"], tmp_path)
+        assert result.exit_code == 0
+        assert "Seeded sample project" in result.output
+        assert "ready" in result.output
+        assert "fakoli-state next" in result.output
+
+    def test_init_with_sample_status_shows_ready_tasks(self, tmp_path: Path) -> None:
+        """status reflects the seeded ready tasks (state actually persisted)."""
+        assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
+        status_result = self._run(["status", "--json"], tmp_path)
+        assert status_result.exit_code == 0
+        data = json.loads(status_result.output)["data"]
+        assert data["tasks"]["total"] >= 1
+        assert data["tasks"]["ready"] >= 1
+        # PRD advanced through the full lifecycle to approved.
+        assert data["prd_status"] == "approved"
+
+    def test_init_without_sample_leaves_no_tasks(self, tmp_path: Path) -> None:
+        """Without --with-sample, init behaviour is unchanged: no prd, no tasks.
+
+        This is the backward-compatibility guard for the --with-sample flag —
+        the default path must not seed anything.
+        """
+        result = self._run(["init"], tmp_path)
+        assert result.exit_code == 0
+        state_dir = tmp_path / ".fakoli-state"
+        # Default init does NOT write a prd.md.
+        assert not (state_dir / "prd.md").exists()
+        # And `next` finds nothing claimable.
+        next_result = self._run(["next", "--json"], tmp_path)
+        assert next_result.exit_code == 0
+        assert json.loads(next_result.output)["data"]["task"] is None
+
+    def test_init_with_sample_events_replay_to_same_state(self, tmp_path: Path) -> None:
+        """Seeded events.jsonl replays to an identical DB (audit invariant)."""
+        assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
+        state_dir = tmp_path / ".fakoli-state"
+        scratch = tmp_path / "scratch.db"
+        replay_result = self._run(
+            [
+                "replay",
+                "--from-events",
+                str(state_dir / "events.jsonl"),
+                "--into",
+                str(scratch),
+            ],
+            tmp_path,
+        )
+        assert replay_result.exit_code == 0, replay_result.output
+
+        def task_rows(db: Path) -> list[tuple[str, str]]:
+            conn = sqlite3.connect(str(db))
+            try:
+                return sorted(conn.execute("SELECT id, status FROM tasks").fetchall())
+            finally:
+                conn.close()
+
+        assert task_rows(state_dir / "state.db") == task_rows(scratch)
+
+
+# ---------------------------------------------------------------------------
 # status — uninitialized
 # ---------------------------------------------------------------------------
 

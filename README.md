@@ -55,6 +55,25 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick Start
 
+### Zero-to-next in one command
+
+`fakoli-state` is a standalone CLI — no `fakoli-flow`, `fakoli-crew`, or Claude
+Code required. To see the whole loop end-to-end against a seeded sample project:
+
+```bash
+fakoli-state init --with-sample
+# → scaffolds .fakoli-state/, writes a valid sample prd.md, and runs
+#   parse → review → approve → plan → score → review tasks offline (no API key)
+fakoli-state next
+# → returns a ready task immediately — nothing else to author or run
+```
+
+`--with-sample` is purely additive: plain `fakoli-state init` is unchanged and
+seeds nothing. Use the sample to learn the flow, then delete `.fakoli-state/`
+and run `init` for real on your own PRD as shown below.
+
+### The full loop on your own PRD
+
 ```bash
 # 1. Scaffold per-project state
 fakoli-state init --name "My Project"
