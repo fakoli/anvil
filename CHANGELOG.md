@@ -10,6 +10,28 @@ _No unreleased changes._
 
 ---
 
+## [1.24.0] — 2026-06-17
+
+### Changed
+
+- **Trimmed agent descriptions.** Moved the `<example>` blocks out of every agent's
+  frontmatter `description` and into the agent body, shrinking the always-on context
+  footprint from 7,248 → 5,414 tokens (−25%). The triggering examples still live in each
+  agent file — just below the frontmatter rather than inside it — so dispatch guidance is
+  preserved without paying the token cost on every session load.
+
+### Removed
+
+- **The monorepo-only `marketplace-scribe` agent.** Its duties — keeping the root
+  `README.md` plugins table, `.claude-plugin/marketplace.json`, and `registry/*.json` in
+  sync — only exist inside the fakoli-plugins monorepo, not in a standalone fakoli-state
+  checkout. `docs-scribe` and `state-keeper` are refocused for the standalone surface, and
+  marketplace-level regeneration defers to `fakoli-crew:keeper` when that plugin is present.
+  fakoli-state now ships **5 plugin-owned agents**: `critic`, `docs-scribe`, `planner`,
+  `sentinel`, `state-keeper`.
+
+---
+
 ## [1.23.8] — 2026-06-17
 
 ### Added

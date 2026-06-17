@@ -1,6 +1,6 @@
 # Agents reference
 
-> fakoli-state ships 6 plugin-owned agents. Each has a specific role; each defers to a `fakoli-crew` specialist when that plugin is installed (so the same agent works standalone or as part of a richer crew composition).
+> fakoli-state ships 5 plugin-owned agents. Each has a specific role; each defers to a `fakoli-crew` specialist when that plugin is installed (so the same agent works standalone or as part of a richer crew composition).
 
 This document is the canonical per-agent reference. For the higher-level integration picture across all three plugins, see [Integrating with fakoli-flow and fakoli-crew](how-to/integrating-with-fakoli-flow-and-crew.md). For the architectural role of agents inside the plugin, see [architecture.md](architecture.md).
 
@@ -14,7 +14,6 @@ This document is the canonical per-agent reference. For the higher-level integra
 | [critic](#critic) | magenta | Read, Grep, Glob, Bash | `fakoli-crew:critic` (full fallback) |
 | [sentinel](#sentinel) | gray | Read, Grep, Glob, Bash | `fakoli-crew:sentinel` (full fallback) |
 | [state-keeper](#state-keeper) | teal | Read, Grep, Glob, Bash, Edit, Write | `fakoli-crew:keeper` (repo-wide scope only) |
-| [marketplace-scribe](#marketplace-scribe) | cyan | Read, Write, Edit, Bash, Glob, Grep | `fakoli-crew:keeper` (whole-file regen only) |
 | [docs-scribe](#docs-scribe) | purple | Read, Write, Edit, Glob, Grep | `fakoli-crew:herald` (outward docs only) |
 
 Tool lists are read from each agent's frontmatter. The `state-keeper` agent declares `Edit` and `Write` but is restricted by its Iron Rule to writing only sync-report files under `.fakoli-state/.sync-reports/` — never source files, state files, or git refs.
@@ -137,44 +136,6 @@ Both can fire in parallel when a question touches both scopes.
 
 ---
 
-### marketplace-scribe
-
-**Purpose:** Marketplace artifact maintenance. Keeps the public-facing listing of fakoli-state honest and current — the marketplace entry, the registry index row, and the root README plugins table. Fires after any version bump, agent add/remove, skill add/remove, or CLI surface change.
-
-**Frontmatter:** `color: cyan` · `model: opus` · `tools: [Read, Write, Edit, Bash, Glob, Grep]`
-
-**When to dispatch:**
-- Trigger phrases: "update marketplace", "regen registry", "sync plugins table", "marketplace entry drift".
-- After `plugin.json`'s `version` field changes.
-- After a new file appears in (or disappears from) `agents/` or `skills/`.
-- After a new `fakoli-state <subcommand>` ships or an existing one is renamed.
-- When a user, sentinel, or state-keeper notices the registry and the filesystem disagree.
-
-**Iron Rule:** Never invents a capability the plugin does not actually ship. Every agent, skill, command, or CLI subcommand listed in marketplace.json or the README must correspond to a file read in this session. Drift in the other direction — derived artifact ahead of source — destroys trust with first-time visitors.
-
-**What it owns:**
-- `.claude-plugin/marketplace.json` — the fakoli-state row only.
-- `README.md` (root) plugins table — the fakoli-state row only.
-- `registry/*.json` — the fakoli-state entry across every registry file that indexes it.
-
-**What it does NOT own:**
-- `plugins/fakoli-state/.claude-plugin/plugin.json` (description belongs to docs-scribe; structural fields belong to smith).
-- Repo-wide `CLAUDE.md`, `.github/workflows/`, `docs/contributing.md` (belong to `fakoli-crew:keeper`).
-- Other plugins' marketplace rows or registry entries (also `fakoli-crew:keeper`).
-- Anything under `plugins/fakoli-state/docs/` or the plugin's CHANGELOG (belong to docs-scribe).
-
-**Defer behavior:** Scope-split. When `fakoli-crew:keeper` is installed:
-- Route to `marketplace-scribe` for fakoli-state's row in marketplace.json, registry, README plugins table.
-- Route to `fakoli-crew:keeper` for whole-file regeneration, repo-wide README restructuring, CI workflow paths, registry schema changes affecting every plugin.
-
-When in doubt — if a request seems to cross plugin boundaries — prefer `fakoli-crew:keeper`.
-
-**Output shape:** Markdown report with Source of Truth section (from plugin.json + filesystem), Artifact Changes section (one before/after table per artifact), and a Verdict of `IN SYNC`, `APPLIED`, or `DRIFT REMAINING`.
-
-**Source:** [`agents/marketplace-scribe.md`](../agents/marketplace-scribe.md)
-
----
-
 ### docs-scribe
 
 **Purpose:** Inward-facing documentation maintenance. Owns the `docs/` folder (specs, runbooks, design notes, plan archives), the plugin's CHANGELOG, and the `description` field of `plugin.json`. Audits cross-references — broken wikilinks, mismatched section anchors, dangling `see also` pointers, references to files that moved or were archived.
@@ -198,7 +159,7 @@ When in doubt — if a request seems to cross plugin boundaries — prefer `fako
 - `plugins/fakoli-state/.claude-plugin/plugin.json` (`description` field only).
 
 **What it does NOT own:**
-- `.claude-plugin/marketplace.json`, the root `README.md`, `registry/*.json` (belong to marketplace-scribe).
+- `.claude-plugin/marketplace.json`, the root `README.md`, `registry/*.json` (marketplace-level artifacts — belong to `fakoli-crew:keeper`).
 - Repo-wide `CLAUDE.md`, contributor docs, CI workflow docs (belong to `fakoli-crew:keeper`).
 - `plugin.json`'s structural fields (`name`, `version`, `author`, `repository`, `license`, `keywords`) — those are smith's lane.
 - Agent or skill internals — those agents/skills speak for themselves.
@@ -207,7 +168,7 @@ When in doubt — if a request seems to cross plugin boundaries — prefer `fako
 - Route to `fakoli-crew:herald` for root README, marketplace listing prose, badges, value-proposition rewrites for first-time visitors.
 - Route to `docs-scribe` for anything inside `plugins/fakoli-state/docs/`, the plugin's CHANGELOG, the plugin.json description field.
 
-The split-by-audience is deliberate: marketplace-scribe writes for strangers, docs-scribe writes for contributors, state-keeper writes for operators.
+The split-by-audience is deliberate: docs-scribe writes for contributors, state-keeper writes for operators.
 
 **CHANGELOG discipline:**
 - Append-only. Never rewrite history; add a correction entry instead.
@@ -235,13 +196,13 @@ claude plugin list 2>/dev/null | grep -q "fakoli-crew"
 
 Exit code 0 means a crew specialist is available and the agent defers (full fallback) or scope-splits (partial defer). Non-zero means the agent runs its plugin-local body in full. This makes the integration zero-config: install fakoli-crew and the deferral activates; uninstall and the local body runs. No settings.json toggles, no per-task overrides.
 
-Two of the six agents (`critic`, `sentinel`) are full fallbacks — when the crew sibling exists, the plugin-owned agent steps aside entirely. The other four (`planner`, `state-keeper`, `marketplace-scribe`, `docs-scribe`) are scope-splits — both run, but at different levels of granularity. The split-by-scope pattern lets each plugin own a tightly defined surface without the two agents fighting over the same files.
+Two of the five agents (`critic`, `sentinel`) are full fallbacks — when the crew sibling exists, the plugin-owned agent steps aside entirely. The other three (`planner`, `state-keeper`, `docs-scribe`) are scope-splits — both run, but at different levels of granularity. The split-by-scope pattern lets each plugin own a tightly defined surface without the two agents fighting over the same files.
 
 ---
 
 ## Standalone mode
 
-If only fakoli-state is installed, all 6 agents run their full local body. No degradation in capability — the deferral is an optimization (using a more specialized crew agent), not a requirement. The plugin-owned `critic` still produces PASS / SHOULD FIX / MUST FIX verdicts against acceptance criteria. The plugin-owned `sentinel` still re-runs verification commands and produces the binary scorecard. `planner` still proposes Features and Tasks; `state-keeper` still detects the four discrepancy kinds; `marketplace-scribe` still keeps the fakoli-state row honest; `docs-scribe` still sweeps the inward docs and CHANGELOG.
+If only fakoli-state is installed, all 5 agents run their full local body. No degradation in capability — the deferral is an optimization (using a more specialized crew agent), not a requirement. The plugin-owned `critic` still produces PASS / SHOULD FIX / MUST FIX verdicts against acceptance criteria. The plugin-owned `sentinel` still re-runs verification commands and produces the binary scorecard. `planner` still proposes Features and Tasks; `state-keeper` still detects the four discrepancy kinds; `docs-scribe` still sweeps the inward docs and CHANGELOG.
 
 This is the v0 wedge: a solo developer with one Claude Code session can drive the full PRD-to-shipped lifecycle — and the full doc-and-state maintenance lifecycle — without ever installing fakoli-flow or fakoli-crew.
 

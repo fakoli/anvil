@@ -109,7 +109,7 @@ the same way in every case:
 claude plugin list 2>/dev/null | grep -q "fakoli-crew"
 ```
 
-Exit code 0 means defer; non-zero means run the plugin-owned body. The six
+Exit code 0 means defer; non-zero means run the plugin-owned body. The five
 agents and what each defers to:
 
 | Plugin-owned agent | Defers to | Defer style |
@@ -118,12 +118,11 @@ agents and what each defers to:
 | [`sentinel`](../../agents/sentinel.md) | `fakoli-crew:sentinel` for comprehensive validation (CI workflow checks, version sync, broad linting) | Full takeover; plugin-owned `sentinel` becomes the fallback for re-running task-spec verification commands |
 | [`planner`](../../agents/planner.md) | `fakoli-crew:guido` for high-level architecture decisions (interface design, type system choices, project structure) | Partial — `planner` keeps WHAT/scoping/decomposition, defers HOW/architecture questions; flags those as a "guido consult" in its Concerns section |
 | [`state-keeper`](../../agents/state-keeper.md) | `fakoli-crew:keeper` for repo-wide infrastructure (CLAUDE.md, `.github/workflows/`, contributor docs, multi-plugin registry regen) | Scope-split — `state-keeper` keeps drift detection inside one initialized fakoli-state project (orphan branches, orphan packets, stale claims, missing sync_mappings); `fakoli-crew:keeper` owns everything else |
-| [`marketplace-scribe`](../../agents/marketplace-scribe.md) | `fakoli-crew:keeper` for repo-wide regeneration (whole marketplace.json from scratch, schema changes affecting every plugin) | Scope-split — `marketplace-scribe` keeps the fakoli-state row in marketplace.json, README plugins table, and `registry/*.json`; everything broader routes to keeper |
 | [`docs-scribe`](../../agents/docs-scribe.md) | `fakoli-crew:herald` for outward-facing documentation (root README, marketplace blurb prose, badges, first-time-visitor copy) | Scope-split — `docs-scribe` keeps inward-facing docs under `plugins/fakoli-state/docs/`, the plugin's CHANGELOG, and `plugin.json`'s `description` field; everything stranger-facing routes to herald |
 
-Two of the six (`critic`, `sentinel`) are full fallbacks: when the crew
+Two of the five (`critic`, `sentinel`) are full fallbacks: when the crew
 sibling exists, the plugin-owned agent steps aside entirely. The other
-four (`planner`, `state-keeper`, `marketplace-scribe`, `docs-scribe`) are
+three (`planner`, `state-keeper`, `docs-scribe`) are
 scope-splits: both run, but at different levels of granularity. The
 split-by-scope pattern is deliberate — it lets each plugin own a tightly
 defined surface without the two agents fighting over the same files.
@@ -143,8 +142,8 @@ functional on its own. What still works:
   `finish`, `state-ops`). They detect the absence of `fakoli-flow` and run
   their self-contained bodies — six-question interview in `start-prd`,
   solo execution loop in `execute`, solo review loop in `finish`.
-- **All 6 plugin-owned agents** — `critic`, `sentinel`, `planner`,
-  `state-keeper`, `marketplace-scribe`, `docs-scribe`. They execute their
+- **All 5 plugin-owned agents** — `critic`, `sentinel`, `planner`,
+  `state-keeper`, `docs-scribe`. They execute their
   full body without delegating.
 - **All 4 hooks** — `detect-state` (SessionStart), `check-claim`
   (PreToolUse Edit/Write/NotebookEdit), `record-file-change` (PostToolUse

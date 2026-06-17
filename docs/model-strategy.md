@@ -16,14 +16,13 @@ fakoli-state's tier defaults (v1.17.0) follow this rule directly: `DEFAULT_TIER 
 
 ## Tier ↔ agent mapping
 
-### fakoli-state (6 agents)
+### fakoli-state (5 agents)
 
 | Agent | Tier | Why |
 | --- | --- | --- |
 | `planner` | **opus** | PRD-to-tasks synthesis. Requires understanding implicit dependencies, sizing tasks against acceptance criteria, and deciding what to leave for `expand`. Hard reasoning over structured but ambiguous input. |
 | `critic` | **opus** | Code review against acceptance criteria. Subtle bugs (race conditions, broken invariants, security regressions) are the high-value finds; reasoning depth dominates token efficiency. |
 | `docs-scribe` | **sonnet** | Structured generation of CHANGELOG entries, README updates, cross-reference fixes. The input (a code change) and output shape (a Keep-a-Changelog entry) are both well-defined. |
-| `marketplace-scribe` | **sonnet** | Marketplace.json + README plugins-table regeneration. Mechanical-but-careful structured work. |
 | `sentinel` | **haiku** | Evidence validation: run a shell command, parse exit code, compare against acceptance criteria. The classic "read-only investigator" case Anthropic's own `Explore` subagent uses Haiku for. |
 | `state-keeper` | **haiku** | Cross-source-of-truth scan: glob the filesystem, query SQLite, list git branches, report drift. Pure read-and-classify. |
 

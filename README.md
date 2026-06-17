@@ -38,7 +38,7 @@ fakoli-flow defines how work moves, fakoli-crew defines who does the work, and f
 | CLI commands | **23** | Top-level + `prd`, `review`, `hook`, `sync` sub-apps. v1.17.0: `--use-llm` augmentation now picks Anthropic API / Bedrock / OpenAI-compatible endpoints via the same multi-provider resolver as the LLM-planner backstop. |
 | MCP tools | **22** | FastMCP stdio; works in any MCP-compatible client. v1.17.0: `plan_tasks` honors the project's `llm_provider` / `llm_tier` / Bedrock+custom knobs. |
 | Skills | **8 skills** | start-prd, prd, plan, claim, execute, finish, state-ops, resolve-decisions |
-| Agents | **6 agents** | planner (opus), critic (opus), docs-scribe (sonnet), marketplace-scribe (sonnet), sentinel (haiku), state-keeper (haiku) — tier-mapped in v1.17.0 per [docs/model-strategy.md](docs/model-strategy.md) |
+| Agents | **5 agents** | planner (opus), critic (opus), docs-scribe (sonnet), sentinel (haiku), state-keeper (haiku) — tier-mapped in v1.17.0 per [docs/model-strategy.md](docs/model-strategy.md) |
 | Hooks | **4 hooks** | detect-state, check-claim, record-file-change, capture-evidence |
 | LLM providers | **3** | Anthropic API (default) · Amazon Bedrock (`[bedrock]` extra) · OpenAI-compatible custom endpoints (`[custom]` extra). See [docs/llm-providers.md](docs/llm-providers.md). |
 
@@ -157,7 +157,7 @@ Source for the wedges: [`docs/_positioning.md`](docs/_positioning.md).
 /plugin install fakoli-state@fakoli-state
 ```
 
-Installs the plugin, registers the four hooks, wires the MCP server, and makes the six agents discoverable to Claude Code at next session start.
+Installs the plugin, registers the four hooks, wires the MCP server, and makes the five agents discoverable to Claude Code at next session start.
 
 ### Standalone clone (CLI / MCP without the plugin layer)
 
@@ -207,10 +207,9 @@ MCP exposes capabilities; plugins encode operating discipline. The MCP server sh
 | `critic` | magenta | Code-review verdict on submitted-evidence diffs vs task acceptance criteria | `fakoli-crew:critic` |
 | `sentinel` | gray | Verification-command + evidence-completeness scorecard | `fakoli-crew:sentinel` |
 | `state-keeper` | teal | Sync drift detection + reconciliation triage across SQLite / FS / git | `fakoli-crew:keeper` |
-| `marketplace-scribe` | cyan | `.claude-plugin/marketplace.json`, root README plugin table, `registry/*.json` | `fakoli-crew:keeper` |
 | `docs-scribe` | purple | Plugin `docs/` cross-references, `CHANGELOG.md`, `plugin.json.description` | `fakoli-crew:herald` |
 
-The Iron Rule (review agents never `Edit`/`Write`) is enforced at the `tools:` frontmatter level for `critic`, `sentinel`, `state-keeper`, and `docs-scribe`; `planner` proposes-but-does-not-mutate; `marketplace-scribe` is the only agent permitted `Bash` (it runs `scripts/generate-index.sh` and validates regenerated JSON).
+The Iron Rule (review agents never `Edit`/`Write`) is enforced at the `tools:` frontmatter level for `critic` and `sentinel`; `planner` proposes-but-does-not-mutate; `docs-scribe` and `state-keeper` may write only the artifacts they own (docs/CHANGELOG/`plugin.json.description` and sync-report files respectively), never source or state files.
 
 ---
 

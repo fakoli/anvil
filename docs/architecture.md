@@ -57,7 +57,7 @@ graph TD
 
     subgraph Plugin["Plugin layer (operating discipline)"]
         Skills["Skills<br/>start-prd, prd, plan, claim,<br/>execute, finish, state-ops"]
-        Agents["Plugin agents<br/>planner, critic, sentinel,<br/>state-keeper, docs-scribe,<br/>marketplace-scribe"]
+        Agents["Plugin agents<br/>planner, critic, sentinel,<br/>state-keeper, docs-scribe"]
     end
 
     subgraph Engine["State engine"]
@@ -496,7 +496,7 @@ start-prd, prd, plan, claim, execute, finish, state-ops. Verification is
 delegated to `fakoli-flow:verify` and `fakoli-crew:sentinel` rather than a
 plugin-local verify skill (intentional — see README rationale).
 
-### Plugin agents (6)
+### Plugin agents (5)
 
 Defined in [`agents/*.md`](../agents/):
 
@@ -505,7 +505,6 @@ Defined in [`agents/*.md`](../agents/):
 - `sentinel` — pre-merge verification (plugin-local fallback when fakoli-crew:sentinel is absent)
 - `state-keeper` — operational hygiene: orphan claims, drift, schema migrations
 - `docs-scribe` — keeps `docs/` synchronised with shipped behaviour
-- `marketplace-scribe` — keeps the marketplace entry, README, and CHANGELOG honest after each release
 
 Each agent's frontmatter pins `tools:` (least privilege) and declares its
 defer-to relationships with fakoli-crew counterparts.
