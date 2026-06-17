@@ -1,14 +1,25 @@
-"""migrate-events command — rewrite the local event log for git-backed storage.
+"""migrate commands — schema and event-log migrations.
 
-Phase A of the git-backed-events spec (docs/specs/2026-06-10-git-backed-events.md):
-turn a machine-scoped ``events.jsonl`` (sequence ids, strict replay) into a
-repo-scoped, merge-friendly log (hash-chained ids + Lamport counter,
-order-tolerant replay), preserving event order and emitting an old→new id
-mapping for every rewritten event.
+Two distinct, independent migrations live here:
 
-Dry-run by default; ``--yes`` applies. Refuses while claims are active: a
-mid-flight agent is about to append events referencing the old chain, and the
-rewrite would yank the log out from under its next write.
+* ``migrate-events`` (Phase A of the git-backed-events spec,
+  docs/specs/2026-06-10-git-backed-events.md): rewrite a machine-scoped
+  ``events.jsonl`` (sequence ids, strict replay) into a repo-scoped,
+  merge-friendly log (hash-chained ids + Lamport counter, order-tolerant
+  replay), preserving event order and emitting an old→new id mapping.
+
+* ``migrate state`` (T009/F006): promote the in-init ``state.db`` schema
+  migration — the ordered, idempotent forward branches that already run
+  automatically inside ``SqliteBackend.initialize()`` — to an explicit,
+  backed-up, dry-run-by-default command. It detects the on-disk
+  ``schema_version`` (via the T007 ``read_db_schema_version`` accessor),
+  runs the existing engine migration up to the code's ``SCHEMA_VERSION``,
+  and backs up ``state.db`` before mutating. This is NOT a migration
+  framework — it surfaces the migration the engine already performs.
+
+Both are dry-run by default (``--yes`` applies) and both refuse while claims
+are active: a mid-flight agent is about to append events / read the
+projection, and rewriting it out from under the agent corrupts its next write.
 """
 
 from __future__ import annotations
@@ -23,6 +34,7 @@ from fakoli_state.cli._helpers import (
     _require_state_dir,
     _resolve_state_dir,
 )
+from fakoli_state.cli._json import JSON_OPTION, emit_success, fail
 
 # The union merge driver is the whole point of the git layout: concurrent
 # appends on two branches union into one file, and the order-tolerant replay
@@ -39,6 +51,26 @@ _GITIGNORE_GUIDANCE = """\
     replay) and `.fakoli-state/audit.jsonl` (machine-local audit trail).
   - Consider ignoring `.fakoli-state/*.bak` and `.fakoli-state/id_mapping.json`
     if you do not want migration artifacts in the repo."""
+
+# Backup suffix for the state.db schema migration (T009). Distinct from
+# ``_BACKUP_SUFFIX`` above (the events.jsonl backup) so a schema migration and
+# an events migration never clobber each other's backup.
+_DB_BACKUP_SUFFIX = ".pre-schema-migration.bak"
+
+# ---------------------------------------------------------------------------
+# ``migrate`` sub-app: groups the schema migration under `migrate state`.
+# `migrate-events` stays a top-level command (registered in cli/__init__) for
+# backward compatibility; the schema migration is a NEW command and lives here.
+# ---------------------------------------------------------------------------
+
+migrate_app = typer.Typer(
+    name="migrate",
+    help=(
+        "Schema/state migrations. `migrate state` upgrades .fakoli-state/state.db "
+        "to the current engine schema version (dry-run by default; --yes to apply)."
+    ),
+    no_args_is_help=True,
+)
 
 
 def migrate_events(
@@ -246,6 +278,238 @@ def migrate_events(
     typer.echo(f"\nMigrated {len(new_lines)} events to git-backed storage.")
     typer.echo(f"Id mapping written to {mapping_path}.")
     typer.echo("Commit .fakoli-state/events.jsonl and .fakoli-state/.gitattributes.")
+
+
+@migrate_app.command("state")
+def migrate_state(
+    yes: bool = typer.Option(  # noqa: B008
+        False,
+        "--yes",
+        help="Apply the migration. Without this flag the command is a dry run.",
+    ),
+    json_output: bool = JSON_OPTION,
+) -> None:
+    """Upgrade .fakoli-state/state.db to the current engine schema version.
+
+    T009/F006. The ordered, idempotent forward migration branches (0/1→4,
+    2→4, 3→4) ALREADY live inside ``SqliteBackend._check_schema_version`` and
+    run automatically on ``initialize()``. This command promotes that in-init
+    migration to an explicit, backed-up, dry-run-by-default operation — it does
+    NOT add a new migration framework.
+
+    Flow:
+
+    1. Read the TRUE on-disk ``schema_version`` via ``read_db_schema_version``
+       (the T007 accessor) — without migrating.
+    2. If already at ``SCHEMA_VERSION``, report a no-op and exit 0.
+    3. Refuse while any claim is active (same guard as ``migrate-events``): a
+       mid-flight agent reads/writes the projection, and a schema change under
+       it would corrupt its next write.
+    4. Dry-run by default — report the from→to versions and exit. With ``--yes``,
+       copy ``state.db`` to ``state.db.pre-schema-migration.bak`` and then run
+       the existing engine migration by calling ``initialize()`` (which captures
+       the pre-DDL version and runs the forward branches up to ``SCHEMA_VERSION``).
+    """
+    from fakoli_state.state.backend import SchemaMismatch
+    from fakoli_state.state.schema import SCHEMA_VERSION
+    from fakoli_state.state.sqlite import read_db_schema_version
+
+    command = "migrate state"
+
+    state_dir = _resolve_state_dir(None)
+    _require_state_dir(state_dir, command=command, json_output=json_output)
+
+    db_path = state_dir / "state.db"
+
+    # 1. TRUE on-disk version, read WITHOUT migrating (T007 accessor). A missing
+    #    db reports 0 — there is nothing to migrate, and initialize() would
+    #    create a fresh db already stamped at SCHEMA_VERSION.
+    from_version = read_db_schema_version(db_path)
+
+    # 2. Already current → idempotent no-op (covers "re-running migrate is a
+    #    no-op" once the db has been brought up to SCHEMA_VERSION).
+    if from_version == SCHEMA_VERSION:
+        if json_output:
+            emit_success(
+                command,
+                {
+                    "migrated": False,
+                    "from_version": from_version,
+                    "to_version": SCHEMA_VERSION,
+                    "applied": False,
+                    "backup": None,
+                },
+            )
+            return
+        typer.echo(
+            f"state.db is already at schema version {SCHEMA_VERSION} — "
+            "nothing to migrate."
+        )
+        return
+
+    # 2b. An on-disk version the engine has no forward branch for (e.g. a db
+    #     newer than this build, or an unknown stamp) cannot be migrated up.
+    #     Surface it cleanly rather than letting initialize() raise mid-apply.
+    if from_version > SCHEMA_VERSION:
+        msg = (
+            f"state.db schema version {from_version} is NEWER than this "
+            f"engine's version {SCHEMA_VERSION}. Upgrade fakoli-state — this "
+            "build cannot migrate a forward-versioned database backward."
+        )
+        if json_output:
+            fail(command, msg, code="schema_too_new")
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=1)
+
+    # 3. Active-claim guard (same contract as migrate-events). Open the backend,
+    #    but DO NOT let initialize() migrate yet on a non-dry run path — we open
+    #    via the standalone read above, so opening the backend to list claims
+    #    would already run the migration. Avoid that by querying claims through
+    #    a short-lived read that does not migrate: open in dry-run order.
+    #
+    #    We must list active claims, which requires an initialized backend, and
+    #    initialize() runs the migration. To keep the dry run side-effect-free,
+    #    list claims against a SCRATCH copy of the db so the real db is never
+    #    mutated until --yes.
+    active_ids = _active_claim_ids_without_migrating(state_dir, db_path)
+    if active_ids:
+        ids = ", ".join(sorted(active_ids))
+        msg = (
+            f"{len(active_ids)} active claim(s) ({ids}). Release or finish them "
+            "first — a schema migration rewrites the projection a mid-flight "
+            "agent is about to read and append to."
+        )
+        if json_output:
+            fail(command, msg, code="active_claims")
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=1)
+
+    backup_path = db_path.with_name(db_path.name + _DB_BACKUP_SUFFIX)
+
+    # 4a. Dry run (default): report and exit, mutating nothing.
+    if not yes:
+        if json_output:
+            emit_success(
+                command,
+                {
+                    "migrated": False,
+                    "from_version": from_version,
+                    "to_version": SCHEMA_VERSION,
+                    "applied": False,
+                    "backup": str(backup_path),
+                },
+            )
+            return
+        typer.echo(f"Schema migration  : v{from_version} -> v{SCHEMA_VERSION}")
+        typer.echo(f"Will back up      : {db_path}")
+        typer.echo(f"            to    : {backup_path}")
+        typer.echo("\nDry run — nothing written. Re-run with --yes to apply.")
+        return
+
+    # 4b. Apply (--yes): refuse to clobber a leftover backup, copy state.db, then
+    #     run the existing engine migration by initializing the backend (which
+    #     captures the pre-DDL version and runs the forward branches).
+    if backup_path.exists():
+        msg = (
+            f"backup {backup_path} already exists (previous migration "
+            "attempt?). Move it aside before re-running."
+        )
+        if json_output:
+            fail(command, msg, code="backup_exists")
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=1)
+
+    # Copy the db AND its WAL/SHM sidecars so the backup is a faithful restore
+    # point: a WAL-mode db with an uncheckpointed -wal carries committed rows
+    # not yet folded into the main file. copy2 preserves mtime; missing sidecars
+    # are skipped (a checkpointed db has none).
+    shutil.copy2(db_path, backup_path)
+    for sidecar_suffix in ("-wal", "-shm"):
+        sidecar = db_path.with_name(db_path.name + sidecar_suffix)
+        if sidecar.exists():
+            shutil.copy2(
+                sidecar, backup_path.with_name(backup_path.name + sidecar_suffix)
+            )
+
+    from fakoli_state.cli._helpers import _open_backend
+
+    try:
+        backend = _open_backend(state_dir)
+    except SchemaMismatch as exc:
+        # No forward branch matched (handled the > case above, but a gap inside
+        # the supported range still raises). Leave the backup in place and the
+        # db untouched beyond whatever initialize did before raising.
+        msg = (
+            f"cannot migrate state.db from version {from_version} to "
+            f"{SCHEMA_VERSION}: {exc}. The pre-migration backup is at "
+            f"{backup_path}."
+        )
+        if json_output:
+            fail(command, msg, code="schema_mismatch")
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=1) from None
+
+    try:
+        to_version = backend.get_schema_version()
+    finally:
+        backend.close()
+
+    if json_output:
+        emit_success(
+            command,
+            {
+                "migrated": True,
+                "from_version": from_version,
+                "to_version": to_version,
+                "applied": True,
+                "backup": str(backup_path),
+            },
+        )
+        return
+    typer.echo(f"Migrated state.db v{from_version} -> v{to_version}.")
+    typer.echo(f"Backup written to {backup_path}.")
+    typer.echo(
+        "Re-running `fakoli-state migrate state` is now a no-op. Delete the "
+        "backup once you have verified the migration."
+    )
+
+
+def _active_claim_ids_without_migrating(state_dir: Path, db_path: Path) -> list[str]:
+    """Return active claim ids, listing them WITHOUT migrating the live state.db.
+
+    The active-claim guard must run on the DRY-RUN path too, but opening the
+    real backend calls ``initialize()`` — which would migrate the live db before
+    the user passed ``--yes``. To keep the dry run side-effect-free we replay the
+    event log into a SCRATCH db (built from the current schema DDL) and list
+    active claims there. The scratch db reflects the same canonical claim state
+    as the live db (both derive from ``events.jsonl``) without touching it.
+
+    If there is no event log yet (a brand-new project), there are no claims.
+    """
+    events_path = state_dir / "events.jsonl"
+    if not events_path.exists():
+        return []
+
+    import tempfile
+
+    from fakoli_state.clock import SystemClock
+    from fakoli_state.config import read_events_storage
+    from fakoli_state.state.sqlite import SqliteBackend
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        scratch_db = str(Path(tmpdir) / "scratch.db")
+        backend = SqliteBackend(
+            db_path=scratch_db,
+            events_path=str(events_path),
+            clock=SystemClock(),
+            events_storage=read_events_storage(state_dir / "config.yaml"),
+        )
+        backend.initialize()
+        try:
+            backend.replay_from_empty(str(events_path))
+            return [c.id for c in backend.list_active_claims()]
+        finally:
+            backend.close()
 
 
 # ---------------------------------------------------------------------------

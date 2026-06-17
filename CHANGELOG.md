@@ -10,6 +10,39 @@ _No unreleased changes._
 
 ---
 
+## [1.25.0] — 2026-06-17
+
+### Added
+
+- **`fakoli-state migrate state` command (T009/F006).** Promotes the schema
+  migration that previously only ran **silently inside `initialize()`** — on the
+  first command after an engine upgrade — to an explicit, backed-up,
+  dry-run-by-default operation. It does **not** introduce a new migration
+  framework: it runs the exact ordered, idempotent forward branches (`0/1→4`,
+  `2→4`, `3→4`) that already live in `SqliteBackend._check_schema_version`.
+  - **Detects the TRUE on-disk version** via the `read_db_schema_version`
+    accessor (read-only — detection never migrates as a side effect).
+  - **Dry-run by default** — reports `from → to` and exits without touching the
+    db; `--yes` applies.
+  - **Backs up `state.db`** (and any `-wal`/`-shm` sidecars) to
+    `state.db.pre-schema-migration.bak` before mutating, and refuses to clobber
+    a leftover backup from a prior attempt.
+  - **Refuses while any claim is active** — same guard as `migrate-events`;
+    listing active claims on the dry-run path uses a scratch copy so the live db
+    is never migrated before `--yes`. A db version newer than the engine
+    (`schema_too_new`) is surfaced cleanly instead of failing mid-apply.
+  - **Idempotent** — once at the current `SCHEMA_VERSION`, re-running is a
+    reported no-op that mutates nothing.
+  - **`--json`** emits the standard envelope (`{"ok": true, "command": "migrate
+    state", "data": {"from_version", "to_version", "applied", "migrated",
+    "backup"}}`). `migrate-events` stays a top-level command; `migrate` is now a
+    sub-app grouping `migrate state`.
+- `docs/migrations.md`: documents the explicit-migration flow, behaviour, and its
+  relationship to the `replay` escape hatch (in-place row-preserving vs. rebuild
+  from the audit log). Covered by new cases in `tests/test_snapshot.py`.
+
+---
+
 ## [1.24.0] — 2026-06-17
 
 ### Changed

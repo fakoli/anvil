@@ -70,6 +70,53 @@ $ sqlite3 .fakoli-state/state.db "PRAGMA user_version;"
 4
 ```
 
+## Explicit migration: `fakoli-state migrate state`
+
+The auto-upgrade described above runs **silently inside `initialize()`** on the
+first `fakoli-state` command after an engine upgrade — convenient, but invisible
+and un-backed-up. For operators who want the migration to be deliberate,
+`fakoli-state migrate state` promotes that same in-init migration to an
+explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
+migration framework — it runs the exact ordered, idempotent forward branches
+(`0/1→4`, `2→4`, `3→4`) that already live in
+`SqliteBackend._check_schema_version`.
+
+```bash
+# Inspect what would happen (dry run — mutates nothing):
+$ fakoli-state migrate state
+Schema migration  : v3 -> v4
+Will back up      : /repo/.fakoli-state/state.db
+            to    : /repo/.fakoli-state/state.db.pre-schema-migration.bak
+
+Dry run — nothing written. Re-run with --yes to apply.
+
+# Apply it:
+$ fakoli-state migrate state --yes
+Migrated state.db v3 -> v4.
+Backup written to /repo/.fakoli-state/state.db.pre-schema-migration.bak.
+```
+
+Behaviour:
+
+- **Detects the TRUE on-disk version** via the `read_db_schema_version`
+  accessor (read-only; never migrates as a side effect of detection).
+- **Dry-run by default** — reports `from → to` and exits without touching the
+  db. `--yes` applies.
+- **Backs up `state.db`** (and any `-wal`/`-shm` sidecars) to
+  `state.db.pre-schema-migration.bak` before mutating, and refuses to clobber
+  an existing backup from a prior attempt.
+- **Refuses while any claim is active** — same guard as `migrate-events`. A
+  mid-flight agent reads/appends to the projection; migrating it out from under
+  the agent corrupts its next write.
+- **Idempotent** — once the db is at the current `SCHEMA_VERSION`, re-running is
+  a reported no-op that mutates nothing.
+- **`--json`** emits the standard envelope
+  (`{"ok": true, "command": "migrate state", "data": {"from_version", "to_version", "applied", "migrated", "backup"}}`).
+
+The `replay` escape hatch below remains available; `migrate state` is the
+in-place, row-preserving path, while `replay` rebuilds `state.db` from the audit
+log.
+
 ## When you need a real migration
 
 Any non-additive schema change (renaming a column, dropping a table, changing

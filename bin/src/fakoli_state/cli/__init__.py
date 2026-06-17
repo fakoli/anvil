@@ -13,7 +13,7 @@ from fakoli_state.cli.claim import claim, next, release, renew
 from fakoli_state.cli.drift import drift
 from fakoli_state.cli.hooks import hook_app
 from fakoli_state.cli.init_status import init, status
-from fakoli_state.cli.migrate import migrate_events
+from fakoli_state.cli.migrate import migrate_app, migrate_events
 from fakoli_state.cli.packet_apply import apply, packet, submit
 from fakoli_state.cli.plan import expand, list_tasks, plan, review_app, score, show
 from fakoli_state.cli.prd import prd_app
@@ -42,6 +42,7 @@ app.add_typer(prd_app, name="prd")
 app.add_typer(review_app, name="review")
 app.add_typer(hook_app, name="hook")
 app.add_typer(sync_app, name="sync")
+app.add_typer(migrate_app, name="migrate")
 
 # ---------------------------------------------------------------------------
 # --version callback
