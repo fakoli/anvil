@@ -167,6 +167,51 @@ sync_github_conflict_strategy: local_wins
         cfg = load_config(config_path)
         assert cfg.strict_evidence is False
 
+    def test_fast_lane_thresholds_default(self, tmp_path: Path) -> None:
+        """T020 — absent keys → the renderer's built-in 2/2 ceilings."""
+        config_path = _write_config(tmp_path / "config.yaml", _minimal_yaml())
+        cfg = load_config(config_path)
+        assert cfg.fast_lane_complexity_max == 2
+        assert cfg.fast_lane_blast_radius_max == 2
+
+    def test_fast_lane_thresholds_override(self, tmp_path: Path) -> None:
+        """T020 — explicit ceilings are parsed and surfaced on Config."""
+        yaml_content = (
+            _minimal_yaml()
+            + "fast_lane_complexity_max: 3\n"
+            + "fast_lane_blast_radius_max: 1\n"
+        )
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        cfg = load_config(config_path)
+        assert cfg.fast_lane_complexity_max == 3
+        assert cfg.fast_lane_blast_radius_max == 1
+
+    def test_fast_lane_thresholds_in_default_template(self, tmp_path: Path) -> None:
+        """The scaffolded default config declares the 2/2 fast-lane ceilings."""
+        config_path = tmp_path / "config.yaml"
+        write_default_config(config_path, project_name="Tmpl Project")
+        cfg = load_config(config_path)
+        assert cfg.fast_lane_complexity_max == 2
+        assert cfg.fast_lane_blast_radius_max == 2
+
+    def test_fast_lane_complexity_max_out_of_range_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """T020 — an out-of-range fast_lane_complexity_max raises at load time."""
+        yaml_content = _minimal_yaml() + "fast_lane_complexity_max: 9\n"
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        with pytest.raises(ValueError, match="fast_lane_complexity_max"):
+            load_config(config_path)
+
+    def test_fast_lane_blast_radius_max_boolean_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """T020 — a boolean fast_lane_blast_radius_max is rejected, not coerced."""
+        yaml_content = _minimal_yaml() + "fast_lane_blast_radius_max: true\n"
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        with pytest.raises(ValueError, match="fast_lane_blast_radius_max"):
+            load_config(config_path)
+
 
 # ---------------------------------------------------------------------------
 # load_config — validation failures

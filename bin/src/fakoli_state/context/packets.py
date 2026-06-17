@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from fakoli_state.config import Config
     from fakoli_state.state.models import (
         Claim,
         Decision,
@@ -28,9 +29,11 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "FAST_LANE_REQUIRED_EVIDENCE_MAX",
     "LIGHTWEIGHT_BLAST_RADIUS_MAX",
     "LIGHTWEIGHT_COMPLEXITY_MAX",
     "WorkPacket",
+    "fast_lane_packet",
     "is_lightweight",
     "render_packet",
 ]
@@ -50,6 +53,29 @@ __all__ = [
 
 LIGHTWEIGHT_COMPLEXITY_MAX = 2
 LIGHTWEIGHT_BLAST_RADIUS_MAX = 2
+
+
+# ---------------------------------------------------------------------------
+# Fast-lane evidence trimming (T020) — "right-size process by score".
+#
+# T015 trimmed the *update-protocol prose* of a small, low-blast task. T020
+# goes one step further: on the same lightweight (fast-lane) packet it also
+# trims the *required-evidence checklist* the agent must satisfy, down to a
+# single essential field. A trivial change does not need a multi-item evidence
+# ceremony — one verification line is enough — while a higher-blast task keeps
+# the FULL required-evidence list. This is the "fewer required evidence fields,
+# single-step" half of the acceptance criteria.
+#
+# Crucially this is a *packet-rendering* trim only: the task's stored
+# ``Verification.required_evidence`` is never mutated, and completion still
+# records an immutable evidence transition. The fast-lane only changes what the
+# agent is *shown to need*, never the audit ledger. The review gate
+# (``review.gates.evidence_complete``) still reads the task's full stored list
+# — the fast-lane is advisory right-sizing of the packet, not a back-door that
+# weakens the evidence record.
+# ---------------------------------------------------------------------------
+
+FAST_LANE_REQUIRED_EVIDENCE_MAX = 1
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +156,30 @@ def is_lightweight(
     return complexity <= complexity_max and blast_radius <= blast_radius_max
 
 
+def _required_evidence_for(
+    task: Task,
+    *,
+    lightweight: bool,
+    fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
+) -> list[str]:
+    """Return the required-evidence list to *render* for *task*.
+
+    The full packet shows every declared item. The fast-lane (lightweight)
+    packet trims the list to at most ``fast_lane_required_evidence_max`` items
+    (default 1) — the "fewer required evidence fields, single-step" half of
+    T020 — preserving declaration order so the first / most essential item is
+    the one kept. Pure: depends only on the task's declared list; never mutates
+    ``task.verification``. A task that declares <= the ceiling, or that is not
+    on the fast-lane, is returned unchanged.
+    """
+    declared = list(task.verification.required_evidence)
+    if not lightweight:
+        return declared
+    if fast_lane_required_evidence_max < 0:
+        return declared
+    return declared[:fast_lane_required_evidence_max]
+
+
 def _render_markdown(
     task: Task,
     *,
@@ -139,6 +189,7 @@ def _render_markdown(
     related_decisions: list[Decision],
     active_claim: Claim | None,
     lightweight: bool,
+    fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> str:
     """Build the full markdown string from the normalised inputs."""
     lines: list[str] = []
@@ -217,10 +268,24 @@ def _render_markdown(
         for cmd in task.verification.commands:
             lines.append(f"- `{cmd}`")
         lines.append("")
-    if task.verification.required_evidence:
+    required_evidence = _required_evidence_for(
+        task,
+        lightweight=lightweight,
+        fast_lane_required_evidence_max=fast_lane_required_evidence_max,
+    )
+    if required_evidence:
         lines.append("Required evidence:")
-        for item in task.verification.required_evidence:
+        for item in required_evidence:
             lines.append(f"- {item}")
+        if lightweight and len(required_evidence) < len(
+            task.verification.required_evidence
+        ):
+            # Make the trim explicit so the agent (and any human reading the
+            # packet) knows the checklist was right-sized, not lost.
+            lines.append(
+                "- _(fast-lane: evidence checklist trimmed to the essential"
+                " item; the full task record retains every requirement)_"
+            )
         lines.append("")
     if task.verification.manual_steps:
         lines.append("Manual steps:")
@@ -282,6 +347,7 @@ def _render_json(
     related_decisions: list[Decision],
     active_claim: Claim | None,
     lightweight: bool,
+    fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> dict[str, Any]:
     """Build the structured JSON dict that mirrors the markdown sections."""
     task_data: dict[str, Any] = json.loads(task.model_dump_json())
@@ -319,6 +385,17 @@ def _render_json(
                 f"fakoli-state renew {active_claim.id}"
             )
 
+    # T020 — the right-sized required-evidence checklist the agent is shown.
+    # ``task_data["verification"]["required_evidence"]`` still carries the FULL
+    # declared list (the immutable record an MCP consumer can audit against);
+    # this top-level key carries only what the fast-lane asks the agent to
+    # satisfy, mirroring the markdown trim exactly.
+    rendered_required_evidence = _required_evidence_for(
+        task,
+        lightweight=lightweight,
+        fast_lane_required_evidence_max=fast_lane_required_evidence_max,
+    )
+
     return {
         "task_id": task.id,
         "task": task_data,
@@ -327,6 +404,7 @@ def _render_json(
         "dependencies_open": deps_open_data,
         "decisions": decisions_data,
         "active_claim": claim_data,
+        "required_evidence": rendered_required_evidence,
         "update_protocol": update_protocol,
         "variant": "lightweight" if lightweight else "full",
     }
@@ -346,6 +424,7 @@ def render_packet(
     related_decisions: list[Decision] | None = None,
     active_claim: Claim | None = None,
     lightweight: bool | None = None,
+    fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> WorkPacket:
     """Render a Task plus its surrounding context into a WorkPacket.
 
@@ -377,9 +456,18 @@ def render_packet(
             the renderer decide from the task's score via :func:`is_lightweight`
             — a small, low-blast task gets a trimmed update protocol. Pass a
             bool to override (e.g. a config-driven caller in T020). The header,
-            goal, acceptance criteria, scope, decisions, verification, and
-            claim sections are identical in both variants — only the update
-            protocol prose is right-sized.
+            goal, acceptance criteria, scope, decisions, and claim sections are
+            identical in both variants; the lightweight variant right-sizes the
+            update-protocol prose AND the required-evidence checklist.
+        fast_lane_required_evidence_max:
+            T020 — the maximum number of ``required_evidence`` items the
+            lightweight (fast-lane) packet renders, in declaration order
+            (default 1: a single essential field, single-step). Ignored on the
+            full packet, which always renders every declared item. Set to a
+            negative number to disable evidence trimming entirely (render the
+            full list even on the fast-lane). This only changes what the agent
+            is *shown*; the task's stored ``Verification.required_evidence`` and
+            the eventual completion-evidence record are never altered.
 
     Returns:
         A :class:`WorkPacket` with ``markdown`` (human/Claude-paste form),
@@ -401,6 +489,7 @@ def render_packet(
         related_decisions=resolved_decisions,
         active_claim=active_claim,
         lightweight=resolved_lightweight,
+        fast_lane_required_evidence_max=fast_lane_required_evidence_max,
     )
     json_data = _render_json(
         task,
@@ -410,6 +499,7 @@ def render_packet(
         related_decisions=resolved_decisions,
         active_claim=active_claim,
         lightweight=resolved_lightweight,
+        fast_lane_required_evidence_max=fast_lane_required_evidence_max,
     )
 
     return WorkPacket(
@@ -417,4 +507,50 @@ def render_packet(
         markdown=markdown,
         json_data=json_data,
         variant="lightweight" if resolved_lightweight else "full",
+    )
+
+
+def fast_lane_packet(
+    task: Task,
+    config: Config,
+    *,
+    feature: Feature | None = None,
+    dependencies_completed: list[Task] | None = None,
+    dependencies_open: list[Task] | None = None,
+    related_decisions: list[Decision] | None = None,
+    active_claim: Claim | None = None,
+) -> WorkPacket:
+    """Render a work packet, routing the fast-lane from *config* thresholds.
+
+    This is T020's config-driven entry point: it reads
+    ``config.fast_lane_complexity_max`` and ``config.fast_lane_blast_radius_max``
+    and uses them as the :func:`is_lightweight` ceilings, so a project can widen
+    or narrow the fast-lane in ``config.yaml`` without touching code. A task at
+    or below BOTH ceilings (and scored on both dimensions) routes to the minimal
+    fast-lane packet — trimmed update protocol and a single-step required-
+    evidence checklist; anything above either ceiling, or unscored, gets the
+    full packet (the safe default).
+
+    The routing is purely about *packet shape*. The task's stored verification
+    and the eventual completion-evidence transition are untouched — a fast-lane
+    task still records the same immutable evidence ledger as any other.
+
+    Thin wrapper over :func:`render_packet`; the heavy lifting (and the purity
+    guarantees) live there. Kept here so CLI/MCP callers have one obvious
+    config-aware seam instead of re-deriving the ``lightweight`` decision at
+    every call site.
+    """
+    lightweight = is_lightweight(
+        task,
+        complexity_max=config.fast_lane_complexity_max,
+        blast_radius_max=config.fast_lane_blast_radius_max,
+    )
+    return render_packet(
+        task,
+        feature=feature,
+        dependencies_completed=dependencies_completed,
+        dependencies_open=dependencies_open,
+        related_decisions=related_decisions,
+        active_claim=active_claim,
+        lightweight=lightweight,
     )

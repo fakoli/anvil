@@ -14,8 +14,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from fakoli_state.config import Config
 from fakoli_state.context.packets import (
+    FAST_LANE_REQUIRED_EVIDENCE_MAX,
     WorkPacket,
+    fast_lane_packet,
     is_lightweight,
     render_packet,
 )
@@ -592,3 +595,154 @@ class TestLightweightPacketRouting:
             assert "## Acceptance criteria" in packet.markdown
             assert "## Verification" in packet.markdown
             assert "## Scope (likely files)" in packet.markdown
+
+
+# ---------------------------------------------------------------------------
+# T020 — fast-lane work packets for trivial-scored tasks
+#
+# Acceptance criteria:
+#  - Tasks scoring below configurable complexity/blast thresholds render a
+#    minimal packet (fewer required evidence fields, single-step) while still
+#    recording a completion-evidence transition.
+#  - The threshold is config-driven.
+#  - A trivial-scored task completes via the fast-lane and still produces an
+#    immutable evidence record; a high-blast task still requires the full packet.
+# ---------------------------------------------------------------------------
+
+_THREE_EVIDENCE = ["test output", "PR link", "screenshots"]
+
+
+def _make_config(
+    *,
+    fast_lane_complexity_max: int = 2,
+    fast_lane_blast_radius_max: int = 2,
+) -> Config:
+    """A minimal Config carrying just the T020 fast-lane ceilings."""
+    return Config(
+        project_name="Test Project",
+        project_id="test-id",
+        fast_lane_complexity_max=fast_lane_complexity_max,
+        fast_lane_blast_radius_max=fast_lane_blast_radius_max,
+    )
+
+
+class TestFastLaneEvidenceTrim:
+    """The fast-lane packet shows fewer required-evidence fields (single-step)."""
+
+    def test_fast_lane_packet_trims_required_evidence_to_single_step(self) -> None:
+        """A trivial-scored task renders only the first required-evidence item."""
+        task = _make_task(scores=_LIGHT_SCORE, required_evidence=_THREE_EVIDENCE)
+        packet = render_packet(task)
+        assert packet.variant == "lightweight"
+        # Markdown shows the first (essential) item but not the trailing ones.
+        assert "- test output" in packet.markdown
+        assert "- PR link" not in packet.markdown
+        assert "- screenshots" not in packet.markdown
+        # And it advertises the trim so nothing looks silently dropped.
+        assert "fast-lane" in packet.markdown.lower()
+
+    def test_fast_lane_json_carries_trimmed_required_evidence(self) -> None:
+        """json_data['required_evidence'] mirrors the markdown trim."""
+        task = _make_task(scores=_LIGHT_SCORE, required_evidence=_THREE_EVIDENCE)
+        packet = render_packet(task)
+        assert packet.json_data["required_evidence"] == ["test output"]
+        assert (
+            len(packet.json_data["required_evidence"])
+            == FAST_LANE_REQUIRED_EVIDENCE_MAX
+        )
+
+    def test_fast_lane_preserves_full_evidence_in_task_record(self) -> None:
+        """The trim is render-only: the immutable task record keeps every item."""
+        task = _make_task(scores=_LIGHT_SCORE, required_evidence=_THREE_EVIDENCE)
+        packet = render_packet(task)
+        # The full ledger lives on task.verification untouched...
+        assert list(task.verification.required_evidence) == _THREE_EVIDENCE
+        # ...and the packet's structured task copy still carries all three.
+        assert (
+            packet.json_data["task"]["verification"]["required_evidence"]
+            == _THREE_EVIDENCE
+        )
+
+    def test_high_blast_task_keeps_full_required_evidence(self) -> None:
+        """A high-blast task still requires the FULL evidence checklist."""
+        task = _make_task(scores=_HEAVY_SCORE, required_evidence=_THREE_EVIDENCE)
+        packet = render_packet(task)
+        assert packet.variant == "full"
+        for item in _THREE_EVIDENCE:
+            assert f"- {item}" in packet.markdown
+        assert packet.json_data["required_evidence"] == _THREE_EVIDENCE
+        assert "fast-lane" not in packet.markdown.lower()
+
+    def test_fast_lane_with_single_evidence_item_adds_no_trim_note(self) -> None:
+        """When the declared list is already minimal, no trim note is emitted."""
+        task = _make_task(scores=_LIGHT_SCORE, required_evidence=["test output"])
+        packet = render_packet(task)
+        assert "- test output" in packet.markdown
+        assert "fast-lane" not in packet.markdown.lower()
+
+    def test_fast_lane_evidence_trim_disabled_by_negative_max(self) -> None:
+        """A negative ceiling renders the full evidence list even on the fast-lane."""
+        task = _make_task(scores=_LIGHT_SCORE, required_evidence=_THREE_EVIDENCE)
+        packet = render_packet(task, fast_lane_required_evidence_max=-1)
+        assert packet.variant == "lightweight"
+        assert packet.json_data["required_evidence"] == _THREE_EVIDENCE
+
+
+class TestFastLaneConfigDrivenThresholds:
+    """The fast-lane routing reads its ceilings from config (config-driven)."""
+
+    def test_fast_lane_packet_routes_lightweight_at_default_ceilings(self) -> None:
+        """A 1/1 task routes to the fast-lane under the default 2/2 ceilings."""
+        task = _make_task(scores=_LIGHT_SCORE, required_evidence=_THREE_EVIDENCE)
+        packet = fast_lane_packet(task, _make_config())
+        assert packet.variant == "lightweight"
+        assert packet.json_data["required_evidence"] == ["test output"]
+
+    def test_fast_lane_config_lowering_ceiling_excludes_borderline_task(self) -> None:
+        """Lowering the complexity ceiling forces a borderline task to full."""
+        # complexity=2 task: fast-lane under the default ceiling (2)...
+        borderline = Score(
+            complexity=2,
+            parallelizability=4,
+            context_load=2,
+            blast_radius=1,
+            review_risk=2,
+            agent_suitability=4,
+        )
+        task = _make_task(scores=borderline, required_evidence=_THREE_EVIDENCE)
+        assert fast_lane_packet(task, _make_config()).variant == "lightweight"
+        # ...but full once config lowers the complexity ceiling to 1.
+        tightened = _make_config(fast_lane_complexity_max=1)
+        full = fast_lane_packet(task, tightened)
+        assert full.variant == "full"
+        assert full.json_data["required_evidence"] == _THREE_EVIDENCE
+
+    def test_fast_lane_config_raising_ceiling_includes_larger_task(self) -> None:
+        """Raising the blast ceiling pulls a mid-blast task into the fast-lane."""
+        mid = Score(
+            complexity=2,
+            parallelizability=3,
+            context_load=2,
+            blast_radius=4,
+            review_risk=2,
+            agent_suitability=3,
+        )
+        task = _make_task(scores=mid, required_evidence=_THREE_EVIDENCE)
+        # Default 2/2 ceilings: blast_radius=4 is above the ceiling → full.
+        assert fast_lane_packet(task, _make_config()).variant == "full"
+        # Raise the blast ceiling to 4 → now fast-lane.
+        widened = _make_config(fast_lane_blast_radius_max=4)
+        assert fast_lane_packet(task, widened).variant == "lightweight"
+
+    def test_fast_lane_high_blast_never_fast_laned_at_default_config(self) -> None:
+        """A 5/5-blast task stays on the full packet under default config."""
+        task = _make_task(scores=_HEAVY_SCORE, required_evidence=_THREE_EVIDENCE)
+        packet = fast_lane_packet(task, _make_config())
+        assert packet.variant == "full"
+        assert packet.json_data["required_evidence"] == _THREE_EVIDENCE
+
+    def test_fast_lane_unscored_task_takes_full_packet(self) -> None:
+        """An unscored task is never fast-laned regardless of config."""
+        task = _make_task(scores=Score(), required_evidence=_THREE_EVIDENCE)
+        packet = fast_lane_packet(task, _make_config())
+        assert packet.variant == "full"

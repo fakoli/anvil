@@ -417,6 +417,35 @@ def _resolve_strict_evidence(strict: bool | None, state_dir: Path) -> bool:
         return False
 
 
+def _load_fast_lane_config(state_dir: Path):  # type: ignore[no-untyped-def]
+    """Soft-load the project config for T020 fast-lane packet routing.
+
+    Returns a ``Config`` (carrying ``fast_lane_complexity_max`` /
+    ``fast_lane_blast_radius_max``) or ``None`` when there is no config.yaml or
+    it fails to parse — in which case ``generate_work_packet`` falls back to
+    ``render_packet`` with the renderer's built-in default ceilings. A broken
+    config never blocks packet generation.
+    """
+    config_path = state_dir / "config.yaml"
+    if not config_path.exists():
+        return None
+
+    import yaml
+
+    try:
+        from fakoli_state.config import load_config
+
+        return load_config(config_path)
+    except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
+        print(
+            f"Warning: config.yaml load failed "
+            f"({type(exc).__name__}: {exc}); fast-lane packet thresholds could "
+            "not be resolved from config; using built-in defaults for this call.",
+            file=sys.stderr,
+        )
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Tool 1: get_project_summary
 # ---------------------------------------------------------------------------
@@ -789,7 +818,7 @@ def generate_work_packet(
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
-        from fakoli_state.context.packets import render_packet
+        from fakoli_state.context.packets import fast_lane_packet, render_packet
         from fakoli_state.state.models import Task
 
         task = backend.get_task(task_id)
@@ -811,14 +840,29 @@ def generate_work_packet(
 
         active_claim = _find_active_claim_for_task(backend, task_id)
 
-        packet = render_packet(
-            task,
-            feature=feature,
-            dependencies_completed=dependencies_completed,
-            dependencies_open=dependencies_open,
-            related_decisions=None,
-            active_claim=active_claim,
-        )
+        # T020 — route the fast-lane from the project's config thresholds when a
+        # config can be loaded; fall back to the renderer's built-in defaults
+        # otherwise. A broken config never blocks packet generation.
+        cfg = _load_fast_lane_config(state_dir)
+        if cfg is not None:
+            packet = fast_lane_packet(
+                task,
+                cfg,
+                feature=feature,
+                dependencies_completed=dependencies_completed,
+                dependencies_open=dependencies_open,
+                related_decisions=None,
+                active_claim=active_claim,
+            )
+        else:
+            packet = render_packet(
+                task,
+                feature=feature,
+                dependencies_completed=dependencies_completed,
+                dependencies_open=dependencies_open,
+                related_decisions=None,
+                active_claim=active_claim,
+            )
 
         if format == "json":
             return WorkPacketResponse(format="json", content=packet.json_data)

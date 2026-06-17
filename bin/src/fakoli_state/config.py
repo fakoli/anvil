@@ -27,6 +27,18 @@ logger = logging.getLogger(__name__)
 # hardcoded ``complexity >= 4`` gate in ``planning.inference.expand_task``.
 DEFAULT_AUTO_EXPAND_THRESHOLD: Final[int] = 4
 
+# T020 — fast-lane (right-size-by-score) ceilings. A task whose complexity and
+# blast_radius scores are BOTH at/below these values routes to a minimal,
+# single-step work packet with a trimmed required-evidence set. These defaults
+# mirror the conservative built-in ceilings the packet renderer ships with
+# (``context.packets.LIGHTWEIGHT_COMPLEXITY_MAX`` /
+# ``LIGHTWEIGHT_BLAST_RADIUS_MAX``); config.yaml can raise or lower them per
+# project. Keeping the constants here lets the CLI/MCP call sites read a single
+# source of truth without importing the (heavier) packets module just to learn
+# the default.
+DEFAULT_FAST_LANE_COMPLEXITY_MAX: Final[int] = 2
+DEFAULT_FAST_LANE_BLAST_RADIUS_MAX: Final[int] = 2
+
 
 @dataclass(frozen=True)
 class Config:
@@ -209,6 +221,26 @@ class Config:
     # Defaults to False so a config written before this key existed keeps its
     # prior advisory behaviour without surprise.
     strict_evidence: bool = False
+
+    # T020 — fast-lane (right-size process by score) thresholds.
+    #
+    # A task whose complexity AND blast_radius scores are both at/below these
+    # ceilings is "trivial": ``context.packets`` renders it a minimal,
+    # single-step work packet with a trimmed required-evidence set (fewer
+    # fields for the agent to satisfy) instead of the full update-protocol
+    # prose. The task still records an immutable completion-evidence transition
+    # exactly like any other — only the *packet shape* is right-sized, never the
+    # evidence ledger. A task above either ceiling (e.g. a 1/5-complexity change
+    # that touches a 5/5-blast schema/config surface) always gets the full
+    # packet — the safe default.
+    #
+    #   fast_lane_complexity_max: 2     # DEFAULT; valid range 1-5
+    #   fast_lane_blast_radius_max: 2   # DEFAULT; valid range 1-5
+    #
+    # Defaults mirror the renderer's built-in conservative ceilings, so a config
+    # written before these keys existed keeps the exact prior routing.
+    fast_lane_complexity_max: int = DEFAULT_FAST_LANE_COMPLEXITY_MAX
+    fast_lane_blast_radius_max: int = DEFAULT_FAST_LANE_BLAST_RADIUS_MAX
 
     # Phase 9 T5 — multi-provider sync.
     #
@@ -468,6 +500,21 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         resolved,
     )
 
+    # T020 — fast-lane score ceilings. Absent keys → the renderer's built-in
+    # defaults, so a pre-T020 config keeps its exact prior packet routing.
+    fast_lane_complexity_max = _validate_score_ceiling(
+        data.get("fast_lane_complexity_max", DEFAULT_FAST_LANE_COMPLEXITY_MAX),
+        "fast_lane_complexity_max",
+        resolved,
+    )
+    fast_lane_blast_radius_max = _validate_score_ceiling(
+        data.get(
+            "fast_lane_blast_radius_max", DEFAULT_FAST_LANE_BLAST_RADIUS_MAX
+        ),
+        "fast_lane_blast_radius_max",
+        resolved,
+    )
+
     # v1.22.0 — events storage mode. Absent key → "local" (every pre-existing
     # project keeps sequence ids and strict replay). An invalid value raises
     # at load time like every other literal-typed field: a typo'd mode that
@@ -543,6 +590,10 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         # key → False (advisory), preserving pre-T025 behaviour for every
         # config written before this knob existed.
         strict_evidence=bool(data.get("strict_evidence", False)),
+        # T020 — fast-lane ceilings. Absent keys fall back to the renderer's
+        # built-in defaults (see _build_config above), preserving prior routing.
+        fast_lane_complexity_max=fast_lane_complexity_max,
+        fast_lane_blast_radius_max=fast_lane_blast_radius_max,
         db_path=db_path,
         events_path=events_path,
     )
@@ -698,6 +749,39 @@ def _validate_auto_expand_threshold(value: object, config_path: Path) -> int:
             f"score scale), got {threshold} ({config_path})."
         )
     return threshold
+
+
+def _validate_score_ceiling(
+    value: object, field_name: str, config_path: Path
+) -> int:
+    """Return *value* as an int in [1, 5], else raise ValueError.
+
+    Shared validator for the T020 fast-lane score ceilings
+    (``fast_lane_complexity_max`` / ``fast_lane_blast_radius_max``). Same
+    contract as :func:`_validate_auto_expand_threshold`: YAML ints pass through,
+    a quoted ``"2"`` is accepted, and booleans are rejected explicitly (in
+    Python ``bool`` is an ``int`` subclass, so ``fast_lane_complexity_max:
+    true`` would otherwise silently become 1 — never fast-lane anything but the
+    very smallest tasks — with no error).
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{field_name} must be an integer 1-5, got boolean "
+            f"{value!r} ({config_path})."
+        )
+    try:
+        ceiling = int(str(value))
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} must be an integer 1-5, got {value!r} "
+            f"({config_path})."
+        ) from exc
+    if not 1 <= ceiling <= 5:
+        raise ValueError(
+            f"{field_name} must be in the range 1-5 (the score scale), got "
+            f"{ceiling} ({config_path})."
+        )
+    return ceiling
 
 
 def _str_or_none(value: object) -> str | None:
@@ -888,6 +972,24 @@ branch_prefix: agent
 # ---------------------------------------------------------------------------
 auto_expand: true
 auto_expand_threshold: 4
+
+# ---------------------------------------------------------------------------
+# Fast-lane work packets — right-size process by score (T020)
+#
+# A task whose complexity AND blast_radius scores are both at or below these
+# ceilings is treated as "trivial": `fakoli-state packet` renders it a minimal,
+# single-step work packet with a trimmed required-evidence set (fewer fields
+# for the agent to satisfy) instead of the full update-protocol prose. The task
+# still records an immutable completion-evidence transition exactly like any
+# other — only the packet shape is right-sized. A task above either ceiling
+# (e.g. a tiny change that touches a schema/config/public-API surface) always
+# gets the full packet — the safe default.
+#
+#   fast_lane_complexity_max: 2     # 1-5 (complexity score scale)
+#   fast_lane_blast_radius_max: 2   # 1-5 (blast-radius score scale)
+# ---------------------------------------------------------------------------
+fast_lane_complexity_max: 2
+fast_lane_blast_radius_max: 2
 
 # ---------------------------------------------------------------------------
 # Completion-evidence enforcement (T025/B25)

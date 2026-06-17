@@ -87,7 +87,7 @@ def packet(
     ),
 ) -> None:
     """Render a work packet for TASK_ID and write it to .fakoli-state/packets/."""
-    from fakoli_state.context.packets import render_packet
+    from fakoli_state.context.packets import fast_lane_packet, render_packet
 
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir)
@@ -127,14 +127,29 @@ def packet(
                 active_claim = claim
                 break
 
-        work_packet = render_packet(
-            task,
-            feature=feature,
-            dependencies_completed=dependencies_completed,
-            dependencies_open=dependencies_open,
-            related_decisions=None,  # Phase 6+ wiring
-            active_claim=active_claim,
-        )
+        # T020 — route the fast-lane from the project's config thresholds when a
+        # config is available; fall back to the renderer's built-in defaults
+        # (via render_packet) when there is no/broken config.yaml.
+        cfg = _load_config_optional(state_dir)
+        if cfg is not None:
+            work_packet = fast_lane_packet(
+                task,
+                cfg,
+                feature=feature,
+                dependencies_completed=dependencies_completed,
+                dependencies_open=dependencies_open,
+                related_decisions=None,  # Phase 6+ wiring
+                active_claim=active_claim,
+            )
+        else:
+            work_packet = render_packet(
+                task,
+                feature=feature,
+                dependencies_completed=dependencies_completed,
+                dependencies_open=dependencies_open,
+                related_decisions=None,  # Phase 6+ wiring
+                active_claim=active_claim,
+            )
     finally:
         backend.close()
 

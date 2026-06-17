@@ -10,6 +10,46 @@ _No unreleased changes._
 
 ---
 
+## [1.39.0] — 2026-06-17
+
+### Added
+
+- **Fast-lane work packets — right-size process by score (T020).** A task
+  whose `complexity` AND `blast_radius` scores are both at or below configurable
+  ceilings now routes to a minimal, single-step work packet: the trimmed
+  update-protocol prose introduced in T015 *plus* a required-evidence checklist
+  trimmed to the single essential field. A trivial change no longer drags an
+  agent through a multi-item evidence ceremony, while anything above either
+  ceiling (e.g. a one-line change that touches a 5/5-blast schema/config/public-API
+  surface) — or any unscored task — keeps the full packet, the safe default.
+  - **Configurable ceilings.** Two new `config.yaml` keys,
+    `fast_lane_complexity_max` (default 2) and `fast_lane_blast_radius_max`
+    (default 2), let a project widen or narrow the fast-lane without touching
+    code. Both are validated to the 1-5 score scale (booleans rejected); absent
+    keys fall back to the renderer's built-in conservative defaults, so every
+    pre-T020 config keeps its exact prior packet routing.
+  - **New config-aware seam.** A new public `context.packets.fast_lane_packet`
+    helper reads those two ceilings and drives `is_lightweight` / `render_packet`,
+    giving CLI and MCP callers one obvious entry point instead of re-deriving the
+    `lightweight` decision at every call site. `render_packet` gains a
+    `fast_lane_required_evidence_max` parameter (default 1; negative disables the
+    evidence trim) and now exports `FAST_LANE_REQUIRED_EVIDENCE_MAX`.
+  - **Wired into both surfaces.** `fakoli-state packet` (CLI) and the
+    `generate_work_packet` MCP tool now route the fast-lane from the project's
+    config when one is loadable, and fall back to `render_packet` with built-in
+    defaults when there is no/broken `config.yaml` — a broken config never blocks
+    packet generation.
+  - **Packet-shape only — never the evidence ledger.** The trim is purely a
+    rendering concern: the task's stored `Verification.required_evidence` is
+    never mutated, the JSON packet still carries the full declared list for audit
+    (alongside the right-sized `required_evidence` the agent is shown), completion
+    still records the same immutable evidence transition, and the review gate
+    still reads the full stored list. The fast-lane is advisory right-sizing, not
+    a back-door that weakens the evidence record.
+  - Covered by `tests/test_config.py` and `tests/test_context.py`.
+
+---
+
 ## [1.38.0] — 2026-06-17
 
 ### Added
