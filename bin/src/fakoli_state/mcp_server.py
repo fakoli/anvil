@@ -2718,5 +2718,81 @@ def describe_surface() -> dict[str, Any]:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+# A one-line usage string shared by ``--help`` and the unknown-flag error path.
+_USAGE = "usage: python -m fakoli_state.mcp_server [--help] [--version]"
+
+
+def _help_text() -> str:
+    """Render the ``--help`` page.
+
+    Deliberately self-contained (no project/backend access) so it works inside
+    a bare Docker image where no ``.fakoli-state/`` exists yet. The tool list is
+    introspected live from the registered FastMCP surface so it can never drift
+    from reality. ``FAKOLI_STATE_ROOT`` is documented here because the container
+    image resolves project state through it (a bind-mounted host directory).
+    """
+    from fakoli_state import __version__
+    from fakoli_state.cli.describe import mcp_tool_names
+
+    tools = mcp_tool_names()
+    lines = [
+        f"fakoli-state-mcp {__version__} — FastMCP (stdio) server",
+        "",
+        _USAGE,
+        "",
+        "Run with no arguments to start the stdio MCP server (the default; this",
+        "is what an MCP client launches). --help and --version print and exit 0",
+        "without opening a backend, so they are safe as a container smoke test.",
+        "",
+        "Options:",
+        "  -h, --help      Show this help and exit.",
+        "  -v, --version   Print the engine version and exit.",
+        "",
+        "Environment:",
+        "  FAKOLI_STATE_ROOT  Project root holding .fakoli-state/ (defaults to the",
+        "                     current working directory). In Docker, bind-mount the",
+        "                     host project here, e.g. -v \"$PWD:/project\" -e",
+        "                     FAKOLI_STATE_ROOT=/project.",
+        "",
+        f"Registered tools ({len(tools)}):",
+    ]
+    lines += [f"  {name}" for name in tools]
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the MCP server.
+
+    With no recognised flags this starts the blocking stdio server (the default
+    an MCP client invokes) and never returns. ``--help``/``--version`` short-
+    circuit before ``mcp.run()`` so a container smoke test
+    (``docker run --rm fakoli-state-mcp --help``) prints and exits cleanly
+    instead of hanging on stdio. Backward-compatible: the no-arg path is
+    unchanged.
+    """
+    args = sys.argv[1:] if argv is None else argv
+
+    if any(a in ("-h", "--help") for a in args):
+        print(_help_text())
+        return 0
+
+    if any(a in ("-v", "--version") for a in args):
+        from fakoli_state import __version__
+
+        print(__version__)
+        return 0
+
+    # Reject unknown flags rather than silently ignoring them and starting the
+    # server — a typo'd flag should fail fast, not block on stdio forever.
+    unknown = [a for a in args if a.startswith("-")]
+    if unknown:
+        print(f"fakoli-state-mcp: unrecognized arguments: {' '.join(unknown)}", file=sys.stderr)
+        print(_USAGE, file=sys.stderr)
+        return 2
+
     mcp.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

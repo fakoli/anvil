@@ -1,0 +1,39 @@
+# Keep the Docker build context minimal and deterministic. The image only needs
+# bin/{pyproject.toml,uv.lock,src} and README.md (see Dockerfile COPY layers).
+
+# Virtualenvs — rebuilt inside the image by `uv sync`.
+.venv/
+bin/.venv/
+
+# Bytecode / build artifacts.
+__pycache__/
+*.pyc
+dist/
+*.egg-info/
+
+# Tooling caches.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+bin/.coverage
+
+# Runtime state — never bake project state into the image; it is bind-mounted.
+.fakoli-state/
+bin/.fakoli-state/
+packets/
+.fakoli-state-build/
+
+# VCS, CI, and large dirs the image does not need.
+.git/
+.github/
+benchmarks/
+tests/
+agents/
+skills/
+hooks/
+assets/
+docs/
+
+# Local editor / OS noise.
+.DS_Store

@@ -1,0 +1,69 @@
+# Docker MCP catalog manifest for the fakoli-state FastMCP (stdio) server.
+#
+# Submission flow (mirrors github.com/docker/mcp-registry CONTRIBUTING.md):
+#   1. Fork docker/mcp-registry, then copy this file to
+#      servers/fakoli-state/server.yaml in that fork.
+#   2. Pin `source.commit` to the fakoli-state commit being published.
+#   3. Validate locally:
+#        task build   -- --tools fakoli-state   # builds the image from ./Dockerfile
+#        task catalog -- fakoli-state            # generates catalogs/fakoli-state/catalog.yaml
+#        docker mcp catalog import $PWD/catalogs/fakoli-state/catalog.yaml
+#   4. Open a PR against docker/mcp-registry.
+#
+# See docs/mcp.md "Publishing to the Docker MCP catalog" for the full walkthrough.
+
+name: fakoli-state
+image: mcp/fakoli-state
+type: server
+
+meta:
+  category: productivity
+  tags:
+    - agent-coordination
+    - project-state
+    - sqlite
+    - local-first
+    - evidence-based
+
+about:
+  title: fakoli-state
+  description: >-
+    Local-first project state engine. Turns rough ideas and PRDs into reviewed,
+    lockable, evidence-backed work packets that humans and AI agents can
+    coordinate on without conflicts. Exposes the full PRD -> plan -> review ->
+    claim -> apply lifecycle as MCP tools over stdio.
+  icon: https://avatars.githubusercontent.com/u/9919?s=200&v=4
+
+source:
+  project: https://github.com/fakoli/fakoli-state
+  # Pin to the published commit before opening the registry PR.
+  commit: 0000000000000000000000000000000000000000
+  # The image is built from the repo-root Dockerfile (no pre-published image).
+  dockerfile: Dockerfile
+
+run:
+  # Mount the user's project directory so the server can resolve
+  # .fakoli-state/state.db. FAKOLI_STATE_ROOT (below) points the engine at it.
+  volumes:
+    - '{{fakoli-state.project_path}}:/project'
+
+config:
+  description: >-
+    fakoli-state reads and writes canonical project state under
+    .fakoli-state/ inside the mounted project directory. No secrets or API keys
+    are required for the core coordination tools.
+  env:
+    # The engine resolves the project root from FAKOLI_STATE_ROOT, falling back
+    # to the working directory. Inside the container the project is mounted at
+    # /project, so we point the engine there.
+    - name: FAKOLI_STATE_ROOT
+      example: /project
+      value: /project
+  parameters:
+    type: object
+    properties:
+      project_path:
+        type: string
+        description: Absolute path on the host to the project directory containing (or to contain) .fakoli-state/.
+    required:
+      - project_path

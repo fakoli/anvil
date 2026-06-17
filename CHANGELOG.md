@@ -10,6 +10,48 @@ _No unreleased changes._
 
 ---
 
+## [1.36.0] — 2026-06-17
+
+### Added
+
+- **Docker MCP catalog packaging for the FastMCP stdio server (T021/F006).**
+  fakoli-state's MCP surface can now be published to (and run from) the Docker
+  MCP catalog as a self-contained stdio server image, so a host without a local
+  Python/uv toolchain can launch the full PRD → plan → review → claim → apply
+  tool set by pulling one image and bind-mounting a project directory.
+  - **Repo-root `Dockerfile`** builds the engine on the distroless-friendly
+    `ghcr.io/astral-sh/uv` base, installs dependencies from `bin/uv.lock` in a
+    cached layer (frozen, no dev/provider extras), runs as a non-root user, and
+    sets `ENTRYPOINT ["python", "-m", "fakoli_state.mcp_server"]`. The image is
+    stateless — project state lives under `.fakoli-state/` in a bind-mounted
+    host directory resolved via `FAKOLI_STATE_ROOT` (defaulting to `/project`,
+    declared as a `VOLUME`), never baked into the image.
+  - **`server.yaml` Docker MCP catalog manifest** (mirroring
+    `docker/mcp-registry` conventions): server metadata, `productivity`
+    category, tags, the `{{fakoli-state.project_path}}:/project` volume mount,
+    the `FAKOLI_STATE_ROOT` env wiring, and a `project_path` parameter — plus
+    inline submission steps for opening the registry PR.
+  - **`--help` / `--version` entry point on the MCP server** — a new
+    `main(argv)` short-circuits before `mcp.run()` so a container smoke test
+    (`docker run --rm fakoli-state-mcp --help`) prints and exits 0 *without*
+    blocking on stdio. The help page is self-contained (no backend/project
+    access, so it works in a bare image), introspects the live FastMCP tool
+    list (it can never drift from the registered surface), documents
+    `FAKOLI_STATE_ROOT`, and rejects unknown flags with exit 2 rather than
+    silently starting the server. The no-argument path (start the blocking stdio
+    server) is byte-for-byte unchanged.
+  - **`.dockerignore`** keeps the build context minimal and deterministic (only
+    `bin/{pyproject.toml,uv.lock,src}` and `README.md` reach the image).
+  - **Publishing walkthrough** documented in `docs/mcp.md` (build, smoke test,
+    bind-mount run, and the catalog submission flow).
+  - Covered by `tests/test_docker_mcp_catalog.py`: in-process entry-point checks
+    (`--help`/`--version` print and exit 0, unknown flags exit 2, the help page
+    lists every registered tool) run always in CI; the real
+    `docker build` / `docker run` smoke test is guarded behind a
+    Docker-availability skip.
+
+---
+
 ## [1.35.0] — 2026-06-17
 
 ### Added

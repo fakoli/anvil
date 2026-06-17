@@ -1070,6 +1070,92 @@ candidate set is built.
 
 ---
 
+## Publishing to the Docker MCP catalog
+
+The stdio server ships a `Dockerfile` (repo root) and a Docker MCP catalog manifest
+(`server.yaml`) so it can be distributed through the
+[Docker MCP catalog / registry](https://github.com/docker/mcp-registry). This lets any
+Docker-MCP-Gateway user run fakoli-state as a containerized MCP server without a local `uv`
+or Python toolchain — the image bundles a pinned CPython and the locked dependency set.
+
+### Image contents and statelessness
+
+The image packages only what the MCP surface needs: `bin/pyproject.toml`, `bin/uv.lock`,
+`bin/src/fakoli_state/`, and `README.md`. It installs dependencies from the lockfile with
+`uv sync --frozen --no-dev` (no LLM-provider extras — those stay opt-in, matching the host
+install) and runs as a non-root `fakoli` user. **No project state is baked into the image.**
+The engine resolves `.fakoli-state/state.db` from `FAKOLI_STATE_ROOT` (falling back to the
+working directory), so the host project is **bind-mounted at runtime**.
+
+### Build and smoke test
+
+```bash
+# From the repo root (build context = repo root):
+docker build -t fakoli-state-mcp .
+
+# Smoke test: the entry point handles --help/--version and exits 0 without
+# opening a backend or blocking on stdio. This is the catalog smoke test.
+docker run --rm fakoli-state-mcp --help
+docker run --rm fakoli-state-mcp --version
+```
+
+The `--help` page lists every registered MCP tool (introspected live from the FastMCP
+surface, so it never drifts) and documents the `FAKOLI_STATE_ROOT` bind-mount convention.
+
+### Run against a host project
+
+```bash
+docker run --rm -i \
+  -v "$PWD:/project" \
+  -e FAKOLI_STATE_ROOT=/project \
+  fakoli-state-mcp
+```
+
+`-i` keeps stdin open for the stdio transport. The mounted `/project` must already contain
+(or will receive) a `.fakoli-state/` directory — run `fakoli-state init` there first, or
+call the `init_project` tool over MCP.
+
+Equivalent `mcpServers` entry for an MCP client that launches Docker directly:
+
+```json
+{
+  "mcpServers": {
+    "fakoli-state": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "${PWD}:/project",
+        "-e", "FAKOLI_STATE_ROOT=/project",
+        "fakoli-state-mcp"
+      ]
+    }
+  }
+}
+```
+
+### Catalog submission
+
+The repo-root `server.yaml` is the Docker MCP catalog manifest. To publish:
+
+1. Fork [`docker/mcp-registry`](https://github.com/docker/mcp-registry) and copy this repo's
+   `server.yaml` to `servers/fakoli-state/server.yaml` in the fork.
+2. Pin `source.commit` to the fakoli-state commit you are publishing.
+3. Validate locally (requires the Docker MCP toolkit and `task`):
+
+   ```bash
+   task build   -- --tools fakoli-state   # builds mcp/fakoli-state from ./Dockerfile
+   task catalog -- fakoli-state            # generates catalogs/fakoli-state/catalog.yaml
+   docker mcp catalog import "$PWD/catalogs/fakoli-state/catalog.yaml"
+   ```
+
+4. Open a PR against `docker/mcp-registry`.
+
+The manifest declares a `project_path` parameter that the gateway maps to the container's
+`/project` volume, plus `FAKOLI_STATE_ROOT=/project`, so catalog users get the bind-mount
+wiring automatically.
+
+---
+
 ## See also
 
 - [`specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md) — canonical
