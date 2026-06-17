@@ -202,7 +202,9 @@ The wrapper scripts `bin/fakoli-state` and `bin/fakoli-state-mcp` shell out to `
 
 ---
 
-## Integration with fakoli-flow and fakoli-crew
+## Optional: integration with fakoli-flow and fakoli-crew
+
+> Everything in [Quick Start](#quick-start) runs on `fakoli-state` alone — no `fakoli-flow`, no `fakoli-crew`, no Claude Code. This section is **purely additive**: install the siblings only if you want orchestration on top. Nothing above degrades without them.
 
 When both fakoli-state and fakoli-flow are installed, the flow pipeline upgrades automatically:
 
@@ -240,10 +242,15 @@ fakoli-state shipped Phases 1–10 across v1.0.0 → v1.10.0. The Phase 10 plugi
 
 ## Requirements
 
-- Claude Code with plugin support
-- Python 3.11+ with `uv` (resolved on first invocation — no manual install)
-- fakoli-flow (recommended — enables pipeline integration)
-- fakoli-crew (recommended — provides specialist agents)
+**Required**
+
+- Python 3.11+ with `uv` (resolved on first invocation — no manual install). This alone runs the full standalone CLI/MCP loop.
+
+**Optional**
+
+- Claude Code with plugin support — to run fakoli-state as a plugin rather than a bare CLI / MCP server.
+- fakoli-flow — additive: enables wave-based pipeline orchestration over the same state.
+- fakoli-crew — additive: provides specialist subagents that flow dispatches.
 
 ---
 

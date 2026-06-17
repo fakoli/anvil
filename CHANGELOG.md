@@ -10,6 +10,38 @@ _No unreleased changes._
 
 ---
 
+## [1.33.1] — 2026-06-17
+
+### Changed
+
+- **Standalone-first onboarding docs (T011/F002).** The Getting Started
+  walkthrough and the README now lead with a crew/flow-free path — every step
+  (`init` → `prd` → `plan` → `claim` → `execute` → `finish`) is driven entirely
+  through the `fakoli-state` CLI (or the equivalent MCP tools), so a new user
+  can run the full loop without `fakoli-flow` or `fakoli-crew` installed and
+  without Claude Code.
+  - `docs/how-to/getting-started.md` gains an explicit **"Optional:
+    fakoli-flow / fakoli-crew integration"** section, clearly marked as
+    *purely additive* — the sibling plugins are an opt-in orchestration upgrade
+    over the same state engine, never a prerequisite, and nothing in the
+    standalone walkthrough degrades without them.
+  - `README.md` reframes the integration section as "Optional:" and splits
+    **Requirements** into **Required** (Python 3.11+ with `uv`) vs **Optional**
+    (Claude Code, fakoli-flow, fakoli-crew — each additive), correcting the
+    prior "recommended" framing that implied the siblings were needed.
+
+### Added
+
+- **Docs self-sufficiency gate.** New `tests/test_standalone_docs.py` enforces
+  the standalone-first contract so the onboarding story cannot silently rot
+  back into "you also need flow/crew": it mirrors the backlog verification
+  (`grep -L -e 'flow:' -e 'crew:' docs/how-to/getting-started.md`) — the
+  standalone walkthrough references no `flow:`/`crew:` command token — and adds
+  structural checks that the standalone path leads and that an explicitly
+  optional, additive integration section exists.
+
+---
+
 ## [1.33.0] — 2026-06-17
 
 ### Added

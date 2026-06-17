@@ -187,6 +187,30 @@ fakoli-state apply T001 --approve
 
 The work packet under `.fakoli-state/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).
 
+## Optional: fakoli-flow / fakoli-crew integration
+
+Everything above is the **standalone path** — every step ran through the
+`fakoli-state` CLI (or, equivalently, the matching MCP tools: `init_project`,
+`parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
+`get_next_task`, `claim_task`, `generate_work_packet`,
+`submit_completion_evidence`, `apply_review_decision`). You never needed
+`fakoli-flow` or `fakoli-crew` installed, and nothing in the walkthrough
+above depends on them.
+
+The two sibling plugins are **purely additive** — an opt-in upgrade, never a
+prerequisite. If you install them, the same state engine gains orchestration
+on top:
+
+- **fakoli-flow** drives the loop for you — its execute skill reads
+  `fakoli-state next`, claims, dispatches work, and submits evidence in
+  waves instead of one command at a time.
+- **fakoli-crew** supplies the specialist subagents that flow dispatches, and
+  exposes the same MCP tool surface to every crew agent.
+
+When neither is installed, the CLI/MCP loop you just ran **is** the product —
+nothing degrades. For exactly what changes when you add them, see
+[`integrating-with-fakoli-flow-and-crew.md`](integrating-with-fakoli-flow-and-crew.md).
+
 ## Common stumbles
 
 - **"PRD must be in 'reviewed' status to approve"** — you ran `prd review --approve` without first running `prd review`. The two-step pattern is intentional. Run `fakoli-state prd review` first, then `fakoli-state prd review --approve`.
