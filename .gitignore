@@ -1,0 +1,25 @@
+# Python virtualenv (uv sync materializes this under bin/)
+.venv/
+bin/.venv/
+
+# Python bytecode / build artifacts
+__pycache__/
+*.pyc
+dist/
+*.egg-info/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+bin/.coverage
+
+# fakoli-state runtime state (created when running the CLI, tests, or benchmarks)
+.fakoli-state/
+bin/.fakoli-state/
+packets/
+
+# Agent build scratch space — never commit
+.fakoli-state-build/
+docs/plans/agent-*-status.md

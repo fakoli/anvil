@@ -1,0 +1,69 @@
+graph TD
+    User["Human developer"]
+    Agent["AI coding agent<br/>(Claude Code, Codex, Cursor, ...)"]
+
+    subgraph Entry["Entry surfaces"]
+        CLI["CLI<br/>fakoli-state &lt;cmd&gt;"]
+        MCP["MCP server<br/>FastMCP stdio<br/>13 tools"]
+        Hooks["Hooks<br/>SessionStart / PreToolUse / PostToolUse"]
+    end
+
+    subgraph Plugin["Plugin layer (operating discipline)"]
+        Skills["Skills<br/>brainstorm, prd, plan, claim,<br/>execute, finish, state-ops"]
+        Agents["Plugin agents<br/>planner, critic, sentinel,<br/>state-keeper, docs-scribe,<br/>marketplace-scribe"]
+    end
+
+    subgraph Engine["State engine"]
+        Claims["Claims manager<br/>lease + heartbeat + stale reap"]
+        Transitions["Transitions<br/>pure state machine"]
+        Planning["Planning engine<br/>template parser + LLM helpers"]
+        Context["Context engine<br/>work-packet renderer"]
+        Review["Review engine<br/>gates: PRD, readiness, evidence"]
+        GitOps["Git ops<br/>agent/&lt;task&gt;-&lt;slug&gt; branches"]
+    end
+
+    subgraph Storage["Storage layer"]
+        Backend["Backend Protocol"]
+        SQLite[("SQLite<br/>state.db<br/>WAL + BEGIN IMMEDIATE")]
+        Events[("Events<br/>events.jsonl<br/>append-only")]
+    end
+
+    subgraph Sync["Sync engine"]
+        SyncProto["SyncProvider Protocol<br/>+ registry"]
+        GitHub["GitHubIssuesProvider<br/>gh CLI + httpx"]
+    end
+
+    Flow["fakoli-flow<br/>(optional)"]
+    Crew["fakoli-crew<br/>(optional)"]
+
+    User --> CLI
+    User --> Skills
+    Agent --> MCP
+    Agent --> Skills
+    Agent --> Hooks
+
+    CLI --> Engine
+    MCP --> Engine
+    Hooks --> CLI
+    Skills --> CLI
+    Skills --> Agents
+    Agents --> CLI
+
+    Claims --> Backend
+    Transitions --> Backend
+    Planning --> Backend
+    Context --> Backend
+    Review --> Backend
+    GitOps --> Backend
+
+    Backend --> SQLite
+    Backend --> Events
+
+    CLI --> SyncProto
+    SyncProto --> GitHub
+    GitHub --> Backend
+
+    Skills -.optional bridge.-> Flow
+    Skills -.optional bridge.-> Crew
+    Flow -.execute reads.-> CLI
+    Crew -.submits evidence.-> CLI

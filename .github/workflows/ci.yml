@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: test (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      # Install with the `custom` extra so the OpenAI-compatible provider's
+      # 4 test_llm_planner tests exercise the real `openai` SDK instead of
+      # hitting the lazy-import guard (which would make them fail). The extra
+      # pulls `openai>=1.0`; everything else is in the base + dev dep groups.
+      - name: Sync dependencies (with custom extra for openai)
+        working-directory: bin
+        run: uv sync --extra custom
+
+      - name: Run test suite
+        working-directory: bin
+        run: uv run pytest -q
+
+      # Coordination benchmark smoke: drives the real fakoli-state CLI against
+      # a live SQLite state engine. Uses the venv materialized by `uv sync`
+      # above (the harness shells out to `uv run` / the synced CLI).
+      - name: Coordination benchmark smoke
+        working-directory: bin
+        run: uv run python ../benchmarks/run_benchmark.py --scenarios overlapping_files --quick

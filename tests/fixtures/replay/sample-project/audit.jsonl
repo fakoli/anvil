@@ -1,0 +1,2 @@
+{"ts": "2026-05-24T20:35:00+00:00", "kind": "idempotent_no_op", "action": "evidence.submitted", "target_id": "T001", "reason": "evidence.submitted: claim 'C001' already has evidence 'EV001'; rejecting duplicate submission with new evidence_id 'EV-DUP' as idempotent no-op (CL-8)."}
+{"ts": "2026-05-24T20:35:00+00:00", "kind": "rejection", "actor": "test", "attempted_action": "evidence.submitted", "target_id": "T003", "reason": "evidence.submitted payload requires non-empty 'commands_run'."}

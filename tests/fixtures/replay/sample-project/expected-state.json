@@ -1,0 +1,217 @@
+{
+  "claims": [
+    {
+      "branch": null,
+      "claim_type": "task",
+      "claimed_by": "agent-alpha",
+      "created_at": "2026-05-24T18:00:00Z",
+      "expected_files": [],
+      "id": "C001",
+      "last_heartbeat_at": "2026-05-24T18:20:00Z",
+      "lease_expires_at": "2026-05-24T19:20:00Z",
+      "release_reason": "auto-released on submit",
+      "released_at": "2026-05-24T18:30:00Z",
+      "status": "released",
+      "task_id": "T001",
+      "worktree_path": null
+    },
+    {
+      "branch": null,
+      "claim_type": "task",
+      "claimed_by": "agent-alpha",
+      "created_at": "2026-05-24T18:35:00Z",
+      "expected_files": [],
+      "id": "C002",
+      "last_heartbeat_at": "2026-05-24T18:35:00Z",
+      "lease_expires_at": "2026-05-24T19:35:00Z",
+      "release_reason": "lease_expired",
+      "released_at": "2026-05-24T20:35:00Z",
+      "status": "stale",
+      "task_id": "T002",
+      "worktree_path": null
+    }
+  ],
+  "evidence": [
+    {
+      "claim_id": "C001",
+      "commands_run": [
+        "pytest tests/ -v"
+      ],
+      "commit_sha": null,
+      "files_changed": [
+        "src/auth.py"
+      ],
+      "id": "EV001",
+      "known_limitations": null,
+      "output_excerpt": "5 passed",
+      "pr_url": null,
+      "screenshots": [],
+      "submitted_at": "2026-05-24T18:30:00Z",
+      "submitted_by": "agent-alpha",
+      "task_id": "T001"
+    }
+  ],
+  "features": [
+    {
+      "description": "The only feature.",
+      "id": "F001",
+      "requirements": [],
+      "status": "proposed",
+      "tasks": [],
+      "title": "Feature F001"
+    }
+  ],
+  "prd": {
+    "acceptance_criteria": [
+      "Golden snapshot matches."
+    ],
+    "goals": [
+      "Ship SL-1."
+    ],
+    "last_reviewed_at": "2026-05-24T18:00:00Z",
+    "last_reviewed_by": "alice",
+    "non_goals": [],
+    "open_questions": [],
+    "requirements": [
+      "R001"
+    ],
+    "risks": [],
+    "status": "reviewed",
+    "summary": "Build the thing."
+  },
+  "project": {
+    "created_at": "2026-05-24T18:00:00Z",
+    "description": "A realistic replay-equivalence fixture.",
+    "id": "proj-1",
+    "name": "Sample Project",
+    "updated_at": "2026-05-24T18:00:00Z"
+  },
+  "requirements": [
+    {
+      "derived": false,
+      "id": "R001",
+      "prd_section": "requirements",
+      "source_paragraph": null,
+      "text": "Replay must reproduce canonical state."
+    }
+  ],
+  "reviews": [
+    {
+      "created_at": "2026-05-24T18:30:00Z",
+      "decision": "approve",
+      "id": "RV-E000021",
+      "notes": null,
+      "reviewed_by": "alice",
+      "target_id": "T001",
+      "target_kind": "task"
+    }
+  ],
+  "sync_mappings": [
+    {
+      "conflict_resolution_strategy": "prompt",
+      "external_id": "42",
+      "external_system": "github_issues",
+      "external_url": "https://github.com/acme/repo/issues/42",
+      "last_synced_at": "2026-05-24T20:35:00Z",
+      "provider_metadata": {
+        "labels": [
+          "sl-1"
+        ]
+      },
+      "sync_state": "in_sync",
+      "task_id": "T001"
+    }
+  ],
+  "tasks": [
+    {
+      "acceptance_criteria": [],
+      "conflict_groups": [],
+      "created_at": "2026-05-24T18:00:00Z",
+      "dependencies": [],
+      "description": "desc",
+      "feature_id": "F001",
+      "id": "T001",
+      "implementation_notes": [],
+      "likely_files": [],
+      "parent_task_id": null,
+      "priority": "medium",
+      "scores": {
+        "agent_suitability": null,
+        "blast_radius": null,
+        "complexity": null,
+        "context_load": null,
+        "explanation": null,
+        "parallelizability": null,
+        "review_risk": null
+      },
+      "status": "done",
+      "title": "Task T001",
+      "updated_at": "2026-05-24T18:30:00Z",
+      "verification": {
+        "commands": [],
+        "manual_steps": [],
+        "required_evidence": []
+      }
+    },
+    {
+      "acceptance_criteria": [],
+      "conflict_groups": [],
+      "created_at": "2026-05-24T18:00:00Z",
+      "dependencies": [],
+      "description": "desc",
+      "feature_id": "F001",
+      "id": "T002",
+      "implementation_notes": [],
+      "likely_files": [],
+      "parent_task_id": null,
+      "priority": "medium",
+      "scores": {
+        "agent_suitability": null,
+        "blast_radius": null,
+        "complexity": null,
+        "context_load": null,
+        "explanation": null,
+        "parallelizability": null,
+        "review_risk": null
+      },
+      "status": "ready",
+      "title": "Task T002",
+      "updated_at": "2026-05-24T20:35:00Z",
+      "verification": {
+        "commands": [],
+        "manual_steps": [],
+        "required_evidence": []
+      }
+    },
+    {
+      "acceptance_criteria": [],
+      "conflict_groups": [],
+      "created_at": "2026-05-24T18:00:00Z",
+      "dependencies": [],
+      "description": "desc",
+      "feature_id": "F001",
+      "id": "T003",
+      "implementation_notes": [],
+      "likely_files": [],
+      "parent_task_id": null,
+      "priority": "medium",
+      "scores": {
+        "agent_suitability": null,
+        "blast_radius": null,
+        "complexity": null,
+        "context_load": null,
+        "explanation": null,
+        "parallelizability": null,
+        "review_risk": null
+      },
+      "status": "ready",
+      "title": "Task T003",
+      "updated_at": "2026-05-24T18:00:00Z",
+      "verification": {
+        "commands": [],
+        "manual_steps": [],
+        "required_evidence": []
+      }
+    }
+  ]
+}

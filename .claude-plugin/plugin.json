@@ -1,0 +1,23 @@
+{
+  "name": "fakoli-state",
+  "version": "1.23.8",
+  "description": "Local-first, runtime-neutral project state for humans and AI coding agents — turn PRDs into lockable, evidence-backed work packets.",
+  "author": {
+    "name": "Sekou Doumbouya",
+    "url": "https://github.com/fakoli"
+  },
+  "repository": "https://github.com/fakoli/fakoli-state",
+  "license": "MIT",
+  "keywords": [
+    "agent-coordination",
+    "claims",
+    "evidence-based",
+    "llm-work-packets",
+    "local-first",
+    "mcp",
+    "project-state",
+    "runtime-neutral",
+    "sqlite",
+    "terraform-for-work"
+  ]
+}

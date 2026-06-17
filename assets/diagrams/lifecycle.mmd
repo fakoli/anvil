@@ -1,0 +1,34 @@
+stateDiagram-v2
+    [*] --> proposed: plan / expand
+
+    proposed --> drafted: task_proposed_to_drafted
+    drafted --> reviewed: task_drafted_to_reviewed<br/>gate: acceptance_criteria<br/>+ verification.commands
+    reviewed --> ready: task_reviewed_to_ready
+    ready --> claimed: task_ready_to_claimed<br/>gate: PRD reviewed or approved
+
+    claimed --> in_progress: task_claimed_to_in_progress
+    in_progress --> blocked: task_in_progress_to_blocked<br/>(reason required)
+    blocked --> in_progress: task_blocked_to_in_progress
+
+    in_progress --> needs_review: task_in_progress_to_needs_review<br/>(evidence submitted)
+
+    needs_review --> accepted: task_needs_review_to_accepted<br/>gate: required_evidence present
+    needs_review --> rejected: task_needs_review_to_rejected<br/>(reason required)
+
+    accepted --> done: task_accepted_to_done
+    rejected --> drafted: task_rejected_to_drafted
+
+    done --> [*]
+
+    note right of claimed
+        Claim row holds lease +
+        heartbeat. Stale leases
+        are reaped on every
+        mutating CLI / MCP call.
+    end note
+
+    note right of needs_review
+        Human or critic agent
+        verdict. Rejection loops
+        back through drafted.
+    end note

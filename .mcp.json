@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fakoli-state": {
+      "type": "stdio",
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/fakoli-state-mcp"]
+    }
+  }
+}

@@ -1,0 +1,1059 @@
+# fakoli-state MCP server
+
+## What it does
+
+Agents need to read and write canonical project state without each one shelling out to the
+CLI per operation and without fighting over the same SQLite rows. The MCP server exposes 22
+tools over stdio so that any MCP-compatible runtime — Claude Code, Codex, Cursor, OpenHands,
+Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
+apply workflow as first-class tool calls. Read-only tools return structured Pydantic
+objects; mutating tools run stale-claim reaping before writing, so the state the agent sees
+is always fresh.
+
+The toolset is organized by lifecycle phase:
+
+- **Bootstrap & status** (`init_project`, `get_project_status`, `get_project_summary`)
+- **PRD lifecycle** (`parse_prd`, `review_prd`)
+- **Planning & scoring** (`plan_tasks`, `score_tasks`, `review_tasks`)
+- **Task inspection** (`list_tasks`, `get_task`, `get_next_task`, `get_dependency_graph`,
+  `check_conflicts`)
+- **Claiming & execution** (`claim_task`, `release_task`, `renew_claim`,
+  `generate_work_packet`, `submit_progress`, `submit_completion_evidence`,
+  `update_task_status`)
+- **Review gate** (`apply_review_decision`)
+- **Decision resolution** (`find_decisions`)
+
+The eight workflow tools added in v1.13.0 — `init_project`, `get_project_status`,
+`parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
+`apply_review_decision` — deliberately omit git operations (branch / worktree creation),
+matching `claim_task`'s long-standing behavior: remote agents may have no git access, so
+the MCP surface stays git-free. Git side-effects remain CLI-only.
+
+---
+
+## Installation
+
+The server is wired automatically once the plugin is installed. No manual configuration is
+required. The plugin ships a `.mcp.json` at its root that Claude Code reads on session start:
+
+```json
+{
+  "mcpServers": {
+    "fakoli-state": {
+      "type": "stdio",
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/fakoli-state-mcp"]
+    }
+  }
+}
+```
+
+`${CLAUDE_PLUGIN_ROOT}` is the absolute path to the installed plugin directory. The wrapper
+`bin/fakoli-state-mcp` calls `uv sync` if `uv.lock` or `pyproject.toml` is newer than the
+virtual environment (covering cold starts and `git pull` updates), then delegates to
+`python -m fakoli_state.mcp_server`.
+
+Each tool call opens a fresh `SqliteBackend` against `.fakoli-state/state.db` resolved from
+the agent's current working directory at call time. Agents can invoke from any project
+directory — the server re-resolves state on every call.
+
+**Prerequisite**: `fakoli-state init` must have been run in the project root before any tool
+call will succeed.
+
+---
+
+## Tool reference
+
+Tools are grouped below by access pattern: read-only tools first, mutating tools second.
+
+### Read-only tools
+
+---
+
+### `get_project_summary`
+
+Returns a snapshot of overall project health: task counts by status, active claim count,
+blocked task count, and ready task count. Stale-claim reaping runs before the read, so
+counts reflect freshly expired leases.
+
+**Inputs**
+
+None.
+
+**Output**
+
+```json
+{
+  "project_id": "string",
+  "project_name": "string",
+  "project_description": "string",
+  "prd_status": "string | null",
+  "task_counts": {
+    "proposed": 0,
+    "drafted": 0,
+    "reviewed": 0,
+    "ready": 0,
+    "claimed": 0,
+    "in_progress": 0,
+    "blocked": 0,
+    "needs_review": 0,
+    "accepted": 0,
+    "done": 0,
+    "rejected": 0
+  },
+  "active_claim_count": 0,
+  "blocked_task_count": 0,
+  "ready_task_count": 0
+}
+```
+
+`prd_status` is `null` when no PRD has been parsed yet.
+
+**Failure modes**
+
+- `ToolError` — project not initialized (`.fakoli-state/` missing).
+- `ToolError` — project row not found in state.db (run `fakoli-state init`).
+
+**When to call**: at session start or before orchestrating a wave, to decide how many agents
+to spawn and whether the queue is draining or stacking up.
+
+---
+
+### `list_tasks`
+
+Returns tasks filtered by status, feature, or claiming actor. All three filters are optional
+and combinable. `status` and `feature_id` are pushed to SQL; `claimed_by` is an in-memory
+filter joined against active claims.
+
+**Inputs**
+
+| Parameter    | Type            | Required | Default |
+|--------------|-----------------|----------|---------|
+| `status`     | `string \| null` | no       | `null`  |
+| `feature_id` | `string \| null` | no       | `null`  |
+| `claimed_by` | `string \| null` | no       | `null`  |
+
+Valid `status` values: `proposed`, `drafted`, `reviewed`, `ready`, `claimed`,
+`in_progress`, `blocked`, `needs_review`, `accepted`, `done`, `rejected`.
+
+**Output**
+
+A JSON array of Task objects serialized from their Pydantic models. Each element includes
+full task fields: `id`, `title`, `status`, `priority`, `feature_id`, `dependencies`,
+`conflict_groups`, `expected_files`, `scores`, and all other Task model fields.
+
+**Failure modes**
+
+- `ToolError` — state directory not found.
+
+**When to call**: when a coordinator agent needs to see all `ready` tasks before deciding
+which ones to dispatch in a wave.
+
+---
+
+### `get_task`
+
+Returns the full Task object for a single task ID.
+
+**Inputs**
+
+| Parameter | Type     | Required |
+|-----------|----------|----------|
+| `task_id` | `string` | yes      |
+
+**Output**
+
+A single Task object serialized to JSON (same shape as one element from `list_tasks`).
+
+**Failure modes**
+
+- `ToolError` — task not found: `"Task '{task_id}' not found."`.
+- `ToolError` — state directory not found.
+
+**When to call**: after `get_next_task` returns a candidate, to read the full acceptance
+criteria and constraints before calling `claim_task`.
+
+---
+
+### `get_next_task`
+
+Returns the single highest-priority `ready` task that has no active claim and no unsatisfied
+dependencies. Sort key (from `ClaimManager.next_claimable()`): `priority desc` (`critical` >
+`high` > `medium` > `low`), then `complexity asc` (lower score wins; unscored tasks rank
+last), then `created_at asc` (oldest first for fairness). Returns `null` when no claimable
+task is available.
+
+Stale-claim reaping runs before the selection, so expired leases are cleared before the
+candidate set is computed. Tasks in active conflict groups (where a conflicting task is
+already claimed) are excluded.
+
+**Inputs**
+
+| Parameter | Type            | Required | Default |
+|-----------|-----------------|----------|---------|
+| `actor`   | `string \| null` | no       | `null`  |
+
+`actor` is accepted but not used in the selection logic in the current implementation;
+it is reserved for future suitability filtering.
+
+**Output**
+
+A Task object serialized to JSON, or `null`.
+
+**Failure modes**
+
+- `ToolError` — state directory not found.
+
+**When to call**: the standard first step for any agent entering the work loop — call
+`get_next_task`, then `claim_task` on the returned ID.
+
+---
+
+### `generate_work_packet`
+
+Renders a work packet for a task in markdown or JSON format. The packet includes task intent,
+acceptance criteria, constraints, non-goals, open dependencies, and the active claim if one
+exists. Delegates to `fakoli_state.context.packets.render_packet`.
+
+**Inputs**
+
+| Parameter | Type                       | Required | Default      |
+|-----------|----------------------------|----------|--------------|
+| `task_id` | `string`                   | yes      |              |
+| `format`  | `"markdown" \| "json"`     | no       | `"markdown"` |
+
+**Output**
+
+```json
+{
+  "format": "markdown",
+  "content": "# T012 — Implement auth middleware\n..."
+}
+```
+
+`content` is a `string` when `format` is `"markdown"` and a `dict` when `format` is
+`"json"`.
+
+**Failure modes**
+
+- `ToolError` — task not found.
+- `ToolError` — state directory not found.
+
+**When to call**: immediately after `claim_task` succeeds, to get the structured prompt
+the agent will work against.
+
+---
+
+### `check_conflicts`
+
+Cross-references a list of proposed file paths against the `expected_files` of all currently
+active claims, excluding the task's own claim. Returns one conflict entry per overlapping
+file per claim.
+
+**Inputs**
+
+| Parameter        | Type           | Required |
+|------------------|----------------|----------|
+| `task_id`        | `string`       | yes      |
+| `proposed_files` | `list[string]` | yes      |
+
+**Output**
+
+```json
+{
+  "conflicts": [
+    {
+      "file": "src/auth/middleware.py",
+      "claim_id": "C001",
+      "claimed_by": "agent-welder-1",
+      "task_id": "T008"
+    }
+  ]
+}
+```
+
+An empty `conflicts` list means no overlaps were detected.
+
+**Failure modes**
+
+- `ToolError` — state directory not found.
+
+**When to call**: before declaring `expected_files` in a `claim_task` call, to surface
+potential write conflicts before work begins rather than discovering them at merge time.
+
+---
+
+### `get_dependency_graph`
+
+Returns nodes, directed edges, and the `ready_to_claim` set for a given scope. Edges run
+from dependency to dependent (`from → to`). `ready_to_claim` lists task IDs that are in
+`ready` status, have all dependencies in `done` status, and have no active claim.
+
+**Inputs**
+
+| Parameter   | Type                             | Required | Default  |
+|-------------|----------------------------------|----------|----------|
+| `scope`     | `"all" \| "feature" \| "task"`   | no       | `"all"`  |
+| `target_id` | `string \| null`                 | no       | `null`   |
+
+`target_id` is required when `scope` is `"feature"` or `"task"`. When `scope` is `"task"`,
+the graph covers the target task and all its transitive dependencies.
+
+**Output**
+
+```json
+{
+  "nodes": [
+    {
+      "id": "T001",
+      "title": "Scaffold auth module",
+      "status": "done",
+      "priority": "high",
+      "feature_id": "F001"
+    }
+  ],
+  "edges": [
+    { "from": "T001", "to": "T002" }
+  ],
+  "ready_to_claim": ["T002", "T003"]
+}
+```
+
+**Failure modes**
+
+- `ToolError` — `target_id` is `null` when `scope` is `"feature"` or `"task"`.
+- `ToolError` — state directory not found.
+
+**When to call**: when a planner agent needs to decide which tasks are unblocked and safe
+to dispatch in parallel this wave.
+
+---
+
+### Mutating tools
+
+Every mutating tool runs `detect_and_release_stale` at the top of its call. This is
+automatic — agents do not need to trigger reaping manually. See
+[Stale-claim reaping](#stale-claim-reaping) for details.
+
+---
+
+### `claim_task`
+
+Acquires an exclusive lease on a task for the given actor. Delegates to
+`ClaimManager.claim`, which writes the `Claim` row in an atomic SQLite transaction.
+Stale-claim reaping runs first.
+
+**Gate**: the PRD must not be in `draft` status. If the PRD is `draft` or missing, the tool
+raises a `ToolError` and no claim is created.
+
+**Inputs**
+
+| Parameter                | Type                    | Required | Default |
+|--------------------------|-------------------------|----------|---------|
+| `task_id`                | `string`                | yes      |         |
+| `claimed_by`             | `string`                | yes      |         |
+| `expected_files`         | `list[string] \| null`  | no       | `[]`    |
+| `lease_duration_seconds` | `int`                   | no       | `900`   |
+
+`lease_duration_seconds` is converted to minutes (floor, minimum 1) before being passed
+to `ClaimManager`. The default 900 seconds gives a 15-minute MCP-side override — note that
+the CLI's `ClaimManager` ships with a 60-minute default (see
+[`bin/src/fakoli_state/claims/manager.py`](../bin/src/fakoli_state/claims/manager.py)
+line 118), and the project-level override is read from `.fakoli-state/config.yaml`.
+
+**Output**
+
+```json
+{
+  "id": "C001",
+  "task_id": "T012",
+  "claimed_by": "agent-welder-1",
+  "lease_expires_at": "2026-05-25T14:15:00+00:00",
+  "branch": "agent/t012-implement-auth",
+  "worktree_path": null,
+  "expected_files": ["src/auth/middleware.py", "tests/test_auth.py"]
+}
+```
+
+`branch` and `worktree_path` are `null` when git ops are not configured.
+
+**Failure modes**
+
+- `ToolError` — PRD is `draft` or missing.
+- `ToolError` — `ClaimError` from `ClaimManager` (task already claimed, task not in claimable state, etc.).
+- `ToolError` — state directory not found.
+
+**When to call**: after `get_next_task` or `get_task` confirms the task is ready and
+the agent has checked conflicts.
+
+---
+
+### `release_task`
+
+Releases the active claim on a task held by `actor`. The claim is located by task ID; the
+actor string does not need to match (the lookup finds the active claim regardless of who
+holds it). Stale-claim reaping runs first.
+
+**Inputs**
+
+| Parameter | Type            | Required | Default |
+|-----------|-----------------|----------|---------|
+| `task_id` | `string`        | yes      |         |
+| `actor`   | `string`        | yes      |         |
+| `reason`  | `string \| null` | no      | `null`  |
+
+**Output**
+
+```json
+{
+  "released": true,
+  "claim_id": "C001"
+}
+```
+
+**Failure modes**
+
+- `ToolError` — no active claim found for the task.
+- `ToolError` — `ClaimError` from `ClaimManager`.
+- `ToolError` — state directory not found.
+
+**When to call**: when an agent determines it cannot complete a task and wants to return it
+to the `ready` pool for another agent to pick up.
+
+---
+
+### `renew_claim`
+
+Extends the lease on an active claim. Use this as a heartbeat during long-running work to
+prevent the claim from going stale. Stale-claim reaping runs first, so the claim must still
+be active at the point of the call.
+
+**Inputs**
+
+| Parameter        | Type     | Required | Default |
+|------------------|----------|----------|---------|
+| `task_id`        | `string` | yes      |         |
+| `actor`          | `string` | yes      |         |
+| `extend_seconds` | `int`    | no       | `900`   |
+
+`extend_seconds` is converted to minutes (floor, minimum 1). The default extends by 15
+minutes from the time of the call.
+
+**Output**
+
+```json
+{
+  "lease_expires_at": "2026-05-25T14:30:00+00:00"
+}
+```
+
+**Failure modes**
+
+- `ToolError` — no active claim found (claim may have already gone stale).
+- `ToolError` — `ClaimError` from `ClaimManager`.
+- `ToolError` — state directory not found.
+
+**When to call**: every ~5 minutes while actively working on a claimed task (recommended
+in the execute skill). Missing a renewal window causes the claim to go stale and the task
+to re-enter the `ready` pool.
+
+---
+
+### `submit_progress`
+
+Records an in-progress note for a task without changing its status. Writes a
+`progress.noted` event to the JSONL audit log. Does not require an active claim.
+
+**Inputs**
+
+| Parameter | Type     | Required |
+|-----------|----------|----------|
+| `task_id` | `string` | yes      |
+| `actor`   | `string` | yes      |
+| `notes`   | `string` | yes      |
+
+**Output**
+
+```json
+{
+  "recorded": true
+}
+```
+
+**Failure modes**
+
+- `ToolError` — task not found.
+- `ToolError` — state directory not found.
+
+**When to call**: to emit a mid-task checkpoint visible in the event log — for example,
+after completing one sub-step of a multi-step task, so the audit trail reflects partial
+progress.
+
+---
+
+### `submit_completion_evidence`
+
+Submits completion evidence for a task. Requires an active claim. Emits an
+`evidence.submitted` event that auto-releases the claim and transitions the task to
+`needs_review`. Mirrors `fakoli-state submit` from the CLI.
+
+**Inputs**
+
+| Parameter        | Type                    | Required | Default |
+|------------------|-------------------------|----------|---------|
+| `task_id`        | `string`                | yes      |         |
+| `actor`          | `string`                | yes      |         |
+| `commands_run`   | `list[string]`          | yes      |         |
+| `files_changed`  | `list[string]`          | yes      |         |
+| `output_excerpt` | `string \| null`        | no       | `null`  |
+| `pr_url`         | `string \| null`        | no       | `null`  |
+| `commit_sha`     | `string \| null`        | no       | `null`  |
+
+**Output**
+
+```json
+{
+  "evidence_id": "EV3A9F1C2D",
+  "task_status": "needs_review"
+}
+```
+
+`evidence_id` is an `"EV"` prefix followed by 8 uppercase hex characters, generated at
+call time.
+
+**Failure modes**
+
+- `ToolError` — task not found.
+- `ToolError` — no active claim found for the task (claim the task before submitting).
+- `ToolError` — `TransactionAborted` from the backend.
+- `ToolError` — state directory not found.
+
+**When to call**: when the agent's work is complete and it is ready to hand off to review.
+This is the last step in the execute loop before the agent exits.
+
+---
+
+### `update_task_status`
+
+Transitions a task to a new status. Only the following transitions are permitted:
+
+| From           | To allowed        |
+|----------------|-------------------|
+| `drafted`      | `ready`           |
+| `ready`        | `drafted`         |
+| `in_progress`  | `blocked`         |
+| `claimed`      | `blocked`         |
+| `blocked`      | `in_progress`     |
+
+Any other transition raises a `ToolError` with the current status and the allowed targets.
+Stale-claim reaping runs first.
+
+**Inputs**
+
+| Parameter   | Type                               | Required | Default |
+|-------------|------------------------------------|----------|---------|
+| `task_id`   | `string`                           | yes      |         |
+| `to_status` | `"drafted" \| "ready" \| "blocked" \| "in_progress"` | yes      |         |
+| `actor`     | `string`                           | yes      |         |
+| `reason`    | `string \| null`                   | no       | `null`  |
+
+**Output**
+
+```json
+{
+  "from_status": "drafted",
+  "to_status": "ready"
+}
+```
+
+**Failure modes**
+
+- `ToolError` — task not found.
+- `ToolError` — transition not allowed (message includes current status and valid targets).
+- `ToolError` — `TransactionAborted` from the backend.
+- `ToolError` — state directory not found.
+
+**When to call**: when a planner agent marks reviewed tasks as `ready` before a work wave,
+or when a sentinel marks an `in_progress` task as `blocked` after discovering a dependency
+that cannot be resolved yet.
+
+---
+
+### Workflow tools (v1.13.0)
+
+These eight tools complete the lifecycle so a non-Claude-Code MCP client can run the entire
+PRD-to-done flow without touching the CLI. All eight accept an optional `cwd` argument so a
+single MCP session can target multiple project roots. None of them perform git operations.
+
+---
+
+#### Bootstrap & status
+
+---
+
+### `init_project`
+
+Scaffolds a `.fakoli-state/` directory in the target project root. Creates the canonical
+layout (`config.yaml`, `state.db`, `events.jsonl`, `packets/`), seeds the project row, and
+emits `project.created` + `state.initialized`. Mirrors `fakoli-state init` minus git
+operations.
+
+**Inputs**
+
+| Parameter | Type             | Required | Default        |
+|-----------|------------------|----------|----------------|
+| `name`    | `string \| null` | no       | basename of `cwd` |
+| `cwd`     | `string \| null` | no       | `Path.cwd()`   |
+
+**Output**
+
+```json
+{
+  "project_id": "from-mcp",
+  "project_name": "From MCP",
+  "state_dir": "/abs/path/.fakoli-state",
+  "created": true
+}
+```
+
+**Failure modes**
+
+- `ToolError` — directory is the plugin root (refuses to init inside the plugin).
+- `ToolError` — `.fakoli-state/` already exists (use CLI `init --force` to reinit).
+- `ToolError` — scaffold I/O failure.
+
+**When to call**: the very first MCP call against a fresh project root.
+
+---
+
+### `get_project_status`
+
+Returns PRD status, task counts by state, active claims, ready-queue depth, and
+initialization flag. Mirrors `fakoli-state status`. Returns `initialized: false` with empty
+counts when `.fakoli-state/` is absent — does **not** raise. Use this as the canonical
+"am I bootstrapped?" probe.
+
+**Inputs**
+
+| Parameter | Type             | Required | Default      |
+|-----------|------------------|----------|--------------|
+| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+
+**Output**
+
+```json
+{
+  "initialized": true,
+  "project_id": "proj-test",
+  "project_name": "Status Project",
+  "state_dir": "/abs/path/.fakoli-state",
+  "prd_status": "reviewed",
+  "task_counts": { "proposed": 0, "drafted": 0, "...": "..." },
+  "total_tasks": 3,
+  "ready_queue_depth": 2,
+  "active_claim_count": 1
+}
+```
+
+`get_project_status` differs from `get_project_summary` in two ways: it accepts an explicit
+`cwd`, and it answers gracefully when the project is not initialized.
+
+**Failure modes**
+
+None — always returns a response.
+
+---
+
+#### PRD lifecycle
+
+---
+
+### `parse_prd`
+
+Reads `.fakoli-state/prd.md` (or `file=` path), parses via
+`fakoli_state.planning.template.parse_prd`, and emits `prd.parsed` on success. Parse errors
+are returned in the response (not raised) so the caller can decide whether to fix and retry.
+Mirrors `fakoli-state prd parse`.
+
+**Inputs**
+
+| Parameter | Type             | Required | Default                          |
+|-----------|------------------|----------|----------------------------------|
+| `file`    | `string \| null` | no       | `<cwd>/.fakoli-state/prd.md`     |
+| `cwd`     | `string \| null` | no       | `Path.cwd()`                     |
+
+**Output**
+
+```json
+{
+  "prd_status": "draft",
+  "requirement_count": 2,
+  "feature_count": 1,
+  "task_count": 2,
+  "errors": [],
+  "prd_path": "/abs/path/.fakoli-state/prd.md"
+}
+```
+
+When `errors` is non-empty, no `prd.parsed` event is emitted (matching the CLI which exits 1
+before applying); the caller should fix the PRD and re-call.
+
+**Failure modes**
+
+- `ToolError` — project not initialized.
+- `ToolError` — PRD file not found at the resolved path.
+- `ToolError` — PRD file unreadable.
+
+**When to call**: right after the user (or another agent) writes `prd.md`.
+
+---
+
+### `review_prd`
+
+Transitions the PRD: `draft → reviewed` (default) or `reviewed → approved` (when
+`approve=true`). Emits `prd.reviewed` or `prd.approved`. Mirrors `fakoli-state prd review`
+and `prd review --approve`.
+
+**Inputs**
+
+| Parameter  | Type             | Required | Default   |
+|------------|------------------|----------|-----------|
+| `approve`  | `bool`           | no       | `false`   |
+| `reviewer` | `string`         | no       | `"human"` |
+| `notes`    | `string \| null` | no       | `null`    |
+| `cwd`      | `string \| null` | no       | `Path.cwd()` |
+
+**Output**
+
+```json
+{
+  "from_status": "draft",
+  "to_status": "reviewed",
+  "reviewer": "alice"
+}
+```
+
+**Failure modes**
+
+- `ToolError` — no PRD found (run `parse_prd` first).
+- `ToolError` — wrong starting status for the requested transition.
+- `ToolError` — project not initialized.
+
+---
+
+#### Planning & scoring
+
+---
+
+### `plan_tasks`
+
+Runs the planner pipeline against the current PRD: emits `feature.created` and
+`task.created` events, runs dependency + conflict-group inference, then promotes
+`proposed → drafted`. Mirrors `fakoli-state plan` in deterministic mode (no LLM
+augmentation — agents that need LLM enrichment must use the CLI).
+
+**Inputs**
+
+| Parameter | Type             | Required | Default      |
+|-----------|------------------|----------|--------------|
+| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+
+**Output**
+
+```json
+{
+  "feature_count": 1,
+  "task_count": 2,
+  "conflict_group_count": 0,
+  "warnings": []
+}
+```
+
+`warnings` mirrors the parse errors surfaced as warnings during plan (matching the CLI).
+
+**Failure modes**
+
+- `ToolError` — project not initialized.
+- `ToolError` — PRD file not found.
+
+**When to call**: right after `review_prd` (draft → reviewed) so the deterministic plan
+has the latest PRD content.
+
+---
+
+### `score_tasks`
+
+Runs the rule-based scoring engine on a single task or all unscored tasks. Emits
+`task.scored` per scored task. Mirrors `fakoli-state score [TASK_ID]` in deterministic
+mode.
+
+**Inputs**
+
+| Parameter | Type             | Required | Default      |
+|-----------|------------------|----------|--------------|
+| `task_id` | `string \| null` | no       | `null` (score all unscored) |
+| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+
+**Output**
+
+```json
+{
+  "scored": [
+    {
+      "task_id": "T001",
+      "complexity": 3,
+      "parallelizability": 4,
+      "context_load": 2,
+      "blast_radius": 3,
+      "review_risk": 2,
+      "agent_suitability": 4
+    }
+  ],
+  "skipped_already_scored": 0
+}
+```
+
+**Failure modes**
+
+- `ToolError` — `task_id` provided but not found.
+- `ToolError` — project not initialized.
+
+---
+
+### `review_tasks`
+
+Promotes tasks through `drafted → reviewed → ready` using the gate functions in
+`fakoli_state.state.transitions`. Mirrors `fakoli-state review tasks`. Returns the lists
+of promoted task IDs and any tasks blocked by a gate (with the gate's failure reason).
+
+**Inputs**
+
+| Parameter | Type             | Required | Default      |
+|-----------|------------------|----------|--------------|
+| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+
+**Output**
+
+```json
+{
+  "promoted_to_reviewed": ["T001", "T002"],
+  "promoted_to_ready":    ["T001", "T002"],
+  "blocked": []
+}
+```
+
+A task that fails the `drafted → reviewed` gate (missing acceptance criteria or
+verification commands) appears in `blocked` instead of either promotion list.
+
+**Failure modes**
+
+- `ToolError` — project not initialized.
+
+---
+
+#### Review gate
+
+---
+
+### `apply_review_decision`
+
+Applies a human review decision to a task in `needs_review` status. With `approve=true` the
+task moves through `needs_review → accepted → done` (the backend handles the auto-promotion).
+With `approve=false` (and a non-empty `reason`) the task is rejected — typically returned
+to `drafted` for rework. Mirrors `fakoli-state apply TASK_ID --approve` and `--reject
+--reason TEXT`.
+
+**Inputs**
+
+| Parameter   | Type             | Required | Default   |
+|-------------|------------------|----------|-----------|
+| `task_id`   | `string`         | yes      |           |
+| `approve`   | `bool`           | yes      |           |
+| `reviewer`  | `string`         | no       | `"human"` |
+| `reason`    | `string \| null` | no       | `null` (required when `approve=false`) |
+| `cwd`      | `string \| null` | no       | `Path.cwd()` |
+
+**Output**
+
+```json
+{
+  "task_id": "T001",
+  "decision": "accepted",
+  "from_status": "needs_review",
+  "to_status": "done",
+  "reviewer": "alice"
+}
+```
+
+`to_status` reflects the backend's post-promotion status (typically `done` on approval).
+
+**Failure modes**
+
+- `ToolError` — task not found.
+- `ToolError` — task not in `needs_review` status (submit evidence first).
+- `ToolError` — `approve=false` without a `reason`.
+- `ToolError` — project not initialized.
+
+---
+
+### Decision resolution (v1.14.0)
+
+One read-only tool that surfaces unresolved PRD items so the `resolve-decisions` skill can
+drive Q&A with the user. Detection logic lives in `fakoli_state.planning.decisions` and is
+shared with the CLI subcommand `fakoli-state prd find-decisions`.
+
+---
+
+### `find_decisions`
+
+Scans the PRD for three categories of items needing a human decision:
+
+1. **`needs_decision`** — inline `[NEEDS DECISION]` markers anywhere in the raw markdown
+   (with an optional `: <question>` payload).
+2. **`open_question`** — items under the `## Open Questions` section (skipping
+   "none identified" placeholders).
+3. **`missing_field`** — tasks in the backend whose `acceptance_criteria` or
+   `verification.commands` are empty (gates the review pipeline would block on).
+
+The tool is read-only — no events are emitted. It is the sibling of `parse_prd` intended to
+power the `resolve-decisions` skill's Q&A loop. Mirrors `fakoli-state prd find-decisions`.
+
+**Inputs**
+
+| Parameter | Type             | Required | Default      |
+|-----------|------------------|----------|--------------|
+| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+
+**Output**
+
+```json
+{
+  "decisions": [
+    {
+      "id": "ND-001",
+      "kind": "needs_decision",
+      "location": "Summary (line 5)",
+      "text": "which format?",
+      "context_paragraph": "The system must serialize inputs [NEEDS DECISION: which format?].",
+      "suggested_resolution_field": "inline rewrite"
+    }
+  ],
+  "counts_by_kind": {
+    "needs_decision": 1,
+    "open_question": 0,
+    "missing_field": 0
+  },
+  "total": 1
+}
+```
+
+Stable order: all `needs_decision` first (in source order), then `open_question`
+(in PRD order), then `missing_field` (in task-ID order). Resolution is iterative — the
+agent walks the list and drives one Q&A per entry, so ordering shapes the conversation.
+
+**Failure modes**
+
+- `ToolError` — project not initialized.
+- `ToolError` — PRD file missing. (Mirrors `parse_prd` rather than returning an empty
+  response, so a fresh project doesn't silently look "resolved".)
+
+**CLI equivalent**
+
+```bash
+fakoli-state prd find-decisions
+fakoli-state prd find-decisions --file path/to/prd.md
+```
+
+**When to call**: after `parse_prd` succeeds but before `review_prd` or `plan_tasks`, so
+unresolved markers and missing fields are surfaced and resolved before downstream tools
+treat the PRD as ready.
+
+---
+
+## Error model
+
+Every failure raises a FastMCP `ToolError`. The message is a human-readable string
+describing what failed, what was expected, and what the agent should do next. There is no
+outer envelope — `ToolError` is surfaced directly to the MCP client.
+
+Example error message from `claim_task` when the PRD gate fires:
+
+```
+Cannot claim task 'T012': PRD is in 'draft' status. The PRD must be reviewed or approved
+before tasks can be claimed.
+```
+
+Example error message from `update_task_status` when the transition is invalid:
+
+```
+Cannot transition task 'T012' from 'done' to 'ready'. Allowed targets from 'done': none.
+This tool supports only: drafted↔ready and blocked toggle.
+```
+
+The spec describes a structured `{code, message, target_id, payload}` envelope for future
+versions; the current implementation uses the `ToolError` string directly. Agents should
+treat any `ToolError` as a terminal condition for the current operation and log the message
+before deciding whether to retry, release, or escalate.
+
+---
+
+## Integration with fakoli-crew and fakoli-flow
+
+**fakoli-crew agents** gain access to all 22 MCP tools when fakoli-state is installed
+alongside fakoli-crew. The standard work loop for a crew agent (welder, smith, guido) is:
+
+1. `get_next_task` — find the highest-priority claimable task.
+2. `check_conflicts` — verify proposed files do not overlap active claims.
+3. `claim_task` — acquire the lease.
+4. `generate_work_packet` — render the structured prompt.
+5. Do the work; call `renew_claim` every ~5 minutes.
+6. `submit_progress` for mid-task checkpoints (optional).
+7. `submit_completion_evidence` — release the claim and move the task to `needs_review`.
+
+The sentinel agent uses `get_project_summary` and `list_tasks` (filtered by
+`status="needs_review"`) to find tasks awaiting verification, then calls
+`update_task_status` to set a task `blocked` if evidence is insufficient.
+
+**fakoli-flow skills** use the MCP tools when fakoli-state is present:
+
+- `flow:execute` reads `get_next_task` and calls `claim_task` before dispatching each
+  wave, replacing the markdown-status-file convention.
+- `flow:verify` filters on `needs_review` tasks via `list_tasks` before dispatching the
+  sentinel.
+- `flow:finish` uses `update_task_status` to drive accepted tasks toward `done` before
+  the merge or PR decision.
+
+When fakoli-state is absent, fakoli-flow and fakoli-crew continue to operate via their
+existing markdown-status conventions. Integration is strictly opt-in.
+
+See [`specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md) for the
+full integration contract.
+
+---
+
+## Stale-claim reaping
+
+Every mutating tool (`claim_task`, `release_task`, `renew_claim`, `submit_progress`,
+`submit_completion_evidence`, `update_task_status`) and `get_project_summary` call
+`detect_and_release_stale` before performing their operation. This is automatic — agents do
+not need to trigger reaping manually.
+
+Reaping scans all active claims, identifies those whose `lease_expires_at` timestamp has
+passed, marks them stale, and returns the associated tasks to the `ready` pool. If the
+reaper itself throws an exception, the error is swallowed and the main operation proceeds
+(best-effort, never blocking).
+
+The practical consequence: an agent that calls `get_next_task` will never receive a task
+whose claim expired seconds ago — the expired claim is cleared in the same call before the
+candidate set is built.
+
+---
+
+## See also
+
+- [`specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md) — canonical
+  design spec: data model, task lifecycle, phasing plan, integration contracts.
+- `hooks.md` — claim discipline hooks: `check-claim.sh`, `record-file-change.sh`,
+  `capture-evidence.sh`, `detect-state.sh`. (Landing in Phase 6 documentation pass.)
+- `integration-flow-crew.md` — detailed integration contract between fakoli-state,
+  fakoli-flow, and fakoli-crew. (Planned.)
