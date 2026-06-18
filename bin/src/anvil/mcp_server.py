@@ -29,6 +29,78 @@ from pydantic import BaseModel, ConfigDict, Field
 mcp: FastMCP = FastMCP("anvil")
 
 # ---------------------------------------------------------------------------
+# Planning vs execution surface split (audit item L2)
+# ---------------------------------------------------------------------------
+#
+# The 24 tools fall into two groups:
+#
+#   EXECUTION (14) — the turn-to-turn loop an agent runs while doing work:
+#       get_next_task, claim_task, release_task, renew_claim, submit_progress,
+#       submit_completion_evidence, update_task_status, get_task,
+#       get_project_status, get_project_summary, list_tasks, check_conflicts,
+#       generate_work_packet, get_dependency_graph
+#
+#   PLANNING (10) — one-shot bootstrap/plan/review operations run rarely (often
+#       once per project), tagged ``planning`` below:
+#       init_project, parse_prd, review_prd, plan_tasks, score_tasks,
+#       review_tasks, apply_review_decision, edit_dependencies, find_decisions,
+#       describe_surface
+#
+# Every planning tool carries the ``planning`` tag. The live stdio server hides
+# the planning surface BY DEFAULT (``apply_surface_gate`` at startup) so a steady-
+# state execution client never pays the ~1.2k-token planning schema cost on every
+# turn. Setting ``ANVIL_MCP_PLANNING`` (truthy) keeps all 24 tools on the wire —
+# use it for the planning phase, or run a second server entry with the flag set.
+#
+# IMPORTANT: the gate is applied ONLY when the live server starts (see
+# ``apply_surface_gate``), never at import time. So ``from anvil.mcp_server import
+# mcp`` still sees all 24 registered tools, and every introspection surface that
+# reports "what the engine can do" — ``describe_surface``, ``anvil describe``,
+# ``mcp_tool_names()``, the ``--help`` tool list, the Docker catalog smoke test —
+# is unchanged. Only the per-turn wire surface of the *default* execution server
+# shrinks. No tool is removed; all 24 remain reachable.
+
+PLANNING_TAG = "planning"
+
+# Env flag that opts a live server back into the full 24-tool surface.
+_PLANNING_ENV = "ANVIL_MCP_PLANNING"
+
+
+def _planning_surface_enabled(env: dict[str, str] | None = None) -> bool:
+    """Return True when the planning surface should be exposed on the wire.
+
+    Resolves from the ``ANVIL_MCP_PLANNING`` env var. Truthy values
+    (``1``/``true``/``yes``/``on``, case-insensitive) enable the full 24-tool
+    surface; anything else (incl. unset) yields the lean execution-only default.
+    """
+    import os
+
+    source = os.environ if env is None else env
+    raw = source.get(_PLANNING_ENV, "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def apply_surface_gate(
+    server: FastMCP = mcp, env: dict[str, str] | None = None
+) -> bool:
+    """Hide the planning tool surface on *server* unless the env flag opts in.
+
+    Called once at live-server startup (``main``) and by the context audit so the
+    measured/served surface matches. Returns True when the planning surface is
+    exposed (no gate applied), False when it was hidden.
+
+    Idempotent and reversible: re-enables the planning tags first, then disables
+    them when the flag is off, so calling it twice (or after a prior enable)
+    converges to the same state.
+    """
+    if _planning_surface_enabled(env):
+        # Full surface: ensure planning tools are visible (covers a prior gate).
+        server.enable(tags={PLANNING_TAG})
+        return True
+    server.disable(tags={PLANNING_TAG})
+    return False
+
+# ---------------------------------------------------------------------------
 # Return-type Pydantic models (what each tool returns)
 # ---------------------------------------------------------------------------
 
@@ -1174,7 +1246,7 @@ def get_dependency_graph(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def edit_dependencies(
     actor: str,
     add: list[list[str]] | None = None,
@@ -1334,7 +1406,7 @@ class InitProjectResponse(BaseModel):
     created: bool
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def init_project(
     name: str | None = None,
     cwd: str | None = None,
@@ -1535,7 +1607,7 @@ class ParsePrdResponse(BaseModel):
     prd_path: str
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def parse_prd(
     file: str | None = None,
     cwd: str | None = None,
@@ -1663,7 +1735,7 @@ class ReviewPrdResponse(BaseModel):
     reviewer: str
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def review_prd(
     approve: bool = False,
     reviewer: str = "human",
@@ -1774,7 +1846,7 @@ class PlanTasksResponse(BaseModel):
     pruned_feature_ids: list[str] = []
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def plan_tasks(
     cwd: str | None = None,
     use_llm: bool = True,
@@ -2156,7 +2228,7 @@ class ScoreTasksResponse(BaseModel):
     expansion_queue: list[ExpansionQueueEntry]
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def score_tasks(
     task_id: str | None = None,
     cwd: str | None = None,
@@ -2327,7 +2399,7 @@ class ReviewTasksResponse(BaseModel):
     blocked: list[BlockedTaskEntry]
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
     """Promote tasks through drafted → reviewed → ready, applying the review
     gates. Returns the promoted task IDs per stage plus any tasks a gate
@@ -2453,7 +2525,7 @@ class ApplyReviewResponse(BaseModel):
     next_ready: NextReadyTask | None = None
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def apply_review_decision(
     task_id: str,
     approve: bool,
@@ -2629,7 +2701,7 @@ class FindDecisionsResponse(BaseModel):
     total: int
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
     """Scan the PRD for items needing a human decision (read-only; emits no
     events). Walks three sources: inline ``[NEEDS DECISION]`` markers,
@@ -2729,7 +2801,7 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(tags={PLANNING_TAG})
 def describe_surface() -> dict[str, Any]:
     """Return a machine-readable manifest of the anvil command surface: the CLI
     subcommands and MCP tool names this engine exposes, plus engine version,
@@ -2781,6 +2853,15 @@ def _help_text() -> str:
         "                     current working directory). In Docker, bind-mount the",
         "                     host project here, e.g. -v \"$PWD:/project\" -e",
         "                     ANVIL_ROOT=/project.",
+        "  ANVIL_MCP_PLANNING  When truthy (1/true/yes/on), the live server",
+        "                     exposes the full 24-tool surface. By DEFAULT the 10",
+        "                     one-shot planning tools (init_project, parse_prd,",
+        "                     review_prd, plan_tasks, score_tasks, review_tasks,",
+        "                     apply_review_decision, edit_dependencies,",
+        "                     find_decisions, describe_surface) are hidden from the",
+        "                     per-turn wire surface to cut always-on context; the",
+        "                     14 execution tools remain. All 24 are always",
+        "                     registered (this list reflects the full surface).",
         "",
         f"Registered tools ({len(tools)}):",
     ]
@@ -2817,6 +2898,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"anvil-mcp: unrecognized arguments: {' '.join(unknown)}", file=sys.stderr)
         print(_USAGE, file=sys.stderr)
         return 2
+
+    # L2: hide the one-shot planning tool surface on the live wire UNLESS the
+    # operator opts back in via ANVIL_MCP_PLANNING. This shrinks the always-on
+    # per-turn cost for the common execution client without removing any tool —
+    # all 24 stay registered (introspection/--help/describe unchanged) and the
+    # planning 10 return the moment the flag is set. Applied here, not at import,
+    # so only the live server's wire surface is affected.
+    if not apply_surface_gate(mcp):
+        print(
+            "anvil-mcp: planning tools hidden (execution surface only). "
+            f"Set {_PLANNING_ENV}=1 to expose the full 24-tool surface for "
+            "planning.",
+            file=sys.stderr,
+        )
 
     mcp.run()
     return 0

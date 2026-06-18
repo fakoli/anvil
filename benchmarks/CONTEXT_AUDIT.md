@@ -18,6 +18,53 @@ yields ~7,800 always-on — same shape, slightly higher).
 
 ---
 
+## L2 — planning surface is hidden by default (current numbers)
+
+The MCP server ships **24 tools** but splits them into two surfaces:
+
+- **Execution surface (14 tools, always-on):** the turn-to-turn loop an agent
+  runs while doing work — `get_next_task`, `claim_task`, `release_task`,
+  `renew_claim`, `submit_progress`, `submit_completion_evidence`,
+  `update_task_status`, `get_task`, `get_project_status`, `get_project_summary`,
+  `list_tasks`, `check_conflicts`, `generate_work_packet`,
+  `get_dependency_graph`.
+- **Planning surface (10 tools, gated):** one-shot bootstrap/plan/review
+  operations run rarely — `init_project`, `parse_prd`, `review_prd`,
+  `plan_tasks`, `score_tasks`, `review_tasks`, `apply_review_decision`,
+  `edit_dependencies`, `find_decisions`, `describe_surface`. Tagged `planning`
+  and **hidden from the per-turn wire by default**.
+
+The live server hides the planning surface unless `ANVIL_MCP_PLANNING` is truthy
+(`1`/`true`/`yes`/`on`). Set it for the planning phase (or run a second server
+entry with the flag) to get all 24 tools back. **No tool is removed** — all 24
+stay registered; `anvil describe`, `--help`, and the Docker catalog smoke test
+still report the full 24-tool surface (they read the registry, not the gated
+wire). Only the *default execution client's* per-turn schema payload shrinks.
+
+**Default (execution-only) always-on footprint — measured:**
+
+| Category | Items | Tokens | Share |
+|----------|------:|-------:|------:|
+| MCP tool schemas (execution surface, default) | 14 | **1,455** | 59.8% |
+| Skill descriptions (registry) | 8 | **494** | 20.3% |
+| Agent descriptions (registry) | 5 | **465** | 19.1% |
+| Hook injection (SessionStart) | 1 | **19** | 0.8% |
+| Command descriptions | 0 | **0** | 0.0% |
+| **ALWAYS-ON GRAND TOTAL** | — | **2,433** | 100% |
+
+**Before L2** (all 24 tools on the wire): always-on **4,214 tok**, MCP **3,236
+tok**. **After L2** (planning hidden): always-on **2,433 tok**, MCP **1,455
+tok** — a **−1,781 tok (−42%) always-on** cut, driven entirely by dropping the
+10 planning schemas (`apply_review_decision` 309, `plan_tasks` 270,
+`score_tasks` 197, … were the heaviest). With `ANVIL_MCP_PLANNING=1` the full
+24-tool surface returns and the footprint matches the pre-L2 numbers.
+
+> The historical analysis below predates L2 and the L1 docstring trim; it is
+> kept for the before/after narrative. The numbers in *this* section are the
+> current `context_audit.py` output (which now measures the gated default).
+
+---
+
 ## What "always-on" means
 
 The **always-on footprint** is the text that sits in an agent's context the

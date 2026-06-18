@@ -217,14 +217,21 @@ def _mcp_tool_wire_schemas() -> list[dict] | None:
     them to the client (name + description + inputSchema). This is the
     ground-truth always-on payload Claude Code receives.
 
+    L2: the audit measures the DEFAULT live-server surface — i.e. with the
+    planning gate applied (``ANVIL_MCP_PLANNING`` unset). The helper calls
+    ``apply_surface_gate`` before listing so the always-on subtotal reflects what
+    a steady-state execution client actually pays per turn (the lean 14-tool
+    surface), not the full 24-tool catalog.
+
     Strategy: shell out to the plugin's own venv via `uv run` so we get the
     real FastMCP serialization. Returns None if the runtime is unavailable
     (e.g. uv not installed) so the caller can fall back to a static estimate.
     """
     helper = (
         "import json,asyncio\n"
-        "from anvil.mcp_server import mcp\n"
+        "from anvil.mcp_server import mcp, apply_surface_gate\n"
         "async def m():\n"
+        "    apply_surface_gate(mcp, env={})  # default: planning hidden\n"
         "    tools = await mcp.list_tools()\n"
         "    out=[]\n"
         "    for t in tools:\n"
@@ -259,13 +266,18 @@ def _mcp_tool_wire_schemas() -> list[dict] | None:
 
 
 def collect_mcp_schemas() -> tuple[Category, str]:
-    """ALWAYS-ON: the 22 MCP tool schemas (name + description + input schema)
-    are injected into context whenever the MCP server is connected.
+    """ALWAYS-ON: the MCP tool schemas (name + description + input schema) are
+    injected into context whenever the MCP server is connected.
+
+    L2: this measures the DEFAULT live surface — planning tools hidden — so the
+    subtotal is the lean execution surface a steady-state client pays per turn.
+    The 10 planning tools are NOT counted here (they only appear on the wire when
+    ``ANVIL_MCP_PLANNING`` is set, i.e. during the planning phase).
 
     Each tool is measured as the COMPACT JSON wire form (no whitespace) — this
     is what the model actually pays for. We tokenize the per-tool JSON.
     """
-    cat = Category("MCP tool schemas (22 tools)", always_on=True)
+    cat = Category("MCP tool schemas (execution surface, default)", always_on=True)
     schemas = _mcp_tool_wire_schemas()
     if schemas is None:
         note = (
@@ -277,7 +289,10 @@ def collect_mcp_schemas() -> tuple[Category, str]:
     for s in schemas:
         wire = json.dumps(s, separators=(",", ":"), ensure_ascii=False)
         cat.items.append(measure(s["name"], wire))
-    note = f"Measured live from FastMCP ({len(schemas)} tools)."
+    note = (
+        f"Measured live from FastMCP — {len(schemas)} execution tools (planning "
+        "tools hidden by default; set ANVIL_MCP_PLANNING=1 to expose all 24)."
+    )
     return cat, note
 
 

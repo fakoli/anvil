@@ -63,6 +63,19 @@ anvil apply T001           # apply the review verdict
 (Exact tool names mirror `bin/src/anvil/mcp_server.py`; CLI commands mirror
 `bin/src/anvil/cli/__init__.py`. Run `anvil describe --json` for the live list.)
 
+### Execution vs planning surface (MCP)
+
+To keep the per-turn context lean, the MCP server exposes only the **14
+execution tools** by default — the turn-to-turn loop (next/claim/packet/submit/
+status/conflicts/deps). The **10 one-shot planning tools** (`init_project`,
+`parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
+`apply_review_decision`, `edit_dependencies`, `find_decisions`,
+`describe_surface`) are **hidden by default** and re-appear when the server is
+started with **`ANVIL_MCP_PLANNING=1`** (or `true`/`yes`/`on`). Nothing is
+removed — every capability stays reachable via the CLI command in the same row,
+and the full 24-tool surface returns the moment the env flag is set. Use it for
+the planning phase; the steady-state execution loop needs none of the 10.
+
 ## Notes
 - Claude Code adds SessionStart/PreToolUse/PostToolUse **hooks**; these are
   Claude-Code-only and have no cross-harness equivalent. Every capability is

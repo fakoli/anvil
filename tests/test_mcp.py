@@ -326,11 +326,30 @@ def _run(coro: Any) -> Any:
 
 
 # ===========================================================================
-# Test: list_tools — all 13 registered
+# Test: list_tools — all 24 registered (full surface, planning gate off)
 # ===========================================================================
 
+# The 10 one-shot planning tools, tagged ``planning`` and hidden from the live
+# wire surface by default (L2). The remaining 14 are the always-on execution
+# surface.
+_PLANNING_TOOLS = {
+    "init_project", "parse_prd", "review_prd", "plan_tasks", "score_tasks",
+    "review_tasks", "apply_review_decision", "edit_dependencies",
+    "find_decisions", "describe_surface",
+}
+_EXECUTION_TOOLS = {
+    "get_project_summary", "list_tasks", "get_task", "get_next_task",
+    "claim_task", "release_task", "renew_claim", "generate_work_packet",
+    "submit_progress", "submit_completion_evidence", "check_conflicts",
+    "get_dependency_graph", "update_task_status", "get_project_status",
+}
+_ALL_TOOLS = _PLANNING_TOOLS | _EXECUTION_TOOLS
+
+
 class TestListTools:
-    def test_list_tools_returns_all_twenty_one(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_list_tools_returns_all_twenty_four(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The autouse _full_mcp_surface fixture guarantees the planning surface
+        # is enabled, so the in-process client sees every registered tool.
         _init_state_dir(tmp_path)
         monkeypatch.chdir(tmp_path)
 
@@ -340,19 +359,113 @@ class TestListTools:
                 return {t.name for t in tools}
 
         names = _run(run())
-        expected = {
-            # Original 13
-            "get_project_summary", "list_tasks", "get_task", "get_next_task",
-            "claim_task", "release_task", "renew_claim",
-            "generate_work_packet", "submit_progress", "submit_completion_evidence",
-            "check_conflicts", "get_dependency_graph", "update_task_status",
-            # v1.13.0 workflow tools
-            "init_project", "get_project_status", "parse_prd", "review_prd",
-            "plan_tasks", "score_tasks", "review_tasks", "apply_review_decision",
-            # v1.14.0 decision resolution
-            "find_decisions",
-        }
-        assert expected <= names, f"Missing tools: {expected - names}"
+        assert _ALL_TOOLS <= names, f"Missing tools: {_ALL_TOOLS - names}"
+        assert len(_ALL_TOOLS) == 24
+
+
+# ===========================================================================
+# Test: planning-surface gate (L2) — execution vs planning split
+# ===========================================================================
+
+
+class TestPlanningSurfaceGate:
+    """The planning surface is hidden from the live wire by default and exposed
+    only when ANVIL_MCP_PLANNING is truthy — without removing any tool from the
+    registry. Calls re-apply the gate via ``apply_surface_gate``; the autouse
+    fixture restores the full surface afterward."""
+
+    def _wire_names(self) -> set[str]:
+        async def run() -> set[str]:
+            async with Client(mcp) as c:
+                return {t.name for t in await c.list_tools()}
+
+        return _run(run())
+
+    def test_default_hides_planning_tools(self) -> None:
+        from anvil.mcp_server import apply_surface_gate
+
+        exposed = apply_surface_gate(mcp, env={})
+        assert exposed is False
+        names = self._wire_names()
+        assert _EXECUTION_TOOLS <= names, f"Missing exec tools: {_EXECUTION_TOOLS - names}"
+        assert names.isdisjoint(_PLANNING_TOOLS), (
+            f"Planning tools leaked into default surface: {names & _PLANNING_TOOLS}"
+        )
+        assert len(names) == 14
+
+    def test_env_flag_exposes_full_surface(self) -> None:
+        from anvil.mcp_server import apply_surface_gate
+
+        exposed = apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
+        assert exposed is True
+        names = self._wire_names()
+        assert _ALL_TOOLS <= names
+        assert len(names & _ALL_TOOLS) == 24
+
+    @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on", "On"])
+    def test_truthy_values_enable(self, val: str) -> None:
+        from anvil.mcp_server import _planning_surface_enabled
+
+        assert _planning_surface_enabled({"ANVIL_MCP_PLANNING": val}) is True
+
+    @pytest.mark.parametrize("val", ["", "0", "false", "no", "off", "  ", "nope"])
+    def test_falsy_or_unset_values_disable(self, val: str) -> None:
+        from anvil.mcp_server import _planning_surface_enabled
+
+        assert _planning_surface_enabled({"ANVIL_MCP_PLANNING": val}) is False
+        assert _planning_surface_enabled({}) is False
+
+    def test_gate_is_idempotent_and_reversible(self) -> None:
+        from anvil.mcp_server import apply_surface_gate
+
+        # Disable twice, then enable, then disable — converges each time.
+        apply_surface_gate(mcp, env={})
+        apply_surface_gate(mcp, env={})
+        assert len(self._wire_names()) == 14
+        apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
+        assert len(self._wire_names() & _ALL_TOOLS) == 24
+        apply_surface_gate(mcp, env={})
+        assert len(self._wire_names()) == 14
+
+    def test_gated_planning_tool_is_uncallable_but_returns_when_enabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.mcp_server import apply_surface_gate
+
+        _init_state_dir(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        # Gated: describe_surface (a planning tool) must be unreachable.
+        apply_surface_gate(mcp, env={})
+
+        async def call_gated() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("describe_surface", {})
+
+        with pytest.raises(ToolError):
+            _run(call_gated())
+
+        # Enabled: it returns the full 24-tool manifest (introspection is
+        # registry-based, so it reports the whole engine surface).
+        apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
+
+        async def call_enabled() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("describe_surface", {}))
+
+        manifest = _run(call_enabled())
+        assert manifest["mcp"]["count"] == 24
+
+    def test_registry_still_reports_all_24_when_gated(self) -> None:
+        # describe/mcp_tool_names introspect the registry, NOT the wire surface,
+        # so the documented "full engine surface" never shrinks under the gate.
+        from anvil.cli.describe import mcp_tool_names
+        from anvil.mcp_server import apply_surface_gate
+
+        apply_surface_gate(mcp, env={})
+        names = set(mcp_tool_names())
+        assert _ALL_TOOLS <= names
+        assert len(names) == 24
 
 
 # ===========================================================================
