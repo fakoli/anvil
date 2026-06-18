@@ -199,17 +199,41 @@ def packet(
 # ---------------------------------------------------------------------------
 
 
+def _split_repeatable(values: list[str]) -> list[str]:
+    """Normalize a repeatable comma-aware option into a clean list of values.
+
+    The flag is repeatable (``multiple=True`` semantics), so each occurrence is
+    one value. When the flag is passed exactly once, its value is split on
+    commas to preserve backward compatibility with the legacy comma-joined
+    form. When it is passed more than once, each occurrence is kept verbatim so
+    that values containing embedded commas survive intact (CL-2).
+    """
+    if len(values) == 1:
+        return [v.strip() for v in values[0].split(",") if v.strip()]
+    return [v.strip() for v in values if v.strip()]
+
+
 def submit(
     task_id: str = typer.Argument(..., help="Task ID to submit evidence for (e.g. T001)."),  # noqa: B008
-    commands: str = typer.Option(  # noqa: B008
+    commands: list[str] = typer.Option(  # noqa: B008
         ...,
         "--commands",
-        help="Comma-separated verification commands that were run.",
+        help=(
+            "Verification command(s) that were run. Repeatable: pass --commands "
+            "once per command (one occurrence == one value, so commands with "
+            "embedded commas survive intact). A single occurrence is still split "
+            "on commas for backward compatibility."
+        ),
     ),
-    files_changed: str = typer.Option(  # noqa: B008
+    files_changed: list[str] = typer.Option(  # noqa: B008
         ...,
         "--files-changed",
-        help="Comma-separated file paths modified.",
+        help=(
+            "File path(s) modified. Repeatable: pass --files-changed once per "
+            "path (one occurrence == one value, so paths with embedded commas "
+            "survive intact). A single occurrence is still split on commas for "
+            "backward compatibility."
+        ),
     ),
     output_file: Path | None = typer.Option(  # noqa: B008
         None,
@@ -301,9 +325,13 @@ def submit(
             )
             raise typer.Exit(code=1)
 
-        # Parse comma-separated arguments.
-        commands_list = [c.strip() for c in commands.split(",") if c.strip()]
-        files_list = [f.strip() for f in files_changed.split(",") if f.strip()]
+        # Parse repeatable / comma-separated arguments. --commands and
+        # --files-changed are repeatable (one occurrence == one value), so a
+        # value containing commas survives intact when the flag is repeated.
+        # A single occurrence is still split on commas for backward
+        # compatibility with the legacy comma-joined form (CL-2).
+        commands_list = _split_repeatable(commands)
+        files_list = _split_repeatable(files_changed)
         screenshots_list = (
             [p.strip() for p in screenshots.split(",") if p.strip()]
             if screenshots

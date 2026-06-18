@@ -10,6 +10,7 @@ import typer
 
 from anvil import __version__
 from anvil.cli.claim import claim, next, release, renew
+from anvil.cli.conflicts import conflicts
 from anvil.cli.describe import describe
 from anvil.cli.doctor import doctor
 from anvil.cli.drift import drift
@@ -94,6 +95,7 @@ app.command()(describe)
 app.command()(scan)
 app.command()(drift)
 app.command()(graph)
+app.command()(conflicts)
 app.command()(doctor)
 app.command()(plan)
 app.command()(score)

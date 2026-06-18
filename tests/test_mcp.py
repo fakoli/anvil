@@ -3058,3 +3058,275 @@ class TestPlanTasksOrphanPrune:
         resp = _run(re_plan())
         assert "T002" in resp["pruned_task_ids"]
         assert self._list_task_ids(tmp_path) == {"T001"}
+
+
+# ===========================================================================
+# Audit-trail integrity: empty/whitespace actor guard (_require_actor)
+# ===========================================================================
+
+
+class TestRequireActor:
+    """Each mutating tool that records an actor must reject empty or
+    whitespace-only actor values before touching the backend.
+
+    Covers: claim_task (claimed_by), release_task, renew_claim,
+    submit_progress, submit_completion_evidence, update_task_status.
+    """
+
+    # -----------------------------------------------------------------------
+    # claim_task — uses `claimed_by` as the actor field
+    # -----------------------------------------------------------------------
+
+    def test_claim_task_rejects_empty_claimed_by(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("claim_task", {
+                    "task_id": "T001",
+                    "claimed_by": "",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    def test_claim_task_rejects_whitespace_claimed_by(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("claim_task", {
+                    "task_id": "T001",
+                    "claimed_by": "   ",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    # -----------------------------------------------------------------------
+    # release_task
+    # -----------------------------------------------------------------------
+
+    def test_release_task_rejects_empty_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("release_task", {
+                    "task_id": "T001",
+                    "actor": "",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    def test_release_task_rejects_whitespace_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("release_task", {
+                    "task_id": "T001",
+                    "actor": "\t\n",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    # -----------------------------------------------------------------------
+    # renew_claim
+    # -----------------------------------------------------------------------
+
+    def test_renew_claim_rejects_empty_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x",
+                          minutes_until_expiry=30)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("renew_claim", {
+                    "task_id": "T001",
+                    "actor": "",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    def test_renew_claim_rejects_whitespace_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x",
+                          minutes_until_expiry=30)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("renew_claim", {
+                    "task_id": "T001",
+                    "actor": "  ",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    # -----------------------------------------------------------------------
+    # submit_progress
+    # -----------------------------------------------------------------------
+
+    def test_submit_progress_rejects_empty_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("submit_progress", {
+                    "task_id": "T001",
+                    "actor": "",
+                    "notes": "in progress",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    def test_submit_progress_rejects_whitespace_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("submit_progress", {
+                    "task_id": "T001",
+                    "actor": " \t ",
+                    "notes": "in progress",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    # -----------------------------------------------------------------------
+    # submit_completion_evidence
+    # -----------------------------------------------------------------------
+
+    def test_submit_completion_evidence_rejects_empty_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="in_progress")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("submit_completion_evidence", {
+                    "task_id": "T001",
+                    "actor": "",
+                    "commands_run": ["pytest"],
+                    "files_changed": ["src/foo.py"],
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    def test_submit_completion_evidence_rejects_whitespace_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="in_progress")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("submit_completion_evidence", {
+                    "task_id": "T001",
+                    "actor": "   ",
+                    "commands_run": ["pytest"],
+                    "files_changed": ["src/foo.py"],
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    # -----------------------------------------------------------------------
+    # update_task_status
+    # -----------------------------------------------------------------------
+
+    def test_update_task_status_rejects_empty_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="drafted")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("update_task_status", {
+                    "task_id": "T001",
+                    "to_status": "ready",
+                    "actor": "",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())
+
+    def test_update_task_status_rejects_whitespace_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="drafted")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("update_task_status", {
+                    "task_id": "T001",
+                    "to_status": "ready",
+                    "actor": "\n",
+                })
+
+        with pytest.raises(ToolError, match="actor|empty|whitespace"):
+            _run(run())

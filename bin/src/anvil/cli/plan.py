@@ -561,6 +561,24 @@ def plan(
                     },
                 )
                 backend.append(status_draft)
+
+        # CL-4 — persist the inferred ConflictGroups so the conflict_groups
+        # table round-trips them (surfaced later by `anvil conflicts`). The
+        # task rows already carry the group IDs in their conflict_groups field;
+        # these events populate the dedicated table with the full group records.
+        for cg in inference_result.conflict_groups:
+            now = clock.now()
+            backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor="anvil-cli",
+                    action="conflict_group.upserted",
+                    target_kind="conflict_group",
+                    target_id=cg.id,
+                    payload_json=cg.model_dump(mode="json"),
+                )
+            )
+
         # Echo summary inside the try block so it only runs on full success;
         # otherwise inference_result may be unbound (if append raised
         # before line 173) and the access below would NameError.

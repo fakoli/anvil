@@ -217,6 +217,23 @@ class FeatureDeletedPayload(BaseModel):
     reason: str = ""
 
 
+class ConflictGroupUpsertedPayload(BaseModel):
+    """Payload for 'conflict_group.upserted' (CL-4).
+
+    Persists a ConflictGroup computed during planning/inference into the
+    ``conflict_groups`` table so the file-overlap groupings round-trip across
+    process boundaries. Forwarded to ``ConflictGroup.model_validate`` in the
+    handler.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    task_ids: list[Any] = []
+    reason: str = ""
+
+
 class ClaimCreatedPayload(BaseModel):
     """Payload for 'claim.created'."""
 
@@ -814,6 +831,7 @@ __all__ = [
     "ClaimReleasedPayload",
     "ClaimRenewedPayload",
     "ClaimStalePayload",
+    "ConflictGroupUpsertedPayload",
     "EvidenceSubmittedPayload",
     "FeatureCreatedPayload",
     "FileChangedPayload",

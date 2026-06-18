@@ -252,6 +252,27 @@ _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
+def _require_actor(actor: str) -> str:
+    """Strip leading/trailing whitespace and raise ToolError when empty.
+
+    An empty or whitespace-only actor would write a blank ``actor`` field into
+    every audit event emitted by the tool, making the audit trail useless for
+    attribution. Raise early so the caller gets a clear error rather than a
+    silent blank entry in the event log.
+
+    Returns the stripped actor string on success so callers can write::
+
+        actor = _require_actor(actor)
+    """
+    stripped = actor.strip()
+    if not stripped:
+        raise ToolError(
+            "actor must not be empty or whitespace — "
+            "pass the agent or user identity for audit-trail attribution."
+        )
+    return stripped
+
+
 def _resolve_state_dir(cwd: str | None = None) -> Path:
     """Return the absolute path to .anvil/ for the given cwd.
 
@@ -657,6 +678,7 @@ def claim_task(
     lease_duration_seconds controls the lease length (default 900 = 15 min).
     The ClaimManager uses minutes; we convert.
     """
+    claimed_by = _require_actor(claimed_by)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -718,6 +740,7 @@ def release_task(
 
     Stale-claim reaping runs first. Returns the claim_id that was released.
     """
+    actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -765,6 +788,7 @@ def renew_claim(
     Stale-claim reaping runs first.
     extend_seconds controls how far the lease is extended (default 900 = 15 min).
     """
+    actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -908,6 +932,7 @@ def submit_progress(
 
     Stale-claim reaping runs first.
     """
+    actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -965,6 +990,7 @@ def submit_completion_evidence(
 
     Stale-claim reaping runs first.
     """
+    actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -1289,6 +1315,7 @@ def update_task_status(
 
     Stale-claim reaping runs first.
     """
+    actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -2160,6 +2187,24 @@ def plan_tasks(
                     ))
                 except EventRejected as exc:
                     raise ToolError(str(exc)) from exc
+
+        # CL-4 — persist the inferred ConflictGroups so the conflict_groups
+        # table round-trips them (parity with `anvil plan`). The task rows
+        # already carry the group IDs; these events populate the dedicated
+        # table with the full group records.
+        for cg in inference_result.conflict_groups:
+            now = clock.now()
+            try:
+                backend.append(EventDraft(
+                    timestamp=now,
+                    actor="anvil-mcp",
+                    action="conflict_group.upserted",
+                    target_kind="conflict_group",
+                    target_id=cg.id,
+                    payload_json=cg.model_dump(mode="json"),
+                ))
+            except EventRejected as exc:
+                raise ToolError(str(exc)) from exc
 
         return PlanTasksResponse(
             feature_count=len(result.features),

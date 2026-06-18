@@ -46,6 +46,7 @@ from anvil.state.models import (
     PRD,
     Claim,
     ClaimStatus,
+    ConflictGroup,
     Event,
     EventDraft,
     Feature,
@@ -63,6 +64,7 @@ from anvil.state.payloads import (
     ClaimReleasedPayload,
     ClaimRenewedPayload,
     ClaimStalePayload,
+    ConflictGroupUpsertedPayload,
     EvidenceSubmittedPayload,
     FeatureCreatedPayload,
     FeatureDeletedPayload,
@@ -994,6 +996,26 @@ class SqliteBackend:
             for r in rows
         ]
 
+    def list_conflict_groups(self) -> list[ConflictGroup]:
+        """Return all persisted ConflictGroup rows ordered by ID (CL-4).
+
+        Read-only. The ``conflict_groups`` table is populated by
+        ``conflict_group.upserted`` events emitted during planning/inference.
+        """
+        conn = self._require_conn()
+        rows = conn.execute(
+            "SELECT id, name, task_ids, reason FROM conflict_groups ORDER BY id"
+        ).fetchall()
+        return [
+            ConflictGroup(
+                id=r[0],
+                name=r[1],
+                task_ids=json.loads(r[2] or "[]"),
+                reason=r[3],
+            )
+            for r in rows
+        ]
+
     def list_events(
         self,
         *,
@@ -1827,6 +1849,13 @@ class SqliteBackend:
                 self._check_feature_deleted,
                 self._write_feature_deleted,
             ),
+            # CL-4 — persist ConflictGroups computed during planning/inference
+            # so the conflict_groups table round-trips them.
+            "conflict_group.upserted": ActionSpec(
+                ConflictGroupUpsertedPayload,
+                self._check_conflict_group_upserted,
+                self._write_conflict_group_upserted,
+            ),
             # Phase 8: pull-applies-remote — local Task gets title/desc/status
             # rewritten from the remote payload after a non-conflict pull.
             "task.synced_from_remote": ActionSpec(
@@ -2249,6 +2278,53 @@ class SqliteBackend:
                 "status": data["status"],
                 "requirements": json.dumps(data["requirements"]),
                 "tasks": json.dumps(data["tasks"]),
+            },
+        )
+
+    def _check_conflict_group_upserted(
+        self,
+        conn: sqlite3.Connection,
+        payload: ConflictGroupUpsertedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate the ConflictGroup payload before any write (CL-4)."""
+        _ = (conn, event)
+        try:
+            ConflictGroup.model_validate(payload.model_dump(mode="json"))
+        except Exception as exc:
+            raise EventRejected(
+                f"conflict_group.upserted: invalid ConflictGroup payload: {exc}"
+            ) from exc
+
+    def _write_conflict_group_upserted(
+        self,
+        conn: sqlite3.Connection,
+        payload: ConflictGroupUpsertedPayload,
+        event: Event,
+    ) -> None:
+        """Insert/replace a ConflictGroup row from the event payload (CL-4).
+
+        Payload fields map directly to the ConflictGroup model (id, name,
+        task_ids, reason). Idempotent UPSERT keyed on ``id`` so re-planning the
+        same task graph rewrites the group in place rather than erroring.
+        """
+        _ = event
+        group = ConflictGroup.model_validate(payload.model_dump(mode="json"))
+        data = group.model_dump(mode="json")
+        conn.execute(
+            """
+            INSERT INTO conflict_groups (id, name, task_ids, reason)
+            VALUES (:id, :name, :task_ids, :reason)
+            ON CONFLICT(id) DO UPDATE SET
+                name     = excluded.name,
+                task_ids = excluded.task_ids,
+                reason   = excluded.reason
+            """,
+            {
+                "id": data["id"],
+                "name": data["name"],
+                "task_ids": json.dumps(data["task_ids"]),
+                "reason": data["reason"],
             },
         )
 

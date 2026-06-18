@@ -2720,6 +2720,97 @@ class TestSubmitCommand:
         assert "INCOMPLETE" in result.output
         assert "screenshots" in result.output
 
+    # -- CL-2: repeatable --commands / --files-changed -------------------
+
+    def test_submit_repeated_commands_and_files_flags(self, tmp_path: Path) -> None:
+        """Passing --commands / --files-changed more than once keeps each
+        occurrence as one value (click multiple=True semantics)."""
+        import json as _json
+
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        _do_claim(tmp_path, task_id, actor="agent-test")
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "submit", task_id,
+                "--commands", "pytest tests/ -v",
+                "--commands", "ruff check .",
+                "--files-changed", "src/auth.py",
+                "--files-changed", "src/main.py",
+                "--actor", "agent-test",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, f"submit failed: {result.output}"
+        envelope = _json.loads(result.output)
+        assert envelope["ok"] is True
+        data = envelope["data"]
+        assert data["commands_run"] == ["pytest tests/ -v", "ruff check ."]
+        assert data["files_changed"] == ["src/auth.py", "src/main.py"]
+
+    def test_submit_repeated_flag_preserves_embedded_commas(self, tmp_path: Path) -> None:
+        """A repeated --commands / --files-changed value containing commas
+        survives intact (one occurrence == one value). This is the core CL-2
+        fix: the legacy single-flag form split on commas and mangled such
+        values."""
+        import json as _json
+
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        _do_claim(tmp_path, task_id, actor="agent-test")
+
+        cmd_with_comma = "python -c 'print(1,2,3)'"
+        path_with_comma = "src/weird,name.py"
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "submit", task_id,
+                "--commands", cmd_with_comma,
+                "--commands", "pytest -v",
+                "--files-changed", path_with_comma,
+                "--files-changed", "src/main.py",
+                "--actor", "agent-test",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, f"submit failed: {result.output}"
+        data = _json.loads(result.output)["data"]
+        # The embedded comma must NOT split the value.
+        assert data["commands_run"] == [cmd_with_comma, "pytest -v"]
+        assert data["files_changed"] == [path_with_comma, "src/main.py"]
+
+    def test_submit_legacy_comma_joined_single_flag(self, tmp_path: Path) -> None:
+        """Backward compatibility: a single --commands / --files-changed
+        occurrence whose value is comma-joined is still split into a list."""
+        import json as _json
+
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        _do_claim(tmp_path, task_id, actor="agent-test")
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "submit", task_id,
+                "--commands", "pytest -v, ruff check .",
+                "--files-changed", "src/auth.py, src/main.py",
+                "--actor", "agent-test",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, f"submit failed: {result.output}"
+        data = _json.loads(result.output)["data"]
+        assert data["commands_run"] == ["pytest -v", "ruff check ."]
+        assert data["files_changed"] == ["src/auth.py", "src/main.py"]
+
 
 # ---------------------------------------------------------------------------
 # Phase 5 — apply command
@@ -4074,3 +4165,164 @@ class TestGraphMermaid:
             tmp_path, ["graph", "--format", "mermaid", "--scope", "task"]
         )
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# conflicts command (CL-5) — surface persisted conflict groups
+# ---------------------------------------------------------------------------
+
+
+def _seed_conflict_group(tmp_path: Path) -> None:
+    """Seed a feature, two tasks, and a conflict_groups row directly.
+
+    Mirrors ``_seed_graph_tasks``: inserts via SQLite so the read surface is
+    tested in isolation from the planner.
+    """
+    _do_init(tmp_path, name="Conflicts Test Project")
+    db_path = tmp_path / ".anvil" / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT OR IGNORE INTO features "
+        "(id, title, description, status, requirements, tasks) "
+        "VALUES ('F001', 'F', 'desc', 'proposed', '[]', '[]')"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO conflict_groups (id, name, task_ids, reason) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            "CG-T001-T002",
+            "CG-T001-T002",
+            json.dumps(["T001", "T002"]),
+            "Tasks T001 and T002 share overlapping files: src/b.py",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+_CONFLICT_PRD = """\
+# Project: Conflict Plan Test
+
+## Summary
+
+Two tasks whose likely_files overlap should form a conflict group.
+
+## Goals
+
+- Detect file-overlap conflicts.
+
+## Requirements
+
+- R001: Overlapping work.
+
+## Features
+
+### F001: Overlap Feature
+
+The only feature.
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: First overlapping task
+
+**Feature:** F001
+**Priority:** medium
+**Likely files:** src/a.py, src/b.py
+
+**Acceptance criteria:**
+
+- Does the thing.
+
+**Verification:**
+
+- `pytest -q`
+
+### T002: Second overlapping task
+
+**Feature:** F001
+**Priority:** medium
+**Likely files:** src/b.py, src/c.py
+
+**Acceptance criteria:**
+
+- Does the other thing.
+
+**Verification:**
+
+- `pytest -q`
+"""
+
+
+class TestConflictsCommand:
+    """``anvil conflicts`` (CL-5) lists persisted conflict groups."""
+
+    def test_empty_state_text(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Empty Conflicts")
+        result = _invoke_cmd(tmp_path, ["conflicts"])
+        assert result.exit_code == 0, result.output
+        assert "No conflict groups." in result.output
+
+    def test_empty_state_json(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Empty Conflicts JSON")
+        result = _invoke_cmd(tmp_path, ["conflicts", "--json"])
+        assert result.exit_code == 0, result.output
+        env = json.loads(result.stdout.strip())
+        assert env["ok"] is True
+        assert env["command"] == "conflicts"
+        assert env["data"]["count"] == 0
+        assert env["data"]["conflict_groups"] == []
+
+    def test_lists_seeded_group_text(self, tmp_path: Path) -> None:
+        _seed_conflict_group(tmp_path)
+        result = _invoke_cmd(tmp_path, ["conflicts"])
+        assert result.exit_code == 0, result.output
+        assert "1 conflict group(s):" in result.output
+        assert "CG-T001-T002: T001, T002" in result.output
+        assert "src/b.py" in result.output
+
+    def test_lists_seeded_group_json(self, tmp_path: Path) -> None:
+        _seed_conflict_group(tmp_path)
+        result = _invoke_cmd(tmp_path, ["conflicts", "--json"])
+        assert result.exit_code == 0, result.output
+        env = json.loads(result.stdout.strip())
+        assert env["data"]["count"] == 1
+        grp = env["data"]["conflict_groups"][0]
+        assert grp["id"] == "CG-T001-T002"
+        assert grp["task_ids"] == ["T001", "T002"]
+        assert "src/b.py" in grp["reason"]
+
+    def test_invalid_format_exits_nonzero(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Bad Format")
+        result = _invoke_cmd(tmp_path, ["conflicts", "--format", "yaml"])
+        assert result.exit_code == 2
+        assert "unknown format" in result.output
+
+    def test_plan_persists_conflict_groups_then_conflicts_lists_them(
+        self, tmp_path: Path
+    ) -> None:
+        """End-to-end (CL-4 + CL-5): plan persists groups; conflicts surfaces them."""
+        _do_init(tmp_path, name="Plan Conflicts")
+        _write_prd(tmp_path, _CONFLICT_PRD)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        plan_result = _invoke_cmd(tmp_path, ["plan", "--no-llm"])
+        assert plan_result.exit_code == 0, plan_result.output
+
+        # The conflict_groups table is populated (CL-4).
+        db_path = tmp_path / ".anvil" / "state.db"
+        conn = sqlite3.connect(str(db_path))
+        rows = conn.execute(
+            "SELECT id, task_ids FROM conflict_groups ORDER BY id"
+        ).fetchall()
+        conn.close()
+        assert rows, "plan did not persist any conflict_groups row"
+        assert rows[0][0] == "CG-T001-T002"
+        assert json.loads(rows[0][1]) == ["T001", "T002"]
+
+        # And `conflicts` surfaces them (CL-5).
+        result = _invoke_cmd(tmp_path, ["conflicts", "--json"])
+        assert result.exit_code == 0, result.output
+        env = json.loads(result.stdout.strip())
+        ids = {g["id"] for g in env["data"]["conflict_groups"]}
+        assert "CG-T001-T002" in ids

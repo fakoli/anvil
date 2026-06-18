@@ -9696,3 +9696,130 @@ class TestAppendLockBackoff:
         # Exponential, not fixed: the old 50 ms poll took ~100 wake-ups to
         # exhaust 5 s; the backoff schedule gets there in 13-18 larger steps.
         assert 10 <= len(slept) <= 20
+
+
+# ---------------------------------------------------------------------------
+# CL-4 — ConflictGroup persistence round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestConflictGroupPersistence:
+    """conflict_group.upserted events persist ConflictGroup rows that round-trip."""
+
+    @staticmethod
+    def _seed(b: SqliteBackend) -> None:
+        _apply(b, "project.created", _make_project_event().payload_json)
+        _apply(b, "state.initialized", {})
+
+    @staticmethod
+    def _upsert(
+        b: SqliteBackend,
+        cg_id: str,
+        task_ids: list[str],
+        reason: str,
+    ) -> None:
+        _apply(
+            b,
+            "conflict_group.upserted",
+            {
+                "id": cg_id,
+                "name": cg_id,
+                "task_ids": task_ids,
+                "reason": reason,
+            },
+            target_kind="conflict_group",
+            target_id=cg_id,
+        )
+
+    def test_list_conflict_groups_empty_on_fresh_backend(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._seed(b)
+            assert b.list_conflict_groups() == []
+        finally:
+            b.close()
+
+    def test_upserted_event_persists_and_round_trips(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._seed(b)
+            self._upsert(
+                b,
+                "CG-T001-T002",
+                ["T001", "T002"],
+                "Tasks T001 and T002 share overlapping files: a.py",
+            )
+            groups = b.list_conflict_groups()
+            assert len(groups) == 1
+            g = groups[0]
+            assert g.id == "CG-T001-T002"
+            assert g.name == "CG-T001-T002"
+            assert g.task_ids == ["T001", "T002"]
+            assert "a.py" in g.reason
+        finally:
+            b.close()
+
+    def test_round_trip_survives_reopen(self, tmp_path: Path) -> None:
+        """Rows persist across a close()/reopen — true table persistence."""
+        b = _make_backend(tmp_path)
+        try:
+            self._seed(b)
+            self._upsert(b, "CG-T001-T002", ["T001", "T002"], "overlap")
+        finally:
+            b.close()
+        # Reopen against the same on-disk db; initialize() is idempotent.
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        b2 = SqliteBackend(
+            db_path=db_path, events_path=events_path, clock=_make_clock()
+        )
+        b2.initialize()
+        try:
+            groups = b2.list_conflict_groups()
+            assert [g.id for g in groups] == ["CG-T001-T002"]
+        finally:
+            b2.close()
+
+    def test_upsert_is_idempotent_on_id(self, tmp_path: Path) -> None:
+        """Re-emitting the same group ID rewrites the row in place, no error."""
+        b = _make_backend(tmp_path)
+        try:
+            self._seed(b)
+            self._upsert(b, "CG-T001-T002", ["T001", "T002"], "first")
+            self._upsert(b, "CG-T001-T002", ["T001", "T002"], "second")
+            groups = b.list_conflict_groups()
+            assert len(groups) == 1
+            assert groups[0].reason == "second"
+        finally:
+            b.close()
+
+    def test_list_is_ordered_by_id(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._seed(b)
+            self._upsert(b, "CG-T002-T003", ["T002", "T003"], "overlap")
+            self._upsert(b, "CG-T001-T002", ["T001", "T002"], "overlap")
+            assert [g.id for g in b.list_conflict_groups()] == [
+                "CG-T001-T002",
+                "CG-T002-T003",
+            ]
+        finally:
+            b.close()
+
+    def test_invalid_payload_is_rejected(self, tmp_path: Path) -> None:
+        """A payload missing the required ``id`` is rejected up front."""
+        b = _make_backend(tmp_path)
+        try:
+            self._seed(b)
+            with pytest.raises(EventRejected):
+                _apply(
+                    b,
+                    "conflict_group.upserted",
+                    {"name": "x", "task_ids": [], "reason": ""},
+                    target_kind="conflict_group",
+                    target_id="x",
+                )
+        finally:
+            b.close()

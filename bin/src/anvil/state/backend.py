@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from anvil.state.models import (
         PRD,
         Claim,
+        ConflictGroup,
         Event,
         EventDraft,
         Evidence,
@@ -118,6 +119,12 @@ class Backend(Protocol):
         """Return all Feature rows. Used by `plan` for orphan detection
         on re-parse (v1.15.0): the new parse's feature set is diffed
         against this to compute which features to delete."""
+        ...
+
+    def list_conflict_groups(self) -> list[ConflictGroup]:
+        """Return all persisted ConflictGroup rows (CL-4). Populated by
+        `conflict_group.upserted` events emitted during planning/inference;
+        surfaced by `anvil conflicts`."""
         ...
 
     def get_latest_evidence(self, task_id: str) -> Evidence | None:
