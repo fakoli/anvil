@@ -90,22 +90,11 @@ fi
 # Direct-append fallback: write a well-formed JSONL event line.
 # The replay engine reads events.jsonl; this format must match Event model conventions.
 # Action: "file_changed", entity_type: "file", entity_id: <path>.
-# Escape the three interpolated strings minimally (no quotes or backslashes expected
-# from Claude Code tool payloads, but be safe).
-_escape_json() {
-  # Replace backslash first, then double-quote, then control characters.
-  printf '%s' "$1" | python3 -c "
-import sys, json
-print(json.dumps(sys.stdin.read())[1:-1], end='')
-" 2>/dev/null || printf '%s' "$1"
-}
+# The extraction python3 call above already sanitised FILE_PATH, TOOL_NAME, and ACTOR
+# (stripped newlines and quotes), so we can interpolate them directly — no extra
+# python3 spawns needed.  TIMESTAMP comes from `date` and is always safe to inline.
 
-ESCAPED_PATH=$(_escape_json "$FILE_PATH")
-ESCAPED_TOOL=$(_escape_json "${TOOL_NAME:-unknown}")
-ESCAPED_ACTOR=$(_escape_json "${ACTOR:-unknown}")
-ESCAPED_TS=$(_escape_json "$TIMESTAMP")
-
-EVENT_LINE="{\"action\":\"file_changed\",\"entity_type\":\"file\",\"entity_id\":\"${ESCAPED_PATH}\",\"actor\":\"${ESCAPED_ACTOR}\",\"tool\":\"${ESCAPED_TOOL}\",\"timestamp\":\"${ESCAPED_TS}\",\"source\":\"hook\"}"
+EVENT_LINE="{\"action\":\"file_changed\",\"entity_type\":\"file\",\"entity_id\":\"${FILE_PATH}\",\"actor\":\"${ACTOR:-unknown}\",\"tool\":\"${TOOL_NAME:-unknown}\",\"timestamp\":\"${TIMESTAMP}\",\"source\":\"hook\"}"
 
 # Append atomically-ish: write to a temp file, then append.
 # True atomic append on HFS+/APFS requires flock; for Phase 4 the simple append

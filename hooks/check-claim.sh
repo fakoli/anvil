@@ -30,32 +30,25 @@ else
   PAYLOAD=$(cat)
 fi
 
-# Extract the file path being modified.
-# Try .tool_input.path first (Edit, Write); fall back to .tool_input.notebook_path (NotebookEdit).
+# Extract the file path and actor in a single python3 call.
+# FILE_PATH: .tool_input.path (Edit/Write) or .tool_input.notebook_path (NotebookEdit).
+# ACTOR: .session_id (used as actor proxy).
 FILE_PATH=""
+ACTOR=""
 if command -v python3 >/dev/null 2>&1; then
-  FILE_PATH=$(printf '%s' "$PAYLOAD" | python3 -c "
+  EXTRACTED=$(printf '%s' "$PAYLOAD" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
     ti = d.get('tool_input', {})
     print(ti.get('path') or ti.get('notebook_path') or '')
-except Exception:
-    print('')
-" 2>/dev/null)
-fi
-
-# Extract the actor identifier from the payload (session_id as proxy).
-ACTOR=""
-if command -v python3 >/dev/null 2>&1; then
-  ACTOR=$(printf '%s' "$PAYLOAD" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
     print(d.get('session_id') or '')
 except Exception:
     print('')
+    print('')
 " 2>/dev/null)
+  FILE_PATH=$(printf '%s\n' "$EXTRACTED" | sed -n '1p')
+  ACTOR=$(printf '%s\n' "$EXTRACTED" | sed -n '2p')
 fi
 
 # Normalise: if FILE_PATH is empty, we can't check anything — exit silently.
