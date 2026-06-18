@@ -2,25 +2,25 @@
 
 > **Anvil — the system of record for agent teams** (formerly fakoli-state). Now at **v0.0.8**.
 
-Autonomous build, 2026-06-17. This repo (`/Users/sdoumbouya/code/anvil`) is the
-**extracted, standalone Anvil product**, taken from the fakoli-plugins monorepo
-and driven to a complete backlog. Everything below is committed on `main`. Nothing has
-been pushed to a remote — that's left to you.
+Historical build report from 2026-06-17. This repo was extracted as the
+standalone Anvil product from the fakoli-plugins monorepo and driven through
+the backlog listed below. The GitHub repository now lives at
+`fakoli/anvil`; this report preserves the extraction context.
 
 ## Headline
 
 - **Extracted** to a self-contained repo (own CI, README, LICENSE, `.gitignore`), tests green.
 - **Trimmed** for standalone: always-on context footprint **7,248 → ~5,500 tok** (~24% off, ~30% before the new commands re-added a little), the monorepo-only `marketplace-scribe` agent removed, agent-description examples relocated to bodies (no capability lost).
 - **Backlog: 18/18 shipped.** Version climbed **1.23.8 → 1.40.0**, then the product was **renamed to Anvil (0.0.8)**. Full suite **1,671 passed** (from 1,432 at import — +239 tests).
-- **Method:** every item was implemented by one subagent, then **blind-reviewed by fresh subagents** (their own clean context — diff + acceptance criteria only), fixed, verified, and committed only when green; any item that couldn't pass was auto-reverted so the next started clean. I (the orchestrator) re-verified the cumulative suite independently at each milestone.
+- **Method:** every item was implemented by one subagent, then reviewed by fresh subagents using only the diff and acceptance criteria. Failed items were reverted before the next item started, and the cumulative suite was re-verified at each milestone.
 
 ## The arc
 
-You asked for a competitive analysis vs spec-kit/ponytail. It established that the moat
-is **durable, evidence-gated, lease-coordinated state** — a layer the stateless
-spec-driven tools structurally lack. That justified treating anvil as a standalone
-product, which this build delivered: fix the moat's real bugs, make it scriptable and
-portable, then complete the roadmap and stand it up as its own repo.
+The standalone extraction followed a competitive analysis against spec-kit and
+ponytail. The analysis identified durable, evidence-gated, lease-coordinated
+state as the core product boundary: a layer stateless spec-driven tools do not
+provide. The build focused on fixing correctness issues, making the surface
+scriptable and portable, and completing the extraction backlog.
 
 ## Everything shipped
 
@@ -59,13 +59,12 @@ portable, then complete the roadmap and stand it up as its own repo.
 
 ## What the blind-review loop caught (the value of not trusting reports)
 
-Across the session the adversarial-review-plus-self-verify discipline caught a real
-defect in essentially every engine wave — a reviewer that read the wrong worktree, a
-harness that mangled valid JSON, a **bypassable MCP evidence gate**, a silent
-init/read directory split, dotfile-path corruption, and (on T017's first attempt) a
-**latent circular import** that blocked test collection. None survive "tests pass + agent
-says 5/5 confident." This is the live proof of the product's own thesis: **evidence over
-claim.**
+Across the session, the review-plus-verification loop caught defects in several
+engine waves: a reviewer read the wrong worktree, a harness mangled valid JSON,
+an MCP evidence gate was bypassable, init/read directory handling split
+silently, dotfile paths were corrupted, and one T017 attempt introduced a
+circular import that blocked test collection. These are the kinds of issues the
+product is designed to surface: evidence should outrank status claims.
 
 ## Current state
 
@@ -90,8 +89,7 @@ claim.**
 
 1. **Create the GitHub repo and push** (`gh repo create fakoli/anvil --source . --push`)
    — CI will run on first push.
-2. **Lead the README with the benchmark** (collisions 13→0, evidence gate, `drift`) — it's
-   the moat made measurable; competitors can't reproduce it.
+2. **Lead the README with benchmark evidence** (collisions 13→0, evidence gate, `drift`).
 3. **Point monorepo users to this standalone repo** once it's published.
 4. Fix the `_apply_ddl` schema-masking ordering when you next touch core init.
 5. Decide whether the monorepo keeps an anvil copy or redirects to this repo.

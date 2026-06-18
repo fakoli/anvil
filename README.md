@@ -6,28 +6,26 @@
 
 > **The system of record for agent teams.**
 
-> Durable, evidence-gated, lease-coordinated state that lets multiple AI coding agents work one project without colliding or lying about what's done.
+> Durable, evidence-gated, lease-coordinated state for multi-agent software work.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Plugin Version](https://img.shields.io/badge/version-0.0.8-blue.svg)](.claude-plugin/plugin.json)
 [![Marketplace](https://img.shields.io/badge/marketplace-fakoli-purple.svg)](https://github.com/fakoli/anvil)
-[![Tests](https://img.shields.io/badge/tests-1103%20passing-brightgreen.svg)](tests)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests)
 
 </div>
 
-> **Beta — v0.0.8.** New product, early days. The core loop works today; expect surfaces and APIs to move before 1.0.
+> **Beta — v0.0.8.** The core loop works today; command surfaces and APIs may change before 1.0.
 
 ---
 
 ## Why Anvil
 
-Hammers come and go — the agents, the models, the editors. The anvil is what every blow lands on and what survives the work. Anvil is that fixed surface: the system of record agent teams forge against, not another hammer in the pile.
+Anvil is a local-first, backend-neutral project-state layer for humans and AI coding agents. It records requirements, tasks, claims, evidence, and reviews in SQLite under `.anvil/`, then exposes that state through a CLI (`anvil`) and an MCP server.
 
-Concretely, Anvil is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite under `.anvil/` and exposed through a CLI (`anvil`) and an MCP server.
+It is for developers running Claude Code, Codex, Cursor, OpenHands, or Copilot who need multiple agents, and multiple humans, to coordinate against the same plan without overwriting each other. Solo builders can use it to keep PRDs and task state across sessions; project leads can use it to audit what work was claimed, reviewed, and completed.
 
-It is for developers running Claude Code, Codex, Cursor, OpenHands, or Copilot who need multiple agents (and multiple humans) to coordinate against the same plan without overwriting each other. Solo builders who want PRDs that survive sessions. Project leads who want truth that outlives any one chat.
-
-When an AI agent claims a task, that claim is an enforced database row with a lease and a heartbeat — not a convention in a markdown file that the next agent can silently overwrite. Completion is evidence-gated: an agent cannot mark work done without attaching the proof, so the record never lies about what shipped.
+When an AI agent claims a task, that claim is an enforced database row with a lease and heartbeat. Completion is evidence-gated: Anvil does not record completed work without attached proof.
 
 ---
 
@@ -35,7 +33,7 @@ When an AI agent claims a task, that claim is an enforced database row with a le
 
 | Surface | Count | Notes |
 |---|---|---|
-| CLI commands | **23** | Top-level + `prd`, `review`, `hook`, `sync` sub-apps. `--use-llm` augmentation picks Anthropic API / Bedrock / OpenAI-compatible endpoints via the same multi-provider resolver as the LLM-planner backstop. |
+| CLI command entries | **35** | Top-level commands plus `prd`, `review`, `hook`, `sync`, and `migrate` sub-app entries. `--use-llm` augmentation picks Anthropic API / Bedrock / OpenAI-compatible endpoints via the same multi-provider resolver as the LLM-planner backstop. |
 | MCP tools | **24** | FastMCP stdio; works in any MCP-compatible client. `plan_tasks` honors the project's `llm_provider` / `llm_tier` / Bedrock+custom knobs. |
 | Skills | **8 skills** | start-prd, prd, plan, claim, execute, finish, state-ops, resolve-decisions |
 | Agents | **5 agents** | planner (opus), critic (opus), docs-scribe (sonnet), sentinel (haiku), state-keeper (haiku) — tier-mapped per [docs/model-strategy.md](docs/model-strategy.md) |
@@ -46,7 +44,7 @@ Highlights:
 
 - **Multi-provider LLM access.** `BedrockProvider` (boto3 chain) and `CustomEndpointProvider` (vLLM / OpenRouter / LiteLLM-proxy / Together / Groq / Azure-OpenAI / self-hosted) ship alongside the existing `AnthropicProvider`. Precedence: explicit config > env auto-detect > fail loudly. Optional extras keep the default install lean.
 - **Tier-aware model defaults.** New `MODEL_TIERS` vocabulary (`opus` / `sonnet` / `haiku`) with per-agent tier mapping that drops typical session cost ~60% versus the prior "everything routes to Opus" pattern. Override always wins.
-- 1103 tests passing; SQLite schema unchanged.
+- CI covers the full pytest suite and benchmark smoke test; SQLite schema remains at version 5.
 
 Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
@@ -110,9 +108,9 @@ anvil apply T001 --approve
 # → Task T001 applied; event task.applied recorded in events.jsonl
 ```
 
-> To break a complex task into subtasks, use `anvil expand T001 --use-llm` (requires `ANTHROPIC_API_KEY`) or author `T001.1` / `T001.2` rows directly in `prd.md`. Full command reference forthcoming in [`docs/cli-reference.md`](docs/cli-reference.md).
+> To break a complex task into subtasks, use `anvil expand T001 --use-llm` (requires `ANTHROPIC_API_KEY`) or author `T001.1` / `T001.2` rows directly in `prd.md`. See [`docs/cli-reference.md`](docs/cli-reference.md) for command details.
 
-Every mutation appends to `.anvil/events.jsonl`. Replaying the log from scratch against an empty database reconstructs `state.db` byte-for-byte — the audit guarantee Phase 2 ships and every subsequent phase preserves.
+Every mutation appends to `.anvil/events.jsonl`. Replaying the log from scratch against an empty database reconstructs `state.db`; this is the audit guarantee the state engine is built around.
 
 ---
 
@@ -137,7 +135,7 @@ Full architecture and lifecycle diagrams: [`docs/architecture.md`](docs/architec
 
 ## Comparison vs alternatives
 
-| Wedge | anvil | GitHub Issues / CCPM |
+| Capability | anvil | GitHub Issues / CCPM |
 |---|---|---|
 | **Canonical state shape** | Pydantic v2 models in SQLite, validated at every transition | Free-form markdown in an issue body or a `.md` file |
 | **Claim / lock model** | `Claim` row with expiry + heartbeat; stale leases reaped on every call | Assignment-by-label or "I'll take this" in chat — no enforcement |
@@ -145,7 +143,7 @@ Full architecture and lifecycle diagrams: [`docs/architecture.md`](docs/architec
 | **Task scoring** | Six dimensions: complexity, parallelizability, context load, blast radius, review risk, agent suitability | Single-axis story points (if any) |
 | **Runtime coupling** | Runtime-neutral: CLI + FastMCP stdio; any MCP client | Coupled to GitHub or to the CCPM markdown convention |
 
-Source for the wedges: [`docs/_positioning.md`](docs/_positioning.md).
+Source for this comparison: [`docs/_positioning.md`](docs/_positioning.md).
 
 ---
 
@@ -208,7 +206,7 @@ The Iron Rule (review agents never `Edit`/`Write`) is enforced at the `tools:` f
 
 ## Status
 
-Anvil is in beta (v0.0.8) — a new product finding its feet, not a finished one. The full PRD → plan → claim → execute → verify → finish loop works today, plus GitHub Issues sync and multi-provider LLM support. Known gaps and hardening are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md); the near-term focus is correctness — claim races and evidence gates — before adding more surface. Linear and Monday providers, webhook sync, and immediate-apply conflict resolution are on the [`docs/roadmap.md`](docs/roadmap.md).
+Anvil is in beta (v0.0.8). The full PRD → plan → claim → execute → verify → finish loop works today, plus GitHub Issues sync and multi-provider LLM support. Known gaps and hardening are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md); the near-term focus is correctness for claim races, evidence gates, and replay before adding more surface. Linear and Monday providers, webhook sync, and immediate-apply conflict resolution are tracked in [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 

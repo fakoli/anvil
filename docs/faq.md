@@ -90,8 +90,8 @@ in the audit trail), or run `anvil next` to pick a different
 ready task.
 
 Default lease is 60 minutes (configurable in `.anvil/config.yaml`); the lease is extended
-by `anvil renew <claim-id>` or by the MCP `renew_claim` tool. Long
-honest work should heartbeat every few minutes — see
+by `anvil renew <claim-id>` or by the MCP `renew_claim` tool. Long-running
+work should heartbeat every few minutes — see
 [`architecture.md` § Concurrency model](architecture.md) for the four
 layered mechanisms (SQLite WAL + `BEGIN IMMEDIATE`, leases, heartbeats,
 stale reaping).
@@ -260,9 +260,9 @@ mode, also capture the `*.wal` and `*.shm` sidecar files if the database
 is open at copy time — or shut down active sessions first.
 
 The replay guarantee (see next question) means `events.jsonl` alone is
-enough to reconstruct `state.db` byte-for-byte, so the audit log is the
-*minimum* you must preserve. Commit `events.jsonl` to git and you have a
-distributed backup for free.
+enough to reconstruct `state.db`, so the audit log is the *minimum* you must
+preserve. Commit `events.jsonl` to git to keep the audit log available across
+clones.
 
 A native `anvil snapshot` subcommand (`sqlite3 .backup` wrapper
 with retention) is planned for v2.1 — see
@@ -285,7 +285,7 @@ The replay guarantee is the central audit property of the engine: replaying
 every event from `events.jsonl` against an empty database reconstructs
 canonical SQLite state exactly. That property is what makes `events.jsonl`
 the *minimum* you must preserve — commit it to git alongside the repo and
-you have a distributed audit log for free, recoverable from any clone even
+you have a distributed audit log recoverable from any clone even
 if every local `state.db` is lost.
 
 A native `anvil replay` subcommand that consumes `events.jsonl` and
@@ -343,9 +343,9 @@ in the same v2.0 milestone.
 ### How do I contribute?
 
 Open a pull request against
-[github.com/fakoli/fakoli-plugins](https://github.com/fakoli/fakoli-plugins).
-A formal `CONTRIBUTING.md` is forthcoming; the closest current pointer
-is the README's "Status" section and the
+[github.com/fakoli/anvil](https://github.com/fakoli/anvil).
+No dedicated `CONTRIBUTING.md` currently ships; use the README's "Status"
+section and the
 [`roadmap.md`](roadmap.md) item taxonomy (Phase 11 backlog items
 prefixed `P11-XX-XN`, Phase 9 carry-forward items prefixed `P9B-N`).
 
@@ -358,8 +358,9 @@ Three contribution shapes most appreciated right now:
   tracked in [`phase-11-backlog.md`](phase-11-backlog.md); the
   cross-cutting themes in `roadmap.md` indicate which items batch
   cleanly.
-- **Test coverage.** v1.10.0 ships 965 tests; the live-tests doc at
-  [`live-tests.md`](live-tests.md) describes the nightly workflow.
+- **Test coverage.** Keep the local pytest suite and live-test documentation
+  current when adding a surface or provider; [`live-tests.md`](live-tests.md)
+  describes the nightly workflow.
 
 For new architectural choices (a second backend, a daemon, a webhook
 listener), write a SPEC-FIRST design doc under `docs/specs/` before

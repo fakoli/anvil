@@ -25,7 +25,7 @@ anvil's planning features (`--use-llm`, the LLM-driven task-generation backstop,
    - `ANTHROPIC_API_KEY` set → **anthropic**.
    - `AWS_REGION` (or `AWS_DEFAULT_REGION`) set **and** `anthropic[bedrock]` extras installed → **bedrock**. The direct API still wins when both are present because direct is cheaper per token; pin Bedrock in config to override.
    - `CUSTOM_LLM_BASE_URL` set → **custom**.
-3. **Fail loudly** with a multi-line message naming every supported path. anvil never silently falls through to a different provider mid-process — community consensus (research, May 2026) is that silent fallback breaks billing predictability and surprises ops teams during incidents.
+3. **Fail explicitly** with a multi-line message naming every supported path. anvil never silently falls through to a different provider mid-process; silent fallback breaks billing predictability and can surprise operators during incidents.
 
 ---
 
@@ -117,7 +117,7 @@ This adds the `openai` SDK; anvil uses it with `base_url=` to target any endpoin
 
 ### Configure
 
-`base_url` is **required** for the custom path (no sensible default exists — silently falling back to `api.openai.com` when you meant your local server would be a billing surprise). Set it in env OR config:
+`base_url` is **required** for the custom path. No portable default exists, and falling back to `api.openai.com` when a local server was intended would create unexpected billing and data-routing behavior. Set it in env OR config:
 
 ```bash
 # via env

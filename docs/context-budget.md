@@ -4,7 +4,7 @@
 > by [`tests/test_token_budget.py`](../tests/test_token_budget.py).
 
 anvil ships as a Claude Code plugin. Its skills are part of the model's
-context, and that context is not free:
+context, and that context has a cost:
 
 - **Skill frontmatter is always loaded.** Claude Code injects each skill's
   frontmatter `name` + `description` into the system prompt on *every* turn so
@@ -12,12 +12,13 @@ context, and that context is not free:
   always-on "command surface" — the slash commands a user sees — and it is
   paid for whether or not any skill ever fires.
 - **A skill body loads on invocation.** The full `SKILL.md` body is pulled in
-  only when the skill is actually used, but an oversized body still floods the
-  context the moment a user reaches for that skill.
+  only when the skill is actually used, but an oversized body still increases
+  context use the moment a user reaches for that skill.
 
-Left unwatched, skills accrete prose and the always-on tax creeps up. This
-budget keeps the surface frugal and gives CI a gate that catches *growth* (a
-skill quietly doubling) without flapping on ordinary edits.
+Without a budget, skills accrete prose and the always-loaded surface grows.
+This budget keeps the surface bounded and gives CI a gate that catches
+meaningful growth, such as a skill body doubling in size, without flapping on
+ordinary edits.
 
 ## Budgets
 

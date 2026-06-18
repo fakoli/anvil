@@ -1,6 +1,6 @@
 # anvil architecture
 
-> Condensed reference for the **shipped v1.10.0** state. For the original v0
+> Condensed reference for the current **v0.0.8** standalone state. For the original v0
 > vision and aspirational items, see
 > [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
 > For what is planned but not yet shipped, see
@@ -16,7 +16,7 @@
 ## Mental model
 
 anvil is to agentic software work what Terraform is to infrastructure:
-a canonical state file holds the truth, derived views (work packets, markdown
+a canonical state file holds the project record, derived views (work packets, markdown
 plans, dependency graphs) are projected from it, and the plan-then-apply
 rhythm gates execution behind review. The PRD is the configuration; the
 SQLite database is the state; `anvil apply` is the commit point that
@@ -24,7 +24,7 @@ records evidence and transitions a task to `done`. Drift (stale claims,
 orphan branches, sync conflicts) is detected and reconciled, not papered
 over.
 
-The full positioning (the five wedges, the Terraform analogy) is maintained
+The full positioning (the five differentiators and the Terraform analogy) is maintained
 in [`_positioning.md`](_positioning.md); this document does not duplicate
 that material.
 
@@ -44,7 +44,7 @@ graph TD
     end
 
     subgraph Plugin["Plugin layer (operating discipline)"]
-        Skills["Skills<br/>start-prd, prd, plan, claim,<br/>execute, finish, state-ops"]
+        Skills["Skills<br/>start-prd, prd, plan, claim,<br/>execute, finish, state-ops,<br/>resolve-decisions"]
         Agents["Plugin agents<br/>planner, critic, sentinel,<br/>state-keeper, docs-scribe"]
     end
 
@@ -343,7 +343,7 @@ regardless of cwd at call time, addresses the same project's state.
 ## Concurrency model
 
 Multiple humans and multiple agents must coordinate on the same canonical
-state without stepping on each other. anvil achieves this with four
+state without overlapping each other's work. anvil achieves this with four
 mechanisms layered together:
 
 1. **SQLite WAL + `BEGIN IMMEDIATE`.** Every mutating operation runs inside
@@ -376,18 +376,20 @@ when no claim is held.
 
 ## CLI / MCP / hooks surface
 
-### CLI commands (14 top-level + 4 sub-apps)
+### CLI commands
 
-Full reference is forthcoming at
-[`docs/cli-reference.md`](cli-reference.md). The top-level commands assembled
+Full reference is available at
+[`docs/cli-reference.md`](cli-reference.md). The command surface assembled
 in [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py):
 
-- Lifecycle setup: `init`, `status`
+- Lifecycle setup and inspection: `init`, `status`, `describe`, `doctor`
 - PRD authoring: `prd parse`, `prd review` (sub-app)
 - Planning: `plan`, `score`, `expand`, `review tasks` (sub-app)
-- Listing / inspecting: `list`, `show`
+- Listing / inspecting: `list`, `show`, `scan`, `drift`, `graph`, `conflicts`
 - Claiming: `claim`, `release`, `renew`, `next`
 - Working: `packet`, `submit`, `apply`
+- Harness config: `mcp-config`
+- Migration / replay: `migrate state`, `migrate-events`, `replay`
 - Hooks: `hook ...` (sub-app — called by `hooks/*.sh`)
 - Sync: `sync ...` (sub-app — `sync github`, `sync github --health`, ...)
 
@@ -442,10 +444,10 @@ not use `set -e` / `set -u` / `set -o pipefail`, must wrap CLI calls with
 | `record-file-change` | PostToolUse on `Edit / Write / NotebookEdit` | [`record-file-change.sh`](../hooks/record-file-change.sh) | Record the change against the active claim for orphan detection |
 | `capture-evidence` | PostToolUse on `Bash` | [`capture-evidence.sh`](../hooks/capture-evidence.sh) | When the command matches a verification pattern, buffer it as evidence for the active claim |
 
-### Skills (7)
+### Skills (8)
 
 Workflow choreography lives in [`skills/*/SKILL.md`](../skills/) —
-start-prd, prd, plan, claim, execute, finish, state-ops.
+start-prd, prd, plan, claim, execute, finish, state-ops, resolve-decisions.
 
 Skill frontmatter is always loaded into the model's context (it is the
 plugin's command surface), so the combined skill footprint is kept under an
@@ -498,7 +500,7 @@ points at a file you can grep.
 
 ## What is NOT here yet
 
-This document describes shipped v1.10.0 behaviour only. The full backlog of
+This document describes the current shipped behaviour only. The full backlog of
 planned-but-not-yet-shipped items is in [`roadmap.md`](roadmap.md);
 the high-level buckets:
 
@@ -532,7 +534,7 @@ and welder-effort estimates.
 
 ## Further reading
 
-- [`_positioning.md`](_positioning.md) — the five wedges, the Terraform analogy (internal source-of-truth for marketing copy)
+- [`_positioning.md`](_positioning.md) — differentiators and the Terraform analogy (internal positioning reference)
 - [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — the original 358-line v0 build spec (this document is its condensed shipped sibling)
 - [`mcp.md`](mcp.md) — full 24-tool MCP reference with error envelope contract
 - [`github-sync.md`](github-sync.md) — bidirectional GitHub Issues sync reference
