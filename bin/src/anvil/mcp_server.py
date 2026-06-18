@@ -1,26 +1,13 @@
-"""FastMCP (stdio) server — 24 agent-facing tools for anvil.
+"""FastMCP (stdio) server — agent-facing tools for anvil.
 
-Each tool opens a fresh SqliteBackend against the project's
-.anvil/state.db. The server process cwd is fixed at startup — the
-bash wrapper cd-s to ORIGINAL_PWD before `exec uv run python -m
-anvil.mcp_server`, so all tool calls within a single server session
-address the same project's state. To switch projects, restart the MCP
-server in the new project directory.
+Each tool opens a fresh SqliteBackend against the project's .anvil/state.db.
+State resolves per call from the cwd arg (workflow tools), else ANVIL_ROOT,
+else Path.cwd(); the no-cwd tools are pinned to the server's launch directory.
 
-Stale-claim reaping runs at the top of every mutating tool (claim_task,
-release_task, renew_claim, submit_progress, submit_completion_evidence,
-update_task_status) and on get_project_summary. Read-only listers
-(list_tasks, get_task, get_next_task, check_conflicts, get_dependency_graph)
-skip reaping for latency.
-
-v1.13.0 adds 8 workflow tools so non-Claude-Code MCP clients can drive the
-full PRD → plan → review → approve → claim → apply lifecycle without
-dropping to the CLI: init_project, get_project_status, parse_prd,
-review_prd, plan_tasks, score_tasks, review_tasks, apply_review_decision.
-None of the workflow tools touch git — branch/worktree creation stays out
-of the MCP surface (some remote agents have no git access).
-
-Tool names match the spec exactly (2026-05-24-anvil-v0.md §MCP Server).
+Stale-claim reaping runs at the top of every mutating tool and on
+get_project_summary; read-only listers skip it for latency. No tool touches
+git — branch/worktree creation stays in the CLI so remote agents without git
+access can still drive the PRD → plan → review → claim → apply lifecycle.
 """
 
 from __future__ import annotations
@@ -128,11 +115,9 @@ class ProgressResponse(BaseModel):
 
 
 class NextReadyTask(BaseModel):
-    """Compact descriptor of the next claimable task (T014).
-
-    Surfaced in finish/submit responses so the caller can chain straight into
-    the next piece of work. ``null`` when no task is claimable.
-    """
+    """Compact descriptor of the next claimable task, surfaced in finish/submit
+    responses so the caller can chain into the next piece of work. ``null``
+    when no task is claimable."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -213,7 +198,7 @@ class StatusUpdateResponse(BaseModel):
 
 
 class EditDependenciesResponse(BaseModel):
-    """Result of edit_dependencies (batch dependency-edit primitive, T022).
+    """Result of edit_dependencies.
 
     ``changed`` lists every task whose dependency set was actually mutated;
     ``added`` / ``removed`` are the ``[source, target]`` edges (source depends
@@ -474,11 +459,8 @@ def _load_fast_lane_config(state_dir: Path):  # type: ignore[no-untyped-def]
 
 @mcp.tool
 def get_project_summary() -> ProjectSummary:
-    """Return a summary of project state: project info, task counts by status,
-    active claims, blocked count, and ready count.
-
-    Stale claim reaping runs at the top of this call per spec.
-    """
+    """Summarize project state: info, task counts by status, active claims,
+    blocked count, ready count. Reaps stale claims first."""
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -533,21 +515,12 @@ def list_tasks(
     task_type: str | None = None,
     cwd: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return tasks filtered by status, feature_id, task_type, and/or claimed_by.
-
-    status, feature_id, and task_type are pushed to SQL. claimed_by is an
-    in-memory filter applied after retrieval (joins active claims).
-    ``task_type`` (T015) scopes to feature / bugfix / refactor / modify.
+    """List tasks, optionally filtered by status, feature_id, task_type
+    (feature/bugfix/refactor/modify), and/or claimed_by actor.
 
     Args:
-        status: Filter to one task status.
-        feature_id: Filter to one feature.
         claimed_by: Filter to tasks with an active claim held by this actor.
-        task_type: Filter to feature / bugfix / refactor / modify (T015).
-        cwd: Project root. Defaults to ``Path.cwd()``. Mirrors the workflow
-            tools (get_project_status / parse_prd / init_project) so a single
-            MCP session can list tasks across projects without resolving to
-            the server's process directory (GAP-01).
+        cwd: Project root. Defaults to ``Path.cwd()``.
     """
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
@@ -576,10 +549,7 @@ def list_tasks(
 
 @mcp.tool
 def get_task(task_id: str) -> dict[str, Any]:
-    """Return the Task with the given ID.
-
-    Raises a structured ToolError if the task is not found.
-    """
+    """Return the full Task with the given ID (ToolError if not found)."""
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -600,12 +570,11 @@ def get_task(task_id: str) -> dict[str, Any]:
 
 @mcp.tool
 def get_next_task(actor: str | None = None) -> dict[str, Any] | None:
-    """Return the highest-priority ready task with no overlapping active claim.
+    """Return the single highest-priority ready task that has no overlapping
+    active claim, or null if none is claimable.
 
-    Priority ordering (per spec): HIGH > MEDIUM > LOW (critical treated as
-    higher than high). Tiebreak: agent_suitability score desc, then id asc.
-
-    Returns null if no claimable task is available.
+    Ordering: critical > high > medium > low; tiebreak agent_suitability desc,
+    then id asc.
     """
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -681,13 +650,8 @@ def claim_task(
 ) -> ClaimResponse:
     """Acquire an exclusive lease on task_id for claimed_by.
 
-    Gate: PRD must not be in 'draft' status — raises ToolError if it is.
-
-    Delegates to ClaimManager.acquire_claim (ClaimManager.claim in the engine).
-    Stale-claim reaping runs first.
-
-    lease_duration_seconds controls the lease length (default 900 = 15 min).
-    The ClaimManager uses minutes; we convert.
+    Reaps stale claims first; refuses (ToolError) while the PRD is in 'draft'.
+    lease_duration_seconds defaults to 900 (15 min).
     """
     claimed_by = _require_actor(claimed_by)
     state_dir = _resolve_state_dir()
@@ -747,10 +711,8 @@ def release_task(
     actor: str,
     reason: str | None = None,
 ) -> ReleaseResponse:
-    """Release the active claim on task_id held by actor.
-
-    Stale-claim reaping runs first. Returns the claim_id that was released.
-    """
+    """Release the active claim on task_id held by actor; returns the released
+    claim_id. Reaps stale claims first."""
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -794,11 +756,8 @@ def renew_claim(
     actor: str,
     extend_seconds: int = 900,
 ) -> RenewResponse:
-    """Extend the lease on the active claim for task_id.
-
-    Stale-claim reaping runs first.
-    extend_seconds controls how far the lease is extended (default 900 = 15 min).
-    """
+    """Extend the lease on the active claim for task_id by extend_seconds
+    (default 900 = 15 min). Reaps stale claims first."""
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -845,11 +804,8 @@ def generate_work_packet(
     task_id: str,
     format: Literal["markdown", "json"] = "markdown",
 ) -> WorkPacketResponse:
-    """Render a work packet for task_id in markdown or JSON format.
-
-    Delegates to context.packets.render_packet. Returns the rendered content
-    (str for markdown, dict for json) plus the format name.
-    """
+    """Render the work packet for task_id (task brief, dependencies, prior
+    findings) as markdown or JSON."""
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -936,13 +892,8 @@ def submit_progress(
     actor: str,
     notes: str,
 ) -> ProgressResponse:
-    """Record an in-progress status note for task_id.
-
-    Emits a 'progress.noted' audit event but does NOT change task status.
-    The JSONL row is the audit record.
-
-    Stale-claim reaping runs first.
-    """
+    """Record a progress note for task_id as a 'progress.noted' audit event.
+    Does NOT change task status. Reaps stale claims first."""
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -993,14 +944,9 @@ def submit_completion_evidence(
     pr_url: str | None = None,
     commit_sha: str | None = None,
 ) -> EvidenceResponse:
-    """Submit completion evidence for task_id.
-
-    Mirrors `anvil submit` from the CLI. Requires an active claim.
-    Emits evidence.submitted event which auto-releases the claim and
-    transitions the task to needs_review.
-
-    Stale-claim reaping runs first.
-    """
+    """Submit completion evidence for task_id (requires an active claim held by
+    actor). Auto-releases the claim and moves the task to needs_review; names
+    the next claimable task. Reaps stale claims first."""
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -1092,11 +1038,9 @@ def check_conflicts(
     task_id: str,
     proposed_files: list[str],
 ) -> ConflictCheckResponse:
-    """Cross-reference proposed_files against active claims (excluding task_id's own claim).
-
-    Returns a list of conflict entries — one per overlapping file per claim.
-    An empty conflicts list means no conflicts were detected.
-    """
+    """Check proposed_files against active claims (excluding task_id's own),
+    returning one conflict entry per overlapping file per claim. Empty list
+    means no conflicts."""
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -1134,14 +1078,11 @@ def get_dependency_graph(
     scope: Literal["all", "feature", "task"] = "all",
     target_id: str | None = None,
 ) -> DependencyGraphResponse:
-    """Return the task dependency graph with nodes, edges, and ready_to_claim set.
+    """Return the task dependency graph (nodes, edges, ready_to_claim).
 
-    scope='all': entire project.
-    scope='feature': all tasks in the given feature (target_id required).
-    scope='task': the given task plus its transitive dependencies (target_id required).
-
-    ready_to_claim is the list of task IDs that are in 'ready' status, have
-    all dependencies done, and have no active claim.
+    scope='all' is the whole project; 'feature' is one feature's tasks; 'task'
+    is the target plus its transitive deps (target_id required for the latter
+    two). ready_to_claim = ready tasks with all deps done and no active claim.
     """
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -1239,16 +1180,12 @@ def edit_dependencies(
     add: list[list[str]] | None = None,
     remove: list[list[str]] | None = None,
 ) -> EditDependenciesResponse:
-    """Apply a batch of dependency edge edits atomically, rejecting cycles.
+    """Apply a batch of dependency edits atomically, rejecting cycles.
 
-    ``add`` / ``remove`` are lists of ``[source, target]`` pairs meaning
-    *source depends on target* (target is added to / removed from
-    source.dependencies). Multiple sources/targets and both ops are accepted in
-    one call. The WHOLE batch is validated up front: any unknown task,
-    self-dependency, or edit that would introduce a dependency cycle rejects the
-    ENTIRE batch (ToolError) with NO partial application. On success one
-    task.created upsert is emitted per task whose dependency set changed — task
-    status is preserved.
+    ``add`` / ``remove`` are ``[source, target]`` pairs meaning *source depends
+    on target*. The whole batch is validated up front: any unknown task,
+    self-dependency, or cycle rejects the ENTIRE batch (ToolError) with no
+    partial apply. Task status is preserved.
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
@@ -1315,17 +1252,9 @@ def update_task_status(
     actor: str,
     reason: str | None = None,
 ) -> StatusUpdateResponse:
-    """Transition task_id to a new status.
-
-    Allowed transitions per spec:
-    - drafted ↔ ready
-    - in_progress / claimed → blocked
-    - blocked → in_progress
-
-    Any other transition returns a structured ToolError.
-
-    Stale-claim reaping runs first.
-    """
+    """Transition task_id to a new status. Only these moves are allowed
+    (any other raises ToolError): drafted↔ready, in_progress/claimed→blocked,
+    blocked→in_progress. Reaps stale claims first."""
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -1378,20 +1307,13 @@ def update_task_status(
 
 
 # ===========================================================================
-# v1.13.0 — Workflow tools (init / PRD / plan / review / apply)
+# Workflow tools (init / PRD / plan / review / apply)
 # ===========================================================================
 #
-# Eight tools below complete the PRD → plan → review → approve → claim →
-# apply lifecycle for non-Claude-Code MCP clients. Each one mirrors the
-# corresponding CLI handler and reuses the same shared modules (no logic
-# duplication). None of these tools touch git — branch/worktree creation
-# stays in the CLI for the same reason claim_task omits it (remote agents
-# may have no git access).
-#
-# All workflow tools accept an optional ``cwd`` parameter so a single MCP
-# session can target multiple project roots; the existing 13 tools resolve
-# state from ``Path.cwd()`` only (their session-pinned behavior is
-# preserved). ``cwd`` is documented in each tool's docstring.
+# These complete the PRD → plan → review → approve → claim → apply lifecycle
+# for non-Claude-Code MCP clients. Each mirrors the corresponding CLI handler
+# via shared modules (no logic duplication), touches no git, and accepts an
+# optional ``cwd`` to target a project root other than the server's launch dir.
 
 _PRD_FILENAME = "prd.md"
 
@@ -1417,26 +1339,17 @@ def init_project(
     name: str | None = None,
     cwd: str | None = None,
 ) -> InitProjectResponse:
-    """Scaffold a .anvil/ directory in the target project root.
+    """Scaffold a fresh .anvil/ state directory in the target project root.
 
-    Mirrors ``anvil init``. Creates the canonical state layout
-    (config.yaml, state.db, events.jsonl, packets/), seeds the project row,
-    and emits project.created + state.initialized events. Does NOT create
-    a git branch or worktree (consistent with claim_task — remote agents
-    without git access must still be able to bootstrap).
+    Creates the canonical layout (config.yaml, state.db, events.jsonl,
+    packets/), seeds the project row, and emits project.created +
+    state.initialized. Non-destructive: raises ToolError if .anvil/ already
+    exists (use ``anvil init --force`` from the CLI to reinit) or inside the
+    plugin root.
 
     Args:
-        name: Human-readable project name. Defaults to the basename of cwd.
+        name: Project name. Defaults to the cwd basename.
         cwd:  Project root. Defaults to Path.cwd().
-
-    Returns:
-        InitProjectResponse with the resolved project_id, project_name,
-        absolute state_dir path, and created=True.
-
-    Raises:
-        ToolError: When .anvil/ already exists (use --force from the
-                   CLI to reinit), when running inside the plugin root, or
-                   when scaffolding fails.
     """
     from anvil.cli._helpers import _is_plugin_root, _resolve_base_dir, _slug
     from anvil.clock import SystemClock
@@ -1540,12 +1453,9 @@ class ProjectStatusResponse(BaseModel):
 
 @mcp.tool
 def get_project_status(cwd: str | None = None) -> ProjectStatusResponse:
-    """Return PRD status, task counts by state, active claims, and ready
-    queue depth for the target project.
-
-    Mirrors ``anvil status``. Returns initialized=False with empty
-    counts when ``.anvil/`` is absent (no exception — status is the
-    canonical "am I bootstrapped?" probe).
+    """Return PRD status, task counts by state, active-claim count, and ready-
+    queue depth. The canonical "am I bootstrapped?" probe: returns
+    initialized=False with empty counts (no exception) when .anvil/ is absent.
 
     Args:
         cwd: Project root. Defaults to Path.cwd().
@@ -1630,18 +1540,13 @@ def parse_prd(
     file: str | None = None,
     cwd: str | None = None,
 ) -> ParsePrdResponse:
-    """Parse .anvil/prd.md (or --file PATH) and emit prd.parsed.
-
-    Mirrors ``anvil prd parse``. Returns counts plus any parse
-    errors. Errors are returned in the response (not raised) so the caller
-    can decide whether to fix them and retry — matching the CLI which exits
-    1 on errors but still surfaces them. ToolError is raised only for
-    operational failures (missing PRD file, unreadable file, project not
-    initialized).
+    """Parse the PRD markdown into requirements/features/tasks and emit
+    prd.parsed; returns counts. Parse errors are returned in the response (not
+    raised) so the caller can fix and retry; ToolError is raised only for
+    operational failures (missing/unreadable file, project not initialized).
 
     Args:
-        file: Absolute or cwd-relative path to the PRD markdown. Defaults
-              to ``.anvil/prd.md`` under the resolved cwd.
+        file: PRD path (absolute or cwd-relative). Defaults to .anvil/prd.md.
         cwd:  Project root. Defaults to Path.cwd().
     """
     from anvil.clock import SystemClock
@@ -1765,15 +1670,11 @@ def review_prd(
     notes: str | None = None,
     cwd: str | None = None,
 ) -> ReviewPrdResponse:
-    """Transition the PRD: draft → reviewed (default) or reviewed →
-    approved (when approve=True).
-
-    Mirrors ``anvil prd review`` / ``prd review --approve``. Emits
-    prd.reviewed or prd.approved.
+    """Advance the PRD review state: draft → reviewed (default), or reviewed →
+    approved when approve=True. Emits prd.reviewed or prd.approved.
 
     Args:
-        approve:  If True, transition reviewed → approved.
-                  If False, transition draft → reviewed.
+        approve:  True moves reviewed → approved; False moves draft → reviewed.
         reviewer: Identity recorded in the event payload.
         notes:    Optional reviewer notes (recorded on prd.reviewed only).
         cwd:      Project root. Defaults to Path.cwd().
@@ -1862,23 +1763,13 @@ class PlanTasksResponse(BaseModel):
     task_count: int
     conflict_group_count: int
     warnings: list[ParseErrorEntry]
-    # v1.17.0 fields — LLM task-generation backstop signalling.
-    # ``llm_generated`` is True when this call invoked the LLM to draft a
-    # ``## Tasks`` section and appended it to prd.md. ``llm_provider`` is
-    # the resolved provider slug — one of ``anthropic`` / ``bedrock`` /
-    # ``custom``, or ``"injected"`` when a test passes its own provider
-    # — or None when no LLM call was made (tasks already existed or
-    # ``use_llm=False``). The provider is chosen by
-    # :func:`anvil.planning.llm_planner.resolve_planner_provider`
-    # from the project's ``.anvil/config.yaml`` ``llm_provider`` /
-    # ``llm_tier`` / ``bedrock_*`` / ``custom_*`` fields; env auto-detect
-    # is the fallback when config is silent. (mcp-critic SHOULD FIX, PR #65)
+    # LLM backstop signalling. ``llm_generated`` is True when this call drafted
+    # a ``## Tasks`` section via the LLM and appended it to prd.md;
+    # ``llm_provider`` is the resolved provider slug (else None).
     llm_generated: bool = False
     llm_provider: str | None = None
-    # v1.15.0 fields — orphan-prune signalling. ``pruned_task_ids`` and
-    # ``pruned_feature_ids`` list entities that existed in state.db but
-    # were absent from the new PRD parse and got deleted as part of this
-    # call. Empty lists mean no orphans were pruned (the common case).
+    # Orphan-prune signalling: task/feature IDs that were in state.db but absent
+    # from the new PRD parse and deleted this call. Empty when none were pruned.
     pruned_task_ids: list[str] = []
     pruned_feature_ids: list[str] = []
 
@@ -1889,44 +1780,24 @@ def plan_tasks(
     use_llm: bool = True,
     prune_force: bool = False,
 ) -> PlanTasksResponse:
-    """Run the planner pipeline against the current PRD: emit
-    feature.created and task.created events with dependency inference and
-    conflict groups, then promote proposed tasks to drafted.
+    """Run the planner over the current PRD: generate features and tasks, infer
+    dependencies and conflict groups, then promote proposed tasks to drafted.
 
-    Mirrors ``anvil plan``. When the PRD has features+requirements
-    but no ``## Tasks`` section the tool calls the LLM planner (see
-    ``planning.llm_planner``) to draft tasks, appends them to ``prd.md``,
-    and re-parses. Pass ``use_llm=False`` to opt out of this backstop —
-    the tool will then return ``task_count=0`` without mutating the file,
-    leaving the caller to author tasks manually.
+    When the PRD has features but no ``## Tasks`` section, the LLM planner
+    drafts tasks, appends them to prd.md, and re-parses (set use_llm=False to
+    opt out and keep the deterministic parse). The provider is resolved from
+    .anvil/config.yaml, else env auto-detect; see docs/llm-providers.md.
 
-    **LLM provider resolution (v1.17.0).** The provider is chosen from the
-    project's ``.anvil/config.yaml`` (``llm_provider`` /
-    ``llm_tier`` / ``bedrock_*`` / ``custom_*`` fields) when present; when
-    config is absent or unreadable the tool falls back to env auto-detect
-    (``ANTHROPIC_API_KEY`` → anthropic; ``AWS_REGION`` + ``boto3`` →
-    bedrock; ``CUSTOM_LLM_BASE_URL`` → custom). The MCP server inherits
-    its env from the Claude Code host process, so provider credentials
-    (AWS profile, custom-endpoint API key) must be set in the shell that
-    launches Claude Code, not in ``.anvil/config.yaml``. See
-    ``docs/llm-providers.md`` for the full setup matrix.
-
-    Parse errors from the underlying PRD parse are surfaced as warnings,
-    not raised. LLM failures (no provider configured, bad LLM output) are
-    raised as ``ToolError`` so MCP clients see them rather than a silent
-    zero-count response.
+    PRD parse errors surface as warnings; LLM failures raise ToolError rather
+    than returning a silent zero-count.
 
     Args:
         cwd: Project root. Defaults to Path.cwd().
-        use_llm: When True (the default) and the PRD has 0 tasks but ≥1
-            feature, invoke the LLM planner to generate a ``## Tasks``
-            section and append it to ``prd.md``. When False, skip the
-            backstop and return whatever the deterministic parse produced.
-        prune_force: When True, allow deletion of orphan tasks that have
-            advanced past ``ready`` status (claimed / in_progress / etc.).
-            Default False: orphans in those statuses cause the tool to
-            raise ``ToolError`` so the caller can release/complete them
-            first instead of losing claim/evidence history.
+        use_llm: When True (default), draft tasks via LLM if the PRD has
+            features but 0 tasks.
+        prune_force: When True, delete orphan tasks that advanced past
+            ``ready`` (default False raises ToolError so claim/evidence
+            history is not lost silently).
     """
     from anvil.clock import SystemClock
     from anvil.planning.inference import infer_all
@@ -2257,14 +2128,10 @@ class TaskScoreEntry(BaseModel):
 
 
 class ExpansionQueueEntry(BaseModel):
-    """One task queued for sub-task expansion (complexity >= threshold).
-
-    v1.21.0 — the deterministic side of the score → expand loop. The entry
-    carries everything an orchestrating agent needs to act: the task
-    identity, why it queued (complexity), a deterministic suggested split
-    size, and the exact CLI follow-up command. The LLM-side expansion
-    itself happens via the planner agent / ``expand --use-llm``, never here.
-    """
+    """One task queued for sub-task expansion (complexity >= threshold),
+    carrying the task identity, its complexity, a suggested split size, and the
+    exact CLI follow-up command. Expansion itself runs via the planner agent /
+    ``expand --use-llm``, never here."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2282,9 +2149,8 @@ class ScoreTasksResponse(BaseModel):
 
     scored: list[TaskScoreEntry]
     skipped_already_scored: int
-    # v1.21.0 — auto-expansion queue. ``expansion_queue`` lists every task
-    # at/above ``auto_expand_threshold`` (config default 4) when
-    # ``auto_expand`` is enabled (config default true); empty when disabled.
+    # ``expansion_queue`` lists every task at/above ``auto_expand_threshold``
+    # when ``auto_expand`` is on; empty when disabled.
     auto_expand: bool
     auto_expand_threshold: int
     expansion_queue: list[ExpansionQueueEntry]
@@ -2295,27 +2161,18 @@ def score_tasks(
     task_id: str | None = None,
     cwd: str | None = None,
 ) -> ScoreTasksResponse:
-    """Run the rule-based scoring engine on one task or all unscored tasks.
+    """Run the rule-based (non-LLM) scoring engine on one task or all unscored
+    tasks across six dimensions; emits task.scored per task.
 
-    Mirrors ``anvil score [TASK_ID]`` in deterministic mode (no LLM
-    augmentation). Emits a task.scored event per scored task.
-
-    Behavior differs by mode (matches the CLI deliberately):
-    - ``task_id`` is set → that single task is **always** re-scored, even if
-      it already has complete scores. ``skipped_already_scored`` is 0.
-    - ``task_id`` is None → only tasks whose Score is not yet complete are
-      scored. Already-scored tasks count toward ``skipped_already_scored``.
-
-    v1.21.0: the response carries an ``expansion_queue`` — every task whose
-    complexity is at/above the project's ``auto_expand_threshold`` (config
-    default 4) when ``auto_expand`` is enabled (config default true), each
-    with the exact ``anvil expand TXXX --use-llm`` follow-up command.
-    The queue is deterministic; the LLM-side expansion happens via the
-    planner agent, never inside this tool.
+    Pass task_id to always re-score that one task; pass None to score only
+    tasks whose scores are incomplete (the rest count toward
+    skipped_already_scored). The response also carries a deterministic
+    expansion_queue of high-complexity tasks; the LLM-side expansion runs via
+    the planner agent, never here.
 
     Args:
-        task_id: Specific task to score (always re-scored). When None, scores
-                 every task whose Score is not yet complete.
+        task_id: Specific task to score (always re-scored). None scores all
+                 unscored tasks.
         cwd:     Project root. Defaults to Path.cwd().
     """
     from anvil.cli._helpers import _scores_complete
@@ -2472,12 +2329,9 @@ class ReviewTasksResponse(BaseModel):
 
 @mcp.tool
 def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
-    """Promote tasks through drafted → reviewed → ready using the gate
-    logic in ``anvil.state.transitions`` (which encapsulates the
-    review gates).
-
-    Mirrors ``anvil review tasks``. Returns the lists of promoted
-    task IDs and any tasks blocked by a gate (with reasons).
+    """Promote tasks through drafted → reviewed → ready, applying the review
+    gates. Returns the promoted task IDs per stage plus any tasks a gate
+    blocked (with reasons).
 
     Args:
         cwd: Project root. Defaults to Path.cwd().
@@ -2594,8 +2448,8 @@ class ApplyReviewResponse(BaseModel):
     from_status: str
     to_status: str
     reviewer: str
-    # T014: name the next claimable task after this disposition (an approval
-    # that marks a task done may unblock dependents); null when none available.
+    # The next claimable task after this disposition (an approval may unblock
+    # dependents); null when none is available.
     next_ready: NextReadyTask | None = None
 
 
@@ -2608,32 +2462,22 @@ def apply_review_decision(
     strict: bool | None = None,
     cwd: str | None = None,
 ) -> ApplyReviewResponse:
-    """Apply a human review decision: approve (needs_review → accepted →
-    done) or reject (needs_review → rejected/drafted for rework).
+    """Apply a human review decision on a needs_review task: approve (→ accepted
+    → done) or reject (→ rejected/drafted for rework). Emits task.applied; the
+    backend auto-promotes through accepted → done on approval.
 
-    Mirrors ``anvil apply TASK_ID --approve`` and
-    ``--reject --reason TEXT``. Emits a task.applied event; the SQLite
-    backend handles auto-promotion through accepted → done on approval.
-
-    Completion-evidence enforcement (T025/B25) — parity with the CLI. When
-    strict mode is in effect, ``approve=True`` REFUSES (raises ToolError with
-    the stable code ``evidence_incomplete`` listing the missing required-
-    evidence items) BEFORE the accept event is appended, so the task stays in
-    needs_review. This closes the gap where an agent — which completes work via
-    MCP, not the CLI — could mark a task done with missing required evidence.
-    Strict is resolved exactly like the CLI: explicit ``strict`` param wins,
-    else the project config's ``strict_evidence``, else False (advisory). A
-    complete gate, or a task that declares no ``required_evidence``, makes
-    strict a no-op. Reject decisions are NEVER gated.
+    Under strict evidence mode an approval REFUSES (ToolError code
+    ``evidence_incomplete``, listing the missing items) before any event is
+    appended, leaving the task in needs_review; rejections are never gated.
+    Strict resolves as: explicit ``strict`` param > config ``strict_evidence`` >
+    False (advisory).
 
     Args:
         task_id:  Task awaiting review (must be in needs_review status).
-        approve:  True → accept the work. False → reject it.
+        approve:  True accepts the work; False rejects it.
         reviewer: Identity recorded in the event payload.
         reason:   Required when approve=False; recorded as review notes.
-        strict:   Override the evidence gate for this call. True enforces,
-                  False disables, None (default) defers to config
-                  ``strict_evidence``. Only affects approve=True.
+        strict:   Evidence-gate override (approve only). None defers to config.
         cwd:      Project root. Defaults to Path.cwd().
     """
     from anvil.clock import SystemClock
@@ -2749,7 +2593,7 @@ def apply_review_decision(
 
 
 # ===========================================================================
-# v1.14.0 — Decision resolution
+# Decision resolution
 # ===========================================================================
 #
 # One read-only tool that surfaces unresolved decisions in the PRD so the
@@ -2787,33 +2631,17 @@ class FindDecisionsResponse(BaseModel):
 
 @mcp.tool
 def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
-    """Scan the PRD for items needing a human decision.
+    """Scan the PRD for items needing a human decision (read-only; emits no
+    events). Walks three sources: inline ``[NEEDS DECISION]`` markers,
+    ``## Open Questions`` items, and tasks with empty acceptance_criteria or
+    verification.commands. Drives the `resolve-decisions` skill.
 
-    Walks three sources:
-    1. Inline ``[NEEDS DECISION]`` markers in the raw PRD markdown.
-    2. ``## Open Questions`` items (skipping "none identified" placeholders).
-    3. Tasks in the backend whose ``acceptance_criteria`` or
-       ``verification.commands`` are empty.
-
-    Mirrors ``anvil prd find-decisions``. Detection is pure — no
-    events are emitted; this tool is the read-only sibling of `parse_prd`
-    intended to drive the `resolve-decisions` skill.
+    Returns the decisions (needs_decision, then open_question, then
+    missing_field), counts by kind, and the total. Raises ToolError when
+    .anvil/ or prd.md is missing.
 
     Args:
         cwd: Project root. Defaults to ``Path.cwd()``.
-
-    Returns:
-        FindDecisionsResponse with the flat list of decisions, counts by
-        kind, and the total. Stable order: all ``needs_decision`` first
-        (source order), then ``open_question`` (PRD order), then
-        ``missing_field`` (task-ID order).
-
-    Raises:
-        ToolError: When ``.anvil/`` does not exist. When ``prd.md``
-            is missing we also raise — matching ``parse_prd`` so the agent
-            sees the same operational error on a fresh project rather than
-            getting a deceptive "0 decisions" response that hides the
-            missing file.
     """
     from anvil.planning.decisions import find_unresolved_decisions
     from anvil.planning.template import parse_prd as _parse_prd_impl
@@ -2903,19 +2731,10 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
 
 @mcp.tool
 def describe_surface() -> dict[str, Any]:
-    """Return a machine-readable manifest of the anvil command surface.
-
-    The MCP-side counterpart of ``anvil describe``: lets an MCP-only host
-    discover, without a CLI, the exact CLI subcommands and MCP tool names this
-    engine exposes, plus the engine version, SQLite schema version, and a stable
-    ``api_version`` to pin against. Needs no project — it never opens a backend.
-
-    Returns the same manifest dict the CLI emits inside its ``data`` envelope
-    (``api_version``, ``engine_version``, ``schema_version``, ``envelope``,
-    ``cli.commands``/``cli.count``, ``mcp.tools``/``mcp.count``). The list is
-    introspected live from this very server, so it always matches reality —
-    including ``describe_surface`` itself.
-    """
+    """Return a machine-readable manifest of the anvil command surface: the CLI
+    subcommands and MCP tool names this engine exposes, plus engine version,
+    schema version, and a stable ``api_version`` to pin against. Introspected
+    live, needs no project. Lets an MCP-only host discover the surface."""
     # Imported lazily and reused so the CLI and MCP surfaces report the IDENTICAL
     # manifest (single source of truth — no second hand-maintained list).
     from anvil.cli.describe import build_manifest
