@@ -100,6 +100,21 @@ class Config:
     custom_base_url: str | None = None
     custom_api_key_env: str | None = None
 
+    # ---------------------------------------------------------------------------
+    # S3 durable storage (optional). Only consulted when durable_store == "s3".
+    #
+    # Run `anvil backup` to push events.jsonl; `anvil restore` to pull + replay.
+    # Requires boto3: pip install 'anvil-state[s3]'
+    #
+    # ponytail: Literal["none","s3"] only — widen to "gcs"|"azure" when
+    # DurableStore impls exist for those providers.
+    # ---------------------------------------------------------------------------
+    durable_store: Literal["none", "s3"] = "none"
+    s3_bucket: str | None = None
+    s3_prefix: str = ""           # key prefix within the bucket, e.g. "anvil/my-project"
+    s3_region: str | None = None  # falls back to AWS_REGION env; mirrors bedrock_region
+    s3_profile: str | None = None # named AWS profile; mirrors bedrock_profile
+
     # Lease / heartbeat durations in MINUTES. Stored as float so sub-minute
     # values (e.g. ``default_lease_minutes: 0.5`` → 30 s) round-trip without
     # being truncated to whole minutes. ClaimManager computes the lease via
@@ -560,6 +575,19 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
     else:
         llm_tier_value = None
 
+    # S3 durable storage knobs. Mirror bedrock_region/bedrock_profile pattern.
+    durable_store = _validate_literal(
+        data.get("durable_store", "none"),
+        ("none", "s3"),
+        "durable_store",
+    )
+    s3_bucket = _str_or_none(data.get("s3_bucket"))
+    if durable_store == "s3" and not s3_bucket:
+        raise ValueError(
+            f"Config file {resolved}: durable_store is 's3' but s3_bucket is "
+            "absent or blank. Set s3_bucket to the target bucket name."
+        )
+
     return Config(
         project_name=str(data["project_name"]),
         project_id=str(data["project_id"]),
@@ -596,6 +624,12 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         fast_lane_blast_radius_max=fast_lane_blast_radius_max,
         db_path=db_path,
         events_path=events_path,
+        # S3 durable storage — mirrors bedrock_region/bedrock_profile pattern.
+        durable_store=durable_store,  # type: ignore[arg-type]
+        s3_bucket=s3_bucket,
+        s3_prefix=str(data.get("s3_prefix", "") or ""),
+        s3_region=_str_or_none(data.get("s3_region")),
+        s3_profile=_str_or_none(data.get("s3_profile")),
     )
 
 
@@ -1014,4 +1048,15 @@ strict_evidence: false
 # ---------------------------------------------------------------------------
 sync_github_enabled: false
 sync_github_conflict_strategy: prompt  # local_wins | remote_wins | prompt | manual_merge
+
+# ---------------------------------------------------------------------------
+# S3 durable storage (optional)
+# Run `anvil backup` to push events.jsonl; `anvil restore` to pull + replay.
+# Requires boto3: pip install 'anvil-state[s3]'
+# ---------------------------------------------------------------------------
+# durable_store: s3
+# s3_bucket: my-anvil-backups
+# s3_prefix: my-project          # key prefix; recommended to avoid collisions
+# s3_region:                     # defaults to AWS_REGION env
+# s3_profile:                    # named AWS profile
 """
