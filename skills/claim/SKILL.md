@@ -156,13 +156,7 @@ The claim is valid. Work proceeds in the repo root. The branch field on the Clai
 
 Actual code changes happen here, inside the conversation. The agent makes the edits directly on `agent/t012-add-retry-backoff` (or the worktree branch). Commit incrementally — incremental commits make the eventual PR reviewable and give a recovery point if the session is interrupted.
 
-Two hooks run during this phase:
-
-**`check-claim.sh`** (PreToolUse on Edit, Write, NotebookEdit) — warns whenever any active claim exists, prompting the agent to verify the file being modified is within its claim's scope. Per-file scope checking against `expected_files` arrives in Phase 5; until then this is a coarse-grained heads-up. Non-blocking: the edit proceeds regardless.
-
-**`record-file-change.sh`** (PostToolUse on Edit, Write, NotebookEdit) — appends a `file_changed` event to `events.jsonl` for every file touched. This populates the audit trail that Phase 5's `submit` command reads.
-
-Both hooks run automatically. No manual action required.
+Two hooks run automatically during this phase (`check-claim.sh` and `record-file-change.sh`). See `/anvil:execute` Step 3a for full hook descriptions.
 
 ---
 
@@ -232,26 +226,11 @@ anvil release C004 --force
 
 ## Anti-pattern to avoid
 
-Ending this skill with a numbered list like "1. Run `anvil show T012` 2. Run `anvil claim T012` 3. Heartbeat with `renew C004` 4. Run `submit T012` 5. Hand off to `/anvil:finish`..." That handoff style only makes sense when the work is leaving this session entirely — queued for another agent, scheduled for tomorrow, blocked on stakeholder review. When the agent is sitting in the same conversation that holds the active claim, the agent drives `next`, `show`, `claim`, `renew`, `submit`, and `release` inline. The only command the agent must NOT run without explicit user confirmation is `apply --approve` (which lives in `/anvil:finish`) — every other primitive in this skill is the agent's to invoke directly, with the user seeing the output in the same message.
+The agent drives commands inline; it does not hand the user a numbered CLI to-do list. See `/anvil:plan` for the canonical statement. The only command that requires explicit user confirmation before the agent runs it is `apply --approve` (which lives in `/anvil:finish`).
 
-**When to actually hand off CLI commands:** if the user explicitly opts out ("just give me the commands"), or if the runtime lacks the tool needed to execute them (e.g., MCP-only client with no shell and no equivalent `claim` tool). In those cases, a CLI list is the right output. Otherwise, drive.
+**When to actually hand off CLI commands:** if the user explicitly opts out ("just give me the commands"), or if the runtime lacks the tool needed to execute them. In those cases, a CLI list is the right output. Otherwise, drive.
 
-### Decision-presentation discipline (v1.15.0)
-
-When this skill surfaces a multi-option choice — which task to claim from the ready queue, whether to release a claim early, whether to force-claim something with an existing lease — present it as a **structured Q&A turn**, not as prose with bullets.
-
-Use `AskUserQuestion` when running inside Claude Code. The labeled options become an explicit pick UI and the answer comes back as a known label, so the agent can act unambiguously. For other runtimes, fall back to explicit numbered prompts ("Pick 1 / 2 / 3").
-
-**Anti-pattern:** ending a turn with paragraph-style alternatives like "I'd suggest T012 because it's lowest risk, but T015 has higher value, and T019 unlocks the most downstream work — what's your call?" That asks for a decision but doesn't pin down the answer shape. Replace with:
-
-> Three ready tasks I'd recommend claiming first:
-> 1. **T012** — Implement retry-with-backoff (low complexity, no blockers)
-> 2. **T015** — Add caching layer (higher value, but T012 is a dep)
-> 3. **T019** — Migrate to new API (unlocks 3 downstream tasks)
->
-> Pick 1 / 2 / 3 (or name a different task ID).
-
-The rule is the same as the v1.14.0 `resolve-decisions` Q&A pattern, applied to claim-time decisions: any time the agent could present 2+ options, use structured Q&A. Prose-with-bullets that looks like options but lacks an explicit "pick N" prompt forces the user to type free-form intent the agent then has to interpret — wasted turn.
+For **decision-presentation discipline** — how to surface multi-option choices (e.g., which task to claim, whether to force-claim) — see the canonical description in `/anvil:resolve-decisions`. The same structured Q&A pattern applies here.
 
 ---
 
@@ -260,7 +239,6 @@ The rule is the same as the v1.14.0 `resolve-decisions` Q&A pattern, applied to 
 - **Claiming while PRD is still `draft`.** The claim gate checks `prd-status` and raises `ClaimError` before touching anything else. Run `anvil prd review --approve` first.
 - **Ignoring the `agent_suitability` score.** Claiming a task scored `1` or `2` with a small or local model burns 60 minutes and produces output that needs complete rework. Check `anvil show TASK_ID` before committing.
 - **Skipping the heartbeat on long sessions.** Leases expire silently. The task returns to `ready` and another agent can claim it while work is still in progress. Set a timer and run `anvil renew CLAIM_ID` every 5 minutes.
-- **Editing `state.db` directly with sqlite3 to fix a stuck claim.** Use `anvil release --force` instead. Direct edits bypass `events.jsonl` and produce state that cannot be replayed or audited.
 - **Calling `renew` after the lease has already expired.** `renew` raises `ClaimError` on an expired lease — the lease cannot be extended retroactively. Re-claim the task after it returns to `ready`.
 
 ---

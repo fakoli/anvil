@@ -246,7 +246,6 @@ The command overwrites the previous `.anvil/packets/T012.md`. Re-read the packet
 - **Submitting without running all verification commands.** The Review engine checks completeness at `apply` time. Submitting partial evidence delays the ship decision and may require reopening the task.
 - **Skipping heartbeats on sessions longer than 55 minutes.** Leases expire silently. Set a timer at session start and renew every 5 minutes.
 - **Manually tracking files changed.** The `record-file-change.sh` hook tracks this automatically from every Edit, Write, and NotebookEdit call. Pass the hook-tracked list to `--files-changed`; do not reconstruct it by hand.
-- **Editing `state.db` directly to fix a stuck claim.** Use `anvil release --force` instead. Direct edits bypass `events.jsonl` and produce state that cannot be replayed or audited.
 
 ---
 

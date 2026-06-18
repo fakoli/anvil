@@ -174,52 +174,7 @@ anvil does not auto-merge. The deliberate separation between `apply` (state tran
 
 ### Step 5 — Sync to external tracker (optional)
 
-Phase 8 ships bidirectional sync. If the project has a sync provider
-configured (a `GITHUB_REPOSITORY` env var, a `gh auth` session, or any
-contributor-registered provider in `PROVIDER_REGISTRY`) AND the task is
-now at `status=done`, push the final state so the remote tracker
-reflects the completion.
-
-```bash
-anvil sync github --task T012
-```
-
-This runs a single-task push + pull pass through the GitHub Issues
-provider. The closed-issue mapping (`done` → `status:done` label +
-issue state `closed`) writes back to GitHub; any remote-side edits land
-locally in the same pass. Failures (rate limit, deleted issue, auth
-missing) surface on stderr and exit `1` without blocking the next task.
-
-Run a health check first if this is the first sync of the session:
-
-```bash
-anvil sync github --health
-```
-
-For other providers (Linear, Monday, Jira) use the generic form:
-
-```bash
-anvil sync provider <provider_id> --task T012
-```
-
-See [`docs/github-sync.md`](../../docs/github-sync.md) for the full CLI
-surface and conflict-resolution strategies.
-
-**Otherwise** — no provider configured, no `GITHUB_REPOSITORY`, no `gh
-auth` — skip this step. The local `state.db` + `events.jsonl` is the
-canonical record; nothing else needs to happen. anvil is fully
-functional without any external sync.
-
----
-
-## Co-authoring Guidance
-
-When the human is the reviewer and an agent runs this skill:
-
-- Surface the full evidence summary (Step 2 output) BEFORE invoking `apply`. Do not apply without explicit human confirmation.
-- For the reject path, propose a concrete reason — surface the exact failure message from `evidence.commands_run`, not a vague "did not pass".
-- For the hold path, write the open questions in plain language and confirm where they will be tracked before moving on.
-- For the discard path, confirm with the human that the branch will be deleted. Deleting a branch is recoverable for a short window via `git reflog`; after the ref expires it is gone.
+If the project has an external sync provider configured and the task is now at `status=done`, see [`docs/github-sync.md`](../../docs/github-sync.md) for the full CLI surface and conflict-resolution strategies. Otherwise, skip this step — the local `state.db` + `events.jsonl` is the canonical record.
 
 ---
 
@@ -231,28 +186,7 @@ When the human is the reviewer and an agent runs this skill:
 - **Forgetting to delete merged branches.** Agent branches accumulate. After merge, `git branch -d` the branch. Running `anvil sync` (Phase 8) will report stale agent branches, but it is easier to clean up immediately.
 - **Manually editing `state.db` to change a task status.** Use `anvil apply` so the `Review` row and status transition are recorded in `events.jsonl`. Direct edits produce state that cannot be replayed or audited.
 
----
-
-## Decision-presentation discipline (v1.15.0)
-
-Whenever this skill surfaces a multi-option decision to the user — disposition (accept/reject/hold/discard), reject-with-which-reason, delete-branch-now-or-later, batch-multiple-tasks-or-one-at-a-time — present it as a **structured Q&A turn**, not as prose with bullet points.
-
-**Use `AskUserQuestion` when running inside Claude Code.** It gives the user an explicit pick UI with labeled options instead of free-form text they have to type. The labels become the agent's input on the next turn, so the choice is unambiguous and traceable. For runtimes without `AskUserQuestion`, fall back to explicit numbered prompts (`Reply 1 / 2 / 3 / 4`).
-
-**Anti-pattern to avoid:** ending a turn with prose-with-bullets that *looks* like options but doesn't structure the choice. For example:
-
-> "Two options: Cut T014 (planner's recommendation). Cut T008 + T018 (distributed). My recommendation is the first. What's your call?"
-
-That paragraph asks for a decision but doesn't pin down the answer shape — the user might reply "first," "T014," "let's cut T014," "go with your rec," and the agent now has to interpret intent. Replace it with `AskUserQuestion` (or numbered prompts) so the answer is one of N labels and the agent knows exactly what to do next:
-
-> 1. Cut T014 + trim T002 (planner's recommendation; lands at ~80h)
-> 2. Cut T008 + T018 + trim T007 (distributed; keeps all features intact)
-> 3. Defer T017 (Wasm network policy; affects F005)
-> 4. Keep all tasks and accept the overrun
->
-> Pick 1 / 2 / 3 / 4 (or describe).
-
-The rule is the same as the v1.14.0 `resolve-decisions` Q&A pattern, applied one layer up: any time the agent could present 2+ options for the user to pick, use structured Q&A. Prose-with-bullets that looks like options but lacks an explicit "pick N" prompt is the failure mode.
+For **decision-presentation discipline** — how to surface multi-option dispositions (accept/reject/hold/discard) as structured Q&A — see the canonical description in `/anvil:resolve-decisions`. The same pattern applies to any choice this skill surfaces.
 
 ---
 
