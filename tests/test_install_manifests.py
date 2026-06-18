@@ -127,7 +127,7 @@ def test_openclaw_readme_exists() -> None:
 # --- STUBs (NOT verified) ------------------------------------------------
 
 
-@pytest.mark.parametrize("harness", ["openhands", "cline"])
+@pytest.mark.parametrize("harness", ["cline"])
 def test_stub_has_todo_and_no_manifest_body(harness: str) -> None:
     """STUBs must contain TODO and carry NO parseable JSON/TOML manifest body —
     guard against a stub silently becoming a guessed manifest."""
@@ -151,3 +151,53 @@ def test_stub_has_todo_and_no_manifest_body(harness: str) -> None:
             f"{harness} STUB.md contains a parseable JSON object — that looks "
             "like a guessed manifest. STUBs must stay manifest-free."
         )
+
+
+# --- openhands: microagent + config snippet (VERIFIED) ---------------------
+
+
+def test_openhands_microagent_has_frontmatter() -> None:
+    """The OpenHands microagent file ships valid frontmatter required by OpenHands.
+
+    Format confirmed from OpenHands repo: .openhands/microagents/documentation.md
+    Fields: name, type, version, agent, triggers.
+    """
+    p = _packaging() / "openhands" / ".openhands" / "microagents" / "anvil.md"
+    assert p.is_file(), "missing packaging/openhands/.openhands/microagents/anvil.md"
+    text = p.read_text(encoding="utf-8")
+
+    # Must start with YAML frontmatter delimiter.
+    assert text.startswith("---\n"), "microagent must open with YAML frontmatter (---)"
+    end = text.index("---\n", 4)
+    frontmatter = text[4:end]
+
+    # Required frontmatter fields (confirmed from OpenHands primary source).
+    for field in ("name:", "type:", "version:", "agent:", "triggers:"):
+        assert field in frontmatter, f"missing frontmatter field {field!r}"
+
+    # type must be 'knowledge' or 'task' (not an invented value).
+    assert "type: knowledge" in frontmatter or "type: task" in frontmatter
+
+
+def test_openhands_microagent_body_mentions_anvil_mcp() -> None:
+    """The microagent body must reference the MCP tool surface (drift-guard)."""
+    p = _packaging() / "openhands" / ".openhands" / "microagents" / "anvil.md"
+    text = p.read_text(encoding="utf-8")
+    # The body should reference key Anvil concepts so it stays useful.
+    assert "anvil-mcp" in text or "bin/anvil-mcp" in text
+    assert "ANVIL_ROOT" in text
+
+
+def test_openhands_config_snippet_has_stdio_servers() -> None:
+    """The config.toml snippet uses the correct OpenHands TOML key.
+
+    Format confirmed from OpenHands config.template.toml: [mcp] table with
+    stdio_servers array of inline tables {name, command, args[, env]}.
+    """
+    p = _packaging() / "openhands" / "config.toml.snippet"
+    assert p.is_file(), "missing packaging/openhands/config.toml.snippet"
+    text = p.read_text(encoding="utf-8")
+
+    assert "[mcp]" in text, "snippet must contain [mcp] table header"
+    assert "stdio_servers" in text, "snippet must use stdio_servers key"
+    assert "anvil" in text, "snippet must reference the anvil server name"

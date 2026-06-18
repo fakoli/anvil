@@ -49,7 +49,7 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
 def test_known_harnesses_present() -> None:
     """The verified harnesses from the spec are all in the registry."""
     for name in ("codex", "copilot", "gemini", "openclaw", "cursor", "windsurf",
-                 "cline", "zed"):
+                 "cline", "zed", "openhands"):
         assert name in HARNESSES
 
 
@@ -197,6 +197,32 @@ def test_mcp_none_writes_only_instruction(
     assert data["mcp"]["action"] == "skipped"
     assert data["mcp"]["path"] is None
     assert data["mcp"]["note"]  # non-empty note
+
+
+def test_openhands_writes_microagent_file(sandbox: dict[str, Path]) -> None:
+    """openhands install drops AGENTS.md bytes at .openhands/microagents/anvil.md."""
+    result = runner.invoke(
+        app, ["install", "openhands", "--write"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # Instruction written at the OpenHands microagent path, not AGENTS.md root.
+    instr = sandbox["project"] / ".openhands" / "microagents" / "anvil.md"
+    assert instr.is_file(), f"expected {instr} to exist"
+    assert instr.read_bytes() == (_repo_root() / "AGENTS.md").read_bytes()
+    # No MCP config file (mcp_merge="none").
+    assert not (sandbox["home"] / ".codex").exists()
+    assert not (sandbox["home"] / ".cursor").exists()
+    # Note is surfaced on stderr.
+    assert "skipped" in result.stderr
+
+    # JSON envelope: MCP action is skipped, non-empty note.
+    j = runner.invoke(
+        app, ["install", "--json", "openhands"], catch_exceptions=False
+    )
+    data = json.loads(j.stdout.strip())["data"]
+    assert data["mcp"]["action"] == "skipped"
+    assert data["mcp"]["path"] is None
+    assert data["mcp"]["note"]
 
 
 def test_root_flag_propagates_into_written_block(sandbox: dict[str, Path]) -> None:
