@@ -98,6 +98,10 @@ graph TD
 
 Source: [`assets/diagrams/component.mmd`](../assets/diagrams/component.mmd).
 
+<div align="center">
+<img src="../assets/how-it-works.png" alt="Isometric diagram: agents claim tasks from the anvil surface, execute, and submit evidence — claim → execute → evidence → done" width="800" />
+</div>
+
 ### Per-layer responsibilities
 
 | Layer | What it owns | Key files |
