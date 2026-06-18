@@ -1,0 +1,17 @@
+{
+  "name": "anvil",
+  "version": "0.0.8",
+  "description": "Local-first project-state engine for coordinating humans and AI agents.",
+  "author": { "name": "Anvil" },
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Anvil",
+    "shortDescription": "Local-first project-state engine for humans and AI agents.",
+    "longDescription": "Anvil turns PRDs into reviewed, lockable, evidence-backed work packets that humans and AI agents can coordinate on without conflicts. State is event-sourced in SQLite under .anvil/. Exposes a single-mutator CLI and a 24-tool FastMCP stdio server.",
+    "developerName": "Anvil",
+    "category": "Productivity",
+    "capabilities": ["Write"]
+  }
+}
