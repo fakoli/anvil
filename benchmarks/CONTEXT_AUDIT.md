@@ -6,7 +6,7 @@
 **Reproduce:**
 
 ```bash
-cd plugins/anvil
+# from the repo root (standalone layout)
 uv run --with tiktoken python benchmarks/context_audit.py
 ```
 
@@ -25,12 +25,11 @@ moment anvil is installed — *before any skill is invoked or any tool is
 called*. It is paid on **every turn, by every agent**, for the life of the
 session. It comprises:
 
-- **Agent descriptions** — the frontmatter `description` of the 6 agent files
-  (including the long `<example>` blocks) lives in the agent registry / system
-  prompt always.
+- **Agent descriptions** — the frontmatter `description` of the 5 agent files
+  lives in the agent registry / system prompt always.
 - **Skill descriptions** — only the `description:` of the 8 skills is registered
   up front. Skill **bodies** load on demand (progressive disclosure).
-- **MCP tool schemas** — the 22 MCP tools (name + description + JSON input
+- **MCP tool schemas** — the 24 MCP tools (name + description + JSON input
   schema) are injected whenever the MCP server is connected.
 - **Hook injection** — the `SessionStart` hook's stdout is injected once per
   session.
@@ -45,17 +44,18 @@ is counted separately.
 
 | Category | Items | Tokens | Share |
 |----------|------:|-------:|------:|
-| MCP tool schemas | 22 | **3,903** | 53.8% |
-| Agent descriptions (registry) | 6 | **2,769** | 38.2% |
-| Skill descriptions (registry) | 8 | **554** | 7.6% |
-| Hook injection (SessionStart) | 1 | **22** | 0.3% |
+| MCP tool schemas | 24 | **4,456** | 82.0% |
+| Skill descriptions (registry) | 8 | **494** | 9.1% |
+| Agent descriptions (registry) | 5 | **465** | 8.6% |
+| Hook injection (SessionStart) | 1 | **19** | 0.3% |
 | Command descriptions | 0 | **0** | 0.0% |
-| **ALWAYS-ON GRAND TOTAL** | — | **7,248** | 100% |
+| **ALWAYS-ON GRAND TOTAL** | — | **5,434** | 100% |
 
-**Always-on grand total: ~7,248 tokens.**
+**Always-on grand total: ~5,434 tokens.**
 
-Two categories carry 92% of the cost: **MCP tool schemas (53.8%)** and **agent
-descriptions (38.2%)**. Skills, hooks, and commands are noise by comparison.
+MCP tool schemas now dominate at **82%** of the always-on budget. Agent
+descriptions dropped dramatically (from 2,769 to 465 tokens) after removing
+`marketplace-scribe` and trimming `<example>` blocks from agent frontmatter.
 
 ---
 
@@ -63,14 +63,14 @@ descriptions (38.2%)**. Skills, hooks, and commands are noise by comparison.
 
 | Category | Items | Tokens (sum) |
 |----------|------:|-------------:|
-| Skill bodies (on invocation) | 8 | 31,575 |
-| Agent bodies (on dispatch) | 6 | 11,128 |
-| **On-demand total (worst case, all loaded)** | 14 | **42,703** |
+| Skill bodies (on invocation) | 8 | 24,790 |
+| Agent bodies (on dispatch) | 5 | 8,754 |
+| **On-demand total (worst case, all loaded)** | 13 | **33,544** |
 
-This 42.7K is the worst case if *every* body loaded simultaneously. Real usage
-loads one skill body (~3–5K) plus maybe one agent body (~1–3K) per active
-workflow. The progressive-disclosure design genuinely works: ~43K of content is
-kept out of the baseline and 86% of the per-skill body weight is deferred.
+This 33.5K is the worst case if *every* body loaded simultaneously. Real usage
+loads one skill body (~2–5K) plus maybe one agent body (~1–3K) per active
+workflow. The progressive-disclosure design genuinely works: ~33.5K of content is
+kept out of the baseline and the per-skill body weight is deferred.
 
 ---
 
@@ -78,106 +78,81 @@ kept out of the baseline and 86% of the per-skill body weight is deferred.
 
 | # | Tokens | Share | Item | Category |
 |--:|-------:|------:|------|----------|
-| 1 | 760 | 10.5% | `docs-scribe` | Agent descriptions |
-| 2 | 705 | 9.7% | `marketplace-scribe` | Agent descriptions |
-| 3 | 594 | 8.2% | `plan_tasks` | MCP tool schemas |
-| 4 | 488 | 6.7% | `state-keeper` | Agent descriptions |
-| 5 | 455 | 6.3% | `apply_review_decision` | MCP tool schemas |
-| 6 | 409 | 5.6% | `planner` | Agent descriptions |
-| 7 | 344 | 4.7% | `score_tasks` | MCP tool schemas |
-| 8 | 233 | 3.2% | `critic` | Agent descriptions |
-| 9 | 212 | 2.9% | `parse_prd` | MCP tool schemas |
-| 10 | 195 | 2.7% | `submit_completion_evidence` | MCP tool schemas |
+| 1 | 588 | 10.8% | `plan_tasks` | MCP tool schemas |
+| 2 | 453 | 8.3% | `apply_review_decision` | MCP tool schemas |
+| 3 | 340 | 6.3% | `score_tasks` | MCP tool schemas |
+| 4 | 294 | 5.4% | `list_tasks` | MCP tool schemas |
+| 5 | 225 | 4.1% | `edit_dependencies` | MCP tool schemas |
+| 6 | 206 | 3.8% | `parse_prd` | MCP tool schemas |
+| 7 | 193 | 3.6% | `submit_completion_evidence` | MCP tool schemas |
+| 8 | 193 | 3.6% | `review_prd` | MCP tool schemas |
+| 9 | 192 | 3.5% | `describe_surface` | MCP tool schemas |
+| 10 | 189 | 3.5% | `find_decisions` | MCP tool schemas |
 
-The two heaviest items in the entire baseline are **agent descriptions for two
-repo-maintenance agents** (`docs-scribe`, `marketplace-scribe`) that a standalone
-end-user never dispatches — together **1,465 tokens (20% of the always-on
-budget)** spent advertising agents that maintain *this plugin's own docs and
-marketplace listing*.
+The entire top 10 is now **MCP tool schemas**. Agent descriptions no longer
+appear here — the previous top 2 were `docs-scribe` (760 tok) and
+`marketplace-scribe` (705 tok); both have been dramatically reduced
+(`docs-scribe` is now 130 tok in the registry, `marketplace-scribe` is fully
+removed). The MCP schema set grew from 22 to **24 tools** (added
+`edit_dependencies` and `describe_surface`), slightly increasing that category.
 
 ---
 
-## Verdict on the "context-frugal" claim: **MIXED — defensible, not bulletproof**
+## Verdict on the "context-frugal" claim: **IMPROVED — now genuinely defensible**
 
 **Where the claim holds (the honest good news):**
 
-- **~7.2K always-on is genuinely modest** for a plugin that ships 6 agents,
-  8 skills, 22 MCP tools, and a hook suite. As a fraction of a 200K context
-  window that is **~3.6%** — small.
-- **The progressive-disclosure architecture is real and load-bearing.** 42.7K of
+- **~5.4K always-on is genuinely modest** for a plugin that ships 5 agents,
+  8 skills, 24 MCP tools, and a hook suite. As a fraction of a 200K context
+  window that is **~2.7%** — small.
+- **The progressive-disclosure architecture is real and load-bearing.** 33.5K of
   skill/agent body content is deferred. The 8 skill descriptions cost just
-  **554 tokens always-on** while their bodies (31.6K) stay out of context until
+  **494 tokens always-on** while their bodies (24.8K) stay out of context until
   fired. That is exactly the "structurally immune to bloat" mechanism working as
-  advertised. ~86% of skill weight is deferred.
-- **Hooks are nearly free** (22 tokens) and correctly engineered: a single
+  advertised.
+- **Agent descriptions are now lean (465 tokens total).** Removing `marketplace-
+  scribe` and stripping verbose `<example>` blocks from frontmatter brought this
+  category down from 2,769 to 465 tokens — an 83% reduction. The recommendations
+  from the prior audit were applied.
+- **Hooks are nearly free** (19 tokens) and correctly engineered: a single
   one-line `SessionStart` injection; `PreToolUse`/`PostToolUse` stdout is
   transient, not baseline.
 - **No command bloat** (0 tokens — none ship).
 
-**Where the claim is overstated (the honest bad news):**
+**Where the claim is still overstated (the honest bad news):**
 
-- **The MCP schemas are the single largest always-on cost (3,903 tok, 53.8%) and
-  they are NOT deferrable today.** Whenever the MCP server is connected, all 22
-  tool schemas are in context every turn. This is the opposite of "context
-  frugal" — it is the one category that grows linearly with every tool added and
-  has no progressive-disclosure escape hatch. `plan_tasks` alone is 594 tokens.
-- **Agent descriptions are bloated by verbose `<example>` blocks.** Of the 2,769
-  tokens in agent descriptions, **1,888 (68%) are `<example>`/`<commentary>`
-  blocks** — only 881 tokens are the actual "use this agent when…" trigger text
-  the registry needs. `docs-scribe` (760 tok) and `marketplace-scribe` (705 tok)
-  carry three full worked examples each.
-- **Two of the six always-advertised agents are repo-internal maintenance bots**
-  (`docs-scribe`, `marketplace-scribe`) irrelevant to a standalone user, yet they
-  occupy the #1 and #2 spots in the baseline (1,465 tok / 20%).
+- **The MCP schemas are the single largest always-on cost (4,456 tok, 82%) and
+  they are NOT deferrable today.** With agent descriptions now lean, MCP schemas
+  have grown as a fraction of the total and dominate even more. Whenever the MCP
+  server is connected, all 24 tool schemas are in context every turn. This is the
+  one category that grows linearly with every tool added and has no
+  progressive-disclosure escape hatch. `plan_tasks` alone is 588 tokens.
+- **Two new MCP tools added** (`edit_dependencies`, `describe_surface`) vs. the
+  prior audit (+2 tools, +553 tok net increase to MCP schemas).
 
-**Bottom line:** anvil is *frugal where it controls the mechanism*
-(skills, hooks, commands — excellent) and *not frugal where it doesn't lean on
-that mechanism* (MCP schemas, verbose agent examples). The headline 7.2K is fine;
-the composition shows ~3.4K of it (47%) is trimmable without losing capability.
+**Bottom line:** the prior trim recommendations were applied successfully. Agent
+descriptions went from the #1–2 spots in the top contributors to irrelevant,
+dropping from 2,769 to 465 tokens. The always-on total fell from **7,248 to
+5,434 tokens (–25%)**. The remaining optimization surface is almost entirely in
+MCP schema verbosity.
 
 ---
 
-## Trim recommendations (with measured savings)
+## Remaining trim recommendations (with measured savings)
 
 Ordered by savings-per-effort. All savings are measured, not guessed.
 
-### 1. Strip `<example>` blocks out of agent descriptions → save ~1,800 tok (25% of baseline)
+### 1. Trim verbose MCP tool descriptions / defer rarely-used tools → save ~600–1,200 tok
 
-The `<example>`/`<commentary>` blocks account for **1,888 of 2,769** agent-
-description tokens (68%). The registry only needs the trigger sentence + trigger
-words to route correctly; the worked examples belong in the agent *body* (which
-is on-demand and free until dispatch), not the always-on description.
-
-- Move every `<example>` block from frontmatter `description` into the agent's
-  markdown body.
-- Keep ~1–2 lines of trigger text per agent in the description.
-- **Estimated saving: ~1,800 tokens** (agent descriptions drop from 2,769 →
-  ~880). New always-on grand total ≈ **5,450 tok**.
-
-### 2. Make the two repo-maintenance agents opt-in / move them out of the shipped plugin → save ~1,465 tok (20% of baseline)
-
-`docs-scribe` (760) and `marketplace-scribe` (705) maintain *anvil's own*
-docs, CHANGELOG, marketplace.json, and registry. A standalone end-user never
-dispatches them; they are developer-of-this-plugin tooling. Every install pays
-1,465 tok to advertise them.
-
-- Move them to a dev-only location, or gate them behind a separate dev plugin,
-  or (cheapest) apply recommendation #1 to them first so their *descriptions*
-  shrink even if the agents stay.
-- **Estimated saving: ~1,465 tokens** if removed outright; ~1,100 tokens if kept
-  but example-stripped (overlaps with #1).
-
-### 3. Trim verbose MCP tool descriptions / defer rarely-used tools → save ~600–1,200 tok
-
-MCP schemas are 3,903 tok and undeferrable while connected. The fattest tools are
-planning/review tools used in a single phase: `plan_tasks` (594), `score_tasks`
-(344), `apply_review_decision` (455), `parse_prd` (212), `review_prd` (195) —
-together ~1,800 tok for the one-time PRD→plan phase.
+MCP schemas are 4,456 tok and undeferrable while connected. The fattest tools are
+planning/review tools used in a single phase: `plan_tasks` (588), `score_tasks`
+(340), `apply_review_decision` (453), `list_tasks` (294), `edit_dependencies`
+(225), `parse_prd` (206) — together ~2,100 tok for the one-time PRD→plan phase.
 
 - **Tighten docstrings:** the per-tool description is derived from the function
   docstring. Cutting each long docstring to a crisp one-to-two-line summary and
   pushing parameter prose into `Field(description=...)` only where needed
-  realistically removes **~600–900 tok** across the 22 tools with zero
+  realistically removes **~600–900 tok** across the 24 tools with zero
   capability loss.
 - **(Structural, larger) Split the server into a lean default tool surface +
   optional planning tools.** The execution-loop tools (`get_next_task`,
@@ -186,19 +161,38 @@ together ~1,800 tok for the one-time PRD→plan phase.
   tools behind a second MCP server or a lazily-mounted toolset would remove
   **~1,200 tok** from steady-state execution contexts.
 
-### 4. Consolidate skill descriptions (low priority) → save ~150 tok
+### 2. Consolidate skill descriptions (low priority) → save ~150 tok
 
-Skill descriptions are already lean (554 tok total). `start-prd` (129) and
-`resolve-decisions` (99) are the only outliers and embed example trigger phrases.
+Skill descriptions are already lean (494 tok total). `resolve-decisions` (95)
+and `start-prd` (85) are the only outliers and embed example trigger phrases.
 Marginal — only worth doing alongside a broader pass. **~150 tok.**
 
 ### Combined realistic target
 
-Applying #1 + #3 (docstring tighten) — the two no-capability-loss changes —
-takes the always-on baseline from **7,248 → ~4,700 tok (–35%)**. Adding #2
-(de-shipping the maintenance agents) reaches **~3,800 tok (–48%)**. That is the
-difference between "modest" and "genuinely frugal," and it lets the marketing
-claim stand on measured ground.
+Applying #1 (docstring tighten) takes the always-on baseline from **5,434 →
+~4,600 tok (–16%)**. Adding the structural MCP split (defer planning tools)
+reaches **~3,800 tok (–30%)**. That is the difference between "modest" and
+"genuinely frugal," and it lets the marketing claim stand on measured ground.
+
+---
+
+## Change log vs. prior audit
+
+| Metric | Prior audit | This audit | Delta |
+|--------|------------|-----------|-------|
+| Always-on grand total | 7,248 tok | **5,434 tok** | –1,814 (–25%) |
+| Agent descriptions | 2,769 tok (6 agents) | **465 tok (5 agents)** | –2,304 (–83%) |
+| Skill descriptions | 554 tok | **494 tok** | –60 (–11%) |
+| MCP tool schemas | 3,903 tok (22 tools) | **4,456 tok (24 tools)** | +553 (+14%) |
+| Hook injection | 22 tok | **19 tok** | –3 |
+| On-demand skills | 31,575 tok | **24,790 tok** | –6,785 (–21%) |
+| On-demand agents | 11,128 tok | **8,754 tok** | –2,374 (–21%) |
+| On-demand total | 42,703 tok | **33,544 tok** | –9,159 (–21%) |
+
+The agent-description reduction (–83%) is from two causes: `marketplace-scribe`
+removed entirely (was 705 tok), and the remaining agents' frontmatter
+`<example>` blocks moved to agent bodies (on-demand). The MCP increase (+14%)
+reflects two genuinely new tools (`edit_dependencies`, `describe_surface`).
 
 ---
 
@@ -220,3 +214,7 @@ claim stand on measured ground.
 - Numbers use `cl100k_base`. Claude's production tokenizer differs slightly, so
   treat these as accurate-to-±5% relative measures, which is the right
   resolution for trim decisions.
+- **Category label mismatch:** the MCP category header in the script reads
+  "MCP tool schemas (22 tools)" but the live measurement found **24 tools**.
+  The label is a script-internal string; the counts in this document reflect
+  the actual live measurement.
