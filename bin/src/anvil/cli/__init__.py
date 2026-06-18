@@ -30,6 +30,7 @@ from anvil.cli.plan import (
     show,
 )
 from anvil.cli.prd import prd_app
+from anvil.cli.backup import backup, restore
 from anvil.cli.replay import replay
 from anvil.cli.scan import scan
 from anvil.cli.sync import sync_app
@@ -113,6 +114,8 @@ app.command()(packet)
 app.command()(submit)
 app.command()(apply)
 app.command()(replay)
+app.command()(backup)
+app.command()(restore)
 app.command("migrate-events")(migrate_events)
 
 # ---------------------------------------------------------------------------

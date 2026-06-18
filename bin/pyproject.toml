@@ -48,6 +48,7 @@ dependencies = [
 [project.optional-dependencies]
 bedrock = ["anthropic[bedrock]>=0.30"]
 custom = ["openai>=1.0"]
+s3 = ["boto3>=1.26"]
 all-providers = [
     "anthropic[bedrock]>=0.30",
     "openai>=1.0",
