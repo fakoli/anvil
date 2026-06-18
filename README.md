@@ -1,6 +1,6 @@
 <div align="center">
 
-![anvil](assets/logo-256.png)
+![Anvil — system of record for agent teams](assets/banner.png)
 
 # Anvil
 
@@ -115,6 +115,10 @@ Every mutation appends to `.anvil/events.jsonl`. Replaying the log from scratch 
 ---
 
 ## Architecture at a glance
+
+<div align="center">
+<img src="assets/anvil-hero.png" alt="Anvil terminal session showing the claim → execute → evidence → done loop" width="800" />
+</div>
 
 | Layer | What it does |
 |---|---|
