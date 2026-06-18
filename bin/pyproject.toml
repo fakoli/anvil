@@ -43,12 +43,20 @@ dependencies = [
 #     pip install 'anvil-state[bedrock,custom]'  # both
 #     pip install 'anvil-state[all-providers]'   # convenience alias
 #
-# Keeping these optional avoids pulling boto3 (~70MB of transitive deps)
-# and the openai SDK onto every install — most users only need direct API.
+# The [mysql] extra adds PyMySQL for the optional MySQL/Aurora storage backend
+# (default storage is SQLite and pulls nothing new). See
+# docs/specs/2026-06-18-mysql-backend.md.
+#
+#     pip install 'anvil-state[mysql]'     # adds PyMySQL (pure-Python driver)
+#
+# Keeping these optional avoids pulling boto3 (~70MB of transitive deps),
+# the openai SDK, and PyMySQL onto every install — most users only need the
+# direct API + the default SQLite backend.
 [project.optional-dependencies]
 bedrock = ["anthropic[bedrock]>=0.30"]
 custom = ["openai>=1.0"]
 s3 = ["boto3>=1.26"]
+mysql = ["PyMySQL>=1.1"]
 all-providers = [
     "anthropic[bedrock]>=0.30",
     "openai>=1.0",
@@ -66,6 +74,10 @@ dev = [
     "types-pyyaml>=6.0.12.20260518",
     # HTTP mocker: respx mocks httpx (the transport our GitHub HTTP client uses).
     "respx>=0.21",
+    # MySQL backend driver — present in dev so the skip-gated MySQL backend
+    # tests can run when MYSQL_TEST_URL points at a reachable server. The
+    # production [mysql] extra ships the same dependency for end users.
+    "PyMySQL>=1.1",
 ]
 
 [tool.hatch.build.targets.wheel]

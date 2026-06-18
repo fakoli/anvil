@@ -115,6 +115,24 @@ class Config:
     s3_region: str | None = None  # falls back to AWS_REGION env; mirrors bedrock_region
     s3_profile: str | None = None # named AWS profile; mirrors bedrock_profile
 
+    # ---------------------------------------------------------------------------
+    # Storage backend selection (MySQL backend spec, 2026-06-18).
+    #
+    # ``backend: sqlite`` (the DEFAULT, and the value for every config written
+    # before this key existed) selects SqliteBackend with byte-for-byte current
+    # behaviour — no code path changes for existing users.
+    #
+    # ``backend: mysql`` selects MySQLBackend and REQUIRES ``mysql_dsn`` (a
+    # ``mysql://user[:pass]@host[:port]/database[?params]`` URL). Aurora MySQL is
+    # selected purely by pointing ``mysql_dsn`` at the cluster WRITER endpoint —
+    # no Aurora-specific config exists. Password may be omitted from the DSN and
+    # supplied via the ``ANVIL_MYSQL_PASSWORD`` env var so secrets stay out of
+    # committed config. Requires PyMySQL: pip install 'anvil-state[mysql]'.
+    # See docs/specs/2026-06-18-mysql-backend.md.
+    # ---------------------------------------------------------------------------
+    backend: Literal["sqlite", "mysql"] = "sqlite"
+    mysql_dsn: str | None = None
+
     # Lease / heartbeat durations in MINUTES. Stored as float so sub-minute
     # values (e.g. ``default_lease_minutes: 0.5`` → 30 s) round-trip without
     # being truncated to whole minutes. ClaimManager computes the lease via
@@ -588,6 +606,21 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
             "absent or blank. Set s3_bucket to the target bucket name."
         )
 
+    # Storage backend selection. Mirrors the durable_store == "s3" requires
+    # s3_bucket pattern: backend == "mysql" requires a non-blank mysql_dsn.
+    backend = _validate_literal(
+        data.get("backend", "sqlite"),
+        ("sqlite", "mysql"),
+        "backend",
+    )
+    mysql_dsn = _str_or_none(data.get("mysql_dsn"))
+    if backend == "mysql" and not mysql_dsn:
+        raise ValueError(
+            f"Config file {resolved}: backend is 'mysql' but mysql_dsn is "
+            "absent or blank. Set mysql_dsn to a "
+            "mysql://user[:pass]@host[:port]/database URL."
+        )
+
     return Config(
         project_name=str(data["project_name"]),
         project_id=str(data["project_id"]),
@@ -630,6 +663,10 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         s3_prefix=str(data.get("s3_prefix", "") or ""),
         s3_region=_str_or_none(data.get("s3_region")),
         s3_profile=_str_or_none(data.get("s3_profile")),
+        # Storage backend selection (MySQL backend spec). Absent key → sqlite
+        # default, preserving byte-for-byte behaviour for every existing config.
+        backend=backend,  # type: ignore[arg-type]
+        mysql_dsn=mysql_dsn,
     )
 
 
@@ -723,6 +760,70 @@ def read_events_storage(path: str | Path) -> Literal["local", "git"]:
         "events_storage",
     )
     return value  # type: ignore[return-value]
+
+
+def read_backend(
+    path: str | Path,
+) -> tuple[Literal["sqlite", "mysql"], str | None]:
+    """Return the ``(backend, mysql_dsn)`` declared by the config at *path*.
+
+    Narrow, backend-selection-only read used by the backend factories
+    (``cli._helpers._open_backend`` / ``mcp_server._open_backend``), which must
+    pick the storage implementation *before* any command-level config concern
+    applies. Follows the SAME soft-load-with-fallback contract as
+    :func:`read_events_storage`:
+
+    * Missing file → ``("sqlite", None)`` — scratch projects without a config
+      keep the default SQLite backend, byte-for-byte.
+    * Unparseable YAML / non-mapping shape → warn + ``("sqlite", None)``. The
+      repo's standing contract is that a broken config never blocks a CLI
+      command; a damaged config already surfaces loud warnings from every other
+      consumer.
+    * Parseable mapping with an INVALID ``backend`` value → raise. The user
+      explicitly set this knob; a typo that silently fell back to SQLite while
+      they expected MySQL would be a dangerous surprise (their state would land
+      in the wrong store). Same load-time strictness as every literal field.
+    * ``backend: mysql`` with a blank/absent ``mysql_dsn`` → raise, mirroring
+      :func:`load_config`'s requirement.
+
+    Deliberately does NOT call :func:`load_config`: full-config validation would
+    make unrelated misconfigs break every backend open.
+    """
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.exists():
+        return ("sqlite", None)
+    try:
+        with resolved.open(encoding="utf-8") as fh:
+            raw: object = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning(
+            "read_backend: cannot parse %s (%s: %s); assuming backend: sqlite",
+            resolved,
+            type(exc).__name__,
+            exc,
+        )
+        return ("sqlite", None)
+    if not isinstance(raw, dict):
+        logger.warning(
+            "read_backend: %s is not a YAML mapping (got %s); "
+            "assuming backend: sqlite",
+            resolved,
+            type(raw).__name__,
+        )
+        return ("sqlite", None)
+    backend = _validate_literal(
+        raw.get("backend", "sqlite"),
+        ("sqlite", "mysql"),
+        "backend",
+    )
+    dsn = _str_or_none(raw.get("mysql_dsn"))
+    if backend == "mysql" and not dsn:
+        raise ValueError(
+            f"Config file {resolved}: backend is 'mysql' but mysql_dsn is "
+            "absent or blank. Set mysql_dsn to a "
+            "mysql://user[:pass]@host[:port]/database URL."
+        )
+    return (backend, dsn)  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
