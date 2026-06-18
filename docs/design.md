@@ -2,7 +2,7 @@
 
 > Why anvil is shaped the way it is. Companion to `architecture.md` (what is built). For positioning soundbites see `_positioning.md`; for what is planned next see `roadmap.md`.
 
-This document answers "why was it built this way." Each section names the choice, the alternatives rejected, the trade-off accepted, and where to push back if you disagree. The wedges in `_positioning.md` are the marketing surface; this is the engineering reasoning underneath.
+This document answers "why was it built this way." Each section names the choice, the alternatives rejected, the trade-off accepted, and where to challenge the decision. `_positioning.md` keeps the positioning summary; this file keeps the engineering rationale.
 
 No section exceeds 200 words. Read the section you care about; the rest will still be here.
 
@@ -43,7 +43,7 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 
 ### Rejected alternatives
 
-- **Postgres / hosted DB.** Requires a server, credentials, network. Kills the "clone the repo and `anvil init`" demo. The wedge is local-first; a hosted DB is a different product.
+- **Postgres / hosted DB.** Requires a server, credentials, and network access. It changes the "clone the repo and `anvil init`" workflow. The local-first model is the product boundary; a hosted DB is a different product.
 - **Redis / in-memory.** Loses durability across CLI invocations (each is a short-lived process). Loses the audit trail. Forces a sidecar daemon, which is explicitly a non-goal.
 - **File-only (JSON / YAML).** The v0 brief's first instinct. Rejected because: (a) cross-process atomic writes on plain JSON race on macOS NFS and Windows, (b) claim leases need `BEGIN IMMEDIATE` semantics that JSON cannot provide, (c) querying becomes O(n) over the entire file on every CLI call.
 
@@ -67,16 +67,16 @@ Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes,
 
 A hosted control plane would let us ship a web dashboard, real-time collaboration, and a single sign-up funnel. Rejected because:
 
-1. **The wedge dies.** "Backend-neutral local-first state" is what distinguishes us from CCPM-on-GitHub-Issues, Hamster Studio, and Jira/Rovo (see `competitive_gap_analysis_agentic_project_state.md` § "Strategic Positioning"). Going SaaS makes us competitor #11 in a crowded market.
+1. **It changes the product category.** "Backend-neutral local-first state" is what distinguishes Anvil from CCPM-on-GitHub-Issues, Hamster Studio, and Jira/Rovo (see `competitive_gap_analysis_agentic_project_state.md` § "Strategic Positioning"). A SaaS control plane would compete in the task-management category instead.
 2. **Data ownership.** Users running PRDs through an LLM already worry about leakage; making the project plan itself leave the repo doubles that surface.
-3. **Offline-first comes for free.** Plane mode, airgapped networks, slow Wi-Fi — none matter. The system has no "online" mode.
+3. **Offline-first is inherent.** Plane mode, airgapped networks, and unreliable Wi-Fi do not affect the core workflow. The system has no required online mode.
 4. **No auth flow.** `anvil init` is the entire onboarding.
 
 ### Trade-offs
 
 - **Accepted:** cross-machine collaboration goes through sync providers (a projection into GitHub Issues / Linear / Jira), not shared state.db. Slower and lossier than a CRDT — and that audience is buying Linear, not anvil.
 - **Accepted:** if `.anvil/` is git-ignored (sometimes recommended for `state.db` to avoid binary merge conflicts), the canonical state does not survive a `git clone` on a second machine. `events.jsonl` *can* be committed; `replay` rebuilds the DB. The user chooses the trade-off per repo.
-- **Lost:** single-pane-of-glass dashboard, cross-project search. Not in the wedge.
+- **Lost:** hosted dashboard and cross-project search. Those are outside the local-first scope.
 
 ---
 
@@ -92,7 +92,7 @@ A hosted control plane would let us ship a web dashboard, real-time collaboratio
 
 ### What this buys
 
-The "first-class claim/lock/lease model" wedge from `agentic_project_state_design_brief.md` Gap 2: lease expiry kills zombie claims; heartbeats distinguish live from abandoned; `expected_files` enables pre-claim conflict warnings; cross-runtime safety because the claim sits in SQLite, not in any one agent's session memory.
+The "first-class claim/lock/lease model" differentiator from `agentic_project_state_design_brief.md` Gap 2: lease expiry releases abandoned claims; heartbeats distinguish active from stale work; `expected_files` enables pre-claim conflict warnings; cross-runtime safety comes from storing the claim in SQLite rather than in one agent session.
 
 ### Trade-off accepted
 
@@ -100,7 +100,7 @@ Heartbeat discipline is on the agent. An agent that never calls `renew` will see
 
 ### Why lease + heartbeat, not lease alone
 
-A 1-hour lease without heartbeat means stuck claims wait the full hour to free up. A 5-min lease without heartbeat means a long-running honest task gets its claim yanked mid-work. Lease + heartbeat lets us pick a short lease (default 60 min, configurable in `.anvil/config.yaml`) while honest work renews and keeps moving. The combination is what gives us "fast stale detection for crashed agents, no false eviction of working ones."
+A 1-hour lease without heartbeat means stale claims wait the full hour to release. A 5-minute lease without heartbeat means long-running work can be released mid-task. Lease + heartbeat lets Anvil use a configurable lease while active work renews and keeps moving. The combination gives fast stale detection without releasing active claims.
 
 ---
 
@@ -110,7 +110,7 @@ A 1-hour lease without heartbeat means stuck claims wait the full hour to free u
 
 ### Rejected alternatives
 
-- **Trust-based "done."** Agent says "I'm done"; task transitions to `done`. This is what every chat-driven workflow does today. It is also why we have the AI-slop problem: models confidently declare completion of work that does not compile. See competitive gap doc Gap 6 for the full argument.
+- **Trust-based "done."** Agent says "I'm done"; task transitions to `done`. Chat-driven workflows often rely on this pattern, which allows models to declare completion without running or recording verification. See competitive gap doc Gap 6 for the full argument.
 - **Opaque `evidence: string` field.** Unsearchable, unparseable, trivially gameable ("evidence: looks good to me"). No downstream tooling can act on it.
 
 ### What "structured" means
@@ -129,7 +129,7 @@ The `Evidence` Pydantic model requires:
 
 ### Trade-off accepted
 
-Submitting evidence is more work than typing "done." The friction is the feature: it forces the agent to actually run the commands it claims to have run, because the hook captured them and they will not match if it lied. "Quick fix" workflows get `apply --skip-evidence` as an explicit, logged override.
+Submitting evidence is more work than typing "done." That extra step is intentional: it requires the agent to cite commands and files that can be checked against captured hook output. "Quick fix" workflows get `apply --skip-evidence` as an explicit, logged override.
 
 ---
 
@@ -140,7 +140,7 @@ Submitting evidence is more work than typing "done." The friction is the feature
 ### Rejected alternatives
 
 - **CLI only.** Agents would have to shell out and parse stdout. Some can (Claude Code, with Bash); some cannot (Cursor, with no shell). Shell-out loses structured errors.
-- **MCP only.** Humans hate MCP. Shell scripts hate MCP. Hooks hate MCP. `anvil status` in a terminal during debugging is faster than spinning up an MCP client. Hooks are sh, not Python — they shell out to the CLI.
+- **MCP only.** Humans, shell scripts, and hooks still need a command-line surface. `anvil status` in a terminal during debugging is faster than starting an MCP client. Hooks are sh, not Python, so they shell out to the CLI.
 - **REST/HTTP server.** A long-running process. Daemon problems (see below). Authentication. Port collisions. We get the agent-tool benefits via MCP stdio without any of that.
 
 ### The principle
@@ -170,7 +170,7 @@ Both paths are first-class. Neither is the "main" API.
 ### Rejected alternatives
 
 - **Single-axis story points / t-shirt sizes.** Story points conflate "hard to think about" with "lots of files to touch" with "scary to ship." The conflation hides the actually interesting signal: a task can be low-complexity but high-blast-radius (renaming a public API), or high-complexity but low-blast-radius (a tricky algorithm in one file). Routing needs both axes; story points give one.
-- **Only complexity.** Taskmaster does this (per design brief). Useful for "should I expand?" but useless for "which agent should take this?" and "can this run in parallel with T015?". We need parallelizability for the multi-agent wedge and agent_suitability for the cheap-model routing wedge.
+- **Only complexity.** Taskmaster does this (per design brief). Useful for "should I expand?" but not enough for "which agent should take this?" or "can this run in parallel with T015?". Parallelizability supports multi-agent dispatch; agent_suitability supports model-tier routing.
 
 ### Why these six (from design brief § 3)
 
@@ -195,9 +195,9 @@ Six dimensions is more cognitive load than one. We mitigated by making LLM scori
 
 A blocking hook would refuse the Edit tool call when an agent tries to write a file outside its claimed scope. Rejected because:
 
-1. **The agent will route around it.** Claude Code agents that hit a blocking hook learn to call `Bash("sed -i ...")` instead of `Edit`. Hook coverage shrinks; trust degrades.
-2. **False positives kill the workflow.** A task can legitimately need to touch a file it did not predict. A blocking hook turns "I should warn" into "I am breaking the session."
-3. **Hooks run in the user's shell, not a sandbox.** A `set -e` script that hits an unexpected condition can silently kill PreToolUse for *all* tools, not just Edit.
+1. **Agents can bypass editor hooks.** A model that hits a blocking hook can still edit through shell commands, reducing hook coverage.
+2. **False positives interrupt valid work.** A task can legitimately need to touch a file it did not predict. A blocking hook turns an advisory warning into a session interruption.
+3. **Hooks run in the user's shell, not a sandbox.** A `set -e` script that hits an unexpected condition can stop PreToolUse for all matching tools, not just the attempted edit.
 
 ### The right shape
 
@@ -205,7 +205,7 @@ Warn + log + audit trail. The check-claim hook prints a one-line warning to stde
 
 ### What gets enforced anyway
 
-Non-blocking does not mean toothless:
+Non-blocking does not mean unenforced:
 
 - The `apply` gate is a hard gate. No `Evidence` → no transition to `accepted`. No `Review` → no transition to `done`. The hooks observe; the apply gate enforces.
 - The `claim_task` MCP tool refuses if the PRD is still `draft` or another active claim already holds the task. That refusal is at the engine layer, not in a hook — and the engine layer *does* block.
@@ -215,7 +215,7 @@ The discipline is layered: hooks observe and warn, the engine enforces invariant
 
 ### Trade-off accepted
 
-Discipline is observed, not enforced. An agent that ignores all warnings and submits evidence anyway is caught at `apply` time by the sentinel (which cross-references `files_changed` against the warning stream). Detection happens later, but it happens. Performance discipline is a real constraint — see `roadmap.md` Theme 3 for the next welder pass on the 200ms budget.
+Hooks observe and report; the engine enforces state transitions. An agent that ignores warnings and submits evidence anyway is checked at `apply` time by the sentinel, which cross-references `files_changed` against the warning stream. Performance remains a constraint; see `roadmap.md` Theme 3 for the next hot-path pass on the 200ms budget.
 
 ---
 
@@ -227,7 +227,7 @@ Each item below was considered, has a sketch, and was explicitly *not* shipped i
 
 Polling-only in v0. Sync providers (`github_issues` today, more in v2.0) call `gh api` on a `--watch` loop every N seconds.
 
-**Why deferred:** webhooks require a public HTTP endpoint, HMAC verification, out-of-order event de-duplication, and an at-most-once delivery contract — none of which is needed at the current single-user-laptop scale. The complexity-to-benefit ratio flips when (a) someone runs sync on a server with public DNS, or (b) the polling interval starts mattering for UX (sub-minute). Neither has happened.
+**Why deferred:** webhooks require a public HTTP endpoint, HMAC verification, out-of-order event de-duplication, and an at-most-once delivery contract. That complexity is not needed at the current single-user-laptop scale. The cost/benefit changes if sync runs on a server with public DNS or if sub-minute updates become important.
 
 Tracked as P9B-5 (`roadmap.md` § v2.0, SPEC-FIRST). A spec doc must precede implementation because the engine's current "one fetch round-trip per pass" assumption does not hold under webhooks.
 
@@ -237,7 +237,7 @@ A `Backend` Protocol exists in `state/backend.py`, but only `SqliteBackend` ship
 
 **Why deferred:** abstractions calcify against their only implementation. Until a second real backend forces us to find the seams (Postgres for a team deployment, JSON-file for a constrained-runtime use case), the Protocol is a placeholder. We keep it as a refactoring affordance, not a product promise.
 
-The right time to add the second backend is when a real user has a real reason — not preemptively. If that day comes, the Protocol gives us a refactoring target; until then, one battle-tested SQLite impl beats two half-tested ones.
+The right time to add the second backend is when a real user has a concrete requirement. If that day comes, the Protocol gives us a refactoring target; until then, one well-tested SQLite implementation is preferable to multiple lightly tested implementations.
 
 ### Multi-provider LLM beyond Anthropic (deferred indefinitely)
 
@@ -255,13 +255,13 @@ The MCP server is the only long-running process and only lives for the duration 
 
 The user's mental model becomes "two things to manage" instead of "one CLI." We accept the trade: agents must heartbeat, sync is polled, snapshots are manual. The MCP server is acceptable because it dies with the agent that spawned it; the user never sees it.
 
-### Hosted SaaS / web dashboard (out of wedge)
+### Hosted SaaS / web dashboard (out of scope)
 
 See "Why local-first" above.
 
-**Why not:** going SaaS is choosing a different product. A hosted dashboard would compete with Linear, Jira, and Asana — all massively better-funded and better-staffed at the SaaS game.
+**Why not:** going SaaS is choosing a different product. A hosted dashboard would compete with Linear, Jira, and Asana in the task-management category.
 
-anvil's wedge is the *opposite* direction: durable state that survives session resets, lives in the repo, and does not require an account. The dashboard, if one ever exists, is a downstream open-source viewer of the same `.anvil/` directory.
+Anvil's direction is durable state that survives session resets, lives in the repo, and does not require an account. If a dashboard ships later, it should be a downstream viewer of the same `.anvil/` directory.
 
 ### Real-time collaborative editing (out of scope)
 
@@ -296,6 +296,6 @@ If you disagree with anything here, the design is open for argument.
 - **For new capability requests** (a sync provider, a new MCP tool, a missing CLI verb): add to `roadmap.md` under the right theme and target version. Include a one-paragraph "why now" — what forcing function makes this the right moment.
 - **For cleanups and refactors** (untangle a duplication, fix a hot-path perf budget, close a critic finding): add to `tech-debt-backlog.md` with the origin PR or critic round, severity, and adjacency hints.
 - **For new architectural choices** (a second backend, a daemon, a webhook listener): write a SPEC-FIRST design doc in `docs/specs/` before opening a PR. The roadmap items tagged SPEC-FIRST (P9B-5, P9B-9) are the precedents to mirror.
-- **For wedge-level repositioning** (the choices in this file): open an issue, link the user evidence that motivated the rethink, and propose the trade-off explicitly. The choices in this doc are opinionated, but they are not religious — they were the right calls *given the evidence at the time*. New evidence can change them.
+- **For positioning-level changes** (the choices in this file): open an issue, link the user evidence that motivated the change, and propose the trade-off explicitly. The choices in this doc are opinionated, but they are based on current evidence and can change.
 
-The point of writing rationale down is making the trade-offs legible enough to revisit. Nothing in this doc is sacred. All of it was a choice. Most of it can be unmade.
+The point of writing rationale down is making the trade-offs legible enough to revisit. Each item here is a choice, and most can be changed with new evidence.

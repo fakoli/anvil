@@ -1,13 +1,13 @@
 # AGENTS.md — Anvil
 
-Anvil is a local-first, backend-neutral **project-state engine**: it turns rough
-ideas and PRDs into reviewed, lockable, evidence-backed work packets that humans
-and AI agents coordinate on without conflicts. State lives in SQLite under
+Anvil is a local-first, backend-neutral **project-state engine**: it turns PRDs
+into reviewed, lockable, evidence-backed work packets that humans and AI agents
+can coordinate on without conflicts. State lives in SQLite under
 `.anvil/` (event-sourced; `events.jsonl` is the log). Two equivalent surfaces:
 
-- **CLI** — `bin/anvil <command>` (single mutator, zero harness coupling).
+- **CLI** — `bin/anvil <command>` (single mutator, no harness dependency).
 - **MCP** — `bin/anvil-mcp` (24 FastMCP stdio tools). Run
-  `anvil mcp-config <your-client>` to print paste-ready config.
+  `anvil mcp-config <your-client>` to print client-specific config.
 
 Both resolve the project via `ANVIL_ROOT` env var, else the current directory.
 Every read command supports `--json` for a `{"ok":…,"command":…,"data":…}`

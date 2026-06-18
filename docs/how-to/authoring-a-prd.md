@@ -38,7 +38,7 @@ stateDiagram-v2
 
 The `prd_status_gate` in
 [`state/transitions.py`](../../bin/src/anvil/state/transitions.py) enforces the
-final hop: `ready → claimed` refuses while the PRD is still `draft`. (As of v1.10.0 the
+final hop: `ready → claimed` refuses while the PRD is still `draft`. The
 gate accepts both `reviewed` and `approved` — see
 [architecture.md → Gates on the lifecycle](../architecture.md#gates-on-the-lifecycle).)
 

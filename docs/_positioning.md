@@ -1,8 +1,8 @@
 # anvil — Positioning (internal reference)
 
 > Internal source of truth for README, architecture.md, design.md, and the
-> `plugin.json` description. Not part of user-facing docs nav. Quote-grade
-> sentences marked **(Q)**.
+> `plugin.json` description. Not part of user-facing docs nav. Reusable
+> sentences are marked **(Q)**.
 
 ## What it is
 
@@ -14,11 +14,11 @@ claim, and piece of evidence in your project, stored in SQLite under
 ## Who it is for
 
 Developers running Claude Code, Codex, Cursor, OpenHands, or Copilot who need
-multiple agents (and multiple humans) to coordinate against the same plan
-without overwriting each other. Solo builders who want PRDs that survive
-sessions. Project leads who want truth that outlives any one chat.
+multiple agents, and multiple humans, to coordinate against the same plan
+without overwriting each other. Solo builders can preserve PRDs across
+sessions. Project leads can audit what was claimed, reviewed, and completed.
 
-## The 5 wedges (vs CCPM, issue-trackers, chat-driven workflows)
+## The 5 differentiators (vs CCPM, issue-trackers, chat-driven workflows)
 
 1. **Richer canonical state than issue text.** Pydantic v2 models in SQLite, validated at every transition — not free-form markdown in an issue body.
 2. **Explicit claim / lock / lease model.** A `Claim` row with an expiry timestamp and heartbeat; stale leases are detected and released on every CLI or MCP call — not assignment-by-label.
@@ -49,14 +49,13 @@ not MCP-only.
 
 ## Elevator pitch
 
-**(Q)** anvil turns rough ideas and PRDs into reviewed, lockable,
-evidence-backed work packets that humans and AI coding agents can execute in
-parallel without stepping on each other — the canonical project-state layer
-for any agent team.
+**(Q)** anvil turns PRDs into reviewed, lockable, evidence-backed work packets
+that humans and AI coding agents can execute in parallel without overwriting
+each other — the canonical project-state layer for agent teams.
 
 ## What it is NOT
 
 - **Not a SaaS.** State lives in your repo under `.anvil/`; no hosted backend, no account, no telemetry.
 - **Not a chat memory layer.** Chat history is not a database. State survives session resets, model swaps, and agent runtime changes.
 - **Not an issue tracker.** GitHub Issues is an opt-in *sync target* via the bidirectional Phase 8 sync engine — not the source of truth.
-- **Not another coding agent.** It is the coordination layer *around* coding agents — work packets in, evidence out.
+- **Not a coding agent.** It is the coordination layer around coding agents: work packets in, evidence out.
