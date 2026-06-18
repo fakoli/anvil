@@ -52,17 +52,18 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 0
 fi
 
-# Payload via env var (not stdin): `python3 - <<'PYEOF'` reads its script
-# from stdin (the heredoc), overriding any pipe redirect. Critic-4 caught
-# this via a tightened hook-test assertion.
+# Single python3 pass: extract fields AND pre-build the JSON evidence line.
+# Emits shell-sourceable assignments (shlex.quote) for COMMAND/IS_VERIFICATION/
+# ACTOR/EXIT_CODE/TIMESTAMP, plus a ready-to-append EVIDENCE_LINE so the
+# fallback path needs no second interpreter spawn.
 ASSIGNMENTS=$(HOOK_PAYLOAD="$PAYLOAD" python3 - <<'PYEOF' 2>/dev/null
 import os, json, datetime, shlex
 
 MAX_EXCERPT = 4000
 
+VERIFICATION_PATTERNS = ('pytest', 'ruff check', 'mypy', 'npm test', 'cargo test', 'bun test')
+
 def emit(name: str, value: str) -> None:
-    # Use shlex.quote so embedded quotes/newlines/special chars survive the
-    # subsequent shell `eval`. The output looks like: COMMAND='pytest -x'
     print(f"{name}={shlex.quote(value)}")
 
 try:
@@ -85,17 +86,37 @@ try:
     # tz-aware UTC (utcnow() was deprecated in 3.12, removed in 3.13).
     ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
+    is_verification = int(any(p in command for p in VERIFICATION_PATTERNS))
+
+    stdout_ex = stdout_raw[:MAX_EXCERPT]
+    stderr_ex = stderr_raw[:MAX_EXCERPT]
+
+    # Pre-build the JSON evidence line so the fallback path needs no second spawn.
+    record = {
+        'timestamp':      ts,
+        'command':        command,
+        'exit_code':      exit_code_int,
+        'stdout_excerpt': stdout_ex,
+        'stderr_excerpt': stderr_ex,
+        'actor':          actor,
+        'note':           'orphan — no active claim found at capture time; pass this file via: anvil submit TASK_ID --output-file <THIS_FILE>',
+    }
+    evidence_line = json.dumps(record)
+
     emit('COMMAND',        command)
     emit('EXIT_CODE',      str(exit_code_int))
-    emit('STDOUT_EXCERPT', stdout_raw[:MAX_EXCERPT])
-    emit('STDERR_EXCERPT', stderr_raw[:MAX_EXCERPT])
+    emit('STDOUT_EXCERPT', stdout_ex)
+    emit('STDERR_EXCERPT', stderr_ex)
     emit('ACTOR',          actor)
     emit('TIMESTAMP',      ts)
+    emit('IS_VERIFICATION', str(is_verification))
+    emit('EVIDENCE_LINE',  evidence_line)
 except Exception:
     # On any failure, emit empty assignments so the early-exit on $COMMAND
     # fires and the hook exits 0 cleanly.
     for name in ('COMMAND', 'EXIT_CODE', 'STDOUT_EXCERPT',
-                 'STDERR_EXCERPT', 'ACTOR', 'TIMESTAMP'):
+                 'STDERR_EXCERPT', 'ACTOR', 'TIMESTAMP', 'IS_VERIFICATION',
+                 'EVIDENCE_LINE'):
         print(f"{name}=''")
 PYEOF
 )
@@ -110,25 +131,13 @@ if [ -z "$COMMAND" ]; then
 fi
 
 # ---- Verification-command pattern matching --------------------------------
-# Only capture evidence for known verification commands.
-# This avoids filling the buffer with every incidental shell call.
-# Patterns are matched as substrings anywhere in the command string.
-# Phase 5 hardcoded set (Phase 6+ moves this to config):
-#   pytest, ruff check, mypy, npm test, cargo test, bun test
-
-IS_VERIFICATION=0
-
-case "$COMMAND" in
-  *pytest*)       IS_VERIFICATION=1 ;;
-  *"ruff check"*) IS_VERIFICATION=1 ;;
-  *mypy*)         IS_VERIFICATION=1 ;;
-  *"npm test"*)   IS_VERIFICATION=1 ;;
-  *"cargo test"*) IS_VERIFICATION=1 ;;
-  *"bun test"*)   IS_VERIFICATION=1 ;;
-esac
+# IS_VERIFICATION was computed in the python3 extraction pass above.
+# Only capture evidence for known verification commands (pytest, ruff check,
+# mypy, npm test, cargo test, bun test) to avoid polluting the buffer.
+# Phase 6+ moves the hardcoded pattern list to config.
 
 # Not a verification command — silent exit; do not pollute the buffer.
-if [ "$IS_VERIFICATION" -eq 0 ]; then
+if [ "${IS_VERIFICATION:-0}" -eq 0 ]; then
   exit 0
 fi
 
@@ -191,45 +200,10 @@ mkdir -p "$EVIDENCE_DIR" 2>/dev/null
 
 EVIDENCE_FILE="${EVIDENCE_DIR}/orphan.json"
 
-# Build and append the JSON record via python3 to handle escaping safely.
-# Pass all values via environment variables to avoid shell-quoting issues.
-HOOK_COMMAND="$COMMAND" \
-HOOK_EXIT_CODE="${EXIT_CODE:-0}" \
-HOOK_STDOUT="$STDOUT_EXCERPT" \
-HOOK_STDERR="$STDERR_EXCERPT" \
-HOOK_ACTOR="${ACTOR:-unknown}" \
-HOOK_TIMESTAMP="${TIMESTAMP:-}" \
-HOOK_EVIDENCE_FILE="$EVIDENCE_FILE" \
-python3 - <<'PYEOF' 2>/dev/null
-import os, json
-
-command    = os.environ.get('HOOK_COMMAND', '')
-exit_code  = os.environ.get('HOOK_EXIT_CODE', '0')
-stdout_ex  = os.environ.get('HOOK_STDOUT', '')
-stderr_ex  = os.environ.get('HOOK_STDERR', '')
-actor      = os.environ.get('HOOK_ACTOR', 'unknown')
-timestamp  = os.environ.get('HOOK_TIMESTAMP', '')
-evidence_f = os.environ.get('HOOK_EVIDENCE_FILE', '')
-
-try:
-    exit_code_int = int(exit_code)
-except (ValueError, TypeError):
-    exit_code_int = 0
-
-record = {
-    'timestamp':      timestamp,
-    'command':        command,
-    'exit_code':      exit_code_int,
-    'stdout_excerpt': stdout_ex,
-    'stderr_excerpt': stderr_ex,
-    'actor':          actor,
-    'note':           'orphan — no active claim found at capture time; pass this file via: anvil submit TASK_ID --output-file <THIS_FILE>',
-}
-
-line = json.dumps(record)
-if evidence_f:
-    with open(evidence_f, 'a') as fh:
-        fh.write(line + '\n')
-PYEOF
+# EVIDENCE_LINE was pre-built as a valid JSON string by the extraction python3
+# pass above — no second interpreter spawn needed.
+if [ -n "$EVIDENCE_LINE" ]; then
+  printf '%s\n' "$EVIDENCE_LINE" >> "$EVIDENCE_FILE" 2>/dev/null
+fi
 
 exit 0
