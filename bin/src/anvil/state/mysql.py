@@ -847,6 +847,83 @@ class MySQLBackend(SqliteBackend):
         # 3. Run the inherited guards against the now-locked rows.
         self._validate_claim_created_locked(conn, payload)
 
+    def _write_claim_created(self, conn: Any, payload: Any, event: Any) -> None:
+        """INSERT the claim with a PLAIN INSERT (NOT ``INSERT IGNORE``).
+
+        THE load-bearing override for the single-winner guarantee. The inherited
+        SQLite ``_write_claim_created`` issues ``INSERT OR IGNORE INTO claims``,
+        which ``_translate_sql`` rewrites to MySQL ``INSERT IGNORE``. On MySQL,
+        ``INSERT IGNORE`` *downgrades* a duplicate-key error (errno 1062) to a
+        warning and SILENTLY DISCARDS the row. That is catastrophic here: when a
+        second claim slips through the ``SELECT ... FOR UPDATE`` race window (its
+        snapshot does not yet see the first, uncommitted, claim, so the Python
+        guard passes), the row it inserts collides with the
+        ``uq_one_active_claim_per_task`` UNIQUE — and ``INSERT IGNORE`` swallows
+        it. No IntegrityError, no ``EventRejected`` — yet ``_append_once`` would
+        then insert the event row, commit, and RETURN a successful Event: a
+        PHANTOM WINNER (a "claim" that succeeded with no lease). The
+        ``1062 → EventRejected`` mapping in ``_translate_db_exception`` could
+        never fire, because the error never surfaced.
+
+        Using a plain ``INSERT`` makes the duplicate-key violation RAISE
+        (errno 1062), which propagates out of ``_append_once``'s try-block to
+        ``_translate_db_exception`` and becomes a clean ``EventRejected`` — the
+        engine, not a host-local lock, enforcing exactly-one-active-claim
+        (spec §0/§2.2). This is identical in column list, values, and the task
+        ``ready → claimed`` UPDATE to the inherited handler; only the IGNORE is
+        dropped.
+
+        Idempotent replay safety: ``replay_from_empty`` rebuilds from a truncated
+        table, so a committed ``claim.created`` is applied exactly once during
+        replay and never collides with itself. A genuine duplicate id during
+        replay is a corrupt log and SHOULD raise. (The events-table INSERT keeps
+        its IGNORE — that is benign; the ``event_counter`` guarantees distinct
+        event ids, so the events ``INSERT IGNORE`` can never silently drop a
+        real, distinct event.)
+        """
+        import json
+
+        # Plain INSERT — a duplicate active claim (the uq_one_active_claim_per_task
+        # UNIQUE) MUST raise errno 1062 here so it becomes EventRejected, not a
+        # silently-swallowed phantom winner.
+        conn.execute(
+            """
+            INSERT INTO claims
+                (id, task_id, claimed_by, claim_type, status, branch,
+                 worktree_path, expected_files, created_at,
+                 lease_expires_at, last_heartbeat_at, released_at, release_reason)
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            """,
+            (
+                payload.id,
+                payload.task_id,
+                payload.claimed_by,
+                payload.claim_type,
+                payload.status,
+                payload.branch,
+                payload.worktree_path,
+                json.dumps(payload.expected_files),
+                payload.created_at,
+                payload.lease_expires_at,
+                payload.last_heartbeat_at,
+            ),
+        )
+
+        # Side-effect, unchanged from the parent: transition the task
+        # ready → claimed. The WHERE status='ready' guard is preserved; on an
+        # already-claimed task it matches 0 rows (acceptable per the check).
+        conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'claimed',
+                   updated_at = ?
+             WHERE id = ?
+               AND status = 'ready'
+            """,
+            (event.timestamp.isoformat(), payload.task_id),
+        )
+
     # ------------------------------------------------------------------
     # Replay (seam 7) — DB is the source of truth; rebuild from events.jsonl.
     # ------------------------------------------------------------------

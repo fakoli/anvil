@@ -480,8 +480,11 @@ def test_future_schema_version_raises(tmp_path: Path) -> None:
 def test_unique_active_claim_constraint_rejects_second(tmp_path: Path) -> None:
     """Inserting a SECOND active claim for a task directly raises IntegrityError.
 
-    Proves the uq_one_active_claim_per_task generated-column UNIQUE is the
-    host-independent backstop — correctness no longer depends on any app lock.
+    A constraint-level sanity check: the uq_one_active_claim_per_task
+    generated-column UNIQUE exists and fires on a raw duplicate. This pokes the
+    table directly and therefore does NOT exercise the production write path —
+    that is what ``test_backstop_through_production_path_rejects_phantom_winner``
+    below verifies (and the test this one replaced could not).
     """
     import pymysql
 
@@ -520,6 +523,124 @@ def test_unique_active_claim_constraint_rejects_second(tmp_path: Path) -> None:
     finally:
         conn.rollback()
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# The UNIQUE backstop THROUGH the production write path — the phantom-winner
+# blocker (PR #12 review). Must FAIL on the old INSERT-IGNORE code and PASS on
+# the plain-INSERT fix.
+# ---------------------------------------------------------------------------
+
+
+def _make_claim_draft(claim_id: str, task_id: str, actor: str, files: list[str]) -> Any:
+    """Build a claim.created EventDraft shaped exactly like ClaimManager.claim()."""
+    return EventDraft(
+        timestamp=_T0,
+        actor=actor,
+        action="claim.created",
+        target_kind="claim",
+        target_id=claim_id,
+        payload_json={
+            "id": claim_id,
+            "task_id": task_id,
+            "claimed_by": actor,
+            "claim_type": "task",
+            "status": "active",
+            "branch": None,
+            "worktree_path": None,
+            "expected_files": files,
+            "created_at": _T0.isoformat(),
+            "lease_expires_at": _T0.isoformat(),
+            "last_heartbeat_at": _T0.isoformat(),
+            "released_at": None,
+            "release_reason": None,
+            "force": False,
+        },
+    )
+
+
+def test_backstop_through_production_path_rejects_phantom_winner(
+    tmp_path: Path,
+) -> None:
+    """A second active claim driven through ``backend.append()`` raises EventRejected.
+
+    This is the backstop test that exercises the REAL production write path —
+    ``backend.append()`` → ``_check_claim_created`` → ``_write_claim_created`` —
+    not a raw poke at the table. It reproduces the genuine same-task race window:
+    the second claim's in-transaction ``SELECT ... FOR UPDATE`` snapshot does NOT
+    yet see the first (committed-but-overlapping) active claim, so the Python
+    guard (``_validate_claim_created_locked``) passes — exactly as it does when
+    two appends interleave in the InnoDB lock-acquisition window. We simulate
+    that snapshot miss by stubbing the Python guard to a no-op, leaving the
+    ``uq_one_active_claim_per_task`` UNIQUE as the SOLE remaining defense.
+
+    On the OLD code, ``_write_claim_created`` is inherited and emits
+    ``INSERT IGNORE``: the duplicate active claim is SILENTLY SWALLOWED, no
+    exception is raised, the event row is written, the transaction commits, and
+    ``append()`` returns a successful Event — a PHANTOM WINNER. This test then
+    FAILS (no EventRejected, two "active" claims claimed to exist).
+
+    On the FIX, ``_write_claim_created`` is overridden to a plain ``INSERT``: the
+    duplicate raises errno 1062, which ``_translate_db_exception`` maps to
+    ``EventRejected``. No event is written, no phantom winner, exactly one active
+    claim remains.
+    """
+    assert _MYSQL_URL is not None
+    pytest.importorskip("pymysql")
+    _drop_all_tables(_MYSQL_URL)
+
+    b = _make_backend(_MYSQL_URL, tmp_path)
+    try:
+        _setup_project_prd_feature(b)
+        _add_ready_task(b, "T001", ["a.py"])
+
+        # First claim wins cleanly through the full production path.
+        won = b.append(_make_claim_draft("C000001", "T001", "agent-a", ["a.py"]))
+        assert won is not None, "the first claim must succeed"
+
+        def _event_count() -> int:
+            # Count event rows directly so we can prove the rejected claim
+            # commits NONE (the phantom-winner path would write one).
+            row = b._require_conn().execute(
+                "SELECT COUNT(*) FROM events"
+            ).fetchone()
+            return int(row[0])
+
+        # Count events written so far so we can prove the rejected claim adds none.
+        events_before = _event_count()
+        active_before = [c for c in b.list_active_claims() if c.task_id == "T001"]
+        assert len(active_before) == 1, "exactly one active claim after the winner"
+
+        # Simulate the race window: the second append's FOR UPDATE snapshot does
+        # not yet see the first claim, so the Python guard passes. Stub it to a
+        # no-op so the ONLY thing that can stop the phantom is the UNIQUE.
+        b._validate_claim_created_locked = (  # type: ignore[method-assign]
+            lambda conn, payload: None
+        )
+
+        from anvil.state.backend import EventRejected
+
+        # Drive the SECOND active claim for the SAME task through append(). On the
+        # old INSERT-IGNORE code this returns a phantom-winner Event (no raise);
+        # on the fix it must raise EventRejected.
+        with pytest.raises(EventRejected):
+            b.append(_make_claim_draft("C000002", "T001", "agent-b", ["a.py"]))
+
+        # No phantom winner: still exactly one active claim, and no extra event
+        # row was committed for the rejected claim.
+        active_after = [c for c in b.list_active_claims() if c.task_id == "T001"]
+        assert len(active_after) == 1, (
+            f"phantom winner: expected 1 active claim for T001, got "
+            f"{len(active_after)}: {active_after}"
+        )
+        assert active_after[0].id == "C000001", "the original winner must persist"
+        events_after = _event_count()
+        assert events_after == events_before, (
+            "the rejected claim must not write an event row (phantom winner "
+            f"wrote one): before={events_before} after={events_after}"
+        )
+    finally:
+        b.close()
 
 
 # ---------------------------------------------------------------------------
