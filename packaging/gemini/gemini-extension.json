@@ -1,0 +1,13 @@
+{
+  "name": "anvil",
+  "version": "0.0.8",
+  "description": "Local-first project-state engine.",
+  "contextFileName": "AGENTS.md",
+  "mcpServers": {
+    "anvil": {
+      "command": "bash",
+      "args": ["${extensionPath}/bin/anvil-mcp"],
+      "cwd": "${extensionPath}"
+    }
+  }
+}

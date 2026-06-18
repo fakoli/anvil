@@ -85,6 +85,9 @@ bedrock = [
 custom = [
     { name = "openai" },
 ]
+s3 = [
+    { name = "boto3" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -101,6 +104,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.30" },
     { name = "anthropic", extras = ["bedrock"], marker = "extra == 'all-providers'", specifier = ">=0.30" },
     { name = "anthropic", extras = ["bedrock"], marker = "extra == 'bedrock'", specifier = ">=0.30" },
+    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.26" },
     { name = "fastmcp" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "openai", marker = "extra == 'all-providers'", specifier = ">=1.0" },
@@ -109,7 +113,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.12" },
 ]
-provides-extras = ["bedrock", "custom", "all-providers"]
+provides-extras = ["bedrock", "custom", "s3", "all-providers"]
 
 [package.metadata.requires-dev]
 dev = [

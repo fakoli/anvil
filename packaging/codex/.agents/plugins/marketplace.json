@@ -1,0 +1,15 @@
+{
+  "name": "anvil-marketplace",
+  "plugins": [
+    {
+      "name": "anvil",
+      "version": "0.0.8",
+      "description": "Local-first project-state engine for coordinating humans and AI agents.",
+      "source": { "source": "local", "path": "../../" },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      }
+    }
+  ]
+}

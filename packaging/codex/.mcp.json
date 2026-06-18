@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "anvil": {
+      "command": "bash",
+      "args": ["${CODEX_PLUGIN_ROOT}/bin/anvil-mcp"],
+      "cwd": "${CODEX_PLUGIN_ROOT}"
+    }
+  }
+}
