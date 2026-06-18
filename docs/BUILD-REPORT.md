@@ -1,6 +1,6 @@
 # Anvil — standalone build: final report
 
-> **Anvil — the system of record for agent teams** (formerly fakoli-state). Now at **v2.0.0**.
+> **Anvil — the system of record for agent teams** (formerly fakoli-state). Now at **v0.0.8**.
 
 Autonomous build, 2026-06-17. This repo (`/Users/sdoumbouya/code/anvil`) is the
 **extracted, standalone Anvil product**, taken from the fakoli-plugins monorepo
@@ -11,7 +11,7 @@ been pushed to a remote — that's left to you.
 
 - **Extracted** to a self-contained repo (own CI, README, LICENSE, `.gitignore`), tests green.
 - **Trimmed** for standalone: always-on context footprint **7,248 → ~5,500 tok** (~24% off, ~30% before the new commands re-added a little), the monorepo-only `marketplace-scribe` agent removed, agent-description examples relocated to bodies (no capability lost).
-- **Backlog: 18/18 shipped.** Version climbed **1.23.8 → 1.40.0**, then the product was **renamed to Anvil (2.0.0)**. Full suite **1,671 passed** (from 1,432 at import — +239 tests).
+- **Backlog: 18/18 shipped.** Version climbed **1.23.8 → 1.40.0**, then the product was **renamed to Anvil (0.0.8)**. Full suite **1,671 passed** (from 1,432 at import — +239 tests).
 - **Method:** every item was implemented by one subagent, then **blind-reviewed by fresh subagents** (their own clean context — diff + acceptance criteria only), fixed, verified, and committed only when green; any item that couldn't pass was auto-reverted so the next started clean. I (the orchestrator) re-verified the cumulative suite independently at each milestone.
 
 ## The arc
@@ -69,7 +69,7 @@ claim.**
 
 ## Current state
 
-- Branch `main`, working tree clean, **v2.0.0 (schema 5)**, CLI command `anvil`.
+- Branch `main`, working tree clean, **v0.0.8 (schema 5)**, CLI command `anvil`.
 - `cd bin && uv run pytest -q` → **1,671 passed** (the 4 optional-`openai` tests pass with
   `uv sync --extra all-providers`, which CI uses; they're the only ones that need it).
 - CI: `.github/workflows/ci.yml` (py3.11/3.12, uv sync + pytest + benchmark smoke + the
@@ -92,6 +92,6 @@ claim.**
    — CI will run on first push.
 2. **Lead the README with the benchmark** (collisions 13→0, evidence gate, `drift`) — it's
    the moat made measurable; competitors can't reproduce it.
-3. **Deprecate fakoli-flow** in the monorepo and point users here.
+3. **Point monorepo users to this standalone repo** once it's published.
 4. Fix the `_apply_ddl` schema-masking ordering when you next touch core init.
 5. Decide whether the monorepo keeps an anvil copy or redirects to this repo.

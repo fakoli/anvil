@@ -24,21 +24,9 @@ records evidence and transitions a task to `done`. Drift (stale claims,
 orphan branches, sync conflicts) is detected and reconciled, not papered
 over.
 
-In the Fakoli ecosystem, anvil plays the **what is true** role of the
-plugin trinity:
-
-- `fakoli-flow` defines how work moves (skill choreography, gates, merges).
-- `fakoli-crew` defines who does the work (specialist subagents).
-- `anvil` defines what is true (the durable record).
-
-The three plugins compose. When all three are installed, `flow:execute` reads
-`anvil next`, dispatches the right crew specialist, and submits
-evidence back to canonical state before the merge gate. When anvil is
-absent, flow and crew fall back to their markdown-status conventions.
-
-The full positioning (the trinity sentence, the five wedges, the Terraform
-analogy) is maintained in [`_positioning.md`](_positioning.md); this
-document does not duplicate that material.
+The full positioning (the five wedges, the Terraform analogy) is maintained
+in [`_positioning.md`](_positioning.md); this document does not duplicate
+that material.
 
 ---
 
@@ -51,7 +39,7 @@ graph TD
 
     subgraph Entry["Entry surfaces"]
         CLI["CLI<br/>anvil &lt;cmd&gt;"]
-        MCP["MCP server<br/>FastMCP stdio<br/>13 tools"]
+        MCP["MCP server<br/>FastMCP stdio<br/>24 tools"]
         Hooks["Hooks<br/>SessionStart / PreToolUse / PostToolUse"]
     end
 
@@ -80,9 +68,6 @@ graph TD
         GitHub["GitHubIssuesProvider<br/>gh CLI + httpx"]
     end
 
-    Flow["fakoli-flow<br/>(optional)"]
-    Crew["fakoli-crew<br/>(optional)"]
-
     User --> CLI
     User --> Skills
     Agent --> MCP
@@ -109,11 +94,6 @@ graph TD
     CLI --> SyncProto
     SyncProto --> GitHub
     GitHub --> Backend
-
-    Skills -.optional bridge.-> Flow
-    Skills -.optional bridge.-> Crew
-    Flow -.execute reads.-> CLI
-    Crew -.submits evidence.-> CLI
 ```
 
 Source: [`assets/diagrams/component.mmd`](../assets/diagrams/component.mmd).
@@ -124,10 +104,10 @@ Source: [`assets/diagrams/component.mmd`](../assets/diagrams/component.mmd).
 |---|---|---|
 | Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json) |
 | CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py) |
-| MCP server | Runtime-neutral capability surface — 13 stdio tools any MCP client can call | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
+| MCP server | Runtime-neutral capability surface — 24 stdio tools any MCP client can call | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
 | Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](../hooks/hooks.json), [`hooks/*.sh`](../hooks/) |
 | Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](../skills/) |
-| Plugin agents | Specialist roles owned by this plugin; defer to fakoli-crew when installed | [`agents/*.md`](../agents/) |
+| Plugin agents | Specialist roles owned by this plugin | [`agents/*.md`](../agents/) |
 | Backend protocol | The seam between state-engine logic and storage; SqliteBackend is the only impl that ships | [`bin/src/anvil/state/backend.py`](../bin/src/anvil/state/backend.py), [`bin/src/anvil/state/sqlite.py`](../bin/src/anvil/state/sqlite.py) |
 | Transitions | Pure state machine — no I/O, no DB, no side-effects beyond `model_copy()` | [`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py) |
 | Claims manager | Atomic lease + heartbeat; stale detection on every operation | [`bin/src/anvil/claims/manager.py`](../bin/src/anvil/claims/manager.py), [`bin/src/anvil/claims/stale.py`](../bin/src/anvil/claims/stale.py) |
@@ -394,44 +374,6 @@ when no claim is held.
 
 ---
 
-## Integration with fakoli-flow and fakoli-crew
-
-```mermaid
-graph LR
-    Flow["fakoli-flow<br/>how work moves<br/>(skills: execute, verify, finish)"]
-    State["anvil<br/>what is true<br/>(SQLite + JSONL + claims)"]
-    Crew["fakoli-crew<br/>who does the work<br/>(specialist subagents)"]
-
-    Flow -->|"flow:execute calls<br/>anvil next"| State
-    State -->|"returns claimable Task<br/>+ work packet"| Flow
-    Flow -->|"dispatches matching<br/>specialist (welder, scout, ...)"| Crew
-    Crew -->|"submits evidence<br/>via anvil submit"| State
-    State -->|"transitions task<br/>to needs_review"| Flow
-    Flow -->|"flow:verify gates<br/>before merge"| State
-
-    classDef trinityNode fill:#1f2937,stroke:#60a5fa,stroke-width:2px,color:#f9fafb
-    class Flow,State,Crew trinityNode
-```
-
-Source: [`assets/diagrams/trinity.mmd`](../assets/diagrams/trinity.mmd).
-
-Three patterns make this composition safe across plugins:
-
-- **Explicit detection.** Every skill that bridges to a sibling plugin
-  performs an explicit `claude plugin list 2>/dev/null | grep -q
-  "^fakoli-flow"` (or fakoli-crew) check before invoking it. No fuzzy
-  detection by prose; the shell-exit code is the contract.
-- **Graceful fallback.** When a sibling is absent, the skill falls
-  through to its plugin-local equivalent (e.g., anvil's own
-  `sentinel` agent if `fakoli-crew:sentinel` is not installed).
-- **State is the rendezvous.** Flow does not call crew directly to ask
-  for a result; crew submits evidence to anvil, and flow polls
-  state's `needs_review` queue. This keeps each plugin's blast radius
-  bounded and prevents tight coupling between flow's skills and crew's
-  agents.
-
----
-
 ## CLI / MCP / hooks surface
 
 ### CLI commands (14 top-level + 4 sub-apps)
@@ -449,7 +391,7 @@ in [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py):
 - Hooks: `hook ...` (sub-app — called by `hooks/*.sh`)
 - Sync: `sync ...` (sub-app — `sync github`, `sync github --health`, ...)
 
-### MCP tools (13)
+### MCP tools (24)
 
 Full reference is at [`docs/mcp.md`](mcp.md). Source:
 [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py).
@@ -457,18 +399,29 @@ Full reference is at [`docs/mcp.md`](mcp.md). Source:
 | # | Tool | Mutates | Reaps stale |
 |---|---|---|---|
 | 1 | `get_project_summary` | no | yes |
-| 2 | `list_tasks` | no | no |
-| 3 | `get_task` | no | no |
-| 4 | `get_next_task` | no | no |
-| 5 | `claim_task` | yes | yes |
-| 6 | `release_task` | yes | yes |
-| 7 | `renew_claim` | yes | yes |
-| 8 | `generate_work_packet` | no | no |
-| 9 | `submit_progress` | yes (audit-only) | yes |
-| 10 | `submit_completion_evidence` | yes | yes |
-| 11 | `check_conflicts` | no | no |
-| 12 | `get_dependency_graph` | no | no |
-| 13 | `update_task_status` | yes | yes |
+| 2 | `get_project_status` | no | no |
+| 3 | `list_tasks` | no | no |
+| 4 | `get_task` | no | no |
+| 5 | `get_next_task` | no | no |
+| 6 | `get_dependency_graph` | no | no |
+| 7 | `claim_task` | yes | yes |
+| 8 | `release_task` | yes | yes |
+| 9 | `renew_claim` | yes | yes |
+| 10 | `update_task_status` | yes | yes |
+| 11 | `submit_progress` | yes (audit-only) | yes |
+| 12 | `submit_completion_evidence` | yes | yes |
+| 13 | `generate_work_packet` | no | no |
+| 14 | `check_conflicts` | no | no |
+| 15 | `edit_dependencies` | yes | no |
+| 16 | `init_project` | yes | no |
+| 17 | `parse_prd` | yes | no |
+| 18 | `review_prd` | yes | no |
+| 19 | `plan_tasks` | yes | no |
+| 20 | `score_tasks` | yes | no |
+| 21 | `review_tasks` | yes | no |
+| 22 | `apply_review_decision` | yes | no |
+| 23 | `find_decisions` | no | no |
+| 24 | `describe_surface` | no | no |
 
 Sync tools (`sync_run`, `sync_health`, `sync_status`, `sync_reconcile`) are
 not yet on the MCP surface — agents that want sync today shell out via Bash
@@ -492,9 +445,7 @@ not use `set -e` / `set -u` / `set -o pipefail`, must wrap CLI calls with
 ### Skills (7)
 
 Workflow choreography lives in [`skills/*/SKILL.md`](../skills/) —
-start-prd, prd, plan, claim, execute, finish, state-ops. Verification is
-delegated to `fakoli-flow:verify` and `fakoli-crew:sentinel` rather than a
-plugin-local verify skill (intentional — see README rationale).
+start-prd, prd, plan, claim, execute, finish, state-ops.
 
 Skill frontmatter is always loaded into the model's context (it is the
 plugin's command surface), so the combined skill footprint is kept under an
@@ -508,12 +459,11 @@ Defined in [`agents/*.md`](../agents/):
 
 - `planner` — drafts feature / task decomposition from a parsed PRD
 - `critic` — reviews PRD or task drafts; produces an approve / reject / needs_changes verdict
-- `sentinel` — pre-merge verification (plugin-local fallback when fakoli-crew:sentinel is absent)
+- `sentinel` — pre-merge verification
 - `state-keeper` — operational hygiene: orphan claims, drift, schema migrations
 - `docs-scribe` — keeps `docs/` synchronised with shipped behaviour
 
-Each agent's frontmatter pins `tools:` (least privilege) and declares its
-defer-to relationships with fakoli-crew counterparts.
+Each agent's frontmatter pins `tools:` (least privilege).
 
 ---
 
@@ -525,7 +475,7 @@ points at a file you can grep.
 | Layer | File(s) |
 |---|---|
 | Entry: CLI assembly | [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py) |
-| Entry: MCP server (13 tools) | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
+| Entry: MCP server (24 tools) | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
 | Entry: hooks manifest | [`hooks/hooks.json`](../hooks/hooks.json) |
 | Type system | [`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py) |
 | Transitions (pure) | [`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py) |
@@ -582,9 +532,9 @@ and welder-effort estimates.
 
 ## Further reading
 
-- [`_positioning.md`](_positioning.md) — the trinity, the five wedges, the Terraform analogy (internal source-of-truth for marketing copy)
+- [`_positioning.md`](_positioning.md) — the five wedges, the Terraform analogy (internal source-of-truth for marketing copy)
 - [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — the original 358-line v0 build spec (this document is its condensed shipped sibling)
-- [`mcp.md`](mcp.md) — full 13-tool MCP reference with error envelope contract
+- [`mcp.md`](mcp.md) — full 24-tool MCP reference with error envelope contract
 - [`github-sync.md`](github-sync.md) — bidirectional GitHub Issues sync reference
 - [`sync-providers.md`](sync-providers.md) — contributor guide for new sync providers
 - [`prd-template.md`](prd-template.md) — PRD authoring schema and worked example

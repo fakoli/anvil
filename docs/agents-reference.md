@@ -1,20 +1,20 @@
 # Agents reference
 
-> anvil ships 5 plugin-owned agents. Each has a specific role; each defers to a `fakoli-crew` specialist when that plugin is installed (so the same agent works standalone or as part of a richer crew composition).
+> anvil ships 5 plugin-owned agents. Each has a specific role and runs its full body in this session.
 
-This document is the canonical per-agent reference. For the higher-level integration picture across all three plugins, see [Integrating with fakoli-flow and fakoli-crew](how-to/integrating-with-fakoli-flow-and-crew.md). For the architectural role of agents inside the plugin, see [architecture.md](architecture.md).
+This document is the canonical per-agent reference. For the architectural role of agents inside the plugin, see [architecture.md](architecture.md).
 
 ---
 
 ## Quick lookup
 
-| Agent | Color | Tools | Defers to (when fakoli-crew installed) |
-|---|---|---|---|
-| [planner](#planner) | white | Read, Grep, Glob, Bash | `fakoli-crew:guido` (HOW only — architecture) |
-| [critic](#critic) | magenta | Read, Grep, Glob, Bash | `fakoli-crew:critic` (full fallback) |
-| [sentinel](#sentinel) | gray | Read, Grep, Glob, Bash | `fakoli-crew:sentinel` (full fallback) |
-| [state-keeper](#state-keeper) | teal | Read, Grep, Glob, Bash, Edit, Write | `fakoli-crew:keeper` (repo-wide scope only) |
-| [docs-scribe](#docs-scribe) | purple | Read, Write, Edit, Glob, Grep | `fakoli-crew:herald` (outward docs only) |
+| Agent | Color | Tools |
+|---|---|---|
+| [planner](#planner) | white | Read, Grep, Glob, Bash |
+| [critic](#critic) | magenta | Read, Grep, Glob, Bash |
+| [sentinel](#sentinel) | gray | Read, Grep, Glob, Bash |
+| [state-keeper](#state-keeper) | teal | Read, Grep, Glob, Bash, Edit, Write |
+| [docs-scribe](#docs-scribe) | purple | Read, Write, Edit, Glob, Grep |
 
 Tool lists are read from each agent's frontmatter. The `state-keeper` agent declares `Edit` and `Write` but is restricted by its Iron Rule to writing only sync-report files under `.anvil/.sync-reports/` — never source files, state files, or git refs.
 
@@ -35,8 +35,6 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **Iron Rule:** Never modifies `.anvil/state.db` or `.anvil/events.jsonl` directly. Proposes; the CLI commands (`plan`, `score`, `expand`) do the writes. Direct state-file edits bypass the audit log and break the replay guarantee.
 
-**Defer behavior:** Partial. When `fakoli-crew:guido` is available, planner keeps the WHAT (task structure, dependencies, scoring) but defers the HOW (interface design, type system choices, project structure) — it flags those as "guido consult" entries in the Concerns section of its output. Planner never delegates the whole proposal; it always returns the structured Features/Tasks/Concerns block.
-
 **Output shape:** Markdown block with `## Features`, `## Tasks`, and `## Concerns` sections. The `anvil:plan` skill parses this output to drive the `anvil plan` CLI invocation.
 
 **Source:** [`agents/planner.md`](../agents/planner.md)
@@ -53,11 +51,8 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **When to dispatch:**
 - After a claimed task has been submitted (status `needs_review`) and before `anvil apply --approve`.
-- Inside `/flow:execute` as the critic gate that runs after every wave that writes code.
 
 **Iron Rule:** Never modifies any source file, test file, or state file. Reads, analyzes, and reports. If a bug is found, the fix is shown in the report — not applied. The welder agent or the CLI does all writes.
-
-**Defer behavior:** Full fallback. When `fakoli-crew:critic` is installed, the crew agent takes precedence — it carries language-specific expertise (Python type annotations, TypeScript strictness, Rust lifetimes) that this fallback does not replicate at full depth. The plugin-owned critic remains responsible for acceptance-criteria contract checks; the two can run together and merge verdicts.
 
 **Output shape:** Markdown report with an Acceptance Criteria table (each criterion marked SATISFIED or UNSATISFIED), Findings grouped by severity (MUST FIX / SHOULD FIX / CONSIDER / NIT), and a one-line Verdict.
 
@@ -68,7 +63,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **Source:** [`agents/critic.md`](../agents/critic.md)
 
-**See also:** [integrating-with-fakoli-flow-and-crew.md → Example 1](how-to/integrating-with-fakoli-flow-and-crew.md#example-1-flowexecute-consumes-anvil-next--claim--submit) · [cli-reference.md#submit](cli-reference.md#submit)
+**See also:** [cli-reference.md#submit](cli-reference.md#submit)
 
 ---
 
@@ -80,11 +75,8 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **When to dispatch:**
 - After submission and before merge — the final gate that confirms the evidence actually demonstrates the acceptance criteria pass.
-- Inside `/flow:verify` for the final evidence-validation step before `/flow:finish` calls `anvil apply --approve`.
 
 **Iron Rule:** Never modifies any source file, test file, state file, or evidence file. Reads, runs read-only commands, and reports. Every finding is binary — PASS or FAIL. Does not fix; does not suggest; only validates.
-
-**Defer behavior:** Full fallback. When `fakoli-crew:sentinel` is installed, the crew agent takes precedence — it has broader validation depth (CI workflow checks, version sync, comprehensive linting) than this fallback. The plugin-owned sentinel remains responsible for re-running task-spec verification commands; the two can run together and merge scorecards for maximum coverage.
 
 **Output shape:** Plain-text SENTINEL REPORT with one row per acceptance criterion (`[PASS]`, `[FAIL]`, or `[N/A ]`), one row per verification command, and a SUMMARY line ending in `READY` or `NOT READY`.
 
@@ -95,7 +87,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **Source:** [`agents/sentinel.md`](../agents/sentinel.md)
 
-**See also:** [integrating-with-fakoli-flow-and-crew.md → Example 1](how-to/integrating-with-fakoli-flow-and-crew.md#example-1-flowexecute-consumes-anvil-next--claim--submit) · [cli-reference.md#submit](cli-reference.md#submit)
+**See also:** [cli-reference.md#submit](cli-reference.md#submit)
 
 ---
 
@@ -115,12 +107,6 @@ Edit and Write are scoped strictly to producing sync-report files under `.anvil/
 - As the scan phase of `anvil sync` (no `--fix`).
 
 **Iron Rule:** Never auto-remediates. Never deletes branches, worktrees, packets, evidence files, state rows, or events. Never runs destructive git operations (`git branch -D`, `git worktree remove`, `git push --force`, etc.). Sole output is a discrepancy report; remediation is the user's explicit choice via `anvil sync --fix --yes`.
-
-**Defer behavior:** Scope-split. When `fakoli-crew:keeper` is installed, the two have non-overlapping scopes:
-- Route to `fakoli-crew:keeper` for cross-plugin sync, CI workflow drift, contributor docs, multi-plugin registry/marketplace regen.
-- Route to `anvil:state-keeper` for orphan branches in one project, orphan packets, stale claims, missing `sync_mappings`, audit-log spot-checks.
-
-Both can fire in parallel when a question touches both scopes.
 
 **The four reconciliation checks:**
 1. **Orphan branches** — git branch whose embedded task ID is not present in `anvil list --status all`.
@@ -153,22 +139,14 @@ Both can fire in parallel when a question touches both scopes.
 **Iron Rule:** Never edits a doc without first reading the source of truth it is supposed to describe. If a spec describes the schema, read the schema. If a runbook describes a CLI command, read the CLI source. Docs that lie are worse than no docs at all.
 
 **What it owns:**
-- `plugins/anvil/docs/**/*.md` — all inward-facing docs.
-- `plugins/anvil/docs/plans/` — phase plans and agent status archives.
-- `plugins/anvil/CHANGELOG.md` — append-only ledger of user-visible changes.
-- `plugins/anvil/.claude-plugin/plugin.json` (`description` field only).
+- `docs/**/*.md` — all inward-facing docs.
+- `docs/plans/` — phase plans and agent status archives.
+- `CHANGELOG.md` — append-only ledger of user-visible changes.
+- `.claude-plugin/plugin.json` (`description` field only).
 
 **What it does NOT own:**
-- `.claude-plugin/marketplace.json`, the root `README.md`, `registry/*.json` (marketplace-level artifacts — belong to `fakoli-crew:keeper`).
-- Repo-wide `CLAUDE.md`, contributor docs, CI workflow docs (belong to `fakoli-crew:keeper`).
 - `plugin.json`'s structural fields (`name`, `version`, `author`, `repository`, `license`, `keywords`) — those are smith's lane.
 - Agent or skill internals — those agents/skills speak for themselves.
-
-**Defer behavior:** Scope-split. When `fakoli-crew:herald` is installed:
-- Route to `fakoli-crew:herald` for root README, marketplace listing prose, badges, value-proposition rewrites for first-time visitors.
-- Route to `docs-scribe` for anything inside `plugins/anvil/docs/`, the plugin's CHANGELOG, the plugin.json description field.
-
-The split-by-audience is deliberate: docs-scribe writes for contributors, state-keeper writes for operators.
 
 **CHANGELOG discipline:**
 - Append-only. Never rewrite history; add a correction entry instead.
@@ -182,36 +160,9 @@ The split-by-audience is deliberate: docs-scribe writes for contributors, state-
 
 ---
 
-## Defer-to-crew pattern explained
-
-Every plugin-owned agent body starts with a detection step that runs the same shell check:
-
-```bash
-claude plugin list 2>/dev/null | grep -q "fakoli-crew"
-```
-
-- The `2>/dev/null` suppresses stderr when `claude` is not on `PATH` (e.g., in some MCP server contexts).
-- The grep pattern is unanchored. `claude plugin list` renders each row as `  ❯ fakoli-crew@fakoli-plugins` (indented marker line, then `<plugin>@<source>` slug); a `^` anchor would never match. The unanchored substring match is safe because no other installed plugin contains the string `fakoli-crew`.
-- The exit code is the contract — no JSON parsing, no `/help` introspection.
-
-Exit code 0 means a crew specialist is available and the agent defers (full fallback) or scope-splits (partial defer). Non-zero means the agent runs its plugin-local body in full. This makes the integration zero-config: install fakoli-crew and the deferral activates; uninstall and the local body runs. No settings.json toggles, no per-task overrides.
-
-Two of the five agents (`critic`, `sentinel`) are full fallbacks — when the crew sibling exists, the plugin-owned agent steps aside entirely. The other three (`planner`, `state-keeper`, `docs-scribe`) are scope-splits — both run, but at different levels of granularity. The split-by-scope pattern lets each plugin own a tightly defined surface without the two agents fighting over the same files.
-
----
-
-## Standalone mode
-
-If only anvil is installed, all 5 agents run their full local body. No degradation in capability — the deferral is an optimization (using a more specialized crew agent), not a requirement. The plugin-owned `critic` still produces PASS / SHOULD FIX / MUST FIX verdicts against acceptance criteria. The plugin-owned `sentinel` still re-runs verification commands and produces the binary scorecard. `planner` still proposes Features and Tasks; `state-keeper` still detects the four discrepancy kinds; `docs-scribe` still sweeps the inward docs and CHANGELOG.
-
-This is the v0 wedge: a solo developer with one Claude Code session can drive the full PRD-to-shipped lifecycle — and the full doc-and-state maintenance lifecycle — without ever installing fakoli-flow or fakoli-crew.
-
----
-
 ## See also
 
-- [Integrating with fakoli-flow and fakoli-crew](how-to/integrating-with-fakoli-flow-and-crew.md) — the canonical answer to "what happens when I install all three?"
-- [Architecture](architecture.md) — the plugin trinity diagram and where agents sit in the component graph
-- [Skills reference](skills-reference.md) — the seven plugin-owned skills and their bridge points
+- [Architecture](architecture.md) — where agents sit in the component graph
+- [Skills reference](skills-reference.md) — the seven plugin-owned skills
 - [CLI reference](cli-reference.md) — every command an agent might invoke
 - [Authoring a PRD](how-to/authoring-a-prd.md) — the upstream input that planner consumes

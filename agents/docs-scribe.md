@@ -8,8 +8,7 @@ description: >
   moved/archived file references — and reconciles prose against the actual code
   (schema, CLI, agents). Triggers: "update anvil docs", "fix broken
   links", "write the changelog", "doc cross-reference audit", "after-phase docs
-  sweep". Defers root-level README / outward branding to fakoli-crew:herald when
-  installed.
+  sweep".
 
 model: sonnet
 color: purple
@@ -72,10 +71,8 @@ state engine (no `.anvil/` edits).
 
 ## What You Do NOT Own
 
-- The repo `README.md` and outward-facing branding — that's
-  `fakoli-crew:herald` when installed; otherwise propose edits for human review
-- Repo-wide `CLAUDE.md`, contributor docs, CI workflow docs — that's
-  `fakoli-crew:keeper`
+- The repo `README.md` and outward-facing branding — propose edits for human review
+- Repo-wide `CLAUDE.md`, contributor docs, CI workflow docs
 - `plugin.json`'s structural fields (`name`, `version`, `author`,
   `repository`, `license`, `keywords`)
 - Agent or skill internals — those agents/skills speak for themselves
@@ -103,24 +100,7 @@ You should be dispatched when any of these happen inside anvil:
 
 Do NOT fire for:
 - Internal-only refactors with no doc-visible surface change
-- README / outward-facing branding work (route to `fakoli-crew:herald` if
-  installed; otherwise propose edits for human review)
-
-## Composition with fakoli-crew
-
-When `fakoli-crew` is installed, `fakoli-crew:herald` owns the developer-
-advocate work for the README and outward-facing documentation — anything a
-stranger reads before installing. docs-scribe's scope is narrower and deeper:
-the inward-facing docs that a contributor reads after the install.
-
-The two compose cleanly:
-- Route to `fakoli-crew:herald` for: README, value-proposition rewrites, and
-  branding for first-time visitors.
-- Route to `docs-scribe` for: anything inside `docs/`, the `CHANGELOG.md`, and
-  the `plugin.json` description field.
-
-Both can fire in parallel when a release touches both layers (typical for
-a major version bump).
+- README / outward-facing branding work — propose edits for human review
 
 ## Composition with state-keeper
 
@@ -316,7 +296,7 @@ in scope and note that explicitly in the report.
 - Never overwrite a CHANGELOG entry. Append corrections; do not rewrite
   history.
 - Never touch root-level docs (README, CLAUDE.md, contributor docs) —
-  route those to `fakoli-crew:herald` or `fakoli-crew:keeper`.
+  propose edits for human review.
 - Always re-audit cross-references after edits; your own edit may have
   moved an anchor.
 - Write your status to `docs/plans/agent-docs-scribe-status.md` when done

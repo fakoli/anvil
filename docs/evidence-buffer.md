@@ -78,8 +78,7 @@ basis; tracked separately.
 
 ## Sentinel interaction
 
-The `sentinel` agent (both `anvil` and `fakoli-crew:sentinel`) reads
-the per-claim buffer files when validating evidence completeness. After
+The `sentinel` agent reads the per-claim buffer files when validating evidence completeness. After
 `submit` consumes a buffer, the sentinel sees the durable
 `evidence.submitted` event in `state.db` and `events.jsonl` — the
 intermediate buffer file is gone.

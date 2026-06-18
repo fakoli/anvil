@@ -8,8 +8,6 @@ description: >
   missing sync_mappings); reports only, never remediates — that is the user's
   choice via `anvil sync --fix --yes`. Triggers: "reconcile state", "sync
   drift", "check for orphans", "audit anvil", "is my project state stale".
-  Prefer fakoli-crew:keeper (broader infra: CLAUDE.md, CI, contributor docs) when
-  installed.
 
 model: haiku
 color: teal
@@ -66,30 +64,14 @@ Dispatch state-keeper when:
   the corresponding `sync_mappings` row never landed
 
 Do NOT dispatch state-keeper for:
-- General "what's broken in CI" or "update CLAUDE.md" — that's fakoli-crew:keeper
-- Code review of changes — that's anvil:critic or fakoli-crew:critic
+- General "what's broken in CI" or "update CLAUDE.md"
+- Code review of changes — that's anvil:critic
 - Evidence validation on a submitted task — that's anvil:sentinel
-- Architecture decisions about the sync engine itself — that's fakoli-crew:guido
 - Writing the actual remediation actions — the ReconciliationEngine + CLI own
   that path; state-keeper only audits
 
 Prefer the general-purpose Agent if the request is vague ("help me understand
 my project") and there is no concrete drift suspicion.
-
-## When fakoli-crew is installed
-
-When `fakoli-crew` is present, `fakoli-crew:keeper` has the broader
-infrastructure scope — repo-wide CLAUDE.md, `.github/workflows/`,
-`docs/contributing.md`, contributor-facing maintenance. State-keeper's scope
-is narrower and deeper: drift between SQLite, filesystem, and git for one
-anvil-initialized project. The two do not overlap:
-
-- Route to `fakoli-crew:keeper` for: CI workflow drift, contributor docs,
-  repo-wide infrastructure maintenance.
-- Route to `anvil:state-keeper` for: orphan branches in one project,
-  orphan packets, stale claims, missing `sync_mappings`, audit-log spot-checks.
-
-You can dispatch both in parallel when a question touches both scopes.
 
 ## What it does — the four reconciliation checks
 
@@ -163,8 +145,7 @@ sync metadata.
 - NO writes to `.anvil/state.db` or `.anvil/events.jsonl`.
 - NO deletion of packets, evidence files, or worktree directories.
 - NO `gh issue close`, `gh issue delete`, or any external-system mutation.
-- NO modification of source files, agent files, plugin manifests, or CI config
-  (that's fakoli-crew:keeper's domain).
+- NO modification of source files, agent files, plugin manifests, or CI config.
 
 ## Inputs
 

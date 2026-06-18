@@ -59,7 +59,7 @@ Two surfaces are always available:
 
 - **CLI** (`anvil <cmd>`) — runtime-agnostic; any shell-capable agent
   can call it via Bash, and humans use it directly.
-- **MCP server** — 13 tools exposed over FastMCP stdio. Any MCP client
+- **MCP server** — 24 tools exposed over FastMCP stdio. Any MCP client
   connects; tool responses are structured JSON with explicit error
   envelopes.
 
@@ -230,7 +230,7 @@ sqlite3 .anvil/state.db .schema
 sqlite3 .anvil/state.db "SELECT id, status, title FROM tasks;"
 ```
 
-The schema is version 3 as of v1.10.0 (unchanged since v1.8.0 — no
+The schema is version 5 (unchanged since v1.8.0 — no
 migration required). Pydantic models in
 [`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py)
 define every entity; the SQLite implementation lives in

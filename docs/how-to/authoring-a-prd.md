@@ -4,8 +4,9 @@
 > and the deterministic parser does the rest — requirements, features, and tasks all
 > derive from one markdown file.
 
-This guide assumes you have already run `anvil init` and seen the generated
-`.anvil/prd.md`. For the canonical schema, see
+This guide assumes you have already run `anvil init` (which creates the `.anvil/`
+directory but does NOT auto-create `prd.md`) and are ready to author `.anvil/prd.md`
+by hand. For the canonical schema, see
 [`../prd-template.md`](../prd-template.md). For an end-to-end first run, see
 [getting-started.md](getting-started.md).
 

@@ -41,7 +41,7 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ---
 
-## [2.0.0] — 2026-06-17
+## [0.0.8] — 2026-06-17
 
 ### Changed
 

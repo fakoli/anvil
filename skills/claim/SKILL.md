@@ -12,8 +12,6 @@ Turn a `ready` task into an active claim: a row in `state.db` with a 60-minute l
 ## When to Use
 
 - Starting work on a task after `/anvil:plan` has produced a ready queue.
-- When `fakoli-flow:execute` dispatches an agent against an anvil task — the claim step happens inside that dispatch.
-- When `fakoli-crew:welder` picks up integration work, or `fakoli-crew:scout` picks up a research task — both land here before touching files.
 - When resuming after an interrupted session — check `anvil status` first, then re-claim if the previous lease has expired and the task returned to `ready`.
 - When coordinating parallel agents — each agent claims a separate task; `claim` enforces the conflict gate.
 
@@ -47,19 +45,6 @@ Git is optional. When a git repo is present in the project root, `claim` automat
 ---
 
 ## Workflow
-
-### Step 0 — Detect whether `fakoli-flow:execute` is available
-
-Before running the standalone claim flow, run the explicit plugin check so the decision is deterministic and reproducible across sessions — no introspection of in-memory command lists, no fuzzy "if it seems available" prose:
-
-```bash
-claude plugin list 2>/dev/null | grep -q "fakoli-flow"
-```
-
-- **Exit code 0** (`fakoli-flow` plugin present): prefer `/fakoli-flow:execute` for the wave-engine path. It reads `anvil next`, calls `anvil claim`, and dispatches the agent against the claimed task as part of a richer wave-based orchestration with critic gates between waves. The claim still appears in `state.db` — it is the same primitive, called from inside the flow. Branch on the user's existing workflow preferences when deciding whether to bridge.
-- **Non-zero exit** (plugin absent, or `claude` CLI itself not on `PATH`): proceed with the standalone path below (Step 1 onward). The fall-through is intentional graceful degradation: missing tooling never blocks the claim flow.
-
-The grep pattern is intentionally unanchored. Actual `claude plugin list` output renders each installed plugin as `  ❯ fakoli-flow@fakoli-plugins` (indented marker line, plugin name suffixed with `@<source>`); a leading `^` anchor would never match. The unanchored substring is safe because `fakoli-flow` is a unique slug within the marketplace.
 
 ### Step 1 — See what is claimable
 
@@ -288,16 +273,6 @@ The rule is the same as the v1.14.0 `resolve-decisions` Q&A pattern, applied to 
 | After claiming | Work the branch, heartbeat, complete; then Phase 5 `finish` for submit + ship |
 | If `show TASK_ID` reveals `complexity >= 4` | Return to `/anvil:plan` and expand the task before claiming |
 | If `next` returns nothing | `/anvil:state-ops` to diagnose — check `status`, `list --status drafted`, trace blockers |
-
-**When `fakoli-flow` is installed:** `flow:execute` detects anvil and wraps this skill. It reads `anvil next`, calls `anvil claim`, and dispatches the agent against the claimed task. The claim still appears in `state.db` — it is the same primitive, called from inside the flow.
-
-**When `fakoli-crew` is installed:** `welder` is the standard claim consumer for integration work. `scout` claims research tasks. Pass `--actor` to tag the claim with the crew role for traceability:
-
-```bash
-anvil claim T012 --actor fakoli-crew:welder
-```
-
-The `claimed_by` field on the Claim row records the actor string. The audit trail links every file change to the role that made it.
 
 ---
 

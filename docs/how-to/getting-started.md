@@ -33,7 +33,7 @@ The install registers four hooks, wires the MCP server, and makes the six plugin
 
 ```bash
 anvil --version
-# → anvil 1.10.0
+# → anvil 0.0.8
 ```
 
 ## Step 2 — Initialize state in your project
@@ -186,30 +186,6 @@ anvil apply T001 --approve
 `state.db` now records `T001=done` and `C001` released. `events.jsonl` has the full audit trail: `project.created`, `prd.parsed`, `prd.reviewed`, `prd.approved`, `task.created`, `task.scored`, `task.status_changed` × N, `claim.created`, `evidence.submitted`, `task.applied`. Replaying that log from an empty database reconstructs `state.db` byte-for-byte — the audit guarantee that makes `.anvil/` safe to back up by copy.
 
 The work packet under `.anvil/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).
-
-## Optional: fakoli-flow / fakoli-crew integration
-
-Everything above is the **standalone path** — every step ran through the
-`anvil` CLI (or, equivalently, the matching MCP tools: `init_project`,
-`parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
-`get_next_task`, `claim_task`, `generate_work_packet`,
-`submit_completion_evidence`, `apply_review_decision`). You never needed
-`fakoli-flow` or `fakoli-crew` installed, and nothing in the walkthrough
-above depends on them.
-
-The two sibling plugins are **purely additive** — an opt-in upgrade, never a
-prerequisite. If you install them, the same state engine gains orchestration
-on top:
-
-- **fakoli-flow** drives the loop for you — its execute skill reads
-  `anvil next`, claims, dispatches work, and submits evidence in
-  waves instead of one command at a time.
-- **fakoli-crew** supplies the specialist subagents that flow dispatches, and
-  exposes the same MCP tool surface to every crew agent.
-
-When neither is installed, the CLI/MCP loop you just ran **is** the product —
-nothing degrades. For exactly what changes when you add them, see
-[`integrating-with-fakoli-flow-and-crew.md`](integrating-with-fakoli-flow-and-crew.md).
 
 ## Common stumbles
 

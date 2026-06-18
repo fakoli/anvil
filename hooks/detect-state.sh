@@ -11,7 +11,7 @@ if [ ! -d "$STATE_DIR" ]; then
   exit 0
 fi
 
-# Detect language (same pattern as fakoli-flow/hooks/detect-context.sh)
+# Detect language by inspecting well-known project manifest files
 DETECTED_LANG="unknown"
 [ -f "Cargo.toml" ] && DETECTED_LANG="Rust"
 [ -f "pyproject.toml" ] && DETECTED_LANG="Python"

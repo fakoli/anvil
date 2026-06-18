@@ -5,7 +5,7 @@ description: Decide what to do with an anvil task that has submitted evidence an
 
 # Finish — Review Evidence and Ship
 
-Drive the final leg of the task lifecycle: read the evidence, pick a disposition, call `apply`, and hand off to the project's git workflow for merging. Nothing moves from `needs_review` to `done` (or back to `drafted`) without going through here. This skill covers the solo and human-reviewer path; `fakoli-flow:finish` wraps it with wave-level batch apply and automated PR creation.
+Drive the final leg of the task lifecycle: read the evidence, pick a disposition, call `apply`, and hand off to the project's git workflow for merging. Nothing moves from `needs_review` to `done` (or back to `drafted`) without going through here.
 
 ---
 
@@ -265,20 +265,7 @@ The rule is the same as the v1.14.0 `resolve-decisions` Q&A pattern, applied one
 | After reject + redraft | `/anvil:plan` — if the task needs re-scoping; `/anvil:execute` — to re-claim and re-attempt |
 | After accept + merge | The project's normal PR + deploy workflow; anvil does not drive deployment |
 
-**When `fakoli-flow:finish` is installed:** that skill wraps this one for wave-based batch completion. It drives `apply` for all completed tasks in a wave, then triggers automated PR creation via `gh pr create`. Solo and human-reviewer workflows use this skill directly. `fakoli-flow:finish` calls `anvil apply` for each task the same way, but orchestrates the full wave before handing off to git.
-
-**When `fakoli-crew` is installed:** the `sentinel` agent validates evidence before the reviewer reaches this skill. Detect availability explicitly rather than guessing:
-
-```bash
-claude plugin list 2>/dev/null | grep -q "fakoli-crew"
-```
-
-The grep pattern is intentionally unanchored. `claude plugin list` output renders each plugin row as `  ❯ fakoli-crew@fakoli-plugins` (indented marker, then `<plugin>@<source>` slug); a `^` anchor would never match. The unanchored substring is safe because `fakoli-crew` is a unique slug within the marketplace.
-
-- **Exit code 0** (`fakoli-crew` present): dispatch the `fakoli-crew:sentinel` agent against the task's evidence bundle before invoking `anvil apply`. `fakoli-flow:finish` does this dispatch automatically as part of its wave-completion flow; in solo mode, ask the parent Claude session to dispatch the agent and pass the task ID.
-- **Non-zero exit** (`fakoli-crew` absent): fall through to the plugin-local `sentinel` agent if you are running under a Claude session that has access to it, otherwise rely on the reviewer's own reading of the evidence. Sentinel is an agent surface, not a skill — it must be dispatched via the agent mechanism, never via a slash command.
-
-Sentinel produces a pass/fail recommendation that supplements (but does not replace) the reviewer's judgment. The `apply` call is always a human decision.
+Before invoking `anvil apply`, you may dispatch the plugin-local `sentinel` agent (if available in this session) against the task's evidence bundle. Sentinel produces a pass/fail recommendation that supplements — but does not replace — the reviewer's judgment. The `apply` call is always a human decision.
 
 ---
 

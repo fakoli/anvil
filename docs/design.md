@@ -135,7 +135,7 @@ Submitting evidence is more work than typing "done." The friction is the feature
 
 ## Why MCP + CLI both
 
-**Choice:** every state operation has two front doors. A Typer CLI for humans and shell scripts (`anvil claim T012`), and a FastMCP stdio server exposing 13 tools for agents (`claim_task(task_id="T012", actor="claude-session-abc")`). Both delegate to the same `state/` engine; neither owns workflow logic.
+**Choice:** every state operation has two front doors. A Typer CLI for humans and shell scripts (`anvil claim T012`), and a FastMCP stdio server exposing 24 tools for agents (`claim_task(task_id="T012", actor="claude-session-abc")`). Both delegate to the same `state/` engine; neither owns workflow logic.
 
 ### Rejected alternatives
 

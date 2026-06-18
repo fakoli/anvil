@@ -5,7 +5,7 @@ that uses anvil. It describes what the project must do, why, and how to verify i
 The parser reads it deterministically — no LLM required — and writes the results into
 `state.db` as `Requirement`, `Feature`, and `Task` rows.
 
-**Location**: `.anvil/prd.md` inside your project (created by `anvil init`).
+**Location**: `.anvil/prd.md` inside your project (`anvil init` creates the `.anvil/` directory; you author `prd.md` by hand).
 
 **Hard rule**: structure matters. The parser rejects the file with a `ParseError` if any
 required section is missing or malformed. Edit `prd.md`, then run `anvil prd parse`

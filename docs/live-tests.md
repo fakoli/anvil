@@ -53,7 +53,7 @@ cleanup is best-effort (see below).
 ```bash
 export GITHUB_TOKEN=ghp_...                       # your test-repo PAT
 export ANVIL_TEST_REPO=fakoli/anvil-sync-test
-cd plugins/anvil/bin
+cd bin
 uv run pytest -m live_github -v
 ```
 

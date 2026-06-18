@@ -1,6 +1,6 @@
 ---
 name: start-prd
-description: Bootstrap a `.anvil/prd.md` draft from a rough project idea — interview the user question-by-question and write the result so `anvil prd parse` can consume it. Use this skill when the user has a project intent but does not yet have a PRD (e.g., asks to "start a PRD", "draft requirements", "author a PRD", or "spec out a project"); bridges to `/fakoli-flow:brainstorm` when `claude plugin list` reports the `fakoli-flow` plugin installed, and falls back to a self-contained interview loop otherwise.
+description: Bootstrap a `.anvil/prd.md` draft from a rough project idea — interview the user question-by-question and write the result so `anvil prd parse` can consume it. Use this skill when the user has a project intent but does not yet have a PRD (e.g., asks to "start a PRD", "draft requirements", "author a PRD", or "spec out a project").
 ---
 
 # Start a PRD — Rough Idea to PRD Draft
@@ -40,38 +40,9 @@ This skill writes a file; it does not require any `anvil` CLI subcommand to be a
 
 ## Workflow
 
-### Step 1 — Detect whether `fakoli-flow:brainstorm` is available
+### Step 1 — Interview the user
 
-Before running the self-contained interview, run the explicit plugin check so the decision is deterministic and reproducible across sessions — no introspection of in-memory command lists, no fuzzy "if it seems available" prose:
-
-```bash
-claude plugin list 2>/dev/null | grep -q "fakoli-flow"
-```
-
-- **Exit code 0** (`fakoli-flow` plugin present): bridge by invoking `/fakoli-flow:brainstorm` as a sub-skill — proceed with the bridge block below.
-- **Non-zero exit** (plugin absent, or `claude` CLI itself not on `PATH`): fall through to Step 2 (self-contained interview). The fall-through is intentional graceful degradation: missing tooling never blocks the PRD-drafting flow.
-
-The grep pattern is intentionally unanchored. Actual `claude plugin list` output renders each installed plugin as `  ❯ fakoli-flow@fakoli-plugins` (indented marker line, plugin name suffixed with `@<source>`); a leading `^` anchor would never match. The unanchored substring is safe because `fakoli-flow` is a unique slug within the marketplace.
-
-When `fakoli-flow` is installed, prefer it. It runs a more thorough design dialogue (scope check, section-by-section presentation, optional visual companion) and produces a spec document. Hand off the user's rough idea and announce the bridge explicitly:
-
-> The `fakoli-flow` plugin is installed, so I'll use its richer brainstorm flow to design this. When the spec is finished, I'll convert the result into a `prd.md` draft for `anvil`.
-
-Invoke `/fakoli-flow:brainstorm` with the user's idea as the seed. Let it run its full course — scope assessment, clarifying questions, design sections, user approval gate.
-
-When `/fakoli-flow:brainstorm` completes and the user has approved the resulting spec file, convert the spec into the PRD template format and write it to `.anvil/prd.md` (see Step 3 for the file structure and write rules). The spec produced by `fakoli-flow` will not match the `anvil` PRD template verbatim — translate its sections:
-
-- Spec goal / context → `## Summary` and `## Goals`
-- Spec architectural decisions → context that feeds `## Requirements`
-- Spec acceptance criteria → `## Acceptance Criteria`
-- Spec out-of-scope items → `## Non-Goals`
-- Spec data model / behaviors → `## Features` and `## Tasks` blocks
-
-Show the translated `prd.md` to the user for a final glance before writing. Then proceed to Step 4.
-
-### Step 2 — Self-contained interview (fallback)
-
-When `fakoli-flow:brainstorm` is not available, run the interview directly. Ask one question per message. Wait for the answer before asking the next.
+Run the interview directly. Ask one question per message. Wait for the answer before asking the next.
 
 **Question 1 — The rough idea.** Open with:
 
@@ -109,9 +80,9 @@ Each item becomes a candidate `## Features` entry (or a `## Requirements` bullet
 
 The answer populates `## Risks` and `## Open Questions`. If the user says "none", record an empty section rather than skipping it — the visibility of "no risks identified" is itself useful information.
 
-**Stop at six questions unless something material remains unclear.** Asking more questions than necessary fatigues the user and rarely improves the draft. If the answers are sparse, ask a single follow-up before moving to Step 3 — do not chain three more questions to "fix" thin input.
+**Stop at six questions unless something material remains unclear.** Asking more questions than necessary fatigues the user and rarely improves the draft. If the answers are sparse, ask a single follow-up before moving to Step 2 — do not chain three more questions to "fix" thin input.
 
-### Step 3 — Generate the PRD draft and show it to the user
+### Step 2 — Generate the PRD draft and show it to the user
 
 Compose a draft that matches the structure in `docs/prd-template.md` (relative to the plugin root). The minimum draft uses the four required sections plus `## Non-Goals` and `## Acceptance Criteria`:
 
@@ -159,7 +130,7 @@ Add a `## Features` section only when the user named distinct groupings. Add a `
 
 Wait for explicit approval. Apply any requested edits in-place and re-present until the user accepts.
 
-### Step 4 — Write `.anvil/prd.md`
+### Step 3 — Write `.anvil/prd.md`
 
 Once the user has approved the draft, check whether `.anvil/prd.md` already exists:
 
@@ -177,7 +148,7 @@ ls .anvil/prd.md 2>/dev/null
 
 **If the file does not exist**, write the draft directly to `.anvil/prd.md`.
 
-### Step 5 — Parse the draft and continue into the `prd` skill
+### Step 4 — Parse the draft and continue into the `prd` skill
 
 After the file is written, drive the parse inline rather than handing the user a list of CLI commands to run. The user just approved the draft content — asking them to also run `anvil prd parse` themselves adds friction without adding value.
 
@@ -213,7 +184,6 @@ If you want to use LLM augmentation explicitly, the user can set `ANTHROPIC_API_
 - **Overwriting an existing `.anvil/prd.md` without confirmation.** A silent overwrite can destroy a hand-authored PRD that took hours to craft. Always check for an existing file and prompt before clobbering.
 - **Auto-running `anvil prd parse` after writing.** The user should read the draft on disk before parsing. Hand off the next-step command; do not invoke it.
 - **Skipping `## Non-Goals` because the user said "none".** Record "none identified" as an explicit bullet instead of omitting the section. Visibility matters for the planner and for reviewers.
-- **Treating the bridge to `/fakoli-flow:brainstorm` as optional polish.** When the `claude plugin list` check reports `fakoli-flow` installed, its brainstorm flow produces a substantially better spec than the six-question interview. Prefer it unless the user explicitly opts for the lightweight path.
 
 ---
 
@@ -222,9 +192,8 @@ If you want to use LLM augmentation explicitly, the user can set `ANTHROPIC_API_
 | Position | Skill |
 |---|---|
 | Before this skill | Usually none — start-prd is the entry point when no PRD exists |
-| After Step 4 (file written) | `prd` — parse, review, and approve the draft |
+| After Step 3 (file written) | `prd` — parse, review, and approve the draft |
 | After `prd review --approve` | `plan` — generate features, tasks, and scores |
-| If `fakoli-flow` is installed | `/fakoli-flow:brainstorm` runs first (Step 1 bridges to it) |
 
 ---
 
@@ -232,7 +201,6 @@ If you want to use LLM augmentation explicitly, the user can set `ANTHROPIC_API_
 
 | Feature | Phase | Status |
 |---|---|---|
-| Self-contained six-question interview | Phase 7 | available — pure markdown choreography |
-| Bridge to `/fakoli-flow:brainstorm` when `fakoli-flow` is installed | Phase 7 | available — detect via `claude plugin list \| grep -q "fakoli-flow"` (explicit shell check, Phase 9 C3) |
+| Six-question interview | Phase 7 | available — pure markdown choreography |
 | LLM-augmented follow-up question generation | Phase 7 | optional — requires `ANTHROPIC_API_KEY`; skill is fully usable without it |
 | `anvil start-prd` CLI command | Phase 7+ | pending — for now, run this skill via `/anvil:start-prd` |

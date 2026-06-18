@@ -103,7 +103,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 1.10.0`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.0.8`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -969,7 +969,7 @@ anvil hook check-claim --file "src/auth/login.py" --actor "$SESSION_ID"
 ```
 
 **See also:** [`docs/architecture.md`](architecture.md) for the hook
-contract; `plugins/anvil/hooks/check-claim.sh`.
+contract; `hooks/check-claim.sh`.
 
 ### `anvil hook record-file-change` { #hook-record-file-change }
 
@@ -997,7 +997,7 @@ anvil hook record-file-change \
   --file "src/auth/login.py" --tool "Edit" --actor "$SESSION_ID"
 ```
 
-**See also:** `plugins/anvil/hooks/record-file-change.sh`.
+**See also:** `hooks/record-file-change.sh`.
 
 ### `anvil hook capture-evidence` { #hook-capture-evidence }
 
@@ -1036,4 +1036,4 @@ anvil hook capture-evidence \
 
 **See also:** [`docs/evidence-buffer.md`](evidence-buffer.md) for the buffer
 format and how `submit --output-file` consumes it;
-`plugins/anvil/hooks/capture-evidence.sh`.
+`hooks/capture-evidence.sh`.

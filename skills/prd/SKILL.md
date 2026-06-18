@@ -251,10 +251,6 @@ Avoid editing a task's acceptance criteria or scope while that task is `claimed`
 
 ## Phase 3 Limitations
 
-LLM-assisted PRD drafting (start-prd-to-prd pipeline) is deferred to Phase 7. The `start-prd` skill will bridge to `fakoli-flow:brainstorm` at that point, using an LLM to co-author from rough ideas.
-
-Until Phase 7 ships, the agent co-authors with the user directly using the deterministic template. The one-question-at-a-time pattern described in Step 1 is the Phase 3 substitute for automated PRD-drafting assistance.
-
 | Feature | Phase |
 |---|---|
 | `anvil prd parse` | Phase 3 — available |

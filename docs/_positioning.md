@@ -18,22 +18,13 @@ multiple agents (and multiple humans) to coordinate against the same plan
 without overwriting each other. Solo builders who want PRDs that survive
 sessions. Project leads who want truth that outlives any one chat.
 
-## The trinity
-
-**(Q)** fakoli-flow defines how work moves, fakoli-crew defines who does the
-work, and anvil defines what is true. The three plugins compose: when
-all three are installed, `flow:execute` reads `anvil next`, dispatches
-the right crew specialist, and submits evidence back to canonical state
-before the merge gate. When anvil is absent, flow and crew fall back
-to their markdown-status conventions.
-
 ## The 5 wedges (vs CCPM, issue-trackers, chat-driven workflows)
 
 1. **Richer canonical state than issue text.** Pydantic v2 models in SQLite, validated at every transition — not free-form markdown in an issue body.
 2. **Explicit claim / lock / lease model.** A `Claim` row with an expiry timestamp and heartbeat; stale leases are detected and released on every CLI or MCP call — not assignment-by-label.
 3. **LLM-optimized work packets.** `anvil packet T012` renders the exact intent, acceptance criteria, scope, and non-goals an agent needs — not an entire issue thread the agent must summarize.
 4. **Six-dimension task scoring.** Complexity, parallelizability, context load, blast radius, review risk, and agent suitability drive routing and expand recommendations — not single-axis story points.
-5. **Runtime-neutral CLI + MCP.** The state engine is not coupled to any one agent runtime; the FastMCP stdio server exposes 13 tools to any MCP-compatible client.
+5. **Runtime-neutral CLI + MCP.** The state engine is not coupled to any one agent runtime; the FastMCP stdio server exposes 24 tools to any MCP-compatible client.
 
 ## Terraform analogy
 
@@ -49,7 +40,7 @@ not papered over.
 ## MCP vs plugin
 
 **(Q)** MCP exposes capabilities; plugins encode operating discipline. The
-MCP server ships 13 tools (`claim_task`, `submit_completion_evidence`,
+MCP server ships 24 tools (`claim_task`, `submit_completion_evidence`,
 `generate_work_packet`, …) any agent can call, but a tool does not decide *when*
 to claim, *which* specialist should execute, *what* evidence is required, or
 *how* the critic gate runs. That behaviour lives in skills, subagents, and
@@ -61,7 +52,7 @@ not MCP-only.
 **(Q)** anvil turns rough ideas and PRDs into reviewed, lockable,
 evidence-backed work packets that humans and AI coding agents can execute in
 parallel without stepping on each other — the canonical project-state layer
-that fakoli-flow and fakoli-crew compose around.
+for any agent team.
 
 ## What it is NOT
 

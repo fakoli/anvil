@@ -5,15 +5,14 @@ description: Run the agentic execution loop on a claimed anvil task — fetch th
 
 # Execute — Claim to Submit in One Loop
 
-Carry a `ready` task all the way to `needs_review`: fetch the work packet, read it in full, do the work, heartbeat the lease, run verification, and submit evidence. Nothing moves to `needs_review` without passing through here. This skill covers the solo-agent path; `fakoli-flow:execute` wraps it with wave orchestration and critic gates for multi-agent teams.
+Carry a `ready` task all the way to `needs_review`: fetch the work packet, read it in full, do the work, heartbeat the lease, run verification, and submit evidence. Nothing moves to `needs_review` without passing through here.
 
 ---
 
 ## When to Use
 
 - After `anvil claim TASK_ID` has succeeded — claim ID and branch are in hand.
-- When `fakoli-flow:execute` is NOT installed. When it IS installed, prefer that; `fakoli-flow:execute` wraps this skill with wave-based dispatch, critic gates between waves, and coordinated submit timing.
-- For solo execution: one agent, one task, one branch, straight to submit.
+- For execution: one task, one branch, straight to submit.
 
 **Do not use this skill to inspect the queue without taking work** — use `/anvil:state-ops`. Do not use it to make the ship decision on completed tasks — that is `/anvil:finish`.
 
@@ -40,19 +39,6 @@ If the task does not appear, claim it first via `/anvil:claim`. Phase 5 commands
 ---
 
 ## Workflow
-
-### Step 0 — Detect whether `fakoli-flow:execute` is available
-
-Before running the standalone execute loop, run the explicit plugin check so the decision is deterministic and reproducible across sessions — no introspection of in-memory command lists, no fuzzy "if it seems available" prose:
-
-```bash
-claude plugin list 2>/dev/null | grep -q "fakoli-flow"
-```
-
-- **Exit code 0** (`fakoli-flow` plugin present): prefer `/fakoli-flow:execute` for the wave-engine path. It wraps this skill with wave-based dispatch, critic gates between waves, and coordinated submit timing for multi-agent teams. Branch on the user's existing workflow preferences when deciding whether to bridge.
-- **Non-zero exit** (plugin absent, or `claude` CLI itself not on `PATH`): proceed with the standalone path below (Step 1 onward). The fall-through is intentional graceful degradation: missing tooling never blocks the execute flow.
-
-The grep pattern is intentionally unanchored. Actual `claude plugin list` output renders each installed plugin as `  ❯ fakoli-flow@fakoli-plugins` (indented marker line, plugin name suffixed with `@<source>`); a leading `^` anchor would never match. The unanchored substring is safe because `fakoli-flow` is a unique slug within the marketplace.
 
 ### Step 1 — Fetch the work packet
 
@@ -96,58 +82,15 @@ This check costs one minute. A wrong interpretation discovered at submit costs t
 
 ---
 
-### Step 3 — Do the work (route to a fakoli-crew specialist when available, v1.15.0)
+### Step 3 — Do the work
 
-Before opening the editor yourself, decide WHO should do the work — you-the-agent, or a specialist crew member. The decision is deterministic, not a question to put to the user.
-
-**Detection — same explicit shell check as Step 0:**
-
-```bash
-claude plugin list 2>/dev/null | grep -q "fakoli-crew"
-```
-
-**If fakoli-crew is absent** (or `claude` CLI not on `PATH`): do the work yourself in this session. Skip the routing block below; continue with the hooks-and-commits prose.
-
-**If fakoli-crew is installed**: analyze the task and dispatch to the best-fit crew member directly. **Do not** ask the user "want me to do this here, or dispatch?" — that meta-question forces the user to make a routing decision the agent has the context to make. Asking it biases toward the worst answer (self-implement, bypassing the specialist team).
-
-Routing heuristic (apply in order; take the first row that fits):
-
-| Signal in task | Likely crew member | Rationale |
-|---|---|---|
-| `likely_files` includes `.claude-plugin/`, `hooks/hooks.json`, command frontmatter | `fakoli-crew:smith` | plugin-structure work — manifests, hook wiring, frontmatter |
-| `likely_files` includes new abstractions / interface design / type system (`.ts`, `.py`, `.rs` with "Protocol" / "interface" / "trait" in title or criteria) | `fakoli-crew:guido` | design + interface specialist |
-| `likely_files` includes existing-file integration (verbs like "wire", "integrate", "refactor to use", "connect") | `fakoli-crew:welder` | facade + re-export integration specialist |
-| Task title verb: "Research", "Document the X API" | `fakoli-crew:scout` | API research → structured reference doc |
-| `likely_files` includes README, docs, `*.md` user-facing copy | `fakoli-crew:herald` | user-facing documentation specialist |
-| `likely_files` includes `CLAUDE.md`, `.github/workflows/`, contributor docs, `pyproject.toml` infra | `fakoli-crew:keeper` | repository infrastructure |
-| Acceptance criteria centered on tests + verification of existing behavior | `fakoli-crew:sentinel` | binary PASS/FAIL validation |
-| Multi-file refactor + integration + cross-package wiring (3+ files across 2+ packages) | `fakoli-flow:execute` (if installed, see Step 0) OR pair `guido` for design + `welder` for integration | wave-based orchestration |
-
-**Tie-break rule.** When two rows both match (e.g. a TS task with "Protocol" in the title AND verbs like "wire" — guido row 2 and welder row 3 both fire), prefer the row whose Signal column more narrowly describes the **primary verb** of the task title. "Design" / "Define" / "Specify" / "Author the interface" → guido (row 2). "Integrate" / "Wire" / "Connect" / "Refactor to use" → welder (row 3). If both verbs are present in the title equally, pick guido first (design before integration is the workflow order).
-
-After dispatch, the agent's job is to:
-- Read the work packet
-- Brief the crew specialist with the task ID + acceptance criteria + likely_files + verification commands
-- Surface the specialist's output inline (do not ghost the user — show progress)
-- Run the verification commands yourself (Step 5) once the specialist returns
-
-**Only ask the user when ALL of these conditions are clearly true** (any other situation: dispatch silently):
-
-- (a) Two or more rows in the table above match AND the tie-break rule above does not disambiguate (e.g. the task touches three crews and you cannot identify a clear primary), OR
-- (b) Zero rows match — the task's `likely_files` and verb shape don't fit any row (genuine novelty, not just "I'm not sure"), OR
-- (c) The user explicitly said earlier in this session "I want to drive this one myself" — track the preference for the rest of the session.
-
-"The task is unusual" alone is NOT a reason to ask. If you find yourself reaching for that phrase, recheck rows 1-8 — almost every real engineering task fits one. The bias when in doubt: dispatch, not ask.
-
-In every other case: **route silently and report the routing decision inline** ("Dispatching to fakoli-crew:guido for the HttpTransport interface design; I'll surface the proposal here and run verification afterward.").
-
-**Anti-pattern to avoid:** ending Step 3 with "How would you like to proceed with implementation? Four reasonable approaches: 1. I implement it here, 2. dispatch to fakoli-crew, 3. …". That meta-question is the same prose-with-bullets shape v1.13.0 named — but worse, because the question has an obvious answer (whichever specialist matches the task) and the user has no information the agent lacks. The framing biases toward "do it yourself" because the question reads as "should I bother the team?" rather than "which specialist owns this?". Just dispatch.
+Do the work directly in this session. Read the work packet, implement against the acceptance criteria, and run the verification commands yourself (Step 5) when the implementation is complete.
 
 ---
 
-### Step 3a — Implementation discipline (whoever does the work)
+### Step 3a — Implementation discipline
 
-Whether the work is done by you-the-agent or a dispatched crew specialist, the same incremental-commit discipline applies. Commit incrementally to the claim's branch:
+Commit incrementally to the claim's branch:
 
 ```
 agent/t012-add-retry-backoff
@@ -316,10 +259,6 @@ The command overwrites the previous `.anvil/packets/T012.md`. Re-read the packet
 | If `complexity >= 4` at packet read | Return to `/anvil:plan` — the task should have been expanded; release claim first |
 | After submit | `/anvil:finish` drives the apply step and ship decision |
 | If task returns nothing from `next` after submit | `/anvil:state-ops` to diagnose queue state |
-
-**When `fakoli-flow:execute` is installed:** that skill wraps this one. It reads `anvil next`, calls `anvil claim`, dispatches agents against non-overlapping tasks in parallel waves, gates waves with critic review, and coordinates submit timing. Solo agents use this skill directly; orchestrated agent teams use `fakoli-flow:execute`, which calls each step here in sequence for each wave.
-
-**When `fakoli-crew` is installed:** `welder` is the standard executor for integration tasks; `scout` claims research tasks. Each crew agent runs this skill's steps internally, tagged with `--actor fakoli-crew:welder` on claim. The execute loop is identical; the actor identity differs.
 
 ---
 

@@ -26,29 +26,6 @@ anvil's tier defaults (v1.17.0) follow this rule directly: `DEFAULT_TIER = "sonn
 | `sentinel` | **haiku** | Evidence validation: run a shell command, parse exit code, compare against acceptance criteria. The classic "read-only investigator" case Anthropic's own `Explore` subagent uses Haiku for. |
 | `state-keeper` | **haiku** | Cross-source-of-truth scan: glob the filesystem, query SQLite, list git branches, report drift. Pure read-and-classify. |
 
-### fakoli-crew (8 agents — see `plugins/fakoli-crew/agents/`)
-
-| Agent | Tier | Why |
-| --- | --- | --- |
-| `guido` | **opus** | Architecture & design. Interface design, error hierarchies, public-API control — the work that benefits most from "thinking harder." |
-| `critic` | **opus** | Staff Engineer code review. Same rationale as `anvil:critic`. |
-| `scout` | **sonnet** | API research. Reads docs, captures method signatures and schemas. Structured generation of reference files. |
-| `smith` | **sonnet** | Plugin engineering. Manifest validation, hook wiring, command frontmatter. Careful but rule-driven. |
-| `welder` | **sonnet** | Integration: read all upstream agent outputs, wire them together, maintain backward compatibility. Pattern matching, not deep reasoning. |
-| `herald` | **sonnet** | Documentation writing. Structured generation against a known template (README structure, value-prop bullet, install block). |
-| `keeper` | **sonnet** | Infrastructure surgical edits: CLAUDE.md, CI workflows, contributor docs. Targeted writes with cross-source-of-truth awareness. |
-| `sentinel` | **haiku** | QA validation: run tests, check version sync, produce binary PASS/FAIL scorecards. Read-only and rule-driven. |
-
-### fakoli-plugin-critic (5 agents — see `plugins/fakoli-plugin-critic/agents/`)
-
-All five remain on **opus**. Plugin auditing rewards deep reasoning over speed:
-
-- `agent-critic` — silent-failure detection (`allowed-tools:` on agents) requires understanding the agent vs command frontmatter contract.
-- `skill-critic` — no-fuzzy-detection rule requires reasoning about what counts as "fuzzy."
-- `hook-critic` — contract-awareness (`set -e` MUST FIX vs SHOULD FIX) depends on cross-file inference from `hooks.json` + docs.
-- `mcp-critic` — actor-identification audit on mutating tools requires understanding the security model.
-- `structure-critic` — version-string sync across 5 sources of truth requires careful cross-referencing.
-
 ---
 
 ## Override precedence

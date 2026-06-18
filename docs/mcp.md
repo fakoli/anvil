@@ -3,7 +3,7 @@
 ## What it does
 
 Agents need to read and write canonical project state without each one shelling out to the
-CLI per operation and without fighting over the same SQLite rows. The MCP server exposes 22
+CLI per operation and without fighting over the same SQLite rows. The MCP server exposes 24
 tools over stdio so that any MCP-compatible runtime — Claude Code, Codex, Cursor, OpenHands,
 Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
 apply workflow as first-class tool calls. Read-only tools return structured Pydantic
@@ -16,12 +16,13 @@ The toolset is organized by lifecycle phase:
 - **PRD lifecycle** (`parse_prd`, `review_prd`)
 - **Planning & scoring** (`plan_tasks`, `score_tasks`, `review_tasks`)
 - **Task inspection** (`list_tasks`, `get_task`, `get_next_task`, `get_dependency_graph`,
-  `check_conflicts`)
+  `check_conflicts`, `edit_dependencies`)
 - **Claiming & execution** (`claim_task`, `release_task`, `renew_claim`,
   `generate_work_packet`, `submit_progress`, `submit_completion_evidence`,
   `update_task_status`)
 - **Review gate** (`apply_review_decision`)
 - **Decision resolution** (`find_decisions`)
+- **Introspection** (`describe_surface`)
 
 The eight workflow tools added in v1.13.0 — `init_project`, `get_project_status`,
 `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
@@ -1018,40 +1019,6 @@ before deciding whether to retry, release, or escalate.
 
 ---
 
-## Integration with fakoli-crew and fakoli-flow
-
-**fakoli-crew agents** gain access to all 22 MCP tools when anvil is installed
-alongside fakoli-crew. The standard work loop for a crew agent (welder, smith, guido) is:
-
-1. `get_next_task` — find the highest-priority claimable task.
-2. `check_conflicts` — verify proposed files do not overlap active claims.
-3. `claim_task` — acquire the lease.
-4. `generate_work_packet` — render the structured prompt.
-5. Do the work; call `renew_claim` every ~5 minutes.
-6. `submit_progress` for mid-task checkpoints (optional).
-7. `submit_completion_evidence` — release the claim and move the task to `needs_review`.
-
-The sentinel agent uses `get_project_summary` and `list_tasks` (filtered by
-`status="needs_review"`) to find tasks awaiting verification, then calls
-`update_task_status` to set a task `blocked` if evidence is insufficient.
-
-**fakoli-flow skills** use the MCP tools when anvil is present:
-
-- `flow:execute` reads `get_next_task` and calls `claim_task` before dispatching each
-  wave, replacing the markdown-status-file convention.
-- `flow:verify` filters on `needs_review` tasks via `list_tasks` before dispatching the
-  sentinel.
-- `flow:finish` uses `update_task_status` to drive accepted tasks toward `done` before
-  the merge or PR decision.
-
-When anvil is absent, fakoli-flow and fakoli-crew continue to operate via their
-existing markdown-status conventions. Integration is strictly opt-in.
-
-See [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) for the
-full integration contract.
-
----
-
 ## Stale-claim reaping
 
 Every mutating tool (`claim_task`, `release_task`, `renew_claim`, `submit_progress`,
@@ -1162,5 +1129,3 @@ wiring automatically.
   design spec: data model, task lifecycle, phasing plan, integration contracts.
 - `hooks.md` — claim discipline hooks: `check-claim.sh`, `record-file-change.sh`,
   `capture-evidence.sh`, `detect-state.sh`. (Landing in Phase 6 documentation pass.)
-- `integration-flow-crew.md` — detailed integration contract between anvil,
-  fakoli-flow, and fakoli-crew. (Planned.)
