@@ -17,6 +17,7 @@ from anvil.cli.drift import drift
 from anvil.cli.graph import graph
 from anvil.cli.hooks import hook_app
 from anvil.cli.init_status import init, status
+from anvil.cli.mcp_config import mcp_config
 from anvil.cli.migrate import migrate_app, migrate_events
 from anvil.cli.packet_apply import apply, packet, submit
 from anvil.cli.plan import (
@@ -92,6 +93,7 @@ def main(
 app.command()(init)
 app.command()(status)
 app.command()(describe)
+app.command("mcp-config")(mcp_config)
 app.command()(scan)
 app.command()(drift)
 app.command()(graph)

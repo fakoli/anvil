@@ -38,6 +38,8 @@
   - [`anvil sync`](#sync)
   - [`anvil sync github`](#sync-github)
   - [`anvil sync provider`](#sync-provider)
+- Cross-harness
+  - [`anvil mcp-config`](#mcp-config)
 - Hook subcommands (internal)
   - [`anvil hook check-claim`](#hook-check-claim)
   - [`anvil hook record-file-change`](#hook-record-file-change)
@@ -933,6 +935,55 @@ anvil sync provider monday --push --task T015
 **See also:** [`docs/sync-providers.md`](sync-providers.md) for the provider
 registration contract; [`anvil sync github`](#sync-github) for the
 GitHub-specific alias.
+
+---
+
+## Cross-harness
+
+### `anvil mcp-config` { #mcp-config }
+
+**Synopsis:** Print the paste-ready MCP server config block for a target MCP
+client, with the `anvil` server pointed at this checkout's `bin/anvil-mcp` by
+**absolute path** (not `${CLAUDE_PLUGIN_ROOT}`), so any MCP-capable harness gets
+the full 24-tool surface. Read-only and project-free (mirrors `anvil describe`):
+it never opens a backend, runs from any directory, and only *prints* config — it
+never mutates the client's own settings file. In text mode the config goes to
+stdout (paste-clean) and a one-line `# paste into <file>` hint goes to stderr.
+
+**Argument:**
+
+- `CLIENT` *(required)* — one of `claude-code`, `cursor`, `windsurf`, `cline`,
+  `vscode`, `zed`, `codex`. The envelope differs per client (top key
+  `mcpServers` / `servers` / `context_servers`, JSON vs TOML for `codex`); the
+  inner `{command, args[, env]}` spec is identical.
+
+**Flags:**
+
+- `--uv-run` *(flag)* — emit the explicit `uv run --project <bin> python -m
+  anvil.mcp_server` invocation instead of the `bash <bin>/anvil-mcp` wrapper
+  (use on hosts without bash, e.g. Windows).
+- `--root PATH` *(option)* — inject `"env": {"ANVIL_ROOT": "<dir>"}` to pin the
+  project root. Omitted by default (the client's cwd decides).
+- `--json` *(flag)* — emit the standard single-line envelope; `data` carries
+  `{client, target_file, format, config_text}` and nothing goes to stderr.
+
+**Exit codes:**
+
+- `0` — config printed.
+- `2` — unknown client (under `--json`, `error.code` is `bad_request`).
+
+**Example:**
+
+```bash
+anvil mcp-config cursor              # prints the mcpServers JSON block
+anvil mcp-config codex               # prints the [mcp_servers.anvil] TOML block
+anvil mcp-config --uv-run vscode     # explicit uv invocation (no bash)
+anvil mcp-config --json cursor | jq -r .data.config_text
+```
+
+**See also:** [`AGENTS.md`](../AGENTS.md) for the MCP-tool ⇄ CLI-command table;
+[`docs/how-to/using-anvil-on-any-harness.md`](how-to/using-anvil-on-any-harness.md)
+for the full cross-harness walkthrough.
 
 ---
 
