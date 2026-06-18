@@ -131,10 +131,30 @@ class TestEntryPointFlags:
         def _fake_run() -> None:
             called["ran"] = True
 
+        # No ANVIL_MCP_PLANNING set → the default path applies the planning gate
+        # before run(). The autouse _full_mcp_surface fixture restores the full
+        # surface after this test, so the global gate mutation never leaks.
+        monkeypatch.delenv("ANVIL_MCP_PLANNING", raising=False)
         monkeypatch.setattr(srv.mcp, "run", _fake_run)
         rc = main([])
         assert rc == 0
         assert called["ran"] is True
+
+    def test_planning_env_keeps_full_surface_on_startup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # With ANVIL_MCP_PLANNING set, the live server keeps all 24 tools.
+        import asyncio
+
+        import anvil.mcp_server as srv
+
+        monkeypatch.setenv("ANVIL_MCP_PLANNING", "1")
+        monkeypatch.setattr(srv.mcp, "run", lambda: None)
+        rc = main([])
+        assert rc == 0
+        names = {t.name for t in asyncio.run(srv.mcp.list_tools())}
+        assert "plan_tasks" in names
+        assert len(names) == 24
 
 
 # ---------------------------------------------------------------------------

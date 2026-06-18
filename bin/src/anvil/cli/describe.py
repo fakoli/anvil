@@ -187,24 +187,32 @@ def _walk_click_group(group: click.Group, prefix: str) -> list[str]:
 
 
 def mcp_tool_names() -> list[str]:
-    """Return every registered FastMCP tool name, sorted.
+    """Return every REGISTERED FastMCP tool name, sorted — the full engine
+    surface, independent of the live-server visibility gate.
 
     Imported lazily so the CLI does not pull in ``fastmcp`` unless ``describe``
-    is actually run. ``mcp.list_tools()`` is async; this helper drives it to
-    completion whether or not an event loop is already running:
+    is actually run. We read the LOCAL provider (``mcp.local_provider.
+    list_tools()``) rather than the server-level ``mcp.list_tools()``: the local
+    provider applies transforms but does NOT *filter* disabled components (it
+    returns them flagged), whereas the server-level call filters them out. So the
+    local provider yields the complete 24-tool surface even when the L2 planning
+    gate has hidden the 10 planning tools from the per-turn wire
+    (``ANVIL_MCP_PLANNING`` unset). ``describe`` answers "what can this engine
+    do", which never shrinks; the gate only changes what a default execution
+    client is *served* on the wire.
+
+    ``local_provider.list_tools()`` is async; this helper drives it to completion
+    whether or not an event loop is already running:
 
     * from the CLI (``describe`` is a plain sync Typer command, no loop) it uses
       ``asyncio.run``;
     * from *inside* the MCP server's ``describe_surface`` tool (a loop IS
       running) ``asyncio.run`` would raise ``RuntimeError``, so the coroutine is
       run to completion on a throwaway loop in a worker thread.
-
-    Either way the same registry is introspected, so both surfaces report the
-    identical tool list.
     """
     from anvil.mcp_server import mcp
 
-    tools = _run_coro_blocking(mcp.list_tools())
+    tools = _run_coro_blocking(mcp.local_provider.list_tools())
     return sorted(t.name for t in tools)
 
 
