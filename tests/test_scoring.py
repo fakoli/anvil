@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.planning.scoring — rule-based six-dimension scoring engine.
+"""Tests for anvil.planning.scoring — rule-based six-dimension scoring engine.
 
 Coverage targets:
 - score_task returns Score (pure function, no mutation)
@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import datetime
 
-from fakoli_state.planning.scoring import score_all, score_task
-from fakoli_state.state.models import Score, Task, TaskPriority, TaskStatus, Verification
+from anvil.planning.scoring import score_all, score_task
+from anvil.state.models import Score, Task, TaskPriority, TaskStatus, Verification
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -240,7 +240,7 @@ class TestContextLoadDimension:
 class TestBlastRadiusDimension:
     def test_blast_radius_high_for_schema_files(self) -> None:
         """likely_files containing 'schema' → blast_radius = 5."""
-        task = _make_task(likely_files=["bin/src/fakoli_state/state/schema.py"])
+        task = _make_task(likely_files=["bin/src/anvil/state/schema.py"])
         score = score_task(task)
         assert score.blast_radius == 5
 
@@ -387,18 +387,18 @@ class TestScoreExplanation:
 
 class TestSuggestedSubtaskCount:
     def test_complexity_four_suggests_three(self) -> None:
-        from fakoli_state.planning.scoring import suggested_subtask_count
+        from anvil.planning.scoring import suggested_subtask_count
 
         assert suggested_subtask_count(4) == 3
 
     def test_complexity_five_suggests_four(self) -> None:
-        from fakoli_state.planning.scoring import suggested_subtask_count
+        from anvil.planning.scoring import suggested_subtask_count
 
         assert suggested_subtask_count(5) == 4
 
     def test_low_complexity_clamps_to_expand_engine_minimum(self) -> None:
         """The suggestion never leaves the expand engine's 2-5 envelope."""
-        from fakoli_state.planning.scoring import suggested_subtask_count
+        from anvil.planning.scoring import suggested_subtask_count
 
         assert suggested_subtask_count(1) == 2
         assert suggested_subtask_count(2) == 2
@@ -413,7 +413,7 @@ class TestBuildExpansionQueue:
 
     def test_filters_below_default_threshold(self) -> None:
         """Default threshold 4: complexity 3 stays out, 4 and 5 queue."""
-        from fakoli_state.planning.scoring import build_expansion_queue
+        from anvil.planning.scoring import build_expansion_queue
 
         tasks = [
             self._scored("T001", 3),
@@ -424,7 +424,7 @@ class TestBuildExpansionQueue:
         assert [c.task_id for c in queue] == ["T003", "T002"]
 
     def test_exactly_at_threshold_is_included(self) -> None:
-        from fakoli_state.planning.scoring import build_expansion_queue
+        from anvil.planning.scoring import build_expansion_queue
 
         queue = build_expansion_queue([self._scored("T001", 4)], threshold=4)
         assert len(queue) == 1
@@ -434,14 +434,14 @@ class TestBuildExpansionQueue:
 
     def test_unscored_tasks_are_skipped(self) -> None:
         """Tasks the scoring engine has not assessed never enter the queue."""
-        from fakoli_state.planning.scoring import build_expansion_queue
+        from anvil.planning.scoring import build_expansion_queue
 
         unscored = _make_task(task_id="T001")  # scores=Score() → complexity None
         queue = build_expansion_queue([unscored, self._scored("T002", 5)])
         assert [c.task_id for c in queue] == ["T002"]
 
     def test_custom_threshold_widens_the_queue(self) -> None:
-        from fakoli_state.planning.scoring import build_expansion_queue
+        from anvil.planning.scoring import build_expansion_queue
 
         tasks = [self._scored("T001", 2), self._scored("T002", 3)]
         assert build_expansion_queue(tasks) == []
@@ -450,7 +450,7 @@ class TestBuildExpansionQueue:
 
     def test_sorted_by_complexity_desc_then_task_id_asc(self) -> None:
         """Deterministic ordering: most decomposition-worthy first, id tiebreak."""
-        from fakoli_state.planning.scoring import build_expansion_queue
+        from anvil.planning.scoring import build_expansion_queue
 
         tasks = [
             self._scored("T009", 4),
@@ -461,12 +461,12 @@ class TestBuildExpansionQueue:
         assert [c.task_id for c in queue] == ["T005", "T001", "T009"]
 
     def test_empty_input_returns_empty_queue(self) -> None:
-        from fakoli_state.planning.scoring import build_expansion_queue
+        from anvil.planning.scoring import build_expansion_queue
 
         assert build_expansion_queue([]) == []
 
     def test_queue_carries_title_for_rendering(self) -> None:
-        from fakoli_state.planning.scoring import build_expansion_queue
+        from anvil.planning.scoring import build_expansion_queue
 
         queue = build_expansion_queue([self._scored("T001", 5, title="Big refactor")])
         assert queue[0].title == "Big refactor"

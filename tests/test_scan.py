@@ -1,6 +1,6 @@
 """Brownfield scan / ingest tests (backlog T008).
 
-Covers the two surfaces of ``fakoli-state scan`` / ``init --from-repo``:
+Covers the two surfaces of ``anvil scan`` / ``init --from-repo``:
 
 * The pure scan engine (``scan.model`` + ``scan.prd_draft``): walking a tree,
   building + persisting a queryable codebase model, diffing a re-scan, and
@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
+from anvil.cli import app
 
 runner = CliRunner()
 
@@ -52,7 +52,7 @@ def _make_fixture_repo(root: Path) -> None:
 
 class TestScanModel:
     def test_scan_walks_tree_and_groups_by_component(self, tmp_path: Path) -> None:
-        from fakoli_state.scan.model import scan_working_tree
+        from anvil.scan.model import scan_working_tree
 
         _make_fixture_repo(tmp_path)
         model = scan_working_tree(tmp_path)
@@ -72,7 +72,7 @@ class TestScanModel:
         assert langs["markdown"] == 2
 
     def test_scan_excludes_noise_directories(self, tmp_path: Path) -> None:
-        from fakoli_state.scan.model import scan_working_tree
+        from anvil.scan.model import scan_working_tree
 
         _make_fixture_repo(tmp_path)
         # Noise dirs that must never appear in the model.
@@ -87,7 +87,7 @@ class TestScanModel:
         assert not any(p.startswith(".venv/") for p in paths)
 
     def test_persist_and_load_roundtrip_is_queryable(self, tmp_path: Path) -> None:
-        from fakoli_state.scan.model import (
+        from anvil.scan.model import (
             load_model,
             save_model,
             scan_working_tree,
@@ -95,7 +95,7 @@ class TestScanModel:
 
         _make_fixture_repo(tmp_path)
         model = scan_working_tree(tmp_path)
-        db_path = tmp_path / ".fakoli-state" / "scan.db"
+        db_path = tmp_path / ".anvil" / "scan.db"
         save_model(model, db_path)
 
         # The persisted model must be a real, queryable SQLite row set.
@@ -119,12 +119,12 @@ class TestScanModel:
         assert {f.path for f in reloaded.files} == {f.path for f in model.files}
 
     def test_load_missing_db_returns_none(self, tmp_path: Path) -> None:
-        from fakoli_state.scan.model import load_model
+        from anvil.scan.model import load_model
 
         assert load_model(tmp_path / "nope.db") is None
 
     def test_compute_delta_first_scan_is_all_added(self, tmp_path: Path) -> None:
-        from fakoli_state.scan.model import compute_delta, scan_working_tree
+        from anvil.scan.model import compute_delta, scan_working_tree
 
         _make_fixture_repo(tmp_path)
         model = scan_working_tree(tmp_path)
@@ -135,7 +135,7 @@ class TestScanModel:
         assert delta.has_changes
 
     def test_compute_delta_reports_add_remove_change(self, tmp_path: Path) -> None:
-        from fakoli_state.scan.model import compute_delta, scan_working_tree
+        from anvil.scan.model import compute_delta, scan_working_tree
 
         _make_fixture_repo(tmp_path)
         before = scan_working_tree(tmp_path)
@@ -152,7 +152,7 @@ class TestScanModel:
         assert delta.has_changes
 
     def test_compute_delta_no_change(self, tmp_path: Path) -> None:
-        from fakoli_state.scan.model import compute_delta, scan_working_tree
+        from anvil.scan.model import compute_delta, scan_working_tree
 
         _make_fixture_repo(tmp_path)
         a = scan_working_tree(tmp_path)
@@ -169,9 +169,9 @@ class TestScanModel:
 
 class TestPrdDraft:
     def test_draft_prd_parses_with_features_and_tasks(self, tmp_path: Path) -> None:
-        from fakoli_state.planning.template import parse_prd
-        from fakoli_state.scan.model import scan_working_tree
-        from fakoli_state.scan.prd_draft import draft_prd_from_model
+        from anvil.planning.template import parse_prd
+        from anvil.scan.model import scan_working_tree
+        from anvil.scan.prd_draft import draft_prd_from_model
 
         _make_fixture_repo(tmp_path)
         model = scan_working_tree(tmp_path)
@@ -179,7 +179,7 @@ class TestPrdDraft:
 
         assert prd_text.strip()
         parsed = parse_prd(prd_text, prd_id="prd")
-        # A draft fakoli-state generates must always parse cleanly.
+        # A draft anvil generates must always parse cleanly.
         assert parsed.errors == []
         assert len(parsed.features) >= 1
         assert len(parsed.tasks) >= 1
@@ -190,9 +190,9 @@ class TestPrdDraft:
             assert task.verification.commands
 
     def test_draft_prd_anchors_tasks_to_real_files(self, tmp_path: Path) -> None:
-        from fakoli_state.planning.template import parse_prd
-        from fakoli_state.scan.model import scan_working_tree
-        from fakoli_state.scan.prd_draft import draft_prd_from_model
+        from anvil.planning.template import parse_prd
+        from anvil.scan.model import scan_working_tree
+        from anvil.scan.prd_draft import draft_prd_from_model
 
         _make_fixture_repo(tmp_path)
         model = scan_working_tree(tmp_path)
@@ -239,7 +239,7 @@ class TestScanCommand:
         res = runner.invoke(app, ["scan"], catch_exceptions=False)
         assert res.exit_code == 0, res.output
 
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         # 1) a non-empty draft PRD was written
         prd_path = state_dir / "prd.md"
         assert prd_path.exists()
@@ -354,7 +354,7 @@ class TestInitFromRepo:
         assert res.exit_code == 0, res.output
         assert "Seeded draft project from repo" in res.output
 
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         assert (state_dir / "prd.md").exists()
         assert (state_dir / "scan.db").exists()
 

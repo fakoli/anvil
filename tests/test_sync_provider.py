@@ -1,11 +1,11 @@
-"""Tests for fakoli_state.sync — Phase 8 Wave 1 SyncProvider abstraction.
+"""Tests for anvil.sync — Phase 8 Wave 1 SyncProvider abstraction.
 
 Coverage:
 - ``ExternalRef``, ``ExternalTask``, ``ProviderHealth`` Pydantic models —
   validation, serialization, ``extra="forbid"`` enforcement, UTC discipline.
 - ``SyncProvider`` Protocol — structural compliance of both
   ``RecordedSyncProvider`` and a tiny in-test concrete impl.
-- :mod:`fakoli_state.sync.registry` — register / get / list, duplicate
+- :mod:`anvil.sync.registry` — register / get / list, duplicate
   registration raises, unknown lookup raises.
 - ``RecordedSyncProvider`` — hit returns canned value, miss raises with key
   prefix, replay produces identical output, key is stable across calls.
@@ -26,8 +26,8 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from fakoli_state.state.models import Task, TaskPriority, TaskStatus
-from fakoli_state.sync import (
+from anvil.state.models import Task, TaskPriority, TaskStatus
+from anvil.sync import (
     PROVIDER_REGISTRY,
     ExternalRef,
     ExternalTask,
@@ -39,7 +39,7 @@ from fakoli_state.sync import (
     list_sync_providers,
     register_sync_provider,
 )
-from fakoli_state.sync.errors import (
+from anvil.sync.errors import (
     AuthenticationFailed,
     ProviderUnavailable,
     RateLimitExceeded,
@@ -621,7 +621,7 @@ class TestRecordKey:
         # different PYTHONHASHSEED to confirm independence from Python's
         # built-in salted hash().
         code = (
-            "from fakoli_state.sync import RecordedSyncProvider; "
+            "from anvil.sync import RecordedSyncProvider; "
             "print(RecordedSyncProvider.record_key("
             "'fetch_task', external_id='stability-probe'))"
         )

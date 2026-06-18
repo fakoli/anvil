@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.sync.reconciliation — Phase 8 Task 5.
+"""Tests for anvil.sync.reconciliation — Phase 8 Task 5.
 
 Coverage strategy: real local git tmpdirs (no mocks for git), real
 SqliteBackend (no in-memory stub), so every test exercises the actual
@@ -16,10 +16,10 @@ from typing import Any
 
 import pytest
 
-from fakoli_state.clock import FrozenClock
-from fakoli_state.state.models import EventDraft, SyncMapping
-from fakoli_state.state.sqlite import SqliteBackend
-from fakoli_state.sync.reconciliation import (
+from anvil.clock import FrozenClock
+from anvil.state.models import EventDraft, SyncMapping
+from anvil.state.sqlite import SqliteBackend
+from anvil.sync.reconciliation import (
     LOCAL_DRIFT_KINDS,
     Discrepancy,
     DiscrepancyKind,
@@ -331,10 +331,10 @@ class TestOrphanBranch:
 
 
 class TestOrphanPacket:
-    """``.fakoli-state/packets/*.md`` for task ids not in SQLite."""
+    """``.anvil/packets/*.md`` for task ids not in SQLite."""
 
     def _packet_dir(self, root: Path) -> Path:
-        d = root / ".fakoli-state" / "packets"
+        d = root / ".anvil" / "packets"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -403,11 +403,11 @@ class TestOrphanPacket:
     def test_orphan_packet_detected_when_state_dir_is_dot_fakoli(
         self, tmp_path: Path,
     ) -> None:
-        """MUST-FIX 2: when ``state_dir`` IS the ``.fakoli-state/`` dir (the
-        CLI's convention), packets at ``.fakoli-state/packets/*.md`` must still
-        resolve. The old hardcoded ``state_dir / ".fakoli-state" / "packets"``
-        looked at ``.fakoli-state/.fakoli-state/packets`` and never fired."""
-        state_dir = tmp_path / ".fakoli-state"
+        """MUST-FIX 2: when ``state_dir`` IS the ``.anvil/`` dir (the
+        CLI's convention), packets at ``.anvil/packets/*.md`` must still
+        resolve. The old hardcoded ``state_dir / ".anvil" / "packets"``
+        looked at ``.anvil/.anvil/packets`` and never fired."""
+        state_dir = tmp_path / ".anvil"
         pdir = state_dir / "packets"
         pdir.mkdir(parents=True, exist_ok=True)
         (pdir / "T099.md").write_text("# Orphan packet\n")
@@ -714,13 +714,13 @@ class TestMissingExpectedFile:
         finally:
             b.close()
 
-    def test_state_dir_named_fakoli_state_resolves_to_project_root(
+    def test_state_dir_named_anvil_resolves_to_project_root(
         self, tmp_path: Path,
     ) -> None:
-        """When state_dir IS the .fakoli-state/ dir (the CLI's view),
+        """When state_dir IS the .anvil/ dir (the CLI's view),
         likely_files resolve against its PARENT (the project root)."""
         project_root = tmp_path
-        state_dir = project_root / ".fakoli-state"
+        state_dir = project_root / ".anvil"
         state_dir.mkdir(parents=True, exist_ok=True)
         (project_root / "src").mkdir()
         (project_root / "src" / "widget.py").write_text("ok\n")
@@ -729,7 +729,7 @@ class TestMissingExpectedFile:
             self._setup_terminal_task_with_files(
                 b, likely_files=["src/widget.py"],
             )
-            # Pass the .fakoli-state/ dir, mirroring the CLI's _resolve_state_dir.
+            # Pass the .anvil/ dir, mirroring the CLI's _resolve_state_dir.
             engine = ReconciliationEngine(
                 b, state_dir=state_dir, clock=_make_clock(),
             )
@@ -1114,7 +1114,7 @@ class TestReconciliationReport:
         _init_git_repo(tmp_path)
         _git(tmp_path, "branch", "agent/t101-a")
         _git(tmp_path, "branch", "agent/t102-b")
-        pdir = tmp_path / ".fakoli-state" / "packets"
+        pdir = tmp_path / ".anvil" / "packets"
         pdir.mkdir(parents=True, exist_ok=True)
         (pdir / "T201.md").write_text("x")
         b = _make_backend(tmp_path)
@@ -1202,7 +1202,7 @@ class TestDryRun:
     def test_dry_run_skips_all_actions(self, tmp_path: Path) -> None:
         _init_git_repo(tmp_path)
         _git(tmp_path, "branch", "agent/t099-bye")
-        pdir = tmp_path / ".fakoli-state" / "packets"
+        pdir = tmp_path / ".anvil" / "packets"
         pdir.mkdir(parents=True, exist_ok=True)
         packet = pdir / "T201.md"
         packet.write_text("x")
@@ -1306,7 +1306,7 @@ class TestEnumValues:
 class TestLocalDriftKindsContract:
     """Pin the `drift` contract: which DiscrepancyKinds are LOCAL drift.
 
-    LOCAL_DRIFT_KINDS is the exact set the read-only `fakoli-state drift` view
+    LOCAL_DRIFT_KINDS is the exact set the read-only `anvil drift` view
     reports — local intent/state/fs/git drift that needs no external sync
     provider. The two provider-dependent kinds (``missing_sync_mapping``,
     ``drift_sync_state``) are deliberately EXCLUDED. Changing this set changes
@@ -1338,7 +1338,7 @@ class TestLocalDriftKindsContract:
 
 class TestSuggestedFixMatchesCliSyntax:
     """The CLI hints the reconciliation engine emits must actually be
-    parseable by ``fakoli-state sync``. Old strings used positional task
+    parseable by ``anvil sync``. Old strings used positional task
     ids (``--push T001``) which Typer rejects with "Got unexpected extra
     argument" — making the hint useless."""
 
@@ -1349,7 +1349,7 @@ class TestSuggestedFixMatchesCliSyntax:
         positional id, and `sync provider <id>` not `sync <id>`."""
         from typer.testing import CliRunner
 
-        from fakoli_state.cli import app
+        from anvil.cli import app
 
         b = _make_backend(tmp_path)
         try:
@@ -1395,7 +1395,7 @@ class TestSuggestedFixMatchesCliSyntax:
             # the actual exit code can be non-zero for unrelated reasons
             # (uninitialised tmpdir, etc.), but the parser must succeed.
             parts = hint.split()
-            assert parts[0] == "fakoli-state"
+            assert parts[0] == "anvil"
             runner = CliRunner()
             r = runner.invoke(app, parts[1:], catch_exceptions=False)
             # Parser-success contract: no "unexpected extra argument" /
@@ -1416,7 +1416,7 @@ class TestSuggestedFixMatchesCliSyntax:
         """Same contract for the drift_sync_state hint."""
         from typer.testing import CliRunner
 
-        from fakoli_state.cli import app
+        from anvil.cli import app
 
         clock = _make_clock()
         b = _make_backend(tmp_path, clock)
@@ -1445,7 +1445,7 @@ class TestSuggestedFixMatchesCliSyntax:
             )
 
             parts = hint.split()
-            assert parts[0] == "fakoli-state"
+            assert parts[0] == "anvil"
             runner = CliRunner()
             r = runner.invoke(app, parts[1:], catch_exceptions=False)
             combined = (r.output or "")

@@ -20,7 +20,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
+from anvil.cli import app
 
 runner = CliRunner()
 
@@ -89,7 +89,7 @@ def _json_data(tmp_path: Path, cmd: list[str]) -> dict:
 
 
 def _status(tmp_path: Path, task_id: str) -> str | None:
-    conn = sqlite3.connect(str(tmp_path / ".fakoli-state" / "state.db"))
+    conn = sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
     try:
         row = conn.execute(
             "SELECT status FROM tasks WHERE id=?", (task_id,)
@@ -102,7 +102,7 @@ def _status(tmp_path: Path, task_id: str) -> str | None:
 def _plan_bugfix(tmp_path: Path) -> str:
     """init → bugfix PRD → review → approve → plan → score → review tasks."""
     assert _invoke(tmp_path, ["init", "--name", "Task Type E2E"]).exit_code == 0
-    (tmp_path / ".fakoli-state" / "prd.md").write_text(
+    (tmp_path / ".anvil" / "prd.md").write_text(
         _BUGFIX_PRD, encoding="utf-8"
     )
     assert _invoke(tmp_path, ["prd", "parse"]).exit_code == 0
@@ -183,7 +183,7 @@ class TestBugfixTaskTypeEndToEnd:
         data = _json_data(tmp_path, ["show", task_id])
         assert data["task"]["task_type"] == "bugfix"
 
-        conn = sqlite3.connect(str(tmp_path / ".fakoli-state" / "state.db"))
+        conn = sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
         try:
             ev_count = conn.execute(
                 "SELECT COUNT(*) FROM evidence WHERE task_id=?", (task_id,)
@@ -200,6 +200,6 @@ class TestBugfixTaskTypeEndToEnd:
         ).exit_code == 0
         assert _invoke(tmp_path, ["packet", task_id]).exit_code == 0
         packet_md = (
-            tmp_path / ".fakoli-state" / "packets" / f"{task_id}.md"
+            tmp_path / ".anvil" / "packets" / f"{task_id}.md"
         ).read_text(encoding="utf-8")
         assert "**Type:** bugfix" in packet_md

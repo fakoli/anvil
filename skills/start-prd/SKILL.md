@@ -1,18 +1,18 @@
 ---
 name: start-prd
-description: Bootstrap a `.fakoli-state/prd.md` draft from a rough project idea — interview the user question-by-question and write the result so `fakoli-state prd parse` can consume it. Use this skill when the user has a project intent but does not yet have a PRD (e.g., asks to "start a PRD", "draft requirements", "author a PRD", or "spec out a project"); bridges to `/fakoli-flow:brainstorm` when `claude plugin list` reports the `fakoli-flow` plugin installed, and falls back to a self-contained interview loop otherwise.
+description: Bootstrap a `.anvil/prd.md` draft from a rough project idea — interview the user question-by-question and write the result so `anvil prd parse` can consume it. Use this skill when the user has a project intent but does not yet have a PRD (e.g., asks to "start a PRD", "draft requirements", "author a PRD", or "spec out a project"); bridges to `/fakoli-flow:brainstorm` when `claude plugin list` reports the `fakoli-flow` plugin installed, and falls back to a self-contained interview loop otherwise.
 ---
 
 # Start a PRD — Rough Idea to PRD Draft
 
-Produce a parseable PRD from an unstructured prompt by interviewing the user one question at a time. This skill writes `.fakoli-state/prd.md` — it does not parse, review, or approve. Those steps belong to the `prd` skill.
+Produce a parseable PRD from an unstructured prompt by interviewing the user one question at a time. This skill writes `.anvil/prd.md` — it does not parse, review, or approve. Those steps belong to the `prd` skill.
 
 ---
 
 ## When to Use
 
 - The user has an idea ("I want to build a CLI that converts CSV to Parquet") but no PRD yet.
-- `fakoli-state status` reports `prd-status: none` and the user is not ready to write the template by hand.
+- `anvil status` reports `prd-status: none` and the user is not ready to write the template by hand.
 - A rough scope was discussed in chat and now needs to be captured as a structured document.
 - The user explicitly asks to "start a PRD", "draft requirements", "author a PRD", or "spec out" a project before planning.
 
@@ -22,19 +22,19 @@ Produce a parseable PRD from an unstructured prompt by interviewing the user one
 
 ## Prerequisites
 
-`.fakoli-state/` must exist. Confirm before proceeding:
+`.anvil/` must exist. Confirm before proceeding:
 
 ```bash
-ls .fakoli-state/state.db 2>/dev/null || echo "MISSING: run fakoli-state init first"
+ls .anvil/state.db 2>/dev/null || echo "MISSING: run anvil init first"
 ```
 
 If `state.db` is absent, run:
 
 ```bash
-fakoli-state init --name "<project-name>"
+anvil init --name "<project-name>"
 ```
 
-This skill writes a file; it does not require any `fakoli-state` CLI subcommand to be available beyond `init`.
+This skill writes a file; it does not require any `anvil` CLI subcommand to be available beyond `init`.
 
 ---
 
@@ -55,11 +55,11 @@ The grep pattern is intentionally unanchored. Actual `claude plugin list` output
 
 When `fakoli-flow` is installed, prefer it. It runs a more thorough design dialogue (scope check, section-by-section presentation, optional visual companion) and produces a spec document. Hand off the user's rough idea and announce the bridge explicitly:
 
-> The `fakoli-flow` plugin is installed, so I'll use its richer brainstorm flow to design this. When the spec is finished, I'll convert the result into a `prd.md` draft for `fakoli-state`.
+> The `fakoli-flow` plugin is installed, so I'll use its richer brainstorm flow to design this. When the spec is finished, I'll convert the result into a `prd.md` draft for `anvil`.
 
 Invoke `/fakoli-flow:brainstorm` with the user's idea as the seed. Let it run its full course — scope assessment, clarifying questions, design sections, user approval gate.
 
-When `/fakoli-flow:brainstorm` completes and the user has approved the resulting spec file, convert the spec into the PRD template format and write it to `.fakoli-state/prd.md` (see Step 3 for the file structure and write rules). The spec produced by `fakoli-flow` will not match the `fakoli-state` PRD template verbatim — translate its sections:
+When `/fakoli-flow:brainstorm` completes and the user has approved the resulting spec file, convert the spec into the PRD template format and write it to `.anvil/prd.md` (see Step 3 for the file structure and write rules). The spec produced by `fakoli-flow` will not match the `anvil` PRD template verbatim — translate its sections:
 
 - Spec goal / context → `## Summary` and `## Goals`
 - Spec architectural decisions → context that feeds `## Requirements`
@@ -151,43 +151,43 @@ Compose a draft that matches the structure in `docs/prd-template.md` (relative t
 - <From Question 6, or "none identified" as a single bullet.>
 ```
 
-Add a `## Features` section only when the user named distinct groupings. Add a `## Tasks` section only when the user asked for hand-authored tasks; otherwise let `fakoli-state plan` generate them later.
+Add a `## Features` section only when the user named distinct groupings. Add a `## Tasks` section only when the user asked for hand-authored tasks; otherwise let `anvil plan` generate them later.
 
 **Show the draft to the user before writing.** Present the full proposed `prd.md` content inline (or as a fenced markdown block) and ask:
 
-> Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to `.fakoli-state/prd.md`.
+> Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to `.anvil/prd.md`.
 
 Wait for explicit approval. Apply any requested edits in-place and re-present until the user accepts.
 
-### Step 4 — Write `.fakoli-state/prd.md`
+### Step 4 — Write `.anvil/prd.md`
 
-Once the user has approved the draft, check whether `.fakoli-state/prd.md` already exists:
+Once the user has approved the draft, check whether `.anvil/prd.md` already exists:
 
 ```bash
-ls .fakoli-state/prd.md 2>/dev/null
+ls .anvil/prd.md 2>/dev/null
 ```
 
 **If the file exists**, do not overwrite without confirmation. Show the user a one-line summary of the existing file (first heading, line count) and ask:
 
-> `.fakoli-state/prd.md` already exists. Overwrite it with the new draft? (yes / no / save-as-backup)
+> `.anvil/prd.md` already exists. Overwrite it with the new draft? (yes / no / save-as-backup)
 
-- On `yes` — write the new draft to `.fakoli-state/prd.md`.
-- On `no` — stop. Tell the user the draft was not written; offer to save it to a sibling path (e.g., `.fakoli-state/prd.draft.md`).
-- On `save-as-backup` — copy the existing file to `.fakoli-state/prd.md.bak` first, then write the new draft to `.fakoli-state/prd.md`.
+- On `yes` — write the new draft to `.anvil/prd.md`.
+- On `no` — stop. Tell the user the draft was not written; offer to save it to a sibling path (e.g., `.anvil/prd.draft.md`).
+- On `save-as-backup` — copy the existing file to `.anvil/prd.md.bak` first, then write the new draft to `.anvil/prd.md`.
 
-**If the file does not exist**, write the draft directly to `.fakoli-state/prd.md`.
+**If the file does not exist**, write the draft directly to `.anvil/prd.md`.
 
 ### Step 5 — Parse the draft and continue into the `prd` skill
 
-After the file is written, drive the parse inline rather than handing the user a list of CLI commands to run. The user just approved the draft content — asking them to also run `fakoli-state prd parse` themselves adds friction without adding value.
+After the file is written, drive the parse inline rather than handing the user a list of CLI commands to run. The user just approved the draft content — asking them to also run `anvil prd parse` themselves adds friction without adding value.
 
 Confirm the parse and run it:
 
-> Draft written to `.fakoli-state/prd.md`. Ready to parse it into `state.db`? (yes / no / let me edit first)
+> Draft written to `.anvil/prd.md`. Ready to parse it into `state.db`? (yes / no / let me edit first)
 
-- **On `yes`** — invoke `fakoli-state prd parse` (via Bash, the MCP `parse_prd` tool when available, or whichever tool the runtime exposes). Surface the result inline. The user sees the parse output in the same conversation, not after a context switch:
+- **On `yes`** — invoke `anvil prd parse` (via Bash, the MCP `parse_prd` tool when available, or whichever tool the runtime exposes). Surface the result inline. The user sees the parse output in the same conversation, not after a context switch:
   > Parsed 6 requirements, 3 features, 8 tasks. Any unexpected counts? The next step is `prd review` — want me to drive that with you now? (yes / not yet)
-- **On `no`** — stop. Confirm the file is on disk at `.fakoli-state/prd.md` and tell the user it is theirs to refine.
+- **On `no`** — stop. Confirm the file is on disk at `.anvil/prd.md` and tell the user it is theirs to refine.
 - **On `let me edit first`** — wait. When the user signals they are ready, return to the confirm step above and run the parse.
 
 When the user says yes to continuing into review, hand off to the `prd` skill **by invoking it directly** — do not paste a CLI to-do list. The `prd` skill is designed to drive the `review` → `approve` flow conversationally, with the same one-question-at-a-time discipline this skill uses.
@@ -210,8 +210,8 @@ If you want to use LLM augmentation explicitly, the user can set `ANTHROPIC_API_
 
 - **Asking 20 questions at once.** A wall of questions produces a wall of one-word answers. Stay strictly at one question per message — even if it feels slow.
 - **Writing the PRD without showing the user a draft for review.** The interview answers are raw input; the translation into PRD bullets is interpretive. Always show the draft and wait for explicit approval before writing the file.
-- **Overwriting an existing `.fakoli-state/prd.md` without confirmation.** A silent overwrite can destroy a hand-authored PRD that took hours to craft. Always check for an existing file and prompt before clobbering.
-- **Auto-running `fakoli-state prd parse` after writing.** The user should read the draft on disk before parsing. Hand off the next-step command; do not invoke it.
+- **Overwriting an existing `.anvil/prd.md` without confirmation.** A silent overwrite can destroy a hand-authored PRD that took hours to craft. Always check for an existing file and prompt before clobbering.
+- **Auto-running `anvil prd parse` after writing.** The user should read the draft on disk before parsing. Hand off the next-step command; do not invoke it.
 - **Skipping `## Non-Goals` because the user said "none".** Record "none identified" as an explicit bullet instead of omitting the section. Visibility matters for the planner and for reviewers.
 - **Treating the bridge to `/fakoli-flow:brainstorm` as optional polish.** When the `claude plugin list` check reports `fakoli-flow` installed, its brainstorm flow produces a substantially better spec than the six-question interview. Prefer it unless the user explicitly opts for the lightweight path.
 
@@ -235,4 +235,4 @@ If you want to use LLM augmentation explicitly, the user can set `ANTHROPIC_API_
 | Self-contained six-question interview | Phase 7 | available — pure markdown choreography |
 | Bridge to `/fakoli-flow:brainstorm` when `fakoli-flow` is installed | Phase 7 | available — detect via `claude plugin list \| grep -q "fakoli-flow"` (explicit shell check, Phase 9 C3) |
 | LLM-augmented follow-up question generation | Phase 7 | optional — requires `ANTHROPIC_API_KEY`; skill is fully usable without it |
-| `fakoli-state start-prd` CLI command | Phase 7+ | pending — for now, run this skill via `/fakoli-state:start-prd` |
+| `anvil start-prd` CLI command | Phase 7+ | pending — for now, run this skill via `/anvil:start-prd` |

@@ -8,7 +8,7 @@ result an argument rather than a demo.
 Arm A (MarkdownCoordinator): naive shared-TODO coordination. Pick an unchecked task,
 do it, tick the box. Non-atomic read-modify-write => real races.
 
-Arm B (FakoliStateCoordinator): the real fakoli-state engine. `next` then atomic
+Arm B (AnvilCoordinator): the real anvil engine. `next` then atomic
 `claim` (SQLite BEGIN IMMEDIATE) => exclusive ownership; file-overlap blocks at claim
 time; completion carries a structured, gate-checked evidence record.
 """
@@ -142,10 +142,10 @@ class MarkdownCoordinator(Coordinator):
         return not self._unchecked()
 
 
-# --- Arm B: the real fakoli-state engine ------------------------------------
+# --- Arm B: the real anvil engine ------------------------------------
 
-class FakoliStateCoordinator(Coordinator):
-    name = "fakoli-state"
+class AnvilCoordinator(Coordinator):
+    name = "anvil"
 
     # A non-test command: the durable evidence record will visibly lack real
     # verification, which is what makes gamed work auditable after the fact.

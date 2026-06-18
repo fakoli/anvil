@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.planning.template — the deterministic PRD parser.
+"""Tests for anvil.planning.template — the deterministic PRD parser.
 
 All tests follow three rules:
 1. parse_prd() NEVER raises — errors go into ParseResult.errors.
@@ -11,8 +11,8 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 
-from fakoli_state.clock import FrozenClock
-from fakoli_state.planning.template import ParseResult, parse_prd
+from anvil.clock import FrozenClock
+from anvil.planning.template import ParseResult, parse_prd
 
 # ---------------------------------------------------------------------------
 # Fixture path

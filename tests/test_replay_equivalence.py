@@ -44,10 +44,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fakoli_state.clock import FrozenClock
-from fakoli_state.state.models import EventDraft
-from fakoli_state.state.snapshot import serialize_state
-from fakoli_state.state.sqlite import SqliteBackend
+from anvil.clock import FrozenClock
+from anvil.state.models import EventDraft
+from anvil.state.snapshot import serialize_state
+from anvil.state.sqlite import SqliteBackend
 
 # Suite-wide frozen anchor (matches the generator and conftest).
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=UTC)

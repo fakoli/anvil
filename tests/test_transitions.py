@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.state.transitions — every public transition function.
+"""Tests for anvil.state.transitions — every public transition function.
 
 Each transition has:
 - A happy-path test: status change + updated_at change
@@ -17,8 +17,8 @@ import datetime
 
 import pytest
 
-from fakoli_state.review.gates import evidence_complete
-from fakoli_state.state.models import (
+from anvil.review.gates import evidence_complete
+from anvil.state.models import (
     PRD,
     Claim,
     ClaimStatus,
@@ -29,7 +29,7 @@ from fakoli_state.state.models import (
     TaskStatus,
     Verification,
 )
-from fakoli_state.state.transitions import (
+from anvil.state.transitions import (
     TransitionError,
     prd_decision_resolved,
     prd_draft_to_reviewed,
@@ -676,7 +676,7 @@ class TestTransitionImmutability:
 # ---------------------------------------------------------------------------
 #
 # The needs_review → accepted gate is the single enforcement point for evidence.
-# It delegates to fakoli_state.review.gates.evidence_complete — the SAME
+# It delegates to anvil.review.gates.evidence_complete — the SAME
 # predicate the `apply` command uses to preview the gate verdict for the
 # reviewer. These tests prove the wiring and lock the enforcing gate to the
 # preview gate so the two can never diverge again. Exhaustive coverage of the
@@ -705,7 +705,7 @@ class TestEvidenceGateDelegation:
             status=TaskStatus.needs_review,
             verification=Verification(required_evidence=["test output"]),
         )
-        evidence = _make_evidence(commands_run=["pytest -x --cov=fakoli_state"])
+        evidence = _make_evidence(commands_run=["pytest -x --cov=anvil"])
         result = task_needs_review_to_accepted(task, reviewer="alice", evidence=evidence, now=_T1)
         assert result.status == TaskStatus.accepted
 

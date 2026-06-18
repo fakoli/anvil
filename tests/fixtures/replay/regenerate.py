@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Golden-fixture generator for the SL-1 replay-equivalence test.
 
-This script builds a realistic, *deterministic* fakoli-state event log by
+This script builds a realistic, *deterministic* anvil event log by
 driving the real ``SqliteBackend.append`` pipeline with a ``FrozenClock``,
 then commits three artifacts under
 ``tests/fixtures/replay/sample-project/``:
@@ -17,8 +17,8 @@ All three artifacts are committed. Regeneration is a **deliberate human step**
 fixture *legitimately* changes (e.g. a new canonical collection is added to
 ``serialize_state`` or the scenario is intentionally extended):
 
-    uv run --project plugins/fakoli-state/bin \
-        python plugins/fakoli-state/tests/fixtures/replay/regenerate.py
+    uv run --project plugins/anvil/bin \
+        python plugins/anvil/tests/fixtures/replay/regenerate.py
 
 After regenerating, eyeball the diff (``git diff`` on the three artifacts),
 run the equivalence test, and commit the artifacts together with the code
@@ -72,11 +72,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fakoli_state.clock import FrozenClock
-from fakoli_state.state.backend import EventRejected
-from fakoli_state.state.models import EventDraft
-from fakoli_state.state.snapshot import serialize_state
-from fakoli_state.state.sqlite import SqliteBackend
+from anvil.clock import FrozenClock
+from anvil.state.backend import EventRejected
+from anvil.state.models import EventDraft
+from anvil.state.snapshot import serialize_state
+from anvil.state.sqlite import SqliteBackend
 
 # Fixed scenario epoch — matches the suite-wide FrozenClock anchor.
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=UTC)

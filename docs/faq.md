@@ -1,6 +1,6 @@
 # Frequently asked questions
 
-Practical answers for evaluating, installing, and operating fakoli-state. For
+Practical answers for evaluating, installing, and operating anvil. For
 positioning ("why is this different from X"), see the comparison table in the
 [README](../README.md#comparison-vs-alternatives) and
 [`_positioning.md`](_positioning.md). For architectural depth, see
@@ -13,7 +13,7 @@ positioning ("why is this different from X"), see the comparison table in the
 
 ### Do I need a GitHub account or repository?
 
-No. Canonical state lives locally in `.fakoli-state/` (SQLite + JSONL) under
+No. Canonical state lives locally in `.anvil/` (SQLite + JSONL) under
 your project root. GitHub Issues is an opt-in *sync target* via the
 bidirectional sync engine — never the source of truth. The CLI works fully
 offline; `init`, `plan`, `claim`, `submit`, and `apply` make zero network
@@ -22,7 +22,7 @@ calls.
 If you do want GitHub Issues as an external projection (so non-developers can
 read and comment in a familiar surface), set `GITHUB_REPOSITORY` and either
 authenticate `gh` or export `GITHUB_TOKEN`, then run
-`fakoli-state sync github`. The mappings flow both ways and conflicts are
+`anvil sync github`. The mappings flow both ways and conflicts are
 labeled rather than auto-resolved.
 
 See [`design.md` § Why local-first](design.md) for the rationale, and
@@ -33,7 +33,7 @@ setup walkthrough.
 
 No, not for the core flow. The PRD parser, six-dimension scorer, and
 dependency inferencer are deterministic and rule-based — they ship as Python
-in `bin/src/fakoli_state/planning/` and run with no network.
+in `bin/src/anvil/planning/` and run with no network.
 
 An `ANTHROPIC_API_KEY` unlocks three optional `--use-llm` augmentations:
 `plan --use-llm` extends short task descriptions, `score --use-llm` adds a
@@ -48,16 +48,16 @@ ephemeral prompt caching on by default.
 
 See [`llm.md`](llm.md) for the full augmentation contract.
 
-### Which agent runtimes does fakoli-state work with?
+### Which agent runtimes does anvil work with?
 
 Any MCP-compatible runtime. The plugin is built first for Claude Code (where
 the skills, agents, and hooks compose natively), but the CLI and FastMCP
-stdio server are runtime-neutral. fakoli-state is documented as working with
+stdio server are runtime-neutral. anvil is documented as working with
 Claude Code, Codex, Cursor, OpenHands, and Copilot.
 
 Two surfaces are always available:
 
-- **CLI** (`fakoli-state <cmd>`) — runtime-agnostic; any shell-capable agent
+- **CLI** (`anvil <cmd>`) — runtime-agnostic; any shell-capable agent
   can call it via Bash, and humans use it directly.
 - **MCP server** — 13 tools exposed over FastMCP stdio. Any MCP client
   connects; tool responses are structured JSON with explicit error
@@ -83,14 +83,14 @@ which releases your expired lease with `release_reason="stale"`. The task
 returns to `ready` and becomes available to other actors. The audit event
 preserves the original claimant, so the history is not lost.
 
-To resume work yourself, run `fakoli-state claim T001` again. If another
+To resume work yourself, run `anvil claim T001` again. If another
 actor claimed it in the meantime, the call exits non-zero with
 `task already claimed by <actor>`; pass `--force` to take it over (logged
-in the audit trail), or run `fakoli-state next` to pick a different
+in the audit trail), or run `anvil next` to pick a different
 ready task.
 
-Default lease is 60 minutes (configurable in `.fakoli-state/config.yaml`); the lease is extended
-by `fakoli-state renew <claim-id>` or by the MCP `renew_claim` tool. Long
+Default lease is 60 minutes (configurable in `.anvil/config.yaml`); the lease is extended
+by `anvil renew <claim-id>` or by the MCP `renew_claim` tool. Long
 honest work should heartbeat every few minutes — see
 [`architecture.md` § Concurrency model](architecture.md) for the four
 layered mechanisms (SQLite WAL + `BEGIN IMMEDIATE`, leases, heartbeats,
@@ -107,14 +107,14 @@ and prints the active claim id and lease expiry.
 
 The losing actor's options:
 
-- Run `fakoli-state next` to get the next ready task with no conflict.
+- Run `anvil next` to get the next ready task with no conflict.
 - Wait for the lease to expire or for the holder to `release` voluntarily.
 - Pass `--force` to override (logged as a `claim.force_released` event so
   the takeover is auditable).
 
 A second safety layer catches overlap *before* the claim attempt: if the
 target task shares a `ConflictGroup` with an already-claimed task,
-`fakoli-state next` will not surface it and `claim` will warn via
+`anvil next` will not surface it and `claim` will warn via
 pre-claim conflict check. See
 [`architecture.md` § Concurrency model](architecture.md).
 
@@ -143,14 +143,14 @@ aborts mid-batch. See [`llm.md` § Cost notes](llm.md).
 
 There is no shipped migration tool. The recommended path is:
 
-1. `fakoli-state init --name "<project>"` — scaffolds `.fakoli-state/`.
-2. Author `.fakoli-state/prd.md` against the schema in
+1. `anvil init --name "<project>"` — scaffolds `.anvil/`.
+2. Author `.anvil/prd.md` against the schema in
    [`prd-template.md`](prd-template.md). Existing intent / acceptance
    criteria from your markdown status files map cleanly into PRD task
    blocks.
-3. `fakoli-state prd parse` then `prd review --approve` to promote the
+3. `anvil prd parse` then `prd review --approve` to promote the
    PRD to `approved`.
-4. `fakoli-state plan` then `score` to materialize tasks and dependencies.
+4. `anvil plan` then `score` to materialize tasks and dependencies.
 5. Once tasks exist in the database, the old `agent-*-status.md` files can
    be deleted. Their role (per-agent status notes) is replaced by claim
    rows, evidence, and the `events.jsonl` audit log.
@@ -185,17 +185,17 @@ If you want a hook off without editing `hooks.json`, rename the script
 file (e.g., `mv hooks/check-claim.sh hooks/check-claim.sh.off`) — the
 manifest's `command` reference will fail to resolve and the hook becomes a
 silent no-op. To debug a hook that is misbehaving, run the script directly
-from a shell to inspect its stderr; a `FAKOLI_STATE_HOOK_DEBUG=1` env var
-that redirects hook stderr to `.fakoli-state/.hook-debug.log` is tracked
+from a shell to inspect its stderr; a `ANVIL_HOOK_DEBUG=1` env var
+that redirects hook stderr to `.anvil/.hook-debug.log` is tracked
 as a Phase 11 backlog item ([P11-HK-C2](roadmap.md)) but does not ship
 today.
 
 ### Where does my data live, and should I commit it to git?
 
-Everything lives under `.fakoli-state/` in your project root:
+Everything lives under `.anvil/` in your project root:
 
 ```text
-.fakoli-state/
+.anvil/
 ├── config.yaml         # project-level config (sync providers, lease defaults)
 ├── state.db            # SQLite, WAL mode — the canonical state
 ├── events.jsonl        # append-only audit log (replay source)
@@ -209,32 +209,32 @@ Two valid commit policies, both supported:
   `git clone`. Simplest for solo work or small teams. Beware: `state.db`
   is binary and merge conflicts are unrecoverable manually (use replay
   instead).
-- **Gitignore `.fakoli-state/state.db` (and `*.wal`, `*.shm`) but commit
+- **Gitignore `.anvil/state.db` (and `*.wal`, `*.shm`) but commit
   `events.jsonl`.** The replay guarantee means `state.db` is regenerable
   from the event log; this avoids binary merge conflicts while preserving
   audit history across clones.
 
 The CLI and hooks resolve `STATE_DIR` relative to
-`${CLAUDE_PROJECT_DIR:-$PWD}/.fakoli-state`, so every invocation
+`${CLAUDE_PROJECT_DIR:-$PWD}/.anvil`, so every invocation
 addresses the same project regardless of cwd. See
 [`architecture.md` § Storage layout](architecture.md) and
 [`design.md` § Why local-first](design.md).
 
 ### Can I inspect state with `sqlite3` or SQLite Browser?
 
-Yes. `.fakoli-state/state.db` is a standard SQLite file in WAL mode — any
+Yes. `.anvil/state.db` is a standard SQLite file in WAL mode — any
 SQLite tool works.
 
 ```bash
-sqlite3 .fakoli-state/state.db .schema
-sqlite3 .fakoli-state/state.db "SELECT id, status, title FROM tasks;"
+sqlite3 .anvil/state.db .schema
+sqlite3 .anvil/state.db "SELECT id, status, title FROM tasks;"
 ```
 
 The schema is version 3 as of v1.10.0 (unchanged since v1.8.0 — no
 migration required). Pydantic models in
-[`bin/src/fakoli_state/state/models.py`](../bin/src/fakoli_state/state/models.py)
+[`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py)
 define every entity; the SQLite implementation lives in
-[`bin/src/fakoli_state/state/sqlite.py`](../bin/src/fakoli_state/state/sqlite.py).
+[`bin/src/anvil/state/sqlite.py`](../bin/src/anvil/state/sqlite.py).
 
 Read-only inspection is safe and concurrent — WAL mode lets readers
 proceed without blocking the CLI's writers. Do not edit rows directly:
@@ -246,12 +246,12 @@ on every mutation being represented in the log).
 
 ## Backup and recovery
 
-### How do I back up `.fakoli-state/`?
+### How do I back up `.anvil/`?
 
 Copy the directory wholesale:
 
 ```bash
-cp -R .fakoli-state /backup/location/fakoli-state-$(date +%Y-%m-%d)
+cp -R .anvil /backup/location/anvil-$(date +%Y-%m-%d)
 ```
 
 That captures `state.db`, `events.jsonl`, `prd.md`, `config.yaml`, and any
@@ -264,21 +264,21 @@ enough to reconstruct `state.db` byte-for-byte, so the audit log is the
 *minimum* you must preserve. Commit `events.jsonl` to git and you have a
 distributed backup for free.
 
-A native `fakoli-state snapshot` subcommand (`sqlite3 .backup` wrapper
+A native `anvil snapshot` subcommand (`sqlite3 .backup` wrapper
 with retention) is planned for v2.1 — see
 [`roadmap.md` § v2.1 → Snapshot / replay](roadmap.md). Until then,
 `cp -R` is the supported flow.
 
 ### What if `state.db` gets corrupted?
 
-Restore from a backup of `.fakoli-state/` (the directory is safe to `cp -R`
+Restore from a backup of `.anvil/` (the directory is safe to `cp -R`
 — see the previous question). The fastest recovery path today is:
 
 ```bash
 # Back up the broken db (for forensics), then restore from your last backup.
-mv .fakoli-state/state.db .fakoli-state/state.db.broken
-rm -f .fakoli-state/state.db-wal .fakoli-state/state.db-shm
-cp /backup/location/fakoli-state-YYYY-MM-DD/state.db .fakoli-state/state.db
+mv .anvil/state.db .anvil/state.db.broken
+rm -f .anvil/state.db-wal .anvil/state.db-shm
+cp /backup/location/anvil-YYYY-MM-DD/state.db .anvil/state.db
 ```
 
 The replay guarantee is the central audit property of the engine: replaying
@@ -288,7 +288,7 @@ the *minimum* you must preserve — commit it to git alongside the repo and
 you have a distributed audit log for free, recoverable from any clone even
 if every local `state.db` is lost.
 
-A native `fakoli-state replay` subcommand that consumes `events.jsonl` and
+A native `anvil replay` subcommand that consumes `events.jsonl` and
 rebuilds `state.db` byte-for-byte is on the roadmap but not yet shipped —
 see [`roadmap.md` § v2.1 → Snapshot / replay](roadmap.md) (item P9B-7,
 co-required with the snapshot subcommand). Until then, restore from a
@@ -322,11 +322,11 @@ question.
 ### How do I write my own sync provider?
 
 Implement the `SyncProvider` Protocol from
-[`bin/src/fakoli_state/sync/provider.py`](../bin/src/fakoli_state/sync/provider.py)
+[`bin/src/anvil/sync/provider.py`](../bin/src/anvil/sync/provider.py)
 and register it in
-[`registry.py`](../bin/src/fakoli_state/sync/registry.py). The
+[`registry.py`](../bin/src/anvil/sync/registry.py). The
 `GitHubIssuesProvider` at
-[`sync/providers/github_issues.py`](../bin/src/fakoli_state/sync/providers/github_issues.py)
+[`sync/providers/github_issues.py`](../bin/src/anvil/sync/providers/github_issues.py)
 is the reference implementation — read it alongside the contributor
 guide at [`sync-providers.md`](sync-providers.md), which walks through
 the Linear case step by step.
@@ -334,7 +334,7 @@ the Linear case step by step.
 Per-provider acceptance criteria (from `roadmap.md` § v2.0): provider
 module + transport (GraphQL or REST) + full-lifecycle respx tests +
 live nightly workflow gated on the provider's API key secret +
-`fakoli-state sync <provider_id> --health` works.
+`anvil sync <provider_id> --health` works.
 
 Provider config schemas in `config.yaml` (item P9B-9) are co-required
 with the first new provider — that work is SPEC-FIRST and tracked

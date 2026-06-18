@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.context.packets — work-packet renderer.
+"""Tests for anvil.context.packets — work-packet renderer.
 
 Coverage targets (>= 85%):
 - render_packet() happy paths (minimal and full inputs)
@@ -14,15 +14,15 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fakoli_state.config import Config
-from fakoli_state.context.packets import (
+from anvil.config import Config
+from anvil.context.packets import (
     FAST_LANE_REQUIRED_EVIDENCE_MAX,
     WorkPacket,
     fast_lane_packet,
     is_lightweight,
     render_packet,
 )
-from fakoli_state.state.models import (
+from anvil.state.models import (
     Claim,
     ClaimStatus,
     ClaimType,
@@ -558,7 +558,7 @@ class TestLightweightPacketRouting:
         assert "Status will transition" not in packet.markdown
         assert "status_flow" not in packet.json_data["update_protocol"]
         # But the load-bearing submit instruction is always present.
-        assert "fakoli-state submit" in packet.markdown
+        assert "anvil submit" in packet.markdown
 
     def test_high_blast_task_renders_full_variant(self) -> None:
         """A high-blast task keeps the full packet even at low complexity."""

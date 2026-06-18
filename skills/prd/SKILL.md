@@ -1,6 +1,6 @@
 ---
 name: prd
-description: Author, parse, and review a project PRD in fakoli-state — capture the requirements that everything downstream (features, tasks, claims, evidence) gets generated from. Use this skill when starting a new project or revising requirements before any planning work happens.
+description: Author, parse, and review a project PRD in anvil — capture the requirements that everything downstream (features, tasks, claims, evidence) gets generated from. Use this skill when starting a new project or revising requirements before any planning work happens.
 ---
 
 # PRD — Author, Parse, and Review Requirements
@@ -14,35 +14,35 @@ Write the contract that everything downstream depends on. The PRD is the single 
 - Starting a new project — before any planning, scoring, or task assignment happens.
 - Revising the PRD after stakeholder feedback changes the scope or acceptance criteria.
 - Recovering after a scope change mid-project — re-anchor what the work is before resuming claims.
-- Before any invocation of `/fakoli-state:plan` — planning reads from a parsed PRD; authoring must come first.
-- When `fakoli-state status` reports `prd-status: draft` or `prd-status: none` and the project can't proceed.
+- Before any invocation of `/anvil:plan` — planning reads from a parsed PRD; authoring must come first.
+- When `anvil status` reports `prd-status: draft` or `prd-status: none` and the project can't proceed.
 - When a co-authored PRD is ready for a formal review and approval step.
 
-**Do not use this skill to generate or score tasks.** Once the PRD is approved, proceed to `/fakoli-state:plan` for the task graph. This skill only authors, parses, and reviews requirements.
+**Do not use this skill to generate or score tasks.** Once the PRD is approved, proceed to `/anvil:plan` for the task graph. This skill only authors, parses, and reviews requirements.
 
 ---
 
 ## Prerequisites
 
-`.fakoli-state/` must exist. Confirm before proceeding:
+`.anvil/` must exist. Confirm before proceeding:
 
 ```bash
-ls .fakoli-state/state.db 2>/dev/null || echo "MISSING: run fakoli-state init first"
+ls .anvil/state.db 2>/dev/null || echo "MISSING: run anvil init first"
 ```
 
 If `state.db` is absent, run:
 
 ```bash
-fakoli-state init --name "<project-name>"
+anvil init --name "<project-name>"
 ```
 
 Phase 3 commands used in this skill:
 
 | Command | Phase | Status |
 |---|---|---|
-| `fakoli-state prd parse` | Phase 3 | available |
-| `fakoli-state prd review` | Phase 3 | available |
-| `fakoli-state prd review --approve` | Phase 3 | available |
+| `anvil prd parse` | Phase 3 | available |
+| `anvil prd review` | Phase 3 | available |
+| `anvil prd review --approve` | Phase 3 | available |
 
 The structured template at `docs/prd-template.md` (relative to the plugin root) is the canonical contract. The parser enforces it — any deviation from the required sections produces a `ParseError`.
 
@@ -50,25 +50,25 @@ The structured template at `docs/prd-template.md` (relative to the plugin root) 
 
 ## Workflow
 
-### Step 1 — Author or update `.fakoli-state/prd.md`
+### Step 1 — Author or update `.anvil/prd.md`
 
-Drive this step inline. Check the filesystem for an existing PRD before suggesting any edit — the subsequent `fakoli-state prd parse` step (Step 2) is destructive and replaces every `Requirement`, `Feature`, and `Task` row in `state.db`.
+Drive this step inline. Check the filesystem for an existing PRD before suggesting any edit — the subsequent `anvil prd parse` step (Step 2) is destructive and replaces every `Requirement`, `Feature`, and `Task` row in `state.db`.
 
 Run the existence check yourself (Bash, MCP filesystem tool, or whichever read primitive the runtime exposes):
 
 ```bash
-ls .fakoli-state/prd.md 2>/dev/null
+ls .anvil/prd.md 2>/dev/null
 ```
 
 **If the file exists**, do not edit or re-parse without confirmation. Read the file, surface a one-line summary (first heading and total line count are usually enough), and ask:
 
-> `.fakoli-state/prd.md` already exists (`<first-heading>`, `<N>` lines). Open it for editing, save the current copy as a backup first, or leave it alone? (edit / save-as-backup / cancel)
+> `.anvil/prd.md` already exists (`<first-heading>`, `<N>` lines). Open it for editing, save the current copy as a backup first, or leave it alone? (edit / save-as-backup / cancel)
 
 - On `edit` — read the file in full, propose changes inline (show diffs in chat), and apply them once the user confirms. Do not shell out to `$EDITOR` and wait — drive the edits in the conversation.
-- On `cancel` — stop. Confirm the PRD is untouched; offer to run `/fakoli-state:state-ops` to inspect current PRD status.
-- On `save-as-backup` — copy the existing file to `.fakoli-state/prd.md.bak`, then proceed with inline edits as above.
+- On `cancel` — stop. Confirm the PRD is untouched; offer to run `/anvil:state-ops` to inspect current PRD status.
+- On `save-as-backup` — copy the existing file to `.anvil/prd.md.bak`, then proceed with inline edits as above.
 
-**If the file does not exist**, author it inline. Compose the draft in the conversation (using the structure below), present it to the user for approval, then write it directly to `.fakoli-state/prd.md`. Do not tell the user to open `$EDITOR` themselves.
+**If the file does not exist**, author it inline. Compose the draft in the conversation (using the structure below), present it to the user for approval, then write it directly to `.anvil/prd.md`. Do not tell the user to open `$EDITOR` themselves.
 
 The canonical structure is defined in `docs/prd-template.md`. Required sections — the parser fails without them:
 
@@ -99,13 +99,13 @@ Separate each topic as its own exchange. Confirm the goals look right before mov
 
 ### Step 2 — Parse the markdown into state
 
-Invoke the parse yourself once the file is written — do not hand the user a command to type. Use Bash (`fakoli-state prd parse`), the MCP `parse_prd` tool when available, or whichever execution primitive the runtime exposes:
+Invoke the parse yourself once the file is written — do not hand the user a command to type. Use Bash (`anvil prd parse`), the MCP `parse_prd` tool when available, or whichever execution primitive the runtime exposes:
 
 ```bash
-fakoli-state prd parse
+anvil prd parse
 ```
 
-This reads `.fakoli-state/prd.md`, validates structure, and writes `Requirement`, `Feature`, and `Task` entities to `state.db`. PRD status becomes `draft`. Surface the parser output inline in the same message so the user sees the result without a context switch.
+This reads `.anvil/prd.md`, validates structure, and writes `Requirement`, `Feature`, and `Task` entities to `state.db`. PRD status becomes `draft`. Surface the parser output inline in the same message so the user sees the result without a context switch.
 
 **On parse error:** the parser surfaces each `ParseError` with the section name and, where possible, the line number. Existing `state.db` content is preserved — no silent rollback of previous good state. Read the error, propose the fix to `prd.md` inline, apply it after confirmation, and re-run `prd parse` yourself.
 
@@ -126,7 +126,7 @@ parsed 6 requirements, 3 features, 8 tasks
 
 If the counts are wrong, read `prd.md` and confirm all sections survived the parse without truncation. Re-run until the counts match intent.
 
-**After parse, scan for unresolved decisions before review (soft gate, v1.14.0).** Run `fakoli-state prd find-decisions` (or call the `find_decisions` MCP tool) yourself. If it returns non-empty, do not just list the items — present the summary and ask the user how they want to handle them:
+**After parse, scan for unresolved decisions before review (soft gate, v1.14.0).** Run `anvil prd find-decisions` (or call the `find_decisions` MCP tool) yourself. If it returns non-empty, do not just list the items — present the summary and ask the user how they want to handle them:
 
 > The parse succeeded, but the PRD has **N unresolved items** that will shape downstream planning:
 > - X `[NEEDS DECISION]` markers
@@ -167,7 +167,7 @@ Present any gaps directly in chat:
 Once the user accepts or addresses the items, invoke the review:
 
 ```bash
-fakoli-state prd review
+anvil prd review
 ```
 
 Surface the output inline. If the review gate passes, PRD status becomes `reviewed`; tell the user and move to Step 4.
@@ -176,13 +176,13 @@ Surface the output inline. If the review gate passes, PRD status becomes `review
 
 ### Step 4 — Approve when ready
 
-`prd review --approve` is a hard gate. It transitions the PRD from `reviewed` to `approved` and the `fakoli-state claim` gate enforces it — no task can be claimed while the PRD is in `draft` or `reviewed` status. Because approval is permanent in `events.jsonl`, the user MUST explicitly confirm before the agent runs it.
+`prd review --approve` is a hard gate. It transitions the PRD from `reviewed` to `approved` and the `anvil claim` gate enforces it — no task can be claimed while the PRD is in `draft` or `reviewed` status. Because approval is permanent in `events.jsonl`, the user MUST explicitly confirm before the agent runs it.
 
 Before asking, read the full PRD back to the user (or show a concise structural summary — sections present, requirement/feature/task counts, any items the review surfaced). Then ask:
 
 > The PRD is reviewed. Approving it is permanent and opens the claim gate. Ready to approve? (yes / no / let me re-read first)
 
-- **On `yes`** — invoke `fakoli-state prd review --approve` yourself, surface the output, then run `fakoli-state status` and confirm `prd-status: approved`. Tell the user the project is ready for `/fakoli-state:plan` and ask whether to drive that skill next.
+- **On `yes`** — invoke `anvil prd review --approve` yourself, surface the output, then run `anvil status` and confirm `prd-status: approved`. Tell the user the project is ready for `/anvil:plan` and ask whether to drive that skill next.
 - **On `no`** — stop. The PRD stays in `reviewed`; the user can come back to it later.
 - **On `let me re-read first`** — wait. When the user signals ready, return to the confirm prompt above.
 
@@ -202,10 +202,10 @@ Ending this skill with a numbered list like "1. Edit `prd.md` 2. Run `prd parse`
 
 The PRD will change. Here is the safe sequence for updates:
 
-1. Edit `.fakoli-state/prd.md` with the revised content. Before any destructive re-parse, confirm the user intends to overwrite the existing `Requirement`/`Feature`/`Task` rows. Mirror the Step 1 overwrite-gate pattern: show the user a one-line summary (heading + line count) of the current `prd.md`, and prompt `proceed / cancel / save-as-backup` before running `prd parse`. On `save-as-backup`, copy `.fakoli-state/prd.md` to `.fakoli-state/prd.md.bak` first.
-2. Run `fakoli-state prd parse` again. Re-parse replaces all `Requirement`, `Feature`, and `Task` entities — it is not a merge.
-3. Re-run `fakoli-state prd review` if the changes are material (added/removed requirements, changed acceptance criteria, altered feature scope).
-4. Re-run `fakoli-state prd review --approve` for significant scope changes. Minor editorial corrections (typo fixes, clarified wording, unchanged structure) do not require re-approval.
+1. Edit `.anvil/prd.md` with the revised content. Before any destructive re-parse, confirm the user intends to overwrite the existing `Requirement`/`Feature`/`Task` rows. Mirror the Step 1 overwrite-gate pattern: show the user a one-line summary (heading + line count) of the current `prd.md`, and prompt `proceed / cancel / save-as-backup` before running `prd parse`. On `save-as-backup`, copy `.anvil/prd.md` to `.anvil/prd.md.bak` first.
+2. Run `anvil prd parse` again. Re-parse replaces all `Requirement`, `Feature`, and `Task` entities — it is not a merge.
+3. Re-run `anvil prd review` if the changes are material (added/removed requirements, changed acceptance criteria, altered feature scope).
+4. Re-run `anvil prd review --approve` for significant scope changes. Minor editorial corrections (typo fixes, clarified wording, unchanged structure) do not require re-approval.
 
 **Coordinate before re-parsing a live project.** Which command does which prune is load-bearing — read both lines below carefully:
 
@@ -220,7 +220,7 @@ Safety is built into the deletion path:
 
 Before re-parsing while active claims exist:
 
-1. Run `fakoli-state status` to confirm no active claims.
+1. Run `anvil status` to confirm no active claims.
 2. If claims exist, coordinate with the agents holding them. Release the claims first, or wait for them to complete.
 3. Tasks whose IDs survive the re-parse (same `T00N` ID in the file) have their claim and evidence history preserved via the event log. Tasks removed from `prd.md` are pruned per the safety rules above.
 
@@ -231,10 +231,10 @@ Avoid editing a task's acceptance criteria or scope while that task is `claimed`
 ## Common Pitfalls
 
 - **Parsing a thinking-out-loud draft.** `prd.md` is not a scratchpad. Parse only when the document is intended as a real spec. Parsing a half-formed draft seeds `state.db` with garbage requirements that downstream planning will dutifully score and promote.
-- **Approving without re-reading.** Run `cat .fakoli-state/prd.md` before invoking `--approve`. An approval event is permanent in `events.jsonl`. It cannot be undone without replaying from a snapshot.
+- **Approving without re-reading.** Run `cat .anvil/prd.md` before invoking `--approve`. An approval event is permanent in `events.jsonl`. It cannot be undone without replaying from a snapshot.
 - **Skipping `## Non-Goals`.** The planner agent uses non-goals to bound task generation. Without them, tasks may sprawl into adjacent features. Even one item is better than none.
 - **Tasks without verification commands.** The `review tasks` gate (in the plan skill) requires at least one item under `**Verification:**`. Add shell commands — `pytest tests/test_foo.py`, `python -m mymodule --help` — so the gate does not block the entire queue.
-- **Re-parsing with active claims and no coordination.** This silently replaces task rows. Agents holding those tasks will find their task ID in an unexpected state on next heartbeat. Always check `fakoli-state status` before re-parsing.
+- **Re-parsing with active claims and no coordination.** This silently replaces task rows. Agents holding those tasks will find their task ID in an unexpected state on next heartbeat. Always check `anvil status` before re-parsing.
 
 ---
 
@@ -243,9 +243,9 @@ Avoid editing a task's acceptance criteria or scope while that task is `claimed`
 | Position | Skill |
 |---|---|
 | Before this skill | Usually none — prd is the entry point for new projects |
-| After Step 2 (parse success) | `/fakoli-state:state-ops` to verify counts and structure |
-| After Step 4 (approved) | `/fakoli-state:plan` to generate features, tasks, and scores |
-| If `fakoli-state status` shows `prd-status: draft` | Return here to complete review and approval |
+| After Step 2 (parse success) | `/anvil:state-ops` to verify counts and structure |
+| After Step 4 (approved) | `/anvil:plan` to generate features, tasks, and scores |
+| If `anvil status` shows `prd-status: draft` | Return here to complete review and approval |
 
 ---
 
@@ -257,8 +257,8 @@ Until Phase 7 ships, the agent co-authors with the user directly using the deter
 
 | Feature | Phase |
 |---|---|
-| `fakoli-state prd parse` | Phase 3 — available |
-| `fakoli-state prd review` | Phase 3 — available |
-| `fakoli-state prd review --approve` | Phase 3 — available |
+| `anvil prd parse` | Phase 3 — available |
+| `anvil prd review` | Phase 3 — available |
+| `anvil prd review --approve` | Phase 3 — available |
 | LLM-assisted drafting via `--use-llm` | Phase 7 — pending |
-| `fakoli-state start-prd` CLI command | Phase 7 — pending |
+| `anvil start-prd` CLI command | Phase 7 — pending |

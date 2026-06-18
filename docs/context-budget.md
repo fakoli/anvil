@@ -1,9 +1,9 @@
 # Context budget
 
-> A self-imposed token budget on fakoli-state's plugin surface, enforced in CI
+> A self-imposed token budget on anvil's plugin surface, enforced in CI
 > by [`tests/test_token_budget.py`](../tests/test_token_budget.py).
 
-fakoli-state ships as a Claude Code plugin. Its skills are part of the model's
+anvil ships as a Claude Code plugin. Its skills are part of the model's
 context, and that context is not free:
 
 - **Skill frontmatter is always loaded.** Claude Code injects each skill's

@@ -1,19 +1,19 @@
-# fakoli-state-mcp — FastMCP (stdio) server image for the Docker MCP catalog.
+# anvil-mcp — FastMCP (stdio) server image for the Docker MCP catalog.
 #
-# Packages the engine at bin/src/fakoli_state and starts the stdio MCP server.
-# Project state lives in .fakoli-state/ resolved from FAKOLI_STATE_ROOT, so the
+# Packages the engine at bin/src/anvil and starts the stdio MCP server.
+# Project state lives in .anvil/ resolved from ANVIL_ROOT, so the
 # host project is bind-mounted at runtime — the image itself stays stateless.
 #
 # Build (from the repo root):
-#   docker build -t fakoli-state-mcp .
+#   docker build -t anvil-mcp .
 #
 # Smoke test (must print and exit 0, never block on stdio):
-#   docker run --rm fakoli-state-mcp --help
+#   docker run --rm anvil-mcp --help
 #
 # Run against a host project:
 #   docker run --rm -i \
-#     -v "$PWD:/project" -e FAKOLI_STATE_ROOT=/project \
-#     fakoli-state-mcp
+#     -v "$PWD:/project" -e ANVIL_ROOT=/project \
+#     anvil-mcp
 #
 # uv's distroless-friendly image ships uv + a managed CPython. We pin a digest-
 # free tag here for readability; the catalog manifest records the pinned digest.
@@ -49,9 +49,9 @@ COPY bin/src /app/bin/src
 RUN cd /app/bin && uv sync --frozen --no-dev
 
 # Resolve project state from a bind-mounted directory by default. Callers can
-# override with `-e FAKOLI_STATE_ROOT=...`; the server falls back to cwd when
+# override with `-e ANVIL_ROOT=...`; the server falls back to cwd when
 # unset, so this is a convenience default, not a hard requirement.
-ENV FAKOLI_STATE_ROOT=/project
+ENV ANVIL_ROOT=/project
 VOLUME ["/project"]
 
 # Activate the project's uv-managed virtualenv by PATH so the runtime entry
@@ -69,5 +69,5 @@ USER fakoli
 
 # ENTRYPOINT is the server module; CMD is empty so `docker run ... --help`
 # appends --help as an argument the entry point handles (print + exit 0).
-ENTRYPOINT ["python", "-m", "fakoli_state.mcp_server"]
+ENTRYPOINT ["python", "-m", "anvil.mcp_server"]
 CMD []

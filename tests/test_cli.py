@@ -1,6 +1,6 @@
 """CLI integration tests using Typer's CliRunner.
 
-Tests the fakoli-state CLI surface:
+Tests the anvil CLI surface:
 - init — scaffolding, overwrite guards, plugin-root guard
 - status — uninitialized/initialized paths, human and hook formats
 - --version
@@ -18,7 +18,7 @@ from pathlib import Path
 from click.testing import Result
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
+from anvil.cli import app
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -34,7 +34,7 @@ runner = CliRunner()
 
 class TestInit:
     def test_init_creates_state_directory(self, tmp_path: Path) -> None:
-        """init creates .fakoli-state/ with all expected files and directories."""
+        """init creates .anvil/ with all expected files and directories."""
         result = runner.invoke(
             app,
             ["init", "--name", "My Test Project"],
@@ -55,14 +55,14 @@ class TestInit:
             os.chdir(original_cwd)
 
         assert result.exit_code == 0, f"init failed: {result.output}"
-        state_dir = tmp_path / ".fakoli-state"
-        assert state_dir.exists(), ".fakoli-state/ directory not created"
+        state_dir = tmp_path / ".anvil"
+        assert state_dir.exists(), ".anvil/ directory not created"
         assert (state_dir / "state.db").exists(), "state.db not created"
         assert (state_dir / "events.jsonl").exists(), "events.jsonl not created"
         assert (state_dir / "config.yaml").exists(), "config.yaml not created"
         assert (state_dir / "packets").is_dir(), "packets/ not created"
         # snapshots/ is no longer pre-created at init (PS-2);
-        # `fakoli-state snapshot` will create it on first use.
+        # `anvil snapshot` will create it on first use.
 
     def test_init_output_contains_project_name(self, tmp_path: Path) -> None:
         """init prints confirmation with the project name."""
@@ -106,7 +106,7 @@ class TestInit:
         assert "already exists" in second.output or "force" in second.output.lower()
 
     def test_init_force_overwrites_existing(self, tmp_path: Path) -> None:
-        """--force reinitialises an existing .fakoli-state/ directory."""
+        """--force reinitialises an existing .anvil/ directory."""
         original_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
@@ -138,7 +138,7 @@ class TestInit:
         try:
             # First init — produces E000001 (project.created) and E000002 (state.initialized).
             runner.invoke(app, ["init", "--name", "First"], catch_exceptions=False)
-            events_path = tmp_path / ".fakoli-state" / "events.jsonl"
+            events_path = tmp_path / ".anvil" / "events.jsonl"
             first_lines = events_path.read_text(encoding="utf-8").splitlines()
             assert len(first_lines) == 2, f"expected 2 events after first init, got {len(first_lines)}"
 
@@ -162,12 +162,12 @@ class TestInit:
             os.chdir(original_cwd)
 
     def test_init_refuses_in_plugin_root(self, tmp_path: Path) -> None:
-        """init refuses when .claude-plugin/plugin.json declares name == fakoli-state."""
+        """init refuses when .claude-plugin/plugin.json declares name == anvil."""
         # Create fake plugin manifest
         plugin_dir = tmp_path / ".claude-plugin"
         plugin_dir.mkdir()
         (plugin_dir / "plugin.json").write_text(
-            json.dumps({"name": "fakoli-state", "version": "1.0.0"}),
+            json.dumps({"name": "anvil", "version": "1.0.0"}),
             encoding="utf-8",
         )
 
@@ -187,7 +187,7 @@ class TestInit:
         combined = result.output + (result.stderr if hasattr(result, "stderr") and result.stderr else "")
         assert "plugin" in combined.lower() or "plugin" in result.output.lower()
 
-    def test_init_non_fakoli_state_plugin_allowed(self, tmp_path: Path) -> None:
+    def test_init_non_anvil_plugin_allowed(self, tmp_path: Path) -> None:
         """init is allowed in a directory with a different plugin name."""
         plugin_dir = tmp_path / ".claude-plugin"
         plugin_dir.mkdir()
@@ -216,7 +216,7 @@ class TestInit:
 
 
 class TestInitWithSample:
-    """`fakoli-state init --with-sample` seeds a runnable PRD→next loop.
+    """`anvil init --with-sample` seeds a runnable PRD→next loop.
 
     Names contain ``with_sample`` so ``pytest -k with_sample`` selects them
     (per the T004 verification command).
@@ -236,7 +236,7 @@ class TestInitWithSample:
         assert init_result.exit_code == 0, f"init failed: {init_result.output}"
 
         # Scaffold + sample prd.md present.
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         assert (state_dir / "prd.md").exists(), "sample prd.md not written"
         assert (state_dir / "state.db").exists()
 
@@ -255,7 +255,7 @@ class TestInitWithSample:
         assert result.exit_code == 0
         assert "Seeded sample project" in result.output
         assert "ready" in result.output
-        assert "fakoli-state next" in result.output
+        assert "anvil next" in result.output
 
     def test_init_with_sample_status_shows_ready_tasks(self, tmp_path: Path) -> None:
         """status reflects the seeded ready tasks (state actually persisted)."""
@@ -276,7 +276,7 @@ class TestInitWithSample:
         """
         result = self._run(["init"], tmp_path)
         assert result.exit_code == 0
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         # Default init does NOT write a prd.md.
         assert not (state_dir / "prd.md").exists()
         # And `next` finds nothing claimable.
@@ -287,7 +287,7 @@ class TestInitWithSample:
     def test_init_with_sample_events_replay_to_same_state(self, tmp_path: Path) -> None:
         """Seeded events.jsonl replays to an identical DB (audit invariant)."""
         assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         scratch = tmp_path / "scratch.db"
         replay_result = self._run(
             [
@@ -318,7 +318,7 @@ class TestInitWithSample:
 
 class TestStatusUninitialized:
     def test_status_uninitialized_human_format(self, tmp_path: Path) -> None:
-        """status in dir without .fakoli-state/ exits 1."""
+        """status in dir without .anvil/ exits 1."""
         original_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
@@ -334,7 +334,7 @@ class TestStatusUninitialized:
         assert "not initialized" in result.output.lower() or "init" in result.output.lower()
 
     def test_status_uninitialized_hook_format(self, tmp_path: Path) -> None:
-        """status --hook-format in dir without .fakoli-state/ exits 0 with 'uninitialized'."""
+        """status --hook-format in dir without .anvil/ exits 0 with 'uninitialized'."""
         original_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
@@ -439,39 +439,39 @@ class TestStatusInitialized:
 
 class TestVersion:
     def test_version_still_works(self) -> None:
-        """--version prints 'fakoli-state {__version__}' and exits 0.
+        """--version prints 'anvil {__version__}' and exits 0.
 
         Imports __version__ rather than hardcoding so the test doesn't
         need a one-line bump on every release (Critic-4 TQ-5 in PR #41).
         """
-        from fakoli_state import __version__
+        from anvil import __version__
 
         result = runner.invoke(app, ["--version"], catch_exceptions=False)
         assert result.exit_code == 0
-        assert "fakoli-state" in result.output
+        assert "anvil" in result.output
         assert __version__ in result.output
 
     def test_version_short_flag(self) -> None:
         """-V is an alias for --version."""
         result = runner.invoke(app, ["-V"], catch_exceptions=False)
         assert result.exit_code == 0
-        assert "fakoli-state" in result.output
+        assert "anvil" in result.output
 
     def test_version_reports_engine_and_schema(self) -> None:
         """--version reports the engine version AND the SQLite schema version (T012).
 
         A host pinning behaviour needs both: ``__version__`` identifies the
         build, ``schema N`` identifies the on-disk state format. The first token
-        stays ``fakoli-state {__version__}`` for backward compatibility.
+        stays ``anvil {__version__}`` for backward compatibility.
         """
-        from fakoli_state import __version__
-        from fakoli_state.state.schema import get_schema_version
+        from anvil import __version__
+        from anvil.state.schema import get_schema_version
 
         result = runner.invoke(app, ["--version"], catch_exceptions=False)
         assert result.exit_code == 0
         out = result.output
         # Backward-compatible engine token still present and first.
-        assert f"fakoli-state {__version__}" in out
+        assert f"anvil {__version__}" in out
         # Schema version is now also surfaced.
         assert "schema" in out.lower()
         assert str(get_schema_version()) in out
@@ -513,7 +513,7 @@ def _expected_mcp_tool_names() -> list[str]:
     """Independently enumerate the live FastMCP server's registered tools."""
     import asyncio
 
-    from fakoli_state.mcp_server import mcp
+    from anvil.mcp_server import mcp
 
     tools = asyncio.run(mcp.list_tools())
     return sorted(t.name for t in tools)
@@ -523,9 +523,9 @@ class TestDescribe:
     def test_describe_emits_success_envelope_with_versions(self) -> None:
         """describe emits the standard envelope carrying the stable api_version,
         the engine version, and the schema version."""
-        from fakoli_state import __version__
-        from fakoli_state.cli.describe import API_VERSION
-        from fakoli_state.state.schema import get_schema_version
+        from anvil import __version__
+        from anvil.cli.describe import API_VERSION
+        from anvil.state.schema import get_schema_version
 
         result = runner.invoke(app, ["describe"], catch_exceptions=False)
         assert result.exit_code == 0, result.output
@@ -603,8 +603,8 @@ class TestDescribe:
         emits — one source of truth, two surfaces."""
         import asyncio
 
-        from fakoli_state.cli.describe import build_manifest
-        from fakoli_state.mcp_server import mcp
+        from anvil.cli.describe import build_manifest
+        from anvil.mcp_server import mcp
 
         cli_manifest = build_manifest()
 
@@ -712,7 +712,7 @@ Handle errors gracefully.
 
 
 def _do_init(tmp_path: Path, name: str = "Test Project") -> None:
-    """Run `fakoli-state init` in tmp_path."""
+    """Run `anvil init` in tmp_path."""
     original_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
@@ -725,8 +725,8 @@ def _do_init(tmp_path: Path, name: str = "Test Project") -> None:
 
 
 def _write_prd(tmp_path: Path, content: str) -> None:
-    """Write content to .fakoli-state/prd.md."""
-    prd_path = tmp_path / ".fakoli-state" / "prd.md"
+    """Write content to .anvil/prd.md."""
+    prd_path = tmp_path / ".anvil" / "prd.md"
     prd_path.write_text(content, encoding="utf-8")
 
 
@@ -915,11 +915,11 @@ class TestPrdFindDecisions:
 
 
 def _prd_text(tmp_path: Path) -> str:
-    return (tmp_path / ".fakoli-state" / "prd.md").read_text(encoding="utf-8")
+    return (tmp_path / ".anvil" / "prd.md").read_text(encoding="utf-8")
 
 
 def _events_text(tmp_path: Path) -> str:
-    return (tmp_path / ".fakoli-state" / "events.jsonl").read_text(encoding="utf-8")
+    return (tmp_path / ".anvil" / "events.jsonl").read_text(encoding="utf-8")
 
 
 class TestPrdResolveDecisionBackprop:
@@ -1189,12 +1189,12 @@ def _build_recorded_llm_provider_for(prd_content: str):  # type: ignore[no-untyp
     builds the planner's user prompt with the same helper, and records a
     canned response under that prompt's sha256 key.
     """
-    from fakoli_state.planning.llm import LLMResponse, RecordedLLMProvider
-    from fakoli_state.planning.llm_planner import (
+    from anvil.planning.llm import LLMResponse, RecordedLLMProvider
+    from anvil.planning.llm_planner import (
         _SYSTEM_PROMPT,
         _build_user_prompt,
     )
-    from fakoli_state.planning.template import parse_prd
+    from anvil.planning.template import parse_prd
 
     parsed = parse_prd(prd_content, prd_id="prd")
     user_prompt = _build_user_prompt(
@@ -1233,7 +1233,7 @@ class TestPlanLlmBackstop:
         imports ``generate_tasks_markdown`` and that function reads
         ``resolve_planner_provider`` from the same module at call time
         (no early binding into cli.plan)."""
-        from fakoli_state.planning import llm_planner
+        from anvil.planning import llm_planner
 
         # v1.17.0 — resolve_planner_provider gained a `config` parameter
         # (Config | None). The CLI passes the loaded config; the test stub
@@ -1264,10 +1264,10 @@ class TestPlanLlmBackstop:
         # The CLI's summary line should announce LLM generation + the path.
         assert "generated via LLM" in result.output
         assert "anthropic" in result.output
-        assert ".fakoli-state/prd.md" in result.output or "prd.md" in result.output
+        assert ".anvil/prd.md" in result.output or "prd.md" in result.output
 
         # prd.md was mutated — it now contains a `## Tasks` section.
-        prd_text = (tmp_path / ".fakoli-state" / "prd.md").read_text(
+        prd_text = (tmp_path / ".anvil" / "prd.md").read_text(
             encoding="utf-8"
         )
         assert "## Tasks" in prd_text
@@ -1293,7 +1293,7 @@ class TestPlanLlmBackstop:
 
         # Resolver should NOT be called when --no-llm is set; install a
         # raising stub so any accidental invocation surfaces in the test.
-        from fakoli_state.planning import llm_planner
+        from anvil.planning import llm_planner
 
         def _explode(config=None) -> None:  # type: ignore[no-untyped-def]
             raise AssertionError(
@@ -1312,7 +1312,7 @@ class TestPlanLlmBackstop:
         assert "--no-llm" in result.output
 
         # prd.md must NOT have been mutated.
-        prd_text = (tmp_path / ".fakoli-state" / "prd.md").read_text(
+        prd_text = (tmp_path / ".anvil" / "prd.md").read_text(
             encoding="utf-8"
         )
         assert "## Tasks" not in prd_text
@@ -1330,8 +1330,8 @@ class TestPlanLlmBackstop:
         _write_prd(tmp_path, _PRD_WITHOUT_TASKS)
         _invoke_cmd(tmp_path, ["prd", "parse"])
 
-        from fakoli_state.planning import llm_planner
-        from fakoli_state.planning.llm_planner import PlannerProviderUnavailable
+        from anvil.planning import llm_planner
+        from anvil.planning.llm_planner import PlannerProviderUnavailable
 
         sentinel_msg = (
             "No LLM provider available for task generation. "
@@ -1372,7 +1372,7 @@ class TestPlanLlmBackstop:
         first = _invoke_cmd(tmp_path, ["plan"])
         assert first.exit_code == 0, f"first plan failed: {first.output}"
 
-        prd_after_first = (tmp_path / ".fakoli-state" / "prd.md").read_text(
+        prd_after_first = (tmp_path / ".anvil" / "prd.md").read_text(
             encoding="utf-8"
         )
         first_tasks_count = prd_after_first.lower().count("## tasks")
@@ -1383,7 +1383,7 @@ class TestPlanLlmBackstop:
         second = _invoke_cmd(tmp_path, ["plan"])
         assert second.exit_code == 0, f"second plan failed: {second.output}"
 
-        prd_after_second = (tmp_path / ".fakoli-state" / "prd.md").read_text(
+        prd_after_second = (tmp_path / ".anvil" / "prd.md").read_text(
             encoding="utf-8"
         )
         second_tasks_count = prd_after_second.lower().count("## tasks")
@@ -1408,7 +1408,7 @@ class TestScore:
 
     def _insert_over_depth_chain(self, tmp_path: Path) -> None:
         """Insert root → a → b → c → d, with every task scoreable as complex."""
-        conn = sqlite3.connect(str(tmp_path / ".fakoli-state" / "state.db"))
+        conn = sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO features "
@@ -1504,7 +1504,7 @@ class TestScore:
         result = _invoke_cmd(tmp_path, ["score"])
 
         assert result.exit_code == 0, f"score failed: {result.output}"
-        assert "fakoli-state expand d --use-llm" not in result.output
+        assert "anvil expand d --use-llm" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1727,7 +1727,7 @@ class TestReplanPreservesTaskStatus:
         # Simulate Phase 4 claim by mutating one task to 'claimed' directly.
         # (Phase 4 will do this through claim events; we patch the DB to
         # represent the post-claim state without needing Phase 4 code.)
-        db_path = tmp_path / ".fakoli-state" / "state.db"
+        db_path = tmp_path / ".anvil" / "state.db"
         conn = sqlite3.connect(str(db_path))
         conn.execute(
             "UPDATE tasks SET status = 'claimed' WHERE id = 'T001'"
@@ -1762,7 +1762,7 @@ class TestReplanPreservesTaskStatus:
 
 
 def _do_init_and_plan(tmp_path: Path, *, with_git: bool = True) -> Path:
-    """Full setup: optionally git-init, then fakoli-state init + PRD + plan + review_tasks.
+    """Full setup: optionally git-init, then anvil init + PRD + plan + review_tasks.
 
     Returns tmp_path ready for claim-related tests.
     """
@@ -1799,7 +1799,7 @@ def _do_init_and_plan(tmp_path: Path, *, with_git: bool = True) -> Path:
 def _get_first_ready_task_id(tmp_path: Path) -> str | None:
     """Return the first task ID in ready status by querying the backend directly."""
     import sqlite3 as _sqlite3
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     if not db_path.exists():
         return None
     conn = _sqlite3.connect(str(db_path))
@@ -1811,7 +1811,7 @@ def _get_first_ready_task_id(tmp_path: Path) -> str | None:
 def _get_claim_branch(tmp_path: Path, task_id: str) -> str | None:
     """Return the recorded branch for the active claim on task_id (or None)."""
     import sqlite3 as _sqlite3
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = _sqlite3.connect(str(db_path))
     row = conn.execute(
         "SELECT branch FROM claims WHERE task_id=? AND status='active'",
@@ -1909,7 +1909,7 @@ class TestClaimCommand:
         # leaving T001 in `ready` (not done). The next claim of T002 should
         # warn but succeed.
         import sqlite3
-        db = tmp_path / ".fakoli-state" / "state.db"
+        db = tmp_path / ".anvil" / "state.db"
         with sqlite3.connect(str(db)) as conn:
             # Pick the first two ready tasks for the test setup.
             rows = conn.execute(
@@ -1953,7 +1953,7 @@ class TestClaimCommand:
         we just verify the warning text is absent."""
         _do_init_and_plan(tmp_path, with_git=False)
         import sqlite3
-        db = tmp_path / ".fakoli-state" / "state.db"
+        db = tmp_path / ".anvil" / "state.db"
         with sqlite3.connect(str(db)) as conn:
             rows = conn.execute(
                 "SELECT id FROM tasks WHERE status = 'ready' ORDER BY id LIMIT 2"
@@ -2141,7 +2141,7 @@ class TestReleaseCommand:
         """Claim task_id and return the claim ID."""
         import sqlite3 as _sqlite3
         _invoke_cmd(tmp_path, ["claim", task_id, "--actor", "agent-test"])
-        db_path = tmp_path / ".fakoli-state" / "state.db"
+        db_path = tmp_path / ".anvil" / "state.db"
         conn = _sqlite3.connect(str(db_path))
         row = conn.execute(
             "SELECT id FROM claims WHERE task_id=? AND status='active'", (task_id,)
@@ -2165,7 +2165,7 @@ class TestReleaseCommand:
         assert "Released" in result.output or "released" in result.output.lower()
 
         # Verify task returned to ready
-        db_path = tmp_path / ".fakoli-state" / "state.db"
+        db_path = tmp_path / ".anvil" / "state.db"
         conn = _sqlite3.connect(str(db_path))
         status = conn.execute(
             "SELECT status FROM tasks WHERE id=?", (task_id,)
@@ -2202,7 +2202,7 @@ class TestRenewCommand:
         assert task_id is not None
 
         _invoke_cmd(tmp_path, ["claim", task_id, "--actor", "agent-test"])
-        db_path = tmp_path / ".fakoli-state" / "state.db"
+        db_path = tmp_path / ".anvil" / "state.db"
         conn = _sqlite3.connect(str(db_path))
         row = conn.execute(
             "SELECT id FROM claims WHERE task_id=? AND status='active'", (task_id,)
@@ -2254,7 +2254,7 @@ class TestNextCommand:
 
 class TestHookSubcommands:
     def test_hook_check_claim_silent_when_no_state(self, tmp_path: Path) -> None:
-        """hook check-claim exits 0 silently when no .fakoli-state/ exists."""
+        """hook check-claim exits 0 silently when no .anvil/ exists."""
         result = _invoke_cmd(
             tmp_path,
             ["hook", "check-claim", "--file", "src/foo.py", "--actor", "agent-test"],
@@ -2275,7 +2275,7 @@ class TestHookSubcommands:
         )
         assert result.exit_code == 0
 
-        events_path = tmp_path / ".fakoli-state" / "events.jsonl"
+        events_path = tmp_path / ".anvil" / "events.jsonl"
         assert events_path.exists()
         content = events_path.read_text(encoding="utf-8")
         assert "file_changed" in content or "src/app.py" in content
@@ -2309,7 +2309,7 @@ class TestE2EClaimRelease:
         assert claim_result.exit_code == 0, f"claim failed: {claim_result.output}"
 
         # find claim ID from DB
-        db_path = tmp_path / ".fakoli-state" / "state.db"
+        db_path = tmp_path / ".anvil" / "state.db"
         conn = _sqlite3.connect(str(db_path))
         row = conn.execute(
             "SELECT id FROM claims WHERE task_id=? AND status='active'", (task_id,)
@@ -2415,7 +2415,7 @@ def _do_claim(tmp_path: Path, task_id: str, actor: str = "agent-test") -> str:
     import sqlite3 as _sqlite3
 
     _invoke_cmd(tmp_path, ["claim", task_id, "--actor", actor])
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = _sqlite3.connect(str(db_path))
     row = conn.execute(
         "SELECT id FROM claims WHERE task_id=? AND status='active'", (task_id,)
@@ -2428,7 +2428,7 @@ def _get_task_status(tmp_path: Path, task_id: str) -> str | None:
     """Return the current status of task_id from the DB."""
     import sqlite3 as _sqlite3
 
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = _sqlite3.connect(str(db_path))
     row = conn.execute(
         "SELECT status FROM tasks WHERE id=?", (task_id,)
@@ -2444,7 +2444,7 @@ def _get_task_status(tmp_path: Path, task_id: str) -> str | None:
 
 class TestPacketCommand:
     def test_packet_renders_markdown_to_packets_dir(self, tmp_path: Path) -> None:
-        """packet T001 exits 0 and writes .fakoli-state/packets/T001.md."""
+        """packet T001 exits 0 and writes .anvil/packets/T001.md."""
         _do_init_and_plan(tmp_path, with_git=False)
         task_id = _get_first_ready_task_id(tmp_path)
         assert task_id is not None, "No ready task after setup"
@@ -2452,13 +2452,13 @@ class TestPacketCommand:
         result = _invoke_cmd(tmp_path, ["packet", task_id])
         assert result.exit_code == 0, f"packet failed: {result.output}"
 
-        packet_file = tmp_path / ".fakoli-state" / "packets" / f"{task_id}.md"
+        packet_file = tmp_path / ".anvil" / "packets" / f"{task_id}.md"
         assert packet_file.exists(), "Packet .md file not written"
         content = packet_file.read_text(encoding="utf-8")
         assert task_id in content
 
     def test_packet_json_format_writes_json_file(self, tmp_path: Path) -> None:
-        """packet T001 --format json writes .fakoli-state/packets/T001.json."""
+        """packet T001 --format json writes .anvil/packets/T001.json."""
         _do_init_and_plan(tmp_path, with_git=False)
         task_id = _get_first_ready_task_id(tmp_path)
         assert task_id is not None
@@ -2466,7 +2466,7 @@ class TestPacketCommand:
         result = _invoke_cmd(tmp_path, ["packet", task_id, "--format", "json"])
         assert result.exit_code == 0, f"packet --format json failed: {result.output}"
 
-        packet_file = tmp_path / ".fakoli-state" / "packets" / f"{task_id}.json"
+        packet_file = tmp_path / ".anvil" / "packets" / f"{task_id}.json"
         assert packet_file.exists(), "Packet .json file not written"
         data = json.loads(packet_file.read_text(encoding="utf-8"))
         assert "task_id" in data
@@ -2602,7 +2602,7 @@ class TestSubmitCommand:
         # blob. The planner does not surface required_evidence today; tests
         # mutate the DB directly to exercise gate paths (same pattern as the
         # claimed-status mutation used by test_replan_does_not_reset_*).
-        db_path = tmp_path / ".fakoli-state" / "state.db"
+        db_path = tmp_path / ".anvil" / "state.db"
         conn = _sqlite3.connect(str(db_path))
         try:
             verification_json = _json.dumps(
@@ -2678,7 +2678,7 @@ class TestSubmitCommand:
         task_id = _get_first_ready_task_id(tmp_path)
         assert task_id is not None
 
-        db_path = tmp_path / ".fakoli-state" / "state.db"
+        db_path = tmp_path / ".anvil" / "state.db"
         conn = _sqlite3.connect(str(db_path))
         try:
             verification_json = _json.dumps(
@@ -2851,7 +2851,7 @@ class TestHookCaptureEvidence:
     def test_hook_capture_evidence_no_state_dir_exits_zero(
         self, tmp_path: Path
     ) -> None:
-        """hook capture-evidence exits 0 when no .fakoli-state/ exists."""
+        """hook capture-evidence exits 0 when no .anvil/ exists."""
         result = _invoke_cmd(
             tmp_path,
             [
@@ -2880,7 +2880,7 @@ class TestHookCaptureEvidence:
         )
         assert result.exit_code == 0
 
-        orphan_file = tmp_path / ".fakoli-state" / ".evidence-buffer" / "orphan.json"
+        orphan_file = tmp_path / ".anvil" / ".evidence-buffer" / "orphan.json"
         assert orphan_file.exists(), "orphan.json not written"
         content = orphan_file.read_text(encoding="utf-8")
         assert "pytest" in content
@@ -3030,7 +3030,7 @@ class TestUseLlmRequiresApiKey:
 class TestUseLlmRecordedProvider:
     """End-to-end CLI invocations with a RecordedLLMProvider injected.
 
-    We monkeypatch ``fakoli_state.cli.plan._resolve_llm_provider`` to return
+    We monkeypatch ``anvil.cli.plan._resolve_llm_provider`` to return
     a pre-populated ``RecordedLLMProvider`` so the CLI executes the full
     --use-llm code path without touching the network or the env var check.
     """
@@ -3043,7 +3043,7 @@ class TestUseLlmRecordedProvider:
         """Replace _resolve_llm_provider with one that returns ``provider``."""
         import importlib
 
-        plan_module = importlib.import_module("fakoli_state.cli.plan")
+        plan_module = importlib.import_module("anvil.cli.plan")
 
         def fake_resolve(use_llm: bool, config=None):  # type: ignore[no-untyped-def]
             return provider_factory() if use_llm else None
@@ -3054,8 +3054,8 @@ class TestUseLlmRecordedProvider:
         self, tmp_path: Path, monkeypatch  # type: ignore[no-untyped-def]
     ) -> None:
         """plan --use-llm with a recorded provider enriches short descriptions."""
-        from fakoli_state.planning.llm import LLMResponse, RecordedLLMProvider
-        from fakoli_state.planning.template import (
+        from anvil.planning.llm import LLMResponse, RecordedLLMProvider
+        from anvil.planning.template import (
             _DESCRIPTION_ENRICH_SYSTEM_PROMPT,
         )
 
@@ -3101,7 +3101,7 @@ Tiny body.
         )
         # Phase 9 C2: record_key includes tuning args; pass the engine's
         # _DESCRIPTION_ENRICH_MAX_TOKENS so the recorded key matches.
-        from fakoli_state.planning.template import _DESCRIPTION_ENRICH_MAX_TOKENS
+        from anvil.planning.template import _DESCRIPTION_ENRICH_MAX_TOKENS
         key = RecordedLLMProvider.record_key(
             _DESCRIPTION_ENRICH_SYSTEM_PROMPT,
             user_payload,
@@ -3129,10 +3129,10 @@ Tiny body.
 
         # The enriched description landed in the backend. `show` doesn't print
         # description, so query the backend directly to verify augmentation.
-        from fakoli_state.clock import SystemClock
-        from fakoli_state.state.sqlite import SqliteBackend
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
 
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         backend = SqliteBackend(
             db_path=str(state_dir / "state.db"),
             events_path=str(state_dir / "events.jsonl"),
@@ -3152,7 +3152,7 @@ Tiny body.
         self, tmp_path: Path, monkeypatch  # type: ignore[no-untyped-def]
     ) -> None:
         """score --use-llm produces a Score whose explanation contains the LLM text."""
-        from fakoli_state.planning.llm import LLMResponse
+        from anvil.planning.llm import LLMResponse
 
         # We don't know the task body in advance; build a provider that
         # returns the same canned response for ANY key.  Subclass to override
@@ -3201,7 +3201,7 @@ Tiny body.
         self, tmp_path: Path, monkeypatch  # type: ignore[no-untyped-def]
     ) -> None:
         """expand --use-llm prints proposal blocks for a high-complexity task."""
-        from fakoli_state.planning.llm import LLMResponse
+        from anvil.planning.llm import LLMResponse
 
         canned_proposals = [
             {
@@ -3314,7 +3314,7 @@ This is a refactor that touches architecture across many modules.
 
         import importlib
 
-        plan_module = importlib.import_module("fakoli_state.cli.plan")
+        plan_module = importlib.import_module("anvil.cli.plan")
 
         monkeypatch.setattr(plan_module, "_resolve_llm_provider", fake_resolve)
 
@@ -3458,7 +3458,7 @@ class TestPlanOrphanPrune:
     def _list_task_ids(self, tmp_path: Path) -> set[str]:
         """Read task IDs straight from state.db (CLI 'list' adds formatting)."""
         import sqlite3
-        db = tmp_path / ".fakoli-state" / "state.db"
+        db = tmp_path / ".anvil" / "state.db"
         with sqlite3.connect(str(db)) as conn:
             return {r[0] for r in conn.execute("SELECT id FROM tasks")}
 
@@ -3470,7 +3470,7 @@ class TestPlanOrphanPrune:
         a multi-line setup that obscures what the test actually asserts.
         """
         import sqlite3
-        db = tmp_path / ".fakoli-state" / "state.db"
+        db = tmp_path / ".anvil" / "state.db"
         with sqlite3.connect(str(db)) as conn:
             conn.execute(
                 "UPDATE tasks SET status = ? WHERE id = ?", (status, task_id)
@@ -3562,12 +3562,12 @@ class TestPlanOrphanPrune:
 
 
 class TestReplayCommand:
-    """Tests for `fakoli-state replay --from-events <events.jsonl> --into <db>`."""
+    """Tests for `anvil replay --from-events <events.jsonl> --into <db>`."""
 
     def _init_project(self, tmp_path: Path) -> Path:
-        """Run fakoli-state init in tmp_path and return the .fakoli-state dir."""
+        """Run anvil init in tmp_path and return the .anvil dir."""
         _do_init(tmp_path, name="Replay Test Project")
-        return tmp_path / ".fakoli-state"
+        return tmp_path / ".anvil"
 
     def test_replay_happy_path_into_scratch_db(self, tmp_path: Path) -> None:
         """Successful replay into a temp path exits 0 and creates the target db."""
@@ -3655,10 +3655,10 @@ class TestReplayCommand:
 
 
 def _doctor_open_backend(tmp_path: Path):  # type: ignore[no-untyped-def]
-    """Open an initialized backend rooted at tmp_path's .fakoli-state/."""
-    from fakoli_state.cli._helpers import _open_backend
+    """Open an initialized backend rooted at tmp_path's .anvil/."""
+    from anvil.cli._helpers import _open_backend
 
-    return _open_backend(tmp_path / ".fakoli-state")
+    return _open_backend(tmp_path / ".anvil")
 
 
 def _doctor_seed_ready_task(
@@ -3667,7 +3667,7 @@ def _doctor_seed_ready_task(
     """Seed a feature + a ready task (precursor for a claim)."""
     import datetime as _dt
 
-    from fakoli_state.state.models import EventDraft
+    from anvil.state.models import EventDraft
 
     now = _dt.datetime(2026, 5, 25, 12, 0, 0, tzinfo=_dt.UTC)
     b = _doctor_open_backend(tmp_path)
@@ -3706,7 +3706,7 @@ def _doctor_seed_stale_claim(
     """Insert an active claim whose lease already expired (stale)."""
     import datetime as _dt
 
-    from fakoli_state.state.models import EventDraft
+    from anvil.state.models import EventDraft
 
     now = _dt.datetime(2026, 5, 25, 12, 0, 0, tzinfo=_dt.UTC)
     b = _doctor_open_backend(tmp_path)
@@ -3731,7 +3731,7 @@ def _doctor_seed_stale_claim(
 
 def _doctor_stamp_user_version(tmp_path: Path, version: int) -> None:
     """Force PRAGMA user_version on the project's state.db (out of band)."""
-    conn = sqlite3.connect(str(tmp_path / ".fakoli-state" / "state.db"))
+    conn = sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
     try:
         conn.execute(f"PRAGMA user_version = {version}")
         conn.commit()
@@ -3771,7 +3771,7 @@ class TestDoctorHealthy:
 
     def test_doctor_reports_schema_and_lease_values(self, tmp_path: Path) -> None:
         """The state_db and config findings carry schema + lease/heartbeat."""
-        from fakoli_state.state.schema import get_schema_version
+        from anvil.state.schema import get_schema_version
 
         _do_init(tmp_path)
         env = _doctor_json(_invoke_cmd(tmp_path, ["doctor", "--json"]))
@@ -3892,7 +3892,7 @@ class TestDoctorStateRootEnv:
     def test_doctor_honors_state_root_env(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """FAKOLI_STATE_ROOT points doctor at the project from elsewhere."""
+        """ANVIL_ROOT points doctor at the project from elsewhere."""
         proj = tmp_path / "proj"
         elsewhere = tmp_path / "elsewhere"
         proj.mkdir()
@@ -3900,7 +3900,7 @@ class TestDoctorStateRootEnv:
         _do_init(proj)
 
         monkeypatch.chdir(elsewhere)
-        monkeypatch.setenv("FAKOLI_STATE_ROOT", str(proj))
+        monkeypatch.setenv("ANVIL_ROOT", str(proj))
         result = runner.invoke(app, ["doctor", "--json"], catch_exceptions=False)
         assert result.exit_code == 0, result.output
         env = json.loads(result.stdout.strip())
@@ -3909,11 +3909,11 @@ class TestDoctorStateRootEnv:
     def test_doctor_state_root_invalid_json_envelope(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """A FAKOLI_STATE_ROOT with no .fakoli-state/ → parseable error envelope."""
+        """A ANVIL_ROOT with no .anvil/ → parseable error envelope."""
         empty = tmp_path / "empty"
         empty.mkdir()
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("FAKOLI_STATE_ROOT", str(empty))
+        monkeypatch.setenv("ANVIL_ROOT", str(empty))
         result = runner.invoke(app, ["doctor", "--json"], catch_exceptions=False)
         assert result.exit_code != 0
         env = json.loads(result.stdout.strip())
@@ -3941,7 +3941,7 @@ def _seed_graph_tasks(tmp_path: Path) -> None:
     making the rendered diagram byte-deterministic for assertions.
     """
     _do_init(tmp_path, name="Graph Test Project")
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "INSERT OR IGNORE INTO features "
@@ -3971,7 +3971,7 @@ def _seed_graph_tasks(tmp_path: Path) -> None:
 
 
 class TestGraphMermaid:
-    """``fakoli-state graph --format mermaid`` (backlog T019)."""
+    """``anvil graph --format mermaid`` (backlog T019)."""
 
     def test_graph_mermaid_contains_expected_edges_and_statuses(
         self, tmp_path: Path

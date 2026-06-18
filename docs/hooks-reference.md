@@ -1,11 +1,11 @@
 # Hooks reference
 
-> fakoli-state ships 4 hooks that detect project state, enforce claim
+> anvil ships 4 hooks that detect project state, enforce claim
 > discipline, record file changes, and buffer verification-command output as
 > evidence. All hooks are **non-blocking** by design — warnings only, never
 > errors. Hooks are wired via [`hooks/hooks.json`](../hooks/hooks.json) and
-> shell out to `fakoli-state hook ...` subcommands implemented in
-> [`bin/src/fakoli_state/cli/hooks.py`](../bin/src/fakoli_state/cli/hooks.py).
+> shell out to `anvil hook ...` subcommands implemented in
+> [`bin/src/anvil/cli/hooks.py`](../bin/src/anvil/cli/hooks.py).
 
 ---
 
@@ -24,7 +24,7 @@ rejected.
    or silently swallowed — they are never propagated as a non-zero status
    to Claude Code.
 3. **Wrap CLI calls with `|| true`.** When the script shells out to
-   `fakoli-state hook ...`, the call is followed by `|| true` (or the exit
+   `anvil hook ...`, the call is followed by `|| true` (or the exit
    code is captured into a variable that the script then ignores). The
    Python sub-app itself follows the same discipline: every command in
    `cli/hooks.py` wraps its body in `try/except Exception: pass` and ends
@@ -49,7 +49,7 @@ the warning during review, the `events.jsonl` row supports post-hoc
 conflict detection, and the agent keeps moving.
 
 The same principle applies to the CLI degradation path. When the
-`fakoli-state` binary is missing or its `hook` sub-app returns non-zero
+`anvil` binary is missing or its `hook` sub-app returns non-zero
 (database locked, subcommand not yet implemented during a phased
 rollout), the script falls back to a direct file write or silent skip —
 the session is never broken because a backing service is unavailable.
@@ -68,7 +68,7 @@ The four entries are declared in [`hooks/hooks.json`](../hooks/hooks.json):
 | `PostToolUse` | `Bash` | [`capture-evidence.sh`](../hooks/capture-evidence.sh) | 5s |
 
 Each script receives the Claude Code hook payload as JSON on stdin and
-addresses the project state at `${CLAUDE_PROJECT_DIR:-$PWD}/.fakoli-state/`.
+addresses the project state at `${CLAUDE_PROJECT_DIR:-$PWD}/.anvil/`.
 
 ---
 
@@ -83,19 +83,19 @@ one-line state banner to stderr. The banner becomes visible to the agent
 as part of the session-start context.
 
 **Banner format (stderr).**
-- If `.fakoli-state/` is absent:
-  > `[fakoli-state] not initialized in this project — run \`fakoli-state init\` to start`
-- If `.fakoli-state/` exists and the CLI is available:
-  > `[fakoli-state] Language: Python | active-claims:2 ready-tasks:7 blockers:0 prd-status:approved`
-- If `.fakoli-state/` exists but the CLI is missing or returns non-zero:
-  > `[fakoli-state] Language: Python | state present, CLI not available — install fakoli-state bin to enable status`
+- If `.anvil/` is absent:
+  > `[anvil] not initialized in this project — run \`anvil init\` to start`
+- If `.anvil/` exists and the CLI is available:
+  > `[anvil] Language: Python | active-claims:2 ready-tasks:7 blockers:0 prd-status:approved`
+- If `.anvil/` exists but the CLI is missing or returns non-zero:
+  > `[anvil] Language: Python | state present, CLI not available — install anvil bin to enable status`
 
 **Side effects.** None. Read-only banner.
 
 **Performance.** The script header targets <1s. In practice the SessionStart
 event fires once per session, so this is the loosest of the four budgets.
 
-**CLI call.** `fakoli-state status --hook-format` — emits a single line in
+**CLI call.** `anvil status --hook-format` — emits a single line in
 the form `active-claims:N ready-tasks:N blockers:N prd-status:STATUS`.
 
 **Source.** [`hooks/detect-state.sh`](../hooks/detect-state.sh).
@@ -116,26 +116,26 @@ silent.
 
 **Skip conditions (silent).** The script exits 0 with no output when any of
 the following hold:
-- `.fakoli-state/` does not exist in the cwd.
+- `.anvil/` does not exist in the cwd.
 - The payload contains no file path.
 - The file is an absolute path outside the project tree (not under `pwd`).
 - The CLI binary is missing or not executable.
 
 **Warning format (stderr).** When a conflict is detected:
-> `[fakoli-state:check-claim] WARNING: file 'src/foo.py' is in the scope of claim 'C00042' owned by 'session-bbb', not 'session-aaa'.`
+> `[anvil:check-claim] WARNING: file 'src/foo.py' is in the scope of claim 'C00042' owned by 'session-bbb', not 'session-aaa'.`
 
 **Side effects.** None — the CLI subcommand is read-only. It does **not**
 append an event to `events.jsonl`; the audit signal lives only in the
 agent's terminal output for this PR's check-claim path.
 
 **Performance.** Header targets <200ms. The hot path is the shell-out to
-`fakoli-state hook check-claim`, which opens SQLite, calls
+`anvil hook check-claim`, which opens SQLite, calls
 `list_active_claims()`, and closes. Phase 11 backlog item P11-HK-S1 tracks
 consolidating these per-call sqlite spawns.
 
-**CLI call.** `fakoli-state hook check-claim --file PATH --actor ACTOR`
+**CLI call.** `anvil hook check-claim --file PATH --actor ACTOR`
 (defined in
-[`bin/src/fakoli_state/cli/hooks.py`](../bin/src/fakoli_state/cli/hooks.py)).
+[`bin/src/anvil/cli/hooks.py`](../bin/src/anvil/cli/hooks.py)).
 
 **Source.** [`hooks/check-claim.sh`](../hooks/check-claim.sh).
 
@@ -151,11 +151,11 @@ conflict-detection and audit layers with real per-file write data.
 `.notebook_path`), `.tool_name`, and `.session_id`.
 
 **Skip conditions (silent).** Exits 0 with no output when:
-- `.fakoli-state/` does not exist.
+- `.anvil/` does not exist.
 - No file path can be extracted from the payload.
 
 **Two-tier write strategy.**
-1. **Preferred path.** Shell out to `fakoli-state hook record-file-change
+1. **Preferred path.** Shell out to `anvil hook record-file-change
    --file PATH --tool TOOL --actor ACTOR`. The subcommand opens a
    `SqliteBackend`, builds an `Event` with `action="file_changed"`,
    `target_kind="file"`, `target_id=<path>`, calls `backend.apply_event`
@@ -181,9 +181,9 @@ tracks adding `flock` to harden concurrent appends.
 **Purpose.** After every Bash tool call, check whether the command matches
 a verification pattern (substring match against a hardcoded set). If yes,
 capture `stdout` / `stderr` / `exit_code` into the active claim's evidence
-buffer at `.fakoli-state/.evidence-buffer/<claim-id>.json`. If no claim is
+buffer at `.anvil/.evidence-buffer/<claim-id>.json`. If no claim is
 held by the actor, the record lands in `orphan.json` and can be re-attached
-later via `fakoli-state submit TASK_ID --output-file <FILE>`.
+later via `anvil submit TASK_ID --output-file <FILE>`.
 
 **Verification matcher (hardcoded, substring match).**
 - `pytest`
@@ -211,7 +211,7 @@ characters in the captured record. See
 schema and the `submit --output-file` recovery path.
 
 **Two-tier write strategy.**
-1. **Preferred path.** Shell out to `fakoli-state hook capture-evidence
+1. **Preferred path.** Shell out to `anvil hook capture-evidence
    --command CMD --exit-code N --stdout-file F --stderr-file F --actor
    ACTOR`. The subcommand looks up the actor's active claim in `state.db`
    and writes the record to `<claim-id>.json` (or `orphan.json` if no
@@ -222,8 +222,8 @@ schema and the `submit --output-file` recovery path.
    enough to honour the <200ms budget, so it always writes to orphan; the
    user re-attaches it later via `submit --output-file`.
 
-**Side effects.** Appends one line to `.fakoli-state/.evidence-buffer/<claim-id>.json`
-or `.fakoli-state/.evidence-buffer/orphan.json`.
+**Side effects.** Appends one line to `.anvil/.evidence-buffer/<claim-id>.json`
+or `.anvil/.evidence-buffer/orphan.json`.
 
 **Performance.** Header targets <200ms.
 
@@ -243,7 +243,7 @@ or `.fakoli-state/.evidence-buffer/orphan.json`.
   `ls -la $CLAUDE_PLUGIN_ROOT/hooks/`.
 - Run the script manually to see its output and exit status:
   `bash $CLAUDE_PLUGIN_ROOT/hooks/<script>.sh < /dev/null`.
-- Confirm `.fakoli-state/` exists in your cwd — the
+- Confirm `.anvil/` exists in your cwd — the
   `PreToolUse` / `PostToolUse` hooks fast-path-exit 0 when it is absent.
 
 ### I am getting noisy claim warnings
@@ -270,19 +270,19 @@ Checks:
 - Run a command whose string contains one of the matcher substrings.
   `uv run pytest` matches (`pytest` substring). `make test` does not.
 - Confirm the actor has an active claim. Without one, the record lands in
-  `.fakoli-state/.evidence-buffer/orphan.json` rather than the
+  `.anvil/.evidence-buffer/orphan.json` rather than the
   per-claim file.
-- Inspect `.fakoli-state/.evidence-buffer/` for any `*.json` files.
+- Inspect `.anvil/.evidence-buffer/` for any `*.json` files.
 - For recovery from `orphan.json`, see
   [`docs/evidence-buffer.md`](evidence-buffer.md) and use
-  `fakoli-state submit TASK_ID --output-file
-  .fakoli-state/.evidence-buffer/orphan.json`.
+  `anvil submit TASK_ID --output-file
+  .anvil/.evidence-buffer/orphan.json`.
 
 ### A hook is too slow
 
 Per the non-blocking contract, scripts target <200ms each. The dominant
 cost on `check-claim` and `record-file-change` is the python sqlite
-connection open inside `fakoli-state hook ...`. Two backlog items track
+connection open inside `anvil hook ...`. Two backlog items track
 this:
 
 - **P11-HK-S1** — consolidate sqlite spawns across the hook sub-app.
@@ -296,7 +296,7 @@ consumed-and-cleared by `submit`.
 
 ### Temporarily disable a hook
 
-The hook scripts do not currently read any `FAKOLI_STATE_*` env-var
+The hook scripts do not currently read any `ANVIL_*` env-var
 override. To disable a hook:
 
 - **Comment its entry out of `hooks.json`** (and restart the session so
@@ -305,7 +305,7 @@ override. To disable a hook:
   `mv hooks/check-claim.sh hooks/check-claim.sh.disabled`. The bash
   invocation in `hooks.json` then fails to find the script and the
   Claude Code runtime treats the entry as a no-op.
-- **Or remove `.fakoli-state/`** from the project root entirely. Every
+- **Or remove `.anvil/`** from the project root entirely. Every
   hook fast-paths to `exit 0` when the state directory is missing, so
   this turns the whole plugin into a no-op.
 
@@ -322,5 +322,5 @@ existing levers above are the supported workflow today.
   path used by `capture-evidence.sh`.
 - [`hooks/hooks.json`](../hooks/hooks.json) — the source of truth for
   event-to-script wiring.
-- [`bin/src/fakoli_state/cli/hooks.py`](../bin/src/fakoli_state/cli/hooks.py) —
-  the three `fakoli-state hook ...` subcommands the scripts shell into.
+- [`bin/src/anvil/cli/hooks.py`](../bin/src/anvil/cli/hooks.py) —
+  the three `anvil hook ...` subcommands the scripts shell into.

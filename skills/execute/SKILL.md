@@ -1,6 +1,6 @@
 ---
 name: execute
-description: Run the agentic execution loop on a claimed fakoli-state task — fetch the work packet, do the work, submit completion evidence. Use this skill when an agent has just claimed a task and needs to execute it end-to-end without juggling individual CLI commands.
+description: Run the agentic execution loop on a claimed anvil task — fetch the work packet, do the work, submit completion evidence. Use this skill when an agent has just claimed a task and needs to execute it end-to-end without juggling individual CLI commands.
 ---
 
 # Execute — Claim to Submit in One Loop
@@ -11,11 +11,11 @@ Carry a `ready` task all the way to `needs_review`: fetch the work packet, read 
 
 ## When to Use
 
-- After `fakoli-state claim TASK_ID` has succeeded — claim ID and branch are in hand.
+- After `anvil claim TASK_ID` has succeeded — claim ID and branch are in hand.
 - When `fakoli-flow:execute` is NOT installed. When it IS installed, prefer that; `fakoli-flow:execute` wraps this skill with wave-based dispatch, critic gates between waves, and coordinated submit timing.
 - For solo execution: one agent, one task, one branch, straight to submit.
 
-**Do not use this skill to inspect the queue without taking work** — use `/fakoli-state:state-ops`. Do not use it to make the ship decision on completed tasks — that is `/fakoli-state:finish`.
+**Do not use this skill to inspect the queue without taking work** — use `/anvil:state-ops`. Do not use it to make the ship decision on completed tasks — that is `/anvil:finish`.
 
 ---
 
@@ -24,18 +24,18 @@ Carry a `ready` task all the way to `needs_review`: fetch the work packet, read 
 An active claim by the current actor on `TASK_ID`. Verify before proceeding:
 
 ```bash
-fakoli-state list --status claimed
+anvil list --status claimed
 ```
 
-If the task does not appear, claim it first via `/fakoli-state:claim`. Phase 5 commands used in this skill:
+If the task does not appear, claim it first via `/anvil:claim`. Phase 5 commands used in this skill:
 
 | Command | Phase | Status |
 |---|---|---|
-| `fakoli-state packet TASK_ID` | Phase 5 | available |
-| `fakoli-state submit TASK_ID` | Phase 5 | available |
-| `fakoli-state apply TASK_ID` | Phase 5 | available (human-only) |
-| `fakoli-state renew CLAIM_ID` | Phase 4 | available |
-| `fakoli-state release CLAIM_ID` | Phase 4 | available |
+| `anvil packet TASK_ID` | Phase 5 | available |
+| `anvil submit TASK_ID` | Phase 5 | available |
+| `anvil apply TASK_ID` | Phase 5 | available (human-only) |
+| `anvil renew CLAIM_ID` | Phase 4 | available |
+| `anvil release CLAIM_ID` | Phase 4 | available |
 
 ---
 
@@ -57,23 +57,23 @@ The grep pattern is intentionally unanchored. Actual `claude plugin list` output
 ### Step 1 — Fetch the work packet
 
 ```bash
-fakoli-state packet TASK_ID
+anvil packet TASK_ID
 ```
 
 Example:
 
 ```bash
-fakoli-state packet T012
+anvil packet T012
 ```
 
-Writes `.fakoli-state/packets/T012.md` with the full operating context for this task: intent, acceptance criteria, likely files in scope, prior decisions, verification commands, and the output contract. The packet is a derived view regenerated from canonical state — it reflects the current snapshot of `state.db`, not a cached copy.
+Writes `.anvil/packets/T012.md` with the full operating context for this task: intent, acceptance criteria, likely files in scope, prior decisions, verification commands, and the output contract. The packet is a derived view regenerated from canonical state — it reflects the current snapshot of `state.db`, not a cached copy.
 
 Read the packet immediately after fetching it. The acceptance criteria in the packet are the contract that `submit` validates against. Skipping the packet and working from memory or from `show TASK_ID` output risks submitting evidence that misses a required item.
 
 To get the JSON form instead (useful when another tool or agent consumes the packet programmatically):
 
 ```bash
-fakoli-state packet T012 --format json
+anvil packet T012 --format json
 ```
 
 ---
@@ -83,11 +83,11 @@ fakoli-state packet T012 --format json
 Before touching any file, confirm:
 
 1. The acceptance criteria are concrete and independently verifiable — not aspirational descriptions.
-2. The `likely_files` list in the packet does not overlap with files another active claim owns. If overlap exists, resolve it via `/fakoli-state:state-ops` before editing.
+2. The `likely_files` list in the packet does not overlap with files another active claim owns. If overlap exists, resolve it via `/anvil:state-ops` before editing.
 3. All acceptance criteria are unambiguous. If any are unclear, release the claim now rather than discovering the problem at submit time:
 
 ```bash
-fakoli-state release CLAIM_ID --reason "acceptance criteria ambiguous on T012 item 3"
+anvil release CLAIM_ID --reason "acceptance criteria ambiguous on T012 item 3"
 ```
 
 Ask the user to clarify, update the PRD, re-parse, and re-claim once the criteria are concrete.
@@ -153,7 +153,7 @@ Whether the work is done by you-the-agent or a dispatched crew specialist, the s
 agent/t012-add-retry-backoff
 ```
 
-(Or whatever branch prefix the project configured — v1.15.0 made `branch_prefix` host-project-configurable via `.fakoli-state/config.yaml`. The default is `agent/`.)
+(Or whatever branch prefix the project configured — v1.15.0 made `branch_prefix` host-project-configurable via `.anvil/config.yaml`. The default is `agent/`.)
 
 Incremental commits create a recoverable trail. If the agent session is interrupted, the commits survive on the branch and the work does not need to restart from zero.
 
@@ -170,13 +170,13 @@ Two hooks run automatically during this step — no manual action required:
 The default lease is 60 minutes. For sessions longer than 55 minutes, renew before the lease expires:
 
 ```bash
-fakoli-state renew CLAIM_ID
+anvil renew CLAIM_ID
 ```
 
 Example:
 
 ```bash
-fakoli-state renew C004
+anvil renew C004
 ```
 
 Renewing extends `lease_expires_at` by another 60 minutes from now and updates `last_heartbeat_at`. Run this every 5 minutes during active work — set a timer at the start of a long session. A missed heartbeat does not immediately lose the claim; the stale detector fires on the next CLI or MCP operation. Once the lease has expired, the task returns to `ready` and another agent can claim it mid-work.
@@ -188,7 +188,7 @@ Renewed C004: lease extended to 2026-05-25T14:35:00Z
 Only the owning actor can renew. To check remaining lease time without renewing:
 
 ```bash
-fakoli-state list --status claimed
+anvil list --status claimed
 ```
 
 The output includes `lease_expires_at` for each active claim.
@@ -214,15 +214,15 @@ For tasks with expensive verification (integration tests, linting over a full co
 ### Step 6 — Submit the completion
 
 ```bash
-fakoli-state submit TASK_ID --commands "pytest -x" --files-changed src/foo.py,src/bar.py
+anvil submit TASK_ID --commands "pytest -x" --files-changed src/foo.py,src/bar.py
 ```
 
 Additional flags:
 
 ```bash
-fakoli-state submit T012 \
+anvil submit T012 \
   --commands "pytest -x,ruff check src/" \
-  --files-changed src/fakoli_state/claims/manager.py,src/fakoli_state/cli.py \
+  --files-changed src/anvil/claims/manager.py,src/anvil/cli.py \
   --output-file /tmp/pytest-out.log \
   --pr-url https://github.com/org/repo/pull/42
 ```
@@ -245,24 +245,24 @@ Files:     2 changed
 Status:    needs_review
 ```
 
-Review the printed evidence summary before walking away. If a field looks wrong (wrong file list, missing command), inspect with `fakoli-state show T012` and coordinate with the human reviewer before they invoke `apply`.
+Review the printed evidence summary before walking away. If a field looks wrong (wrong file list, missing command), inspect with `anvil show T012` and coordinate with the human reviewer before they invoke `apply`.
 
 ---
 
 ### Step 7 — Wait for apply
 
-`fakoli-state apply TASK_ID` is a human-only step. The task stays in `needs_review` until the human reviewer invokes it. The `/fakoli-state:finish` skill drives that decision — surfacing the evidence, picking a disposition (accept, reject, hold, discard), and running `apply`.
+`anvil apply TASK_ID` is a human-only step. The task stays in `needs_review` until the human reviewer invokes it. The `/anvil:finish` skill drives that decision — surfacing the evidence, picking a disposition (accept, reject, hold, discard), and running `apply`.
 
 Until `apply` is called:
 
 - The branch persists on the claim's git branch.
-- The task is visible in `fakoli-state list --status needs_review`.
+- The task is visible in `anvil list --status needs_review`.
 - No other agent can re-claim the task.
 
 No action required here. Proceed to the next task in the queue:
 
 ```bash
-fakoli-state next
+anvil next
 ```
 
 ---
@@ -274,36 +274,36 @@ fakoli-state next
 **Claim went stale mid-work**: the task has returned to `ready`. Re-claim it:
 
 ```bash
-fakoli-state claim T012
+anvil claim T012
 ```
 
-The branch's commits are preserved on `agent/t012-<slug>`. Continue work on the same branch; the new claim ID replaces the expired one. If another agent claimed the task in the window between expiry and re-claim, coordinate via `fakoli-state show T012` to check the current holder.
+The branch's commits are preserved on `agent/t012-<slug>`. Continue work on the same branch; the new claim ID replaces the expired one. If another agent claimed the task in the window between expiry and re-claim, coordinate via `anvil show T012` to check the current holder.
 
 **Need to abandon**: release the claim so the task returns to the pool:
 
 ```bash
-fakoli-state release CLAIM_ID --reason "blocked on upstream T009 — not merged yet"
+anvil release CLAIM_ID --reason "blocked on upstream T009 — not merged yet"
 ```
 
-The `--reason` string is stored in the Claim row and logged in `events.jsonl`. Another agent picks up the task via `fakoli-state next`.
+The `--reason` string is stored in the Claim row and logged in `events.jsonl`. Another agent picks up the task via `anvil next`.
 
 **Packet is stale**: if the PRD was revised after the packet was generated, re-fetch:
 
 ```bash
-fakoli-state packet T012
+anvil packet T012
 ```
 
-The command overwrites the previous `.fakoli-state/packets/T012.md`. Re-read the packet before continuing.
+The command overwrites the previous `.anvil/packets/T012.md`. Re-read the packet before continuing.
 
 ---
 
 ## Common Pitfalls
 
-- **Working from memory instead of the packet.** `fakoli-state show TASK_ID` is a summary; the packet is the full operating context. Always read the packet before writing code.
+- **Working from memory instead of the packet.** `anvil show TASK_ID` is a summary; the packet is the full operating context. Always read the packet before writing code.
 - **Submitting without running all verification commands.** The Review engine checks completeness at `apply` time. Submitting partial evidence delays the ship decision and may require reopening the task.
 - **Skipping heartbeats on sessions longer than 55 minutes.** Leases expire silently. Set a timer at session start and renew every 5 minutes.
 - **Manually tracking files changed.** The `record-file-change.sh` hook tracks this automatically from every Edit, Write, and NotebookEdit call. Pass the hook-tracked list to `--files-changed`; do not reconstruct it by hand.
-- **Editing `state.db` directly to fix a stuck claim.** Use `fakoli-state release --force` instead. Direct edits bypass `events.jsonl` and produce state that cannot be replayed or audited.
+- **Editing `state.db` directly to fix a stuck claim.** Use `anvil release --force` instead. Direct edits bypass `events.jsonl` and produce state that cannot be replayed or audited.
 
 ---
 
@@ -311,13 +311,13 @@ The command overwrites the previous `.fakoli-state/packets/T012.md`. Re-read the
 
 | Position | Skill |
 |---|---|
-| Before this skill | `/fakoli-state:claim` — active claim required before execute starts |
-| If scope is ambiguous before step 3 | Return to `/fakoli-state:state-ops` to inspect conflicts; resolve before editing |
-| If `complexity >= 4` at packet read | Return to `/fakoli-state:plan` — the task should have been expanded; release claim first |
-| After submit | `/fakoli-state:finish` drives the apply step and ship decision |
-| If task returns nothing from `next` after submit | `/fakoli-state:state-ops` to diagnose queue state |
+| Before this skill | `/anvil:claim` — active claim required before execute starts |
+| If scope is ambiguous before step 3 | Return to `/anvil:state-ops` to inspect conflicts; resolve before editing |
+| If `complexity >= 4` at packet read | Return to `/anvil:plan` — the task should have been expanded; release claim first |
+| After submit | `/anvil:finish` drives the apply step and ship decision |
+| If task returns nothing from `next` after submit | `/anvil:state-ops` to diagnose queue state |
 
-**When `fakoli-flow:execute` is installed:** that skill wraps this one. It reads `fakoli-state next`, calls `fakoli-state claim`, dispatches agents against non-overlapping tasks in parallel waves, gates waves with critic review, and coordinates submit timing. Solo agents use this skill directly; orchestrated agent teams use `fakoli-flow:execute`, which calls each step here in sequence for each wave.
+**When `fakoli-flow:execute` is installed:** that skill wraps this one. It reads `anvil next`, calls `anvil claim`, dispatches agents against non-overlapping tasks in parallel waves, gates waves with critic review, and coordinates submit timing. Solo agents use this skill directly; orchestrated agent teams use `fakoli-flow:execute`, which calls each step here in sequence for each wave.
 
 **When `fakoli-crew` is installed:** `welder` is the standard executor for integration tasks; `scout` claims research tasks. Each crew agent runs this skill's steps internally, tagged with `--actor fakoli-crew:welder` on claim. The execute loop is identical; the actor identity differs.
 
@@ -327,11 +327,11 @@ The command overwrites the previous `.fakoli-state/packets/T012.md`. Re-read the
 
 | Feature | Phase | Status |
 |---|---|---|
-| `fakoli-state packet TASK_ID` | Phase 5 | available |
-| `fakoli-state submit TASK_ID` | Phase 5 | available |
-| `fakoli-state apply TASK_ID` | Phase 5 | available (human-only) |
+| `anvil packet TASK_ID` | Phase 5 | available |
+| `anvil submit TASK_ID` | Phase 5 | available |
+| `anvil apply TASK_ID` | Phase 5 | available (human-only) |
 | `capture-evidence.sh` hook (PostToolUse Bash) | Phase 5 | available |
 | LLM-assisted self-review on submit | Phase 7 | pending |
 | MCP `generate_work_packet` (JSON form via MCP) | Phase 6 | pending |
-| `fakoli-state conflicts` (full conflict map) | Phase 5 | available |
+| `anvil conflicts` (full conflict map) | Phase 5 | available |
 | Per-file scope check refinement in `check-claim.sh` | Phase 5 | available — warns per claim's likely_files scope |

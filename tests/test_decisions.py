@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.planning.decisions.find_unresolved_decisions."""
+"""Tests for anvil.planning.decisions.find_unresolved_decisions."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import datetime
 
 import pytest
 
-from fakoli_state.clock import FrozenClock
-from fakoli_state.planning.decisions import (
+from anvil.clock import FrozenClock
+from anvil.planning.decisions import (
     DecisionKind,
     DecisionResolution,
     ResolutionError,
@@ -15,8 +15,8 @@ from fakoli_state.planning.decisions import (
     apply_decision_to_markdown,
     find_unresolved_decisions,
 )
-from fakoli_state.planning.template import parse_prd
-from fakoli_state.state.models import (
+from anvil.planning.template import parse_prd
+from anvil.state.models import (
     PRD,
     Score,
     Task,

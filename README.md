@@ -1,33 +1,39 @@
 <div align="center">
 
-![fakoli-state](assets/logo-256.png)
+![anvil](assets/logo-256.png)
 
-# fakoli-state
+# Anvil
 
-> fakoli-state turns rough ideas and PRDs into reviewed, lockable, evidence-backed work packets that humans and AI coding agents can execute in parallel without stepping on each other — the canonical project-state layer that fakoli-flow and fakoli-crew compose around.
+> **The system of record for agent teams.**
+
+> Durable, evidence-gated, lease-coordinated state that lets multiple AI coding agents work one project without colliding or lying about what's done.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Plugin Version](https://img.shields.io/badge/version-1.17.0-blue.svg)](.claude-plugin/plugin.json)
-[![Marketplace](https://img.shields.io/badge/marketplace-fakoli-purple.svg)](https://github.com/fakoli/fakoli-state)
+[![Plugin Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](.claude-plugin/plugin.json)
+[![Marketplace](https://img.shields.io/badge/marketplace-fakoli-purple.svg)](https://github.com/fakoli/anvil)
 [![Tests](https://img.shields.io/badge/tests-1103%20passing-brightgreen.svg)](tests)
 
 </div>
 
+> Anvil (formerly fakoli-state, extracted from the fakoli-plugins monorepo).
+
 ---
 
-## Why fakoli-state
+## Why Anvil
 
-fakoli-state is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite under `.fakoli-state/` and exposed through a CLI and an MCP server.
+Hammers come and go — the agents, the models, the editors. The anvil is what every blow lands on and what survives the work. Anvil is that fixed surface: the system of record agent teams forge against, not another hammer in the pile.
+
+Concretely, Anvil is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite under `.anvil/` and exposed through a CLI (`anvil`) and an MCP server.
 
 It is for developers running Claude Code, Codex, Cursor, OpenHands, or Copilot who need multiple agents (and multiple humans) to coordinate against the same plan without overwriting each other. Solo builders who want PRDs that survive sessions. Project leads who want truth that outlives any one chat.
 
-When an AI agent claims a task, that claim is an enforced database row with a lease and a heartbeat — not a convention in a markdown file that the next agent can silently overwrite.
+When an AI agent claims a task, that claim is an enforced database row with a lease and a heartbeat — not a convention in a markdown file that the next agent can silently overwrite. Completion is evidence-gated: an agent cannot mark work done without attaching the proof, so the record never lies about what shipped.
 
 ---
 
 ## The trinity
 
-fakoli-flow defines how work moves, fakoli-crew defines who does the work, and fakoli-state defines what is true. The three plugins compose: when all three are installed, `flow:execute` reads `fakoli-state next`, dispatches the right crew specialist, and submits evidence back to canonical state before the merge gate. When fakoli-state is absent, flow and crew fall back to their markdown-status conventions.
+fakoli-flow defines how work moves, fakoli-crew defines who does the work, and anvil defines what is true. The three plugins compose: when all three are installed, `flow:execute` reads `anvil next`, dispatches the right crew specialist, and submits evidence back to canonical state before the merge gate. When anvil is absent, flow and crew fall back to their markdown-status conventions.
 
 ---
 
@@ -57,64 +63,64 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ### Zero-to-next in one command
 
-`fakoli-state` is a standalone CLI — no `fakoli-flow`, `fakoli-crew`, or Claude
+`anvil` is a standalone CLI — no `fakoli-flow`, `fakoli-crew`, or Claude
 Code required. To see the whole loop end-to-end against a seeded sample project:
 
 ```bash
-fakoli-state init --with-sample
-# → scaffolds .fakoli-state/, writes a valid sample prd.md, and runs
+anvil init --with-sample
+# → scaffolds .anvil/, writes a valid sample prd.md, and runs
 #   parse → review → approve → plan → score → review tasks offline (no API key)
-fakoli-state next
+anvil next
 # → returns a ready task immediately — nothing else to author or run
 ```
 
-`--with-sample` is purely additive: plain `fakoli-state init` is unchanged and
-seeds nothing. Use the sample to learn the flow, then delete `.fakoli-state/`
+`--with-sample` is purely additive: plain `anvil init` is unchanged and
+seeds nothing. Use the sample to learn the flow, then delete `.anvil/`
 and run `init` for real on your own PRD as shown below.
 
 ### The full loop on your own PRD
 
 ```bash
 # 1. Scaffold per-project state
-fakoli-state init --name "My Project"
-# → creates .fakoli-state/{config.yaml,state.db,events.jsonl,packets/}
-# → next step: author your PRD at .fakoli-state/prd.md
+anvil init --name "My Project"
+# → creates .anvil/{config.yaml,state.db,events.jsonl,packets/}
+# → next step: author your PRD at .anvil/prd.md
 
 # 2. Author the PRD against the template (see docs/prd-template.md)
-$EDITOR .fakoli-state/prd.md
+$EDITOR .anvil/prd.md
 
 # 3. Parse, review, approve — the state machine requires draft → reviewed → approved
-fakoli-state prd parse
+anvil prd parse
 # → Parsed PRD: 4 requirements, 12 tasks staged for review
-fakoli-state prd review             # draft → reviewed
-fakoli-state prd review --approve   # reviewed → approved
+anvil prd review             # draft → reviewed
+anvil prd review --approve   # reviewed → approved
 
 # 4. Generate features and tasks; score across six dimensions
-fakoli-state plan
-fakoli-state score
+anvil plan
+anvil score
 # → tabular output: TaskID / Complexity / Parallel / CtxLoad / Blast / Review / Agent (1–5)
-fakoli-state review tasks
+anvil review tasks
 
 # 5. Pick the next ready task and claim it
-fakoli-state next
+anvil next
 # → T001 — "Wire orchestrator retry to DLQ" (ready, no conflicts)
-fakoli-state claim T001
+anvil claim T001
 # → Claim C001 active; branch agent/t001-<slug> created
 
 # 6. Get the work packet, do the work, submit evidence
-fakoli-state packet T001
-fakoli-state submit T001 \
+anvil packet T001
+anvil submit T001 \
     --commands "pytest tests/test_retry.py" \
     --files-changed src/orchestrator/retry.py
 
 # 7. Apply the review verdict — promotes needs_review → accepted → done
-fakoli-state apply T001 --approve
+anvil apply T001 --approve
 # → Task T001 applied; event task.applied recorded in events.jsonl
 ```
 
-> To break a complex task into subtasks, use `fakoli-state expand T001 --use-llm` (requires `ANTHROPIC_API_KEY`) or author `T001.1` / `T001.2` rows directly in `prd.md`. Full command reference forthcoming in [`docs/cli-reference.md`](docs/cli-reference.md).
+> To break a complex task into subtasks, use `anvil expand T001 --use-llm` (requires `ANTHROPIC_API_KEY`) or author `T001.1` / `T001.2` rows directly in `prd.md`. Full command reference forthcoming in [`docs/cli-reference.md`](docs/cli-reference.md).
 
-Every mutation appends to `.fakoli-state/events.jsonl`. Replaying the log from scratch against an empty database reconstructs `state.db` byte-for-byte — the audit guarantee Phase 2 ships and every subsequent phase preserves.
+Every mutation appends to `.anvil/events.jsonl`. Replaying the log from scratch against an empty database reconstructs `state.db` byte-for-byte — the audit guarantee Phase 2 ships and every subsequent phase preserves.
 
 ---
 
@@ -123,7 +129,7 @@ Every mutation appends to `.fakoli-state/events.jsonl`. Replaying the log from s
 | Layer | What it does |
 |---|---|
 | Skills | Workflow choreography — 8 skills: start-prd, prd, plan, claim, execute, finish, state-ops, resolve-decisions. Verification delegates to `fakoli-flow:verify` and `fakoli-crew:sentinel`. |
-| CLI (`fakoli-state`) | Pure state operations — CRUD, scoring, packet generation, sync |
+| CLI (`anvil`) | Pure state operations — CRUD, scoring, packet generation, sync |
 | MCP server | 22 agent-facing tools exposed via stdio to any MCP-compatible runtime |
 | Hooks | Enforce claim discipline, record file changes, capture test evidence |
 | State engine | SQLite backend + append-only JSONL event log (full replay guarantee) |
@@ -139,11 +145,11 @@ Full architecture and lifecycle diagrams: [`docs/architecture.md`](docs/architec
 
 ## Comparison vs alternatives
 
-| Wedge | fakoli-state | GitHub Issues / CCPM |
+| Wedge | anvil | GitHub Issues / CCPM |
 |---|---|---|
 | **Canonical state shape** | Pydantic v2 models in SQLite, validated at every transition | Free-form markdown in an issue body or a `.md` file |
 | **Claim / lock model** | `Claim` row with expiry + heartbeat; stale leases reaped on every call | Assignment-by-label or "I'll take this" in chat — no enforcement |
-| **Agent work packets** | `fakoli-state packet T012` renders exact intent + acceptance criteria + non-goals | Agent must summarize the whole issue thread or plan |
+| **Agent work packets** | `anvil packet T012` renders exact intent + acceptance criteria + non-goals | Agent must summarize the whole issue thread or plan |
 | **Task scoring** | Six dimensions: complexity, parallelizability, context load, blast radius, review risk, agent suitability | Single-axis story points (if any) |
 | **Runtime coupling** | Runtime-neutral: CLI + FastMCP stdio; any MCP client | Coupled to GitHub or to the CCPM markdown convention |
 
@@ -172,8 +178,8 @@ Source for the wedges: [`docs/_positioning.md`](docs/_positioning.md).
 ### As a Claude Code plugin (recommended)
 
 ```bash
-/plugin marketplace add fakoli/fakoli-state
-/plugin install fakoli-state@fakoli-state
+/plugin marketplace add fakoli/anvil
+/plugin install anvil@anvil
 ```
 
 Installs the plugin, registers the four hooks, wires the MCP server, and makes the five agents discoverable to Claude Code at next session start.
@@ -183,19 +189,19 @@ Installs the plugin, registers the four hooks, wires the MCP server, and makes t
 The Python engine, CLI, and MCP server are fully self-contained under `bin/` and need only [uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone https://github.com/fakoli/fakoli-state.git
-cd fakoli-state/bin
+git clone https://github.com/fakoli/anvil.git
+cd anvil/bin
 uv sync                     # materializes .venv and resolves deps
-uv run fakoli-state --help  # drive the CLI directly
+uv run anvil --help  # drive the CLI directly
 ```
 
-The wrapper scripts `bin/fakoli-state` and `bin/fakoli-state-mcp` shell out to `uv run`, so once synced you can also add this directory to your Claude Code plugin paths and use the MCP server (`.mcp.json`) as-is.
+The wrapper scripts `bin/anvil` and `bin/anvil-mcp` shell out to `uv run`, so once synced you can also add this directory to your Claude Code plugin paths and use the MCP server (`.mcp.json`) as-is.
 
 ### Install the full trinity
 
 ```bash
-/plugin marketplace add fakoli/fakoli-state
-/plugin install fakoli-state@fakoli-state
+/plugin marketplace add fakoli/anvil
+/plugin install anvil@anvil
 /plugin install fakoli-crew
 /plugin install fakoli-flow
 ```
@@ -204,19 +210,19 @@ The wrapper scripts `bin/fakoli-state` and `bin/fakoli-state-mcp` shell out to `
 
 ## Optional: integration with fakoli-flow and fakoli-crew
 
-> Everything in [Quick Start](#quick-start) runs on `fakoli-state` alone — no `fakoli-flow`, no `fakoli-crew`, no Claude Code. This section is **purely additive**: install the siblings only if you want orchestration on top. Nothing above degrades without them.
+> Everything in [Quick Start](#quick-start) runs on `anvil` alone — no `fakoli-flow`, no `fakoli-crew`, no Claude Code. This section is **purely additive**: install the siblings only if you want orchestration on top. Nothing above degrades without them.
 
-When both fakoli-state and fakoli-flow are installed, the flow pipeline upgrades automatically:
+When both anvil and fakoli-flow are installed, the flow pipeline upgrades automatically:
 
-- `flow:execute` detects fakoli-state, reads `fakoli-state next`, and calls `fakoli-state claim` before each wave. Status files are replaced by `fakoli-state submit`.
-- `flow:verify` calls `fakoli-state status` and dispatches the sentinel only on tasks with submitted evidence.
-- `flow:finish` calls `fakoli-state apply` per accepted task before the merge or PR.
+- `flow:execute` detects anvil, reads `anvil next`, and calls `anvil claim` before each wave. Status files are replaced by `anvil submit`.
+- `flow:verify` calls `anvil status` and dispatches the sentinel only on tasks with submitted evidence.
+- `flow:finish` calls `anvil apply` per accepted task before the merge or PR.
 
-When both fakoli-state and fakoli-crew are installed, all crew agents gain access to the `fakoli-state-mcp` MCP tool surface. The plugin-owned `agents/critic.md` and `agents/sentinel.md` defer to fakoli-crew specialists when detected.
+When both anvil and fakoli-crew are installed, all crew agents gain access to the `anvil-mcp` MCP tool surface. The plugin-owned `agents/critic.md` and `agents/sentinel.md` defer to fakoli-crew specialists when detected.
 
-When fakoli-state is absent, fakoli-flow and fakoli-crew continue to work via their existing markdown-status conventions. Integration is opt-in throughout.
+When anvil is absent, fakoli-flow and fakoli-crew continue to work via their existing markdown-status conventions. Integration is opt-in throughout.
 
-MCP exposes capabilities; plugins encode operating discipline. The MCP server ships 22 tools any agent can call, but skills, subagents, and hooks decide *when* to claim, *which* specialist runs, *what* evidence is required, and *how* the critic gate fires. fakoli-state is plugin-first and MCP-compatible, not MCP-only.
+MCP exposes capabilities; plugins encode operating discipline. The MCP server ships 22 tools any agent can call, but skills, subagents, and hooks decide *when* to claim, *which* specialist runs, *what* evidence is required, and *how* the critic gate fires. anvil is plugin-first and MCP-compatible, not MCP-only.
 
 ---
 
@@ -236,7 +242,7 @@ The Iron Rule (review agents never `Edit`/`Write`) is enforced at the `tools:` f
 
 ## Status
 
-fakoli-state shipped Phases 1–10 across v1.0.0 → v1.10.0. The Phase 10 plugin-dev audit closed every MUST FIX item; 57 SHOULD FIX / CONSIDER / NIT items are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md). v2.0 will add LinearIssuesProvider and MondayBoardsProvider, spec webhook-based sync, and the immediate-apply `*_applied` conflict-resolution variants — see [`docs/roadmap.md`](docs/roadmap.md).
+anvil shipped Phases 1–10 across v1.0.0 → v1.10.0. The Phase 10 plugin-dev audit closed every MUST FIX item; 57 SHOULD FIX / CONSIDER / NIT items are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md). v2.0 will add LinearIssuesProvider and MondayBoardsProvider, spec webhook-based sync, and the immediate-apply `*_applied` conflict-resolution variants — see [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
@@ -248,7 +254,7 @@ fakoli-state shipped Phases 1–10 across v1.0.0 → v1.10.0. The Phase 10 plugi
 
 **Optional**
 
-- Claude Code with plugin support — to run fakoli-state as a plugin rather than a bare CLI / MCP server.
+- Claude Code with plugin support — to run anvil as a plugin rather than a bare CLI / MCP server.
 - fakoli-flow — additive: enables wave-based pipeline orchestration over the same state.
 - fakoli-crew — additive: provides specialist subagents that flow dispatches.
 

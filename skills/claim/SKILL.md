@@ -1,6 +1,6 @@
 ---
 name: claim
-description: Acquire an exclusive lease on a fakoli-state task — pick from the ready queue, check for file conflicts, claim the task, and get a working git branch to commit into. Use this skill when ready to start work on an approved task.
+description: Acquire an exclusive lease on an anvil task — pick from the ready queue, check for file conflicts, claim the task, and get a working git branch to commit into. Use this skill when ready to start work on an approved task.
 ---
 
 # Claim — Acquire an Exclusive Lease
@@ -11,36 +11,36 @@ Turn a `ready` task into an active claim: a row in `state.db` with a 60-minute l
 
 ## When to Use
 
-- Starting work on a task after `/fakoli-state:plan` has produced a ready queue.
-- When `fakoli-flow:execute` dispatches an agent against a fakoli-state task — the claim step happens inside that dispatch.
+- Starting work on a task after `/anvil:plan` has produced a ready queue.
+- When `fakoli-flow:execute` dispatches an agent against an anvil task — the claim step happens inside that dispatch.
 - When `fakoli-crew:welder` picks up integration work, or `fakoli-crew:scout` picks up a research task — both land here before touching files.
-- When resuming after an interrupted session — check `fakoli-state status` first, then re-claim if the previous lease has expired and the task returned to `ready`.
+- When resuming after an interrupted session — check `anvil status` first, then re-claim if the previous lease has expired and the task returned to `ready`.
 - When coordinating parallel agents — each agent claims a separate task; `claim` enforces the conflict gate.
 
-**Do not use this skill to inspect the queue without taking work** — use `/fakoli-state:state-ops` for that. Do not use this skill to submit completed work — that is the Phase 5 `finish` skill.
+**Do not use this skill to inspect the queue without taking work** — use `/anvil:state-ops` for that. Do not use this skill to submit completed work — that is the Phase 5 `finish` skill.
 
 ---
 
 ## Prerequisites
 
-`.fakoli-state/state.db` must exist and the PRD must be in `reviewed` or `approved` status. Confirm before proceeding:
+`.anvil/state.db` must exist and the PRD must be in `reviewed` or `approved` status. Confirm before proceeding:
 
 ```bash
-fakoli-state status
+anvil status
 ```
 
-Look for `prd-status: approved`. The claim gate enforces this — `fakoli-state claim` raises `ClaimError` when `prd-status` is `draft` or `none`. If the PRD is not approved, proceed to `/fakoli-state:prd` first.
+Look for `prd-status: approved`. The claim gate enforces this — `anvil claim` raises `ClaimError` when `prd-status` is `draft` or `none`. If the PRD is not approved, proceed to `/anvil:prd` first.
 
 Phase 4 commands used in this skill:
 
 | Command | Phase | Status |
 |---|---|---|
-| `fakoli-state next` | Phase 4 | available |
-| `fakoli-state claim TASK_ID` | Phase 4 | available |
-| `fakoli-state release CLAIM_ID` | Phase 4 | available |
-| `fakoli-state renew CLAIM_ID` | Phase 4 | available |
-| `fakoli-state show TASK_ID` | Phase 3 | available |
-| `fakoli-state list --status ready` | Phase 3 | available |
+| `anvil next` | Phase 4 | available |
+| `anvil claim TASK_ID` | Phase 4 | available |
+| `anvil release CLAIM_ID` | Phase 4 | available |
+| `anvil renew CLAIM_ID` | Phase 4 | available |
+| `anvil show TASK_ID` | Phase 3 | available |
+| `anvil list --status ready` | Phase 3 | available |
 
 Git is optional. When a git repo is present in the project root, `claim` automatically creates the branch `agent/<task_id_lower>-<slug>`. Without git, claim still succeeds — the record is written to `state.db` and the branch field is left `null`.
 
@@ -56,33 +56,33 @@ Before running the standalone claim flow, run the explicit plugin check so the d
 claude plugin list 2>/dev/null | grep -q "fakoli-flow"
 ```
 
-- **Exit code 0** (`fakoli-flow` plugin present): prefer `/fakoli-flow:execute` for the wave-engine path. It reads `fakoli-state next`, calls `fakoli-state claim`, and dispatches the agent against the claimed task as part of a richer wave-based orchestration with critic gates between waves. The claim still appears in `state.db` — it is the same primitive, called from inside the flow. Branch on the user's existing workflow preferences when deciding whether to bridge.
+- **Exit code 0** (`fakoli-flow` plugin present): prefer `/fakoli-flow:execute` for the wave-engine path. It reads `anvil next`, calls `anvil claim`, and dispatches the agent against the claimed task as part of a richer wave-based orchestration with critic gates between waves. The claim still appears in `state.db` — it is the same primitive, called from inside the flow. Branch on the user's existing workflow preferences when deciding whether to bridge.
 - **Non-zero exit** (plugin absent, or `claude` CLI itself not on `PATH`): proceed with the standalone path below (Step 1 onward). The fall-through is intentional graceful degradation: missing tooling never blocks the claim flow.
 
 The grep pattern is intentionally unanchored. Actual `claude plugin list` output renders each installed plugin as `  ❯ fakoli-flow@fakoli-plugins` (indented marker line, plugin name suffixed with `@<source>`); a leading `^` anchor would never match. The unanchored substring is safe because `fakoli-flow` is a unique slug within the marketplace.
 
 ### Step 1 — See what is claimable
 
-Invoke `fakoli-state next` yourself — via Bash, the MCP equivalent when available, or whichever execution primitive the runtime exposes. Surface the result inline:
+Invoke `anvil next` yourself — via Bash, the MCP equivalent when available, or whichever execution primitive the runtime exposes. Surface the result inline:
 
 ```bash
-fakoli-state next
+anvil next
 ```
 
 Returns the single highest-priority `ready` task with no unmet dependencies and no conflict-group overlap with currently active claims. Priority ordering: `critical` > `high` > `medium` > `low`; ties broken by complexity ascending (simpler first), then `created_at` ascending (oldest first).
 
-If the user wants to see the full ready queue rather than the top pick, run `fakoli-state list --status ready` yourself and present it.
+If the user wants to see the full ready queue rather than the top pick, run `anvil list --status ready` yourself and present it.
 
-If `next` returns nothing, the queue is empty, fully claimed, or PRD-gated. Run `fakoli-state status` yourself and diagnose inline — read `prd-status`, `ready-tasks`, and `active-claims`, then tell the user what's blocking and what to do about it. A non-zero `ready-tasks` count alongside a non-`approved` `prd-status` means the PRD gate is blocking all claims — the ready count is accurate, but the gate is closed.
+If `next` returns nothing, the queue is empty, fully claimed, or PRD-gated. Run `anvil status` yourself and diagnose inline — read `prd-status`, `ready-tasks`, and `active-claims`, then tell the user what's blocking and what to do about it. A non-zero `ready-tasks` count alongside a non-`approved` `prd-status` means the PRD gate is blocking all claims — the ready count is accurate, but the gate is closed.
 
 ---
 
 ### Step 2 — Inspect the task before claiming
 
-Once `next` returns a candidate (or the user picks one from the ready queue), run `fakoli-state show TASK_ID` yourself and present the full task detail in chat:
+Once `next` returns a candidate (or the user picks one from the ready queue), run `anvil show TASK_ID` yourself and present the full task detail in chat:
 
 ```bash
-fakoli-state show T012
+anvil show T012
 ```
 
 Returns: title, intent, acceptance criteria, verification commands, all six score dimensions (`complexity`, `parallelizability`, `context_load`, `blast_radius`, `review_risk`, `agent_suitability`), `expected_files`, dependency chain, and any active claim on this task.
@@ -90,7 +90,7 @@ Returns: title, intent, acceptance criteria, verification commands, all six scor
 Audit the result inline and surface anything that should give the user pause before the claim fires:
 
 - The acceptance criteria are concrete and independently verifiable — not aspirational descriptions.
-- `complexity` is 3 or under. A score of 4 or 5 means the task should have been expanded via `fakoli-state expand` during planning. Claiming an oversized task and then abandoning it mid-way wastes the lease window.
+- `complexity` is 3 or under. A score of 4 or 5 means the task should have been expanded via `anvil expand` during planning. Claiming an oversized task and then abandoning it mid-way wastes the lease window.
 - `agent_suitability` matches the current executor. A score of 1 or 2 signals that the task requires architectural judgment, significant human context, or decisions that a model is likely to get wrong. Defer those tasks.
 - `expected_files` does not include files that look like they belong to a different subsystem — a sign the task scope drifted during authoring.
 
@@ -104,10 +104,10 @@ This step costs nothing and prevents the most common source of wasted claims.
 
 ### Step 3 — Check for conflicts
 
-Invoke `fakoli-state claim TASK_ID` yourself once the user confirms. The command performs the conflict check before writing anything:
+Invoke `anvil claim TASK_ID` yourself once the user confirms. The command performs the conflict check before writing anything:
 
 ```bash
-fakoli-state claim T012
+anvil claim T012
 ```
 
 The manager checks two conflict conditions before issuing the lease:
@@ -119,17 +119,17 @@ If either condition is true and `--force` is not passed, `claim` raises `ClaimEr
 
 ```
 ClaimError: Task 'T012' conflicts with active claims: claim C003 by agent-scout
-(files: ['src/fakoli_state/state/backend.py']). Use --force to override.
+(files: ['src/anvil/state/backend.py']). Use --force to override.
 ```
 
 Surface the conflict in chat. If it is acceptable — for example, the other actor owns C003 on a read-only research task and T012 writes to a different function in the same file — ask the user explicitly before forcing:
 
-> T012 conflicts with C003 (agent-scout) on `src/fakoli_state/state/backend.py`. Force the claim? `--force` is audit-logged. (yes / no / inspect C003 first)
+> T012 conflicts with C003 (agent-scout) on `src/anvil/state/backend.py`. Force the claim? `--force` is audit-logged. (yes / no / inspect C003 first)
 
 On `yes`, re-run with `--force` yourself:
 
 ```bash
-fakoli-state claim T012 --force
+anvil claim T012 --force
 ```
 
 The override is logged as a warning in `events.jsonl` with the actor identity, the claim being forced, and the overlapping files. Every forced claim is auditable.
@@ -152,7 +152,7 @@ The task transitions from `ready` to `claimed` in `state.db`. Two events are app
 If the user wants a separate git worktree (useful when running two agents in parallel from the same repo without checkout conflicts), invoke `--worktree` yourself:
 
 ```bash
-fakoli-state claim T012 --worktree
+anvil claim T012 --worktree
 ```
 
 This creates `../wt-t012/` with the branch already checked out. Each worktree is fully independent — no stashing required when switching between tasks.
@@ -186,7 +186,7 @@ Both hooks run automatically. No manual action required.
 The default lease is 60 minutes. For sessions longer than 55 minutes, renew before the lease expires. Invoke renewal yourself whenever the agent notices the timer:
 
 ```bash
-fakoli-state renew C004
+anvil renew C004
 ```
 
 Renewing extends `lease_expires_at` by another 60 minutes from now and updates `last_heartbeat_at`. The command errors if the lease is already expired — re-claiming is the only option at that point.
@@ -207,17 +207,17 @@ Once verification passes and the work is ready to leave the agent's hands, drive
 
 > T012 verification passed: 14 tests added, retry-backoff implemented in `src/retry/backoff.py`, no other files touched. Ready to submit? Submitting transitions T012 to `needs_review` and auto-releases C004. (yes / not yet / let me re-check)
 
-On `yes`, invoke `fakoli-state submit TASK_ID` yourself and surface the output:
+On `yes`, invoke `anvil submit TASK_ID` yourself and surface the output:
 
 ```bash
-fakoli-state submit T012
+anvil submit T012
 ```
 
-`submit` reads the evidence packet from `events.jsonl`, transitions the task to `needs_review`, and auto-releases the claim. Tell the user the task is now in `needs_review` and ask whether to hand off to `/fakoli-state:finish` for the apply gate.
+`submit` reads the evidence packet from `events.jsonl`, transitions the task to `needs_review`, and auto-releases the claim. Tell the user the task is now in `needs_review` and ask whether to hand off to `/anvil:finish` for the apply gate.
 
-**The hard handoff lives in `finish`, not here.** `fakoli-state apply TASK_ID --approve` is the only command in this leg of the lifecycle that requires explicit user confirmation before the agent runs it. That gate lives in `/fakoli-state:finish` — invoke that skill rather than running `apply --approve` from here.
+**The hard handoff lives in `finish`, not here.** `anvil apply TASK_ID --approve` is the only command in this leg of the lifecycle that requires explicit user confirmation before the agent runs it. That gate lives in `/anvil:finish` — invoke that skill rather than running `apply --approve` from here.
 
-If Phase 5 `submit` is not yet available in the running environment, fall back to the explicit Phase 4 release flow: run `fakoli-state release C004` yourself (see Step 8), confirm the task is back in `ready`, and tell the user the PR/merge step is theirs.
+If Phase 5 `submit` is not yet available in the running environment, fall back to the explicit Phase 4 release flow: run `anvil release C004` yourself (see Step 8), confirm the task is back in `ready`, and tell the user the PR/merge step is theirs.
 
 ---
 
@@ -230,15 +230,15 @@ When work must stop before completion — blocked on an upstream issue, depriori
 Then run:
 
 ```bash
-fakoli-state release C004 --reason "blocked: upstream T009 not merged"
+anvil release C004 --reason "blocked: upstream T009 not merged"
 ```
 
-The `--reason` string is stored in `release_reason` on the Claim row and logged in `events.jsonl`. Another agent can then pick up the task via `fakoli-state next`.
+The `--reason` string is stored in `release_reason` on the Claim row and logged in `events.jsonl`. Another agent can then pick up the task via `anvil next`.
 
 To release a claim held by a different actor (use sparingly — logged in audit trail), confirm with the user before forcing:
 
 ```bash
-fakoli-state release C004 --force
+anvil release C004 --force
 ```
 
 `--force` bypasses the actor-ownership check and also allows releasing claims in non-`active` states (e.g., `stale`). Every forced release is recorded with the releasing actor's identity.
@@ -247,7 +247,7 @@ fakoli-state release C004 --force
 
 ## Anti-pattern to avoid
 
-Ending this skill with a numbered list like "1. Run `fakoli-state show T012` 2. Run `fakoli-state claim T012` 3. Heartbeat with `renew C004` 4. Run `submit T012` 5. Hand off to `/fakoli-state:finish`..." That handoff style only makes sense when the work is leaving this session entirely — queued for another agent, scheduled for tomorrow, blocked on stakeholder review. When the agent is sitting in the same conversation that holds the active claim, the agent drives `next`, `show`, `claim`, `renew`, `submit`, and `release` inline. The only command the agent must NOT run without explicit user confirmation is `apply --approve` (which lives in `/fakoli-state:finish`) — every other primitive in this skill is the agent's to invoke directly, with the user seeing the output in the same message.
+Ending this skill with a numbered list like "1. Run `anvil show T012` 2. Run `anvil claim T012` 3. Heartbeat with `renew C004` 4. Run `submit T012` 5. Hand off to `/anvil:finish`..." That handoff style only makes sense when the work is leaving this session entirely — queued for another agent, scheduled for tomorrow, blocked on stakeholder review. When the agent is sitting in the same conversation that holds the active claim, the agent drives `next`, `show`, `claim`, `renew`, `submit`, and `release` inline. The only command the agent must NOT run without explicit user confirmation is `apply --approve` (which lives in `/anvil:finish`) — every other primitive in this skill is the agent's to invoke directly, with the user seeing the output in the same message.
 
 **When to actually hand off CLI commands:** if the user explicitly opts out ("just give me the commands"), or if the runtime lacks the tool needed to execute them (e.g., MCP-only client with no shell and no equivalent `claim` tool). In those cases, a CLI list is the right output. Otherwise, drive.
 
@@ -272,10 +272,10 @@ The rule is the same as the v1.14.0 `resolve-decisions` Q&A pattern, applied to 
 
 ## Common Pitfalls
 
-- **Claiming while PRD is still `draft`.** The claim gate checks `prd-status` and raises `ClaimError` before touching anything else. Run `fakoli-state prd review --approve` first.
-- **Ignoring the `agent_suitability` score.** Claiming a task scored `1` or `2` with a small or local model burns 60 minutes and produces output that needs complete rework. Check `fakoli-state show TASK_ID` before committing.
-- **Skipping the heartbeat on long sessions.** Leases expire silently. The task returns to `ready` and another agent can claim it while work is still in progress. Set a timer and run `fakoli-state renew CLAIM_ID` every 5 minutes.
-- **Editing `state.db` directly with sqlite3 to fix a stuck claim.** Use `fakoli-state release --force` instead. Direct edits bypass `events.jsonl` and produce state that cannot be replayed or audited.
+- **Claiming while PRD is still `draft`.** The claim gate checks `prd-status` and raises `ClaimError` before touching anything else. Run `anvil prd review --approve` first.
+- **Ignoring the `agent_suitability` score.** Claiming a task scored `1` or `2` with a small or local model burns 60 minutes and produces output that needs complete rework. Check `anvil show TASK_ID` before committing.
+- **Skipping the heartbeat on long sessions.** Leases expire silently. The task returns to `ready` and another agent can claim it while work is still in progress. Set a timer and run `anvil renew CLAIM_ID` every 5 minutes.
+- **Editing `state.db` directly with sqlite3 to fix a stuck claim.** Use `anvil release --force` instead. Direct edits bypass `events.jsonl` and produce state that cannot be replayed or audited.
 - **Calling `renew` after the lease has already expired.** `renew` raises `ClaimError` on an expired lease — the lease cannot be extended retroactively. Re-claim the task after it returns to `ready`.
 
 ---
@@ -284,17 +284,17 @@ The rule is the same as the v1.14.0 `resolve-decisions` Q&A pattern, applied to 
 
 | Position | Skill |
 |---|---|
-| Before this skill | `/fakoli-state:plan` must have produced `ready` tasks; optionally `/fakoli-state:state-ops` to read the queue first |
+| Before this skill | `/anvil:plan` must have produced `ready` tasks; optionally `/anvil:state-ops` to read the queue first |
 | After claiming | Work the branch, heartbeat, complete; then Phase 5 `finish` for submit + ship |
-| If `show TASK_ID` reveals `complexity >= 4` | Return to `/fakoli-state:plan` and expand the task before claiming |
-| If `next` returns nothing | `/fakoli-state:state-ops` to diagnose — check `status`, `list --status drafted`, trace blockers |
+| If `show TASK_ID` reveals `complexity >= 4` | Return to `/anvil:plan` and expand the task before claiming |
+| If `next` returns nothing | `/anvil:state-ops` to diagnose — check `status`, `list --status drafted`, trace blockers |
 
-**When `fakoli-flow` is installed:** `flow:execute` detects fakoli-state and wraps this skill. It reads `fakoli-state next`, calls `fakoli-state claim`, and dispatches the agent against the claimed task. The claim still appears in `state.db` — it is the same primitive, called from inside the flow.
+**When `fakoli-flow` is installed:** `flow:execute` detects anvil and wraps this skill. It reads `anvil next`, calls `anvil claim`, and dispatches the agent against the claimed task. The claim still appears in `state.db` — it is the same primitive, called from inside the flow.
 
 **When `fakoli-crew` is installed:** `welder` is the standard claim consumer for integration work. `scout` claims research tasks. Pass `--actor` to tag the claim with the crew role for traceability:
 
 ```bash
-fakoli-state claim T012 --actor fakoli-crew:welder
+anvil claim T012 --actor fakoli-crew:welder
 ```
 
 The `claimed_by` field on the Claim row records the actor string. The audit trail links every file change to the role that made it.
@@ -307,15 +307,15 @@ The `claimed_by` field on the Claim row records the actor string. The audit trai
 
 | Feature | Phase | Status |
 |---|---|---|
-| `fakoli-state next` | Phase 4 | available |
-| `fakoli-state claim TASK_ID` | Phase 4 | available |
-| `fakoli-state claim TASK_ID --worktree` | Phase 4 | available |
-| `fakoli-state release CLAIM_ID` | Phase 4 | available |
-| `fakoli-state renew CLAIM_ID` | Phase 4 | available |
+| `anvil next` | Phase 4 | available |
+| `anvil claim TASK_ID` | Phase 4 | available |
+| `anvil claim TASK_ID --worktree` | Phase 4 | available |
+| `anvil release CLAIM_ID` | Phase 4 | available |
+| `anvil renew CLAIM_ID` | Phase 4 | available |
 | `check-claim.sh` hook (PreToolUse) | Phase 4 | available |
 | `record-file-change.sh` hook (PostToolUse) | Phase 4 | available |
-| `fakoli-state submit TASK_ID` (auto-release + needs_review) | Phase 5 | pending |
-| `fakoli-state apply TASK_ID` (evidence review + done) | Phase 5 | pending |
-| `fakoli-state conflicts` (full conflict map across all active claims) | Phase 5 | pending |
+| `anvil submit TASK_ID` (auto-release + needs_review) | Phase 5 | pending |
+| `anvil apply TASK_ID` (evidence review + done) | Phase 5 | pending |
+| `anvil conflicts` (full conflict map across all active claims) | Phase 5 | pending |
 | Per-file scope check refinement in `check-claim.sh` | Phase 5 | pending — current hook warns on any active claim, not per-claim file scope |
-| PR creation / commit assistance | Out of scope | fakoli-state coordinates work; it does not write code |
+| PR creation / commit assistance | Out of scope | anvil coordinates work; it does not write code |

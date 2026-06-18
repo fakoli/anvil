@@ -1,9 +1,9 @@
-"""Integration tests for the fakoli-state MCP server (13 tools).
+"""Integration tests for the anvil MCP server (13 tools).
 
 All tests use the FastMCP in-process Client — no HTTP, no mocking.
 Each test runs against a real SqliteBackend in a per-test tmp_path.
 
-The server resolves state via Path.cwd() / ".fakoli-state", so every
+The server resolves state via Path.cwd() / ".anvil", so every
 test uses monkeypatch.chdir(tmp_path) to isolate cwd.
 
 FastMCP 3.3.1 in-memory transport: Client(mcp) passes the server directly.
@@ -30,7 +30,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from fakoli_state.mcp_server import mcp
+from anvil.mcp_server import mcp
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -71,19 +71,19 @@ def _data(result: Any) -> Any:
 
 
 def _init_state_dir(tmp_path: Path, project_name: str = "Test Project") -> Path:
-    """Create .fakoli-state/ in tmp_path with project + events initialised.
+    """Create .anvil/ in tmp_path with project + events initialised.
 
-    Mirrors what `fakoli-state init` does; reuses SqliteBackend + event
+    Mirrors what `anvil init` does; reuses SqliteBackend + event
     factories from the sqlite test layer so we don't duplicate CLI coupling.
     """
-    from fakoli_state.clock import SystemClock
-    from fakoli_state.state.models import EventDraft
-    from fakoli_state.state.sqlite import SqliteBackend
+    from anvil.clock import SystemClock
+    from anvil.state.models import EventDraft
+    from anvil.state.sqlite import SqliteBackend
 
-    state_dir = tmp_path / ".fakoli-state"
+    state_dir = tmp_path / ".anvil"
     state_dir.mkdir()
     (state_dir / "packets").mkdir()
-    # PS-2: snapshots/ is no longer pre-created; the `fakoli-state snapshot`
+    # PS-2: snapshots/ is no longer pre-created; the `anvil snapshot`
     # command will create it on first use when implemented.
     (state_dir / "events.jsonl").touch()
 
@@ -381,14 +381,14 @@ class TestGetProjectSummary:
         assert "task_counts" in data
 
     def test_error_when_not_initialized(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """ToolError raised when .fakoli-state/ is absent."""
+        """ToolError raised when .anvil/ is absent."""
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
             async with Client(mcp) as c:
                 await c.call_tool("get_project_summary", {})
 
-        with pytest.raises(ToolError, match="not initialized|fakoli-state"):
+        with pytest.raises(ToolError, match="not initialized|anvil"):
             _run(run())
 
     def test_task_counts_all_statuses(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1749,7 +1749,7 @@ The single feature exercised by the test PRD.
 
 
 def _write_prd_file(state_dir: Path, content: str = _MINIMAL_PRD) -> Path:
-    """Drop a PRD file into .fakoli-state/prd.md."""
+    """Drop a PRD file into .anvil/prd.md."""
     prd_path = state_dir / "prd.md"
     prd_path.write_text(content, encoding="utf-8")
     return prd_path
@@ -1776,7 +1776,7 @@ class TestInitProject:
         assert resp["created"] is True
         assert resp["project_name"] == "From MCP"
         assert resp["project_id"] == "from-mcp"
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         assert state_dir.exists()
         assert (state_dir / "state.db").exists()
         assert (state_dir / "events.jsonl").exists()
@@ -1872,8 +1872,8 @@ class TestParsePrd:
         assert resp["errors"] == []
         assert resp["prd_status"] == "draft"
         # Verify the PRD was actually persisted.
-        from fakoli_state.clock import SystemClock
-        from fakoli_state.state.sqlite import SqliteBackend
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
         b = SqliteBackend(
             db_path=str(state_dir / "state.db"),
             events_path=str(state_dir / "events.jsonl"),
@@ -2105,12 +2105,12 @@ def _build_recorded_planner_provider(prd_content: str):  # type: ignore[no-untyp
     production path passes to the planner, then builds the planner user
     prompt via the same helper and hashes it under the planner's tuning
     args (max_tokens=8000, temperature=0.0)."""
-    from fakoli_state.planning.llm import LLMResponse, RecordedLLMProvider
-    from fakoli_state.planning.llm_planner import (
+    from anvil.planning.llm import LLMResponse, RecordedLLMProvider
+    from anvil.planning.llm_planner import (
         _SYSTEM_PROMPT,
         _build_user_prompt,
     )
-    from fakoli_state.planning.template import parse_prd
+    from anvil.planning.template import parse_prd
 
     parsed = parse_prd(prd_content, prd_id="prd")
     user_prompt = _build_user_prompt(
@@ -2143,7 +2143,7 @@ class TestPlanTasksLlmBackstop:
     ) -> None:
         """Replace ``resolve_planner_provider`` so the tool uses a recorded
         provider without needing ANTHROPIC_API_KEY or a real API call."""
-        from fakoli_state.planning import llm_planner
+        from anvil.planning import llm_planner
 
         # v1.17.0 — resolve_planner_provider gained a `config` parameter.
         # The MCP tool passes the loaded config; the stub accepts and ignores.
@@ -2200,7 +2200,7 @@ class TestPlanTasksLlmBackstop:
 
         # Resolver should NOT fire when use_llm=False; install a raising
         # stub so an accidental call surfaces as a test failure.
-        from fakoli_state.planning import llm_planner
+        from anvil.planning import llm_planner
 
         def _explode(config=None) -> None:  # type: ignore[no-untyped-def]
             raise AssertionError(
@@ -2237,8 +2237,8 @@ class TestPlanTasksLlmBackstop:
         _write_prd_file(state_dir, _PRD_WITHOUT_TASKS_MCP)
         monkeypatch.chdir(tmp_path)
 
-        from fakoli_state.planning import llm_planner
-        from fakoli_state.planning.llm_planner import PlannerProviderUnavailable
+        from anvil.planning import llm_planner
+        from anvil.planning.llm_planner import PlannerProviderUnavailable
 
         sentinel_msg = (
             "No LLM provider available for task generation. "
@@ -2784,7 +2784,7 @@ class TestFindDecisions:
     def test_error_when_not_initialized(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No .fakoli-state/ → ToolError mirroring the other workflow tools."""
+        """No .anvil/ → ToolError mirroring the other workflow tools."""
         monkeypatch.chdir(tmp_path)
 
         async def run() -> None:
@@ -2797,7 +2797,7 @@ class TestFindDecisions:
     def test_error_when_no_prd_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """fakoli-state initialized but prd.md missing → ToolError (matches
+        """anvil initialized but prd.md missing → ToolError (matches
         parse_prd behaviour; see find_decisions docstring for rationale)."""
         _init_state_dir(tmp_path)
         monkeypatch.chdir(tmp_path)
@@ -2954,13 +2954,13 @@ class TestPlanTasksOrphanPrune:
 
     def _list_task_ids(self, tmp_path: Path) -> set[str]:
         import sqlite3
-        db = tmp_path / ".fakoli-state" / "state.db"
+        db = tmp_path / ".anvil" / "state.db"
         with sqlite3.connect(str(db)) as conn:
             return {r[0] for r in conn.execute("SELECT id FROM tasks")}
 
     def _set_task_status(self, tmp_path: Path, task_id: str, status: str) -> None:
         import sqlite3
-        db = tmp_path / ".fakoli-state" / "state.db"
+        db = tmp_path / ".anvil" / "state.db"
         with sqlite3.connect(str(db)) as conn:
             conn.execute(
                 "UPDATE tasks SET status = ? WHERE id = ?", (status, task_id)

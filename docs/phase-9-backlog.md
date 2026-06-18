@@ -8,7 +8,7 @@
 > roadmap with its original ID preserved. Use this file only to understand the
 > Phase 9 decision context. For "what's planned next", read `roadmap.md`.
 
-# fakoli-state — Post-v1.9.0 Backlog (v2.x roadmap + carry-forward tech debt)
+# anvil — Post-v1.9.0 Backlog (v2.x roadmap + carry-forward tech debt)
 
 This file is the forward-looking companion to
 [`tech-debt-backlog.md`](tech-debt-backlog.md). Where `tech-debt-backlog.md`
@@ -40,11 +40,11 @@ GraphQL-only API; httpx client with respx mocking. Status mapping needs a per-te
 
 **Acceptance**:
 
-- `bin/src/fakoli_state/sync/providers/linear.py` with full Protocol surface.
-- `bin/src/fakoli_state/sync/clients/linear_api.py` — GraphQL transport.
+- `bin/src/anvil/sync/providers/linear.py` with full Protocol surface.
+- `bin/src/anvil/sync/clients/linear_api.py` — GraphQL transport.
 - `tests/test_linear_provider.py` with respx mocks; full lifecycle test.
-- Live-Linear nightly workflow under `.github/workflows/fakoli-state-live-linear.yml` gated on `LINEAR_API_KEY` secret.
-- `fakoli-state sync linear_issues --health` works.
+- Live-Linear nightly workflow under `.github/workflows/anvil-live-linear.yml` gated on `LINEAR_API_KEY` secret.
+- `anvil sync linear_issues --health` works.
 
 ### P9B-2 · MondayBoardsProvider · `monday_boards`
 
@@ -58,9 +58,9 @@ Monday has people-columns and per-board custom columns; the `provider_metadata` 
 
 **Status**: OPEN. **Target**: v2.1.
 
-Jira's workflow/status taxonomy is per-project; the provider needs a one-time discovery call to map fakoli-state's 11 `TaskStatus` values to the project's actual statuses. Auth via PAT + email pair.
+Jira's workflow/status taxonomy is per-project; the provider needs a one-time discovery call to map anvil's 11 `TaskStatus` values to the project's actual statuses. Auth via PAT + email pair.
 
-**Acceptance**: same shape as P9B-1; one-time `--discover-statuses` flag that writes the discovered mapping into `.fakoli-state/config.yaml` under `sync.providers.jira_issues.status_map`.
+**Acceptance**: same shape as P9B-1; one-time `--discover-statuses` flag that writes the discovered mapping into `.anvil/config.yaml` under `sync.providers.jira_issues.status_map`.
 
 ### P9B-4 · GitHubProjectsProvider · `github_projects`
 
@@ -76,13 +76,13 @@ Sibling to `github_issues` but for Projects v2 (the newer board surface). Shares
 
 **Status**: SPEC-FIRST. **Target**: v2.0.
 
-`--watch` polls every N seconds. For providers that publish webhooks (GitHub, Linear, Monday, Jira), the engine should accept push-based sync via a long-running listener. Webhook secret in `.fakoli-state/config.yaml`; HMAC verification on every payload.
+`--watch` polls every N seconds. For providers that publish webhooks (GitHub, Linear, Monday, Jira), the engine should accept push-based sync via a long-running listener. Webhook secret in `.anvil/config.yaml`; HMAC verification on every payload.
 
 Needs a design doc first: the engine's current "one fetch round-trip per task per pass" assumption does not hold under webhooks (events arrive out of order, may duplicate, may race with manual sync calls). The reconciliation engine has to become idempotent over arbitrary event ordering rather than just over sequential polling iterations.
 
 **Spec scope**:
 
-- Webhook listener as a separate `fakoli-state webhook-listen --provider X --port 8080` subcommand (decouples lifetime from CLI sync calls).
+- Webhook listener as a separate `anvil webhook-listen --provider X --port 8080` subcommand (decouples lifetime from CLI sync calls).
 - Event de-duplication via `(provider_id, external_id, last_modified)` tuple — first event wins, later same-tuple events are ignored.
 - Out-of-order delivery — the listener queues events and processes them in `last_modified` order with a configurable max-delay.
 - HMAC verification per provider (GitHub uses `X-Hub-Signature-256`; Linear uses `Linear-Signature`; etc.).
@@ -146,18 +146,18 @@ follow-up but track them here so the next planning pass picks them up.
 
 ## v2.x — New work surfaces
 
-### P9B-7 · `fakoli-state snapshot` subcommand
+### P9B-7 · `anvil snapshot` subcommand
 
 **Status**: OPEN. **Target**: v2.1.
 
-Phase 5 (v1.4.0) removed the pre-created `.fakoli-state/snapshots/` directory because nothing wrote to it. The intent was always to ship a `sqlite3 .backup` wrapper as `fakoli-state snapshot` that writes a timestamped `.db` into that directory and prunes by retention policy. The directory will be created on first invocation.
+Phase 5 (v1.4.0) removed the pre-created `.anvil/snapshots/` directory because nothing wrote to it. The intent was always to ship a `sqlite3 .backup` wrapper as `anvil snapshot` that writes a timestamped `.db` into that directory and prunes by retention policy. The directory will be created on first invocation.
 
 **Acceptance**:
 
-- `fakoli-state snapshot [--retention 30d|count:N]` writes `.fakoli-state/snapshots/YYYY-MM-DDTHH-MM-SSZ.db`.
-- `fakoli-state snapshot --list` shows existing snapshots with size + age.
-- `fakoli-state snapshot --restore <name>` restores a snapshot atomically (writes to a temp file, swaps via rename).
-- Documented in `docs/specs/2026-05-24-fakoli-state-v0.md` § Snapshots.
+- `anvil snapshot [--retention 30d|count:N]` writes `.anvil/snapshots/YYYY-MM-DDTHH-MM-SSZ.db`.
+- `anvil snapshot --list` shows existing snapshots with size + age.
+- `anvil snapshot --restore <name>` restores a snapshot atomically (writes to a temp file, swaps via rename).
+- Documented in `docs/specs/2026-05-24-anvil-v0.md` § Snapshots.
 
 ### P9B-8 · MCP sync tools surface
 

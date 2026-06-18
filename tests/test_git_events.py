@@ -38,12 +38,12 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
-from fakoli_state.clock import FrozenClock
-from fakoli_state.state.hashing import canonical_payload_json, hash_event_id
-from fakoli_state.state.models import Event, EventDraft
-from fakoli_state.state.snapshot import serialize_state
-from fakoli_state.state.sqlite import SqliteBackend
+from anvil.cli import app
+from anvil.clock import FrozenClock
+from anvil.state.hashing import canonical_payload_json, hash_event_id
+from anvil.state.models import Event, EventDraft
+from anvil.state.snapshot import serialize_state
+from anvil.state.sqlite import SqliteBackend
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -866,7 +866,7 @@ def _build_local_project(project_dir: Path) -> str:
     mapping), so the round-trip check covers event-id-derived state (the
     RV-E{n} review ids) — exactly what the id mapping exists for.
     """
-    state_dir = project_dir / ".fakoli-state"
+    state_dir = project_dir / ".anvil"
     state_dir.mkdir(parents=True)
     (state_dir / "config.yaml").write_text(
         "project_name: 'Migrate Me'\nproject_id: 'proj-1'\n",
@@ -915,7 +915,7 @@ def _map_pre_state_ids(pre_state: str, id_mapping: dict[str, str]) -> str:
 class TestMigrateEvents:
     def test_dry_run_is_the_default_and_writes_nothing(self, tmp_path: Path) -> None:
         _build_local_project(tmp_path)
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         log_before = (state_dir / "events.jsonl").read_bytes()
         config_before = (state_dir / "config.yaml").read_text(encoding="utf-8")
 
@@ -931,7 +931,7 @@ class TestMigrateEvents:
 
     def test_yes_applies_full_migration(self, tmp_path: Path) -> None:
         pre_state = _build_local_project(tmp_path)
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         old_ids = [line["id"] for line in _log_lines(state_dir)]
 
         result = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
@@ -984,18 +984,18 @@ class TestMigrateEvents:
         _build_local_project(tmp_path)
         first = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
         assert first.exit_code == 0, first.output
-        log_after_first = (tmp_path / ".fakoli-state" / "events.jsonl").read_bytes()
+        log_after_first = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
 
         second = _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"])
         assert second.exit_code == 0, second.output
         assert "already 'git'" in second.output
         assert (
-            tmp_path / ".fakoli-state" / "events.jsonl"
+            tmp_path / ".anvil" / "events.jsonl"
         ).read_bytes() == log_after_first
 
     def test_refuses_while_claims_are_active(self, tmp_path: Path) -> None:
         """A mid-flight agent's log must not be rewritten under it."""
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         state_dir.mkdir(parents=True)
         (state_dir / "config.yaml").write_text(
             "project_name: 'Busy'\nproject_id: 'proj-1'\n", encoding="utf-8"
@@ -1045,14 +1045,14 @@ class TestMigrateEvents:
         # A migrated (git-mode) project lives at tmp_path.
         _build_local_project(tmp_path)
         assert _run_in(tmp_path, ["migrate-events", "--to", "git", "--yes"]).exit_code == 0
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
 
         # Simulate a merge=union duplicate: append a verbatim copy of the last line.
         log_path = state_dir / "events.jsonl"
         raw = log_path.read_text(encoding="utf-8").splitlines()
         (log_path).write_text("\n".join(raw + [raw[-1]]) + "\n", encoding="utf-8")
 
-        # Replay from a SCRATCH cwd that has no .fakoli-state/config.yaml of its own.
+        # Replay from a SCRATCH cwd that has no .anvil/config.yaml of its own.
         scratch = tmp_path / "elsewhere"
         scratch.mkdir()
         into = scratch / "rebuilt.db"
@@ -1093,7 +1093,7 @@ class TestMigrateEvents:
 
     def test_config_rewrite_preserves_crlf(self, tmp_path: Path) -> None:
         """Greptile P2: a CRLF config.yaml stays CRLF after the migration edit."""
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         _build_local_project(tmp_path)
         config_path = state_dir / "config.yaml"
         # Rewrite the existing config with CRLF endings.

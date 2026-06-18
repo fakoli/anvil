@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.state.sqlite — SqliteBackend including the audit guarantee.
+"""Tests for anvil.state.sqlite — SqliteBackend including the audit guarantee.
 
 THE MOST CRITICAL TEST: test_replay_from_empty_reconstructs_state_exactly.
 
@@ -25,16 +25,16 @@ from typing import Any
 
 import pytest
 
-from fakoli_state.clock import FrozenClock
-from fakoli_state.state.backend import (
+from anvil.clock import FrozenClock
+from anvil.state.backend import (
     EventRejected,
     SchemaMismatch,
     StateLocked,
     TransactionAborted,
 )
-from fakoli_state.state.models import Event, EventDraft
-from fakoli_state.state.schema import SCHEMA_VERSION
-from fakoli_state.state.sqlite import (
+from anvil.state.models import Event, EventDraft
+from anvil.state.schema import SCHEMA_VERSION
+from anvil.state.sqlite import (
     _FLOCK_BACKOFF_CAP_S,
     _FLOCK_BACKOFF_INITIAL_S,
     _FLOCK_TIMEOUT_S,
@@ -3076,8 +3076,8 @@ class TestGreptileP4Fixes:
         the new claim succeeded. Fix: always use UUID-derived hex; the
         format is 'C' + 8 hex chars so collision is statistically
         impossible (~4 billion-to-one)."""
-        from fakoli_state.claims.manager import ClaimManager
-        from fakoli_state.clock import SystemClock
+        from anvil.claims.manager import ClaimManager
+        from anvil.clock import SystemClock
 
         b = _make_backend(tmp_path)
         try:
@@ -3870,7 +3870,7 @@ class TestPhase5EvidenceAndApplyHandlers:
     ) -> None:
         """needs_review + decision=rejected → task.status='drafted'.
 
-        Per spec (docs/specs/2026-05-24-fakoli-state-v0.md): the rejected
+        Per spec (docs/specs/2026-05-24-anvil-v0.md): the rejected
         state is a transient audit marker; the task immediately auto-
         promotes to drafted so it can be re-reviewed. Critic-1 + Critic-2
         flagged that the original implementation left the task permanently
@@ -4059,7 +4059,7 @@ class TestPhase5EvidenceAndApplyHandlers:
         regress.  A rejected task auto-promotes back to drafted for rework —
         it is NOT the terminal ReviewDecision.reject closure.
         """
-        from fakoli_state.state.models import ReviewDecision
+        from anvil.state.models import ReviewDecision
 
         b = _make_backend(tmp_path)
         try:
@@ -4092,7 +4092,7 @@ class TestPhase5EvidenceAndApplyHandlers:
         Companion to test_list_reviews_rejected_maps_to_needs_changes — pins
         both directions of _TASK_OUTCOME_TO_REVIEW_DECISION.
         """
-        from fakoli_state.state.models import ReviewDecision
+        from anvil.state.models import ReviewDecision
 
         b = _make_backend(tmp_path)
         try:
@@ -4819,7 +4819,7 @@ class TestSyncMappingHandler:
         self, tmp_path: Path
     ) -> None:
         """apply_sync_mapping() builds the event and inserts the row in one call."""
-        from fakoli_state.state.models import SyncMapping
+        from anvil.state.models import SyncMapping
 
         b = _make_backend(tmp_path)
         events_path = str(tmp_path / "events.jsonl")
@@ -4857,7 +4857,7 @@ class TestSyncMappingHandler:
         self, tmp_path: Path
     ) -> None:
         """The Event returned by apply_sync_mapping() carries a real E000xxx id."""
-        from fakoli_state.state.models import SyncMapping
+        from anvil.state.models import SyncMapping
 
         b = _make_backend(tmp_path)
         try:
@@ -5188,7 +5188,7 @@ class TestApplySyncMappingPayloadSerialization:
         raise ValidationError (extra='forbid' on the payload model)."""
         from pydantic import ValidationError
 
-        from fakoli_state.state.models import SyncMapping
+        from anvil.state.models import SyncMapping
 
         b = _make_backend(tmp_path)
         try:
@@ -5203,7 +5203,7 @@ class TestApplySyncMappingPayloadSerialization:
             # missing-on-payload value defaults. So the more direct probe is:
             # construct the canonical payload model with an extra kwarg and
             # confirm it rejects.
-            from fakoli_state.state.payloads import SyncMappingUpsertedPayload
+            from anvil.state.payloads import SyncMappingUpsertedPayload
 
             with pytest.raises(ValidationError):
                 SyncMappingUpsertedPayload(
@@ -5245,8 +5245,8 @@ class TestApplySyncMappingPayloadSerialization:
         """
         from pydantic import ConfigDict, Field, ValidationError, create_model
 
-        from fakoli_state.state import sqlite as sqlite_mod
-        from fakoli_state.state.models import SyncMapping
+        from anvil.state import sqlite as sqlite_mod
+        from anvil.state.models import SyncMapping
 
         # Build a drop-in replacement payload class that requires a NEW
         # field SyncMapping does not have. The original payload module
@@ -5289,7 +5289,7 @@ class TestApplySyncMappingPayloadSerialization:
 
     def test_apply_sync_mapping_records_actor_kwarg(self, tmp_path: Path) -> None:
         """SF-7: apply_sync_mapping(..., actor='alice') threads the actor into the event."""
-        from fakoli_state.state.models import SyncMapping
+        from anvil.state.models import SyncMapping
 
         b = _make_backend(tmp_path)
         try:
@@ -5578,7 +5578,7 @@ class TestSyncProviderSnakeCaseRegistry:
     """SF-3: register/get with snake_case provider ids (e.g. github_issues)."""
 
     def test_register_and_get_snake_case(self) -> None:
-        from fakoli_state.sync import (
+        from anvil.sync import (
             PROVIDER_REGISTRY,
             get_sync_provider,
             register_sync_provider,
@@ -5637,7 +5637,7 @@ class TestPayloadValidation:
     @staticmethod
     def _import_payload_models() -> Any:
         """Return the payloads module (deferred import to keep test isolation)."""
-        from fakoli_state.state import payloads as p
+        from anvil.state import payloads as p
         return p
 
     # ------------------------------------------------------------------
@@ -6531,8 +6531,8 @@ class TestMissingSyncMappingPerProvider:
     ) -> None:
         """Two providers configured, task only mapped to one → discrepancy
         for the missing one."""
-        from fakoli_state.state.models import SyncMapping
-        from fakoli_state.sync.reconciliation import (
+        from anvil.state.models import SyncMapping
+        from anvil.sync.reconciliation import (
             DiscrepancyKind,
             ReconciliationEngine,
         )
@@ -6632,7 +6632,7 @@ class TestSyncDispatcherUsesConcreteSubclasses:
         ``types.UnionType`` regression would fail this with an
         ``AttributeError`` at hasattr-resolution.
         """
-        from fakoli_state.state.payloads import ACTION_TO_PAYLOAD
+        from anvil.state.payloads import ACTION_TO_PAYLOAD
 
         b = _make_backend(tmp_path)
         try:
@@ -6877,7 +6877,7 @@ class TestListClaimsReviewsEvidence:
 
     def test_list_claims_returns_valid_claim_objects(self, tmp_path: Path) -> None:
         """list_claims() returns fully deserialized Claim objects (not dicts)."""
-        from fakoli_state.state.models import Claim
+        from anvil.state.models import Claim
 
         b = _make_backend(tmp_path)
         try:
@@ -6944,7 +6944,7 @@ class TestListClaimsReviewsEvidence:
 
     def test_list_reviews_returns_valid_review_objects(self, tmp_path: Path) -> None:
         """list_reviews() returns fully deserialized Review objects (not dicts)."""
-        from fakoli_state.state.models import Review
+        from anvil.state.models import Review
 
         b = _make_backend(tmp_path)
         try:
@@ -7024,7 +7024,7 @@ class TestListClaimsReviewsEvidence:
 
     def test_list_evidence_returns_valid_evidence_objects(self, tmp_path: Path) -> None:
         """list_evidence() returns fully deserialized Evidence objects (not dicts)."""
-        from fakoli_state.state.models import Evidence
+        from anvil.state.models import Evidence
 
         b = _make_backend(tmp_path)
         try:
@@ -7081,7 +7081,7 @@ class TestListRequirements:
         self, tmp_path: Path
     ) -> None:
         """list_requirements() returns Requirement objects populated by prd.parsed."""
-        from fakoli_state.state.models import Requirement
+        from anvil.state.models import Requirement
 
         b = _make_backend(tmp_path)
         try:
@@ -8448,19 +8448,19 @@ import sys
 sys.path.insert(0, {str(tmp_path)!r})
 # Add the src directory to the path.
 import subprocess, os, time
-# Find the fakoli_state package.
+# Find the anvil package.
 result = subprocess.run(
     [sys.executable, '-c',
-     'import fakoli_state; print(fakoli_state.__file__)'],
+     'import anvil; print(anvil.__file__)'],
     capture_output=True, text=True
 )
 src_root = os.path.dirname(os.path.dirname(result.stdout.strip()))
 sys.path.insert(0, src_root)
 
 from datetime import UTC, datetime
-from fakoli_state.clock import FrozenClock
-from fakoli_state.state.models import EventDraft
-from fakoli_state.state.sqlite import SqliteBackend
+from anvil.clock import FrozenClock
+from anvil.state.models import EventDraft
+from anvil.state.sqlite import SqliteBackend
 
 events_path = {events_path!r}
 db_path = {db_path!r}
@@ -9220,7 +9220,7 @@ class TestDecideApplyContract:
                                   "detected_at": _T0.isoformat(),
                                   "reason": "lease_expired", "actor": "system"},
                                  target_kind="claim", target_id="C001"))
-            from fakoli_state.state.models import ClaimStatus
+            from anvil.state.models import ClaimStatus
             claim = b.get_claim("C001")
             assert claim is not None
             assert claim.status == ClaimStatus.stale
@@ -9257,7 +9257,7 @@ class TestDecideApplyContract:
             _setup_claimable_task_and_claim(b)
             b.append(_make_event("evidence.submitted", _make_evidence_payload(),
                                  target_kind="task", target_id="T001"))
-            from fakoli_state.state.models import TaskStatus
+            from anvil.state.models import TaskStatus
             task = b.get_task("T001")
             assert task is not None
             assert task.status == TaskStatus.needs_review
@@ -9302,7 +9302,7 @@ class TestDecideApplyContract:
                                  {"task_id": "T001", "reviewer": "alice",
                                   "decision": "accepted", "notes": None},
                                  target_kind="task", target_id="T001"))
-            from fakoli_state.state.models import TaskStatus
+            from anvil.state.models import TaskStatus
             task = b.get_task("T001")
             assert task is not None
             assert task.status == TaskStatus.done
@@ -9322,7 +9322,7 @@ class TestDecideApplyContract:
         must reject with EventRejected before any write occurs. The JSONL log
         must be unchanged and the task must remain at 'ready'.
         """
-        from fakoli_state.state.models import TaskStatus
+        from anvil.state.models import TaskStatus
         b = _make_backend(tmp_path)
         events_path = str(tmp_path / "events.jsonl")
         try:
@@ -9372,7 +9372,7 @@ class TestDecideApplyContract:
         - A review row is inserted with decision='rejected'.
         - A new event line appears in events.jsonl.
         """
-        from fakoli_state.state.models import ReviewDecision, TaskStatus
+        from anvil.state.models import ReviewDecision, TaskStatus
         b = _make_backend(tmp_path)
         events_path = str(tmp_path / "events.jsonl")
         try:
@@ -9424,7 +9424,7 @@ class TestDecideApplyContract:
         with the canonical 'accepted' decision (mapped to ReviewDecision.approve by
         _row_to_review per _TASK_OUTCOME_TO_REVIEW_DECISION).
         """
-        from fakoli_state.state.models import ReviewDecision, TaskStatus
+        from anvil.state.models import ReviewDecision, TaskStatus
         b = _make_backend(tmp_path)
         try:
             _setup_claimable_task_and_claim(b)
@@ -9465,7 +9465,7 @@ class TestDecideApplyContract:
         - Task status unchanged (still 'claimed').
         - Claim status unchanged (still 'active').
         """
-        from fakoli_state.state.models import ClaimStatus, TaskStatus
+        from anvil.state.models import ClaimStatus, TaskStatus
         b = _make_backend(tmp_path)
         events_path = str(tmp_path / "events.jsonl")
         try:
@@ -9513,7 +9513,7 @@ class TestDecideApplyContract:
         - Active claim is auto-released (status → 'released').
         - Exactly one new event line in events.jsonl.
         """
-        from fakoli_state.state.models import ClaimStatus, TaskStatus
+        from anvil.state.models import ClaimStatus, TaskStatus
         b = _make_backend(tmp_path)
         events_path = str(tmp_path / "events.jsonl")
         try:

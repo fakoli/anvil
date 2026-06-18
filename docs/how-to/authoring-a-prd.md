@@ -4,8 +4,8 @@
 > and the deterministic parser does the rest — requirements, features, and tasks all
 > derive from one markdown file.
 
-This guide assumes you have already run `fakoli-state init` and seen the generated
-`.fakoli-state/prd.md`. For the canonical schema, see
+This guide assumes you have already run `anvil init` and seen the generated
+`.anvil/prd.md`. For the canonical schema, see
 [`../prd-template.md`](../prd-template.md). For an end-to-end first run, see
 [getting-started.md](getting-started.md).
 
@@ -36,7 +36,7 @@ stateDiagram-v2
 ```
 
 The `prd_status_gate` in
-[`state/transitions.py`](../../bin/src/fakoli_state/state/transitions.py) enforces the
+[`state/transitions.py`](../../bin/src/anvil/state/transitions.py) enforces the
 final hop: `ready → claimed` refuses while the PRD is still `draft`. (As of v1.10.0 the
 gate accepts both `reviewed` and `approved` — see
 [architecture.md → Gates on the lifecycle](../architecture.md#gates-on-the-lifecycle).)
@@ -47,7 +47,7 @@ gate accepts both `reviewed` and `approved` — see
 
 The full schema lives in [`../prd-template.md`](../prd-template.md). The deterministic
 parser at
-[`planning/template.py`](../../bin/src/fakoli_state/planning/template.py) extracts these
+[`planning/template.py`](../../bin/src/anvil/planning/template.py) extracts these
 sections in this order:
 
 | Section                | Required | Stored as                  |
@@ -75,16 +75,16 @@ an existing one, breaking every cross-reference. Write `- R001: ...` not just `-
 ## A real-ish example
 
 Here is a self-contained PRD for adding JSONL audit export to the `status` command.
-Drop this into `.fakoli-state/prd.md` and run `prd parse` to see the full round-trip.
+Drop this into `.anvil/prd.md` and run `prd parse` to see the full round-trip.
 
 ```markdown
 # Project: status-jsonl-export
 
 ## Summary
 
-Extend the existing `fakoli-state status` command with an opt-in JSONL export so audit
+Extend the existing `anvil status` command with an opt-in JSONL export so audit
 tooling can stream per-run snapshots without parsing the human-readable output. Targets
-operators integrating fakoli-state output into external dashboards.
+operators integrating anvil output into external dashboards.
 
 ## Goals
 
@@ -109,9 +109,9 @@ operators integrating fakoli-state output into external dashboards.
 
 ## Acceptance Criteria
 
-- `fakoli-state status --format jsonl | jq -s 'length'` returns the task count.
-- `fakoli-state status` output is unchanged across the upgrade (golden-file test passes).
-- `fakoli-state status --format bogus` exits 2 with a Typer usage message.
+- `anvil status --format jsonl | jq -s 'length'` returns the task count.
+- `anvil status` output is unchanged across the upgrade (golden-file test passes).
+- `anvil status --format bogus` exits 2 with a Typer usage message.
 
 ## Risks
 
@@ -142,7 +142,7 @@ Validates `--format` values at the CLI boundary and preserves the existing defau
 
 **Feature:** F001
 **Priority:** high
-**Likely files:** bin/src/fakoli_state/cli/status.py
+**Likely files:** bin/src/anvil/cli/status.py
 
 Add a `--format` Typer Option with choices `text` and `jsonl`, defaulting to `text`. Wire
 the parsed value through to a new dispatch function; do not change the existing renderer
@@ -157,13 +157,13 @@ on the default branch.
 **Verification:**
 
 - `pytest tests/test_cli_status.py -v`
-- `fakoli-state status --format text | diff - tests/golden/status-text.txt`
+- `anvil status --format text | diff - tests/golden/status-text.txt`
 
 ### T002: Implement JSONL row renderer
 
 **Feature:** F001
 **Priority:** high
-**Likely files:** bin/src/fakoli_state/cli/status.py, bin/src/fakoli_state/cli/_render.py
+**Likely files:** bin/src/anvil/cli/status.py, bin/src/anvil/cli/_render.py
 
 Build a pure function `render_jsonl(tasks: list[Task]) -> Iterator[str]` that yields one
 JSON string per task with the field list from R003. Use `model_dump(mode="json")` to
@@ -183,9 +183,9 @@ guarantee ISO-8601 timestamps.
 Run the parser against it:
 
 ```text
-$ fakoli-state prd parse
+$ anvil prd parse
 Parsed 6 requirements, 2 features, 2 tasks.
-PRD source: /your/project/.fakoli-state/prd.md
+PRD source: /your/project/.anvil/prd.md
 ```
 
 The parser writes a `prd.parsed` event with the full payload (summary, goals,
@@ -200,12 +200,12 @@ Two CLI calls, two events, two human checkpoints:
 
 ```bash
 # 1. You read the parser output and confirm the requirements look right.
-fakoli-state prd review
+anvil prd review
 # → PRD reviewed by 'human'.
-# → Run `fakoli-state prd review --approve` to approve.
+# → Run `anvil prd review --approve` to approve.
 
 # 2. You sign off — tasks can now be claimed.
-fakoli-state prd review --approve
+anvil prd review --approve
 # → PRD approved by 'human'.
 ```
 
@@ -215,9 +215,9 @@ is a separate "I am ready for agents to start work." Skipping the first step fai
 loudly:
 
 ```text
-$ fakoli-state prd review --approve
+$ anvil prd review --approve
 Error: PRD must be in 'reviewed' status to approve, got 'draft'.
-Run `fakoli-state prd review` first.
+Run `anvil prd review` first.
 ```
 
 Symmetrically, calling `prd review` when the PRD is already `reviewed` or `approved`
@@ -233,8 +233,8 @@ audit log.
 
 PRDs are not write-once. The expected loop:
 
-1. Edit `.fakoli-state/prd.md`.
-2. Re-run `fakoli-state prd parse`.
+1. Edit `.anvil/prd.md`.
+2. Re-run `anvil prd parse`.
 3. Re-run the gates: `prd review`, then `prd review --approve`.
 
 **Re-parse replaces, not merges.** Every `prd parse` invocation completely replaces the
@@ -244,7 +244,7 @@ no preservation of hand-edits on individual rows. This is documented at
 
 The replacement extends to tasks already in `claimed` or `in_progress` status. **Coordinate
 with active agents before re-parsing a live project** — releasing their claims first via
-`fakoli-state release` keeps the audit log clean.
+`anvil release` keeps the audit log clean.
 
 Because IDs are stable when written explicitly (`R001:` rather than bare `-`), edits
 that re-order or insert items preserve cross-references. Auto-assigned IDs do not; the
@@ -279,7 +279,7 @@ the same PRD.
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-fakoli-state plan --use-llm
+anvil plan --use-llm
 ```
 
 The default model is `claude-sonnet-4-6`. Prompt caching is on by default — the system
@@ -291,7 +291,7 @@ batch pay only for new user tokens within the 5-minute cache window.
 Missing API key with `--use-llm` exits cleanly with code 1 — no partial state is written:
 
 ```text
-$ fakoli-state plan --use-llm
+$ anvil plan --use-llm
 Error: --use-llm requires ANTHROPIC_API_KEY in environment. Set it or omit --use-llm.
 ```
 

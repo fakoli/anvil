@@ -1,10 +1,10 @@
-# fakoli-state GitHub Issues sync
+# anvil GitHub Issues sync
 
 ## What it is
 
-Bidirectional, polling-based sync between fakoli-state tasks and GitHub issues.
+Bidirectional, polling-based sync between anvil tasks and GitHub issues.
 Every local `Task` round-trips to an issue in a configured repo, status labels
-encode the fakoli-state lifecycle, and divergence is detected per-task via
+encode the anvil lifecycle, and divergence is detected per-task via
 recorded `last_synced_at` vs the remote `updated_at`. v0 ships the
 `GitHubIssuesProvider` only; the same `sync` surface accepts Linear, Monday,
 Jira, and any other contributor-registered backend via the `SyncProvider`
@@ -19,10 +19,10 @@ Protocol (see [`sync-providers.md`](sync-providers.md)).
 gh auth login
 
 # Probe reachability + auth before doing any state mutation.
-fakoli-state sync github --health
+anvil sync github --health
 
 # One push+pull pass against every local task.
-fakoli-state sync github
+anvil sync github
 ```
 
 For environments without `gh` installed (CI runners, sandboxes), set a PAT
@@ -31,7 +31,7 @@ instead:
 ```bash
 export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxx
 export GITHUB_REPOSITORY=owner/repo
-fakoli-state sync github
+anvil sync github
 ```
 
 ---
@@ -62,8 +62,8 @@ the only option. Format is always `<owner>/<repo>`; the constructor raises
 ### Transport selection
 
 ```bash
-fakoli-state sync github                  # transport=auto (default)
-fakoli-state sync provider github_issues  # same, generic syntax
+anvil sync github                  # transport=auto (default)
+anvil sync provider github_issues  # same, generic syntax
 ```
 
 The provider's `transport` kwarg accepts `auto`, `gh_cli`, or `http`. `auto`
@@ -77,7 +77,7 @@ CI runners with `GITHUB_TOKEN`.
 
 ### Configured providers (reconciliation)
 
-`fakoli-state sync` (bare, no subcommand) runs the reconciliation engine,
+`anvil sync` (bare, no subcommand) runs the reconciliation engine,
 which uses the *list of configured providers* to decide which tasks count
 as "done but unmapped" and need a sync.
 
@@ -91,7 +91,7 @@ preserving v1.8.0 behaviour for projects that have not yet bothered to
 declare a list.
 
 ```yaml
-# .fakoli-state/config.yaml — opt-in subset
+# .anvil/config.yaml — opt-in subset
 sync:
   providers:
     - github_issues
@@ -108,23 +108,23 @@ produces a single discrepancy with `payload.missing_provider ==
 
 ## CLI reference
 
-Every subcommand under `fakoli-state sync` and its flags.
+Every subcommand under `anvil sync` and its flags.
 
 | Command                                                  | Description                                                              |
 |----------------------------------------------------------|--------------------------------------------------------------------------|
-| `fakoli-state sync`                                      | Run reconciliation only (no provider call). Prints discrepancy report.   |
-| `fakoli-state sync --fix --yes`                          | Apply every suggested fix from reconciliation. `--yes` required in CI.   |
-| `fakoli-state sync github`                               | Alias for `sync provider github_issues`. Push + pull every local task.   |
-| `fakoli-state sync github --push`                        | Push only (skip pull). Useful right after `apply --approve`.             |
-| `fakoli-state sync github --pull`                        | Pull only (skip push). Useful for reconciling remote-side edits.         |
-| `fakoli-state sync github --task T001`                   | Scope a sync pass to a single task.                                      |
-| `fakoli-state sync github --health`                      | Probe reachability + auth. Exits without touching state.                 |
-| `fakoli-state sync github --fix`                         | Force `remote_wins` on every conflict for this iteration.                |
-| `fakoli-state sync github --watch`                       | Long-running poll loop. Ctrl-C exits.                                    |
-| `fakoli-state sync github --watch --interval 30`         | Override poll cadence (seconds). `--interval 0` runs one iteration.      |
-| `fakoli-state sync provider <id>`                        | Generic provider invocation. `<id>` resolves via `PROVIDER_REGISTRY`.    |
-| `fakoli-state sync provider <id> --push --task T001`     | Single-task push against any registered provider.                        |
-| `fakoli-state sync github --yes`                         | Auto-confirm conflict prompts (defaults to `local_wins`).                |
+| `anvil sync`                                      | Run reconciliation only (no provider call). Prints discrepancy report.   |
+| `anvil sync --fix --yes`                          | Apply every suggested fix from reconciliation. `--yes` required in CI.   |
+| `anvil sync github`                               | Alias for `sync provider github_issues`. Push + pull every local task.   |
+| `anvil sync github --push`                        | Push only (skip pull). Useful right after `apply --approve`.             |
+| `anvil sync github --pull`                        | Pull only (skip push). Useful for reconciling remote-side edits.         |
+| `anvil sync github --task T001`                   | Scope a sync pass to a single task.                                      |
+| `anvil sync github --health`                      | Probe reachability + auth. Exits without touching state.                 |
+| `anvil sync github --fix`                         | Force `remote_wins` on every conflict for this iteration.                |
+| `anvil sync github --watch`                       | Long-running poll loop. Ctrl-C exits.                                    |
+| `anvil sync github --watch --interval 30`         | Override poll cadence (seconds). `--interval 0` runs one iteration.      |
+| `anvil sync provider <id>`                        | Generic provider invocation. `<id>` resolves via `PROVIDER_REGISTRY`.    |
+| `anvil sync provider <id> --push --task T001`     | Single-task push against any registered provider.                        |
+| `anvil sync github --yes`                         | Auto-confirm conflict prompts (defaults to `local_wins`).                |
 
 Exit codes:
 
@@ -171,7 +171,7 @@ Every pushed issue gets a footer appended to its body:
 <original task description>
 
 ---
-_synced from fakoli-state task T001_
+_synced from anvil task T001_
 ```
 
 The footer is emitted by `_compose_body(task_description, task_id)` and
@@ -196,7 +196,7 @@ event records the choice in `resolution`.
 | `local_wins`    | Record decision; local re-push deferred to the next push pass.            | `local_wins_deferred`           |
 | `remote_wins`   | Record decision; local mutation from remote deferred to the next pull.    | `remote_wins_deferred`          |
 | `prompt`        | Interactive prompt: `[local/remote/skip]`. Defaults to local on `--yes` or non-tty. | `prompt_chose_local`, `prompt_chose_remote`, `prompt_skipped`, `prompt_defaulted_to_local` |
-| `manual_merge`  | Write `.fakoli-state/.sync-conflicts/<task_id>.md`; refuse to sync this task. | `manual_merge_file_written`     |
+| `manual_merge`  | Write `.anvil/.sync-conflicts/<task_id>.md`; refuse to sync this task. | `manual_merge_file_written`     |
 
 **`_deferred` is the v1.8.0 + v1.9.0 contract.** Recording a `local_wins` /
 `remote_wins` decision does NOT immediately mutate the other side in this
@@ -207,9 +207,9 @@ that mutate immediately; until then the deferred contract is the truthful
 one.
 
 For `manual_merge`: the markdown file at
-`.fakoli-state/.sync-conflicts/<task_id>.md` shows local and remote
+`.anvil/.sync-conflicts/<task_id>.md` shows local and remote
 side-by-side. Resolve the file (edit local or accept remote), delete it,
-then rerun `fakoli-state sync github` to continue. The batch exits with
+then rerun `anvil sync github` to continue. The batch exits with
 code `2` if any task is parked pending manual merge.
 
 ---
@@ -261,22 +261,22 @@ single `jq` over the JSONL.
 
 ```bash
 # Every deferred pull this week
-jq 'select(.action == "sync.pull.deferred")' .fakoli-state/events.jsonl
+jq 'select(.action == "sync.pull.deferred")' .anvil/events.jsonl
 
 # Every task with a local_moved_no_push hint awaiting --push
 jq 'select(.payload_json.resolution == "local_moved_no_push") | .target_id' \
-   .fakoli-state/events.jsonl | sort -u
+   .anvil/events.jsonl | sort -u
 
 # Conflict resolution histogram
 jq -r 'select(.action == "sync.conflict_detected") | .payload_json.resolution' \
-   .fakoli-state/events.jsonl | sort | uniq -c
+   .anvil/events.jsonl | sort | uniq -c
 ```
 
 ---
 
 ## Reconciliation
 
-Bare `fakoli-state sync` runs the `ReconciliationEngine` only — no
+Bare `anvil sync` runs the `ReconciliationEngine` only — no
 provider call, no network. It cross-checks SQLite state vs filesystem
 (packets/) vs git (branches/worktrees) and prints a discrepancy report.
 
@@ -291,10 +291,10 @@ Discrepancy kinds:
 | `missing_sync_mapping`  | warning  | no (prints CLI hint) |
 | `drift_sync_state`      | warning  | no (prints CLI hint) |
 
-`fakoli-state sync --fix --yes` applies the auto-fixable kinds via the
+`anvil sync --fix --yes` applies the auto-fixable kinds via the
 backend or a bounded git subprocess. The two stub-fix kinds
 (`missing_sync_mapping`, `drift_sync_state`) print the operator-facing
-`fakoli-state sync provider <id> --pull --task <id>` command in
+`anvil sync provider <id> --pull --task <id>` command in
 `suggested_fix` but require manual execution — pushing or pulling
 requires the provider credentials and conflict-resolution flow, which
 the reconciliation engine does not own.
@@ -326,7 +326,7 @@ from these events).
 Filter the JSONL for forensic queries:
 
 ```bash
-jq 'select(.action | startswith("sync."))' .fakoli-state/events.jsonl
+jq 'select(.action | startswith("sync."))' .anvil/events.jsonl
 ```
 
 Audit emission failures are non-fatal — a sync that succeeded but whose
@@ -341,7 +341,7 @@ audit row failed to write logs to stderr rather than aborting the sync.
 | `GITHUB_TOKEN` missing, no `gh auth`     | `--health` reports `auth_configured=False` with a hint; sync ops exit `1`.           |
 | `gh` uninstalled mid-`--watch`           | Transport flips to `http` on the next iteration's new provider instance (currently per-watch single instance — re-probe happens on restart). Each iteration prints the error and continues. |
 | Rate-limited                             | `RateLimitExceeded` → wrapped as `SyncProviderError` → batch loop continues; that single task gets `sync.push.failed` / `sync.pull.failed`. |
-| Issue deleted on remote                  | `fetch_task` returns `None`; sync logs `external_deleted` on stderr; SyncMapping's `sync_state` flips to `external_deleted` so `fakoli-state sync` (reconciliation) surfaces a `drift_sync_state` discrepancy with `payload.reason='external_deleted'`. |
+| Issue deleted on remote                  | `fetch_task` returns `None`; sync logs `external_deleted` on stderr; SyncMapping's `sync_state` flips to `external_deleted` so `anvil sync` (reconciliation) surfaces a `drift_sync_state` discrepancy with `payload.reason='external_deleted'`. |
 | Provider raises arbitrary exception      | Caught by the best-effort wrapping loop in `_push_one_task` / `_pull_one_task`; surfaced on stderr with `exception_type` recorded in the audit event; loop continues with the next task. |
 | `--watch` iteration raises               | Outer `except Exception` in `_run_watch_loop` surfaces the error and keeps polling; the daemon never dies on a single bad pass. |
 
@@ -365,5 +365,5 @@ rollback notes.
 - [`mcp.md`](mcp.md) — MCP server (does not currently expose sync tools;
   agents call the CLI directly).
 - [`migrations.md`](migrations.md) — schema version history.
-- `specs/2026-05-24-fakoli-state-v0.md` — canonical design spec
+- `specs/2026-05-24-anvil-v0.md` — canonical design spec
   including the Phase 8 sync contract.

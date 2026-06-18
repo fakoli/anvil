@@ -28,7 +28,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
+from anvil.cli import app
 
 runner = CliRunner()
 
@@ -104,7 +104,7 @@ def _planned(tmp_path: Path) -> str:
     assert _invoke(
         tmp_path, ["init", "--name", "Strict Evidence Test Project"]
     ).exit_code == 0
-    (tmp_path / ".fakoli-state" / "prd.md").write_text(_PRD, encoding="utf-8")
+    (tmp_path / ".anvil" / "prd.md").write_text(_PRD, encoding="utf-8")
     assert _invoke(tmp_path, ["prd", "parse"]).exit_code == 0
     assert _invoke(tmp_path, ["prd", "review"]).exit_code == 0
     assert _invoke(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
@@ -112,7 +112,7 @@ def _planned(tmp_path: Path) -> str:
     assert _invoke(tmp_path, ["score"]).exit_code == 0
     assert _invoke(tmp_path, ["review", "tasks"]).exit_code == 0
 
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = _sqlite3.connect(str(db_path))
     try:
         row = conn.execute(
@@ -130,7 +130,7 @@ def _require_screenshots_evidence(tmp_path: Path, task_id: str) -> None:
     Same direct-DB mutation as test_cli.py's screenshot-gate tests — the
     planner does not surface required_evidence today.
     """
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = _sqlite3.connect(str(db_path))
     try:
         verification_json = _json.dumps(
@@ -150,7 +150,7 @@ def _require_screenshots_evidence(tmp_path: Path, task_id: str) -> None:
 
 
 def _status(tmp_path: Path, task_id: str) -> str | None:
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = _sqlite3.connect(str(db_path))
     try:
         row = conn.execute(
@@ -209,7 +209,7 @@ def _reach_needs_review_sufficient(tmp_path: Path, task_id: str) -> None:
 
 def _set_config_strict(tmp_path: Path, value: bool) -> None:
     """Append/replace strict_evidence in config.yaml."""
-    cfg = tmp_path / ".fakoli-state" / "config.yaml"
+    cfg = tmp_path / ".anvil" / "config.yaml"
     text = cfg.read_text(encoding="utf-8")
     text += f"\nstrict_evidence: {'true' if value else 'false'}\n"
     cfg.write_text(text, encoding="utf-8")

@@ -1,6 +1,6 @@
 # Claiming and shipping a task
 
-> Claims are how fakoli-state coordinates concurrent work across humans and AI agents. A claim is an exclusive lease on one task plus a git branch to do the work on, recorded atomically in SQLite with a heartbeat-extended expiry so a crashed or abandoned agent never permanently parks a task. This how-to walks the full lifecycle from `next` through `apply` from one contributor's perspective — every flag and behaviour described here is verified against `bin/src/fakoli_state/cli/` and `bin/src/fakoli_state/claims/`.
+> Claims are how anvil coordinates concurrent work across humans and AI agents. A claim is an exclusive lease on one task plus a git branch to do the work on, recorded atomically in SQLite with a heartbeat-extended expiry so a crashed or abandoned agent never permanently parks a task. This how-to walks the full lifecycle from `next` through `apply` from one contributor's perspective — every flag and behaviour described here is verified against `bin/src/anvil/cli/` and `bin/src/anvil/claims/`.
 
 If you have not yet authored a PRD and promoted at least one task to `ready`, start at [`getting-started.md`](getting-started.md) and [`authoring-a-prd.md`](authoring-a-prd.md). This document assumes you have an approved PRD and at least one task in `ready`.
 
@@ -16,12 +16,12 @@ ready → claimed → in_progress → needs_review → accepted → done
 
 The full 11-status state machine — including the named gates that fire on each transition — is documented in [`../architecture.md#task-lifecycle`](../architecture.md). The concurrency primitives that make claims safe under multi-actor load are in [`../architecture.md#concurrency-model`](../architecture.md).
 
-## Step 1 — Pick the next task: `fakoli-state next`
+## Step 1 — Pick the next task: `anvil next`
 
 `next` is a non-mutating recommender. It scans tasks in `ready` status, filters out any with unmet dependencies or active claims (including conflict-group siblings), and returns the highest-priority candidate.
 
 ```bash
-fakoli-state next
+anvil next
 ```
 
 Sample output:
@@ -32,7 +32,7 @@ Next recommended task: T012
   Priority: high
   Complexity: 3
 
-Run `fakoli-state claim T012` to acquire the lease.
+Run `anvil claim T012` to acquire the lease.
 ```
 
 ### How `next` ranks candidates
@@ -54,13 +54,13 @@ The `--actor <name>` flag sets the identity recorded in the claim audit trail bu
 
 `next` reaps stale claims before scanning, so an expired claim by another actor will not hide a task from you on this call.
 
-## Step 2 — Claim the task: `fakoli-state claim T012`
+## Step 2 — Claim the task: `anvil claim T012`
 
 ```bash
-fakoli-state claim T012
+anvil claim T012
 ```
 
-What happens, in order, inside the CLI ([`cli/claim.py::claim`](../../bin/src/fakoli_state/cli/claim.py)):
+What happens, in order, inside the CLI ([`cli/claim.py::claim`](../../bin/src/anvil/cli/claim.py)):
 
 1. **Stale-claim reap.** `detect_and_release_stale()` releases any expired leases first so the conflict check sees current truth.
 2. **Pre-claim conflict check.** `manager.check_conflicts()` compares the task's `likely_files` against the `expected_files` of every active claim by another actor. Any overlap is printed to stderr; without `--force` the command exits non-zero before mutating state.
@@ -76,7 +76,7 @@ Claimed task 'T012' as 'alice'.
   Lease until: 2026-05-25T15:23:00+00:00
   Branch:      agent/t012-wire-submit-progress-evidence-buffer-flush
 
-Run `fakoli-state renew C9F3A210` to extend the lease before it expires.
+Run `anvil renew C9F3A210` to extend the lease before it expires.
 ```
 
 ### Claim flags
@@ -93,15 +93,15 @@ The `Claim` row carries `expected_files` (copied from `task.likely_files`), `cla
 
 ### Git is not required
 
-`create_branch_for_task()` returns a non-blocking warning when `git` is missing or the cwd is not a git repository — the claim still succeeds, you just don't get a branch. fakoli-state must work without git so non-source projects (writing, research) can use it.
+`create_branch_for_task()` returns a non-blocking warning when `git` is missing or the cwd is not a git repository — the claim still succeeds, you just don't get a branch. anvil must work without git so non-source projects (writing, research) can use it.
 
-## Step 3 — Get the work packet: `fakoli-state packet T012`
+## Step 3 — Get the work packet: `anvil packet T012`
 
 ```bash
-fakoli-state packet T012
+anvil packet T012
 ```
 
-The packet is the complete context one agent needs to execute the task — and nothing else. It is rendered from canonical state by [`context/packets.py::render_packet`](../../bin/src/fakoli_state/context/packets.py) and written to `.fakoli-state/packets/T012.md`.
+The packet is the complete context one agent needs to execute the task — and nothing else. It is rendered from canonical state by [`context/packets.py::render_packet`](../../bin/src/anvil/context/packets.py) and written to `.anvil/packets/T012.md`.
 
 Sections in the markdown packet:
 
@@ -119,9 +119,9 @@ Sections in the markdown packet:
 ### Two formats
 
 ```bash
-fakoli-state packet T012                # markdown → .fakoli-state/packets/T012.md
-fakoli-state packet T012 --format json  # JSON → .fakoli-state/packets/T012.json
-fakoli-state packet T012 -f json        # short form
+anvil packet T012                # markdown → .anvil/packets/T012.md
+anvil packet T012 --format json  # JSON → .anvil/packets/T012.json
+anvil packet T012 -f json        # short form
 ```
 
 The JSON form mirrors the markdown sections one-for-one and is what the MCP `generate_work_packet` tool returns to agents. The content the CLI writes to disk is also echoed to stdout so callers can pipe.
@@ -138,10 +138,10 @@ The first file change auto-transitions the task `claimed → in_progress`.
 
 ## Step 5 — Renew the lease before it expires
 
-A claim's lease expires after `default_lease_minutes` (the `ClaimManager` ships with `60` as the in-code default; the project-level override lives in `.fakoli-state/config.yaml`). Renew it before expiry:
+A claim's lease expires after `default_lease_minutes` (the `ClaimManager` ships with `60` as the in-code default; the project-level override lives in `.anvil/config.yaml`). Renew it before expiry:
 
 ```bash
-fakoli-state renew C9F3A210
+anvil renew C9F3A210
 ```
 
 Sample output:
@@ -163,17 +163,17 @@ A `renew` against an already-expired lease raises `ClaimError`: "lease expired .
 You can force-release someone else's stale (or active) claim with `--force`:
 
 ```bash
-fakoli-state release C9F3A210 --force --reason "stale; reclaiming for hot-fix"
+anvil release C9F3A210 --force --reason "stale; reclaiming for hot-fix"
 ```
 
 Note that `release` takes the **claim ID** (`C9F3A210`), not the task ID — claims have their own identifier (`C` + 8 hex chars) so the audit trail survives multiple claims per task over time.
 
-## Step 6 — Submit evidence: `fakoli-state submit T012`
+## Step 6 — Submit evidence: `anvil submit T012`
 
 ```bash
-fakoli-state submit T012 \
+anvil submit T012 \
     --commands "pytest tests/test_submit.py -v" \
-    --files-changed "bin/src/fakoli_state/cli/packet_apply.py,tests/test_submit.py" \
+    --files-changed "bin/src/anvil/cli/packet_apply.py,tests/test_submit.py" \
     --output-file /tmp/pytest-output.log \
     --pr-url "https://github.com/you/repo/pull/142"
 ```
@@ -206,7 +206,7 @@ Evidence submitted for task 'T012'.
   Submitted by: alice
   ...
 Task 'T012' status → needs_review.
-Run `fakoli-state apply T012` when ready for human review.
+Run `anvil apply T012` when ready for human review.
 Evidence gate: PASSED — all required evidence present.
 ```
 
@@ -222,7 +222,7 @@ Re-run `submit` with the missing flag (`--commands` for test output, `--pr-url` 
 
 ### How the evidence gate matches
 
-[`review/gates.py::evidence_complete`](../../bin/src/fakoli_state/review/gates.py) maps each item in `required_evidence` to a structured field using substring rules:
+[`review/gates.py::evidence_complete`](../../bin/src/anvil/review/gates.py) maps each item in `required_evidence` to a structured field using substring rules:
 
 | Required-evidence item contains | Checked against |
 |---|---|
@@ -234,7 +234,7 @@ Re-run `submit` with the missing flag (`--commands` for test output, `--pr-url` 
 
 Match is case-insensitive. The word-boundary on "PR" exists because plain substring matching gave false positives on words like "improve", "approve", "process" (Greptile + Critic-1, PR #41).
 
-## Step 7 — Apply: `fakoli-state apply T012`
+## Step 7 — Apply: `anvil apply T012`
 
 `apply` is the merge gate. It is **human-only by default** — not exposed via the MCP surface — so an agent cannot self-approve its own work.
 
@@ -243,7 +243,7 @@ Match is case-insensitive. The word-boundary on "PR" exists because plain substr
 Run `apply` without `--approve` or `--reject` to see the gate verdict without mutating state:
 
 ```bash
-fakoli-state apply T012
+anvil apply T012
 ```
 
 ```text
@@ -257,7 +257,7 @@ Pass --approve to accept or --reject --reason TEXT to reject.
 ### Approve
 
 ```bash
-fakoli-state apply T012 --approve
+anvil apply T012 --approve
 ```
 
 Emits a `task.applied` event with `decision="accepted"`. The handler transitions `needs_review → accepted → done` atomically and records the reviewer (defaults to `$USER`, then `human` — set with `--reviewer`).
@@ -269,7 +269,7 @@ Task 'T012' approved by 'alice' → done.
 ### Reject
 
 ```bash
-fakoli-state apply T012 --reject --reason "missing rate-limit test for the 429 path"
+anvil apply T012 --reject --reason "missing rate-limit test for the 429 path"
 ```
 
 `--reject` requires `--reason` (the CLI errors out otherwise). The task transitions `needs_review → rejected → drafted`, the reason is logged on the `task.applied` event, and the author can re-edit the PRD, re-run `prd parse`, re-score, and re-claim.
@@ -280,10 +280,10 @@ fakoli-state apply T012 --reject --reason "missing rate-limit test for the 429 p
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Task 'T012' cannot be claimed: status is 'claimed'` | Someone (you or another actor) already holds the claim. | `fakoli-state list --status claimed` to find the holder. Wait, or `release C... --force` if it is stale. |
-| `Task 'T012' cannot be claimed: no PRD found` | You ran `claim` before `prd parse`. | Author `.fakoli-state/prd.md`, run `prd parse`, then `prd review`. |
+| `Task 'T012' cannot be claimed: status is 'claimed'` | Someone (you or another actor) already holds the claim. | `anvil list --status claimed` to find the holder. Wait, or `release C... --force` if it is stale. |
+| `Task 'T012' cannot be claimed: no PRD found` | You ran `claim` before `prd parse`. | Author `.anvil/prd.md`, run `prd parse`, then `prd review`. |
 | `conflicts with active claims: ... overlapping files: [...]` | Another actor's claim's `expected_files` overlap yours. | Coordinate, wait, or `claim --force` if you are sure. The conflict is logged either way. |
-| `Claim 'C...' lease expired at ... please re-claim` | You let the heartbeat lapse. | `fakoli-state claim T012` again — the stale claim auto-reaps on the next mutating call. |
+| `Claim 'C...' lease expired at ... please re-claim` | You let the heartbeat lapse. | `anvil claim T012` again — the stale claim auto-reaps on the next mutating call. |
 | `no active claim found for task 'T012'` on `submit` | The claim was released or expired before you submitted. | Re-claim, redo the work (or pick up from the branch) and submit again. |
 | `Evidence gate: INCOMPLETE — missing items` | `submit` did not satisfy `task.verification.required_evidence`. | Re-run `submit` with the missing flag (`--commands`, `--pr-url`, etc.). |
 | `--reject requires --reason TEXT` | You passed `--reject` without `--reason`. | Add `--reason "<text>"`. |
@@ -292,7 +292,7 @@ fakoli-state apply T012 --reject --reason "missing rate-limit test for the 429 p
 ### Abandoning a claim cleanly
 
 ```bash
-fakoli-state release C9F3A210 --reason "abandoning, blocked on upstream API"
+anvil release C9F3A210 --reason "abandoning, blocked on upstream API"
 ```
 
 The task returns to `ready` and is immediately claimable by anyone. The reason is recorded on the `claim.released` event so the next claimant has context.
@@ -300,7 +300,7 @@ The task returns to `ready` and is immediately claimable by anyone. The reason i
 ### Force-releasing someone else's claim
 
 ```bash
-fakoli-state release C9F3A210 --force --reason "stale recovery; original actor offline"
+anvil release C9F3A210 --force --reason "stale recovery; original actor offline"
 ```
 
 `--force` bypasses the actor-ownership check and lets you release an `active` or `stale` claim by anyone. The original `claimed_by` is preserved on the event for audit.
@@ -319,7 +319,7 @@ evidence.submitted → Evidence row inserted; task in_progress → needs_review;
 task.applied       → task needs_review → accepted → done (or → rejected → drafted)
 ```
 
-This is the audit trail that backs fakoli-state's replay guarantee — see [`../architecture.md#event-log-and-jsonl-replay`](../architecture.md).
+This is the audit trail that backs anvil's replay guarantee — see [`../architecture.md#event-log-and-jsonl-replay`](../architecture.md).
 
 ## Where to next
 

@@ -23,7 +23,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
+from anvil.cli import app
 
 runner = CliRunner()
 
@@ -145,7 +145,7 @@ def _init(tmp_path: Path) -> None:
 def _planned_project(tmp_path: Path) -> None:
     """init -> PRD -> review -> approve -> plan --no-llm -> score -> review tasks."""
     _init(tmp_path)
-    (tmp_path / ".fakoli-state" / "prd.md").write_text(_FULL_PRD, encoding="utf-8")
+    (tmp_path / ".anvil" / "prd.md").write_text(_FULL_PRD, encoding="utf-8")
     assert _invoke(tmp_path, ["prd", "parse"]).exit_code == 0
     assert _invoke(tmp_path, ["prd", "review"]).exit_code == 0
     assert _invoke(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
@@ -277,7 +277,7 @@ class TestFindDecisionsJson:
 class TestPlanJson:
     def test_plan_json_success(self, tmp_path: Path) -> None:
         _init(tmp_path)
-        (tmp_path / ".fakoli-state" / "prd.md").write_text(_FULL_PRD, encoding="utf-8")
+        (tmp_path / ".anvil" / "prd.md").write_text(_FULL_PRD, encoding="utf-8")
         assert _invoke(tmp_path, ["prd", "parse"]).exit_code == 0
         assert _invoke(tmp_path, ["prd", "review"]).exit_code == 0
         assert _invoke(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
@@ -292,7 +292,7 @@ class TestPlanJson:
 class TestScoreJson:
     def test_score_json_success(self, tmp_path: Path) -> None:
         _init(tmp_path)
-        (tmp_path / ".fakoli-state" / "prd.md").write_text(_FULL_PRD, encoding="utf-8")
+        (tmp_path / ".anvil" / "prd.md").write_text(_FULL_PRD, encoding="utf-8")
         assert _invoke(tmp_path, ["prd", "parse"]).exit_code == 0
         assert _invoke(tmp_path, ["prd", "review"]).exit_code == 0
         assert _invoke(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
@@ -317,7 +317,7 @@ class TestScoreJson:
 class TestReviewTasksJson:
     def test_review_tasks_json_success(self, tmp_path: Path) -> None:
         _init(tmp_path)
-        (tmp_path / ".fakoli-state" / "prd.md").write_text(_FULL_PRD, encoding="utf-8")
+        (tmp_path / ".anvil" / "prd.md").write_text(_FULL_PRD, encoding="utf-8")
         assert _invoke(tmp_path, ["prd", "parse"]).exit_code == 0
         assert _invoke(tmp_path, ["prd", "review"]).exit_code == 0
         assert _invoke(tmp_path, ["prd", "review", "--approve"]).exit_code == 0

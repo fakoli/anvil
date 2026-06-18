@@ -10,7 +10,7 @@ Test selector: ``pytest -k acceptance_grammar``.
 
 from __future__ import annotations
 
-from fakoli_state.planning.template import (
+from anvil.planning.template import (
     AcceptanceClause,
     parse_acceptance_grammar,
     parse_prd,

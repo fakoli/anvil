@@ -1,19 +1,19 @@
-# Docker MCP catalog manifest for the fakoli-state FastMCP (stdio) server.
+# Docker MCP catalog manifest for the anvil FastMCP (stdio) server.
 #
 # Submission flow (mirrors github.com/docker/mcp-registry CONTRIBUTING.md):
 #   1. Fork docker/mcp-registry, then copy this file to
-#      servers/fakoli-state/server.yaml in that fork.
-#   2. Pin `source.commit` to the fakoli-state commit being published.
+#      servers/anvil/server.yaml in that fork.
+#   2. Pin `source.commit` to the anvil commit being published.
 #   3. Validate locally:
-#        task build   -- --tools fakoli-state   # builds the image from ./Dockerfile
-#        task catalog -- fakoli-state            # generates catalogs/fakoli-state/catalog.yaml
-#        docker mcp catalog import $PWD/catalogs/fakoli-state/catalog.yaml
+#        task build   -- --tools anvil   # builds the image from ./Dockerfile
+#        task catalog -- anvil            # generates catalogs/anvil/catalog.yaml
+#        docker mcp catalog import $PWD/catalogs/anvil/catalog.yaml
 #   4. Open a PR against docker/mcp-registry.
 #
 # See docs/mcp.md "Publishing to the Docker MCP catalog" for the full walkthrough.
 
-name: fakoli-state
-image: mcp/fakoli-state
+name: anvil
+image: mcp/anvil
 type: server
 
 meta:
@@ -26,7 +26,7 @@ meta:
     - evidence-based
 
 about:
-  title: fakoli-state
+  title: anvil
   description: >-
     Local-first project state engine. Turns rough ideas and PRDs into reviewed,
     lockable, evidence-backed work packets that humans and AI agents can
@@ -35,7 +35,7 @@ about:
   icon: https://avatars.githubusercontent.com/u/9919?s=200&v=4
 
 source:
-  project: https://github.com/fakoli/fakoli-state
+  project: https://github.com/fakoli/anvil
   # Pin to the published commit before opening the registry PR.
   commit: 0000000000000000000000000000000000000000
   # The image is built from the repo-root Dockerfile (no pre-published image).
@@ -43,20 +43,20 @@ source:
 
 run:
   # Mount the user's project directory so the server can resolve
-  # .fakoli-state/state.db. FAKOLI_STATE_ROOT (below) points the engine at it.
+  # .anvil/state.db. ANVIL_ROOT (below) points the engine at it.
   volumes:
-    - '{{fakoli-state.project_path}}:/project'
+    - '{{anvil.project_path}}:/project'
 
 config:
   description: >-
-    fakoli-state reads and writes canonical project state under
-    .fakoli-state/ inside the mounted project directory. No secrets or API keys
+    anvil reads and writes canonical project state under
+    .anvil/ inside the mounted project directory. No secrets or API keys
     are required for the core coordination tools.
   env:
-    # The engine resolves the project root from FAKOLI_STATE_ROOT, falling back
+    # The engine resolves the project root from ANVIL_ROOT, falling back
     # to the working directory. Inside the container the project is mounted at
     # /project, so we point the engine there.
-    - name: FAKOLI_STATE_ROOT
+    - name: ANVIL_ROOT
       example: /project
       value: /project
   parameters:
@@ -64,6 +64,6 @@ config:
     properties:
       project_path:
         type: string
-        description: Absolute path on the host to the project directory containing (or to contain) .fakoli-state/.
+        description: Absolute path on the host to the project directory containing (or to contain) .anvil/.
     required:
       - project_path

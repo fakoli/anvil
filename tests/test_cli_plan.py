@@ -1,4 +1,4 @@
-"""CLI tests for ``fakoli-state expand`` — Phase 9 T6 (C4: --format prd).
+"""CLI tests for ``anvil expand`` — Phase 9 T6 (C4: --format prd).
 
 Greenfield test module created in Phase 9 to cover the new ``--format``
 option on the ``expand`` subcommand (added by Phase 9 T6 / C4) and to lock
@@ -11,7 +11,7 @@ Coverage:
 - Validation precedence — ``--format`` is checked BEFORE the ``--use-llm``
   guard so a user passing both bad flags sees the clearer error first.
 
-Pattern: monkeypatch ``fakoli_state.cli.plan._resolve_llm_provider`` to
+Pattern: monkeypatch ``anvil.cli.plan._resolve_llm_provider`` to
 return an in-test fake provider that returns canned proposals.  This is
 the same pattern used by ``tests/test_cli.py::TestUseLlmRecordedProvider``
 (line ~1815) — kept consistent so a future helper extraction can share the
@@ -31,8 +31,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
-from fakoli_state.planning.llm import LLMResponse
+from anvil.cli import app
+from anvil.planning.llm import LLMResponse
 
 runner = CliRunner()
 
@@ -56,7 +56,7 @@ def _do_init(tmp_path: Path, name: str = "Expand Test Project") -> None:
 
 
 def _write_prd(tmp_path: Path, content: str) -> None:
-    prd_path = tmp_path / ".fakoli-state" / "prd.md"
+    prd_path = tmp_path / ".anvil" / "prd.md"
     prd_path.write_text(content, encoding="utf-8")
 
 
@@ -77,7 +77,7 @@ def _install_provider(
     """Replace ``_resolve_llm_provider`` so the test never touches network/env."""
     import importlib
 
-    plan_module = importlib.import_module("fakoli_state.cli.plan")
+    plan_module = importlib.import_module("anvil.cli.plan")
 
     def fake_resolve(use_llm: bool, config=None):  # type: ignore[no-untyped-def]
         return provider_factory() if use_llm else None
@@ -400,7 +400,7 @@ class TestExpandFormatPrd:
             f"{prd_blocks}\n"
         )
 
-        from fakoli_state.planning.template import parse_prd
+        from anvil.planning.template import parse_prd
 
         parsed = parse_prd(wrapped_prd, prd_id="prd-roundtrip")
         # No fatal errors from the parser.
@@ -479,7 +479,7 @@ class TestExpandFormatHelp:
 
 
 # ---------------------------------------------------------------------------
-# batch_deps — `fakoli-state deps` batch dependency-edit primitive (T022/F007)
+# batch_deps — `anvil deps` batch dependency-edit primitive (T022/F007)
 # ---------------------------------------------------------------------------
 
 
@@ -493,7 +493,7 @@ def _seed_dep_tasks(tmp_path: Path, ids_with_deps: list[tuple[str, list[str]]]) 
     dependency-only upserts the ``deps`` command emits.
     """
     _do_init(tmp_path, name="Deps Test Project")
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "INSERT OR IGNORE INTO features "
@@ -518,7 +518,7 @@ def _seed_dep_tasks(tmp_path: Path, ids_with_deps: list[tuple[str, list[str]]]) 
 
 def _deps_of(tmp_path: Path, task_id: str) -> list[str]:
     """Read a task's persisted dependency list straight from state.db."""
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = sqlite3.connect(str(db_path))
     try:
         row = conn.execute(
@@ -531,7 +531,7 @@ def _deps_of(tmp_path: Path, task_id: str) -> list[str]:
 
 
 def _status_of(tmp_path: Path, task_id: str) -> str:
-    db_path = tmp_path / ".fakoli-state" / "state.db"
+    db_path = tmp_path / ".anvil" / "state.db"
     conn = sqlite3.connect(str(db_path))
     try:
         row = conn.execute(

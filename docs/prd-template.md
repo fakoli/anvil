@@ -1,24 +1,24 @@
 # PRD Template
 
-The `.fakoli-state/prd.md` file is the authoritative source of truth for every project
-that uses fakoli-state. It describes what the project must do, why, and how to verify it.
+The `.anvil/prd.md` file is the authoritative source of truth for every project
+that uses anvil. It describes what the project must do, why, and how to verify it.
 The parser reads it deterministically — no LLM required — and writes the results into
 `state.db` as `Requirement`, `Feature`, and `Task` rows.
 
-**Location**: `.fakoli-state/prd.md` inside your project (created by `fakoli-state init`).
+**Location**: `.anvil/prd.md` inside your project (created by `anvil init`).
 
 **Hard rule**: structure matters. The parser rejects the file with a `ParseError` if any
-required section is missing or malformed. Edit `prd.md`, then run `fakoli-state prd parse`
+required section is missing or malformed. Edit `prd.md`, then run `anvil prd parse`
 to refresh state.
 
 **Reference**: the canonical data model and CLI command set are defined in
-[`docs/specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md).
+[`docs/specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
 
 ---
 
 ## Quick-Start Example
 
-Copy this block into `.fakoli-state/prd.md` and edit it for your project. Every required
+Copy this block into `.anvil/prd.md` and edit it for your project. Every required
 and optional section is shown with realistic content. Delete optional sections you do not
 need; do not delete required ones.
 
@@ -370,7 +370,7 @@ structured fields and an optional free-form description paragraph.
 ```
 
 IDs must be zero-padded to three digits: `T001`, `T002`, etc. Subtask IDs (`T001.1`,
-`T001.2`) are created by `fakoli-state expand`, not by the user directly in `prd.md`.
+`T001.2`) are created by `anvil expand`, not by the user directly in `prd.md`.
 
 **Task fields** (all optional; order within the block does not matter):
 
@@ -392,7 +392,7 @@ function until Task A is done. Examples: T002 tests `HttpTransport` in 2-process
 → T002 depends on T001 (the task that implements `HttpTransport`); T015 migrates data
 to the new schema → T015 depends on T010 (the task that adds the schema). It is NOT
 for "tasks I share files with" — file overlap is detected automatically as conflict
-groups. The `fakoli-state claim` command warns (but does not refuse) when claiming a
+groups. The `anvil claim` command warns (but does not refuse) when claiming a
 task whose dependencies aren't yet `done`; pass `--force` to silence the warning if
 you're intentionally working a stacked-PR workflow.
 
@@ -418,7 +418,7 @@ Parse positional arguments. Derive the output path by swapping `.json` for `.yam
 - `python -m tool --help`
 ```
 
-**Parser behavior if absent**: no `Task` entities are created. `fakoli-state plan` can
+**Parser behavior if absent**: no `Task` entities are created. `anvil plan` can
 generate tasks from requirements after parsing, but `## Tasks` is the direct way to
 provide hand-authored tasks.
 
@@ -448,7 +448,7 @@ IDs are stable across edits.
 looks for the bare ID pattern.
 
 **Subtask IDs are generated, not authored.** The `## Tasks` section should only contain
-root task IDs (`T001`, `T002`, ...). Run `fakoli-state expand T001` to break a task
+root task IDs (`T001`, `T002`, ...). Run `anvil expand T001` to break a task
 into subtasks; the planner writes `T001.1`, `T001.2`, etc. into state. These do not
 appear in `prd.md`.
 
@@ -459,7 +459,7 @@ appear in `prd.md`.
 **Preprocessing**: HTML comments (`<!-- ... -->`) are stripped before any section
 matching. Trailing whitespace and extra blank lines are ignored.
 
-**Re-parse replaces, not merges**: running `fakoli-state prd parse` a second time
+**Re-parse replaces, not merges**: running `anvil prd parse` a second time
 replaces all `Requirement`, `Feature`, and `Task` entities in `state.db` completely.
 There is no merge. Edit `prd.md` and re-run the command to refresh state. Tasks in
 `in_progress` or `claimed` status are also replaced — coordinate with active agents
@@ -486,25 +486,25 @@ by the parser — write `` - `pytest tests/` `` or `- pytest tests/` ; both are 
 
 ## After Parsing
 
-Once `fakoli-state prd parse` succeeds, the PRD status is `draft`. From there:
+Once `anvil prd parse` succeeds, the PRD status is `draft`. From there:
 
-1. **Review and approve the PRD**: `fakoli-state prd review --approve` transitions the
+1. **Review and approve the PRD**: `anvil prd review --approve` transitions the
    PRD from `draft` → `reviewed` → `approved`. The claims manager enforces this gate —
    no task can be claimed while the PRD is in `draft` or `reviewed` status.
 
-2. **Generate and promote tasks**: `fakoli-state plan` promotes requirements and features
-   into `proposed` tasks. `fakoli-state score` populates the six-dimension scores
+2. **Generate and promote tasks**: `anvil plan` promotes requirements and features
+   into `proposed` tasks. `anvil score` populates the six-dimension scores
    (complexity, parallelizability, context load, blast radius, review risk, agent
-   suitability). `fakoli-state expand T001` breaks tasks with `complexity ≥ 4` into
-   subtasks. `fakoli-state review tasks` promotes drafted tasks to `reviewed` and then
+   suitability). `anvil expand T001` breaks tasks with `complexity ≥ 4` into
+   subtasks. `anvil review tasks` promotes drafted tasks to `reviewed` and then
    `ready`.
 
 3. **Claim and work**: only tasks in `ready` status can be claimed. Run
-   `fakoli-state next` to find the highest-priority claimable task, then
-   `fakoli-state claim T001` to acquire an exclusive lease. The claim auto-creates an
-   `agent/t001-<slug>` branch. Evidence submitted via `fakoli-state submit` releases the
+   `anvil next` to find the highest-priority claimable task, then
+   `anvil claim T001` to acquire an exclusive lease. The claim auto-creates an
+   `agent/t001-<slug>` branch. Evidence submitted via `anvil submit` releases the
    claim automatically.
 
 The full workflow is described in the spec at
-[`docs/specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md)
+[`docs/specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md)
 under "Data Flows".

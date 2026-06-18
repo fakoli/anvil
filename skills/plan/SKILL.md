@@ -11,12 +11,12 @@ Convert an approved PRD into a queue of agent-ready tasks. This skill drives fou
 
 ## When to Use
 
-- Immediately after `fakoli-state prd review --approve` — the PRD is approved and the task graph does not yet exist.
+- Immediately after `anvil prd review --approve` — the PRD is approved and the task graph does not yet exist.
 - After a significant PRD revision that adds new `## Features` or `## Tasks` sections — re-plan to generate the updated task graph.
-- When `fakoli-state status` shows `prd-status: approved` but `ready-tasks: 0` and no tasks exist yet.
+- When `anvil status` shows `prd-status: approved` but `ready-tasks: 0` and no tasks exist yet.
 - When tasks exist but none have scores — scoring was skipped or the plan was never completed.
 
-**Do not use this skill for re-scoring individual tasks, managing claims, or adjusting task status after work has started.** Once tasks are `ready`, proceed to `/fakoli-state:execute` (Phase 5). Use `/fakoli-state:state-ops` for inspection at any point.
+**Do not use this skill for re-scoring individual tasks, managing claims, or adjusting task status after work has started.** Once tasks are `ready`, proceed to `/anvil:execute` (Phase 5). Use `/anvil:state-ops` for inspection at any point.
 
 ---
 
@@ -25,21 +25,21 @@ Convert an approved PRD into a queue of agent-ready tasks. This skill drives fou
 The PRD must be parsed and in at least `reviewed` status. Confirm before proceeding:
 
 ```bash
-fakoli-state status
+anvil status
 ```
 
-Look for `prd-status: reviewed` or `prd-status: approved`. If `prd-status: draft` or `prd-status: none`, proceed to `/fakoli-state:prd` first.
+Look for `prd-status: reviewed` or `prd-status: approved`. If `prd-status: draft` or `prd-status: none`, proceed to `/anvil:prd` first.
 
 Phase 3 commands used in this skill:
 
 | Command | Phase | Status |
 |---|---|---|
-| `fakoli-state plan` | Phase 3 | available |
-| `fakoli-state score [TASK_ID]` | Phase 3 | available |
-| `fakoli-state expand TASK_ID --use-llm` | Phase 7 | available |
-| `fakoli-state review tasks` | Phase 3 | available |
-| `fakoli-state list [--status X]` | Phase 3 | available |
-| `fakoli-state show TASK_ID` | Phase 3 | available |
+| `anvil plan` | Phase 3 | available |
+| `anvil score [TASK_ID]` | Phase 3 | available |
+| `anvil expand TASK_ID --use-llm` | Phase 7 | available |
+| `anvil review tasks` | Phase 3 | available |
+| `anvil list [--status X]` | Phase 3 | available |
+| `anvil show TASK_ID` | Phase 3 | available |
 
 ---
 
@@ -47,7 +47,7 @@ Phase 3 commands used in this skill:
 
 ### Step 0 — Scan for unresolved decisions (soft gate, v1.14.0)
 
-Before running `plan`, drive `fakoli-state prd find-decisions` (or the `find_decisions` MCP tool) yourself. The planner's task generation is shaped by the PRD's requirements and features — if those still contain `[NEEDS DECISION]` markers or unresolved Open Questions, the generated task graph will inherit the ambiguity. Surfacing unresolved items before plan runs is cheap; after plan runs, the same ambiguities will land as task descriptions that need re-editing and re-planning.
+Before running `plan`, drive `anvil prd find-decisions` (or the `find_decisions` MCP tool) yourself. The planner's task generation is shaped by the PRD's requirements and features — if those still contain `[NEEDS DECISION]` markers or unresolved Open Questions, the generated task graph will inherit the ambiguity. Surfacing unresolved items before plan runs is cheap; after plan runs, the same ambiguities will land as task descriptions that need re-editing and re-planning.
 
 If `find_decisions` returns empty, skip this step entirely — do not even mention it to the user. The soft gate only fires when there is something to decide.
 
@@ -72,10 +72,10 @@ The soft-gate design is deliberate: `find-decisions` non-empty does NOT block pl
 
 ### Step 1 — Generate features and tasks (`plan` guarantees tasks as of v1.15.0)
 
-Invoke `fakoli-state plan` yourself — via Bash, the MCP `plan_tasks` tool when available, or whichever execution primitive the runtime exposes:
+Invoke `anvil plan` yourself — via Bash, the MCP `plan_tasks` tool when available, or whichever execution primitive the runtime exposes:
 
 ```bash
-fakoli-state plan
+anvil plan
 ```
 
 Reads the parsed PRD from `state.db` and emits `feature.created` and `task.created` events. Dependency inference and conflict-group detection run automatically — tasks that share `likely_files` entries are grouped into the same conflict group.
@@ -88,18 +88,18 @@ Reads the parsed PRD from `state.db` and emits `feature.created` and `task.creat
 The output line tells you what happened:
 
 ```
-Planned 3 features, 19 tasks (19 generated via LLM (anthropic), appended to .fakoli-state/prd.md)
+Planned 3 features, 19 tasks (19 generated via LLM (anthropic), appended to .anvil/prd.md)
 ```
 
 When you see `(N generated via LLM ...)`, surface it explicitly in chat so the user knows their `prd.md` was modified:
 
-> Plan generated 3 features and 19 tasks. The PRD had no `## Tasks` section, so I generated them via LLM and appended a `## Tasks` block to `.fakoli-state/prd.md` (auditable on disk). Want to review the generated tasks before continuing? (show me / looks good / I want to edit first)
+> Plan generated 3 features and 19 tasks. The PRD had no `## Tasks` section, so I generated them via LLM and appended a `## Tasks` block to `.anvil/prd.md` (auditable on disk). Want to review the generated tasks before continuing? (show me / looks good / I want to edit first)
 
 If the LLM call fails (no `ANTHROPIC_API_KEY`, network failure, malformed response), the CLI exits non-zero with a clear message. **Do not paper over a failure by dispatching the planner subagent as a workaround** — surface the error to the user and ask whether they want to set up the LLM path or author tasks manually in `## Tasks`.
 
 If you genuinely don't want LLM auto-gen for a specific call (e.g. on a CI machine without API keys), pass `--no-llm`. The CLI exits 1 with a clear "0 tasks generated; author them manually" message.
 
-**Pause and present the task list.** Run `fakoli-state list` yourself and present titles, features, and priorities in chat:
+**Pause and present the task list.** Run `anvil list` yourself and present titles, features, and priorities in chat:
 
 > Plan generated 3 features, 8 tasks. Here they are:
 > [list output]
@@ -126,7 +126,7 @@ For Claude Code runtimes, use the `AskUserQuestion` tool so the user gets a stru
 
 Always: agent generates the question, proposes 2-4 candidate answers when the surrounding context allows, accepts the pick, applies the choice (edit `prd.md`, re-parse, etc.). One decision per turn — do NOT batch three decisions into one question.
 
-When the LLM flagged tasks for expansion, do **not** open a per-task Q&A here — expansion is no longer a decision the user makes task-by-task. Scoring (Step 2) emits an EXPANSION QUEUE for every task at/above the configured `auto_expand_threshold`, and Step 3 auto-expands the whole queue with one summary checkpoint at the end. Only surface expansion as a question if the project has opted out (`auto_expand: false` in `.fakoli-state/config.yaml`) or the user has said they want to pick manually.
+When the LLM flagged tasks for expansion, do **not** open a per-task Q&A here — expansion is no longer a decision the user makes task-by-task. Scoring (Step 2) emits an EXPANSION QUEUE for every task at/above the configured `auto_expand_threshold`, and Step 3 auto-expands the whole queue with one summary checkpoint at the end. Only surface expansion as a question if the project has opted out (`auto_expand: false` in `.anvil/config.yaml`) or the user has said they want to pick manually.
 
 The one-decision-per-turn rule still applies whenever the post-plan output surfaces structural concerns about the PRD (e.g., "R010 vs F003 drift"). Each concern is one Q&A turn with proposed fix options, not a wall of "issues to consider."
 
@@ -137,7 +137,7 @@ The one-decision-per-turn rule still applies whenever the post-plan output surfa
 Once the user confirms the task list, invoke the scorer yourself:
 
 ```bash
-fakoli-state score
+anvil score
 ```
 
 Populates all six dimensions on each `Task`. The scorer is rule-based — no LLM required. Dimensions:
@@ -157,14 +157,14 @@ When tasks score at/above the configured `auto_expand_threshold` (default 4) and
 EXPANSION QUEUE (complexity >= 4)
 ---------------------------------
   T001         complexity=5  suggested-subtasks=4  Storage backend refactor
-    $ fakoli-state expand T001 --use-llm
+    $ anvil expand T001 --use-llm
   T003         complexity=4  suggested-subtasks=3  Auth middleware
-    $ fakoli-state expand T003 --use-llm
+    $ anvil expand T003 --use-llm
 
 2 task(s) queued for expansion. ...
 ```
 
-**The queue drives Step 3 automatically — do not ask the user per task.** Unless the user opted out (`auto_expand: false` in `.fakoli-state/config.yaml`, or they said so in chat), proceed straight to Step 3 and expand every queued task. The queue replaces the old "flag for expand and ask" dance: the score already made the decision; your job is to execute it and present one summary afterward.
+**The queue drives Step 3 automatically — do not ask the user per task.** Unless the user opted out (`auto_expand: false` in `.anvil/config.yaml`, or they said so in chat), proceed straight to Step 3 and expand every queued task. The queue replaces the old "flag for expand and ask" dance: the score already made the decision; your job is to execute it and present one summary afterward.
 
 Two score signals still warrant explicit attention in chat (these are NOT auto-handled):
 
@@ -178,18 +178,18 @@ Two score signals still warrant explicit attention in chat (these are NOT auto-h
 **Default behavior: expand every task in the EXPANSION QUEUE automatically — no per-task user Q&A.** Dispatch the planner agent (`agents/planner.md`) to work the queue, or drive the commands yourself when the runtime has a shell:
 
 ```bash
-fakoli-state expand T001 --use-llm --format prd
+anvil expand T001 --use-llm --format prd
 ```
 
-For each queued task: run the expand command, take the returned `### T00X.N` blocks, apply them to the `## Tasks` section of `.fakoli-state/prd.md` (drop or keep the parent block per the parser's behavior — confirm before removing), then re-run the pipeline once at the end:
+For each queued task: run the expand command, take the returned `### T00X.N` blocks, apply them to the `## Tasks` section of `.anvil/prd.md` (drop or keep the parent block per the parser's behavior — confirm before removing), then re-run the pipeline once at the end:
 
 ```bash
-fakoli-state prd parse
-fakoli-state plan
-fakoli-state score
+anvil prd parse
+anvil plan
+anvil score
 ```
 
-**Skip auto-expansion only when the user opted out** — `auto_expand: false` in `.fakoli-state/config.yaml` (the queue section will not even render), or an explicit instruction in chat ("don't split anything yet"). In the opt-out case, fall back to asking once: "N tasks scored at/above the expansion threshold — want me to expand them?"
+**Skip auto-expansion only when the user opted out** — `auto_expand: false` in `.anvil/config.yaml` (the queue section will not even render), or an explicit instruction in chat ("don't split anything yet"). In the opt-out case, fall back to asking once: "N tasks scored at/above the expansion threshold — want me to expand them?"
 
 **One summary checkpoint after the queue is drained.** Do not narrate each expansion as a separate decision; collect the results and present a single recap before moving to Step 4:
 
@@ -224,7 +224,7 @@ If the LLM call fails (no API key, network failure), surface the error and fall 
 Invoke the gate yourself:
 
 ```bash
-fakoli-state review tasks
+anvil review tasks
 ```
 
 Promotes tasks through `drafted → reviewed → ready`. The gate checks two conditions for each task:
@@ -242,22 +242,22 @@ T006: PROMOTED to ready
 
 For each blocked task, surface the exact missing field in chat — do not just report "blocked". Propose the fix inline, apply it to `prd.md` after confirmation, re-parse, and re-run `review tasks` yourself. Do not retry without fixing the underlying gap — the gate will block on the same condition again.
 
-When the gate passes for every expected task, run `fakoli-state list --status ready` yourself and present the queue:
+When the gate passes for every expected task, run `anvil list --status ready` yourself and present the queue:
 
 > Review passed. Ready queue:
 > [list output]
-> Ready for `/fakoli-state:execute`? (yes / not yet — anything to adjust first)
+> Ready for `/anvil:execute`? (yes / not yet — anything to adjust first)
 
 ---
 
 ### Step 5 — Verify the ready queue
 
-If `fakoli-state list --status ready` returned non-empty in Step 4 and the user confirmed, the plan is complete — hand off into `/fakoli-state:execute` by invoking that skill, not by listing CLI commands.
+If `anvil list --status ready` returned non-empty in Step 4 and the user confirmed, the plan is complete — hand off into `/anvil:execute` by invoking that skill, not by listing CLI commands.
 
 If the ready list is empty after Step 4 succeeded, something blocked the gate. Diagnose inline:
 
 ```bash
-fakoli-state list --status drafted
+anvil list --status drafted
 ```
 
 Read every row, surface the failure reason, propose the fix in chat, apply it to `prd.md` after confirmation, then re-run the relevant pipeline steps yourself.
@@ -266,10 +266,10 @@ Read every row, surface the failure reason, propose the fix in chat, apply it to
 
 ### Step 6 — Drill into specific tasks
 
-Run `fakoli-state show TASK_ID` yourself whenever a task looks suspicious — a title that seems too broad, a `blast_radius` of 5 on something that should be isolated, or a dependency chain that creates a bottleneck:
+Run `anvil show TASK_ID` yourself whenever a task looks suspicious — a title that seems too broad, a `blast_radius` of 5 on something that should be isolated, or a dependency chain that creates a bottleneck:
 
 ```bash
-fakoli-state show T003
+anvil show T003
 ```
 
 Surface the result inline: title, description, acceptance criteria, verification commands, all six score dimensions, `expected_files`, and dependency chain. These are planning issues that are far cheaper to fix before claiming than after.
@@ -278,7 +278,7 @@ Surface the result inline: title, description, acceptance criteria, verification
 
 ## Anti-pattern to avoid
 
-Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Run `review tasks` 4. Run `list --status ready` 5. Run `/fakoli-state:execute`..." That handoff style only makes sense when the work is leaving this session entirely — queued for another agent, scheduled for tomorrow, blocked on stakeholder review. When the agent and user are in the same conversation, drive each command, surface its output, and present the next decision. Pause-and-present discipline is the whole point of interactive driving — it preserves the user's judgment at every gate without forcing them into a CLI.
+Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Run `review tasks` 4. Run `list --status ready` 5. Run `/anvil:execute`..." That handoff style only makes sense when the work is leaving this session entirely — queued for another agent, scheduled for tomorrow, blocked on stakeholder review. When the agent and user are in the same conversation, drive each command, surface its output, and present the next decision. Pause-and-present discipline is the whole point of interactive driving — it preserves the user's judgment at every gate without forcing them into a CLI.
 
 **When to actually hand off CLI commands:** if the user explicitly opts out ("just give me the commands"), or if the runtime lacks the tool needed to execute them (e.g., MCP-only client with no shell and no `plan` tool). In those cases, a CLI list is the right output. Otherwise, drive.
 
@@ -298,9 +298,9 @@ Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Ru
 
 | Position | Skill |
 |---|---|
-| Before this skill | `/fakoli-state:prd` — PRD must be at least `reviewed` |
-| After Step 1 (plan) | `/fakoli-state:state-ops` — inspect the raw task graph before scoring |
-| After Step 5 (ready queue confirmed) | `/fakoli-state:execute` (Phase 5) — agents can now claim and work tasks |
+| Before this skill | `/anvil:prd` — PRD must be at least `reviewed` |
+| After Step 1 (plan) | `/anvil:state-ops` — inspect the raw task graph before scoring |
+| After Step 5 (ready queue confirmed) | `/anvil:execute` (Phase 5) — agents can now claim and work tasks |
 | If `show TASK_ID` reveals complexity at/above `auto_expand_threshold` | Expand in Step 3, then re-run `score` and `review tasks` |
 
 ---
@@ -309,12 +309,12 @@ Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Ru
 
 | Feature | Phase | Status |
 |---|---|---|
-| `fakoli-state plan` | Phase 3 | available |
-| `fakoli-state score` | Phase 3 | available |
-| `fakoli-state review tasks` | Phase 3 | available |
-| `fakoli-state list` | Phase 3 | available |
-| `fakoli-state show TASK_ID` | Phase 3 | available |
-| `fakoli-state expand TASK_ID --use-llm` (auto-generate subtasks) | Phase 7 | available — driven automatically by the Step 2 EXPANSION QUEUE |
-| `fakoli-state score --use-llm` (LLM-augmented scoring) | Phase 7 | pending — rule-based scoring is default |
-| `fakoli-state next` (pick highest-priority claimable task) | Phase 4 | pending — use `list --status ready` instead |
+| `anvil plan` | Phase 3 | available |
+| `anvil score` | Phase 3 | available |
+| `anvil review tasks` | Phase 3 | available |
+| `anvil list` | Phase 3 | available |
+| `anvil show TASK_ID` | Phase 3 | available |
+| `anvil expand TASK_ID --use-llm` (auto-generate subtasks) | Phase 7 | available — driven automatically by the Step 2 EXPANSION QUEUE |
+| `anvil score --use-llm` (LLM-augmented scoring) | Phase 7 | pending — rule-based scoring is default |
+| `anvil next` (pick highest-priority claimable task) | Phase 4 | pending — use `list --status ready` instead |
 | Planner agent (`agents/planner.md`) | Phase 3 | available — dispatched by plan when needed |

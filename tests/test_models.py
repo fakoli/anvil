@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.state.models — Pydantic validation, enums, embedded objects.
+"""Tests for anvil.state.models — Pydantic validation, enums, embedded objects.
 
 Coverage targets:
 - All 11 StrEnums
@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from fakoli_state.state.models import (
+from anvil.state.models import (
     PRD,
     Claim,
     ClaimStatus,
@@ -368,7 +368,7 @@ class TestExtraForbid:
 class TestEventIdFormat:
     def test_event_id_format_valid(self) -> None:
         """Event(id='E000001') is accepted."""
-        from fakoli_state.state.models import Event
+        from anvil.state.models import Event
 
         event = Event(
             id="E000001",
@@ -382,7 +382,7 @@ class TestEventIdFormat:
 
     def test_event_id_format_invalid(self) -> None:
         """Event(id='garbage') raises ValidationError — id must start with E followed by digits."""
-        from fakoli_state.state.models import Event
+        from anvil.state.models import Event
 
         with pytest.raises(ValidationError) as exc_info:
             Event(
@@ -397,7 +397,7 @@ class TestEventIdFormat:
 
     def test_event_id_format_must_have_digits(self) -> None:
         """Event id 'Eabc' (non-digits after E) also raises ValidationError."""
-        from fakoli_state.state.models import Event
+        from anvil.state.models import Event
 
         with pytest.raises(ValidationError):
             Event(
@@ -494,7 +494,7 @@ class TestWritePathErrors:
     def test_new_error_types_importable_and_in_hierarchy(self) -> None:
         """EventRejected and IdempotentNoOp live alongside the existing
         backend exceptions and share the BackendError base."""
-        from fakoli_state.state.backend import (
+        from anvil.state.backend import (
             BackendError,
             EventRejected,
             IdempotentNoOp,
@@ -516,7 +516,7 @@ class TestWritePathErrors:
         """
         # EventDraft has no id field — the backend assigns it.
 
-        from fakoli_state.state.models import EventDraft
+        from anvil.state.models import EventDraft
         fields = EventDraft.model_fields
         assert "id" not in fields, "EventDraft must not have an id field"
         assert "action" in fields

@@ -1,4 +1,4 @@
-# fakoli-state MCP server
+# anvil MCP server
 
 ## What it does
 
@@ -39,25 +39,25 @@ required. The plugin ships a `.mcp.json` at its root that Claude Code reads on s
 ```json
 {
   "mcpServers": {
-    "fakoli-state": {
+    "anvil": {
       "type": "stdio",
       "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/fakoli-state-mcp"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/anvil-mcp"]
     }
   }
 }
 ```
 
 `${CLAUDE_PLUGIN_ROOT}` is the absolute path to the installed plugin directory. The wrapper
-`bin/fakoli-state-mcp` calls `uv sync` if `uv.lock` or `pyproject.toml` is newer than the
+`bin/anvil-mcp` calls `uv sync` if `uv.lock` or `pyproject.toml` is newer than the
 virtual environment (covering cold starts and `git pull` updates), then delegates to
-`python -m fakoli_state.mcp_server`.
+`python -m anvil.mcp_server`.
 
-Each tool call opens a fresh `SqliteBackend` against `.fakoli-state/state.db` resolved from
+Each tool call opens a fresh `SqliteBackend` against `.anvil/state.db` resolved from
 the agent's current working directory at call time. Agents can invoke from any project
 directory — the server re-resolves state on every call.
 
-**Prerequisite**: `fakoli-state init` must have been run in the project root before any tool
+**Prerequisite**: `anvil init` must have been run in the project root before any tool
 call will succeed.
 
 ---
@@ -111,8 +111,8 @@ None.
 
 **Failure modes**
 
-- `ToolError` — project not initialized (`.fakoli-state/` missing).
-- `ToolError` — project row not found in state.db (run `fakoli-state init`).
+- `ToolError` — project not initialized (`.anvil/` missing).
+- `ToolError` — project row not found in state.db (run `anvil init`).
 
 **When to call**: at session start or before orchestrating a wave, to decide how many agents
 to spawn and whether the queue is draining or stacking up.
@@ -213,7 +213,7 @@ A Task object serialized to JSON, or `null`.
 
 Renders a work packet for a task in markdown or JSON format. The packet includes task intent,
 acceptance criteria, constraints, non-goals, open dependencies, and the active claim if one
-exists. Delegates to `fakoli_state.context.packets.render_packet`.
+exists. Delegates to `anvil.context.packets.render_packet`.
 
 **Inputs**
 
@@ -358,8 +358,8 @@ raises a `ToolError` and no claim is created.
 `lease_duration_seconds` is converted to minutes (floor, minimum 1) before being passed
 to `ClaimManager`. The default 900 seconds gives a 15-minute MCP-side override — note that
 the CLI's `ClaimManager` ships with a 60-minute default (see
-[`bin/src/fakoli_state/claims/manager.py`](../bin/src/fakoli_state/claims/manager.py)
-line 118), and the project-level override is read from `.fakoli-state/config.yaml`.
+[`bin/src/anvil/claims/manager.py`](../bin/src/anvil/claims/manager.py)
+line 118), and the project-level override is read from `.anvil/config.yaml`.
 
 **Output**
 
@@ -495,7 +495,7 @@ progress.
 
 Submits completion evidence for a task. Requires an active claim. Emits an
 `evidence.submitted` event that auto-releases the claim and transitions the task to
-`needs_review`. Mirrors `fakoli-state submit` from the CLI.
+`needs_review`. Mirrors `anvil submit` from the CLI.
 
 **Inputs**
 
@@ -604,9 +604,9 @@ single MCP session can target multiple project roots. None of them perform git o
 
 ### `init_project`
 
-Scaffolds a `.fakoli-state/` directory in the target project root. Creates the canonical
+Scaffolds a `.anvil/` directory in the target project root. Creates the canonical
 layout (`config.yaml`, `state.db`, `events.jsonl`, `packets/`), seeds the project row, and
-emits `project.created` + `state.initialized`. Mirrors `fakoli-state init` minus git
+emits `project.created` + `state.initialized`. Mirrors `anvil init` minus git
 operations.
 
 **Inputs**
@@ -622,7 +622,7 @@ operations.
 {
   "project_id": "from-mcp",
   "project_name": "From MCP",
-  "state_dir": "/abs/path/.fakoli-state",
+  "state_dir": "/abs/path/.anvil",
   "created": true
 }
 ```
@@ -630,7 +630,7 @@ operations.
 **Failure modes**
 
 - `ToolError` — directory is the plugin root (refuses to init inside the plugin).
-- `ToolError` — `.fakoli-state/` already exists (use CLI `init --force` to reinit).
+- `ToolError` — `.anvil/` already exists (use CLI `init --force` to reinit).
 - `ToolError` — scaffold I/O failure.
 
 **When to call**: the very first MCP call against a fresh project root.
@@ -640,8 +640,8 @@ operations.
 ### `get_project_status`
 
 Returns PRD status, task counts by state, active claims, ready-queue depth, and
-initialization flag. Mirrors `fakoli-state status`. Returns `initialized: false` with empty
-counts when `.fakoli-state/` is absent — does **not** raise. Use this as the canonical
+initialization flag. Mirrors `anvil status`. Returns `initialized: false` with empty
+counts when `.anvil/` is absent — does **not** raise. Use this as the canonical
 "am I bootstrapped?" probe.
 
 **Inputs**
@@ -657,7 +657,7 @@ counts when `.fakoli-state/` is absent — does **not** raise. Use this as the c
   "initialized": true,
   "project_id": "proj-test",
   "project_name": "Status Project",
-  "state_dir": "/abs/path/.fakoli-state",
+  "state_dir": "/abs/path/.anvil",
   "prd_status": "reviewed",
   "task_counts": { "proposed": 0, "drafted": 0, "...": "..." },
   "total_tasks": 3,
@@ -681,16 +681,16 @@ None — always returns a response.
 
 ### `parse_prd`
 
-Reads `.fakoli-state/prd.md` (or `file=` path), parses via
-`fakoli_state.planning.template.parse_prd`, and emits `prd.parsed` on success. Parse errors
+Reads `.anvil/prd.md` (or `file=` path), parses via
+`anvil.planning.template.parse_prd`, and emits `prd.parsed` on success. Parse errors
 are returned in the response (not raised) so the caller can decide whether to fix and retry.
-Mirrors `fakoli-state prd parse`.
+Mirrors `anvil prd parse`.
 
 **Inputs**
 
 | Parameter | Type             | Required | Default                          |
 |-----------|------------------|----------|----------------------------------|
-| `file`    | `string \| null` | no       | `<cwd>/.fakoli-state/prd.md`     |
+| `file`    | `string \| null` | no       | `<cwd>/.anvil/prd.md`     |
 | `cwd`     | `string \| null` | no       | `Path.cwd()`                     |
 
 **Output**
@@ -702,7 +702,7 @@ Mirrors `fakoli-state prd parse`.
   "feature_count": 1,
   "task_count": 2,
   "errors": [],
-  "prd_path": "/abs/path/.fakoli-state/prd.md"
+  "prd_path": "/abs/path/.anvil/prd.md"
 }
 ```
 
@@ -722,7 +722,7 @@ before applying); the caller should fix the PRD and re-call.
 ### `review_prd`
 
 Transitions the PRD: `draft → reviewed` (default) or `reviewed → approved` (when
-`approve=true`). Emits `prd.reviewed` or `prd.approved`. Mirrors `fakoli-state prd review`
+`approve=true`). Emits `prd.reviewed` or `prd.approved`. Mirrors `anvil prd review`
 and `prd review --approve`.
 
 **Inputs**
@@ -760,7 +760,7 @@ and `prd review --approve`.
 
 Runs the planner pipeline against the current PRD: emits `feature.created` and
 `task.created` events, runs dependency + conflict-group inference, then promotes
-`proposed → drafted`. Mirrors `fakoli-state plan` in deterministic mode (no LLM
+`proposed → drafted`. Mirrors `anvil plan` in deterministic mode (no LLM
 augmentation — agents that need LLM enrichment must use the CLI).
 
 **Inputs**
@@ -795,7 +795,7 @@ has the latest PRD content.
 ### `score_tasks`
 
 Runs the rule-based scoring engine on a single task or all unscored tasks. Emits
-`task.scored` per scored task. Mirrors `fakoli-state score [TASK_ID]` in deterministic
+`task.scored` per scored task. Mirrors `anvil score [TASK_ID]` in deterministic
 mode.
 
 **Inputs**
@@ -834,7 +834,7 @@ mode.
 ### `review_tasks`
 
 Promotes tasks through `drafted → reviewed → ready` using the gate functions in
-`fakoli_state.state.transitions`. Mirrors `fakoli-state review tasks`. Returns the lists
+`anvil.state.transitions`. Mirrors `anvil review tasks`. Returns the lists
 of promoted task IDs and any tasks blocked by a gate (with the gate's failure reason).
 
 **Inputs**
@@ -871,7 +871,7 @@ verification commands) appears in `blocked` instead of either promotion list.
 Applies a human review decision to a task in `needs_review` status. With `approve=true` the
 task moves through `needs_review → accepted → done` (the backend handles the auto-promotion).
 With `approve=false` (and a non-empty `reason`) the task is rejected — typically returned
-to `drafted` for rework. Mirrors `fakoli-state apply TASK_ID --approve` and `--reject
+to `drafted` for rework. Mirrors `anvil apply TASK_ID --approve` and `--reject
 --reason TEXT`.
 
 **Inputs**
@@ -920,8 +920,8 @@ is claimable.
 ### Decision resolution (v1.14.0)
 
 One read-only tool that surfaces unresolved PRD items so the `resolve-decisions` skill can
-drive Q&A with the user. Detection logic lives in `fakoli_state.planning.decisions` and is
-shared with the CLI subcommand `fakoli-state prd find-decisions`.
+drive Q&A with the user. Detection logic lives in `anvil.planning.decisions` and is
+shared with the CLI subcommand `anvil prd find-decisions`.
 
 ---
 
@@ -937,7 +937,7 @@ Scans the PRD for three categories of items needing a human decision:
    `verification.commands` are empty (gates the review pipeline would block on).
 
 The tool is read-only — no events are emitted. It is the sibling of `parse_prd` intended to
-power the `resolve-decisions` skill's Q&A loop. Mirrors `fakoli-state prd find-decisions`.
+power the `resolve-decisions` skill's Q&A loop. Mirrors `anvil prd find-decisions`.
 
 **Inputs**
 
@@ -981,8 +981,8 @@ agent walks the list and drives one Q&A per entry, so ordering shapes the conver
 **CLI equivalent**
 
 ```bash
-fakoli-state prd find-decisions
-fakoli-state prd find-decisions --file path/to/prd.md
+anvil prd find-decisions
+anvil prd find-decisions --file path/to/prd.md
 ```
 
 **When to call**: after `parse_prd` succeeds but before `review_prd` or `plan_tasks`, so
@@ -1020,7 +1020,7 @@ before deciding whether to retry, release, or escalate.
 
 ## Integration with fakoli-crew and fakoli-flow
 
-**fakoli-crew agents** gain access to all 22 MCP tools when fakoli-state is installed
+**fakoli-crew agents** gain access to all 22 MCP tools when anvil is installed
 alongside fakoli-crew. The standard work loop for a crew agent (welder, smith, guido) is:
 
 1. `get_next_task` — find the highest-priority claimable task.
@@ -1035,7 +1035,7 @@ The sentinel agent uses `get_project_summary` and `list_tasks` (filtered by
 `status="needs_review"`) to find tasks awaiting verification, then calls
 `update_task_status` to set a task `blocked` if evidence is insufficient.
 
-**fakoli-flow skills** use the MCP tools when fakoli-state is present:
+**fakoli-flow skills** use the MCP tools when anvil is present:
 
 - `flow:execute` reads `get_next_task` and calls `claim_task` before dispatching each
   wave, replacing the markdown-status-file convention.
@@ -1044,10 +1044,10 @@ The sentinel agent uses `get_project_summary` and `list_tasks` (filtered by
 - `flow:finish` uses `update_task_status` to drive accepted tasks toward `done` before
   the merge or PR decision.
 
-When fakoli-state is absent, fakoli-flow and fakoli-crew continue to operate via their
+When anvil is absent, fakoli-flow and fakoli-crew continue to operate via their
 existing markdown-status conventions. Integration is strictly opt-in.
 
-See [`specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md) for the
+See [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) for the
 full integration contract.
 
 ---
@@ -1075,44 +1075,44 @@ candidate set is built.
 The stdio server ships a `Dockerfile` (repo root) and a Docker MCP catalog manifest
 (`server.yaml`) so it can be distributed through the
 [Docker MCP catalog / registry](https://github.com/docker/mcp-registry). This lets any
-Docker-MCP-Gateway user run fakoli-state as a containerized MCP server without a local `uv`
+Docker-MCP-Gateway user run anvil as a containerized MCP server without a local `uv`
 or Python toolchain — the image bundles a pinned CPython and the locked dependency set.
 
 ### Image contents and statelessness
 
 The image packages only what the MCP surface needs: `bin/pyproject.toml`, `bin/uv.lock`,
-`bin/src/fakoli_state/`, and `README.md`. It installs dependencies from the lockfile with
+`bin/src/anvil/`, and `README.md`. It installs dependencies from the lockfile with
 `uv sync --frozen --no-dev` (no LLM-provider extras — those stay opt-in, matching the host
 install) and runs as a non-root `fakoli` user. **No project state is baked into the image.**
-The engine resolves `.fakoli-state/state.db` from `FAKOLI_STATE_ROOT` (falling back to the
+The engine resolves `.anvil/state.db` from `ANVIL_ROOT` (falling back to the
 working directory), so the host project is **bind-mounted at runtime**.
 
 ### Build and smoke test
 
 ```bash
 # From the repo root (build context = repo root):
-docker build -t fakoli-state-mcp .
+docker build -t anvil-mcp .
 
 # Smoke test: the entry point handles --help/--version and exits 0 without
 # opening a backend or blocking on stdio. This is the catalog smoke test.
-docker run --rm fakoli-state-mcp --help
-docker run --rm fakoli-state-mcp --version
+docker run --rm anvil-mcp --help
+docker run --rm anvil-mcp --version
 ```
 
 The `--help` page lists every registered MCP tool (introspected live from the FastMCP
-surface, so it never drifts) and documents the `FAKOLI_STATE_ROOT` bind-mount convention.
+surface, so it never drifts) and documents the `ANVIL_ROOT` bind-mount convention.
 
 ### Run against a host project
 
 ```bash
 docker run --rm -i \
   -v "$PWD:/project" \
-  -e FAKOLI_STATE_ROOT=/project \
-  fakoli-state-mcp
+  -e ANVIL_ROOT=/project \
+  anvil-mcp
 ```
 
 `-i` keeps stdin open for the stdio transport. The mounted `/project` must already contain
-(or will receive) a `.fakoli-state/` directory — run `fakoli-state init` there first, or
+(or will receive) a `.anvil/` directory — run `anvil init` there first, or
 call the `init_project` tool over MCP.
 
 Equivalent `mcpServers` entry for an MCP client that launches Docker directly:
@@ -1120,13 +1120,13 @@ Equivalent `mcpServers` entry for an MCP client that launches Docker directly:
 ```json
 {
   "mcpServers": {
-    "fakoli-state": {
+    "anvil": {
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
         "-v", "${PWD}:/project",
-        "-e", "FAKOLI_STATE_ROOT=/project",
-        "fakoli-state-mcp"
+        "-e", "ANVIL_ROOT=/project",
+        "anvil-mcp"
       ]
     }
   }
@@ -1138,29 +1138,29 @@ Equivalent `mcpServers` entry for an MCP client that launches Docker directly:
 The repo-root `server.yaml` is the Docker MCP catalog manifest. To publish:
 
 1. Fork [`docker/mcp-registry`](https://github.com/docker/mcp-registry) and copy this repo's
-   `server.yaml` to `servers/fakoli-state/server.yaml` in the fork.
-2. Pin `source.commit` to the fakoli-state commit you are publishing.
+   `server.yaml` to `servers/anvil/server.yaml` in the fork.
+2. Pin `source.commit` to the anvil commit you are publishing.
 3. Validate locally (requires the Docker MCP toolkit and `task`):
 
    ```bash
-   task build   -- --tools fakoli-state   # builds mcp/fakoli-state from ./Dockerfile
-   task catalog -- fakoli-state            # generates catalogs/fakoli-state/catalog.yaml
-   docker mcp catalog import "$PWD/catalogs/fakoli-state/catalog.yaml"
+   task build   -- --tools anvil   # builds mcp/anvil from ./Dockerfile
+   task catalog -- anvil            # generates catalogs/anvil/catalog.yaml
+   docker mcp catalog import "$PWD/catalogs/anvil/catalog.yaml"
    ```
 
 4. Open a PR against `docker/mcp-registry`.
 
 The manifest declares a `project_path` parameter that the gateway maps to the container's
-`/project` volume, plus `FAKOLI_STATE_ROOT=/project`, so catalog users get the bind-mount
+`/project` volume, plus `ANVIL_ROOT=/project`, so catalog users get the bind-mount
 wiring automatically.
 
 ---
 
 ## See also
 
-- [`specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md) — canonical
+- [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — canonical
   design spec: data model, task lifecycle, phasing plan, integration contracts.
 - `hooks.md` — claim discipline hooks: `check-claim.sh`, `record-file-change.sh`,
   `capture-evidence.sh`, `detect-state.sh`. (Landing in Phase 6 documentation pass.)
-- `integration-flow-crew.md` — detailed integration contract between fakoli-state,
+- `integration-flow-crew.md` — detailed integration contract between anvil,
   fakoli-flow, and fakoli-crew. (Planned.)

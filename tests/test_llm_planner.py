@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.planning.llm_planner — LLM-driven task generation."""
+"""Tests for anvil.planning.llm_planner — LLM-driven task generation."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import datetime
 
 import pytest
 
-from fakoli_state.clock import FrozenClock
-from fakoli_state.planning.llm import LLMResponse, RecordedLLMProvider
-from fakoli_state.planning.llm_planner import (
+from anvil.clock import FrozenClock
+from anvil.planning.llm import LLMResponse, RecordedLLMProvider
+from anvil.planning.llm_planner import (
     _SYSTEM_PROMPT,
     PlannerProviderUnavailable,
     TaskGenerationError,
@@ -17,8 +17,8 @@ from fakoli_state.planning.llm_planner import (
     generate_tasks_markdown,
     resolve_planner_provider,
 )
-from fakoli_state.planning.template import parse_prd
-from fakoli_state.state.models import PRD, Feature, Requirement, Task
+from anvil.planning.template import parse_prd
+from anvil.state.models import PRD, Feature, Requirement, Task
 
 _FROZEN = FrozenClock(datetime.datetime(2026, 5, 26, 12, 0, tzinfo=datetime.UTC))
 
@@ -103,7 +103,7 @@ class TestResolvePlannerProvider:
         """Config.llm_provider="custom" wins even when ANTHROPIC_API_KEY is
         the only env variable set. (We construct a custom provider so the
         test does not need the openai SDK on the env path.)"""
-        from fakoli_state.config import Config
+        from anvil.config import Config
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
         monkeypatch.setenv("CUSTOM_LLM_BASE_URL", "http://localhost:8000/v1")
@@ -120,8 +120,8 @@ class TestResolvePlannerProvider:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Config.llm_tier="opus" → AnthropicProvider built with the Opus id."""
-        from fakoli_state.config import Config
-        from fakoli_state.planning.llm import MODEL_TIERS
+        from anvil.config import Config
+        from anvil.planning.llm import MODEL_TIERS
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
         cfg = Config(
@@ -140,7 +140,7 @@ class TestResolvePlannerProvider:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Config.llm_model wins over llm_tier when both are set."""
-        from fakoli_state.config import Config
+        from anvil.config import Config
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
         cfg = Config(
@@ -196,7 +196,7 @@ class TestResolvePlannerProviderGreptileFixes:
         PlannerProviderUnavailable so CLI/MCP catch the same exception type
         they catch for every other resolver failure mode.
         """
-        from fakoli_state.config import Config
+        from anvil.config import Config
 
         monkeypatch.delenv("CUSTOM_LLM_BASE_URL", raising=False)
 
@@ -228,7 +228,7 @@ class TestResolvePlannerProviderGreptileFixes:
         endpoint (the "claude-sonnet-4-6 sent to local vLLM serving
         Mistral" failure mode).
         """
-        from fakoli_state.config import Config
+        from anvil.config import Config
 
         monkeypatch.setenv("CUSTOM_LLM_BASE_URL", "http://localhost:8000/v1")
 
@@ -259,8 +259,8 @@ class TestResolvePlannerProviderGreptileFixes:
         is the *intentional* fallback that v1.17.0 ships — distinct from
         the no-model-AND-no-tier case above.
         """
-        from fakoli_state.config import Config
-        from fakoli_state.planning.llm import MODEL_TIERS
+        from anvil.config import Config
+        from anvil.planning.llm import MODEL_TIERS
 
         monkeypatch.setenv("CUSTOM_LLM_BASE_URL", "http://localhost:8000/v1")
         cfg = Config(
@@ -294,7 +294,7 @@ class TestBedrockProvider:
     def test_tier_resolves_to_bedrock_inference_profile(self) -> None:
         """tier="opus" must pick the us.anthropic.* inference-profile id,
         not the bare claude-opus-4-7 id (which is the direct-API form)."""
-        from fakoli_state.planning.llm import BEDROCK_MODEL_TIERS, BedrockProvider
+        from anvil.planning.llm import BEDROCK_MODEL_TIERS, BedrockProvider
 
         provider = BedrockProvider(
             tier="opus",
@@ -305,7 +305,7 @@ class TestBedrockProvider:
 
     def test_explicit_model_overrides_tier(self) -> None:
         """model= wins over tier= when both are passed."""
-        from fakoli_state.planning.llm import BedrockProvider
+        from anvil.planning.llm import BedrockProvider
 
         provider = BedrockProvider(
             model="eu.anthropic.claude-sonnet-4-6-20260601",
@@ -316,7 +316,7 @@ class TestBedrockProvider:
 
     def test_default_tier_is_sonnet(self) -> None:
         """No tier or model → DEFAULT_TIER ("sonnet") on the Bedrock table."""
-        from fakoli_state.planning.llm import BEDROCK_MODEL_TIERS, BedrockProvider
+        from anvil.planning.llm import BEDROCK_MODEL_TIERS, BedrockProvider
 
         provider = BedrockProvider(client=self._stub_client())  # type: ignore[arg-type]
         assert provider._model == BEDROCK_MODEL_TIERS["sonnet"]  # type: ignore[attr-defined]
@@ -335,7 +335,7 @@ class TestBedrockProvider:
         """
         import builtins
 
-        from fakoli_state.config import Config
+        from anvil.config import Config
 
         real_import = builtins.__import__
 
@@ -358,21 +358,21 @@ class TestBedrockProvider:
 
         msg = str(exc_info.value)
         # Help text should name the install command.
-        assert "fakoli-state[bedrock]" in msg or "anthropic[bedrock]" in msg
+        assert "anvil[bedrock]" in msg or "anthropic[bedrock]" in msg
 
 
 class TestResolveModelForTier:
     """v1.17.0 — tier ↔ model-id mapping helper."""
 
     def test_direct_api_table(self) -> None:
-        from fakoli_state.planning.llm import resolve_model_for_tier
+        from anvil.planning.llm import resolve_model_for_tier
 
         assert resolve_model_for_tier("opus") == "claude-opus-4-7"
         assert resolve_model_for_tier("sonnet") == "claude-sonnet-4-6"
         assert resolve_model_for_tier("haiku") == "claude-haiku-4-5"
 
     def test_bedrock_table_has_us_prefix(self) -> None:
-        from fakoli_state.planning.llm import resolve_model_for_tier
+        from anvil.planning.llm import resolve_model_for_tier
 
         assert resolve_model_for_tier("opus", bedrock=True).startswith(
             "us.anthropic."
@@ -384,7 +384,7 @@ class TestResolveModelForTier:
     def test_unknown_tier_raises_valueerror(self) -> None:
         import pytest as _pytest
 
-        from fakoli_state.planning.llm import resolve_model_for_tier
+        from anvil.planning.llm import resolve_model_for_tier
 
         with _pytest.raises(ValueError) as exc_info:
             resolve_model_for_tier("supernova")
@@ -400,7 +400,7 @@ class TestCustomEndpointProvider:
         """No portable default model → ValueError when model is empty."""
         import pytest as _pytest
 
-        from fakoli_state.planning.llm import CustomEndpointProvider
+        from anvil.planning.llm import CustomEndpointProvider
 
         with _pytest.raises(ValueError) as exc_info:
             CustomEndpointProvider(model="", base_url="http://localhost:8000/v1")
@@ -412,7 +412,7 @@ class TestCustomEndpointProvider:
         """No base_url arg AND no CUSTOM_LLM_BASE_URL env → ValueError."""
         import pytest as _pytest
 
-        from fakoli_state.planning.llm import CustomEndpointProvider
+        from anvil.planning.llm import CustomEndpointProvider
 
         monkeypatch.delenv("CUSTOM_LLM_BASE_URL", raising=False)
         with _pytest.raises(ValueError) as exc_info:
@@ -491,7 +491,7 @@ class TestBuildUserPrompt:
 
 
 def _existing_task(task_id: str) -> Task:
-    from fakoli_state.state.models import Score, TaskPriority, TaskStatus, Verification
+    from anvil.state.models import Score, TaskPriority, TaskStatus, Verification
     now = _FROZEN.now()
     return Task(
         id=task_id,
@@ -802,7 +802,7 @@ A description.
         )
         recorded = RecordedLLMProvider({key: _canned_response(_CANNED_TASKS_MARKDOWN)})
 
-        from fakoli_state.planning import llm_planner as planner_mod
+        from anvil.planning import llm_planner as planner_mod
         monkeypatch.setattr(
             planner_mod,
             "resolve_planner_provider",

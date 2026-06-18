@@ -3,19 +3,19 @@
 T021 publishes the FastMCP stdio server to the Docker MCP catalog. That requires
 three artifacts to exist and agree:
 
-  1. A repo-root ``Dockerfile`` that packages ``bin/src/fakoli_state`` and starts
-     the stdio MCP server, with ``FAKOLI_STATE_ROOT`` bind-mount support.
+  1. A repo-root ``Dockerfile`` that packages ``bin/src/anvil`` and starts
+     the stdio MCP server, with ``ANVIL_ROOT`` bind-mount support.
   2. A repo-root ``server.yaml`` Docker MCP catalog manifest.
   3. A documented publishing path in ``docs/mcp.md``.
 
 The acceptance criteria also require the image to start the server *and* a smoke
 test that "connects and lists tools". The backlog verification command is::
 
-    docker build -t fakoli-state-mcp plugins/fakoli-state \
-        && docker run --rm fakoli-state-mcp --help
+    docker build -t anvil-mcp plugins/anvil \
+        && docker run --rm anvil-mcp --help
 
 In this standalone repo the build context is the repo root (drop the
-``plugins/fakoli-state/`` prefix). The load-bearing prerequisite for that smoke
+``plugins/anvil/`` prefix). The load-bearing prerequisite for that smoke
 test is that the server entry point handles ``--help``/``--version`` and exits 0
 *without* blocking on stdio — otherwise ``docker run ... --help`` hangs forever.
 ``mcp.run()`` ignores argv, so before T021 there was no such handler.
@@ -39,9 +39,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from fakoli_state import __version__
-from fakoli_state.cli.describe import mcp_tool_names
-from fakoli_state.mcp_server import main
+from anvil import __version__
+from anvil.cli.describe import mcp_tool_names
+from anvil.mcp_server import main
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -75,7 +75,7 @@ def _mcp_doc() -> Path:
 
 
 class TestEntryPointFlags:
-    """``python -m fakoli_state.mcp_server --help/--version`` must not block."""
+    """``python -m anvil.mcp_server --help/--version`` must not block."""
 
     def test_help_prints_and_returns_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = main(["--help"])
@@ -83,7 +83,7 @@ class TestEntryPointFlags:
         assert rc == 0
         assert "usage:" in out
         # The help page must document the bind-mount env var (acceptance criterion).
-        assert "FAKOLI_STATE_ROOT" in out
+        assert "ANVIL_ROOT" in out
 
     def test_help_lists_every_registered_tool(
         self, capsys: pytest.CaptureFixture[str]
@@ -124,7 +124,7 @@ class TestEntryPointFlags:
     def test_no_args_starts_server(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Backward-compatibility: the default (no-arg) path must still call
         # mcp.run(). We stub run() so the test does not block on stdio.
-        import fakoli_state.mcp_server as srv
+        import anvil.mcp_server as srv
 
         called: dict[str, bool] = {"ran": False}
 
@@ -149,12 +149,12 @@ class TestDockerfile:
     def test_dockerfile_runs_the_mcp_server_module(self) -> None:
         text = _dockerfile().read_text()
         # The image must start the FastMCP stdio server.
-        assert "fakoli_state.mcp_server" in text
+        assert "anvil.mcp_server" in text
 
     def test_dockerfile_documents_bind_mount_root(self) -> None:
         text = _dockerfile().read_text()
-        # FAKOLI_STATE_ROOT bind-mount support is an explicit acceptance criterion.
-        assert "FAKOLI_STATE_ROOT" in text
+        # ANVIL_ROOT bind-mount support is an explicit acceptance criterion.
+        assert "ANVIL_ROOT" in text
 
     def test_dockerfile_installs_from_lockfile(self) -> None:
         # Reproducible image: install from the committed uv.lock, not a fresh resolve.
@@ -184,7 +184,7 @@ class TestCatalogManifest:
         # Docker MCP registry server.yaml required keys.
         for key in ("name", "image", "type", "meta", "about", "source"):
             assert key in data, f"server.yaml missing required key {key!r}"
-        assert data["name"] == "fakoli-state"
+        assert data["name"] == "anvil"
         assert data["type"] == "server"
 
     def test_source_points_at_local_dockerfile(self) -> None:
@@ -196,7 +196,7 @@ class TestCatalogManifest:
 
     def test_manifest_wires_bind_mount(self) -> None:
         data = yaml.safe_load(_server_yaml().read_text())
-        # A volume + FAKOLI_STATE_ROOT env must be declared so catalog users get
+        # A volume + ANVIL_ROOT env must be declared so catalog users get
         # the bind-mount automatically.
         run = data.get("run", {})
         volumes = run.get("volumes", [])
@@ -204,7 +204,7 @@ class TestCatalogManifest:
 
         config = data.get("config", {})
         env_names = {e.get("name") for e in config.get("env", [])}
-        assert "FAKOLI_STATE_ROOT" in env_names
+        assert "ANVIL_ROOT" in env_names
 
     def test_meta_category_is_valid(self) -> None:
         data = yaml.safe_load(_server_yaml().read_text())
@@ -222,9 +222,9 @@ class TestPublishingDocs:
         text = _mcp_doc().read_text()
         assert "Docker MCP catalog" in text
         # The smoke-test build command must be documented.
-        assert "docker build -t fakoli-state-mcp" in text
+        assert "docker build -t anvil-mcp" in text
         # The bind-mount run convention must be documented.
-        assert "FAKOLI_STATE_ROOT" in text
+        assert "ANVIL_ROOT" in text
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ class TestDockerBuildSmoke:
 
     def test_build_and_help(self) -> None:
         root = _repo_root()
-        tag = "fakoli-state-mcp:t021-test"
+        tag = "anvil-mcp:t021-test"
         build = subprocess.run(
             ["docker", "build", "-t", tag, "."],
             cwd=str(root),

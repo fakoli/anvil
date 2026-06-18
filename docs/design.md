@@ -1,6 +1,6 @@
-# fakoli-state design rationale
+# anvil design rationale
 
-> Why fakoli-state is shaped the way it is. Companion to `architecture.md` (what is built). For positioning soundbites see `_positioning.md`; for what is planned next see `roadmap.md`.
+> Why anvil is shaped the way it is. Companion to `architecture.md` (what is built). For positioning soundbites see `_positioning.md`; for what is planned next see `roadmap.md`.
 
 This document answers "why was it built this way." Each section names the choice, the alternatives rejected, the trade-off accepted, and where to push back if you disagree. The wedges in `_positioning.md` are the marketing surface; this is the engineering reasoning underneath.
 
@@ -10,17 +10,17 @@ No section exceeds 200 words. Read the section you care about; the rest will sti
 
 ## Mental model: Terraform for agentic work
 
-fakoli-state is to agentic software work what Terraform is to infrastructure: a canonical state file holds the truth, derived views project from it, and the plan-then-apply rhythm gates execution behind review. The analogy drove four shape decisions; naming things in those terms makes the system legible to anyone who has used Terraform.
+anvil is to agentic software work what Terraform is to infrastructure: a canonical state file holds the truth, derived views project from it, and the plan-then-apply rhythm gates execution behind review. The analogy drove four shape decisions; naming things in those terms makes the system legible to anyone who has used Terraform.
 
-| Terraform concept | fakoli-state equivalent | Where it lives |
+| Terraform concept | anvil equivalent | Where it lives |
 |---|---|---|
-| `.tf` configuration | `prd.md` + parsed `Requirement`/`Feature`/`Task` rows | `.fakoli-state/prd.md`, rows in `state.db` |
-| `terraform.tfstate` | `state.db` — Pydantic-validated SQLite | `.fakoli-state/state.db` |
-| `terraform plan` | `fakoli-state packet T012` — work-packet preview before claim | derived view, not stored |
-| `terraform apply` | `fakoli-state apply T012` — reviewed transition to `done` | `Review` row + `apply.*` event |
+| `.tf` configuration | `prd.md` + parsed `Requirement`/`Feature`/`Task` rows | `.anvil/prd.md`, rows in `state.db` |
+| `terraform.tfstate` | `state.db` — Pydantic-validated SQLite | `.anvil/state.db` |
+| `terraform plan` | `anvil packet T012` — work-packet preview before claim | derived view, not stored |
+| `terraform apply` | `anvil apply T012` — reviewed transition to `done` | `Review` row + `apply.*` event |
 | State locking | `Claim` row with `lease_expires_at` + heartbeat | `claims` table, `BEGIN IMMEDIATE` txn |
 | Drift detection | stale-claim sweep + `sync --fix` reconciliation | `claims/stale.py`, `sync.reconcile` |
-| Workspace | `.fakoli-state/` per repo | created by `fakoli-state init` |
+| Workspace | `.anvil/` per repo | created by `anvil init` |
 | Backend protocol | `Backend` Protocol — SQLite ships | `state/backend.py` |
 
 ### What the analogy gets right
@@ -31,7 +31,7 @@ fakoli-state is to agentic software work what Terraform is to infrastructure: a 
 
 ### Where the analogy stops
 
-- **No resource ownership.** Terraform owns the resources it manages; fakoli-state does not own source code. Agents and humans edit files; fakoli-state records *that* they edited and *what evidence* they produced.
+- **No resource ownership.** Terraform owns the resources it manages; anvil does not own source code. Agents and humans edit files; anvil records *that* they edited and *what evidence* they produced.
 - **No `destroy` verb.** No resource graph to tear down — only `release --force` for stuck claims, and `apply --reject` to send a task back to drafted.
 - **No `import` flow.** Existing repos don't have a "state to discover." `init` creates an empty workspace; the PRD authoring flow populates it.
 
@@ -39,29 +39,29 @@ fakoli-state is to agentic software work what Terraform is to infrastructure: a 
 
 ## Why SQLite + WAL
 
-**Choice:** one SQLite database per project at `.fakoli-state/state.db`, opened in WAL mode with `BEGIN IMMEDIATE` for mutating transactions. Append-only JSONL event log alongside (`events.jsonl`) as the replay source of truth.
+**Choice:** one SQLite database per project at `.anvil/state.db`, opened in WAL mode with `BEGIN IMMEDIATE` for mutating transactions. Append-only JSONL event log alongside (`events.jsonl`) as the replay source of truth.
 
 ### Rejected alternatives
 
-- **Postgres / hosted DB.** Requires a server, credentials, network. Kills the "clone the repo and `fakoli-state init`" demo. The wedge is local-first; a hosted DB is a different product.
+- **Postgres / hosted DB.** Requires a server, credentials, network. Kills the "clone the repo and `anvil init`" demo. The wedge is local-first; a hosted DB is a different product.
 - **Redis / in-memory.** Loses durability across CLI invocations (each is a short-lived process). Loses the audit trail. Forces a sidecar daemon, which is explicitly a non-goal.
 - **File-only (JSON / YAML).** The v0 brief's first instinct. Rejected because: (a) cross-process atomic writes on plain JSON race on macOS NFS and Windows, (b) claim leases need `BEGIN IMMEDIATE` semantics that JSON cannot provide, (c) querying becomes O(n) over the entire file on every CLI call.
 
 ### Trade-offs
 
 - **Accepted:** SQLite is single-writer. Two concurrent claims serialize at the DB level. Fine — claims are a coordination primitive, not a throughput primitive. SQLite handles ~10k writes/sec; we will hit other walls first.
-- **Accepted:** schema migrations are our problem, not the user's. We ship a `fakoli-state migrate` command and version the schema explicitly (`docs/migrations.md`).
+- **Accepted:** schema migrations are our problem, not the user's. We ship a `anvil migrate` command and version the schema explicitly (`docs/migrations.md`).
 - **Lost:** network multi-writer. Two laptops cannot share a `state.db` over a shared drive. That use case is served by sync providers, not by sharing the DB.
 
 ### Why WAL specifically
 
-Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes, blocking all readers. WAL mode lets readers proceed concurrently with a single writer. For our workload — many `fakoli-state status` reads from hooks, occasional `fakoli-state claim` writes from agents — WAL is the right pick. We pay a `wal` + `wal-shm` sidecar file cost in `.fakoli-state/`; both are git-ignored.
+Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes, blocking all readers. WAL mode lets readers proceed concurrently with a single writer. For our workload — many `anvil status` reads from hooks, occasional `anvil claim` writes from agents — WAL is the right pick. We pay a `wal` + `wal-shm` sidecar file cost in `.anvil/`; both are git-ignored.
 
 ---
 
 ## Why local-first
 
-**Choice:** state lives under `.fakoli-state/` inside the user's repository. No hosted backend, no account, no telemetry, no network call unless the user opts into a sync provider.
+**Choice:** state lives under `.anvil/` inside the user's repository. No hosted backend, no account, no telemetry, no network call unless the user opts into a sync provider.
 
 ### Rejected alternative: SaaS-first
 
@@ -70,19 +70,19 @@ A hosted control plane would let us ship a web dashboard, real-time collaboratio
 1. **The wedge dies.** "Backend-neutral local-first state" is what distinguishes us from CCPM-on-GitHub-Issues, Hamster Studio, and Jira/Rovo (see `competitive_gap_analysis_agentic_project_state.md` § "Strategic Positioning"). Going SaaS makes us competitor #11 in a crowded market.
 2. **Data ownership.** Users running PRDs through an LLM already worry about leakage; making the project plan itself leave the repo doubles that surface.
 3. **Offline-first comes for free.** Plane mode, airgapped networks, slow Wi-Fi — none matter. The system has no "online" mode.
-4. **No auth flow.** `fakoli-state init` is the entire onboarding.
+4. **No auth flow.** `anvil init` is the entire onboarding.
 
 ### Trade-offs
 
-- **Accepted:** cross-machine collaboration goes through sync providers (a projection into GitHub Issues / Linear / Jira), not shared state.db. Slower and lossier than a CRDT — and that audience is buying Linear, not fakoli-state.
-- **Accepted:** if `.fakoli-state/` is git-ignored (sometimes recommended for `state.db` to avoid binary merge conflicts), the canonical state does not survive a `git clone` on a second machine. `events.jsonl` *can* be committed; `replay` rebuilds the DB. The user chooses the trade-off per repo.
+- **Accepted:** cross-machine collaboration goes through sync providers (a projection into GitHub Issues / Linear / Jira), not shared state.db. Slower and lossier than a CRDT — and that audience is buying Linear, not anvil.
+- **Accepted:** if `.anvil/` is git-ignored (sometimes recommended for `state.db` to avoid binary merge conflicts), the canonical state does not survive a `git clone` on a second machine. `events.jsonl` *can* be committed; `replay` rebuilds the DB. The user chooses the trade-off per repo.
 - **Lost:** single-pane-of-glass dashboard, cross-project search. Not in the wedge.
 
 ---
 
 ## Why claims with leases
 
-**Choice:** a `Claim` row is created on `fakoli-state claim T012`, with `claimed_by`, `lease_expires_at`, `last_heartbeat_at`, `expected_files`, and an optional branch/worktree binding. Heartbeats via `renew T012` every 5 min; stale leases detected and released on every CLI/MCP op.
+**Choice:** a `Claim` row is created on `anvil claim T012`, with `claimed_by`, `lease_expires_at`, `last_heartbeat_at`, `expected_files`, and an optional branch/worktree binding. Heartbeats via `renew T012` every 5 min; stale leases detected and released on every CLI/MCP op.
 
 ### Rejected alternatives
 
@@ -100,13 +100,13 @@ Heartbeat discipline is on the agent. An agent that never calls `renew` will see
 
 ### Why lease + heartbeat, not lease alone
 
-A 1-hour lease without heartbeat means stuck claims wait the full hour to free up. A 5-min lease without heartbeat means a long-running honest task gets its claim yanked mid-work. Lease + heartbeat lets us pick a short lease (default 60 min, configurable in `.fakoli-state/config.yaml`) while honest work renews and keeps moving. The combination is what gives us "fast stale detection for crashed agents, no false eviction of working ones."
+A 1-hour lease without heartbeat means stuck claims wait the full hour to free up. A 5-min lease without heartbeat means a long-running honest task gets its claim yanked mid-work. Lease + heartbeat lets us pick a short lease (default 60 min, configurable in `.anvil/config.yaml`) while honest work renews and keeps moving. The combination is what gives us "fast stale detection for crashed agents, no false eviction of working ones."
 
 ---
 
 ## Why evidence is required
 
-**Choice:** `fakoli-state submit T012` requires a structured `Evidence` payload (see `state/models.py`) with `commands_run`, `files_changed`, `output_excerpt`, exit codes, and optional artifacts. The `sentinel` agent validates it before a task can move to `accepted`. Free-form "tests passed" strings are rejected.
+**Choice:** `anvil submit T012` requires a structured `Evidence` payload (see `state/models.py`) with `commands_run`, `files_changed`, `output_excerpt`, exit codes, and optional artifacts. The `sentinel` agent validates it before a task can move to `accepted`. Free-form "tests passed" strings are rejected.
 
 ### Rejected alternatives
 
@@ -135,12 +135,12 @@ Submitting evidence is more work than typing "done." The friction is the feature
 
 ## Why MCP + CLI both
 
-**Choice:** every state operation has two front doors. A Typer CLI for humans and shell scripts (`fakoli-state claim T012`), and a FastMCP stdio server exposing 13 tools for agents (`claim_task(task_id="T012", actor="claude-session-abc")`). Both delegate to the same `state/` engine; neither owns workflow logic.
+**Choice:** every state operation has two front doors. A Typer CLI for humans and shell scripts (`anvil claim T012`), and a FastMCP stdio server exposing 13 tools for agents (`claim_task(task_id="T012", actor="claude-session-abc")`). Both delegate to the same `state/` engine; neither owns workflow logic.
 
 ### Rejected alternatives
 
 - **CLI only.** Agents would have to shell out and parse stdout. Some can (Claude Code, with Bash); some cannot (Cursor, with no shell). Shell-out loses structured errors.
-- **MCP only.** Humans hate MCP. Shell scripts hate MCP. Hooks hate MCP. `fakoli-state status` in a terminal during debugging is faster than spinning up an MCP client. Hooks are sh, not Python — they shell out to the CLI.
+- **MCP only.** Humans hate MCP. Shell scripts hate MCP. Hooks hate MCP. `anvil status` in a terminal during debugging is faster than spinning up an MCP client. Hooks are sh, not Python — they shell out to the CLI.
 - **REST/HTTP server.** A long-running process. Daemon problems (see below). Authentication. Port collisions. We get the agent-tool benefits via MCP stdio without any of that.
 
 ### The principle
@@ -261,7 +261,7 @@ See "Why local-first" above.
 
 **Why not:** going SaaS is choosing a different product. A hosted dashboard would compete with Linear, Jira, and Asana — all massively better-funded and better-staffed at the SaaS game.
 
-fakoli-state's wedge is the *opposite* direction: durable state that survives session resets, lives in the repo, and does not require an account. The dashboard, if one ever exists, is a downstream open-source viewer of the same `.fakoli-state/` directory.
+anvil's wedge is the *opposite* direction: durable state that survives session resets, lives in the repo, and does not require an account. The dashboard, if one ever exists, is a downstream open-source viewer of the same `.anvil/` directory.
 
 ### Real-time collaborative editing (out of scope)
 
@@ -269,11 +269,11 @@ Two humans editing the PRD simultaneously, CRDT-style.
 
 **Why not:** the use case is rare (PRDs are written by one author, reviewed by others) and the engineering cost is enormous (Yjs / Automerge / operational transforms, conflict UI, presence indicators).
 
-Solved by git: branch, edit, PR, merge. fakoli-state inherits git's collaboration model for the PRD; the SQLite state.db is regenerable from `events.jsonl` so merge conflicts on the DB itself are recoverable by replay.
+Solved by git: branch, edit, PR, merge. anvil inherits git's collaboration model for the PRD; the SQLite state.db is regenerable from `events.jsonl` so merge conflicts on the DB itself are recoverable by replay.
 
 ### Bundled single static binary (uv trade-off)
 
-fakoli-state ships Python source in `bin/src/`; `uv` resolves and caches dependencies on first invocation via `bin/fakoli-state` shell wrapper.
+anvil ships Python source in `bin/src/`; `uv` resolves and caches dependencies on first invocation via `bin/anvil` shell wrapper.
 
 **Why not bundled:** PyInstaller / Nuitka / shiv binaries are 50-200 MB each, must be built per-platform (macOS x86_64, macOS arm64, Linux x86_64, Linux arm64, Windows), require signing on macOS, and break the "I want to read what it does" debuggability that source distribution gives.
 

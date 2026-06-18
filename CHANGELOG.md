@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to fakoli-state are documented here. This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to anvil are documented here. This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
@@ -24,7 +24,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
     overlapping an incoming claim's files and annotates each with the exact
     overlapping subset. Both are I/O-free and deterministic; they are re-exported
     from `review/__init__.py`.
-  - **Wired into both surfaces.** `fakoli-state packet` (CLI) and the
+  - **Wired into both surfaces.** `anvil packet` (CLI) and the
     `generate_work_packet` MCP tool now compute overlap against the active
     claim's `expected_files` (falling back to the task's planner-populated
     `likely_files` before a claim exists) and pass the findings to the renderer.
@@ -38,6 +38,21 @@ All notable changes to fakoli-state are documented here. This project adheres to
     running `tests/test_review.py` standalone) without re-entering a
     partially-initialized module.
   - Covered by `tests/test_review.py`.
+
+---
+
+## [2.0.0] — 2026-06-17
+
+### Changed
+
+- Renamed fakoli-state -> Anvil (the system of record for agent teams). **BREAKING:** CLI command is now `anvil` (was fakoli-state); state dir is `.anvil/` (was .fakoli-state/); env var is `ANVIL_ROOT` (was FAKOLI_STATE_ROOT); import package is `anvil` (PyPI dist `anvil-state`).
+  - Anvil (formerly fakoli-state, extracted from the fakoli-plugins monorepo).
+  - The Python import package moved from `fakoli_state` to `anvil`; the
+    distribution is published as `anvil-state` because the bare `anvil` name is
+    taken on PyPI. The console script and MCP launcher are now `anvil` and
+    `anvil-mcp`. The companion env vars (`ANVIL_GLOBAL_CONFIG`,
+    `ANVIL_TEST_GH_TOKEN`, `ANVIL_TEST_REPO`, `ANVIL_HOOK_DEBUG`) follow the same
+    prefix change.
 
 ---
 
@@ -65,7 +80,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
     `lightweight` decision at every call site. `render_packet` gains a
     `fast_lane_required_evidence_max` parameter (default 1; negative disables the
     evidence trim) and now exports `FAST_LANE_REQUIRED_EVIDENCE_MAX`.
-  - **Wired into both surfaces.** `fakoli-state packet` (CLI) and the
+  - **Wired into both surfaces.** `anvil packet` (CLI) and the
     `generate_work_packet` MCP tool now route the fast-lane from the project's
     config when one is loadable, and fall back to `render_packet` with built-in
     defaults when there is no/broken `config.yaml` — a broken config never blocks
@@ -126,7 +141,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 - **Batch dependency-edit primitive — atomic, cycle-detecting (T022/F007).**
   A new way to rewire task dependencies in bulk, exposed both as the
-  `fakoli-state deps` CLI command and the `edit_dependencies` MCP tool, so a
+  `anvil deps` CLI command and the `edit_dependencies` MCP tool, so a
   human or an agent can add and remove many dependency edges in a single
   transaction instead of mutating tasks one at a time.
   - **Edge model.** Each edge is `SOURCE:TARGET` (CLI) / `[source, target]`
@@ -157,29 +172,29 @@ All notable changes to fakoli-state are documented here. This project adheres to
 ### Added
 
 - **Docker MCP catalog packaging for the FastMCP stdio server (T021/F006).**
-  fakoli-state's MCP surface can now be published to (and run from) the Docker
+  anvil's MCP surface can now be published to (and run from) the Docker
   MCP catalog as a self-contained stdio server image, so a host without a local
   Python/uv toolchain can launch the full PRD → plan → review → claim → apply
   tool set by pulling one image and bind-mounting a project directory.
   - **Repo-root `Dockerfile`** builds the engine on the distroless-friendly
     `ghcr.io/astral-sh/uv` base, installs dependencies from `bin/uv.lock` in a
     cached layer (frozen, no dev/provider extras), runs as a non-root user, and
-    sets `ENTRYPOINT ["python", "-m", "fakoli_state.mcp_server"]`. The image is
-    stateless — project state lives under `.fakoli-state/` in a bind-mounted
-    host directory resolved via `FAKOLI_STATE_ROOT` (defaulting to `/project`,
+    sets `ENTRYPOINT ["python", "-m", "anvil.mcp_server"]`. The image is
+    stateless — project state lives under `.anvil/` in a bind-mounted
+    host directory resolved via `ANVIL_ROOT` (defaulting to `/project`,
     declared as a `VOLUME`), never baked into the image.
   - **`server.yaml` Docker MCP catalog manifest** (mirroring
     `docker/mcp-registry` conventions): server metadata, `productivity`
-    category, tags, the `{{fakoli-state.project_path}}:/project` volume mount,
-    the `FAKOLI_STATE_ROOT` env wiring, and a `project_path` parameter — plus
+    category, tags, the `{{anvil.project_path}}:/project` volume mount,
+    the `ANVIL_ROOT` env wiring, and a `project_path` parameter — plus
     inline submission steps for opening the registry PR.
   - **`--help` / `--version` entry point on the MCP server** — a new
     `main(argv)` short-circuits before `mcp.run()` so a container smoke test
-    (`docker run --rm fakoli-state-mcp --help`) prints and exits 0 *without*
+    (`docker run --rm anvil-mcp --help`) prints and exits 0 *without*
     blocking on stdio. The help page is self-contained (no backend/project
     access, so it works in a bare image), introspects the live FastMCP tool
     list (it can never drift from the registered surface), documents
-    `FAKOLI_STATE_ROOT`, and rejects unknown flags with exit 2 rather than
+    `ANVIL_ROOT`, and rejects unknown flags with exit 2 rather than
     silently starting the server. The no-argument path (start the blocking stdio
     server) is byte-for-byte unchanged.
   - **`.dockerignore`** keeps the build context minimal and deterministic (only
@@ -199,7 +214,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 ### Added
 
 - **`graph --format mermaid` dependency/state diagram (T019/F008).** A new
-  read-only `fakoli-state graph` command renders the persisted task graph as a
+  read-only `anvil graph` command renders the persisted task graph as a
   copy-pasteable diagram. `--format mermaid` emits a deterministic Mermaid
   `graph LR` flowchart whose nodes are tasks (labelled with ID, title, and
   status, and coloured per status via `classDef`) and whose edges are
@@ -220,7 +235,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
     byte-identical output. Subtask IDs like `T001.1` are sanitised to
     Mermaid-safe node IDs, labels are HTML-escaped, and an empty scope still
     yields a valid (renderable) diagram rather than a broken block. Invalid
-    `--scope`/`--format` values and a bad `FAKOLI_STATE_ROOT` still return a
+    `--scope`/`--format` values and a bad `ANVIL_ROOT` still return a
     parseable error envelope under `--json`.
 
 ---
@@ -240,8 +255,8 @@ All notable changes to fakoli-state are documented here. This project adheres to
     `docs/prd-template.md`); an unknown value falls back to `feature` with a
     non-fatal parse warning rather than aborting the parse — the same forgiving
     policy `**Priority:**` already uses.
-  - **`--type` filter on `list` and `next`.** `fakoli-state list --type bugfix`
-    and `fakoli-state next --type refactor` scope to a single type, pushed down
+  - **`--type` filter on `list` and `next`.** `anvil list --type bugfix`
+    and `anvil next --type refactor` scope to a single type, pushed down
     to SQL via a new `task_type` parameter threaded through
     `Backend.list_tasks` / `SqliteBackend.list_tasks`,
     `ClaimManager.next_claimable`, and the MCP `list_tasks` tool. The `list`
@@ -287,7 +302,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 - **Standalone-first onboarding docs (T011/F002).** The Getting Started
   walkthrough and the README now lead with a crew/flow-free path — every step
   (`init` → `prd` → `plan` → `claim` → `execute` → `finish`) is driven entirely
-  through the `fakoli-state` CLI (or the equivalent MCP tools), so a new user
+  through the `anvil` CLI (or the equivalent MCP tools), so a new user
   can run the full loop without `fakoli-flow` or `fakoli-crew` installed and
   without Claude Code.
   - `docs/how-to/getting-started.md` gains an explicit **"Optional:
@@ -316,7 +331,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`fakoli-state claim --branch NAME` — caller-supplied / existing-branch
+- **`anvil claim --branch NAME` — caller-supplied / existing-branch
   claims (T027).** A claim can now attach to a branch the user names directly
   instead of always generating the default `agent/<task>-<slug>` name, so the
   engine meets an agent or human where their own git workflow already is rather
@@ -353,7 +368,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`fakoli-state prd resolve-decision` — decision back-propagation into the
+- **`anvil prd resolve-decision` — decision back-propagation into the
   PRD (T018).** Closes the loop opened by `prd find-decisions`: an answered
   decision can now be written back into `prd.md` itself, not just tracked in a
   reviewer's head, so the PRD stays the single source of truth instead of
@@ -391,14 +406,14 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **Global-config layer `~/.config/fakoli-state/config.yaml` with project
+- **Global-config layer `~/.config/anvil/config.yaml` with project
   override (T016/F006).** A user-wide config now supplies defaults that any
   individual project can override, so settings like `default_lease_minutes`,
   `llm_tier`, or `auto_expand_threshold` can be set once per machine instead of
-  re-declared in every project's `.fakoli-state/config.yaml`.
+  re-declared in every project's `.anvil/config.yaml`.
   - **Strict precedence, lowest → highest:** built-in dataclass default <
-    global config (`~/.config/fakoli-state/config.yaml`) < project config
-    (`.fakoli-state/config.yaml`) < explicit CLI flag. A key set in the project
+    global config (`~/.config/anvil/config.yaml`) < project config
+    (`.anvil/config.yaml`) < explicit CLI flag. A key set in the project
     config wins over the same key in the global config; a global-only key
     supplies the value; a key in neither falls through to the dataclass default.
   - **New `load_merged_config()` and `global_config_path()` in `config.py`.**
@@ -413,9 +428,9 @@ All notable changes to fakoli-state are documented here. This project adheres to
     factored into shared `_read_yaml_mapping` / `_build_config` helpers so both
     paths validate identically.
   - **Global-path resolution honours XDG.** `global_config_path()` resolves
-    `FAKOLI_STATE_GLOBAL_CONFIG` (explicit file override, for tests / unusual
-    installs) > `$XDG_CONFIG_HOME/fakoli-state/config.yaml` > the documented
-    `~/.config/fakoli-state/config.yaml` default. A missing or empty global
+    `ANVIL_GLOBAL_CONFIG` (explicit file override, for tests / unusual
+    installs) > `$XDG_CONFIG_HOME/anvil/config.yaml` > the documented
+    `~/.config/anvil/config.yaml` default. A missing or empty global
     config means "no global defaults" rather than an error; a *broken* global
     config the user explicitly wrote raises the same loud `ValueError` /
     `YAMLError` as a broken project config.
@@ -469,13 +484,13 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`fakoli-state describe` self-describing command surface + `--version` schema
+- **`anvil describe` self-describing command surface + `--version` schema
   reporting (T012/F003).** The engine now exposes a machine-readable manifest of
   its own public surface so a non-Claude host (Codex/Cursor/CI/another agent) can
   discover what it can do without parsing `--help` text or hard-coding a tool list.
-  - **`fakoli-state --version` now reports engine AND schema version** —
-    `fakoli-state 1.29.0 (schema 4)`. The first token stays
-    `fakoli-state {__version__}` for backward compatibility with existing parsers;
+  - **`anvil --version` now reports engine AND schema version** —
+    `anvil 1.29.0 (schema 4)`. The first token stays
+    `anvil {__version__}` for backward compatibility with existing parsers;
     the `(schema N)` suffix identifies the on-disk state format the engine speaks,
     which a host pinning behaviour needs alongside the build id.
   - **New `describe` command** emits the standard `{"ok": true, "command":
@@ -512,7 +527,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`fakoli-state doctor` one-shot health diagnosis (T010/F002).** A read-only
+- **`anvil doctor` one-shot health diagnosis (T010/F002).** A read-only
   triage command that answers "is this project's state healthy?" in a single
   pass, emitting a list of severity-tagged findings (`ok`/`info`/`warning`/`error`)
   and **exiting non-zero when ANY finding is ERROR-level** — a real health gate,
@@ -550,7 +565,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
     claim and a schema mismatch lists BOTH findings, not just the schema one.
   - Honors the v1.24 `--json` envelope (`{"ok": true, "command": "doctor",
     "data": {"healthy", "worst_severity", "findings": [...]}}`) and the
-    `FAKOLI_STATE_ROOT` / `--cwd` resolution precedence. Covered by
+    `ANVIL_ROOT` / `--cwd` resolution precedence. Covered by
     `tests/test_cli.py` (11 cases, incl. the healthy-clean-exit and
     stale-claim-plus-schema-mismatch acceptance scenarios).
 
@@ -560,15 +575,15 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`fakoli-state scan` brownfield ingest + `init --from-repo` (T008).** A new
+- **`anvil scan` brownfield ingest + `init --from-repo` (T008).** A new
   command takes an *existing* repo from nothing to a ready-to-claim task graph
   with no PRD authoring, no LLM, and no API key. `scan` walks the working tree,
   persists a re-scannable **codebase model** in its own SQLite db
-  (`.fakoli-state/scan.db`), and — on the first scan of a project with no PRD yet
+  (`.anvil/scan.db`), and — on the first scan of a project with no PRD yet
   — synthesises a draft `prd.md` plus an initial feature/task graph by driving
   the same offline parse → plan → score → review pipeline `init --with-sample`
   uses. `init --from-repo` is the convenience entry point: it scaffolds
-  `.fakoli-state/` like a bare `init`, then immediately runs the scan.
+  `.anvil/` like a bare `init`, then immediately runs the scan.
   - **Separate `scan.db` keeps the replay/audit guarantee intact.** The codebase
     model lives in its own database, never in the event-sourced `state.db`, so
     the canonical event log and its byte-equality replay invariant are untouched.
@@ -583,10 +598,10 @@ All notable changes to fakoli-state are documented here. This project adheres to
     the per-command CLI bodies use and cannot drift from the hand-run sequence.
     The generated draft PRD carries `## Features`/`## Tasks` sections with
     non-empty acceptance-criteria + verification blocks, so the run ends with at
-    least one task in `ready` and `fakoli-state next` returns a first task.
+    least one task in `ready` and `anvil next` returns a first task.
   - **`--from-repo` is mutually exclusive with `--with-sample`** (both own
     `prd.md` and seed the graph; the combination is refused up front) and honours
-    the v1.24 conventions — `FAKOLI_STATE_ROOT` resolution via the shared helpers
+    the v1.24 conventions — `ANVIL_ROOT` resolution via the shared helpers
     and the single `--json` envelope. Covered by `tests/test_scan.py`.
 
 ---
@@ -595,14 +610,14 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`fakoli-state init --with-sample` one-command quickstart (T004).** A single
+- **`anvil init --with-sample` one-command quickstart (T004).** A single
   command now takes a brand-new user from nothing to a ready-to-claim task with
   no PRD authoring, no LLM, and no API key. Passing `--with-sample` to `init`
-  scaffolds the `.fakoli-state/` directory as before, then writes a
+  scaffolds the `.anvil/` directory as before, then writes a
   self-contained sample `prd.md` (a fictional "Markdown Link Checker" CLI) and
   runs the full deterministic pipeline offline — parse → review → approve →
   plan → score → review tasks — leaving at least one task in `ready` so
-  `fakoli-state next` returns a first task immediately.
+  `anvil next` returns a first task immediately.
   - **Fully offline / no API key.** The sample PRD already contains a `## Tasks`
     section, so `plan` never reaches its LLM task-generation backstop. Seeding
     drives the same engine modules the per-command CLI bodies use
@@ -616,10 +631,10 @@ All notable changes to fakoli-state are documented here. This project adheres to
   - **Atomic with `init`.** The seed runs inside the same backend session that
     `init` opens, so the sample pipeline is applied in one shot. The sample PRD
     is embedded as a module constant (`_sample.SAMPLE_PRD`) rather than a data
-    file, since the wheel only packages `src/fakoli_state`.
+    file, since the wheel only packages `src/anvil`.
   - **Opt-in and back-compatible.** Without the flag, `init` behaviour is
     unchanged. The confirmation output reports the seeded feature/task/ready
-    counts and points straight at `fakoli-state next`.
+    counts and points straight at `anvil next`.
 
 ---
 
@@ -655,7 +670,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`fakoli-state migrate state` command (T009/F006).** Promotes the schema
+- **`anvil migrate state` command (T009/F006).** Promotes the schema
   migration that previously only ran **silently inside `initialize()`** — on the
   first command after an engine upgrade — to an explicit, backed-up,
   dry-run-by-default operation. It does **not** introduce a new migration
@@ -698,10 +713,10 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 - **The monorepo-only `marketplace-scribe` agent.** Its duties — keeping the root
   `README.md` plugins table, `.claude-plugin/marketplace.json`, and `registry/*.json` in
-  sync — only exist inside the fakoli-plugins monorepo, not in a standalone fakoli-state
+  sync — only exist inside the fakoli-plugins monorepo, not in a standalone anvil
   checkout. `docs-scribe` and `state-keeper` are refocused for the standalone surface, and
   marketplace-level regeneration defers to `fakoli-crew:keeper` when that plugin is present.
-  fakoli-state now ships **5 plugin-owned agents**: `critic`, `docs-scribe`, `planner`,
+  anvil now ships **5 plugin-owned agents**: `critic`, `docs-scribe`, `planner`,
   `sentinel`, `state-keeper`.
 
 ---
@@ -710,19 +725,19 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`fakoli-state drift` command** (read-only): surfaces three-source divergence —
+- **`anvil drift` command** (read-only): surfaces three-source divergence —
   INTENT (PRD/tasks) vs STATE (SQLite) vs FILESYSTEM/GIT — by reusing the reconciliation
   engine (no duplicated logic). Reports `missing_expected_file` (a done/accepted task
   whose `likely_files` are absent on disk — a new engine check), `orphan_branch`,
   `orphan_worktree`, `orphan_packet`, and `stale_claim`. Works **without** a configured
   sync provider (local drift only), emits the `--json` envelope, exits 0 (a report, not a
-  gate), and honors `FAKOLI_STATE_ROOT`. This is the "is the code still what the spec
+  gate), and honors `ANVIL_ROOT`. This is the "is the code still what the spec
   said?" view competitors structurally lack.
 
 ### Fixed
 
 - **Reconciliation: orphan-packet scan never fired.** `_scan_orphan_packets` used a
-  doubled `.fakoli-state/.fakoli-state/packets` path under the real CLI/MCP calling
+  doubled `.anvil/.anvil/packets` path under the real CLI/MCP calling
   convention, so orphan packets were undetectable via both `drift` and `sync` (only
   unit tests that pass the project root masked it). Now resolves correctly.
 - **Expected-file path normalization corrupted dotfiles.** `str.lstrip("./")` stripped a
@@ -736,11 +751,11 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **`FAKOLI_STATE_ROOT` environment override** for project resolution across the CLI and
-  the MCP server. When set, it points fakoli-state at the project root (the directory
-  containing `.fakoli-state`) regardless of the current working directory — making the
+- **`ANVIL_ROOT` environment override** for project resolution across the CLI and
+  the MCP server. When set, it points anvil at the project root (the directory
+  containing `.anvil`) regardless of the current working directory — making the
   engine correct inside containers and non-cwd MCP hosts. Precedence: explicit `--cwd` >
-  `FAKOLI_STATE_ROOT` > cwd. An invalid value fails loudly (no silent cwd fallback), and
+  `ANVIL_ROOT` > cwd. An invalid value fails loudly (no silent cwd fallback), and
   `init` / `init_project` honor it too so create-then-read target the same directory.
   Centralized in `cli/_helpers._resolve_base_dir`.
 - **`schema_version` exposed to tooling.** `status` (human + `--json`) now reports
@@ -766,7 +781,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 - **Context-footprint self-audit** (`benchmarks/context_audit.py` +
   `benchmarks/CONTEXT_AUDIT.md`): a reproducible measurement (tiktoken, chars/4 fallback)
-  of the always-on context cost fakoli-state imposes when installed — ~**7,248 tokens**
+  of the always-on context cost anvil imposes when installed — ~**7,248 tokens**
   (MCP tool schemas 54%, agent descriptions 38%, skill descriptions 8%, hooks 0.3%), with
   the ~42.7K of skill/agent bodies excluded by progressive disclosure. MCP schemas are
   measured live from the real FastMCP serialization. Verdict: modest (~3.6% of a 200K
@@ -873,7 +888,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 - **Coordination benchmark (`benchmarks/`).** A reproducible harness that runs the
   same multi-actor workload through two coordinators — naive shared-markdown vs. the
-  real fakoli-state CLI — across four scenarios (overlapping files, dependency
+  real anvil CLI — across four scenarios (overlapping files, dependency
   ordering, crash/stale-lease recovery, evidence gaming). Drives the live engine; no
   third-party deps. `python3 benchmarks/run_benchmark.py`.
 
@@ -923,7 +938,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
   - New config knob `events_storage: local | git` (default `local`; validated at load time like every other literal field). `local` keeps pre-1.22.0 behaviour byte-for-byte — sequence ids, strict sequential replay, byte-equality guarantee untouched
   - In git mode, event ids are hash-chained — `"E-" + sha256(parent_event_id ‖ canonical_json(payload) ‖ actor ‖ ts)[:12]` — so two branches/machines append concurrently with zero collision risk; the envelope gains `parent_event_id` (chain link) and `lamport` (writer sets max-seen + 1). Local mode omits both keys from serialized lines
   - Order-tolerant replay in git mode: load all lines (torn trailing line tolerated exactly as before), dedupe by event id (a line duplicated by a `merge=union` union applies once), order by `(lamport, ts, event_id)`. Competing cross-branch `claim.created` events on one task resolve deterministically — earliest `(lamport, ts, id)` wins the task transition (`claim.superseded` materialization is Phase B)
-  - New CLI command `fakoli-state migrate-events --to git [--yes]`: rewrites the local log with hash ids preserving order, emits `id_mapping.json` (old → new), writes `.fakoli-state/.gitattributes` (`events.jsonl merge=union`), prints `.gitignore` guidance, flips `events_storage: git` in config.yaml, and rebuilds the projection. Dry-run by default; refuses while claims are active; backs up the original log
+  - New CLI command `anvil migrate-events --to git [--yes]`: rewrites the local log with hash ids preserving order, emits `id_mapping.json` (old → new), writes `.anvil/.gitattributes` (`events.jsonl merge=union`), prints `.gitignore` guidance, flips `events_storage: git` in config.yaml, and rebuilds the projection. Dry-run by default; refuses while claims are active; backs up the original log
   - Schema v4 (auto-upgrade from v0–v3): `events.id` CHECK widened to accept hash ids; new nullable `events.seq` column — the replay-assigned display order in git mode (derived state, never written to the log; NULL in local mode where the monotonic id is the order)
   - New pure module `state/hashing.py` (`hash_event_id` / `canonical_payload_json`) shared by the write path, the migration command, and tests
   - 33 new tests: hash chain linkage, dedupe replay, lamport tie ordering, a divergent-merge simulation (common prefix + two branch suffixes concatenated both ways converge to identical state, with the competing-claims winner deterministic), migration round-trip (pre-state equals post-state modulo the id mapping), config knob validation, v3→v4 schema auto-upgrade
@@ -935,7 +950,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 ### Added
 - **Complexity score → auto-expansion loop.** After scoring, every task whose `complexity` is at/above the configurable threshold is queued for decomposition instead of just sitting in a report (idea adopted from claude-task-master):
   - New config knobs: `auto_expand` (default `true`) and `auto_expand_threshold` (default 4, validated 1–5; booleans explicitly rejected so `true` cannot silently become threshold 1)
-  - CLI `score` now prints an **EXPANSION QUEUE** section — task id, complexity, deterministic suggested sub-task count (`complexity - 1`, clamped to the expand engine's 2–5 envelope), and the exact `fakoli-state expand TXXX --use-llm` follow-up per task
+  - CLI `score` now prints an **EXPANSION QUEUE** section — task id, complexity, deterministic suggested sub-task count (`complexity - 1`, clamped to the expand engine's 2–5 envelope), and the exact `anvil expand TXXX --use-llm` follow-up per task
   - MCP `score_tasks` response gains an `expansion_queue` field with the same data (queueing stays deterministic; LLM-side decomposition still only runs via `expand --use-llm` or the planner agent)
   - `expand` threshold no longer hardcoded — `planning.inference.expand_task` accepts the config threshold
   - `skills/plan/SKILL.md`: after scoring, the orchestrator auto-dispatches planner expansion for queued tasks (one summary checkpoint, no per-task Q&A) unless `auto_expand: false`
@@ -993,8 +1008,8 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Added
 
-- **Replay proven in CI (SL-1).** New `serialize_state(backend)` produces a deterministic, total snapshot of canonical state; `test_replay_equivalence` asserts `serialize_state(normal apply path) == serialize_state(replay_from_empty) == a committed golden`, plus cross-db and same-handle idempotence. A new `.github/workflows/fakoli-state.yml` runs the full suite (incl. this check) on every PR — the replay guarantee is now an enforced invariant, not an assertion.
-- `fakoli-state replay --from-events <jsonl> --into <db>` CLI wrapping the existing `replay_from_empty` engine; guards the live `state.db` and missing-file inputs.
+- **Replay proven in CI (SL-1).** New `serialize_state(backend)` produces a deterministic, total snapshot of canonical state; `test_replay_equivalence` asserts `serialize_state(normal apply path) == serialize_state(replay_from_empty) == a committed golden`, plus cross-db and same-handle idempotence. A new `.github/workflows/anvil.yml` runs the full suite (incl. this check) on every PR — the replay guarantee is now an enforced invariant, not an assertion.
+- `anvil replay --from-events <jsonl> --into <db>` CLI wrapping the existing `replay_from_empty` engine; guards the live `state.db` and missing-file inputs.
 - Backend read methods `list_claims` / `list_reviews` / `list_evidence` / `list_requirements` returning full canonical collections (not active-only), deterministically ordered.
 
 ### Fixed
@@ -1037,7 +1052,7 @@ All notable changes to fakoli-state are documented here. This project adheres to
 
 ### Fixed
 
-- **Evidence gate divergence (correctness).** The `needs_review → accepted` transition enforced a different evidence check than the one `fakoli-state apply` previews to the reviewer. The transition used a raw, case-sensitive substring match against a flattened corpus of every `Evidence` field, while `apply` (`cli/packet_apply.py`) used the intent-based `review.gates.evidence_complete`. The two could disagree in both directions: a task could preview as INCOMPLETE yet be accepted, or preview as complete yet be rejected. The substring gate was also trivially gameable — writing a required literal (e.g. `"test output"`) into any field passed it, and `pytest --collect-only` satisfied a "tests pass" requirement. `transitions._evidence_complete` now delegates to `review.gates.evidence_complete`, making it the single source of truth. A parametrized agreement test locks the enforcing gate to the preview gate so they can never diverge again.
+- **Evidence gate divergence (correctness).** The `needs_review → accepted` transition enforced a different evidence check than the one `anvil apply` previews to the reviewer. The transition used a raw, case-sensitive substring match against a flattened corpus of every `Evidence` field, while `apply` (`cli/packet_apply.py`) used the intent-based `review.gates.evidence_complete`. The two could disagree in both directions: a task could preview as INCOMPLETE yet be accepted, or preview as complete yet be rejected. The substring gate was also trivially gameable — writing a required literal (e.g. `"test output"`) into any field passed it, and `pytest --collect-only` satisfied a "tests pass" requirement. `transitions._evidence_complete` now delegates to `review.gates.evidence_complete`, making it the single source of truth. A parametrized agreement test locks the enforcing gate to the preview gate so they can never diverge again.
 
 ---
 
@@ -1047,8 +1062,8 @@ Major capability release: **multi-provider LLM access** (direct Anthropic API, A
 
 ### Added
 
-- `planning/llm.BedrockProvider` — Anthropic-on-Bedrock via `anthropic.AnthropicBedrock`. Boto3 credential chain (env vars / profile / IAM role) just works. Optional dep: `pip install 'fakoli-state[bedrock]'`.
-- `planning/llm.CustomEndpointProvider` — any OpenAI-compatible `/v1/chat/completions` endpoint via the `openai` SDK with `base_url=`. Targets vLLM, LiteLLM proxy, OpenRouter, Together, Groq, Azure OpenAI, local llama.cpp. Optional dep: `pip install 'fakoli-state[custom]'`.
+- `planning/llm.BedrockProvider` — Anthropic-on-Bedrock via `anthropic.AnthropicBedrock`. Boto3 credential chain (env vars / profile / IAM role) just works. Optional dep: `pip install 'anvil[bedrock]'`.
+- `planning/llm.CustomEndpointProvider` — any OpenAI-compatible `/v1/chat/completions` endpoint via the `openai` SDK with `base_url=`. Targets vLLM, LiteLLM proxy, OpenRouter, Together, Groq, Azure OpenAI, local llama.cpp. Optional dep: `pip install 'anvil[custom]'`.
 - `planning/llm.MODEL_TIERS`, `BEDROCK_MODEL_TIERS`, `DEFAULT_TIER`, `resolve_model_for_tier()` — tier vocabulary (`opus` / `sonnet` / `haiku`) and the helper that maps a logical tier to the right model id for each provider's namespace.
 - `Config` fields: `llm_provider` (anthropic/bedrock/custom), `llm_tier` (opus/sonnet/haiku), `bedrock_region`, `bedrock_profile`, `custom_base_url`, `custom_api_key_env`. All optional; env auto-detect kicks in when blank.
 - `docs/llm-providers.md` — provider setup guide with worked examples for direct API, Bedrock (env / profile / IAM), and three custom-endpoint shapes (vLLM, OpenRouter, LiteLLM proxy).
@@ -1061,10 +1076,10 @@ Major capability release: **multi-provider LLM access** (direct Anthropic API, A
 - `planning/llm_planner.resolve_planner_provider()` — gained an optional `config: Config | None` parameter. New precedence: explicit `config.llm_provider` > env auto-detect (`ANTHROPIC_API_KEY` > `AWS_REGION`+bedrock-extras > `CUSTOM_LLM_BASE_URL`) > fail loudly. Single provider per process; no silent fallback across providers.
 - `generate_tasks_markdown()` — gained an optional `config:` parameter, threaded through to the resolver so projects' explicit provider+tier+credential knobs apply.
 - `cli/plan._resolve_llm_provider()` — delegates to `resolve_planner_provider(config)` so `--use-llm` augmentation honors the same multi-provider precedence as the no-tasks LLM backstop. Single source of truth for provider selection across the CLI.
-- `cli/plan._load_config_optional()` — new helper that soft-loads `.fakoli-state/config.yaml` and emits a stderr warning naming the exception class on load failure. Mirrors `cli/claim.py`'s existing pattern.
+- `cli/plan._load_config_optional()` — new helper that soft-loads `.anvil/config.yaml` and emits a stderr warning naming the exception class on load failure. Mirrors `cli/claim.py`'s existing pattern.
 - `AnthropicProvider` — gained `tier=` kwarg (Opus / Sonnet / Haiku), resolves via `MODEL_TIERS`. Existing `model=` arg still wins when both are passed; backward compatible for every existing caller.
 - Default model tier across the codebase shifts from "Sonnet (hardcoded constant)" to `DEFAULT_TIER = "sonnet"` (community consensus per anthropics/claude-code#27665). Functional behaviour unchanged on the default path; the change is documentation + config plumbing.
-- Agent frontmatter — `model:` set explicitly across all 6 fakoli-state agents (was `opus` uniformly; now `opus` for reasoning/synthesis, `sonnet` for structured generation, `haiku` for mechanical/read-only):
+- Agent frontmatter — `model:` set explicitly across all 6 anvil agents (was `opus` uniformly; now `opus` for reasoning/synthesis, `sonnet` for structured generation, `haiku` for mechanical/read-only):
   - `planner` → opus | `critic` → opus | `docs-scribe` → sonnet | `marketplace-scribe` → sonnet | `sentinel` → haiku | `state-keeper` → haiku
 - `config.yaml` template — gains commented `llm_*`, `bedrock_*`, `custom_*` blocks with tier-mapping reference so new projects see the multi-provider shape at init time.
 
@@ -1077,7 +1092,7 @@ Major capability release: **multi-provider LLM access** (direct Anthropic API, A
 - **greptile MUST FIX #1.** `_choose_provider_family` was using `hasattr(anthropic, "AnthropicBedrock")` to detect whether the Bedrock extras were installed. The `AnthropicBedrock` class ships with the base `anthropic` install — only `boto3` (the transitive dep added by the `[bedrock]` extra) actually gates it. Switched to `try: import boto3` so AWS_REGION-set boxes without the extras correctly fall through to "no provider available" instead of picking Bedrock and crashing at construction.
 - **greptile MUST FIX #2 + critic MUST FIX #1.** When the operator pinned `llm_provider: bedrock` (or `custom`) in config without installing the extras, the underlying `LLMProviderError` propagated past the resolver's `PlannerProviderUnavailable` contract — users saw a raw traceback where curated help text was promised. The resolver now wraps every per-family `_build_*` call's `LLMProviderError` into `PlannerProviderUnavailable` with an install-command suggestion.
 - **critic MUST FIX #2.** `_build_custom` silently defaulted to `claude-sonnet-4-6` when the operator had `llm_provider: custom` but no `llm_model` / `llm_tier`. On a local vLLM serving Mistral-7B (or any non-Anthropic OpenRouter route) this produced a confusing "model not found" failure that looked like a network issue. The resolver now refuses to invent a model and raises `PlannerProviderUnavailable` with an actionable message naming the config keys.
-- **structure-critic MUST FIX.** `bin/src/fakoli_state/__init__.py` `__version__` was stale at `1.16.0` — every other source of truth had bumped to `1.17.0`. Now in sync, plus a new `tests/test_version_sync.py` regression that asserts `pyproject.toml`, `__init__.py`, and `plugin.json` agree at the start of every test run.
+- **structure-critic MUST FIX.** `bin/src/anvil/__init__.py` `__version__` was stale at `1.16.0` — every other source of truth had bumped to `1.17.0`. Now in sync, plus a new `tests/test_version_sync.py` regression that asserts `pyproject.toml`, `__init__.py`, and `plugin.json` agree at the start of every test run.
 
 ### Changed (post-review polish)
 
@@ -1145,7 +1160,7 @@ v1.16.0 closes all three.
   Plus an explicit cycle-avoidance rule and an instruction to OMIT
   the field entirely when no deps exist (no empty `**Dependencies:**`
   lines).
-- **`fakoli-state claim` warns on undone dependencies (soft gate)**.
+- **`anvil claim` warns on undone dependencies (soft gate)**.
   Before acquiring the lease, claim fetches `task.dependencies` and
   checks each one's status. If any are not yet `done`, emits a
   stderr warning naming each dep + status, then proceeds with the
@@ -1187,7 +1202,7 @@ the file-based inference.
 The claim warning is soft (proceeds with the claim) so existing CI /
 scripts that call `claim` won't suddenly start failing. Users who
 prefer stricter behaviour can wrap the warning in their own
-project's git-pre-push hook or check `fakoli-state show TASK_ID`
+project's git-pre-push hook or check `anvil show TASK_ID`
 before claiming.
 
 ### Fixed (post-greptile review)
@@ -1224,16 +1239,16 @@ decision the agent had the context to make**. v1.15.0 closes all five.
 
 What changed in this release:
 
-1. **`fakoli-state plan` GUARANTEES task generation** — calls the LLM
+1. **`anvil plan` GUARANTEES task generation** — calls the LLM
    automatically when the PRD has features + requirements but no
    `## Tasks` section. The user no longer has to remember to dispatch
-   the `fakoli-state:planner` subagent as a workaround.
-2. **`fakoli-state plan` PRUNES ORPHAN tasks/features on re-parse** —
+   the `anvil:planner` subagent as a workaround.
+2. **`anvil plan` PRUNES ORPHAN tasks/features on re-parse** —
    the docs always claimed "Re-parse replaces, not merges" but the
    implementation only upserted by ID. New `task.deleted` /
    `feature.deleted` event types with safety guards land the
    re-parse contract.
-3. **`fakoli-state expand --use-llm` tolerates fenced JSON + prose** —
+3. **`anvil expand --use-llm` tolerates fenced JSON + prose** —
    previously every call failed with `Expecting value: line 1 column
    1 (char 0)` because the parser couldn't handle the markdown
    fences Claude routinely wraps JSON in.
@@ -1260,7 +1275,7 @@ behaviour-change callout in **Migration** below.
   tier-chain design" below). 15 unit tests covering tier resolution,
   prompt assembly, output validation, and end-to-end with a recorded
   LLM provider.
-- **`fakoli-state plan` LLM backstop (CLI).** When the deterministic
+- **`anvil plan` LLM backstop (CLI).** When the deterministic
   parse yields 0 tasks but ≥1 features, the CLI calls
   `generate_tasks_markdown()`, idempotently appends the `## Tasks`
   block to `prd.md` (re-runs are no-ops once the section exists),
@@ -1288,14 +1303,14 @@ behaviour-change callout in **Migration** below.
   rows still reference the task (FK-protected audit history that
   not even `--prune-force` overrides). `feature.deleted` refuses if
   tasks still reference the feature (FK RESTRICT pre-check).
-- **`fakoli-state plan` auto-prunes orphans on re-parse.** Computes
+- **`anvil plan` auto-prunes orphans on re-parse.** Computes
   the diff between `state.db` and the new parse, emits the deletion
   events. Safe-status orphans prune silently; unsafe-status orphans
   cause exit 1 with a blocked-IDs list and the `--prune-force`
   escape hatch. Output line surfaces what was pruned.
 - **`Backend.list_features()` Protocol method + SQLite impl** —
   orphan detection needs the full feature set for the diff.
-- **New `branch_prefix` field in `.fakoli-state/config.yaml`**
+- **New `branch_prefix` field in `.anvil/config.yaml`**
   (default `"agent"`, preserving pre-v1.15.0 behaviour). The CLI's
   `claim` command reads this and creates branches as
   `<branch_prefix>/<task-id>-<slug>` — set `branch_prefix: feature`
@@ -1428,7 +1443,7 @@ New CLI flags (`--no-llm`, `--prune-force`) and MCP parameters
 (`use_llm`, `prune_force`) are opt-in.
 
 **One behaviour callout for MCP and CLI callers (post-mcp-critic
-review).** Pre-1.15.0 callers of `plan_tasks` / `fakoli-state plan`
+review).** Pre-1.15.0 callers of `plan_tasks` / `anvil plan`
 on a PRD with features + requirements but no `## Tasks` section
 previously got `task_count=0` and unchanged `prd.md`. As of v1.15.0
 the default behaviour is to **call the LLM and rewrite `prd.md`** —
@@ -1438,7 +1453,7 @@ pre-1.15.0 "task_count=0, file untouched" behaviour. The CLI
 output line and the new MCP response fields explicitly surface
 when the file was modified.
 
-The `fakoli-state:planner` agent file (`agents/planner.md`) is
+The `anvil:planner` agent file (`agents/planner.md`) is
 unchanged. It remains useful as a reference and for explicit-
 dispatch use cases that need the subagent's structured-output
 discipline (PRD critique, expansion proposals, incremental
@@ -1485,7 +1500,7 @@ over a CLI is exactly this: turning *blocked on a decision* into
   verification commands). Returns a flat ordered list of
   `UnresolvedDecision` records. Pure module — no I/O, no backend.
   18 unit tests in `tests/test_decisions.py`.
-- **New CLI subcommand `fakoli-state prd find-decisions`** that prints
+- **New CLI subcommand `anvil prd find-decisions`** that prints
   a structured per-kind summary with id, location, text, surrounding
   context paragraph, and suggested resolution field. Exits 0
   regardless of finding count (it's a read-only inspection command).
@@ -1572,7 +1587,7 @@ no Open Questions, no missing fields) see no change at all.
 ## [1.13.0] — 2026-05-26
 
 Two-axis release driven by a single user observation: agents using
-fakoli-state were ending every workflow with a CLI to-do list ("1. Run
+anvil were ending every workflow with a CLI to-do list ("1. Run
 `prd parse`, 2. Run `prd review`, 3. Run `prd review --approve`,
 4. Run `plan`, …") instead of driving the workflow inline. The
 handoff pattern only makes sense when work is leaving the session
@@ -1635,7 +1650,7 @@ the full workflow without dropping to a Bash tool they may not have).
   behavior: an explicit `task_id` always re-scores (whether or not
   scores are complete); omitting `task_id` only scores tasks whose
   Score is incomplete. The asymmetry is deliberate and matches
-  `fakoli-state score [TASK_ID]`.
+  `anvil score [TASK_ID]`.
 - New "Workflow tools (v1.13.0)" section in `docs/mcp.md`,
   organized by lifecycle phase (Bootstrap → PRD → Planning → Review)
   with parameters, returns, examples, and CLI equivalents for each
@@ -1646,8 +1661,8 @@ the full workflow without dropping to a Bash tool they may not have).
 No breaking changes. The 13 existing MCP tools, all 23 CLI commands,
 and the on-disk state schema are unchanged. The skill rewrites
 change the agent's interactive behavior only — any CLI script,
-hook, or pre-existing workflow that invokes `fakoli-state` commands
-directly continues to work identically. Plugins that wrap fakoli-state
+hook, or pre-existing workflow that invokes `anvil` commands
+directly continues to work identically. Plugins that wrap anvil
 (`fakoli-flow`, `fakoli-crew`) are unaffected.
 
 ### Notes on `init_project` and helper extraction
@@ -1666,15 +1681,15 @@ shared constants module someday.
 ## [1.12.1] — 2026-05-26
 
 Bug-fix release for a silent-drop in the PRD parser. Reported by a user
-running fakoli-state in another project: an agent authored a PRD with
+running anvil in another project: an agent authored a PRD with
 `## Features` written as bullets (instead of `### F001:` H3 blocks) and
-`fakoli-state prd parse` reported "0 features, 0 tasks" before exiting
+`anvil prd parse` reported "0 features, 0 tasks" before exiting
 0. The agent's work was invisibly discarded.
 
 ### Fixed
 
 - `_parse_features` and `_parse_tasks` in
-  `bin/src/fakoli_state/planning/template.py` now emit a `ParseError`
+  `bin/src/anvil/planning/template.py` now emit a `ParseError`
   when their section body has non-empty / non-comment content but
   produces zero `### Fxxx:` / `### Txxx:` H3 blocks. The error message
   names the canonical format and points to `docs/prd-template.md`. This
@@ -1719,17 +1734,17 @@ running fakoli-state in another project: an agent authored a PRD with
 ## [1.12.0] — 2026-05-26
 
 Skill rename to resolve the `brainstorm` namespace collision with
-`fakoli-flow:brainstorm`. The fakoli-state skill that drafts a PRD from
+`fakoli-flow:brainstorm`. The anvil skill that drafts a PRD from
 a rough idea is now `start-prd` — slug, slash command, and every
 cross-reference updated. The skill router can now route "let's
 brainstorm" cleanly to `fakoli-flow` and "start a PRD" cleanly to
-fakoli-state. Markdown-choreography only; no Python source, schema, or
+anvil. Markdown-choreography only; no Python source, schema, or
 test changes (967 tests still passing).
 
 ### Changed
 
-- **BREAKING:** `/fakoli-state:brainstorm` skill renamed to
-  `/fakoli-state:start-prd`. Directory (`skills/brainstorm/` →
+- **BREAKING:** `/anvil:brainstorm` skill renamed to
+  `/anvil:start-prd`. Directory (`skills/brainstorm/` →
   `skills/start-prd/`), frontmatter `name:`, slash-command form, and
   every cross-reference in README, `architecture.md`,
   `skills-reference.md`, `how-to/integrating-with-fakoli-flow-and-crew.md`,
@@ -1751,9 +1766,9 @@ test changes (967 tests still passing).
 ### Migration
 
 If your scripts, hooks, CI, agents, or muscle memory invoke
-`/fakoli-state:brainstorm`, change to `/fakoli-state:start-prd`. No
+`/anvil:brainstorm`, change to `/anvil:start-prd`. No
 state schema migration is required (still v3, unchanged since v1.8.0);
-no CLI command was renamed (no `fakoli-state brainstorm` CLI command
+no CLI command was renamed (no `anvil brainstorm` CLI command
 ever shipped — only the skill); the rename is purely at the skill-
 router layer.
 
@@ -1836,7 +1851,7 @@ flag is the only behavior change and is purely additive (optional).
 - `.claude-plugin/plugin.json` description tightened from 192 → 131 chars;
   10 high-signal keywords (added `local-first`, `runtime-neutral`,
   `terraform-for-work`, `llm-work-packets`; dropped generic terms). [PR #54]
-- Repo root `README.md`: added fakoli-state to "The Fakoli Ecosystem"
+- Repo root `README.md`: added anvil to "The Fakoli Ecosystem"
   trinity narrative; refreshed "Available Plugins" row (removed stale
   "Scaffolded; phases 2-8 in progress"). [This PR]
 
@@ -1856,7 +1871,7 @@ Phase 10: first plugin-dev best-practices audit + 8 MUST FIX items closed
 inline. fakoli-crew v2.2.0 ships 5 new cross-plugin specialist critic agents
 (agent-critic, skill-critic, hook-critic, mcp-critic, structure-critic — see
 `plugins/fakoli-crew/CHANGELOG.md` § 2.2.0); this release applies their first
-audit pass against fakoli-state v1.9.0's surface area and closes every MUST
+audit pass against anvil v1.9.0's surface area and closes every MUST
 FIX they surfaced. 57 SHOULD FIX / CONSIDER / NIT items are deferred to
 `docs/phase-11-backlog.md` with per-critic provenance preserved.
 
@@ -1870,9 +1885,9 @@ Ships v1.10.0.
 1. `agents/critic.md:26` — renamed `allowed-tools:` → `tools:` (the `allowed-tools:` key is the *command* frontmatter key; on agent files it is silently ignored and the agent loads with full unrestricted tool access, defeating the Iron Rule's least-privilege intent for the read-only reviewer). Found by agent-critic.
 2. `agents/docs-scribe.md:67` — same `allowed-tools:` → `tools:` rename. Found by agent-critic.
 3. `agents/marketplace-scribe.md:67` — same rename. Found by agent-critic.
-4. `agents/planner.md:44` — same rename (highest-stakes occurrence: the Iron Rule explicitly forbids planner writes to `.fakoli-state/`, but the frontmatter that was supposed to enforce least-privilege was silently ignored). Found by agent-critic.
+4. `agents/planner.md:44` — same rename (highest-stakes occurrence: the Iron Rule explicitly forbids planner writes to `.anvil/`, but the frontmatter that was supposed to enforce least-privilege was silently ignored). Found by agent-critic.
 5. `agents/state-keeper.md:45` — same rename (highest blast-radius occurrence given agent proximity to git and state files). Found by agent-critic.
-6. `skills/finish/SKILL.md:249-252` — removed dangling `/fakoli-state:sentinel` slash-command reference (sentinel is an agent surface, not a skill — there is no slash-command for it; the broken reference would 404 on invocation). Replaced with explicit `claude plugin list 2>/dev/null | grep -q "^fakoli-crew"` shell gate plus prose explaining the agent-dispatch contract so the next Claude session cannot re-introduce the bug by pattern-matching. As a bonus closure (welder Fix #6), this also resolves what would have been P11-SK-S5 in the Phase 11 backlog ("Fuzzy detection for `fakoli-crew:sentinel` — no shell check") — reducing the deferred SHOULD FIX count from 25 to 24. Found by skill-critic.
+6. `skills/finish/SKILL.md:249-252` — removed dangling `/anvil:sentinel` slash-command reference (sentinel is an agent surface, not a skill — there is no slash-command for it; the broken reference would 404 on invocation). Replaced with explicit `claude plugin list 2>/dev/null | grep -q "^fakoli-crew"` shell gate plus prose explaining the agent-dispatch contract so the next Claude session cannot re-introduce the bug by pattern-matching. As a bonus closure (welder Fix #6), this also resolves what would have been P11-SK-S5 in the Phase 11 backlog ("Fuzzy detection for `fakoli-crew:sentinel` — no shell check") — reducing the deferred SHOULD FIX count from 25 to 24. Found by skill-critic.
 7. `skills/prd/SKILL.md:57-59` — added overwrite-confirmation gate before `prd parse` mutates `state.db` rows. Mirrors the brainstorm/SKILL.md:162-176 exists-check + summary + `yes/no/save-as-backup` prompt; applied at two mutation points (the editor open in Step 1 and the re-parse during iteration) since the prd flow has two destructive entry points. Found by skill-critic.
 8. `README.md:103` — Skills row claimed a `verify` skill that does NOT exist on disk (overpromise); rewrote the row to list the 7 real skills (brainstorm, prd, plan, claim, execute, finish, state-ops) and document that verification is delegated to `fakoli-flow:verify` and `fakoli-crew:sentinel`, so the reader understands *why* `verify` is absent. Found by structure-critic.
 
@@ -1883,11 +1898,11 @@ critic agents that this release was the first subject of:
 
 - **agent-critic** (magenta) — reviews `<plugin>/agents/*.md` frontmatter (name/description/color/model/tools), color-collision detection, `<example>` count discipline, the `allowed-tools:` vs `tools:` antipattern, defer-to validity, and file-length proportionality.
 - **skill-critic** (teal) — reviews `<plugin>/skills/*/SKILL.md` for frontmatter validity, one-question-at-a-time discipline, hard-gate presence on irreversible actions, decision-flow clarity, lazy-loading discipline, and the no-fuzzy-detection rule.
-- **hook-critic** (gray) — reviews `<plugin>/hooks/*.sh` + `hooks.json` for shebang portability, `${CLAUDE_PLUGIN_ROOT}` usage, stdin handling, hot-path performance, idempotency, matcher specificity, and — critically — whether the script's error-handling style matches the plugin's declared hook contract (e.g., fakoli-state's non-blocking contract forbids `set -e`).
+- **hook-critic** (gray) — reviews `<plugin>/hooks/*.sh` + `hooks.json` for shebang portability, `${CLAUDE_PLUGIN_ROOT}` usage, stdin handling, hot-path performance, idempotency, matcher specificity, and — critically — whether the script's error-handling style matches the plugin's declared hook contract (e.g., anvil's non-blocking contract forbids `set -e`).
 - **mcp-critic** (white) — reviews `.mcp.json` + MCP server source for schema validity, `@mcp.tool()` decoration discipline, typed parameter annotations, structured error returns, secret-leak risks, transport choice rationale, and actor-identification on mutating tools.
 - **structure-critic** (brown) — reviews cross-plugin structure: `plugin.json` required fields, version sync across `plugin.json` / `pyproject.toml` / `__init__.py` / `marketplace.json` / `registry/index.json`, README surface tables vs actual filesystem counts, CHANGELOG Keep-a-Changelog discipline, and `[Unreleased]` hygiene after a tag.
 
-Each critic ships with a known-bad fixture at `plugins/fakoli-crew/tests/fixtures/audit-targets/` and a manual-verification recipe at `plugins/fakoli-crew/tests/RECIPES.md`. Together they form the cross-plugin critic surface — fakoli-state was the first subject; future plugins (fakoli-flow, fakoli-speak, etc.) can run the same five-critic audit.
+Each critic ships with a known-bad fixture at `plugins/fakoli-crew/tests/fixtures/audit-targets/` and a manual-verification recipe at `plugins/fakoli-crew/tests/RECIPES.md`. Together they form the cross-plugin critic surface — anvil was the first subject; future plugins (fakoli-flow, fakoli-speak, etc.) can run the same five-critic audit.
 
 ### Deferred — Phase 11 backlog
 
@@ -1925,7 +1940,7 @@ Phase 7 leftovers closed: `RecordedLLMProvider.record_key` now folds
 `max_tokens` and `temperature` into the canonical hash (two recordings
 under different tuning args no longer collide); brainstorm-skill
 fakoli-flow detection uses an explicit `claude plugin list` check rather
-than fuzzy prose; `fakoli-state expand --use-llm --format prd` emits
+than fuzzy prose; `anvil expand --use-llm --format prd` emits
 paste-ready markdown blocks matching `docs/prd-template.md` (with
 `**Feature:**` and `**Priority:**` populated from the parent task).
 
@@ -1933,40 +1948,40 @@ Ships v1.9.0.
 
 ### Added — Audit honesty (T5)
 
-- `bin/src/fakoli_state/cli/sync.py`:
+- `bin/src/anvil/cli/sync.py`:
   - Six deferred conflict-resolution branches (`local_wins_deferred`, `remote_wins_deferred`, `prompt_defaulted_to_local`, `prompt_chose_local`, `prompt_chose_remote`, `prompt_skipped`) now emit `sync.pull.deferred` instead of the prior `sync.pull.completed`. The JSONL is safe to grep for "did this task actually update?".
   - `local_moved`-only pull path (local Task ahead of `last_synced_at`, no remote movement) now sets `sync_state="local_ahead"` (was `in_sync` — wrong) and emits `sync.push.deferred` with `resolution="local_moved_no_push"`. Operators grep `events.jsonl` for the token to find tasks awaiting a follow-up `--push`.
   - `_resolve_conflict` signature: `-> bool` → `-> tuple[bool, bool, str]` = `(resolved, applied, resolution)`. Internal private function; no external caller impact.
-- `bin/src/fakoli_state/state/payloads.py`:
+- `bin/src/anvil/state/payloads.py`:
   - 13 new per-action Pydantic v2 subclasses replacing the v1.8.0 single all-optional `SyncAuditPayload` model: `SyncBatchStartedPayload`, `SyncBatchCompletedPayload`, `SyncPushStartedPayload`, `SyncPushCompletedPayload`, `SyncPushDeferredPayload`, `SyncPushFailedPayload`, `SyncPullStartedPayload`, `SyncPullCompletedPayload`, `SyncPullDeferredPayload`, `SyncPullFailedPayload`, `SyncConflictDetectedPayload`, `SyncReconciliationStartedPayload`, `SyncReconciliationCompletedPayload`. Each has `extra="forbid"`; field-vs-action mismatches now fail at validate time.
   - `SyncAuditPayload` preserved as a backwards-compat module-level type-form (`Annotated[Union[...], Field(discriminator="action")]`) — existing imports resolve; callers that used `SyncAuditPayload.model_validate(d)` directly migrate to `TypeAdapter(SyncAuditPayload).validate_python(d)` or look up the concrete subclass via `ACTION_TO_PAYLOAD[action]`.
   - `ACTION_TO_PAYLOAD: dict[str, type[BaseModel]]` exported for direct dispatcher lookup.
-- `bin/src/fakoli_state/state/sqlite.py`: dispatcher uses the new `ACTION_TO_PAYLOAD` registry; the prior 13 explicit `(SyncAuditPayload, handler)` entries collapse into a single dict comprehension. When a new sync action is added the dispatcher auto-picks it up.
+- `bin/src/anvil/state/sqlite.py`: dispatcher uses the new `ACTION_TO_PAYLOAD` registry; the prior 13 explicit `(SyncAuditPayload, handler)` entries collapse into a single dict comprehension. When a new sync action is added the dispatcher auto-picks it up.
 
 ### Added — Multi-provider config (T5)
 
-- `bin/src/fakoli_state/config.py`: new optional top-level `sync.providers` config key parsed into `Config.sync_providers: tuple[str, ...] | None`. Three-way semantics:
+- `bin/src/anvil/config.py`: new optional top-level `sync.providers` config key parsed into `Config.sync_providers: tuple[str, ...] | None`. Three-way semantics:
   - Key absent → `None` → fall back to `sorted(PROVIDER_REGISTRY)` (v1.8.0 default).
   - `sync.providers: [a, b]` → `("a", "b")` → use the explicit list.
   - `sync.providers: []` → `()` (NOT `None`) → opt out of every provider; sync is a no-op.
-- `bin/src/fakoli_state/cli/sync.py::_resolve_configured_providers` is the single lookup seam; wrapped in `try/except (ValueError, OSError)` so a malformed config falls back to the registry rather than breaking `fakoli-state sync`. Loud config errors are the job of `init`/`doctor`.
+- `bin/src/anvil/cli/sync.py::_resolve_configured_providers` is the single lookup seam; wrapped in `try/except (ValueError, OSError)` so a malformed config falls back to the registry rather than breaking `anvil sync`. Loud config errors are the job of `init`/`doctor`.
 - Documented in `docs/sync-providers.md` § "Per-provider configuration (v1.9.0)" — full schema, three-way table, fallback semantics, reconciliation interaction.
 
 ### Added — Phase 7 cleanup (T6)
 
 - **C2 — `RecordedLLMProvider.record_key`:** signature extended to `record_key(system, user, *, max_tokens=4096, temperature=0.0)`; canonical hash folds `str(int(max_tokens))` and `repr(float(temperature))` as length-prefixed chunks 3 and 4. `repr(float(...))` normalises `0`, `0.0`, and `0.00` to the same key. Default values mirror `LLMProvider.generate` defaults so back-compat calls with no kwargs still work. The v1.7.0 footgun where two recordings under different tuning args silently collided is closed; tests that pre-compute keys MUST pass the matching values the engine uses at lookup time (`_SCORE_EXPLAIN_MAX_TOKENS=300`, `_DESCRIPTION_ENRICH_MAX_TOKENS=400`, `_EXPAND_MAX_TOKENS=2000`). Collateral updates to 8 call sites in `tests/test_llm_integration.py` + 1 in `tests/test_cli.py`.
 - **C3 — Brainstorm-flow detection:** `skills/brainstorm/SKILL.md` replaces the fuzzy "if fakoli-flow seems available" prose with an explicit `claude plugin list 2>/dev/null | grep -q "^fakoli-flow"` shell check plus exit-code-driven branching. Slash-command name corrected from `/flow:brainstorm` (typo) to the fully-qualified `/fakoli-flow:brainstorm` — the typo would have broken the bridge invocation when fakoli-flow IS installed. Detection is OPTIONAL: exit non-zero (or missing `claude` binary) falls through to the local interview.
-- **C4 — `expand --format prd`:** new `--format {text,prd}` Typer option on `fakoli-state expand`. `--format prd` emits ready-to-paste markdown blocks matching `docs/prd-template.md`'s `## Tasks` schema (H3 heading, `**Feature:**`, `**Priority:**`, `**Likely files:**`, description paragraph, `**Acceptance criteria:**` bullets, `**Verification:**` with `TODO` placeholder). `**Feature:**` and `**Priority:**` are populated from the parent task's metadata (Phase 9 critic CONSIDER fix — eliminates the manual-edit step in the paste-into-`prd.md` workflow). Default `--format text` keeps the v1.7.0 human-readable per-subtask block output unchanged. The new mode round-trips cleanly through `parse_prd` — see `tests/test_cli_plan.py::test_prd_format_output_round_trips_to_prd_parser` for the canonical proof.
+- **C4 — `expand --format prd`:** new `--format {text,prd}` Typer option on `anvil expand`. `--format prd` emits ready-to-paste markdown blocks matching `docs/prd-template.md`'s `## Tasks` schema (H3 heading, `**Feature:**`, `**Priority:**`, `**Likely files:**`, description paragraph, `**Acceptance criteria:**` bullets, `**Verification:**` with `TODO` placeholder). `**Feature:**` and `**Priority:**` are populated from the parent task's metadata (Phase 9 critic CONSIDER fix — eliminates the manual-edit step in the paste-into-`prd.md` workflow). Default `--format text` keeps the v1.7.0 human-readable per-subtask block output unchanged. The new mode round-trips cleanly through `parse_prd` — see `tests/test_cli_plan.py::test_prd_format_output_round_trips_to_prd_parser` for the canonical proof.
 
 ### Added — Two new plugin-owned doc agents (T4)
 
-- `plugins/fakoli-state/agents/marketplace-scribe.md` — cyan, opus. Owns `.claude-plugin/marketplace.json`, the root `README.md` plugins table, and `registry/*.json` index files. Fires after any version bump, agent add/remove, or skill add/remove inside fakoli-state. Defers to `fakoli-crew:keeper` when not in a fakoli-state context. Includes `Bash` in `allowed-tools` so it can run `scripts/generate-index.sh` and validate regenerated JSON via `python -m json.tool` / `jq .`.
-- `plugins/fakoli-state/agents/docs-scribe.md` — purple, opus. Owns the plugin's `docs/` folder, `CHANGELOG.md`, and the `description` field of `.claude-plugin/plugin.json`. Audits cross-references between docs — broken `[[wikilinks]]`, mismatched section anchors, dangling `see also` pointers, references to moved/archived files. Fires after any schema change, new CLI command, new agent, or completed phase. Defers to `fakoli-crew:herald` for general README work. No `Bash` (pure docs work).
-- Color collisions checked vs the existing four agents (planner=white, critic=magenta, sentinel=gray, state-keeper=teal). Cyan and purple are unused by every existing fakoli-state agent and by every fakoli-crew agent.
+- `plugins/anvil/agents/marketplace-scribe.md` — cyan, opus. Owns `.claude-plugin/marketplace.json`, the root `README.md` plugins table, and `registry/*.json` index files. Fires after any version bump, agent add/remove, or skill add/remove inside anvil. Defers to `fakoli-crew:keeper` when not in an anvil context. Includes `Bash` in `allowed-tools` so it can run `scripts/generate-index.sh` and validate regenerated JSON via `python -m json.tool` / `jq .`.
+- `plugins/anvil/agents/docs-scribe.md` — purple, opus. Owns the plugin's `docs/` folder, `CHANGELOG.md`, and the `description` field of `.claude-plugin/plugin.json`. Audits cross-references between docs — broken `[[wikilinks]]`, mismatched section anchors, dangling `see also` pointers, references to moved/archived files. Fires after any schema change, new CLI command, new agent, or completed phase. Defers to `fakoli-crew:herald` for general README work. No `Bash` (pure docs work).
+- Color collisions checked vs the existing four agents (planner=white, critic=magenta, sentinel=gray, state-keeper=teal). Cyan and purple are unused by every existing anvil agent and by every fakoli-crew agent.
 
 ### Added — Documentation
 
-- `docs/phase-9-backlog.md` (NEW) — forward-looking v2.x roadmap. Carries the items consciously deferred from Phase 9 (LinearIssuesProvider, MondayBoardsProvider, JiraIssuesProvider, GitHubProjectsProvider, webhook-based sync spec, immediate-apply `*_applied` resolution variants, `fakoli-state snapshot` CLI, MCP sync tools surface, per-provider config nesting), plus the carry-forward `CL-N` / `TQ-N` / `PS-N` items still open in `docs/tech-debt-backlog.md`.
+- `docs/phase-9-backlog.md` (NEW) — forward-looking v2.x roadmap. Carries the items consciously deferred from Phase 9 (LinearIssuesProvider, MondayBoardsProvider, JiraIssuesProvider, GitHubProjectsProvider, webhook-based sync spec, immediate-apply `*_applied` resolution variants, `anvil snapshot` CLI, MCP sync tools surface, per-provider config nesting), plus the carry-forward `CL-N` / `TQ-N` / `PS-N` items still open in `docs/tech-debt-backlog.md`.
 - `docs/github-sync.md` — new "Audit honesty" section explaining `sync.pull.completed` vs `sync.pull.deferred` semantics, the `local_ahead` mapping state, and the full controlled vocabulary of `resolution` tokens (including the new `local_moved_no_push`). Audit events table grows by one (`sync.push.deferred`).
 - `docs/sync-providers.md` — new "Per-provider configuration (v1.9.0)" section documenting the optional `sync.providers` config key with the three-way absent/explicit/empty semantics.
 - `docs/llm.md` — corrected `RecordedLLMProvider.record_key` signature and example (tuning args participate in the key per Phase 9 C2); new `expand --format prd` worked example with paste-ready output and round-trip note.
@@ -1975,11 +1990,11 @@ Ships v1.9.0.
 
 ### Changed
 
-- `bin/src/fakoli_state/state/payloads.py::SyncPullCompletedPayload` docstring — enumerates the four honest emission conditions (clean pull, tombstone, in_sync no-divergence, local-moved-only with paired `sync.push.deferred` hint). The local-moved-only branch is the one most likely to surprise readers who expect "completed" to imply "mutated"; the docstring is explicit that the pull terminal is honest because the pull itself succeeded — only the follow-up push is deferred.
-- `bin/src/fakoli_state/cli/sync.py::_emit_audit` docstring — updated to reflect that the discriminated union has REQUIRED fields per action now; the None-strip is still load-bearing for OPTIONAL fields with `None` defaults (JSONL would otherwise carry `"audit_note": null` rows that clutter forensic queries and break `jq 'has("audit_note")'` filters).
-- `bin/src/fakoli_state/planning/llm.py` module docstring — `RecordedLLMProvider` key shape description corrected from the stale `sha256(system + "---" + user)` to the length-prefixed `sha256` over `(system, user, max_tokens, temperature)`.
-- `bin/src/fakoli_state/state/payloads.py:393-399` — `TypeAlias` terminology corrected to "module-level type-form (`Annotated[Union[...], Field(discriminator="action")]`)". `SyncAuditPayload` is NOT a `typing.TypeAlias` (no `: TypeAlias =` annotation); it is a Pydantic discriminated-union type form.
-- `bin/src/fakoli_state/cli/plan.py::_render_subtask_proposals_as_prd` — added optional kw-only `parent_feature_id` and `parent_priority` parameters. The CLI caller (`expand --format prd`) now threads `task.feature_id` and `str(task.priority)` through — eliminates the prior empty `**Feature:**` line and `**Priority:** medium` default that the user had to manually edit before `prd parse`. Default behaviour (when the helper is called without parent context) preserved for backwards compat.
+- `bin/src/anvil/state/payloads.py::SyncPullCompletedPayload` docstring — enumerates the four honest emission conditions (clean pull, tombstone, in_sync no-divergence, local-moved-only with paired `sync.push.deferred` hint). The local-moved-only branch is the one most likely to surprise readers who expect "completed" to imply "mutated"; the docstring is explicit that the pull terminal is honest because the pull itself succeeded — only the follow-up push is deferred.
+- `bin/src/anvil/cli/sync.py::_emit_audit` docstring — updated to reflect that the discriminated union has REQUIRED fields per action now; the None-strip is still load-bearing for OPTIONAL fields with `None` defaults (JSONL would otherwise carry `"audit_note": null` rows that clutter forensic queries and break `jq 'has("audit_note")'` filters).
+- `bin/src/anvil/planning/llm.py` module docstring — `RecordedLLMProvider` key shape description corrected from the stale `sha256(system + "---" + user)` to the length-prefixed `sha256` over `(system, user, max_tokens, temperature)`.
+- `bin/src/anvil/state/payloads.py:393-399` — `TypeAlias` terminology corrected to "module-level type-form (`Annotated[Union[...], Field(discriminator="action")]`)". `SyncAuditPayload` is NOT a `typing.TypeAlias` (no `: TypeAlias =` annotation); it is a Pydantic discriminated-union type form.
+- `bin/src/anvil/cli/plan.py::_render_subtask_proposals_as_prd` — added optional kw-only `parent_feature_id` and `parent_priority` parameters. The CLI caller (`expand --format prd`) now threads `task.feature_id` and `str(task.priority)` through — eliminates the prior empty `**Feature:**` line and `**Priority:** medium` default that the user had to manually edit before `prd parse`. Default behaviour (when the helper is called without parent context) preserved for backwards compat.
 - `tests/test_llm.py::test_separator_prevents_collision` docstring — updated from the stale `"\n---\n"` separator description to "Length-prefixed encoding prevents concat-collisions across any byte boundary." Assertion unchanged.
 
 ### Tests
@@ -2006,7 +2021,7 @@ Ships v1.9.0.
 
 Phase 8: bidirectional sync. Adds a multi-provider `SyncProvider` Protocol
 abstraction with GitHub Issues as the first concrete implementation, wires
-opt-in `fakoli-state sync` CLI surface with bidirectional push/pull, four
+opt-in `anvil sync` CLI surface with bidirectional push/pull, four
 conflict-resolution strategies, watch-loop polling, and full reconciliation
 between SQLite state / filesystem / git. The Protocol is registry-driven
 so Monday, Linear, Jira, and custom providers can plug in without engine
@@ -2018,11 +2033,11 @@ additive. See docs/migrations.md.
 
 ### Added — Sync abstraction layer
 
-- `bin/src/fakoli_state/sync/` package — `SyncProvider` Protocol (`push_task`, `fetch_task`, `list_tasks`, `delete_task`, `health_check`), `ExternalRef` + `ExternalTask` + `ProviderHealth` Pydantic models, `SyncProviderError` hierarchy (`AuthenticationFailed`, `RateLimitExceeded`, `ProviderUnavailable`, `SyncConflict`), `RecordedSyncProvider` test double (sha256 length-prefixed keyed), `PROVIDER_REGISTRY` + `register_sync_provider` / `get_sync_provider` / `list_sync_providers`. snake_case `provider_id` discipline.
-- `bin/src/fakoli_state/sync/providers/github_issues.py` — `GitHubIssuesProvider` concrete impl. Auto-registers as `"github_issues"` on package import. Dual transport: `gh` CLI primary, `httpx` + `GITHUB_TOKEN` fallback. Status mapping: 11 TaskStatus values → `status:*` labels; only `done` closes the issue. Body footer convention (`---\n_synced from fakoli-state task {task_id}_`) is round-trippable via `_strip_footer`. Label preservation across pushes (HTTP transport reads existing labels first, preserves non-`status:*`).
-- `bin/src/fakoli_state/sync/clients/gh_cli.py` — subprocess wrapper for `gh issue create/edit/view/list/close`. Stderr-scan error classification (auth/rate-limit/network).
-- `bin/src/fakoli_state/sync/clients/github_http.py` — httpx wrapper with Link-header pagination + 1000-page safety cap + `responses`-style HTTP mocking via respx in tests.
-- `bin/src/fakoli_state/sync/reconciliation.py` — `ReconciliationEngine.scan() / fix(dry_run=False)` covering 6 discrepancy kinds: orphan_branch, orphan_packet, orphan_worktree, stale_claim, missing_sync_mapping, drift_sync_state. The first 4 have full fix paths; the latter 2 emit operator-facing CLI commands (`fakoli-state sync provider <id> --pull --task T001`) for Phase 9 immediate-apply.
+- `bin/src/anvil/sync/` package — `SyncProvider` Protocol (`push_task`, `fetch_task`, `list_tasks`, `delete_task`, `health_check`), `ExternalRef` + `ExternalTask` + `ProviderHealth` Pydantic models, `SyncProviderError` hierarchy (`AuthenticationFailed`, `RateLimitExceeded`, `ProviderUnavailable`, `SyncConflict`), `RecordedSyncProvider` test double (sha256 length-prefixed keyed), `PROVIDER_REGISTRY` + `register_sync_provider` / `get_sync_provider` / `list_sync_providers`. snake_case `provider_id` discipline.
+- `bin/src/anvil/sync/providers/github_issues.py` — `GitHubIssuesProvider` concrete impl. Auto-registers as `"github_issues"` on package import. Dual transport: `gh` CLI primary, `httpx` + `GITHUB_TOKEN` fallback. Status mapping: 11 TaskStatus values → `status:*` labels; only `done` closes the issue. Body footer convention (`---\n_synced from anvil task {task_id}_`) is round-trippable via `_strip_footer`. Label preservation across pushes (HTTP transport reads existing labels first, preserves non-`status:*`).
+- `bin/src/anvil/sync/clients/gh_cli.py` — subprocess wrapper for `gh issue create/edit/view/list/close`. Stderr-scan error classification (auth/rate-limit/network).
+- `bin/src/anvil/sync/clients/github_http.py` — httpx wrapper with Link-header pagination + 1000-page safety cap + `responses`-style HTTP mocking via respx in tests.
+- `bin/src/anvil/sync/reconciliation.py` — `ReconciliationEngine.scan() / fix(dry_run=False)` covering 6 discrepancy kinds: orphan_branch, orphan_packet, orphan_worktree, stale_claim, missing_sync_mapping, drift_sync_state. The first 4 have full fix paths; the latter 2 emit operator-facing CLI commands (`anvil sync provider <id> --pull --task T001`) for Phase 9 immediate-apply.
 
 ### Added — State schema (SCHEMA_VERSION 3)
 
@@ -2035,17 +2050,17 @@ additive. See docs/migrations.md.
 
 ### Added — CLI surface
 
-- `fakoli-state sync` — runs reconciliation only (scan + print report).
-- `fakoli-state sync --fix --yes` — reconciliation + apply remediations (`--yes` required for non-interactive; refuses without `--yes` on cron/CI).
-- `fakoli-state sync <provider>` — push+pull all tasks via the named provider.
-- `fakoli-state sync github` — backwards-compat alias for `sync github_issues`.
-- `fakoli-state sync provider <id>` — generic provider invocation.
+- `anvil sync` — runs reconciliation only (scan + print report).
+- `anvil sync --fix --yes` — reconciliation + apply remediations (`--yes` required for non-interactive; refuses without `--yes` on cron/CI).
+- `anvil sync <provider>` — push+pull all tasks via the named provider.
+- `anvil sync github` — backwards-compat alias for `sync github_issues`.
+- `anvil sync provider <id>` — generic provider invocation.
 - Flags: `--push` (push-only), `--pull` (pull-only), `--task T001` (single-task), `--watch --interval N` (long-running poll loop with per-iteration error recovery), `--health` (provider auth probe, works pre-init), `--fix` (forces remote_wins conflict strategy).
-- Conflict resolution: per-task `SyncMapping.conflict_resolution_strategy` ∈ {`local_wins`, `remote_wins`, `prompt`, `manual_merge`}. Resolution events emit `*_deferred` audit strings (truthful — actual mutations happen on the next pass; Phase 9 will wire immediate apply). `manual_merge` writes `.fakoli-state/.sync-conflicts/<task_id>.md`; batch exits 2 if any task needed operator input.
+- Conflict resolution: per-task `SyncMapping.conflict_resolution_strategy` ∈ {`local_wins`, `remote_wins`, `prompt`, `manual_merge`}. Resolution events emit `*_deferred` audit strings (truthful — actual mutations happen on the next pass; Phase 9 will wire immediate apply). `manual_merge` writes `.anvil/.sync-conflicts/<task_id>.md`; batch exits 2 if any task needed operator input.
 
 ### Added — Plugin-owned agent
 
-- `plugins/fakoli-state/agents/state-keeper.md` (color `teal`, model `opus`) — specialized agent for sync drift detection + reconciliation triage. Defers to `fakoli-crew:keeper` when crew is installed.
+- `plugins/anvil/agents/state-keeper.md` (color `teal`, model `opus`) — specialized agent for sync drift detection + reconciliation triage. Defers to `fakoli-crew:keeper` when crew is installed.
 
 ### Added — Documentation
 
@@ -2056,7 +2071,7 @@ additive. See docs/migrations.md.
 
 ### Added — Nightly CI
 
-- `.github/workflows/fakoli-state-live-github.yml` — daily cron at 06:00 UTC. Gated on `secrets.FAKOLI_STATE_TEST_GH_TOKEN` (job exits 0 with a notice if secret missing). Runs `pytest -m live_github -v` against a real test repo.
+- `.github/workflows/anvil-live-github.yml` — daily cron at 06:00 UTC. Gated on `secrets.ANVIL_TEST_GH_TOKEN` (job exits 0 with a notice if secret missing). Runs `pytest -m live_github -v` against a real test repo.
 - `tests/test_github_issues_live.py` — 3 live tests (lifecycle, label preservation, rate-limit handling). All decorated `@pytest.mark.live_github`; excluded from default `pytest -q` via `addopts = "-m 'not live_github'"` in pyproject.toml. Cleanup contract: every test closes its own issues + leaves a `[fakoli-test]` UUID prefix for orphan sweeping.
 
 ### Changed
@@ -2072,9 +2087,9 @@ additive. See docs/migrations.md.
 
 ### Migration notes
 
-- Schema bumps 2 → 3. Existing v1.7.x databases auto-upgrade on first `fakoli-state` invocation under 1.8.0. The diff is purely additive (new table, no shape changes to existing tables). No manual action required.
+- Schema bumps 2 → 3. Existing v1.7.x databases auto-upgrade on first `anvil` invocation under 1.8.0. The diff is purely additive (new table, no shape changes to existing tables). No manual action required.
 - The `responses` dev dep has been dropped; if you have a custom test that imported it, switch to `respx` for httpx mocking.
-- `fakoli-state sync` is a NEW command. Existing CLI commands are unchanged.
+- `anvil sync` is a NEW command. Existing CLI commands are unchanged.
 
 ---
 
@@ -2099,7 +2114,7 @@ behavior changes visible to existing CLI / MCP callers.
 - CL-7: `agents/critic.md` and `agents/sentinel.md` color collisions with fakoli-crew — state/critic purple → magenta, state/sentinel cyan → gray.
 - CL-9: `review.gates._contains_test_keyword` no longer matches `pytest --collect-only` / `--co` (zero-test runs were satisfying the "tests pass" evidence gate).
 - CL-14: `skills/finish/SKILL.md` text updated — the apply flow emits a single `task.applied` event, not the nonexistent `review.created` + `task.status_changed` pair.
-- PS-2: `init` no longer pre-creates `.fakoli-state/snapshots/`; the directory will be created on first use when `fakoli-state snapshot` ships.
+- PS-2: `init` no longer pre-creates `.anvil/snapshots/`; the directory will be created on first use when `anvil snapshot` ships.
 
 ### Fixed (PR #47 critic deferrals)
 
@@ -2128,10 +2143,10 @@ Phase 7: LLM augmentation. Adds an `LLMProvider` Protocol with an Anthropic-back
 
 ### Added
 
-- `bin/src/fakoli_state/planning/llm.py` — `LLMProvider` Protocol + `AnthropicProvider` (with ephemeral prompt-caching on the system block per the claude-api skill guidance) + `RecordedLLMProvider` for deterministic tests + `LLMResponse` Pydantic model + `LLMProviderError`. Default model: `claude-sonnet-4-6`; API key sourced from `ANTHROPIC_API_KEY` env var.
-- `--use-llm` flag on `fakoli-state plan`, `score`, and `expand`. Off by default — opt-in augmentation that enriches deterministic output (score explanations, short task descriptions, sub-task proposals for complex tasks).
-- `bin/src/fakoli_state/planning/inference.py::expand_task` — new function returning `list[SubtaskProposal]`. Deterministic path returns `[]`; with provider + `complexity >= 4`, calls LLM to propose 2-5 sub-tasks. JSON-parse-tolerant; malformed responses fall back to `[]` with a warning.
-- `plugins/fakoli-state/skills/brainstorm/SKILL.md` — interview-style PRD authoring skill. Bridges to `fakoli-flow:brainstorm` when installed; standalone otherwise.
+- `bin/src/anvil/planning/llm.py` — `LLMProvider` Protocol + `AnthropicProvider` (with ephemeral prompt-caching on the system block per the claude-api skill guidance) + `RecordedLLMProvider` for deterministic tests + `LLMResponse` Pydantic model + `LLMProviderError`. Default model: `claude-sonnet-4-6`; API key sourced from `ANTHROPIC_API_KEY` env var.
+- `--use-llm` flag on `anvil plan`, `score`, and `expand`. Off by default — opt-in augmentation that enriches deterministic output (score explanations, short task descriptions, sub-task proposals for complex tasks).
+- `bin/src/anvil/planning/inference.py::expand_task` — new function returning `list[SubtaskProposal]`. Deterministic path returns `[]`; with provider + `complexity >= 4`, calls LLM to propose 2-5 sub-tasks. JSON-parse-tolerant; malformed responses fall back to `[]` with a warning.
+- `plugins/anvil/skills/brainstorm/SKILL.md` — interview-style PRD authoring skill. Bridges to `fakoli-flow:brainstorm` when installed; standalone otherwise.
 - `docs/llm.md` — provider config, prompt-caching usage, `RecordedLLMProvider` test pattern, failure modes.
 - 46 new tests: 29 in `tests/test_llm.py` (provider unit tests), 17 in `tests/test_llm_integration.py` (engine integration via `RecordedLLMProvider`), plus 10 new CLI flag tests in `tests/test_cli.py`.
 
@@ -2152,19 +2167,19 @@ Tests: 613 → 640 + Wave 3a additions (Wave 3a may add a few more — total to 
 
 ## [1.6.0] — 2026-05-25
 
-Phase 6: MCP server. Exposes 13 agent-facing tools via FastMCP (stdio), wires them into Claude Code via `.mcp.json`, adds the `progress.noted` audit event, and ships 50 MCP integration tests. Any agent in a project with fakoli-state installed now has direct programmatic access to the full state engine without shelling out to the CLI.
+Phase 6: MCP server. Exposes 13 agent-facing tools via FastMCP (stdio), wires them into Claude Code via `.mcp.json`, adds the `progress.noted` audit event, and ships 50 MCP integration tests. Any agent in a project with anvil installed now has direct programmatic access to the full state engine without shelling out to the CLI.
 
 ### Added
 
-- `bin/src/fakoli_state/mcp_server.py` — FastMCP (stdio) server with 13 agent-facing tools. Read-only tools: `get_project_summary`, `list_tasks`, `get_task`, `get_next_task`, `generate_work_packet`, `check_conflicts`, `get_dependency_graph`. Mutating tools: `claim_task`, `release_task`, `renew_claim`, `submit_progress`, `submit_completion_evidence`, `update_task_status`. Stale-claim reaping runs at the top of `get_project_summary` and all six mutating tools. The server opens a fresh `SqliteBackend` per tool call (`Path.cwd() / .fakoli-state`) — agents in different cwds see their own state, no leakage.
-- `plugins/fakoli-state/.mcp.json` — wires `fakoli-state-mcp` as a stdio MCP server via `${CLAUDE_PLUGIN_ROOT}/bin/fakoli-state-mcp`. Claude Code agents in any project with this plugin installed automatically see the 13 tools.
+- `bin/src/anvil/mcp_server.py` — FastMCP (stdio) server with 13 agent-facing tools. Read-only tools: `get_project_summary`, `list_tasks`, `get_task`, `get_next_task`, `generate_work_packet`, `check_conflicts`, `get_dependency_graph`. Mutating tools: `claim_task`, `release_task`, `renew_claim`, `submit_progress`, `submit_completion_evidence`, `update_task_status`. Stale-claim reaping runs at the top of `get_project_summary` and all six mutating tools. The server opens a fresh `SqliteBackend` per tool call (`Path.cwd() / .anvil`) — agents in different cwds see their own state, no leakage.
+- `plugins/anvil/.mcp.json` — wires `anvil-mcp` as a stdio MCP server via `${CLAUDE_PLUGIN_ROOT}/bin/anvil-mcp`. Claude Code agents in any project with this plugin installed automatically see the 13 tools.
 - `progress.noted` event action — audit-only, structurally parallel to `file_changed`. New `ProgressNotedPayload` in `state/payloads.py` and a no-op handler in `sqlite.py`. Emitted by `submit_progress`.
 - `docs/mcp.md` — 645-line full tool reference covering each tool's signature, return shape, error cases, integration notes for fakoli-flow / fakoli-crew, and the documented error envelope contract.
 - 50 new MCP integration tests in `tests/test_mcp.py` via the FastMCP in-process Client. 2 additional `progress.noted` payload tests in the existing payload test suite.
 
 ### Changed
 
-- `bin/fakoli-state-mcp` — wrapper now executes `python -m fakoli_state.mcp_server` via `uv run` (fully functional). The Phase-6 "not yet implemented" guard block is removed.
+- `bin/anvil-mcp` — wrapper now executes `python -m anvil.mcp_server` via `uv run` (fully functional). The Phase-6 "not yet implemented" guard block is removed.
 
 ### Technical notes
 
@@ -2184,12 +2199,12 @@ PR #41 critic and Greptile reviews tracked as P6-1..P6-5 in
 
 ### Added
 
-- `bin/src/fakoli_state/cli/` — new package replacing the 2,499-line `cli.py`
+- `bin/src/anvil/cli/` — new package replacing the 2,499-line `cli.py`
   monolith. Per-command modules: `init_status`, `prd`, `plan`, `claim`,
   `packet_apply`, `hooks`, plus `_helpers` for shared utilities and
   `__init__.py` as the Typer-app assembler. Public import path
-  (`from fakoli_state.cli import app`) is unchanged. (P6-4)
-- `bin/src/fakoli_state/state/payloads.py` — 17 per-action Pydantic v2 payload
+  (`from anvil.cli import app`) is unchanged. (P6-4)
+- `bin/src/anvil/state/payloads.py` — 17 per-action Pydantic v2 payload
   models (`ProjectCreatedPayload`, `PrdParsedPayload`,
   `EvidenceSubmittedPayload`, etc.) all using `ConfigDict(extra="forbid")`.
   `SqliteBackend._apply_mutation` now validates `event.payload_json` against
@@ -2226,13 +2241,13 @@ PR #41 critic and Greptile reviews tracked as P6-1..P6-5 in
 
 ### Removed
 
-- `bin/src/fakoli_state/cli.py` — replaced by the package above. Imports
+- `bin/src/anvil/cli.py` — replaced by the package above. Imports
   resolve identically.
 - `TaskStatus.stale` from `state.models` and the corresponding
   `task_to_stale` / `task_stale_to_ready` transitions. The state was
   structurally unreachable — only claims can be stale, and the task returns
   directly to `ready` when the claim is reaped. Task lifecycle ASCII diagram
-  in `docs/specs/2026-05-24-fakoli-state-v0.md` updated. CL-16 (claim.stale
+  in `docs/specs/2026-05-24-anvil-v0.md` updated. CL-16 (claim.stale
   task transition skips the intermediate `stale` state) is resolved as a
   side-effect. (P6-3)
 - `cli/_helpers.py::_fetch_recent_events` and `_fetch_latest_evidence` —
@@ -2246,7 +2261,7 @@ PR #41 critic and Greptile reviews tracked as P6-1..P6-5 in
   pre-allocation path is racy under concurrency.
 - Subclasses of `Backend` must implement the three new methods or accept the
   `NotImplementedError` from the Protocol default.
-- The CLI external surface (`fakoli-state <subcommand>`) is unchanged.
+- The CLI external surface (`anvil <subcommand>`) is unchanged.
 
 ---
 
@@ -2271,13 +2286,13 @@ Phase 5: Context engine. Delivers the context engine, review apply gate, three n
 
 ### Added
 
-- Context engine (`context/packets.py`) — `render_packet()` produces both markdown (for `.fakoli-state/packets/T001.md`) and JSON (for MCP `get_work_packet` in Phase 6). Pure function; no I/O.
+- Context engine (`context/packets.py`) — `render_packet()` produces both markdown (for `.anvil/packets/T001.md`) and JSON (for MCP `get_work_packet` in Phase 6). Pure function; no I/O.
 - Review engine apply gate (`review/gates.py`) — `evidence_complete(task, evidence)` validates that submitted Evidence satisfies the task's `required_evidence` list; surfaces specific missing items.
 - Three new CLI commands: `packet TASK_ID [--format md|json]`, `submit TASK_ID --commands ... --files-changed ... [--output-file --pr-url --commit-sha --known-limitations --actor]`, `apply TASK_ID [--approve | --reject] [--reason --reviewer]`.
-- One new hook subcommand: `fakoli-state hook capture-evidence --command --exit-code --stdout-file --stderr-file --actor` — used by the new PostToolUse Bash hook.
+- One new hook subcommand: `anvil hook capture-evidence --command --exit-code --stdout-file --stderr-file --actor` — used by the new PostToolUse Bash hook.
 - Two new skills: `skills/execute/SKILL.md` (full claim → packet → work → submit loop; coordinates with `fakoli-flow:execute` when installed) and `skills/finish/SKILL.md` (apply + ship decision: merge/PR/keep/discard).
 - Two new plugin-owned agents: `agents/critic.md` (code reviewer; defers to `fakoli-crew:critic`) and `agents/sentinel.md` (evidence validator; defers to `fakoli-crew:sentinel`). Both `allowed-tools` exclude Edit/Write (Iron Rule at tool-permission level).
-- New PostToolUse hook: `hooks/capture-evidence.sh` (Bash matcher) — captures stdout/stderr/exit-code of verification commands (`pytest`, `ruff`, `mypy`, `npm test`, `cargo test`, `bun test`) into `.fakoli-state/.evidence-buffer/` per-claim JSON files for later attachment to Evidence.
+- New PostToolUse hook: `hooks/capture-evidence.sh` (Bash matcher) — captures stdout/stderr/exit-code of verification commands (`pytest`, `ruff`, `mypy`, `npm test`, `cargo test`, `bun test`) into `.anvil/.evidence-buffer/` per-claim JSON files for later attachment to Evidence.
 - State engine: 2 new event handlers (`evidence.submitted`, `task.applied`) both routed via `_apply_mutation`. `evidence.submitted` atomically inserts Evidence + transitions task to `needs_review` + auto-releases the active claim. `task.applied` combines `needs_review` → `accepted` → `done` in one transaction when `decision='accepted'`.
 - 81 new tests (403 → 484): `test_context.py` (24 tests), `test_review.py` (20), `test_sqlite.py` extensions (16 new Phase 5 handler tests + the audit replay test for `evidence` + `applied`), `test_cli.py` extensions (17 new), `test_hooks.sh` extensions (5 new capture-evidence smoke tests).
 - Coverage: context 93%, review 97%, state 95.70%, claims 99%, overall 91.16%.
@@ -2298,7 +2313,7 @@ Phase 4: Claims manager. Delivers atomic claim/release/renew/next semantics with
 - Claims manager (`claims/manager.py` — atomic claim/release/renew with lease and heartbeat semantics; Clock-injected for deterministic tests).
 - Stale claim detector (`claims/stale.py` — runs on every CLI invocation; returns expired claims back to the ready pool with audit trail).
 - Four new CLI commands: `claim TASK_ID [--worktree] [--force] [--actor]`, `release CLAIM_ID [--force] [--reason]`, `renew CLAIM_ID`, `next [--actor]`.
-- Hook sub-app: `fakoli-state hook check-claim` and `fakoli-state hook record-file-change` (used by the new bash hooks).
+- Hook sub-app: `anvil hook check-claim` and `anvil hook record-file-change` (used by the new bash hooks).
 - Git ops module: `git_ops/branch.py` auto-creates `agent/<task>-<slug>` branches on claim (with name-collision suffix, graceful no-op when git absent); `git_ops/worktree.py` for optional `--worktree` parallel-checkout.
 - Two new hooks: `check-claim.sh` (PreToolUse on Edit|Write|NotebookEdit; warns when active claims exist) and `record-file-change.sh` (PostToolUse; appends file_changed events to the audit log).
 - New skill: `skills/claim/SKILL.md` — workflow choreography for the claim → work → renew → release loop.
@@ -2355,12 +2370,12 @@ Phase 2: State engine. Delivers the full runtime core — data models, state mac
 - Backend Protocol + concrete `SqliteBackend` in `state/sqlite.py` — WAL journal mode, JSONL event log (`events.jsonl`) written atomically on every mutation, full replay guarantee.
 - DDL schema generator (`state/schema.py`) — foreign keys, composite indexes, schema versioning table; generates idempotent `CREATE TABLE IF NOT EXISTS` SQL.
 - Clock Protocol with `SystemClock` and `FrozenClock` for deterministic tests — injected via `SqliteBackend(clock=...)`.
-- Config loader (`config.py`) — reads `config.yaml` from the `.fakoli-state/` directory; Pydantic-validated; falls back to sensible defaults.
-- PEP 561 `py.typed` marker — `fakoli_state` is now a typed package.
-- CLI subcommand `init` — scaffolds `.fakoli-state/` directory in the caller's project: `config.yaml`, `state.db`, `events.jsonl`, `prd.md`, `packets/`, and `snapshots/`. Fixed a wrapper bug (`--project "$BIN_DIR"` → wrapper now passes `--project` to preserve the caller's working directory so `init` scaffolds in the correct location).
+- Config loader (`config.py`) — reads `config.yaml` from the `.anvil/` directory; Pydantic-validated; falls back to sensible defaults.
+- PEP 561 `py.typed` marker — `anvil` is now a typed package.
+- CLI subcommand `init` — scaffolds `.anvil/` directory in the caller's project: `config.yaml`, `state.db`, `events.jsonl`, `prd.md`, `packets/`, and `snapshots/`. Fixed a wrapper bug (`--project "$BIN_DIR"` → wrapper now passes `--project` to preserve the caller's working directory so `init` scaffolds in the correct location).
 - CLI subcommand `status` — human-readable summary of project state; `--hook-format` flag emits compact key=value pairs for hook consumption.
 - First skill: `state-ops` — covers common state inspection and manipulation workflows from within Claude Code.
-- `SessionStart` hook `detect-state.sh` — detects `.fakoli-state/state.db` in the project root on session start and surfaces a brief status banner to the agent.
+- `SessionStart` hook `detect-state.sh` — detects `.anvil/state.db` in the project root on session start and surfaces a brief status banner to the agent.
 - 173 tests covering `state/models.py`, `state/transitions.py`, `state/sqlite.py`, CLI (`init`, `status`, `--version`), `config.py`, and the `detect-state.sh` hook; 94% overall coverage, 95% on `state/`.
 - Audit-guarantee test `test_replay_from_empty_reconstructs_state_exactly` — replays `events.jsonl` from scratch against an empty database and asserts byte-for-byte equality with the live `state.db`.
 
@@ -2373,14 +2388,14 @@ Phase 1: Plugin scaffold. No executable state operations ship in this release �
 ### Added
 
 - `.claude-plugin/plugin.json` — plugin manifest declaring name, version (`1.0.0`), description, author, repository, license, and marketplace keywords.
-- `README.md` — positions fakoli-state against CCPM and issue-tracker-as-state patterns; documents the "5 must-do-better" list; install instructions (git clone until marketplace publication); Quick Start teaser for the intended `fakoli-state init` flow; architecture overview; 8-phase build status table; integration notes for fakoli-flow and fakoli-crew.
+- `README.md` — positions anvil against CCPM and issue-tracker-as-state patterns; documents the "5 must-do-better" list; install instructions (git clone until marketplace publication); Quick Start teaser for the intended `anvil init` flow; architecture overview; 8-phase build status table; integration notes for fakoli-flow and fakoli-crew.
 - `CHANGELOG.md` — this file; Keep a Changelog format.
 - `LICENSE` — MIT license, copyright 2026 Sekou Doumbouya.
-- `docs/specs/2026-05-24-fakoli-state-v0.md` — canonical build specification: data model, CLI command set, MCP tool surface, hook event mappings, phasing plan, and integration contracts.
-- `bin/fakoli-state` — bash wrapper that invokes `uv run python -m fakoli_state.cli`; `--version` stub returns `1.0.0`.
-- `bin/fakoli-state-mcp` — bash wrapper that invokes `uv run python -m fakoli_state.mcp_server`; stubbed pending Phase 6 with a clean error message instead of a raw Python traceback.
+- `docs/specs/2026-05-24-anvil-v0.md` — canonical build specification: data model, CLI command set, MCP tool surface, hook event mappings, phasing plan, and integration contracts.
+- `bin/anvil` — bash wrapper that invokes `uv run python -m anvil.cli`; `--version` stub returns `1.0.0`.
+- `bin/anvil-mcp` — bash wrapper that invokes `uv run python -m anvil.mcp_server`; stubbed pending Phase 6 with a clean error message instead of a raw Python traceback.
 - `bin/pyproject.toml` — uv-managed Python project (Hatchling build backend); declares dependencies: Typer, Pydantic v2, FastMCP, and test tooling (pytest, ruff, mypy, responses).
 - `bin/uv.lock` — locked dependency tree for reproducible installs.
-- `bin/src/fakoli_state/__init__.py` — package init; exports `__version__ = "1.0.0"`.
-- `bin/src/fakoli_state/cli.py` — Typer application; single `--version` flag functional; all other subcommands stubbed with `typer.echo("Not yet implemented")`.
+- `bin/src/anvil/__init__.py` — package init; exports `__version__ = "1.0.0"`.
+- `bin/src/anvil/cli.py` — Typer application; single `--version` flag functional; all other subcommands stubbed with `typer.echo("Not yet implemented")`.
 - Skeleton directories establishing the plugin layout: `skills/`, `agents/`, `hooks/`, `tests/`, `docs/`.

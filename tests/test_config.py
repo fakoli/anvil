@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.config — Config loading, validation, and template generation.
+"""Tests for anvil.config — Config loading, validation, and template generation.
 
 Coverage targets:
 - load_config() happy path with defaults
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from fakoli_state.config import (
+from anvil.config import (
     Config,
     config_template,
     global_config_path,
@@ -282,7 +282,7 @@ class TestLoadConfigErrors:
 class TestBranchPrefix:
     """v1.15.0: config-driven branch naming so host projects with
     `feature/` or `fix/` conventions don't get silently-incompatible
-    `agent/` branches from fakoli-state claim."""
+    `agent/` branches from anvil claim."""
 
     def test_default_branch_prefix_is_agent(self, tmp_path: Path) -> None:
         """No branch_prefix key in YAML → defaults to 'agent' (preserves
@@ -716,43 +716,43 @@ class TestReadEventsStorage:
 
 
 # ---------------------------------------------------------------------------
-# Global-config layer (T016/B17 — ~/.config/fakoli-state with project override)
+# Global-config layer (T016/B17 — ~/.config/anvil with project override)
 # ---------------------------------------------------------------------------
 
 
 class TestGlobalConfigPath:
     """`global_config_path()` resolution precedence:
 
-        FAKOLI_STATE_GLOBAL_CONFIG (explicit file)
-            > $XDG_CONFIG_HOME/fakoli-state/config.yaml
-            > ~/.config/fakoli-state/config.yaml
+        ANVIL_GLOBAL_CONFIG (explicit file)
+            > $XDG_CONFIG_HOME/anvil/config.yaml
+            > ~/.config/anvil/config.yaml
     """
 
     def test_global_config_default_under_dot_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """With neither env var set, falls back to ~/.config/fakoli-state."""
-        monkeypatch.delenv("FAKOLI_STATE_GLOBAL_CONFIG", raising=False)
+        """With neither env var set, falls back to ~/.config/anvil."""
+        monkeypatch.delenv("ANVIL_GLOBAL_CONFIG", raising=False)
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
         p = global_config_path()
-        assert p == (Path.home() / ".config" / "fakoli-state" / "config.yaml").resolve()
+        assert p == (Path.home() / ".config" / "anvil" / "config.yaml").resolve()
 
     def test_global_config_honours_xdg_config_home(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """$XDG_CONFIG_HOME relocates the default global-config location."""
-        monkeypatch.delenv("FAKOLI_STATE_GLOBAL_CONFIG", raising=False)
+        monkeypatch.delenv("ANVIL_GLOBAL_CONFIG", raising=False)
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
         p = global_config_path()
-        assert p == (tmp_path / "fakoli-state" / "config.yaml").resolve()
+        assert p == (tmp_path / "anvil" / "config.yaml").resolve()
 
     def test_global_config_explicit_override_wins(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """FAKOLI_STATE_GLOBAL_CONFIG points at an explicit file and wins
+        """ANVIL_GLOBAL_CONFIG points at an explicit file and wins
         over XDG_CONFIG_HOME."""
         explicit = tmp_path / "custom-global.yaml"
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(explicit))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(explicit))
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ignored"))
         assert global_config_path() == explicit.resolve()
 
@@ -762,8 +762,8 @@ class TestLoadMergedGlobalConfig:
 
     Precedence (lowest → highest):
         built-in dataclass default
-          < global config (~/.config/fakoli-state/config.yaml)
-          < project config (.fakoli-state/config.yaml)
+          < global config (~/.config/anvil/config.yaml)
+          < project config (.anvil/config.yaml)
           < explicit CLI arg  (exercised in TestGlobalConfigLeasePrecedence)
     """
 
@@ -777,7 +777,7 @@ class TestLoadMergedGlobalConfig:
         project that omits it (global default, no project override)."""
         global_path = tmp_path / "global.yaml"
         _write_config(global_path, "default_lease_minutes: 45\n")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
 
         project = self._project(tmp_path)  # no lease key
         cfg = load_merged_config(project)
@@ -789,7 +789,7 @@ class TestLoadMergedGlobalConfig:
         """The project config overrides the same key in the global config."""
         global_path = tmp_path / "global.yaml"
         _write_config(global_path, "default_lease_minutes: 45\n")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
 
         project = self._project(tmp_path, "default_lease_minutes: 30\n")
         cfg = load_merged_config(project)
@@ -801,7 +801,7 @@ class TestLoadMergedGlobalConfig:
         """A key set in neither layer falls through to the dataclass default."""
         global_path = tmp_path / "global.yaml"
         _write_config(global_path, "branch_prefix: feature\n")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
 
         cfg = load_merged_config(self._project(tmp_path))
         # branch_prefix supplied by global; lease falls through to default 60.
@@ -814,7 +814,7 @@ class TestLoadMergedGlobalConfig:
         """A non-existent global config is fine — project config loads alone,
         identical to the pre-T016 single-file behaviour (back-compat)."""
         monkeypatch.setenv(
-            "FAKOLI_STATE_GLOBAL_CONFIG", str(tmp_path / "does-not-exist.yaml")
+            "ANVIL_GLOBAL_CONFIG", str(tmp_path / "does-not-exist.yaml")
         )
         project = self._project(tmp_path, "default_lease_minutes: 30\n")
         merged = load_merged_config(project)
@@ -828,7 +828,7 @@ class TestLoadMergedGlobalConfig:
         global config MAY supply project_name for a project that omits it."""
         global_path = tmp_path / "global.yaml"
         _write_config(global_path, "project_name: 'Org Default'\n")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
 
         # Project supplies only project_id; project_name comes from global.
         project = _write_config(tmp_path / "config.yaml", "project_id: 'p-1'\n")
@@ -843,7 +843,7 @@ class TestLoadMergedGlobalConfig:
         as the single-file path is raised against the merged mapping."""
         global_path = tmp_path / "global.yaml"
         _write_config(global_path, "default_lease_minutes: 45\n")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
 
         project = _write_config(tmp_path / "config.yaml", "project_id: 'p-1'\n")
         with pytest.raises(ValueError, match="project_name"):
@@ -859,7 +859,7 @@ class TestLoadMergedGlobalConfig:
         global_dir.mkdir()
         global_path = global_dir / "config.yaml"
         _write_config(global_path, "db_path: shared.db\n")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
 
         project_dir = tmp_path / "proj"
         project_dir.mkdir()
@@ -879,10 +879,10 @@ class TestLoadMergedGlobalConfig:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Without a global_path argument, load_merged_config consults
-        global_config_path() (here pinned via FAKOLI_STATE_GLOBAL_CONFIG)."""
+        global_config_path() (here pinned via ANVIL_GLOBAL_CONFIG)."""
         global_path = tmp_path / "global.yaml"
         _write_config(global_path, "branch_prefix: fix\n")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
         cfg = load_merged_config(self._project(tmp_path))
         assert cfg.branch_prefix == "fix"
 
@@ -892,7 +892,7 @@ class TestLoadMergedGlobalConfig:
         """An explicit global_path argument beats the env-resolved default."""
         env_global = tmp_path / "env-global.yaml"
         _write_config(env_global, "branch_prefix: fromenv\n")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(env_global))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(env_global))
 
         arg_global = tmp_path / "arg-global.yaml"
         _write_config(arg_global, "branch_prefix: fromarg\n")
@@ -906,7 +906,7 @@ class TestLoadMergedGlobalConfig:
         """An empty global config file means 'no global defaults', not an error."""
         global_path = tmp_path / "global.yaml"
         global_path.write_text("", encoding="utf-8")
-        monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
         cfg = load_merged_config(self._project(tmp_path))
         assert cfg.default_lease_minutes == 60  # dataclass default
 
@@ -930,9 +930,9 @@ class TestGlobalConfigLeasePrecedence:
         if global_lease is not None:
             global_path = tmp_path / "global.yaml"
             _write_config(global_path, f"default_lease_minutes: {global_lease}\n")
-            monkeypatch.setenv("FAKOLI_STATE_GLOBAL_CONFIG", str(global_path))
+            monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
         else:
-            monkeypatch.delenv("FAKOLI_STATE_GLOBAL_CONFIG", raising=False)
+            monkeypatch.delenv("ANVIL_GLOBAL_CONFIG", raising=False)
             monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-such-xdg"))
 
         body = (
@@ -946,7 +946,7 @@ class TestGlobalConfigLeasePrecedence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Global lease 45, no project lease, no CLI flag → 45."""
-        from fakoli_state.cli._helpers import _lease_manager_kwargs
+        from anvil.cli._helpers import _lease_manager_kwargs
 
         project = self._setup(
             tmp_path, monkeypatch, global_lease="45", project_lease=None
@@ -959,7 +959,7 @@ class TestGlobalConfigLeasePrecedence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Global lease 45 overridden to 30 by the project config."""
-        from fakoli_state.cli._helpers import _lease_manager_kwargs
+        from anvil.cli._helpers import _lease_manager_kwargs
 
         project = self._setup(
             tmp_path, monkeypatch, global_lease="45", project_lease="30"
@@ -972,7 +972,7 @@ class TestGlobalConfigLeasePrecedence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Global 45 → project 30 → CLI --lease 15 wins (full precedence)."""
-        from fakoli_state.cli._helpers import _lease_manager_kwargs
+        from anvil.cli._helpers import _lease_manager_kwargs
 
         project = self._setup(
             tmp_path, monkeypatch, global_lease="45", project_lease="30"
@@ -986,9 +986,9 @@ class TestGlobalConfigLeasePrecedence:
     ) -> None:
         """--lease still wins when there is no config at all (override beats
         the built-in ClaimManager default even with config=None)."""
-        from fakoli_state.cli._helpers import _lease_manager_kwargs
+        from anvil.cli._helpers import _lease_manager_kwargs
 
-        monkeypatch.delenv("FAKOLI_STATE_GLOBAL_CONFIG", raising=False)
+        monkeypatch.delenv("ANVIL_GLOBAL_CONFIG", raising=False)
         kwargs = _lease_manager_kwargs(None, lease_override=15)
         assert kwargs["default_lease_minutes"] == 15
 
@@ -997,6 +997,6 @@ class TestGlobalConfigLeasePrecedence:
     ) -> None:
         """No config and no flag → empty kwargs (ClaimManager keeps its own
         60-min default — preserves pre-T016 behaviour)."""
-        from fakoli_state.cli._helpers import _lease_manager_kwargs
+        from anvil.cli._helpers import _lease_manager_kwargs
 
         assert _lease_manager_kwargs(None, lease_override=None) == {}

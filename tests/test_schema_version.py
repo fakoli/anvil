@@ -15,8 +15,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
-from fakoli_state.state.schema import SCHEMA_VERSION, get_schema_version
+from anvil.cli import app
+from anvil.state.schema import SCHEMA_VERSION, get_schema_version
 
 runner = CliRunner()
 
@@ -48,10 +48,10 @@ def test_get_schema_version_matches_constant() -> None:
 
 def test_backend_get_schema_version_matches_constant(tmp_path: Path) -> None:
     """A freshly initialized DB stamps user_version == SCHEMA_VERSION."""
-    from fakoli_state.clock import SystemClock
-    from fakoli_state.state.sqlite import SqliteBackend
+    from anvil.clock import SystemClock
+    from anvil.state.sqlite import SqliteBackend
 
-    state_dir = tmp_path / ".fakoli-state"
+    state_dir = tmp_path / ".anvil"
     state_dir.mkdir()
     (state_dir / "events.jsonl").touch()
     backend = SqliteBackend(
@@ -114,17 +114,17 @@ def test_read_db_schema_version_returns_zero_for_missing_db(
     tmp_path: Path,
 ) -> None:
     """A non-existent db reports user_version 0 (SQLite's default)."""
-    from fakoli_state.state.sqlite import read_db_schema_version
+    from anvil.state.sqlite import read_db_schema_version
 
     assert read_db_schema_version(str(tmp_path / "nope.db")) == 0
 
 
 def test_read_db_schema_version_does_not_migrate(tmp_path: Path) -> None:
     """The standalone read reports the TRUE on-disk version, unmigrated."""
-    from fakoli_state.state.sqlite import read_db_schema_version
+    from anvil.state.sqlite import read_db_schema_version
 
     _init(tmp_path)
-    state_dir = tmp_path / ".fakoli-state"
+    state_dir = tmp_path / ".anvil"
     _stamp_user_version(state_dir, 3)
 
     # Reads v3 (pre-migration) — NOT the code SCHEMA_VERSION.
@@ -141,7 +141,7 @@ def test_read_db_schema_version_does_not_migrate(tmp_path: Path) -> None:
 def test_status_unknown_schema_version_clean_error_human(tmp_path: Path) -> None:
     """user_version=99 -> status exits 1 with a clean 'Error:' line, no traceback."""
     _init(tmp_path)
-    _stamp_user_version(tmp_path / ".fakoli-state", 99)
+    _stamp_user_version(tmp_path / ".anvil", 99)
 
     # catch_exceptions defaults True here so an UNCAUGHT exception would surface
     # as res.exception (a traceback) rather than a clean exit — we assert none.
@@ -158,7 +158,7 @@ def test_status_unknown_schema_version_clean_error_human(tmp_path: Path) -> None
 def test_status_unknown_schema_version_clean_error_json(tmp_path: Path) -> None:
     """user_version=99 -> status --json returns a schema_mismatch envelope, exit 1."""
     _init(tmp_path)
-    _stamp_user_version(tmp_path / ".fakoli-state", 99)
+    _stamp_user_version(tmp_path / ".anvil", 99)
 
     res = _invoke(tmp_path, ["status", "--json"])
     assert res.exit_code == 1, res.output
@@ -177,7 +177,7 @@ def test_status_hook_format_unknown_schema_version_exits_zero(
 ) -> None:
     """Hook safety: a bad schema must not fail the SessionStart hook."""
     _init(tmp_path)
-    _stamp_user_version(tmp_path / ".fakoli-state", 99)
+    _stamp_user_version(tmp_path / ".anvil", 99)
 
     res = _invoke(tmp_path, ["status", "--hook-format"])
     assert res.exit_code == 0, res.output

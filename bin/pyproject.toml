@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fakoli-state"
-version = "1.40.0"
+name = "anvil-state"
+version = "2.0.0"
 description = "Local-first project state engine: turn rough ideas and PRDs into reviewed, lockable, evidence-backed work packets that humans and AI agents can coordinate on without conflicts."
 readme = "../README.md"
 requires-python = ">=3.11"
@@ -38,10 +38,10 @@ dependencies = [
 # want Amazon Bedrock or an OpenAI-compatible custom endpoint opt in by
 # installing the corresponding extra:
 #
-#     pip install 'fakoli-state[bedrock]'   # adds anthropic[bedrock] (boto3)
-#     pip install 'fakoli-state[custom]'    # adds openai for /v1/chat/completions
-#     pip install 'fakoli-state[bedrock,custom]'  # both
-#     pip install 'fakoli-state[all-providers]'   # convenience alias
+#     pip install 'anvil-state[bedrock]'   # adds anthropic[bedrock] (boto3)
+#     pip install 'anvil-state[custom]'    # adds openai for /v1/chat/completions
+#     pip install 'anvil-state[bedrock,custom]'  # both
+#     pip install 'anvil-state[all-providers]'   # convenience alias
 #
 # Keeping these optional avoids pulling boto3 (~70MB of transitive deps)
 # and the openai SDK onto every install — most users only need direct API.
@@ -54,7 +54,7 @@ all-providers = [
 ]
 
 [project.scripts]
-fakoli-state = "fakoli_state.cli:app"
+anvil = "anvil.cli:app"
 
 [dependency-groups]
 dev = [
@@ -68,7 +68,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fakoli_state"]
+packages = ["src/anvil"]
 
 [tool.ruff]
 line-length = 100
@@ -104,5 +104,5 @@ ignore_errors = true
 testpaths = ["../tests"]
 addopts = "-m 'not live_github'"
 markers = [
-    "live_github: tests that hit the real GitHub API (require FAKOLI_STATE_TEST_GH_TOKEN env)",
+    "live_github: tests that hit the real GitHub API (require ANVIL_TEST_GH_TOKEN env)",
 ]

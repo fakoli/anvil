@@ -1,6 +1,6 @@
-# Getting started with fakoli-state
+# Getting started with anvil
 
-> fakoli-state is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite under `.fakoli-state/` and exposed through a CLI and an MCP server. This walkthrough takes you from an empty directory to a shipped task in about five minutes.
+> anvil is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite under `.anvil/` and exposed through a CLI and an MCP server. This walkthrough takes you from an empty directory to a shipped task in about five minutes.
 
 ## What you'll do
 
@@ -26,41 +26,41 @@ By the end you will have one task in `done`, one claim recorded in `events.jsonl
 From the fakoli marketplace inside Claude Code:
 
 ```bash
-/plugin install fakoli-state
+/plugin install anvil
 ```
 
 The install registers four hooks, wires the MCP server, and makes the six plugin agents discoverable at next session start. Verify with:
 
 ```bash
-fakoli-state --version
-# → fakoli-state 1.10.0
+anvil --version
+# → anvil 1.10.0
 ```
 
 ## Step 2 — Initialize state in your project
 
 ```bash
 cd /path/to/your/project
-fakoli-state init --name "My Project"
+anvil init --name "My Project"
 ```
 
 Output:
 
 ```
-Initialized fakoli-state for 'My Project' (id: my-project)
+Initialized anvil for 'My Project' (id: my-project)
 
-  .fakoli-state/config.yaml
-  .fakoli-state/state.db
-  .fakoli-state/events.jsonl
-  .fakoli-state/packets/
+  .anvil/config.yaml
+  .anvil/state.db
+  .anvil/events.jsonl
+  .anvil/packets/
 
-Next step: author your PRD at .fakoli-state/prd.md, then run `fakoli-state prd parse`.
+Next step: author your PRD at .anvil/prd.md, then run `anvil prd parse`.
 ```
 
 `prd.md` is intentionally NOT auto-created — you author it next against the template.
 
 ## Step 3 — Author your PRD
 
-Open `.fakoli-state/prd.md` in your editor and paste a minimal valid PRD. The required sections are `# Project:`, `## Summary`, `## Goals`, `## Requirements`, plus at least one task in `## Tasks` to actually have something to claim. Any task that declares a `**Feature:** F00N` line must have a matching `### F00N:` block in `## Features`. Full schema in [`../prd-template.md`](../prd-template.md).
+Open `.anvil/prd.md` in your editor and paste a minimal valid PRD. The required sections are `# Project:`, `## Summary`, `## Goals`, `## Requirements`, plus at least one task in `## Tasks` to actually have something to claim. Any task that declares a `**Feature:** F00N` line must have a matching `### F00N:` block in `## Features`. Full schema in [`../prd-template.md`](../prd-template.md).
 
 ```markdown
 # Project: My Project
@@ -112,15 +112,15 @@ Parse the positional file argument, read as UTF-8, write back uppercased.
 ## Step 4 — Parse and review the PRD
 
 ```bash
-fakoli-state prd parse
+anvil prd parse
 # → Parsed 3 requirements, 1 features, 1 tasks.
-# → PRD source: .fakoli-state/prd.md
+# → PRD source: .anvil/prd.md
 
-fakoli-state prd review            # draft → reviewed
+anvil prd review            # draft → reviewed
 # → PRD reviewed by 'human'.
-# → Run `fakoli-state prd review --approve` to approve.
+# → Run `anvil prd review --approve` to approve.
 
-fakoli-state prd review --approve  # reviewed → approved
+anvil prd review --approve  # reviewed → approved
 # → PRD approved by 'human'.
 ```
 
@@ -129,22 +129,22 @@ The two-step gate is deliberate. `prd review` records that a human has read the 
 ## Step 5 — Generate and score tasks
 
 ```bash
-fakoli-state plan
+anvil plan
 # → Planned 1 features, 1 tasks.
 
-fakoli-state score
+anvil score
 # TaskID       Complexity Parallel CtxLoad Blast Review Agent
 # ---------------------------------------------------------------
 # T001                  2        4       2     2      2     4
 #
 # Scored 1 task(s).
 
-fakoli-state review tasks
+anvil review tasks
 # → Promoted 1 task(s) to reviewed.
 # → Promoted 1 task(s) to ready.
 # → 2 total promotion(s). No tasks blocked.
 
-fakoli-state list --status ready
+anvil list --status ready
 # TaskID  Title                    Status  Priority  Score  Feature
 # ----------------------------------------------------------------------
 # T001    Implement uppercase CLI  ready   high      2/4    F001
@@ -152,45 +152,45 @@ fakoli-state list --status ready
 # 1 task(s) listed.
 ```
 
-Six dimensions: complexity, parallelizability, context load, blast radius, review risk, agent suitability — each 1–5. Scores drive `fakoli-state next` routing and `expand` recommendations.
+Six dimensions: complexity, parallelizability, context load, blast radius, review risk, agent suitability — each 1–5. Scores drive `anvil next` routing and `expand` recommendations.
 
 ## Step 6 — Claim and ship the first task
 
 ```bash
-fakoli-state next
+anvil next
 # → T001 — Implement uppercase CLI (ready, priority=high)
 
-fakoli-state claim T001
+anvil claim T001
 # → Claim C001 active; branch agent/t001-implement-uppercase-cli created
 
-fakoli-state packet T001
-# → Wrote .fakoli-state/packets/T001.md
+anvil packet T001
+# → Wrote .anvil/packets/T001.md
 ```
 
-Open `.fakoli-state/packets/T001.md` — it contains the exact intent, acceptance criteria, verification commands, and non-goals the agent (or you) need to execute the work. No issue thread to summarize.
+Open `.anvil/packets/T001.md` — it contains the exact intent, acceptance criteria, verification commands, and non-goals the agent (or you) need to execute the work. No issue thread to summarize.
 
 Do the work on the `agent/t001-*` branch, then submit evidence and apply:
 
 ```bash
-fakoli-state submit T001 \
+anvil submit T001 \
     --commands "pytest tests/test_cli.py" \
     --files-changed src/upper/cli.py
 # → Evidence submitted; task T001 → needs_review.
 
-fakoli-state apply T001 --approve
+anvil apply T001 --approve
 # → Task T001 applied; event task.applied recorded in events.jsonl.
 ```
 
 ## What just happened?
 
-`state.db` now records `T001=done` and `C001` released. `events.jsonl` has the full audit trail: `project.created`, `prd.parsed`, `prd.reviewed`, `prd.approved`, `task.created`, `task.scored`, `task.status_changed` × N, `claim.created`, `evidence.submitted`, `task.applied`. Replaying that log from an empty database reconstructs `state.db` byte-for-byte — the audit guarantee that makes `.fakoli-state/` safe to back up by copy.
+`state.db` now records `T001=done` and `C001` released. `events.jsonl` has the full audit trail: `project.created`, `prd.parsed`, `prd.reviewed`, `prd.approved`, `task.created`, `task.scored`, `task.status_changed` × N, `claim.created`, `evidence.submitted`, `task.applied`. Replaying that log from an empty database reconstructs `state.db` byte-for-byte — the audit guarantee that makes `.anvil/` safe to back up by copy.
 
-The work packet under `.fakoli-state/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).
+The work packet under `.anvil/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).
 
 ## Optional: fakoli-flow / fakoli-crew integration
 
 Everything above is the **standalone path** — every step ran through the
-`fakoli-state` CLI (or, equivalently, the matching MCP tools: `init_project`,
+`anvil` CLI (or, equivalently, the matching MCP tools: `init_project`,
 `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `get_next_task`, `claim_task`, `generate_work_packet`,
 `submit_completion_evidence`, `apply_review_decision`). You never needed
@@ -202,7 +202,7 @@ prerequisite. If you install them, the same state engine gains orchestration
 on top:
 
 - **fakoli-flow** drives the loop for you — its execute skill reads
-  `fakoli-state next`, claims, dispatches work, and submits evidence in
+  `anvil next`, claims, dispatches work, and submits evidence in
   waves instead of one command at a time.
 - **fakoli-crew** supplies the specialist subagents that flow dispatches, and
   exposes the same MCP tool surface to every crew agent.
@@ -213,12 +213,12 @@ nothing degrades. For exactly what changes when you add them, see
 
 ## Common stumbles
 
-- **"PRD must be in 'reviewed' status to approve"** — you ran `prd review --approve` without first running `prd review`. The two-step pattern is intentional. Run `fakoli-state prd review` first, then `fakoli-state prd review --approve`.
+- **"PRD must be in 'reviewed' status to approve"** — you ran `prd review --approve` without first running `prd review`. The two-step pattern is intentional. Run `anvil prd review` first, then `anvil prd review --approve`.
 - **"No ready tasks"** — your PRD's `## Tasks` section is empty, or `review tasks` blocked promotion because `**Acceptance criteria:**` or `**Verification:**` is missing on a task. Both fields are required by the `drafted → reviewed` gate. Re-check [`../prd-template.md`](../prd-template.md).
-- **"PRD file not found"** — `init` does not create `prd.md`. Author it at `.fakoli-state/prd.md` before running `prd parse`.
-- **Claim won't work / git error** — you are not in a git repo, or your working tree is dirty. Run `git init` (if needed), commit or stash pending changes, then retry `fakoli-state claim T001`.
+- **"PRD file not found"** — `init` does not create `prd.md`. Author it at `.anvil/prd.md` before running `prd parse`.
+- **Claim won't work / git error** — you are not in a git repo, or your working tree is dirty. Run `git init` (if needed), commit or stash pending changes, then retry `anvil claim T001`.
 - **`uv` not found** — install it: `pip install uv` or follow [docs.astral.sh/uv](https://docs.astral.sh/uv/).
-- **Want to start over?** — `rm -rf .fakoli-state/` and re-run `fakoli-state init`. Or use `fakoli-state init --force` to wipe and re-scaffold in place.
+- **Want to start over?** — `rm -rf .anvil/` and re-run `anvil init`. Or use `anvil init --force` to wipe and re-scaffold in place.
 
 ## Where to next
 

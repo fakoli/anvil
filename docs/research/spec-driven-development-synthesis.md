@@ -141,7 +141,7 @@ separate axis (see Part B).
 ~2014 Declarative IaC / Terraform          durable "desired state"       [domain]
 2017  Software 2.0 (Karpathy)              intent → searched/compiled    [V: A3]
 2025  GitHub Spec Kit, Kiro, Tessl, …      the agentic convergence       [V: A4]
-2025  Praetorian / fakoli-state            + durable state, leases, ev.  [V: A5]
+2025  Praetorian / anvil            + durable state, leases, ev.  [V: A5]
 ```
 
 The 2025 wave is a *recombination* of verified ancestors: MDA's transformation thesis +
@@ -154,9 +154,9 @@ Sorting by the three capabilities that the evidence treats as the real different
 
 | Capability | Confirmed to have it | Confirmed / strongly-evidenced to lack it |
 |---|---|---|
-| Durable canonical **state** | Praetorian (dual-state, resumable) [A5]; fakoli-state (SQLite) | Spec Kit (markdown, no persistent engine) [A4] |
-| Exclusive task **leasing** | Praetorian (lockfiles) [A5]; fakoli-state (lease+heartbeat) | Spec Kit and the scaffolding tier (none surfaced) |
-| Evidence-based **verification** | Praetorian (Reviewer+Tester gate) [A5]; fakoli-state (evidence contract) | Spec Kit (human-in-the-loop / self-grade) [A4] |
+| Durable canonical **state** | Praetorian (dual-state, resumable) [A5]; anvil (SQLite) | Spec Kit (markdown, no persistent engine) [A4] |
+| Exclusive task **leasing** | Praetorian (lockfiles) [A5]; anvil (lease+heartbeat) | Spec Kit and the scaffolding tier (none surfaced) |
+| Evidence-based **verification** | Praetorian (Reviewer+Tester gate) [A5]; anvil (evidence contract) | Spec Kit (human-in-the-loop / self-grade) [A4] |
 
 *(Kiro, Tessl, task-master, BMAD, Agent OS, OpenSpec were catalogued from the source
 set but did not produce individually-verified architectural claims in this run; the
@@ -189,7 +189,7 @@ contrast between Spec Kit [A4] and Praetorian [A5] exposes a *second, orthogonal
 the spectrum omits: the durability of **execution state** — who holds which task, what
 was actually done, and whether it can be proven later. The popular tier is
 spec-durable but execution-ephemeral. The two systems that close the execution axis
-(Praetorian, fakoli-state) reached it independently. That independent convergence is
+(Praetorian, anvil) reached it independently. That independent convergence is
 the load-bearing evidence that durable, lease-coordinated, evidence-bearing state is the
 defensible layer — not the spec format, which is now commoditized.
 

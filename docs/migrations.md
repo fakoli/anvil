@@ -1,6 +1,6 @@
 # Migrations
 
-`fakoli-state` ships a small schema (one SQLite DB, one JSONL audit log) and
+`anvil` ships a small schema (one SQLite DB, one JSONL audit log) and
 keeps its migration story minimal: the canonical audit log is `events.jsonl`,
 and `backend.replay_from_empty()` rebuilds `state.db` from scratch on any
 codebase version. That makes migrations easy to reason about — most schema
@@ -45,11 +45,11 @@ bumped. No data is rewritten and no offline migration is required.
 If you need to verify the upgrade manually:
 
 ```bash
-$ sqlite3 .fakoli-state/state.db "PRAGMA user_version;"
+$ sqlite3 .anvil/state.db "PRAGMA user_version;"
 4
 ```
 
-If the version is still 1, 2, or 3 after running any `fakoli-state` command, the
+If the version is still 1, 2, or 3 after running any `anvil` command, the
 upgrade did not fire — `initialize()` was never invoked. Most likely a
 process-supervision oddity; open a bug.
 
@@ -63,11 +63,11 @@ in local mode the monotonic `E{N}` id IS the display order.
 The widened `events.id` CHECK (`E[0-9]*` OR `E-*`) only exists in the v4
 DDL; SQLite cannot ALTER a CHECK, so pre-v4 tables keep the strict pattern.
 That is deliberate and harmless: local mode never writes a hash id, and the
-git-mode entry path (`fakoli-state migrate-events --to git`) rebuilds the
+git-mode entry path (`anvil migrate-events --to git`) rebuilds the
 projection from scratch, recreating `events` from the v4 DDL.
 
 ```bash
-$ sqlite3 .fakoli-state/state.db "PRAGMA user_version;"
+$ sqlite3 .anvil/state.db "PRAGMA user_version;"
 4
 ```
 
@@ -82,16 +82,16 @@ that predate the column. New PRDs can declare `**Type:** bugfix` (or
 `refactor` / `modify`) per task; everything else defaults to `feature`.
 
 ```bash
-$ sqlite3 .fakoli-state/state.db "PRAGMA user_version;"
+$ sqlite3 .anvil/state.db "PRAGMA user_version;"
 5
 ```
 
-## Explicit migration: `fakoli-state migrate state`
+## Explicit migration: `anvil migrate state`
 
 The auto-upgrade described above runs **silently inside `initialize()`** on the
-first `fakoli-state` command after an engine upgrade — convenient, but invisible
+first `anvil` command after an engine upgrade — convenient, but invisible
 and un-backed-up. For operators who want the migration to be deliberate,
-`fakoli-state migrate state` promotes that same in-init migration to an
+`anvil migrate state` promotes that same in-init migration to an
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the exact ordered, idempotent forward branches
 (`0/1→5`, `2→5`, `3→5`, `4→5`) that already live in
@@ -99,17 +99,17 @@ migration framework — it runs the exact ordered, idempotent forward branches
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
-$ fakoli-state migrate state
+$ anvil migrate state
 Schema migration  : v3 -> v4
-Will back up      : /repo/.fakoli-state/state.db
-            to    : /repo/.fakoli-state/state.db.pre-schema-migration.bak
+Will back up      : /repo/.anvil/state.db
+            to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
 Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
-$ fakoli-state migrate state --yes
+$ anvil migrate state --yes
 Migrated state.db v3 -> v4.
-Backup written to /repo/.fakoli-state/state.db.pre-schema-migration.bak.
+Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 
 Behaviour:
@@ -151,6 +151,6 @@ The "replay events.jsonl" escape hatch is always available for users who
 prefer to rebuild from the audit log:
 
 ```bash
-$ rm .fakoli-state/state.db .fakoli-state/state.db-wal .fakoli-state/state.db-shm
-$ fakoli-state replay   # rebuilds state.db from events.jsonl
+$ rm .anvil/state.db .anvil/state.db-wal .anvil/state.db-shm
+$ anvil replay   # rebuilds state.db from events.jsonl
 ```

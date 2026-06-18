@@ -1,33 +1,33 @@
-# Spec — fakoli-state Phase 10: plugin-dev best-practices audit + 5 new critic agents
+# Spec — anvil Phase 10: plugin-dev best-practices audit + 5 new critic agents
 
 **Date:** 2026-05-26
 **Author:** Claude (autonomous brainstorm session with user)
 **Status:** draft — pending user approval
 **Target releases:**
-- `fakoli-state` v1.9.0 → v1.10.0
+- `anvil` v1.9.0 → v1.10.0
 - `fakoli-crew` v2.0.1 → v2.1.0 (minor bump — 5 new agents)
 
 ---
 
 ## Goal
 
-Bring `fakoli-state` into closer alignment with the `plugin-dev` plugin's best-practices guidance for agent, skill, hook, MCP, and plugin-structure development. Achieve this by:
+Bring `anvil` into closer alignment with the `plugin-dev` plugin's best-practices guidance for agent, skill, hook, MCP, and plugin-structure development. Achieve this by:
 
 1. Creating five new cross-plugin specialist critic agents inside `fakoli-crew` — one per applicable plugin-dev specialty.
-2. Running those critics against `fakoli-state v1.9.0` as their first real-world audit.
+2. Running those critics against `anvil v1.9.0` as their first real-world audit.
 3. Producing a single consolidated audit doc with severity-sorted findings.
 4. Applying every MUST FIX finding immediately (inline fix-cycle discipline matching `fakoli-flow:execute`'s critic gate); deferring SHOULD FIX / CONSIDER / NIT to a new `docs/phase-11-backlog.md`.
-5. Shipping fakoli-state as v1.10.0 and fakoli-crew as v2.1.0 in a single PR-per-plugin pair.
+5. Shipping anvil as v1.10.0 and fakoli-crew as v2.1.0 in a single PR-per-plugin pair.
 
-This phase delivers both **immediate quality improvement** to fakoli-state AND **reusable audit machinery** that every future fakoli plugin can invoke against itself.
+This phase delivers both **immediate quality improvement** to anvil AND **reusable audit machinery** that every future fakoli plugin can invoke against itself.
 
 ---
 
 ## Context
 
-`fakoli-state v1.9.0` ships with 6 plugin-owned agents (planner, critic, sentinel, state-keeper, marketplace-scribe, docs-scribe), 7 skills (brainstorm, claim, execute, finish, plan, prd, state-ops), 4 hooks (capture-evidence.sh, check-claim.sh, detect-state.sh, record-file-change.sh), 1 MCP server with 13 tools, and a `plugin.json` manifest. Across Phases 1–9 it was built fast — 9 phases, ~30 days, 17 PRs. Some surfaces were built early and have not been re-audited against the plugin-dev best-practices skills that landed later in the ecosystem.
+`anvil v1.9.0` ships with 6 plugin-owned agents (planner, critic, sentinel, state-keeper, marketplace-scribe, docs-scribe), 7 skills (brainstorm, claim, execute, finish, plan, prd, state-ops), 4 hooks (capture-evidence.sh, check-claim.sh, detect-state.sh, record-file-change.sh), 1 MCP server with 13 tools, and a `plugin.json` manifest. Across Phases 1–9 it was built fast — 9 phases, ~30 days, 17 PRs. Some surfaces were built early and have not been re-audited against the plugin-dev best-practices skills that landed later in the ecosystem.
 
-`plugin-dev` offers 7 specialty skills (agent-development, skill-development, hook-development, command-development, mcp-integration, plugin-settings, plugin-structure) and 3 reviewer agents (agent-creator, plugin-validator, skill-reviewer). Of the 7 skills, 5 are directly applicable to fakoli-state's surface area: **agent, skill, hook, mcp, structure**. (`command-development` is N/A — fakoli-state exposes no Claude Code slash commands. `plugin-settings` is small and rolled into `structure-critic`.)
+`plugin-dev` offers 7 specialty skills (agent-development, skill-development, hook-development, command-development, mcp-integration, plugin-settings, plugin-structure) and 3 reviewer agents (agent-creator, plugin-validator, skill-reviewer). Of the 7 skills, 5 are directly applicable to anvil's surface area: **agent, skill, hook, mcp, structure**. (`command-development` is N/A — anvil exposes no Claude Code slash commands. `plugin-settings` is small and rolled into `structure-critic`.)
 
 `fakoli-crew v2.0.1` houses 8 cross-plugin specialist agents today: critic, guido, herald, keeper, scout, sentinel, smith, welder. The 5 new critics fit naturally alongside this roster — same naming convention, same single-noun discipline, same defer-to patterns.
 
@@ -44,12 +44,12 @@ This phase delivers both **immediate quality improvement** to fakoli-state AND *
 - `mcp-critic.md`
 - `structure-critic.md`
 
-Placed in fakoli-crew (not fakoli-state) because they are **plugin-generic** — they audit any plugin's surfaces, not fakoli-state-specific structure. Reusable by every future fakoli plugin and by external plugin authors who install fakoli-crew.
+Placed in fakoli-crew (not anvil) because they are **plugin-generic** — they audit any plugin's surfaces, not anvil-specific structure. Reusable by every future fakoli plugin and by external plugin authors who install fakoli-crew.
 
-**fakoli-state can invoke them** via:
+**anvil can invoke them** via:
 - `fakoli-flow:execute` (which auto-discovers fakoli-crew agents)
 - direct `Agent(subagent_type="fakoli-crew:agent-critic", prompt="...")` from any session that has fakoli-crew installed
-- a future fakoli-state skill could wrap them for one-command audit (deferred to Phase 11 — out of scope here)
+- a future anvil skill could wrap them for one-command audit (deferred to Phase 11 — out of scope here)
 
 **No coordinator agent.** The fakoli-flow wave engine already dispatches parallel agents per its declared dependency graph. Adding a "lead critic" or "audit-conductor" agent would duplicate that orchestration. The critics are leaf agents.
 
@@ -65,7 +65,7 @@ Critics report findings in the existing `fakoli-crew:critic` severity rubric:
 
 ### Audit-doc consolidation
 
-After all 5 critics return, `fakoli-crew:keeper` reads the 5 status files and produces a single consolidated audit doc at `plugins/fakoli-state/docs/audits/2026-05-26-plugin-audit.md` (a new `audits/` directory). The doc is severity-sorted, has per-critic detail sections, and tracks closure of MUST FIX items as the welder applies fixes.
+After all 5 critics return, `fakoli-crew:keeper` reads the 5 status files and produces a single consolidated audit doc at `plugins/anvil/docs/audits/2026-05-26-plugin-audit.md` (a new `audits/` directory). The doc is severity-sorted, has per-critic detail sections, and tracks closure of MUST FIX items as the welder applies fixes.
 
 Future audits land at `docs/audits/<YYYY-MM-DD>-plugin-audit.md` — date-stamped, never overwritten. Comparing two audit docs across time shows regression vs progress per critic.
 
@@ -139,7 +139,7 @@ Each critic borrows the methodology of the equivalent `plugin-dev:` skill, then 
 
 ### `mcp-critic`
 
-**Scope:** `.mcp.json` + every Python file backing an MCP tool (for fakoli-state: `bin/src/fakoli_state/mcp_server.py` + supporting modules).
+**Scope:** `.mcp.json` + every Python file backing an MCP tool (for anvil: `bin/src/anvil/mcp_server.py` + supporting modules).
 
 **Checks:**
 - `.mcp.json` schema valid (`mcpServers.<name>.type`, `command`, `args`)
@@ -196,7 +196,7 @@ Wave 1 (parallel × 5):
 Wave 1 verify: each critic .md frontmatter valid; allowed-tools tight; colors unique
         |
         v
-Wave 2 (parallel × 5 — all 5 critics dispatched on fakoli-state v1.9.0):
+Wave 2 (parallel × 5 — all 5 critics dispatched on anvil v1.9.0):
   agent-critic     → docs/plans/agent-agent-critic-status.md
   skill-critic     → docs/plans/agent-skill-critic-status.md
   hook-critic      → docs/plans/agent-hook-critic-status.md
@@ -219,11 +219,11 @@ Wave 4 (welder fix-cycle for MUST FIX only):
         v
 Wave 5 (review):
   fakoli-crew:critic — review all Wave 4 fixes
-  fakoli-crew:sentinel — full fakoli-state pytest + acceptance scorecard
+  fakoli-crew:sentinel — full anvil pytest + acceptance scorecard
         |
         v
 Wave 6 (release prep):
-  keeper: fakoli-state v1.10.0 version bump (4 sources)
+  keeper: anvil v1.10.0 version bump (4 sources)
   keeper: fakoli-crew v2.1.0 version bump (3 sources)
   keeper: CHANGELOG entries both plugins
   keeper: marketplace + registry regen
@@ -258,13 +258,13 @@ Each critic gets one smoke test in `plugins/fakoli-crew/tests/fixtures/audit-tar
 | mcp-critic | `bad-mcp.json` with missing `args` | MUST FIX surfaced |
 | structure-critic | `bad-plugin.json` missing `version` | MUST FIX surfaced |
 
-Each fixture is paired with one assertion test that dispatches the critic against it and asserts the expected severity appears in the returned status file. Implementation: shell-based test (matches fakoli-state's `test_hooks.sh` precedent) OR Python pytest using a recorded-agent test double.
+Each fixture is paired with one assertion test that dispatches the critic against it and asserts the expected severity appears in the returned status file. Implementation: shell-based test (matches anvil's `test_hooks.sh` precedent) OR Python pytest using a recorded-agent test double.
 
 ### Phase-end regression
 
-- `fakoli-state` full pytest suite: 965+ passing (baseline) — any MUST FIX fix must not break.
+- `anvil` full pytest suite: 965+ passing (baseline) — any MUST FIX fix must not break.
 - `fakoli-crew` plugin validation: `bash scripts/generate-index.sh --check` clean.
-- 4-way version sync verified for fakoli-state at v1.10.0; 3-way version sync for fakoli-crew at v2.1.0.
+- 4-way version sync verified for anvil at v1.10.0; 3-way version sync for fakoli-crew at v2.1.0.
 
 ### What is NOT tested
 
@@ -277,23 +277,23 @@ Each fixture is paired with one assertion test that dispatches the critic agains
 
 1. All 5 critics exist in `plugins/fakoli-crew/agents/` with valid frontmatter, unique colors (no collision with existing fakoli-crew critic/guido/herald/keeper/scout/sentinel/smith/welder), distinct `allowed-tools` sets matching the rubric.
 2. All 5 critic smoke-test fixtures + tests exist and pass.
-3. Audit doc `plugins/fakoli-state/docs/audits/2026-05-26-plugin-audit.md` exists with a non-empty findings table and per-critic detail sections.
+3. Audit doc `plugins/anvil/docs/audits/2026-05-26-plugin-audit.md` exists with a non-empty findings table and per-critic detail sections.
 4. Every MUST FIX item from the audit has either `→ fixed in commit <sha>` OR `→ deferred with reason` annotation (no silent gaps).
-5. fakoli-state pytest suite still passes (target 965+).
-6. New `plugins/fakoli-state/docs/phase-11-backlog.md` exists and lists all deferred SHOULD FIX / CONSIDER / NIT items, cross-referenced by critic.
+5. anvil pytest suite still passes (target 965+).
+6. New `plugins/anvil/docs/phase-11-backlog.md` exists and lists all deferred SHOULD FIX / CONSIDER / NIT items, cross-referenced by critic.
 7. fakoli-crew CHANGELOG entry + version bump to v2.1.0 (minor bump for 5 new agents).
-8. fakoli-state CHANGELOG entry + version bump to v1.10.0; 4 sources of truth in sync (plugin.json, pyproject.toml, __init__.py, marketplace.json).
+8. anvil CHANGELOG entry + version bump to v1.10.0; 4 sources of truth in sync (plugin.json, pyproject.toml, __init__.py, marketplace.json).
 9. Root `.claude-plugin/marketplace.json` + `registry/*.json` regenerated.
 10. `plugins/fakoli-crew/README.md` agent table grows from 8 → 13 rows.
-11. `plugins/fakoli-state/README.md` version badge + agent table accurate post-fix.
+11. `plugins/anvil/README.md` version badge + agent table accurate post-fix.
 
 ---
 
 ## Out of scope (deferred)
 
-- A fakoli-state skill that wraps the 5 critics into one command (e.g., `/fakoli-state:audit`) — Phase 11.
+- A anvil skill that wraps the 5 critics into one command (e.g., `/anvil:audit`) — Phase 11.
 - SHOULD FIX / CONSIDER / NIT items found by the audit — Phase 11 backlog.
-- Audits of plugins other than fakoli-state — out of scope; the critics are reusable, but this phase only runs them once on one plugin.
+- Audits of plugins other than anvil — out of scope; the critics are reusable, but this phase only runs them once on one plugin.
 - Webhook-style auto-audit triggers (cron, post-commit hook, CI workflow) — Phase 12+.
 - Linear/Monday/Jira/GitHub Projects sync providers (carry-forward from Phase 9 backlog) — separate phases.
 
@@ -316,7 +316,7 @@ None blocking. Proceed to `/flow:plan <this-spec-path>` after user approval.
 
 ## See also
 
-- `plugins/fakoli-state/docs/plans/2026-05-25-phase-9.md` — the immediately prior phase plan; same wave-engine pattern this phase uses.
-- `plugins/fakoli-state/docs/phase-9-backlog.md` — backlog of items deferred from Phase 9; some may also surface in this audit.
+- `plugins/anvil/docs/plans/2026-05-25-phase-9.md` — the immediately prior phase plan; same wave-engine pattern this phase uses.
+- `plugins/anvil/docs/phase-9-backlog.md` — backlog of items deferred from Phase 9; some may also surface in this audit.
 - `~/.claude/plugins/cache/.../plugin-dev/skills/agent-development/SKILL.md` (and siblings) — the canonical methodology the 5 critics each adapt.
 - `plugins/fakoli-crew/agents/critic.md` — the existing senior reviewer; meta-reviews this phase's Wave 4 fixes.

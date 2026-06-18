@@ -1,18 +1,18 @@
-# fakoli-state coordination benchmark
+# anvil coordination benchmark
 
 **The claim this measures:** when multiple agents work one project in parallel,
-coordinating through fakoli-state's durable state engine produces *fewer collisions,
+coordinating through anvil's durable state engine produces *fewer collisions,
 fewer duplicates, correct ordering, and auditable evidence* than coordinating through
 naive shared-markdown state — and it does so on the real engine, not a model of it.
 
 This is the asset competitors structurally can't produce: spec-kit, task-master, BMAD
-and the rest are stateless, so there is no coordination state to measure. fakoli-state
+and the rest are stateless, so there is no coordination state to measure. anvil
 has one, so we can put a number on it.
 
 ## Run it
 
 ```bash
-cd plugins/fakoli-state/benchmarks
+cd plugins/anvil/benchmarks
 python3 run_benchmark.py                       # all 4 scenarios, 3 trials -> RESULTS.md
 python3 run_benchmark.py --quick               # fast smoke (1 trial, fewer actors)
 python3 run_benchmark.py --scenarios overlapping_files,evidence_gaming
@@ -21,18 +21,18 @@ python3 run_benchmark.py --live                # (phase-2 stub) real subagents
 ```
 
 No third-party dependencies. The first run does a one-time `uv sync` of the
-`fakoli-state` CLI into `bin/.venv`; thereafter it calls that console script directly.
+`anvil` CLI into `bin/.venv`; thereafter it calls that console script directly.
 Results are written to `RESULTS.md` (regenerated each run).
 
 ## How it's built — and why you can trust the number
 
 ```
 harness/
-  engine.py        own the real fakoli-state binary; render a PRD from a TaskSpec list;
+  engine.py        own the real anvil binary; render a PRD from a TaskSpec list;
                    run the real setup pipeline (init->parse->review->plan->score->ready)
   coordinators.py  the ONLY thing that differs between arms:
                      MarkdownCoordinator     — naive shared TODO.md, non-atomic
-                     FakoliStateCoordinator  — real `next`/`claim`/`submit`/`apply`
+                     AnvilCoordinator  — real `next`/`claim`/`submit`/`apply`
   scenarios.py     4 scenarios (task set + actor count + failure injection)
   metrics.py       the oracle: pure functions over the recorded facts
   runner.py        run each scenario through both arms over N seeded trials; aggregate
@@ -43,7 +43,7 @@ the identical actor loop over the identical task set and the identical "work" fu
 The only variable is the coordinator.** Any difference in the metrics is therefore
 attributable solely to the coordination layer.
 
-The fakoli-state arm shells out to the *actual* CLI a user runs — `next`, `claim`,
+The anvil arm shells out to the *actual* CLI a user runs — `next`, `claim`,
 `submit`, `apply` — against a live SQLite state engine. We are not simulating
 `BEGIN IMMEDIATE`; we are contending on it.
 
@@ -92,7 +92,7 @@ python3 - <<'PY'
 # (see git history of this dir for the probe; ~1/12 attempts both succeed)
 PY
 ```
-This is why fakoli-state's `overlapping_files` collisions were low but not zero.
+This is why anvil's `overlapping_files` collisions were low but not zero.
 **Fixed in v1.23.3:** the file-overlap *and* conflict-group re-checks now run inside the
 `BEGIN IMMEDIATE` claim transaction; `overlapping_files` collisions are now **0 across
 all trials**, guarded by `tests/test_claim_concurrency.py` (single-winner under 8 threads).
@@ -114,7 +114,7 @@ coercion. (The crash scenario still fast-forwards the lease by backdating
 - **Reproducible-aggregate, not bit-identical.** Real OS-thread concurrency is
   nondeterministic; numbers are means over seeded trials. Re-running reproduces the
   *conclusion* and close numbers, not identical decimals.
-- **The evidence gate is advisory.** fakoli-state *flags* unverified work; it does not
+- **The evidence gate is advisory.** anvil *flags* unverified work; it does not
   refuse it. The metric is detectability, which markdown structurally lacks.
 - **Actors are simulated.** They model the coordination contract (acquire → work →
   complete), not an LLM's reasoning. That isolates the coordination mechanism, which is

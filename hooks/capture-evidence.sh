@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 
-# capture-evidence.sh — PostToolUse hook for fakoli-state (Phase 5)
+# capture-evidence.sh — PostToolUse hook for anvil (Phase 5)
 # Fires after every Bash tool call.
 # Captures stdout/stderr/exit code of verification commands into a per-claim
-# evidence buffer at .fakoli-state/.evidence-buffer/<claim-id>.json.
+# evidence buffer at .anvil/.evidence-buffer/<claim-id>.json.
 #
 # Phase 5 fallback strategy: when the CLI subcommand is not yet available,
 # write directly to the evidence buffer in shell. Wave 2 (guido) implements:
-#   fakoli-state hook capture-evidence \
+#   anvil hook capture-evidence \
 #     --command CMD --exit-code N \
 #     --stdout-file PATH --stderr-file PATH \
 #     --actor ACTOR
@@ -24,7 +24,7 @@
 #   .tool_response.exit_code — integer exit code
 #   .session_id            — session identifier used as actor proxy
 
-STATE_DIR=".fakoli-state"
+STATE_DIR=".anvil"
 EVIDENCE_DIR="${STATE_DIR}/.evidence-buffer"
 
 # Fast-path: no project state, nothing to capture.
@@ -134,7 +134,7 @@ fi
 
 # ---- Try the CLI subcommand first (guido Wave 2 implements this) ----------
 # CLI invocation shape for guido:
-#   fakoli-state hook capture-evidence \
+#   anvil hook capture-evidence \
 #     --command CMD --exit-code N \
 #     --stdout-file PATH --stderr-file PATH \
 #     --actor ACTOR
@@ -142,7 +142,7 @@ fi
 # The hook passes --stdout-file / --stderr-file (temp files) rather than
 # inlining content because excerpts can be multi-line and avoid quoting issues.
 
-CLI="${CLAUDE_PLUGIN_ROOT}/bin/fakoli-state"
+CLI="${CLAUDE_PLUGIN_ROOT}/bin/anvil"
 
 if [ -x "$CLI" ]; then
   STDOUT_TMP=$(mktemp 2>/dev/null) || STDOUT_TMP=""
@@ -180,7 +180,7 @@ fi
 # Active-claim lookup from shell would require shelling out to the CLI again
 # (or reading state.db directly, which we must never do).  For Phase 5 we
 # always write to orphan.json so no evidence is lost.  The user can attach
-# orphan evidence to a claim later via `fakoli-state submit --output-file`.
+# orphan evidence to a claim later via `anvil submit --output-file`.
 #
 # When the CLI subcommand (guido Wave 2) is wired, it will:
 #   1. Look up the active claim for --actor in state.db.
@@ -223,7 +223,7 @@ record = {
     'stdout_excerpt': stdout_ex,
     'stderr_excerpt': stderr_ex,
     'actor':          actor,
-    'note':           'orphan — no active claim found at capture time; pass this file via: fakoli-state submit TASK_ID --output-file <THIS_FILE>',
+    'note':           'orphan — no active claim found at capture time; pass this file via: anvil submit TASK_ID --output-file <THIS_FILE>',
 }
 
 line = json.dumps(record)

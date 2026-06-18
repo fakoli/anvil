@@ -1,6 +1,6 @@
 ---
 name: resolve-decisions
-description: Walk the PRD's unresolved items — `[NEEDS DECISION]` markers, `## Open Questions`, and missing acceptance-criteria or verification fields — and drive each one as a Q&A turn with the user, proposing concrete options when possible and applying the chosen answer to `.fakoli-state/prd.md`. Use this skill when `fakoli-state prd find-decisions` reports unresolved items, or when other skills (prd, plan) detect decisions blocking progress.
+description: Walk the PRD's unresolved items — `[NEEDS DECISION]` markers, `## Open Questions`, and missing acceptance-criteria or verification fields — and drive each one as a Q&A turn with the user, proposing concrete options when possible and applying the chosen answer to `.anvil/prd.md`. Use this skill when `anvil prd find-decisions` reports unresolved items, or when other skills (prd, plan) detect decisions blocking progress.
 ---
 
 # Resolve Decisions — Walk Open Items as Q&A
@@ -13,10 +13,10 @@ The anti-pattern this skill exists to prevent: handing the user a list of "open 
 
 ## When to Use
 
-- After `fakoli-state prd parse` succeeds and the agent notices unresolved items (`prd` skill Step 3 routes here when `find_decisions` returns non-empty).
-- Before `fakoli-state plan` runs, when `find_decisions` reports `[NEEDS DECISION]` markers or unresolved Open Questions that would shape task generation (`plan` skill Step 0 routes here).
+- After `anvil prd parse` succeeds and the agent notices unresolved items (`prd` skill Step 3 routes here when `find_decisions` returns non-empty).
+- Before `anvil plan` runs, when `find_decisions` reports `[NEEDS DECISION]` markers or unresolved Open Questions that would shape task generation (`plan` skill Step 0 routes here).
 - When the user explicitly asks to "resolve open questions", "answer the NEEDS DECISION items", or "fill in the missing acceptance criteria".
-- When `fakoli-state review tasks` blocks tasks for missing acceptance criteria or verification commands — those become `missing_field` decisions this skill can drive Q&A on, instead of asking the user to re-edit the PRD by hand.
+- When `anvil review tasks` blocks tasks for missing acceptance criteria or verification commands — those become `missing_field` decisions this skill can drive Q&A on, instead of asking the user to re-edit the PRD by hand.
 
 **Do not use this skill** to author requirements from scratch — use `start-prd`. **Do not use this skill** to score or expand tasks — that is the `plan` skill's job. **Do not use this skill** to make `apply --approve` decisions — that is the `finish` skill's gate.
 
@@ -24,17 +24,17 @@ The anti-pattern this skill exists to prevent: handing the user a list of "open 
 
 ## Prerequisites
 
-`.fakoli-state/prd.md` must exist and parse cleanly. Confirm:
+`.anvil/prd.md` must exist and parse cleanly. Confirm:
 
 ```bash
-fakoli-state prd parse 2>&1 | tail -3
+anvil prd parse 2>&1 | tail -3
 ```
 
-The detector is at `bin/src/fakoli_state/planning/decisions.py`; the CLI surface is `fakoli-state prd find-decisions`; the MCP equivalent is the `find_decisions` tool.
+The detector is at `bin/src/anvil/planning/decisions.py`; the CLI surface is `anvil prd find-decisions`; the MCP equivalent is the `find_decisions` tool.
 
 | Command | Phase | Status |
 |---|---|---|
-| `fakoli-state prd find-decisions` | Phase 7+ | available (v1.14.0) |
+| `anvil prd find-decisions` | Phase 7+ | available (v1.14.0) |
 | `find_decisions` MCP tool | Phase 7+ | available (v1.14.0) |
 
 ---
@@ -43,7 +43,7 @@ The detector is at `bin/src/fakoli_state/planning/decisions.py`; the CLI surface
 
 ### Step 1 — Scan for unresolved items
 
-Drive the scan yourself; do not tell the user to run the CLI. Invoke `fakoli-state prd find-decisions` (or the `find_decisions` MCP tool when the runtime exposes it) and parse the result. Surface a one-paragraph summary inline:
+Drive the scan yourself; do not tell the user to run the CLI. Invoke `anvil prd find-decisions` (or the `find_decisions` MCP tool when the runtime exposes it) and parse the result. Surface a one-paragraph summary inline:
 
 > I found **N** unresolved items in the PRD:
 > - **X** `[NEEDS DECISION]` markers (inline, often tied to specific requirements or features)
@@ -54,7 +54,7 @@ Drive the scan yourself; do not tell the user to run the CLI. Invoke `fakoli-sta
 
 On `show me the list first`, present the full list compactly (one line per decision: id, kind, location, first 60 chars of text). Then re-ask "ready to walk them?"
 
-On `not yet`, stop. Confirm the items are visible in `fakoli-state prd find-decisions` for later.
+On `not yet`, stop. Confirm the items are visible in `anvil prd find-decisions` for later.
 
 On `yes`, proceed to Step 2.
 
@@ -75,7 +75,7 @@ Iterate the decision list in the order the detector returned (it is deliberately
 >
 > Pick (1 / 2 / 3 / or describe your own).
 
-On the answer, rewrite the marker inline in `.fakoli-state/prd.md`. For option 1: replace `[NEEDS DECISION: which encoding?]` with `(decision: UTF-8 only)` (or just inline the answer prose if it reads better). Preserve the rest of the sentence verbatim. Save the file, then move on.
+On the answer, rewrite the marker inline in `.anvil/prd.md`. For option 1: replace `[NEEDS DECISION: which encoding?]` with `(decision: UTF-8 only)` (or just inline the answer prose if it reads better). Preserve the rest of the sentence verbatim. Save the file, then move on.
 
 **For an `open_question` item:**
 
@@ -112,7 +112,7 @@ This preserves the audit trail — future re-reads can see *what was unclear at 
 >
 > Add (1) only, (1+2), (1+2+3), or (4) describe?
 
-On the answer, edit the relevant `### T012:` block in `.fakoli-state/prd.md` to add an `**Acceptance criteria:**` field with the chosen bullets. Same pattern for missing `**Verification:**` commands — propose 2-3 candidate `pytest` / shell invocations based on the likely files, accept the pick, write them in.
+On the answer, edit the relevant `### T012:` block in `.anvil/prd.md` to add an `**Acceptance criteria:**` field with the chosen bullets. Same pattern for missing `**Verification:**` commands — propose 2-3 candidate `pytest` / shell invocations based on the likely files, accept the pick, write them in.
 
 **On any decision the LLM cannot propose options for** (the context is too thin, the question is too open), do not invent options. Ask the open-ended question and accept whatever answer the user gives:
 
@@ -125,22 +125,22 @@ On the answer, edit the relevant `### T012:` block in `.fakoli-state/prd.md` to 
 
 Once every decision is answered (or the user explicitly skips the remaining ones), drive a re-parse yourself so the canonical state catches up:
 
-> All N decisions have been applied to `.fakoli-state/prd.md`. Re-parsing to refresh state.db — ready? (yes / wait, I want to re-read the file first)
+> All N decisions have been applied to `.anvil/prd.md`. Re-parsing to refresh state.db — ready? (yes / wait, I want to re-read the file first)
 
-On `yes`, invoke `fakoli-state prd parse`. Surface the new counts. If the re-parse surfaces fresh errors (e.g. you accidentally broke the markdown structure during inline rewrites), drive a fix immediately — do not hand the user a "go fix it in the editor" message. Read the parse error, identify which edit caused it, propose the corrected text, ask the user to confirm, apply.
+On `yes`, invoke `anvil prd parse`. Surface the new counts. If the re-parse surfaces fresh errors (e.g. you accidentally broke the markdown structure during inline rewrites), drive a fix immediately — do not hand the user a "go fix it in the editor" message. Read the parse error, identify which edit caused it, propose the corrected text, ask the user to confirm, apply.
 
-After re-parse, optionally re-run `fakoli-state prd find-decisions` to confirm the unresolved count is 0 (or to surface anything the resolution exposed — e.g., a `needs_decision` rewrite that introduced a new field with empty acceptance criteria).
+After re-parse, optionally re-run `anvil prd find-decisions` to confirm the unresolved count is 0 (or to surface anything the resolution exposed — e.g., a `needs_decision` rewrite that introduced a new field with empty acceptance criteria).
 
 ### Step 4 — Hand off to the next skill
 
 Once the PRD is fully resolved:
 
 > All decisions resolved. The PRD is ready for the next step. What's next?
-> 1. **Continue into `/fakoli-state:plan`** — generate features and tasks now that the PRD is unambiguous.
+> 1. **Continue into `/anvil:plan`** — generate features and tasks now that the PRD is unambiguous.
 > 2. **Review the PRD one more time first** — I'll open it inline so you can scan the `## Decisions` section.
 > 3. **Stop here** — we're done with the resolver; you'll drive plan later.
 
-On `1`, invoke the `plan` skill directly (do not paste `fakoli-state plan` as a command for the user to type).
+On `1`, invoke the `plan` skill directly (do not paste `anvil plan` as a command for the user to type).
 On `2`, show the relevant sections inline; when the user says "looks good," re-ask the next-step question.
 On `3`, confirm and stop.
 
@@ -148,11 +148,11 @@ On `3`, confirm and stop.
 
 ## Anti-pattern to avoid
 
-Ending the skill with a message like *"OQ001 (success criterion) and OQ006 (time budget) should be resolved before planning. Open `.fakoli-state/prd.md` in your editor to fix them, then re-run `fakoli-state prd parse` and `fakoli-state plan`."* That handoff treats an unresolved decision like a known bug instead of a question the agent could have asked. The whole point of an LLM agent inside the conversation is that it can frame the right question with concrete options — pasting the list of unresolved items as a to-do is forfeiting that strength.
+Ending the skill with a message like *"OQ001 (success criterion) and OQ006 (time budget) should be resolved before planning. Open `.anvil/prd.md` in your editor to fix them, then re-run `anvil prd parse` and `anvil plan`."* That handoff treats an unresolved decision like a known bug instead of a question the agent could have asked. The whole point of an LLM agent inside the conversation is that it can frame the right question with concrete options — pasting the list of unresolved items as a to-do is forfeiting that strength.
 
 The rule: **for every unresolved item, the agent generates the question and proposes 2-4 candidate answers (when context allows). The user picks. The agent writes the answer to the file.** No "open the editor" handoffs unless the user explicitly opts out.
 
-**When to actually hand off to the editor:** if the user says "let me think about these — I'll edit them directly later," or if a decision is genuinely too cross-cutting to express as a single Q&A turn (e.g., "redesign the whole authentication architecture"). In those cases, list the unresolved items compactly, point the user at `fakoli-state prd find-decisions` so they can re-surface the list later, and stop.
+**When to actually hand off to the editor:** if the user says "let me think about these — I'll edit them directly later," or if a decision is genuinely too cross-cutting to express as a single Q&A turn (e.g., "redesign the whole authentication architecture"). In those cases, list the unresolved items compactly, point the user at `anvil prd find-decisions` so they can re-surface the list later, and stop.
 
 ---
 
@@ -171,7 +171,7 @@ The rule: **for every unresolved item, the agent generates the question and prop
 
 | Feature | Phase | Status |
 |---|---|---|
-| `fakoli-state prd find-decisions` CLI | v1.14.0 | available |
+| `anvil prd find-decisions` CLI | v1.14.0 | available |
 | `find_decisions` MCP tool | v1.14.0 | available |
 | `[NEEDS DECISION]` marker detection | v1.14.0 | available |
 | `## Open Questions` detection | v1.14.0 | available |

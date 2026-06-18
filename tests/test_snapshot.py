@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.state.snapshot.serialize_state.
+"""Tests for anvil.state.snapshot.serialize_state.
 
 serialize_state is the canonical-state snapshot consumed by the SL-1
 replay-equivalence test. These tests prove two properties:
@@ -21,10 +21,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fakoli_state.clock import FrozenClock
-from fakoli_state.state.models import EventDraft
-from fakoli_state.state.snapshot import serialize_state
-from fakoli_state.state.sqlite import SqliteBackend
+from anvil.clock import FrozenClock
+from anvil.state.models import EventDraft
+from anvil.state.snapshot import serialize_state
+from anvil.state.sqlite import SqliteBackend
 
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=UTC)
 
@@ -375,7 +375,7 @@ def test_serialize_state_requirements_reflect_parsed_prd(tmp_path: Path) -> None
 
 
 # ===========================================================================
-# T009/F006: `fakoli-state migrate state` — promote the in-init schema
+# T009/F006: `anvil migrate state` — promote the in-init schema
 # migration to an explicit, backed-up, dry-run-by-default command.
 #
 # These tests live alongside serialize_state because the round-trip proof is a
@@ -389,9 +389,9 @@ import sqlite3  # noqa: E402
 
 from typer.testing import CliRunner  # noqa: E402
 
-from fakoli_state.cli import app  # noqa: E402
-from fakoli_state.state.schema import SCHEMA_VERSION  # noqa: E402
-from fakoli_state.state.sqlite import read_db_schema_version  # noqa: E402
+from anvil.cli import app  # noqa: E402
+from anvil.state.schema import SCHEMA_VERSION  # noqa: E402
+from anvil.state.sqlite import read_db_schema_version  # noqa: E402
 
 _migrate_runner = CliRunner()
 
@@ -431,7 +431,7 @@ def _build_v3_project(project_dir: Path) -> tuple[str, Path]:
     on the v4-populated backend BEFORE the downgrade, so a post-migration
     snapshot equal to it proves every row survived the round-trip.
     """
-    state_dir = project_dir / ".fakoli-state"
+    state_dir = project_dir / ".anvil"
     state_dir.mkdir(parents=True)
     # A config.yaml so read_events_storage / load paths behave like a real
     # project (local mode is the default; no events_storage key needed).
@@ -464,7 +464,7 @@ def _snapshot_db(db_path: Path, events_path: Path) -> str:
     Opens with a SystemClock; serialize_state is clock-independent (it reads
     stored rows), so the snapshot is comparable to the FrozenClock-built one.
     """
-    from fakoli_state.clock import SystemClock
+    from anvil.clock import SystemClock
 
     b = SqliteBackend(
         db_path=str(db_path),
@@ -531,7 +531,7 @@ class TestMigrateState:
 
         # Replay the (untouched) event log into a scratch db and snapshot it.
         scratch_db = tmp_path / "scratch.db"
-        from fakoli_state.clock import SystemClock
+        from anvil.clock import SystemClock
 
         b = SqliteBackend(
             db_path=str(scratch_db),
@@ -593,7 +593,7 @@ class TestMigrateState:
         self, tmp_path: Path
     ) -> None:
         """An active claim blocks the migration (same guard as migrate-events)."""
-        state_dir = tmp_path / ".fakoli-state"
+        state_dir = tmp_path / ".anvil"
         state_dir.mkdir(parents=True)
         (state_dir / "config.yaml").write_text(
             "project_name: 'Busy'\nproject_id: 'proj-1'\n", encoding="utf-8"

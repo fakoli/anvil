@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.claims.manager and fakoli_state.claims.stale.
+"""Tests for anvil.claims.manager and anvil.claims.stale.
 
 Coverage target: claims/ >= 95%.
 
@@ -18,20 +18,20 @@ from typing import Any
 
 import pytest
 
-from fakoli_state.claims.manager import (
+from anvil.claims.manager import (
     ClaimError,
     ClaimManager,
     ClaimResult,
     ConflictWarning,
 )
-from fakoli_state.claims.stale import detect_and_release_stale
-from fakoli_state.clock import FrozenClock
-from fakoli_state.state.models import (
+from anvil.claims.stale import detect_and_release_stale
+from anvil.clock import FrozenClock
+from anvil.state.models import (
     ClaimStatus,
     EventDraft,
     TaskStatus,
 )
-from fakoli_state.state.sqlite import SqliteBackend
+from anvil.state.sqlite import SqliteBackend
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -972,8 +972,8 @@ class TestReapStaleClaimsSchemaMismatch:
     """
 
     def test_schema_mismatch_propagates(self, tmp_path: Path) -> None:
-        from fakoli_state.cli._helpers import _reap_stale_claims
-        from fakoli_state.state.backend import SchemaMismatch
+        from anvil.cli._helpers import _reap_stale_claims
+        from anvil.state.backend import SchemaMismatch
 
         class _Boom:
             """Stand-in backend whose list_active_claims raises SchemaMismatch.
@@ -988,8 +988,8 @@ class TestReapStaleClaimsSchemaMismatch:
             _reap_stale_claims(_Boom())  # type: ignore[arg-type]
 
     def test_state_locked_is_swallowed(self, tmp_path: Path) -> None:
-        from fakoli_state.cli._helpers import _reap_stale_claims
-        from fakoli_state.state.backend import StateLocked
+        from anvil.cli._helpers import _reap_stale_claims
+        from anvil.state.backend import StateLocked
 
         class _Locked:
             def list_active_claims(self) -> list[Any]:
@@ -999,8 +999,8 @@ class TestReapStaleClaimsSchemaMismatch:
         _reap_stale_claims(_Locked())  # type: ignore[arg-type]
 
     def test_transaction_aborted_is_swallowed(self, tmp_path: Path) -> None:
-        from fakoli_state.cli._helpers import _reap_stale_claims
-        from fakoli_state.state.backend import TransactionAborted
+        from anvil.cli._helpers import _reap_stale_claims
+        from anvil.state.backend import TransactionAborted
 
         class _Aborted:
             def list_active_claims(self) -> list[Any]:
@@ -1294,7 +1294,7 @@ class TestClaimManagerEdgeCases:
             conn.close()
 
             m = _make_manager(b, actor="agent-alpha", clock=clock)
-            with self._capture_warnings(logging.getLogger("fakoli_state.claims.manager")):
+            with self._capture_warnings(logging.getLogger("anvil.claims.manager")):
                 result = m.claim("T001", force=True)
             assert result.claim.status == ClaimStatus.active
         finally:
@@ -1493,8 +1493,8 @@ class TestStaleDetectionEdgeCases:
             )
             conn.close()
 
-            from fakoli_state.claims.stale import detect_and_release_stale
-            from fakoli_state.state.backend import TransactionAborted as _TA
+            from anvil.claims.stale import detect_and_release_stale
+            from anvil.state.backend import TransactionAborted as _TA
 
             call_count = {"n": 0}
             original_append = b.append
@@ -1522,7 +1522,7 @@ class TestStaleDetectionEdgeCases:
         """
         import unittest.mock as _mock
 
-        from fakoli_state.state.models import Claim, ClaimStatus, ClaimType
+        from anvil.state.models import Claim, ClaimStatus, ClaimType
 
         clock = _make_clock(_T0)
         b = _make_backend(tmp_path, clock)
@@ -1544,7 +1544,7 @@ class TestStaleDetectionEdgeCases:
                 release_reason=None,
             )
 
-            from fakoli_state.claims.stale import detect_and_release_stale
+            from anvil.claims.stale import detect_and_release_stale
 
             with _mock.patch.object(b, "list_active_claims", return_value=[fake_claim]):
                 reaped = detect_and_release_stale(b, clock)

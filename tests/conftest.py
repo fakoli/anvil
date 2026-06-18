@@ -1,4 +1,4 @@
-"""Shared test fixtures for fakoli-state Phase 2 test suite.
+"""Shared test fixtures for anvil Phase 2 test suite.
 
 All fixtures use tmp_path (pytest's built-in per-test temp directory) so tests
 are hermetically isolated and leave no on-disk state after completion.
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from fakoli_state.clock import FrozenClock
+from anvil.clock import FrozenClock
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def state_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def backend(state_dir: Path, frozen_clock: FrozenClock):  # type: ignore[no-untyped-def]
     """A fresh SqliteBackend initialized in tmp; cleaned up after test."""
-    from fakoli_state.state.sqlite import SqliteBackend
+    from anvil.state.sqlite import SqliteBackend
 
     db_path = str(state_dir / "state.db")
     events_path = str(state_dir / "events.jsonl")

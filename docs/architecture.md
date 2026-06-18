@@ -1,8 +1,8 @@
-# fakoli-state architecture
+# anvil architecture
 
 > Condensed reference for the **shipped v1.10.0** state. For the original v0
 > vision and aspirational items, see
-> [`specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md).
+> [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
 > For what is planned but not yet shipped, see
 > [`roadmap.md`](roadmap.md).
 >
@@ -15,25 +15,25 @@
 
 ## Mental model
 
-fakoli-state is to agentic software work what Terraform is to infrastructure:
+anvil is to agentic software work what Terraform is to infrastructure:
 a canonical state file holds the truth, derived views (work packets, markdown
 plans, dependency graphs) are projected from it, and the plan-then-apply
 rhythm gates execution behind review. The PRD is the configuration; the
-SQLite database is the state; `fakoli-state apply` is the commit point that
+SQLite database is the state; `anvil apply` is the commit point that
 records evidence and transitions a task to `done`. Drift (stale claims,
 orphan branches, sync conflicts) is detected and reconciled, not papered
 over.
 
-In the Fakoli ecosystem, fakoli-state plays the **what is true** role of the
+In the Fakoli ecosystem, anvil plays the **what is true** role of the
 plugin trinity:
 
 - `fakoli-flow` defines how work moves (skill choreography, gates, merges).
 - `fakoli-crew` defines who does the work (specialist subagents).
-- `fakoli-state` defines what is true (the durable record).
+- `anvil` defines what is true (the durable record).
 
 The three plugins compose. When all three are installed, `flow:execute` reads
-`fakoli-state next`, dispatches the right crew specialist, and submits
-evidence back to canonical state before the merge gate. When fakoli-state is
+`anvil next`, dispatches the right crew specialist, and submits
+evidence back to canonical state before the merge gate. When anvil is
 absent, flow and crew fall back to their markdown-status conventions.
 
 The full positioning (the trinity sentence, the five wedges, the Terraform
@@ -50,7 +50,7 @@ graph TD
     Agent["AI coding agent<br/>(Claude Code, Codex, Cursor, ...)"]
 
     subgraph Entry["Entry surfaces"]
-        CLI["CLI<br/>fakoli-state &lt;cmd&gt;"]
+        CLI["CLI<br/>anvil &lt;cmd&gt;"]
         MCP["MCP server<br/>FastMCP stdio<br/>13 tools"]
         Hooks["Hooks<br/>SessionStart / PreToolUse / PostToolUse"]
     end
@@ -123,25 +123,25 @@ Source: [`assets/diagrams/component.mmd`](../assets/diagrams/component.mmd).
 | Layer | What it owns | Key files |
 |---|---|---|
 | Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json) |
-| CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/fakoli_state/cli/__init__.py`](../bin/src/fakoli_state/cli/__init__.py) |
-| MCP server | Runtime-neutral capability surface — 13 stdio tools any MCP client can call | [`bin/src/fakoli_state/mcp_server.py`](../bin/src/fakoli_state/mcp_server.py) |
+| CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py) |
+| MCP server | Runtime-neutral capability surface — 13 stdio tools any MCP client can call | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
 | Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](../hooks/hooks.json), [`hooks/*.sh`](../hooks/) |
 | Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](../skills/) |
 | Plugin agents | Specialist roles owned by this plugin; defer to fakoli-crew when installed | [`agents/*.md`](../agents/) |
-| Backend protocol | The seam between state-engine logic and storage; SqliteBackend is the only impl that ships | [`bin/src/fakoli_state/state/backend.py`](../bin/src/fakoli_state/state/backend.py), [`bin/src/fakoli_state/state/sqlite.py`](../bin/src/fakoli_state/state/sqlite.py) |
-| Transitions | Pure state machine — no I/O, no DB, no side-effects beyond `model_copy()` | [`bin/src/fakoli_state/state/transitions.py`](../bin/src/fakoli_state/state/transitions.py) |
-| Claims manager | Atomic lease + heartbeat; stale detection on every operation | [`bin/src/fakoli_state/claims/manager.py`](../bin/src/fakoli_state/claims/manager.py), [`bin/src/fakoli_state/claims/stale.py`](../bin/src/fakoli_state/claims/stale.py) |
-| Planning engine | Template-first PRD parser; optional LLM augmentation; deterministic six-dim scorer | [`bin/src/fakoli_state/planning/`](../bin/src/fakoli_state/planning/) |
-| Context engine | Renders work packets (markdown + JSON) from canonical state | [`bin/src/fakoli_state/context/packets.py`](../bin/src/fakoli_state/context/packets.py) |
-| Review engine | Pure transition-gate functions (readiness, evidence) | [`bin/src/fakoli_state/review/gates.py`](../bin/src/fakoli_state/review/gates.py) |
-| Git ops | Auto-create `agent/<task>-<slug>` branch on `claim`; optional worktree | [`bin/src/fakoli_state/git_ops/`](../bin/src/fakoli_state/git_ops/) |
-| Sync engine | Bidirectional GitHub Issues projection via the `SyncProvider` Protocol | [`bin/src/fakoli_state/sync/`](../bin/src/fakoli_state/sync/) |
+| Backend protocol | The seam between state-engine logic and storage; SqliteBackend is the only impl that ships | [`bin/src/anvil/state/backend.py`](../bin/src/anvil/state/backend.py), [`bin/src/anvil/state/sqlite.py`](../bin/src/anvil/state/sqlite.py) |
+| Transitions | Pure state machine — no I/O, no DB, no side-effects beyond `model_copy()` | [`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py) |
+| Claims manager | Atomic lease + heartbeat; stale detection on every operation | [`bin/src/anvil/claims/manager.py`](../bin/src/anvil/claims/manager.py), [`bin/src/anvil/claims/stale.py`](../bin/src/anvil/claims/stale.py) |
+| Planning engine | Template-first PRD parser; optional LLM augmentation; deterministic six-dim scorer | [`bin/src/anvil/planning/`](../bin/src/anvil/planning/) |
+| Context engine | Renders work packets (markdown + JSON) from canonical state | [`bin/src/anvil/context/packets.py`](../bin/src/anvil/context/packets.py) |
+| Review engine | Pure transition-gate functions (readiness, evidence) | [`bin/src/anvil/review/gates.py`](../bin/src/anvil/review/gates.py) |
+| Git ops | Auto-create `agent/<task>-<slug>` branch on `claim`; optional worktree | [`bin/src/anvil/git_ops/`](../bin/src/anvil/git_ops/) |
+| Sync engine | Bidirectional GitHub Issues projection via the `SyncProvider` Protocol | [`bin/src/anvil/sync/`](../bin/src/anvil/sync/) |
 
 The two iron rules of the layering:
 
 1. **CLI is the one-and-only mutator.** Hooks shell out to the CLI; the MCP
    server opens a `SqliteBackend` directly but only via the same engine
-   functions the CLI uses. Skills and agents do not write to `.fakoli-state/`
+   functions the CLI uses. Skills and agents do not write to `.anvil/`
    directly — they call the CLI.
 2. **Transitions are pure.** Every status change is a function from
    `(entity, context) -> new entity`. Persisting the result is the backend's
@@ -152,7 +152,7 @@ The two iron rules of the layering:
 ## Data model
 
 The full type system lives in
-[`bin/src/fakoli_state/state/models.py`](../bin/src/fakoli_state/state/models.py)
+[`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py)
 — **25 Pydantic v2 classes** total (11 enums + 14 models). Every field is
 validated at every transition (`extra="forbid"`,
 `validate_assignment=True`); all timestamps are UTC-required.
@@ -164,7 +164,7 @@ validated at every transition (`extra="forbid"`,
 | `PRDStatus` | draft, reviewed, approved, rejected | Gates task claimability |
 | `FeatureStatus` | proposed, ready, in_progress, done | Coarse-grain status on a Feature |
 | `TaskStatus` | proposed, drafted, reviewed, ready, claimed, in_progress, blocked, needs_review, accepted, done, rejected | The 11-status task lifecycle (see [Task lifecycle](#task-lifecycle)) |
-| `TaskPriority` | low, medium, high, critical | Sort key for `fakoli-state next` |
+| `TaskPriority` | low, medium, high, critical | Sort key for `anvil next` |
 | `ClaimType` | task, feature, file_scope, exploratory | Distinguishes whole-task vs partial leases |
 | `ClaimStatus` | active, released, stale, force_released | Lease lifecycle |
 | `ReviewTargetKind` | prd, task, feature | What a `Review` row points at |
@@ -256,7 +256,7 @@ Source: [`assets/diagrams/lifecycle.mmd`](../assets/diagrams/lifecycle.mmd).
 
 All 11 statuses are defined in `TaskStatus` and the allowed transitions are
 the public functions in
-[`bin/src/fakoli_state/state/transitions.py`](../bin/src/fakoli_state/state/transitions.py).
+[`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py).
 The module is pure (no I/O); each function returns a new `Task` via
 `model_copy(update=...)`.
 
@@ -275,14 +275,14 @@ Three named gates appear in the transition module; each raises
 
 | Transition | Typical driver | CLI verb |
 |---|---|---|
-| proposed → drafted → reviewed → ready | Planner agent or human via `plan` / `review` | `fakoli-state plan`, `fakoli-state review tasks` |
-| ready → claimed | Coding agent (or human) | `fakoli-state claim T012` |
+| proposed → drafted → reviewed → ready | Planner agent or human via `plan` / `review` | `anvil plan`, `anvil review tasks` |
+| ready → claimed | Coding agent (or human) | `anvil claim T012` |
 | claimed → in_progress | Auto on first heartbeat or file change | (implicit) |
-| in_progress ↔ blocked | Agent or human | `fakoli-state hook ... block` |
-| in_progress → needs_review | Coding agent submitting evidence | `fakoli-state submit T012 ...` |
-| needs_review → accepted or rejected | Human reviewer or critic agent | `fakoli-state apply T012 --approve` / `--reject` |
+| in_progress ↔ blocked | Agent or human | `anvil hook ... block` |
+| in_progress → needs_review | Coding agent submitting evidence | `anvil submit T012 ...` |
+| needs_review → accepted or rejected | Human reviewer or critic agent | `anvil apply T012 --approve` / `--reject` |
 | accepted → done | Auto on `apply --approve` | (implicit) |
-| rejected → drafted | Author revises and re-submits | `fakoli-state plan` (re-edit) |
+| rejected → drafted | Author revises and re-submits | `anvil plan` (re-edit) |
 
 Only `drafted ↔ ready` and the `blocked` toggle are exposed via the
 `update_task_status` MCP tool; all other transitions require a more
@@ -305,22 +305,22 @@ Every state mutation appends one `Event` row to two places:
 The replay guarantee is the central audit property of the engine: **replaying
 `events.jsonl` from an empty database must reconstruct canonical SQLite state
 exactly**. This is what makes the engine safe to back up by copying
-`.fakoli-state/` and what makes a corrupted database recoverable.
+`.anvil/` and what makes a corrupted database recoverable.
 
-A native `fakoli-state replay --from-events events.jsonl` subcommand is
+A native `anvil replay --from-events events.jsonl` subcommand is
 planned for v2.1 (item P9B-7 — see
 [`roadmap.md` § Snapshot / replay](roadmap.md#theme-snapshot--replay)) and
 **does not ship today**. Until it does, the supported backup and recovery
-flow is to copy `.fakoli-state/` wholesale; the replay guarantee makes
+flow is to copy `.anvil/` wholesale; the replay guarantee makes
 that safe and minimal:
 
 ```bash
 # Back up before destructive work.
-cp -r .fakoli-state /backup/location/fakoli-state-$(date +%Y-%m-%d)
+cp -r .anvil /backup/location/anvil-$(date +%Y-%m-%d)
 
 # Recover from a corrupted state.db by restoring the backup.
-rm -f .fakoli-state/state.db .fakoli-state/state.db-wal .fakoli-state/state.db-shm
-cp /backup/location/fakoli-state-YYYY-MM-DD/state.db .fakoli-state/state.db
+rm -f .anvil/state.db .anvil/state.db-wal .anvil/state.db-shm
+cp /backup/location/anvil-YYYY-MM-DD/state.db .anvil/state.db
 ```
 
 `events.jsonl` is the durable audit log even without replay tooling —
@@ -336,11 +336,11 @@ assignment to the backend's `apply_event` method.
 
 ## Storage layout
 
-`fakoli-state init` scaffolds this layout inside the user's project root
+`anvil init` scaffolds this layout inside the user's project root
 (not inside the plugin):
 
 ```text
-<user-project>/.fakoli-state/
+<user-project>/.anvil/
 ├── config.yaml         # project-level config (sync providers, lease defaults, ...)
 ├── state.db            # SQLite — the canonical state (WAL mode)
 ├── events.jsonl        # append-only audit / event log (replay source)
@@ -349,13 +349,13 @@ assignment to the backend's `apply_event` method.
 ```
 
 A `snapshots/` subdirectory was originally planned (and is shown in the v0
-spec) but the `fakoli-state snapshot` subcommand has not yet shipped — see
+spec) but the `anvil snapshot` subcommand has not yet shipped — see
 [Roadmap → v2.1 → snapshot subcommand](roadmap.md#theme-snapshot--replay).
-Backups today are done by copying `.fakoli-state/` wholesale; the replay
+Backups today are done by copying `.anvil/` wholesale; the replay
 guarantee makes that safe.
 
 `hooks` and the CLI alike resolve `STATE_DIR` relative to
-`${CLAUDE_PROJECT_DIR:-$PWD}/.fakoli-state` so every agent invocation,
+`${CLAUDE_PROJECT_DIR:-$PWD}/.anvil` so every agent invocation,
 regardless of cwd at call time, addresses the same project's state.
 
 ---
@@ -363,7 +363,7 @@ regardless of cwd at call time, addresses the same project's state.
 ## Concurrency model
 
 Multiple humans and multiple agents must coordinate on the same canonical
-state without stepping on each other. fakoli-state achieves this with four
+state without stepping on each other. anvil achieves this with four
 mechanisms layered together:
 
 1. **SQLite WAL + `BEGIN IMMEDIATE`.** Every mutating operation runs inside
@@ -372,16 +372,16 @@ mechanisms layered together:
 2. **Claim leases with heartbeats.** A `Claim` row carries
    `lease_expires_at` and `last_heartbeat_at`. The CLI's `renew` command
    (and the MCP `renew_claim` tool) extends the lease. Default lease is 60
-   minutes (configurable via `.fakoli-state/config.yaml`); the in-code
-   default lives at [`claims/manager.py`](../bin/src/fakoli_state/claims/manager.py).
+   minutes (configurable via `.anvil/config.yaml`); the in-code
+   default lives at [`claims/manager.py`](../bin/src/anvil/claims/manager.py).
 3. **Stale-claim reaping.** Every mutating CLI command and every mutating
    MCP tool calls
-   [`detect_and_release_stale()`](../bin/src/fakoli_state/claims/stale.py)
+   [`detect_and_release_stale()`](../bin/src/anvil/claims/stale.py)
    at entry. Leases past their expiry are auto-released with
    `release_reason="stale"`; the audit event preserves the original
    claimant. Read-only listers skip reaping for latency.
 4. **Conflict groups.** A `ConflictGroup` row names a set of tasks whose
-   `expected_files` overlap. `fakoli-state next` and the
+   `expected_files` overlap. `anvil next` and the
    `get_next_task` MCP tool refuse to surface a task whose conflict group
    already has an active claim — preventing two agents from being routed
    to overlapping work even when neither task is itself claimed.
@@ -399,13 +399,13 @@ when no claim is held.
 ```mermaid
 graph LR
     Flow["fakoli-flow<br/>how work moves<br/>(skills: execute, verify, finish)"]
-    State["fakoli-state<br/>what is true<br/>(SQLite + JSONL + claims)"]
+    State["anvil<br/>what is true<br/>(SQLite + JSONL + claims)"]
     Crew["fakoli-crew<br/>who does the work<br/>(specialist subagents)"]
 
-    Flow -->|"flow:execute calls<br/>fakoli-state next"| State
+    Flow -->|"flow:execute calls<br/>anvil next"| State
     State -->|"returns claimable Task<br/>+ work packet"| Flow
     Flow -->|"dispatches matching<br/>specialist (welder, scout, ...)"| Crew
-    Crew -->|"submits evidence<br/>via fakoli-state submit"| State
+    Crew -->|"submits evidence<br/>via anvil submit"| State
     State -->|"transitions task<br/>to needs_review"| Flow
     Flow -->|"flow:verify gates<br/>before merge"| State
 
@@ -422,10 +422,10 @@ Three patterns make this composition safe across plugins:
   "^fakoli-flow"` (or fakoli-crew) check before invoking it. No fuzzy
   detection by prose; the shell-exit code is the contract.
 - **Graceful fallback.** When a sibling is absent, the skill falls
-  through to its plugin-local equivalent (e.g., fakoli-state's own
+  through to its plugin-local equivalent (e.g., anvil's own
   `sentinel` agent if `fakoli-crew:sentinel` is not installed).
 - **State is the rendezvous.** Flow does not call crew directly to ask
-  for a result; crew submits evidence to fakoli-state, and flow polls
+  for a result; crew submits evidence to anvil, and flow polls
   state's `needs_review` queue. This keeps each plugin's blast radius
   bounded and prevents tight coupling between flow's skills and crew's
   agents.
@@ -438,7 +438,7 @@ Three patterns make this composition safe across plugins:
 
 Full reference is forthcoming at
 [`docs/cli-reference.md`](cli-reference.md). The top-level commands assembled
-in [`bin/src/fakoli_state/cli/__init__.py`](../bin/src/fakoli_state/cli/__init__.py):
+in [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py):
 
 - Lifecycle setup: `init`, `status`
 - PRD authoring: `prd parse`, `prd review` (sub-app)
@@ -452,7 +452,7 @@ in [`bin/src/fakoli_state/cli/__init__.py`](../bin/src/fakoli_state/cli/__init__
 ### MCP tools (13)
 
 Full reference is at [`docs/mcp.md`](mcp.md). Source:
-[`bin/src/fakoli_state/mcp_server.py`](../bin/src/fakoli_state/mcp_server.py).
+[`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py).
 
 | # | Tool | Mutates | Reaps stale |
 |---|---|---|---|
@@ -472,7 +472,7 @@ Full reference is at [`docs/mcp.md`](mcp.md). Source:
 
 Sync tools (`sync_run`, `sync_health`, `sync_status`, `sync_reconcile`) are
 not yet on the MCP surface — agents that want sync today shell out via Bash
-to `fakoli-state sync`. See
+to `anvil sync`. See
 [Roadmap → v2.1 → MCP sync tools](roadmap.md#theme-mcp-surface-sync-tools).
 
 ### Hooks (4)
@@ -524,25 +524,25 @@ points at a file you can grep.
 
 | Layer | File(s) |
 |---|---|
-| Entry: CLI assembly | [`bin/src/fakoli_state/cli/__init__.py`](../bin/src/fakoli_state/cli/__init__.py) |
-| Entry: MCP server (13 tools) | [`bin/src/fakoli_state/mcp_server.py`](../bin/src/fakoli_state/mcp_server.py) |
+| Entry: CLI assembly | [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py) |
+| Entry: MCP server (13 tools) | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
 | Entry: hooks manifest | [`hooks/hooks.json`](../hooks/hooks.json) |
-| Type system | [`bin/src/fakoli_state/state/models.py`](../bin/src/fakoli_state/state/models.py) |
-| Transitions (pure) | [`bin/src/fakoli_state/state/transitions.py`](../bin/src/fakoli_state/state/transitions.py) |
-| Backend Protocol | [`bin/src/fakoli_state/state/backend.py`](../bin/src/fakoli_state/state/backend.py) |
-| SQLite impl + schema | [`bin/src/fakoli_state/state/sqlite.py`](../bin/src/fakoli_state/state/sqlite.py), [`schema.py`](../bin/src/fakoli_state/state/schema.py) |
-| Event payloads | [`bin/src/fakoli_state/state/payloads.py`](../bin/src/fakoli_state/state/payloads.py) |
-| Claims manager | [`bin/src/fakoli_state/claims/manager.py`](../bin/src/fakoli_state/claims/manager.py) |
-| Stale reaping | [`bin/src/fakoli_state/claims/stale.py`](../bin/src/fakoli_state/claims/stale.py) |
-| Planning (template + LLM + scoring) | [`bin/src/fakoli_state/planning/`](../bin/src/fakoli_state/planning/) |
-| Context (work packets) | [`bin/src/fakoli_state/context/packets.py`](../bin/src/fakoli_state/context/packets.py) |
-| Review gates | [`bin/src/fakoli_state/review/gates.py`](../bin/src/fakoli_state/review/gates.py) |
-| Git ops | [`bin/src/fakoli_state/git_ops/`](../bin/src/fakoli_state/git_ops/) |
-| Sync Protocol + registry | [`bin/src/fakoli_state/sync/provider.py`](../bin/src/fakoli_state/sync/provider.py), [`registry.py`](../bin/src/fakoli_state/sync/registry.py) |
-| GitHub provider | [`bin/src/fakoli_state/sync/providers/github_issues.py`](../bin/src/fakoli_state/sync/providers/github_issues.py) |
-| Reconciliation | [`bin/src/fakoli_state/sync/reconciliation.py`](../bin/src/fakoli_state/sync/reconciliation.py) |
-| Plugin config | [`bin/src/fakoli_state/config.py`](../bin/src/fakoli_state/config.py) |
-| Clock abstraction | [`bin/src/fakoli_state/clock.py`](../bin/src/fakoli_state/clock.py) |
+| Type system | [`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py) |
+| Transitions (pure) | [`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py) |
+| Backend Protocol | [`bin/src/anvil/state/backend.py`](../bin/src/anvil/state/backend.py) |
+| SQLite impl + schema | [`bin/src/anvil/state/sqlite.py`](../bin/src/anvil/state/sqlite.py), [`schema.py`](../bin/src/anvil/state/schema.py) |
+| Event payloads | [`bin/src/anvil/state/payloads.py`](../bin/src/anvil/state/payloads.py) |
+| Claims manager | [`bin/src/anvil/claims/manager.py`](../bin/src/anvil/claims/manager.py) |
+| Stale reaping | [`bin/src/anvil/claims/stale.py`](../bin/src/anvil/claims/stale.py) |
+| Planning (template + LLM + scoring) | [`bin/src/anvil/planning/`](../bin/src/anvil/planning/) |
+| Context (work packets) | [`bin/src/anvil/context/packets.py`](../bin/src/anvil/context/packets.py) |
+| Review gates | [`bin/src/anvil/review/gates.py`](../bin/src/anvil/review/gates.py) |
+| Git ops | [`bin/src/anvil/git_ops/`](../bin/src/anvil/git_ops/) |
+| Sync Protocol + registry | [`bin/src/anvil/sync/provider.py`](../bin/src/anvil/sync/provider.py), [`registry.py`](../bin/src/anvil/sync/registry.py) |
+| GitHub provider | [`bin/src/anvil/sync/providers/github_issues.py`](../bin/src/anvil/sync/providers/github_issues.py) |
+| Reconciliation | [`bin/src/anvil/sync/reconciliation.py`](../bin/src/anvil/sync/reconciliation.py) |
+| Plugin config | [`bin/src/anvil/config.py`](../bin/src/anvil/config.py) |
+| Clock abstraction | [`bin/src/anvil/clock.py`](../bin/src/anvil/clock.py) |
 
 ---
 
@@ -563,7 +563,7 @@ the high-level buckets:
 - **v2.1 — follow-on capability.**
   - `JiraIssuesProvider` (per-project workflow discovery).
   - `GitHubProjectsProvider` (Projects v2 board surface).
-  - `fakoli-state snapshot` subcommand (`sqlite3 .backup` wrapper, retention).
+  - `anvil snapshot` subcommand (`sqlite3 .backup` wrapper, retention).
   - MCP sync surface — four new tools (`sync_run`, `sync_health`,
     `sync_status`, `sync_reconcile`).
 - **v2.x — hygiene.**
@@ -583,7 +583,7 @@ and welder-effort estimates.
 ## Further reading
 
 - [`_positioning.md`](_positioning.md) — the trinity, the five wedges, the Terraform analogy (internal source-of-truth for marketing copy)
-- [`specs/2026-05-24-fakoli-state-v0.md`](specs/2026-05-24-fakoli-state-v0.md) — the original 358-line v0 build spec (this document is its condensed shipped sibling)
+- [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — the original 358-line v0 build spec (this document is its condensed shipped sibling)
 - [`mcp.md`](mcp.md) — full 13-tool MCP reference with error envelope contract
 - [`github-sync.md`](github-sync.md) — bidirectional GitHub Issues sync reference
 - [`sync-providers.md`](sync-providers.md) — contributor guide for new sync providers

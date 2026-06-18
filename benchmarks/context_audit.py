@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-context_audit.py — Measure the ALWAYS-ON context/token footprint of fakoli-state.
+context_audit.py — Measure the ALWAYS-ON context/token footprint of anvil.
 
-"Measure before you market." fakoli-state positions itself as context-frugal /
+"Measure before you market." anvil positions itself as context-frugal /
 structurally immune to context bloat. This script MEASURES that honestly.
 
-It counts the tokens that sit in an agent's context the moment fakoli-state is
+It counts the tokens that sit in an agent's context the moment anvil is
 installed, BEFORE any skill is invoked or any tool is called:
 
   ALWAYS-ON (paid on every turn, every agent):
@@ -88,7 +88,7 @@ def split_frontmatter(text: str) -> tuple[str, str]:
 def extract_description(frontmatter: str) -> str:
     """Extract the `description` field value from a YAML frontmatter block.
 
-    Handles three shapes that appear in fakoli-state:
+    Handles three shapes that appear in anvil:
       1. Single-line:   description: some text
       2. Block scalar:  description: >    (folded, indented continuation lines)
                         description: |    (literal)
@@ -223,7 +223,7 @@ def _mcp_tool_wire_schemas() -> list[dict] | None:
     """
     helper = (
         "import json,asyncio\n"
-        "from fakoli_state.mcp_server import mcp\n"
+        "from anvil.mcp_server import mcp\n"
         "async def m():\n"
         "    tools = await mcp.list_tools()\n"
         "    out=[]\n"
@@ -298,7 +298,7 @@ def collect_hook_injection() -> tuple[Category, str]:
     injected = ""
     if script.exists():
         try:
-            # Run in a scratch dir with no .fakoli-state so output is the
+            # Run in a scratch dir with no .anvil so output is the
             # deterministic "not initialized" line. CLAUDE_PLUGIN_ROOT points
             # at the plugin so the script can locate its bin.
             import tempfile
@@ -370,7 +370,7 @@ def main() -> int:
     ondemand.append(collect_agent_bodies())
 
     print(hr())
-    print("  fakoli-state — ALWAYS-ON CONTEXT FOOTPRINT AUDIT")
+    print("  anvil — ALWAYS-ON CONTEXT FOOTPRINT AUDIT")
     print(hr())
     print(f"  Tokenizer: {TOKENIZER_NAME}")
     print(f"  Plugin root: {PLUGIN_ROOT}")

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# anvil-mcp — shell wrapper for the MCP server entry point.
+# anvil.mcp_server landed in Phase 6 and registers 13 tools via FastMCP.
+
+# Preserve caller's cwd; see bin/anvil for the rationale.
+ORIGINAL_PWD="$PWD"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! command -v uv > /dev/null 2>&1; then
+    printf 'anvil-mcp: uv is required: https://docs.astral.sh/uv/getting-started/installation/\n' >&2
+    exit 127
+fi
+
+# Sync only when uv.lock is missing, pyproject.toml is newer than .venv,
+# or uv.lock is newer than .venv (covers the `git pull` case where only the
+# lock file moves). File-age based, fully idempotent — no cat/grep involved.
+(cd "$BIN_DIR" && {
+    if [ ! -f uv.lock ] || [ pyproject.toml -nt .venv ] || [ uv.lock -nt .venv ]; then
+        uv sync --quiet
+    fi
+})
+
+cd "$ORIGINAL_PWD" || exit 1
+exec uv run --quiet --project "$BIN_DIR" python -m anvil.mcp_server "$@"

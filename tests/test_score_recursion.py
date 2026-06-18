@@ -12,14 +12,14 @@ from __future__ import annotations
 
 import datetime
 
-from fakoli_state.planning.scoring import (
+from anvil.planning.scoring import (
     DEFAULT_RECURSION_DEPTH_CAP,
     _depth_of,
     build_expansion_queue,
     build_recursive_expansion_queue,
     is_expanded,
 )
-from fakoli_state.state.models import (
+from anvil.state.models import (
     Score,
     Task,
     TaskPriority,

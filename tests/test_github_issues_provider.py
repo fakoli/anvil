@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.sync.providers.github_issues — Phase 8 Wave 2 Task 4.
+"""Tests for anvil.sync.providers.github_issues — Phase 8 Wave 2 Task 4.
 
 Every test mocks the transport layer (subprocess for gh CLI, ``responses``
 library for HTTP) — NO live GitHub API calls. Ever.
@@ -32,8 +32,8 @@ import httpx
 import pytest
 import respx  # httpx-native mocker (responses lib only mocks `requests`)
 
-from fakoli_state.state.models import Task, TaskPriority, TaskStatus
-from fakoli_state.sync import (
+from anvil.state.models import Task, TaskPriority, TaskStatus
+from anvil.sync import (
     PROVIDER_REGISTRY,
     AuthenticationFailed,
     ExternalRef,
@@ -44,9 +44,9 @@ from fakoli_state.sync import (
     get_sync_provider,
     list_sync_providers,
 )
-from fakoli_state.sync.clients.gh_cli import GhCliClient
-from fakoli_state.sync.clients.github_http import GithubHttpClient
-from fakoli_state.sync.providers.github_issues import (
+from anvil.sync.clients.gh_cli import GhCliClient
+from anvil.sync.clients.github_http import GithubHttpClient
+from anvil.sync.providers.github_issues import (
     DONE_STATUSES,
     LABEL_TO_STATUS,
     STATUS_TO_LABEL,
@@ -91,7 +91,7 @@ def _make_gh_issue_payload(
     *,
     number: int = 42,
     title: str = "Sample task",
-    body: str = "Task body\n\n---\n_synced from fakoli-state task T001_",
+    body: str = "Task body\n\n---\n_synced from anvil task T001_",
     state: str = "open",
     labels: list[str] | None = None,
     assignees: list[str] | None = None,
@@ -163,7 +163,7 @@ def http_provider() -> GitHubIssuesProvider:
 
 class TestProviderRegistration:
     def test_auto_registers_on_sync_package_import(self) -> None:
-        # The fakoli_state.sync import at the top of this module already
+        # The anvil.sync import at the top of this module already
         # triggered registration via the providers package side-effect.
         assert "github_issues" in list_sync_providers()
 
@@ -679,7 +679,7 @@ class TestFetchTask:
     def test_happy_path_http(self, http_provider) -> None:
         payload = _make_gh_issue_payload(
             number=12,
-            body="My description\n\n---\n_synced from fakoli-state task T001_",
+            body="My description\n\n---\n_synced from anvil task T001_",
             labels=["status:ready", "p1"],
             assignees=["octocat"],
         )
@@ -1077,7 +1077,7 @@ class TestProviderMetadata:
 
     def test_body_footer_round_trip(self) -> None:
         body = _compose_body("My description", "T042")
-        assert body.endswith("_synced from fakoli-state task T042_")
+        assert body.endswith("_synced from anvil task T042_")
         assert _strip_footer(body) == "My description"
 
     def test_strip_footer_preserves_unrelated_body(self) -> None:

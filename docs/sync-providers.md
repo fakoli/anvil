@@ -1,8 +1,8 @@
-# fakoli-state sync providers
+# anvil sync providers
 
 ## Why a Protocol
 
-fakoli-state needs to talk to many task-tracker backends — GitHub Issues,
+anvil needs to talk to many task-tracker backends — GitHub Issues,
 GitHub Projects, Linear, Monday, Jira, internal trackers — without
 re-implementing the state engine, reconciliation, CLI, or audit log for
 each one. The `SyncProvider` Protocol is the single shape every backend
@@ -16,7 +16,7 @@ documentation for the bundled GitHub Issues provider lives in
 
 ## The `SyncProvider` Protocol
 
-Defined in `bin/src/fakoli_state/sync/provider.py`. Use
+Defined in `bin/src/anvil/sync/provider.py`. Use
 `typing.Protocol` — runtime structural typing, no inheritance required.
 
 ```python
@@ -120,7 +120,7 @@ Returned by `health_check`. Never `raise`; encode failure as fields.
 Defined in `sync/registry.py`.
 
 ```python
-from fakoli_state.sync.registry import register_sync_provider
+from anvil.sync.registry import register_sync_provider
 
 register_sync_provider("linear_issues", LinearIssuesProvider)
 ```
@@ -144,8 +144,8 @@ See `sync/providers/github_issues.py:613` for the registration call and
 ## Step-by-step: add Linear support
 
 ```
-bin/src/fakoli_state/sync/providers/linear.py        # new provider class
-bin/src/fakoli_state/sync/clients/linear_api.py      # API client (GraphQL)
+bin/src/anvil/sync/providers/linear.py        # new provider class
+bin/src/anvil/sync/clients/linear_api.py      # API client (GraphQL)
 tests/test_linear_provider.py                        # respx-based tests
 ```
 
@@ -153,7 +153,7 @@ tests/test_linear_provider.py                        # respx-based tests
 
 `sync/clients/linear_api.py` wraps the GraphQL endpoint via `httpx`.
 Keep it transport-only: no `Task` ↔ Linear-issue translation, no
-fakoli-state types. Each method returns a raw dict and raises
+anvil types. Each method returns a raw dict and raises
 `SyncProviderError` on transport failure.
 
 ### 2. Write the provider
@@ -161,8 +161,8 @@ fakoli-state types. Each method returns a raw dict and raises
 `sync/providers/linear.py` consumes the client and exposes the Protocol:
 
 ```python
-from fakoli_state.sync.provider import ExternalRef, ExternalTask, ProviderHealth
-from fakoli_state.sync.registry import register_sync_provider
+from anvil.sync.provider import ExternalRef, ExternalTask, ProviderHealth
+from anvil.sync.registry import register_sync_provider
 
 class LinearIssuesProvider:
     provider_id: str = "linear_issues"
@@ -185,7 +185,7 @@ register_sync_provider(LinearIssuesProvider.provider_id, LinearIssuesProvider)
 Add to `sync/providers/__init__.py`:
 
 ```python
-from fakoli_state.sync.providers import linear  # noqa: F401
+from anvil.sync.providers import linear  # noqa: F401
 ```
 
 ### 4. Test with `respx` + `RecordedSyncProvider`
@@ -194,7 +194,7 @@ from fakoli_state.sync.providers import linear  # noqa: F401
 provider-specific tests; CLI / engine tests that consume *any* provider
 use `RecordedSyncProvider` instead (see Testing pattern below).
 
-After landing those four files, `fakoli-state sync provider
+After landing those four files, `anvil sync provider
 linear_issues` works end-to-end with no changes to the CLI, engine, or
 reconciliation code.
 
@@ -202,7 +202,7 @@ reconciliation code.
 
 ## Status label mapping
 
-Every provider must map fakoli-state's 11 `TaskStatus` values to whatever
+Every provider must map anvil's 11 `TaskStatus` values to whatever
 the remote system uses. Centralise the mapping in a module-level
 `STATUS_TO_LABEL: dict[TaskStatus, str]` and a reverse `LABEL_TO_STATUS`
 so push and fetch agree verbatim.
@@ -244,8 +244,8 @@ Two complementary doubles:
 ### `RecordedSyncProvider`
 
 ```python
-from fakoli_state.sync.recorded import RecordedSyncProvider
-from fakoli_state.sync.provider import ExternalRef
+from anvil.sync.recorded import RecordedSyncProvider
+from anvil.sync.provider import ExternalRef
 
 key = RecordedSyncProvider.record_key(
     "push_task", task=task, mapping=None,
@@ -284,7 +284,7 @@ deregistering modules.
 ### Schema
 
 ```yaml
-# .fakoli-state/config.yaml — fragment
+# .anvil/config.yaml — fragment
 sync:
   providers:
     - github_issues
@@ -313,17 +313,17 @@ scan everything registered. The `Config.sync_providers: tuple[str, ...]
 Lookup happens in `_resolve_configured_providers` in `cli/sync.py` —
 the single seam. A malformed config (unparseable YAML, type errors)
 falls back to `sorted(PROVIDER_REGISTRY)` rather than breaking
-`fakoli-state sync` entirely. Loud config errors are the job of
-`fakoli-state init` / `doctor`, not the sync surface.
+`anvil sync` entirely. Loud config errors are the job of
+`anvil init` / `doctor`, not the sync surface.
 
 ### Init template
 
-The `fakoli-state init` config template does NOT include `sync.providers`
+The `anvil init` config template does NOT include `sync.providers`
 — it is opt-in. Add it manually when you want to narrow or opt out.
 
 ### Reconciliation interaction
 
-The bare `fakoli-state sync` (reconciliation only) consumes the same
+The bare `anvil sync` (reconciliation only) consumes the same
 configured-providers list. When the list is the registry fallback,
 reconciliation emits one `missing_sync_mapping` discrepancy per missing
 provider per done task. When the list is explicit, only the listed
@@ -399,4 +399,4 @@ transient network).
 - `sync/registry.py` — registry mechanics + duplicate-registration
   guard.
 - `sync/errors.py` — exception hierarchy.
-- `specs/2026-05-24-fakoli-state-v0.md` — canonical design spec.
+- `specs/2026-05-24-anvil-v0.md` — canonical design spec.

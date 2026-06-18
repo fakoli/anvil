@@ -1,7 +1,7 @@
-"""Integration tests for `fakoli-state sync` (Phase 8 Wave 3 Task 6).
+"""Integration tests for `anvil sync` (Phase 8 Wave 3 Task 6).
 
 Every test uses Typer's CliRunner and injects a RecordedSyncProvider (or
-a thin subclass) via monkeypatching :data:`fakoli_state.sync.registry.PROVIDER_REGISTRY`
+a thin subclass) via monkeypatching :data:`anvil.sync.registry.PROVIDER_REGISTRY`
 so the suite never touches real GitHub.
 
 Coverage groups (one class per behaviour cluster):
@@ -29,16 +29,16 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
-from fakoli_state.state.models import (
+from anvil.cli import app
+from anvil.state.models import (
     ConflictResolutionStrategy,
     ExternalSystem,
     SyncMapping,
     SyncState,
 )
-from fakoli_state.sync import registry as sync_registry
-from fakoli_state.sync.errors import SyncProviderError
-from fakoli_state.sync.provider import (
+from anvil.sync import registry as sync_registry
+from anvil.sync.errors import SyncProviderError
+from anvil.sync.provider import (
     ExternalRef,
     ExternalTask,
     ProviderHealth,
@@ -173,7 +173,7 @@ def _make_scripted_provider_cls(
 
 @pytest.fixture
 def initialized_project(tmp_path: Path) -> Path:
-    """A tmp_path that has had `fakoli-state init` run against it."""
+    """A tmp_path that has had `anvil init` run against it."""
     cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
@@ -204,12 +204,12 @@ def _seed_task(
 ) -> None:
     """Apply project + feature + task events directly to the backend.
 
-    ``project_root`` is the directory containing ``.fakoli-state/``.
+    ``project_root`` is the directory containing ``.anvil/``.
     """
-    from fakoli_state.cli._helpers import _open_backend
-    from fakoli_state.state.models import EventDraft as _EventDraft
+    from anvil.cli._helpers import _open_backend
+    from anvil.state.models import EventDraft as _EventDraft
 
-    state_dir = project_root / ".fakoli-state"
+    state_dir = project_root / ".anvil"
     b = _open_backend(state_dir)
     try:
         # Feature first.
@@ -272,9 +272,9 @@ def _seed_sync_mapping(
     sync_state: SyncState = SyncState.in_sync,
 ) -> None:
     """Write a SyncMapping for a task via apply_sync_mapping()."""
-    from fakoli_state.cli._helpers import _open_backend
+    from anvil.cli._helpers import _open_backend
 
-    state_dir = project_root / ".fakoli-state"
+    state_dir = project_root / ".anvil"
     b = _open_backend(state_dir)
     try:
         b.apply_sync_mapping(
@@ -297,9 +297,9 @@ def _seed_sync_mapping(
 def _read_events_jsonl(project_root: Path) -> list[dict[str, Any]]:
     """Parse events.jsonl into a list of dicts.
 
-    ``project_root`` is the directory containing ``.fakoli-state/``.
+    ``project_root`` is the directory containing ``.anvil/``.
     """
-    events_path = project_root / ".fakoli-state" / "events.jsonl"
+    events_path = project_root / ".anvil" / "events.jsonl"
     if not events_path.exists():
         return []
     out: list[dict[str, Any]] = []
@@ -322,7 +322,7 @@ def _actions_in_events(state_dir: Path) -> list[str]:
 
 
 class TestSyncBareReconciliation:
-    """`fakoli-state sync` with no subcommand runs the reconciliation engine."""
+    """`anvil sync` with no subcommand runs the reconciliation engine."""
 
     def test_empty_project_reports_no_discrepancies(
         self, initialized_project: Path, patched_registry: dict[str, Any]
@@ -608,7 +608,7 @@ class TestSyncHealth:
         Per P2-4: a provider health probe is a network/auth diagnostic.
         It must not require local state — the operator should be able to
         sanity-check GITHUB_TOKEN / connectivity from a fresh checkout
-        before running `fakoli-state init`.
+        before running `anvil init`.
         """
         cls = _make_scripted_provider_cls()
         patched_registry[_TEST_PROVIDER_ID] = cls
@@ -639,8 +639,8 @@ class TestSyncConflictResolution:
         """Seed a task with a mapping whose remote `last_modified` is in the
         future, then bump the task's updated_at to also be in the future so
         both sides have moved since last_synced_at."""
-        from fakoli_state.cli._helpers import _open_backend
-        from fakoli_state.state.models import EventDraft as _EventDraft
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.models import EventDraft as _EventDraft
     
         _seed_task(project_root, now=_NOW - timedelta(hours=2))
         _seed_sync_mapping(
@@ -649,7 +649,7 @@ class TestSyncConflictResolution:
             strategy=strategy,
         )
 
-        state_dir = project_root / ".fakoli-state"
+        state_dir = project_root / ".anvil"
 
         # Bump local task by emitting task.status_changed (moves updated_at forward).
         b = _open_backend(state_dir)
@@ -762,7 +762,7 @@ class TestSyncConflictResolution:
         )
         assert r.exit_code == 2, r.output
         merge_path = (
-            initialized_project / ".fakoli-state" / ".sync-conflicts" / "T001.md"
+            initialized_project / ".anvil" / ".sync-conflicts" / "T001.md"
         )
         assert merge_path.exists(), f"manual_merge file not written: {r.output}"
         content = merge_path.read_text()
@@ -1010,7 +1010,7 @@ class TestIsTtyChecksBothDescriptors:
     def test_returns_false_when_stdout_not_a_tty(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from fakoli_state.cli import sync as sync_mod
+        from anvil.cli import sync as sync_mod
 
         monkeypatch.setattr(sync_mod.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(sync_mod.sys.stdout, "isatty", lambda: False)
@@ -1020,7 +1020,7 @@ class TestIsTtyChecksBothDescriptors:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The `docker run -t` case: stdout has a tty but stdin is closed."""
-        from fakoli_state.cli import sync as sync_mod
+        from anvil.cli import sync as sync_mod
 
         monkeypatch.setattr(sync_mod.sys.stdin, "isatty", lambda: False)
         monkeypatch.setattr(sync_mod.sys.stdout, "isatty", lambda: True)
@@ -1029,7 +1029,7 @@ class TestIsTtyChecksBothDescriptors:
     def test_returns_true_when_both_are_ttys(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from fakoli_state.cli import sync as sync_mod
+        from anvil.cli import sync as sync_mod
 
         monkeypatch.setattr(sync_mod.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(sync_mod.sys.stdout, "isatty", lambda: True)
@@ -1052,7 +1052,7 @@ class TestWatchLoopSurvivesIterationFailure:
         ``_run_sync_once`` to raise once, then succeed, and run the watch
         body twice in-process.
         """
-        from fakoli_state.cli import sync as sync_mod
+        from anvil.cli import sync as sync_mod
 
         cls = _make_scripted_provider_cls()
         patched_registry[_TEST_PROVIDER_ID] = cls
@@ -1074,8 +1074,8 @@ class TestWatchLoopSurvivesIterationFailure:
         # ONE iteration normally. We want to verify the loop survives
         # the first exception, so we instead invoke the loop directly
         # with a small counter-based stop.
-        from fakoli_state.cli._helpers import _open_backend
-        state_dir = initialized_project / ".fakoli-state"
+        from anvil.cli._helpers import _open_backend
+        state_dir = initialized_project / ".anvil"
         provider = cls()
         backend = _open_backend(state_dir)
         try:
@@ -1119,7 +1119,7 @@ class TestWatchLoopSurvivesIterationFailure:
         propagating to the CLI runner."""
         import typer as _typer
 
-        from fakoli_state.cli import sync as sync_mod
+        from anvil.cli import sync as sync_mod
 
         cls = _make_scripted_provider_cls()
         patched_registry[_TEST_PROVIDER_ID] = cls
@@ -1167,8 +1167,8 @@ class TestManualMergeReturnsFalseAndBatchExits2:
         Observability: the sync.batch.completed event fires AFTER T001's
         manual_merge file is written — proving the batch was not halted
         mid-iteration by a raised typer.Exit."""
-        from fakoli_state.cli._helpers import _open_backend
-        from fakoli_state.state.models import EventDraft as _EventDraft
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.models import EventDraft as _EventDraft
     
         # T001 — diverged manual_merge mapping.
         _seed_task(initialized_project, task_id="T001", now=_NOW - timedelta(hours=2))
@@ -1188,7 +1188,7 @@ class TestManualMergeReturnsFalseAndBatchExits2:
         )
 
         # Bump T001 local updated_at so local_moved is True.
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             b.append(_EventDraft(
@@ -1274,7 +1274,7 @@ class TestHealthWorksWithoutInit:
         tmp_path: Path,
         patched_registry: dict[str, Any],
     ) -> None:
-        """An operator probing connectivity before `fakoli-state init` must
+        """An operator probing connectivity before `anvil init` must
         not be blocked by the state-dir check. Health is a network/auth
         diagnostic, not a state operation."""
         ph = ProviderHealth(
@@ -1374,7 +1374,7 @@ class TestPullAppliesRemoteToLocal:
         patched_registry: dict[str, Any],
     ) -> None:
         """Remote moved, local untouched → local Task.title is overwritten."""
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         # Seed T001 with title='old' at _NOW - 2h (so updated_at < last_synced_at)
         _seed_task(
@@ -1407,7 +1407,7 @@ class TestPullAppliesRemoteToLocal:
         assert r.exit_code == 0, r.output
 
         # The local Task now carries the remote title/description.
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             task = b.get_task("T001")
@@ -1474,7 +1474,7 @@ class TestPullAppliesRemoteToLocal:
         patched_registry: dict[str, Any],
     ) -> None:
         """SyncMapping.sync_state ends as 'in_sync' after a remote-applied pull."""
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         _seed_task(
             initialized_project, title="old", description="old desc",
@@ -1503,7 +1503,7 @@ class TestPullAppliesRemoteToLocal:
         )
         assert r.exit_code == 0, r.output
 
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             mapping = b.get_sync_mapping("T001")
@@ -1563,7 +1563,7 @@ class TestContributorProviderMappingPersists:
         patched_registry: dict[str, Any],
     ) -> None:
         """Register a provider with a non-enum id; push; verify mapping row."""
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         class _CustomProvider(_ScriptedProvider):
             provider_id = "my_custom_tracker"  # NOT in ExternalSystem enum
@@ -1583,7 +1583,7 @@ class TestContributorProviderMappingPersists:
         assert r.exit_code == 0, r.output
 
         # SyncMapping row landed with external_system='my_custom_tracker'.
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             mapping = b.get_sync_mapping(
@@ -1609,7 +1609,7 @@ class TestContributorProviderMappingPersists:
         ``existing=None`` (mapping was never persisted), called
         ``push_task(mapping=None)``, and created a new remote record.
         """
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         class _CustomProvider(_ScriptedProvider):
             provider_id = "my_custom_tracker"
@@ -1637,7 +1637,7 @@ class TestContributorProviderMappingPersists:
             catch_exceptions=False,
         )
 
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             mappings = b.list_sync_mappings(external_system="my_custom_tracker")
@@ -1724,7 +1724,7 @@ class TestDeferredConflictResolutionBumpsMappingState:
         """After a local_wins resolution, a second pull with the same
         remote payload must NOT re-detect the conflict because
         last_synced_at has advanced past remote.last_modified."""
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         TestSyncConflictResolution()._setup_diverged(
             initialized_project, patched_registry,
@@ -1746,7 +1746,7 @@ class TestDeferredConflictResolutionBumpsMappingState:
 
         # Mapping must now reflect the resolution: local_ahead, with
         # last_synced_at advanced past remote.last_modified.
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             mapping = b.get_sync_mapping("T001")
@@ -1783,7 +1783,7 @@ class TestDeferredConflictResolutionBumpsMappingState:
         patched_registry: dict[str, Any],
     ) -> None:
         """SF-4 — manual_merge parks the mapping at sync_state=conflict."""
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         TestSyncConflictResolution()._setup_diverged(
             initialized_project, patched_registry,
@@ -1796,7 +1796,7 @@ class TestDeferredConflictResolutionBumpsMappingState:
         )
         assert r.exit_code == 2, r.output
 
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             mapping = b.get_sync_mapping("T001")
@@ -1820,7 +1820,7 @@ class TestTombstoneFlipsSyncStateAndIsReconciled:
         initialized_project: Path,
         patched_registry: dict[str, Any],
     ) -> None:
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         _seed_task(initialized_project)
         _seed_sync_mapping(initialized_project)
@@ -1836,7 +1836,7 @@ class TestTombstoneFlipsSyncStateAndIsReconciled:
         )
         assert r.exit_code == 0, r.output
 
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             mapping = b.get_sync_mapping("T001")
@@ -1854,10 +1854,10 @@ class TestTombstoneFlipsSyncStateAndIsReconciled:
         initialized_project: Path,
         patched_registry: dict[str, Any],
     ) -> None:
-        """After a tombstone, `fakoli-state sync` (reconciliation) must
+        """After a tombstone, `anvil sync` (reconciliation) must
         surface a `drift_sync_state` discrepancy whose payload tags the
         reason as `external_deleted` so the operator can act."""
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         _seed_task(initialized_project)
         _seed_sync_mapping(initialized_project)
@@ -1875,10 +1875,10 @@ class TestTombstoneFlipsSyncStateAndIsReconciled:
 
         # Step 2: reconciliation scan. Use the engine directly so we
         # can inspect the discrepancy payload rather than parsing stdout.
-        from fakoli_state.clock import SystemClock
-        from fakoli_state.sync.reconciliation import ReconciliationEngine
+        from anvil.clock import SystemClock
+        from anvil.sync.reconciliation import ReconciliationEngine
 
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             engine = ReconciliationEngine(
@@ -1923,7 +1923,7 @@ class TestCleanPullBumpsLastSyncedAt:
     ) -> None:
         from datetime import datetime as _dt
 
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         # Seed with last_synced_at well in the past so we can detect
         # the advance.
@@ -1955,7 +1955,7 @@ class TestCleanPullBumpsLastSyncedAt:
         )
         assert r.exit_code == 0, r.output
 
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             mapping = b.get_sync_mapping("T001")
@@ -1979,7 +1979,7 @@ class TestCleanPullBumpsLastSyncedAt:
     ) -> None:
         """After a clean pull, the reconciliation drift scan must NOT
         flag the mapping as stale — last_synced_at was advanced."""
-        from fakoli_state.cli._helpers import _open_backend
+        from anvil.cli._helpers import _open_backend
 
         # Initial state: mapping is 14 days old (well past the 7-day
         # threshold).
@@ -2011,10 +2011,10 @@ class TestCleanPullBumpsLastSyncedAt:
         assert r.exit_code == 0, r.output
 
         # Now run reconciliation — no stale drift should fire.
-        from fakoli_state.clock import SystemClock
-        from fakoli_state.sync.reconciliation import ReconciliationEngine
+        from anvil.clock import SystemClock
+        from anvil.sync.reconciliation import ReconciliationEngine
 
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             engine = ReconciliationEngine(
@@ -2144,8 +2144,8 @@ class TestLocalMovedOnlyEmitsLocalAhead:
         patched_registry: dict[str, Any],
     ) -> None:
         """Bump the local Task's updated_at, pull, then assert mapping is local_ahead."""
-        from fakoli_state.cli._helpers import _open_backend
-        from fakoli_state.state.models import EventDraft as _EventDraft
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.models import EventDraft as _EventDraft
     
         # Seed: task at past, mapping at past+1h, remote last_modified at past.
         seed_time = _NOW - timedelta(hours=4)
@@ -2159,7 +2159,7 @@ class TestLocalMovedOnlyEmitsLocalAhead:
         # (so local_moved=True). status_changed updates updated_at to now-ish;
         # the seed timestamps put us well below current time, so this
         # creates the local_ahead-vs-remote divergence.
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             b.append(_EventDraft(
@@ -2220,8 +2220,8 @@ class TestLocalMovedOnlyEmitsLocalAhead:
         """The local-moved-only pull emits ``sync.push.deferred`` with
         ``resolution="local_moved_no_push"`` so operators can grep for
         tasks awaiting a follow-up push."""
-        from fakoli_state.cli._helpers import _open_backend
-        from fakoli_state.state.models import EventDraft as _EventDraft
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.models import EventDraft as _EventDraft
     
         seed_time = _NOW - timedelta(hours=4)
         _seed_task(initialized_project, now=seed_time)
@@ -2230,7 +2230,7 @@ class TestLocalMovedOnlyEmitsLocalAhead:
             last_synced_at=seed_time + timedelta(hours=1),
         )
 
-        state_dir = initialized_project / ".fakoli-state"
+        state_dir = initialized_project / ".anvil"
         b = _open_backend(state_dir)
         try:
             b.append(_EventDraft(
@@ -2299,7 +2299,7 @@ class TestMalformedConfigFallsBackToRegistry:
     is used." Before the Greptile P1 fix, the ``except (ValueError, OSError)``
     block let ``yaml.YAMLError`` (a subclass of ``Exception``, not of
     ``ValueError`` or ``OSError``) escape — so a syntactically broken
-    ``.fakoli-state/config.yaml`` blew up ``fakoli-state sync`` with an
+    ``.anvil/config.yaml`` blew up ``anvil sync`` with an
     unhandled traceback instead of the documented graceful fallback.
     """
 
@@ -2315,7 +2315,7 @@ class TestMalformedConfigFallsBackToRegistry:
         ``yaml.YAMLError``. The CLI must catch this and fall back to
         ``sorted(PROVIDER_REGISTRY)`` so reconciliation still runs.
         """
-        config_path = initialized_project / ".fakoli-state" / "config.yaml"
+        config_path = initialized_project / ".anvil" / "config.yaml"
         # Deliberately malformed YAML: unclosed list in sync.providers.
         # yaml.safe_load raises yaml.YAMLError (specifically a ScannerError
         # / ParserError subclass), which is NOT a ValueError or OSError.

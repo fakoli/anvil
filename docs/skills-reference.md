@@ -1,6 +1,6 @@
 # Skills reference
 
-> fakoli-state ships 7 skills that orchestrate workflows around the CLI. Each
+> anvil ships 7 skills that orchestrate workflows around the CLI. Each
 > skill has a trigger phrase (the slash command), a step-by-step procedure,
 > and optional bridges to `fakoli-flow` or `fakoli-crew` skills when those
 > plugins are installed. This reference indexes each skill, names its source
@@ -53,10 +53,10 @@ invoke at any point in any session without changing state.
 
 ## State-ops
 
-**Trigger:** `/fakoli-state:state-ops`
+**Trigger:** `/anvil:state-ops`
 
 **Purpose:** Inspect the canonical SQLite state without mutating it. Wraps
-`fakoli-state status`, `list`, `show`, `next`, `conflicts`, and `sync`
+`anvil status`, `list`, `show`, `next`, `conflicts`, and `sync`
 (reconciliation-only mode).
 
 **When to use:**
@@ -78,17 +78,17 @@ commands, [`mcp.md`](mcp.md) for the equivalent MCP read-only tools.
 
 ## Start-PRD
 
-**Trigger:** `/fakoli-state:start-prd`
+**Trigger:** `/anvil:start-prd`
 
 **Purpose:** Turn a rough idea into a structured PRD draft via one-question-
-at-a-time Q&A, then write the result to `.fakoli-state/prd.md` so
-`fakoli-state prd parse` can consume it.
+at-a-time Q&A, then write the result to `.anvil/prd.md` so
+`anvil prd parse` can consume it.
 
 **When to use:**
 
 - The user has an idea ("I want to build a CLI that converts CSV to Parquet")
   but no PRD yet.
-- `fakoli-state status` reports `prd-status: none` and the user is not ready
+- `anvil status` reports `prd-status: none` and the user is not ready
   to write the template by hand.
 - A rough scope was discussed in chat and now needs to be captured as a
   structured document.
@@ -96,7 +96,7 @@ at-a-time Q&A, then write the result to `.fakoli-state/prd.md` so
 **Bridges to fakoli-flow:** When `fakoli-flow` is installed, this skill
 prefers `/fakoli-flow:brainstorm` for its richer guided design dialogue
 (scope check, section-by-section presentation, optional visual companion).
-The skill then translates the resulting spec into the `fakoli-state` PRD
+The skill then translates the resulting spec into the `anvil` PRD
 template format. Standalone, it falls back to a deterministic six-question
 interview loop.
 
@@ -119,7 +119,7 @@ the canonical PRD template structure.
 
 ## PRD
 
-**Trigger:** `/fakoli-state:prd`
+**Trigger:** `/anvil:prd`
 
 **Purpose:** Author, parse, and review the project PRD. The PRD is the
 single source of truth for every `Requirement`, `Feature`, and `Task` row
@@ -132,13 +132,13 @@ cleanly, and clears the review gate.
 - Revising the PRD after stakeholder feedback changes scope or acceptance criteria.
 - Recovering after a scope change mid-project — re-anchor what the work is
   before resuming claims.
-- Before any invocation of `/fakoli-state:plan` — planning reads from a
+- Before any invocation of `/anvil:plan` — planning reads from a
   parsed PRD; authoring must come first.
 
 **Bridges to fakoli-flow:** None at the skill level. LLM-assisted PRD
 drafting through `fakoli-flow` is referenced from the `start-prd` skill
-(see above); the `prd` skill itself operates on `.fakoli-state/prd.md`
-directly via `fakoli-state prd parse` / `review` / `review --approve`.
+(see above); the `prd` skill itself operates on `.anvil/prd.md`
+directly via `anvil prd parse` / `review` / `review --approve`.
 
 **Source:** `skills/prd/SKILL.md`
 
@@ -149,7 +149,7 @@ directly via `fakoli-state prd parse` / `review` / `review --approve`.
 
 ## Plan
 
-**Trigger:** `/fakoli-state:plan`
+**Trigger:** `/anvil:plan`
 
 **Purpose:** Convert an approved PRD into a queue of agent-ready tasks.
 Drives four sequential state transitions: PRD requirements → features and
@@ -157,15 +157,15 @@ tasks → scored tasks → reviewed-and-ready tasks.
 
 **When to use:**
 
-- Immediately after `fakoli-state prd review --approve` — the PRD is
+- Immediately after `anvil prd review --approve` — the PRD is
   approved and the task graph does not yet exist.
 - After a significant PRD revision that adds new `## Features` or `## Tasks`
   sections — re-plan to generate the updated task graph.
-- When `fakoli-state status` shows `prd-status: approved` but
+- When `anvil status` shows `prd-status: approved` but
   `ready-tasks: 0` and no tasks exist yet.
 
 **Bridges to fakoli-flow:** None at the skill level. When `fakoli-flow` is
-installed, its `/flow:plan` skill consumes `fakoli-state plan` output and
+installed, its `/flow:plan` skill consumes `anvil plan` output and
 groups tasks into dependency-ordered waves — but the bridge runs in the
 other direction (flow calls into state). This skill itself stays local.
 
@@ -173,13 +173,13 @@ other direction (flow calls into state). This skill itself stays local.
 
 **See also:**
 [`how-to/integrating-with-fakoli-flow-and-crew.md`](how-to/integrating-with-fakoli-flow-and-crew.md)
-for how `/flow:plan` consumes `fakoli-state plan` output.
+for how `/flow:plan` consumes `anvil plan` output.
 
 ---
 
 ## Claim
 
-**Trigger:** `/fakoli-state:claim`
+**Trigger:** `/anvil:claim`
 
 **Purpose:** Acquire an exclusive 60-minute lease on a `ready` task. Picks
 from the queue, checks for file conflicts, claims the task, and creates the
@@ -187,17 +187,17 @@ git branch `agent/<task_id_lower>-<slug>` to commit into.
 
 **When to use:**
 
-- Starting work on a task after `/fakoli-state:plan` has produced a ready queue.
-- When `fakoli-flow:execute` dispatches an agent against a fakoli-state
+- Starting work on a task after `/anvil:plan` has produced a ready queue.
+- When `fakoli-flow:execute` dispatches an agent against an anvil
   task — the claim step happens inside that dispatch.
-- When resuming after an interrupted session — check `fakoli-state status`
+- When resuming after an interrupted session — check `anvil status`
   first, then re-claim if the previous lease has expired and the task
   returned to `ready`.
 - When coordinating parallel agents — each agent claims a separate task;
   `claim` enforces the conflict gate.
 
 **Bridges to fakoli-flow:** When `fakoli-flow` is installed, `flow:execute`
-wraps this skill — it reads `fakoli-state next`, calls `fakoli-state
+wraps this skill — it reads `anvil next`, calls `anvil
 claim`, and dispatches the agent against the claimed task. The claim still
 appears in `state.db`; it is the same primitive, called from inside the
 flow. Solo agents invoke this skill directly.
@@ -208,7 +208,7 @@ standard consumer for research tasks. Pass `--actor` to tag the claim with
 the crew role for traceability:
 
 ```bash
-fakoli-state claim T012 --actor fakoli-crew:welder
+anvil claim T012 --actor fakoli-crew:welder
 ```
 
 **Source:** `skills/claim/SKILL.md`
@@ -220,7 +220,7 @@ fakoli-state claim T012 --actor fakoli-crew:welder
 
 ## Execute
 
-**Trigger:** `/fakoli-state:execute`
+**Trigger:** `/anvil:execute`
 
 **Purpose:** Carry a claimed task all the way to `needs_review`: fetch the
 work packet, read it in full, do the work, heartbeat the lease, run
@@ -228,13 +228,13 @@ verification, and submit evidence. Covers the solo-agent path.
 
 **When to use:**
 
-- After `fakoli-state claim TASK_ID` has succeeded — claim ID and branch in hand.
+- After `anvil claim TASK_ID` has succeeded — claim ID and branch in hand.
 - When `fakoli-flow:execute` is NOT installed. When it IS installed, prefer
   that skill — it wraps this one with wave orchestration and critic gates.
 - For solo execution: one agent, one task, one branch, straight to submit.
 
 **Bridges to fakoli-flow:** When `fakoli-flow:execute` is installed, that
-skill wraps this one. It reads `fakoli-state next`, calls `fakoli-state
+skill wraps this one. It reads `anvil next`, calls `anvil
 claim`, dispatches agents against non-overlapping tasks in parallel waves,
 gates waves with critic review, and coordinates submit timing. Solo agents
 use this skill directly; orchestrated agent teams use `/fakoli-flow:execute`,
@@ -256,17 +256,17 @@ for the full wave-engine dispatch example.
 
 ## Finish
 
-**Trigger:** `/fakoli-state:finish`
+**Trigger:** `/anvil:finish`
 
 **Purpose:** Drive the final leg of the task lifecycle — read the
 evidence, pick a disposition (accept and ship, reject and reopen, hold for
-investigation, or discard), call `fakoli-state apply`, and hand off to the
+investigation, or discard), call `anvil apply`, and hand off to the
 project's git workflow for merging.
 
 **When to use:**
 
-- Tasks appear in `fakoli-state list --status needs_review`.
-- Before merging a PR that contains fakoli-state-tracked work — confirm the
+- Tasks appear in `anvil list --status needs_review`.
+- Before merging a PR that contains anvil-tracked work — confirm the
   task has been applied first.
 - At end-of-day or end-of-iteration when deciding what to ship versus what
   to reopen.
@@ -275,7 +275,7 @@ project's git workflow for merging.
 skill wraps this one for wave-based batch completion. It drives `apply` for
 all completed tasks in a wave, then triggers automated PR creation via
 `gh pr create`. Solo and human-reviewer workflows use this skill directly.
-`fakoli-flow:finish` calls `fakoli-state apply` for each task the same
+`fakoli-flow:finish` calls `anvil apply` for each task the same
 way, but orchestrates the full wave before handing off to git.
 
 **Bridges to fakoli-crew:** When `fakoli-crew` is installed, the `sentinel`
@@ -287,7 +287,7 @@ claude plugin list 2>/dev/null | grep -q "fakoli-crew"
 ```
 
 Exit code 0 means dispatch `fakoli-crew:sentinel` against the task's
-evidence bundle before invoking `fakoli-state apply`. Non-zero means fall
+evidence bundle before invoking `anvil apply`. Non-zero means fall
 through to the plugin-local `sentinel` agent (or rely on the reviewer's
 own reading of the evidence). Sentinel produces a pass/fail recommendation
 that supplements but does not replace the reviewer's judgment — `apply` is
@@ -302,9 +302,9 @@ external-tracker step after `apply --approve`.
 
 ## Composition patterns
 
-### Standalone fakoli-state
+### Standalone anvil
 
-Install order: fakoli-state alone. No external plugin dependencies.
+Install order: anvil alone. No external plugin dependencies.
 
 All 7 skills run their self-contained bodies end to end: start-prd → prd
 → plan → claim → execute → finish, with state-ops available for inspection
@@ -317,31 +317,31 @@ installing flow or crew.
 
 ### + fakoli-flow
 
-Install order: fakoli-state + fakoli-flow. The start-prd, execute, and
+Install order: anvil + fakoli-flow. The start-prd, execute, and
 finish skills bridge to their `/flow:*` equivalents; the plan, claim, prd,
 and state-ops skills stay local. Specifically:
 
-- `/fakoli-state:start-prd` bridges to `/fakoli-flow:brainstorm` for the
+- `/anvil:start-prd` bridges to `/fakoli-flow:brainstorm` for the
   richer guided design dialogue, then translates the spec back to the
-  fakoli-state PRD template.
-- `/fakoli-state:execute` is wrapped by `/fakoli-flow:execute`, which adds
+  anvil PRD template.
+- `/anvil:execute` is wrapped by `/fakoli-flow:execute`, which adds
   wave-based dispatch, critic gates between waves, and coordinated submit
   timing.
-- `/fakoli-state:finish` is wrapped by `/fakoli-flow:finish`, which adds
+- `/anvil:finish` is wrapped by `/fakoli-flow:finish`, which adds
   wave-level batch apply and automated PR creation.
 
-The wrapping skills still call into the underlying `fakoli-state` CLI —
+The wrapping skills still call into the underlying `anvil` CLI —
 state is the rendezvous, not flow.
 
 ### + fakoli-flow + fakoli-crew
 
-Install order: fakoli-state + fakoli-flow + fakoli-crew (the full
+Install order: anvil + fakoli-flow + fakoli-crew (the full
 trinity). Same bridges as above for the flow side; additionally the
 agents invoked within `/flow:*` skills are crew specialists rather than
 plugin-local ones. The `welder` agent handles integration work, `scout`
 handles research, `critic` runs language-deep code review, `sentinel`
 runs comprehensive validation, and `keeper` handles repo-wide cleanup.
-The fakoli-state CLI remains the only writer to `state.db` and
+The anvil CLI remains the only writer to `state.db` and
 `events.jsonl` throughout — flow and crew never touch the storage layer
 directly.
 

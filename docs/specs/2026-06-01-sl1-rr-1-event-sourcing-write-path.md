@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-01
 **Status:** Approved (brainstorm) — ready for `/flow:plan`
-**Plugin:** `fakoli-state`
+**Plugin:** `anvil`
 **Tracks:** tech-debt-backlog `SL1-RR-1`; fakoli-style principle **P4** `open_work`
 **Supersedes the tactical fix** described in the original SL1-RR-1 review (Option A / Option C). This spec adopts the deeper root-cause fix.
 
@@ -349,9 +349,9 @@ A test with a large synthetic log asserting `scan_tail` reads bounded bytes
 
 ### E. CI
 
-Full suite runs on every fakoli-state PR via `.github/workflows/fakoli-state.yml`
+Full suite runs on every anvil PR via `.github/workflows/anvil.yml`
 (with the `TERM=dumb` / unset `FORCE_COLOR` guard already in place), invoked as
-`uv run --project plugins/fakoli-state/bin --extra all-providers --with pytest pytest`.
+`uv run --project plugins/anvil/bin --extra all-providers --with pytest pytest`.
 
 ## 9. Acceptance criteria
 
@@ -374,10 +374,10 @@ Full suite runs on every fakoli-state PR via `.github/workflows/fakoli-state.yml
    that fsyncs per event.
 8. The poison-line regression test and the ID-reuse/self-heal test pass.
 9. `test_replay_equivalence` (P4) remains green against the regenerated golden.
-10. The full fakoli-state suite passes in CI.
+10. The full anvil suite passes in CI.
 11. fakoli-style P4 `open_work` is updated to mark SL1-RR-1 resolved and point
     at the new embodiments; `tech-debt-backlog.md` SL1-RR-1 marked `DONE`.
-12. `plugins/fakoli-state` version bumped (minor — new write-path architecture)
+12. `plugins/anvil` version bumped (minor — new write-path architecture)
     and `registry/` regenerated.
 
 ## 10. Out of scope

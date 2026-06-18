@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.git_ops.branch and fakoli_state.git_ops.worktree.
+"""Tests for anvil.git_ops.branch and anvil.git_ops.worktree.
 
 Uses real git (tmp git init per test) — no mocking.
 
@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from fakoli_state.git_ops.branch import (
+from anvil.git_ops.branch import (
     BranchResult,
     _slug,
     create_branch_for_task,
     is_git_available,
     is_git_repo,
 )
-from fakoli_state.git_ops.worktree import (
+from anvil.git_ops.worktree import (
     WorktreeResult,
     create_worktree_for_task,
 )

@@ -1,12 +1,12 @@
 graph LR
     Flow["fakoli-flow<br/>how work moves<br/>(skills: execute, verify, finish)"]
-    State["fakoli-state<br/>what is true<br/>(SQLite + JSONL + claims)"]
+    State["anvil<br/>what is true<br/>(SQLite + JSONL + claims)"]
     Crew["fakoli-crew<br/>who does the work<br/>(specialist subagents)"]
 
-    Flow -->|"flow:execute calls<br/>fakoli-state next"| State
+    Flow -->|"flow:execute calls<br/>anvil next"| State
     State -->|"returns claimable Task<br/>+ work packet"| Flow
     Flow -->|"dispatches matching<br/>specialist (welder, scout, ...)"| Crew
-    Crew -->|"submits evidence<br/>via fakoli-state submit"| State
+    Crew -->|"submits evidence<br/>via anvil submit"| State
     State -->|"transitions task<br/>to needs_review"| Flow
     Flow -->|"flow:verify gates<br/>before merge"| State
 

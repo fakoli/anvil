@@ -1,6 +1,6 @@
 # Agents reference
 
-> fakoli-state ships 5 plugin-owned agents. Each has a specific role; each defers to a `fakoli-crew` specialist when that plugin is installed (so the same agent works standalone or as part of a richer crew composition).
+> anvil ships 5 plugin-owned agents. Each has a specific role; each defers to a `fakoli-crew` specialist when that plugin is installed (so the same agent works standalone or as part of a richer crew composition).
 
 This document is the canonical per-agent reference. For the higher-level integration picture across all three plugins, see [Integrating with fakoli-flow and fakoli-crew](how-to/integrating-with-fakoli-flow-and-crew.md). For the architectural role of agents inside the plugin, see [architecture.md](architecture.md).
 
@@ -16,7 +16,7 @@ This document is the canonical per-agent reference. For the higher-level integra
 | [state-keeper](#state-keeper) | teal | Read, Grep, Glob, Bash, Edit, Write | `fakoli-crew:keeper` (repo-wide scope only) |
 | [docs-scribe](#docs-scribe) | purple | Read, Write, Edit, Glob, Grep | `fakoli-crew:herald` (outward docs only) |
 
-Tool lists are read from each agent's frontmatter. The `state-keeper` agent declares `Edit` and `Write` but is restricted by its Iron Rule to writing only sync-report files under `.fakoli-state/.sync-reports/` — never source files, state files, or git refs.
+Tool lists are read from each agent's frontmatter. The `state-keeper` agent declares `Edit` and `Write` but is restricted by its Iron Rule to writing only sync-report files under `.anvil/.sync-reports/` — never source files, state files, or git refs.
 
 ---
 
@@ -24,20 +24,20 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 ### planner
 
-**Purpose:** PRD-to-tasks decomposition. Reads `.fakoli-state/prd.md`, proposes Features that group related Requirements, drafts Tasks with acceptance criteria and verification commands, and flags high-complexity tasks that should be expanded.
+**Purpose:** PRD-to-tasks decomposition. Reads `.anvil/prd.md`, proposes Features that group related Requirements, drafts Tasks with acceptance criteria and verification commands, and flags high-complexity tasks that should be expanded.
 
 **Frontmatter:** `color: white` · `model: opus` · `tools: [Read, Grep, Glob, Bash]`
 
 **When to dispatch:**
-- After `fakoli-state prd parse` and `fakoli-state prd review --approve` — the first task graph needs to be generated.
+- After `anvil prd parse` and `anvil prd review --approve` — the first task graph needs to be generated.
 - After new Requirements (e.g., R005-R008) are added to an existing PRD — the task graph needs incremental extension without losing claims on existing tasks.
-- When a task scores `complexity >= 4` and the user wants suggested subtasks — feeds the `fakoli-state expand` LLM-augmentation path.
+- When a task scores `complexity >= 4` and the user wants suggested subtasks — feeds the `anvil expand` LLM-augmentation path.
 
-**Iron Rule:** Never modifies `.fakoli-state/state.db` or `.fakoli-state/events.jsonl` directly. Proposes; the CLI commands (`plan`, `score`, `expand`) do the writes. Direct state-file edits bypass the audit log and break the replay guarantee.
+**Iron Rule:** Never modifies `.anvil/state.db` or `.anvil/events.jsonl` directly. Proposes; the CLI commands (`plan`, `score`, `expand`) do the writes. Direct state-file edits bypass the audit log and break the replay guarantee.
 
 **Defer behavior:** Partial. When `fakoli-crew:guido` is available, planner keeps the WHAT (task structure, dependencies, scoring) but defers the HOW (interface design, type system choices, project structure) — it flags those as "guido consult" entries in the Concerns section of its output. Planner never delegates the whole proposal; it always returns the structured Features/Tasks/Concerns block.
 
-**Output shape:** Markdown block with `## Features`, `## Tasks`, and `## Concerns` sections. The `fakoli-state:plan` skill parses this output to drive the `fakoli-state plan` CLI invocation.
+**Output shape:** Markdown block with `## Features`, `## Tasks`, and `## Concerns` sections. The `anvil:plan` skill parses this output to drive the `anvil plan` CLI invocation.
 
 **Source:** [`agents/planner.md`](../agents/planner.md)
 
@@ -52,7 +52,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 **Frontmatter:** `color: magenta` · `model: opus` · `tools: [Read, Grep, Glob, Bash]`
 
 **When to dispatch:**
-- After a claimed task has been submitted (status `needs_review`) and before `fakoli-state apply --approve`.
+- After a claimed task has been submitted (status `needs_review`) and before `anvil apply --approve`.
 - Inside `/flow:execute` as the critic gate that runs after every wave that writes code.
 
 **Iron Rule:** Never modifies any source file, test file, or state file. Reads, analyzes, and reports. If a bug is found, the fix is shown in the report — not applied. The welder agent or the CLI does all writes.
@@ -68,7 +68,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **Source:** [`agents/critic.md`](../agents/critic.md)
 
-**See also:** [integrating-with-fakoli-flow-and-crew.md → Example 1](how-to/integrating-with-fakoli-flow-and-crew.md#example-1-flowexecute-consumes-fakoli-state-next--claim--submit) · [cli-reference.md#submit](cli-reference.md#submit)
+**See also:** [integrating-with-fakoli-flow-and-crew.md → Example 1](how-to/integrating-with-fakoli-flow-and-crew.md#example-1-flowexecute-consumes-anvil-next--claim--submit) · [cli-reference.md#submit](cli-reference.md#submit)
 
 ---
 
@@ -80,7 +80,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **When to dispatch:**
 - After submission and before merge — the final gate that confirms the evidence actually demonstrates the acceptance criteria pass.
-- Inside `/flow:verify` for the final evidence-validation step before `/flow:finish` calls `fakoli-state apply --approve`.
+- Inside `/flow:verify` for the final evidence-validation step before `/flow:finish` calls `anvil apply --approve`.
 
 **Iron Rule:** Never modifies any source file, test file, state file, or evidence file. Reads, runs read-only commands, and reports. Every finding is binary — PASS or FAIL. Does not fix; does not suggest; only validates.
 
@@ -95,35 +95,35 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **Source:** [`agents/sentinel.md`](../agents/sentinel.md)
 
-**See also:** [integrating-with-fakoli-flow-and-crew.md → Example 1](how-to/integrating-with-fakoli-flow-and-crew.md#example-1-flowexecute-consumes-fakoli-state-next--claim--submit) · [cli-reference.md#submit](cli-reference.md#submit)
+**See also:** [integrating-with-fakoli-flow-and-crew.md → Example 1](how-to/integrating-with-fakoli-flow-and-crew.md#example-1-flowexecute-consumes-anvil-next--claim--submit) · [cli-reference.md#submit](cli-reference.md#submit)
 
 ---
 
 ### state-keeper
 
-**Purpose:** Sync reconciliation. Detects drift between fakoli-state's three sources of truth — the SQLite canonical state, the project filesystem (packets, evidence buffer, worktrees), and git (branches, claims, commits). Returns a structured discrepancy report. Reports only — never remediates.
+**Purpose:** Sync reconciliation. Detects drift between anvil's three sources of truth — the SQLite canonical state, the project filesystem (packets, evidence buffer, worktrees), and git (branches, claims, commits). Returns a structured discrepancy report. Reports only — never remediates.
 
 **Frontmatter:** `color: teal` · `model: opus` · `tools: [Read, Grep, Glob, Bash, Edit, Write]`
 
-Edit and Write are scoped strictly to producing sync-report files under `.fakoli-state/.sync-reports/` when the caller requests one. Source files, state files, evidence files, and git refs are never touched.
+Edit and Write are scoped strictly to producing sync-report files under `.anvil/.sync-reports/` when the caller requests one. Source files, state files, evidence files, and git refs are never touched.
 
 **When to dispatch:**
-- Trigger phrases: "reconcile state", "sync drift", "check for orphans", "audit fakoli-state".
+- Trigger phrases: "reconcile state", "sync drift", "check for orphans", "audit anvil".
 - After a rebase, force-push, or manual filesystem cleanup that may have broken state-engine assumptions.
 - When a claim is suspected stale (worktree gone, branch missing).
 - When a task is marked synced (`external_id` present) but the `sync_mappings` row may never have landed.
-- As the scan phase of `fakoli-state sync` (no `--fix`).
+- As the scan phase of `anvil sync` (no `--fix`).
 
-**Iron Rule:** Never auto-remediates. Never deletes branches, worktrees, packets, evidence files, state rows, or events. Never runs destructive git operations (`git branch -D`, `git worktree remove`, `git push --force`, etc.). Sole output is a discrepancy report; remediation is the user's explicit choice via `fakoli-state sync --fix --yes`.
+**Iron Rule:** Never auto-remediates. Never deletes branches, worktrees, packets, evidence files, state rows, or events. Never runs destructive git operations (`git branch -D`, `git worktree remove`, `git push --force`, etc.). Sole output is a discrepancy report; remediation is the user's explicit choice via `anvil sync --fix --yes`.
 
 **Defer behavior:** Scope-split. When `fakoli-crew:keeper` is installed, the two have non-overlapping scopes:
 - Route to `fakoli-crew:keeper` for cross-plugin sync, CI workflow drift, contributor docs, multi-plugin registry/marketplace regen.
-- Route to `fakoli-state:state-keeper` for orphan branches in one project, orphan packets, stale claims, missing `sync_mappings`, audit-log spot-checks.
+- Route to `anvil:state-keeper` for orphan branches in one project, orphan packets, stale claims, missing `sync_mappings`, audit-log spot-checks.
 
 Both can fire in parallel when a question touches both scopes.
 
 **The four reconciliation checks:**
-1. **Orphan branches** — git branch whose embedded task ID is not present in `fakoli-state list --status all`.
+1. **Orphan branches** — git branch whose embedded task ID is not present in `anvil list --status all`.
 2. **Orphan packets** — packet directory under `packets/` with no matching task in SQLite.
 3. **Stale claims** — claim row in SQLite with no matching worktree at the expected path.
 4. **Missing sync_mappings** — task with sync evidence (events log shows `sync.pushed`) but no row in `sync_mappings`.
@@ -143,7 +143,7 @@ Both can fire in parallel when a question touches both scopes.
 **Frontmatter:** `color: purple` · `model: opus` · `tools: [Read, Write, Edit, Glob, Grep]`
 
 **When to dispatch:**
-- Trigger phrases: "update fakoli-state docs", "fix broken links", "write the changelog", "doc cross-reference audit", "after-phase docs sweep".
+- Trigger phrases: "update anvil docs", "fix broken links", "write the changelog", "doc cross-reference audit", "after-phase docs sweep".
 - After a schema change (migration, model class change, column added or removed).
 - After a new CLI command or subcommand ships.
 - After a new agent is added.
@@ -153,10 +153,10 @@ Both can fire in parallel when a question touches both scopes.
 **Iron Rule:** Never edits a doc without first reading the source of truth it is supposed to describe. If a spec describes the schema, read the schema. If a runbook describes a CLI command, read the CLI source. Docs that lie are worse than no docs at all.
 
 **What it owns:**
-- `plugins/fakoli-state/docs/**/*.md` — all inward-facing docs.
-- `plugins/fakoli-state/docs/plans/` — phase plans and agent status archives.
-- `plugins/fakoli-state/CHANGELOG.md` — append-only ledger of user-visible changes.
-- `plugins/fakoli-state/.claude-plugin/plugin.json` (`description` field only).
+- `plugins/anvil/docs/**/*.md` — all inward-facing docs.
+- `plugins/anvil/docs/plans/` — phase plans and agent status archives.
+- `plugins/anvil/CHANGELOG.md` — append-only ledger of user-visible changes.
+- `plugins/anvil/.claude-plugin/plugin.json` (`description` field only).
 
 **What it does NOT own:**
 - `.claude-plugin/marketplace.json`, the root `README.md`, `registry/*.json` (marketplace-level artifacts — belong to `fakoli-crew:keeper`).
@@ -166,7 +166,7 @@ Both can fire in parallel when a question touches both scopes.
 
 **Defer behavior:** Scope-split. When `fakoli-crew:herald` is installed:
 - Route to `fakoli-crew:herald` for root README, marketplace listing prose, badges, value-proposition rewrites for first-time visitors.
-- Route to `docs-scribe` for anything inside `plugins/fakoli-state/docs/`, the plugin's CHANGELOG, the plugin.json description field.
+- Route to `docs-scribe` for anything inside `plugins/anvil/docs/`, the plugin's CHANGELOG, the plugin.json description field.
 
 The split-by-audience is deliberate: docs-scribe writes for contributors, state-keeper writes for operators.
 
@@ -202,7 +202,7 @@ Two of the five agents (`critic`, `sentinel`) are full fallbacks — when the cr
 
 ## Standalone mode
 
-If only fakoli-state is installed, all 5 agents run their full local body. No degradation in capability — the deferral is an optimization (using a more specialized crew agent), not a requirement. The plugin-owned `critic` still produces PASS / SHOULD FIX / MUST FIX verdicts against acceptance criteria. The plugin-owned `sentinel` still re-runs verification commands and produces the binary scorecard. `planner` still proposes Features and Tasks; `state-keeper` still detects the four discrepancy kinds; `docs-scribe` still sweeps the inward docs and CHANGELOG.
+If only anvil is installed, all 5 agents run their full local body. No degradation in capability — the deferral is an optimization (using a more specialized crew agent), not a requirement. The plugin-owned `critic` still produces PASS / SHOULD FIX / MUST FIX verdicts against acceptance criteria. The plugin-owned `sentinel` still re-runs verification commands and produces the binary scorecard. `planner` still proposes Features and Tasks; `state-keeper` still detects the four discrepancy kinds; `docs-scribe` still sweeps the inward docs and CHANGELOG.
 
 This is the v0 wedge: a solo developer with one Claude Code session can drive the full PRD-to-shipped lifecycle — and the full doc-and-state maintenance lifecycle — without ever installing fakoli-flow or fakoli-crew.
 

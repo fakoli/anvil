@@ -1,6 +1,6 @@
 """Token-footprint CI budget gate (backlog T013 / feature F003).
 
-fakoli-state ships as a Claude Code plugin whose skills are *always* visible:
+anvil ships as a Claude Code plugin whose skills are *always* visible:
 Claude Code injects every skill's frontmatter ``name`` + ``description`` into
 the system prompt so the model can decide when to invoke a skill. That
 frontmatter is paid for on *every* turn of *every* conversation, whether or
@@ -60,7 +60,7 @@ TOTAL_FULL_BUDGET = 40000
 
 
 def _plugin_root() -> Path:
-    """Return the absolute path of the fakoli-state plugin (repo) root.
+    """Return the absolute path of the anvil plugin (repo) root.
 
     The test file lives at ``<root>/tests/test_token_budget.py``, so
     ``parents[1]`` is the repo root — matching ``test_version_sync.py``.

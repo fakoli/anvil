@@ -1,12 +1,12 @@
-# fakoli-state — Context / Token Footprint Audit
+# anvil — Context / Token Footprint Audit
 
-> "Measure before you market." fakoli-state positions itself as *context-frugal* /
+> "Measure before you market." anvil positions itself as *context-frugal* /
 > structurally immune to context bloat. This audit measures that claim honestly.
 
 **Reproduce:**
 
 ```bash
-cd plugins/fakoli-state
+cd plugins/anvil
 uv run --with tiktoken python benchmarks/context_audit.py
 ```
 
@@ -21,7 +21,7 @@ yields ~7,800 always-on — same shape, slightly higher).
 ## What "always-on" means
 
 The **always-on footprint** is the text that sits in an agent's context the
-moment fakoli-state is installed — *before any skill is invoked or any tool is
+moment anvil is installed — *before any skill is invoked or any tool is
 called*. It is paid on **every turn, by every agent**, for the life of the
 session. It comprises:
 
@@ -34,7 +34,7 @@ session. It comprises:
   schema) are injected whenever the MCP server is connected.
 - **Hook injection** — the `SessionStart` hook's stdout is injected once per
   session.
-- **Commands** — slash-command frontmatter (fakoli-state ships **none**).
+- **Commands** — slash-command frontmatter (anvil ships **none**).
 
 **On-demand** content (skill bodies, agent bodies) is *not* in the baseline and
 is counted separately.
@@ -130,7 +130,7 @@ marketplace listing*.
   (`docs-scribe`, `marketplace-scribe`) irrelevant to a standalone user, yet they
   occupy the #1 and #2 spots in the baseline (1,465 tok / 20%).
 
-**Bottom line:** fakoli-state is *frugal where it controls the mechanism*
+**Bottom line:** anvil is *frugal where it controls the mechanism*
 (skills, hooks, commands — excellent) and *not frugal where it doesn't lean on
 that mechanism* (MCP schemas, verbose agent examples). The headline 7.2K is fine;
 the composition shows ~3.4K of it (47%) is trimmable without losing capability.
@@ -156,7 +156,7 @@ is on-demand and free until dispatch), not the always-on description.
 
 ### 2. Make the two repo-maintenance agents opt-in / move them out of the shipped plugin → save ~1,465 tok (20% of baseline)
 
-`docs-scribe` (760) and `marketplace-scribe` (705) maintain *fakoli-state's own*
+`docs-scribe` (760) and `marketplace-scribe` (705) maintain *anvil's own*
 docs, CHANGELOG, marketplace.json, and registry. A standalone end-user never
 dispatches them; they are developer-of-this-plugin tooling. Every install pays
 1,465 tok to advertise them.

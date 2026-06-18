@@ -1,11 +1,11 @@
 """Integration tests for Phase 7 Wave 2 — LLM augmentation of planning engine.
 
-Wave 1 produced ``fakoli_state.planning.llm`` (Protocol + AnthropicProvider +
+Wave 1 produced ``anvil.planning.llm`` (Protocol + AnthropicProvider +
 RecordedLLMProvider).  Wave 2 wires that into:
 
-- :func:`fakoli_state.planning.scoring.score_task` (explanation enrichment)
-- :func:`fakoli_state.planning.template.parse_prd`  (short description enrichment)
-- :func:`fakoli_state.planning.inference.expand_task` (sub-task proposals)
+- :func:`anvil.planning.scoring.score_task` (explanation enrichment)
+- :func:`anvil.planning.template.parse_prd`  (short description enrichment)
+- :func:`anvil.planning.inference.expand_task` (sub-task proposals)
 
 These tests use the deterministic :class:`RecordedLLMProvider` exclusively —
 no live API calls, no SDK mocking.  Each test pre-computes the lookup key
@@ -24,19 +24,19 @@ from typing import Any
 
 import pytest
 
-from fakoli_state.planning.inference import (
+from anvil.planning.inference import (
     SubtaskProposal,
     expand_task,
 )
-from fakoli_state.planning.llm import (
+from anvil.planning.llm import (
     LLMProvider,
     LLMProviderError,
     LLMResponse,
     RecordedLLMProvider,
 )
-from fakoli_state.planning.scoring import score_task
-from fakoli_state.planning.template import parse_prd
-from fakoli_state.state.models import (
+from anvil.planning.scoring import score_task
+from anvil.planning.template import parse_prd
+from anvil.state.models import (
     Score,
     Task,
     TaskPriority,
@@ -141,7 +141,7 @@ class TestScoreTaskWithProvider:
 
         # Build the system prompt the way scoring.py builds it so we can
         # pre-compute the recording key.
-        from fakoli_state.planning.scoring import _SCORE_EXPLAIN_SYSTEM_PROMPT
+        from anvil.planning.scoring import _SCORE_EXPLAIN_SYSTEM_PROMPT
 
         # First compute the deterministic score so we know what user payload
         # the engine will build (scores must match).
@@ -167,7 +167,7 @@ class TestScoreTaskWithProvider:
         )
         # Phase 9 C2: record_key includes tuning args, so the test must pass
         # the exact max_tokens the score engine uses (_SCORE_EXPLAIN_MAX_TOKENS).
-        from fakoli_state.planning.scoring import _SCORE_EXPLAIN_MAX_TOKENS
+        from anvil.planning.scoring import _SCORE_EXPLAIN_MAX_TOKENS
         key = RecordedLLMProvider.record_key(
             _SCORE_EXPLAIN_SYSTEM_PROMPT,
             user_payload,
@@ -219,7 +219,7 @@ class TestScoreTaskWithProvider:
         """An empty LLM response leaves the deterministic explanation alone."""
         task = _make_task(likely_files=["src/bar.py"])
 
-        from fakoli_state.planning.scoring import _SCORE_EXPLAIN_SYSTEM_PROMPT
+        from anvil.planning.scoring import _SCORE_EXPLAIN_SYSTEM_PROMPT
 
         det_score = score_task(task)
         user_payload = json.dumps(
@@ -242,7 +242,7 @@ class TestScoreTaskWithProvider:
         )
         # Phase 9 C2: record_key includes tuning args; pass the engine's
         # _SCORE_EXPLAIN_MAX_TOKENS so the recorded key matches the lookup.
-        from fakoli_state.planning.scoring import _SCORE_EXPLAIN_MAX_TOKENS
+        from anvil.planning.scoring import _SCORE_EXPLAIN_MAX_TOKENS
         key = RecordedLLMProvider.record_key(
             _SCORE_EXPLAIN_SYSTEM_PROMPT,
             user_payload,
@@ -339,7 +339,7 @@ class TestParsePrdWithProvider:
 
     def test_provider_enriches_short_description(self) -> None:
         """A short Task description (<50 chars) is replaced by the LLM output."""
-        from fakoli_state.planning.template import _DESCRIPTION_ENRICH_SYSTEM_PROMPT
+        from anvil.planning.template import _DESCRIPTION_ENRICH_SYSTEM_PROMPT
 
         # Pre-parse to learn what the deterministic description looks like
         # (so we can build the same user prompt the engine will).
@@ -353,7 +353,7 @@ class TestParsePrdWithProvider:
         )
         # Phase 9 C2: record_key includes tuning args; pass the engine's
         # _DESCRIPTION_ENRICH_MAX_TOKENS so the recorded key matches.
-        from fakoli_state.planning.template import _DESCRIPTION_ENRICH_MAX_TOKENS
+        from anvil.planning.template import _DESCRIPTION_ENRICH_MAX_TOKENS
         key = RecordedLLMProvider.record_key(
             _DESCRIPTION_ENRICH_SYSTEM_PROMPT,
             user_payload,
@@ -454,7 +454,7 @@ class TestExpandTaskDefaults:
 class TestExpandTaskWithProvider:
     def test_high_complexity_calls_provider_and_returns_proposals(self) -> None:
         """complexity >= 4 + provider → parsed SubtaskProposal list."""
-        from fakoli_state.planning.inference import _EXPAND_SYSTEM_PROMPT
+        from anvil.planning.inference import _EXPAND_SYSTEM_PROMPT
 
         task = _make_task(
             task_id="T042",
@@ -483,7 +483,7 @@ class TestExpandTaskWithProvider:
         user_payload = _expand_user_payload(task)
         # Phase 9 C2: record_key includes tuning args; expand_task uses
         # _EXPAND_MAX_TOKENS, so the test must pass the same value to match.
-        from fakoli_state.planning.inference import _EXPAND_MAX_TOKENS
+        from anvil.planning.inference import _EXPAND_MAX_TOKENS
         key = RecordedLLMProvider.record_key(
             _EXPAND_SYSTEM_PROMPT, user_payload, max_tokens=_EXPAND_MAX_TOKENS
         )
@@ -516,7 +516,7 @@ class TestExpandTaskWithProvider:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Garbled (non-JSON) LLM output → empty + stderr warning."""
-        from fakoli_state.planning.inference import (
+        from anvil.planning.inference import (
             _EXPAND_MAX_TOKENS,
             _EXPAND_SYSTEM_PROMPT,
         )
@@ -540,7 +540,7 @@ class TestExpandTaskWithProvider:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """LLM returns a JSON object (not list) → empty + warning."""
-        from fakoli_state.planning.inference import (
+        from anvil.planning.inference import (
             _EXPAND_MAX_TOKENS,
             _EXPAND_SYSTEM_PROMPT,
         )
@@ -561,7 +561,7 @@ class TestExpandTaskWithProvider:
 
     def test_skips_malformed_items_but_keeps_good_ones(self) -> None:
         """Items missing title are skipped; well-formed siblings still returned."""
-        from fakoli_state.planning.inference import (
+        from anvil.planning.inference import (
             _EXPAND_MAX_TOKENS,
             _EXPAND_SYSTEM_PROMPT,
         )
@@ -598,7 +598,7 @@ class TestExpandTaskWithProvider:
 
     def test_caps_proposals_at_five(self) -> None:
         """If the LLM returns >5 proposals, the engine truncates to 5."""
-        from fakoli_state.planning.inference import (
+        from anvil.planning.inference import (
             _EXPAND_MAX_TOKENS,
             _EXPAND_SYSTEM_PROMPT,
         )
@@ -636,11 +636,11 @@ class TestExpandTaskHandlesLlmQuirks:
     and falls back to regex-extracting the first JSON array when the LLM
     wraps the response in prose. Before this, every fenced response was
     treated as non-JSON and silently dropped — the user reported that
-    `fakoli-state expand --use-llm` returned "non-JSON" for every task."""
+    `anvil expand --use-llm` returned "non-JSON" for every task."""
 
     def _setup(self, response_text: str):  # type: ignore[no-untyped-def]
         """Build the recorded-provider machinery for an expand_task call."""
-        from fakoli_state.planning.inference import (
+        from anvil.planning.inference import (
             _EXPAND_MAX_TOKENS,
             _EXPAND_SYSTEM_PROMPT,
         )

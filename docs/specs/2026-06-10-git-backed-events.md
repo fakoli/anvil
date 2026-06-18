@@ -2,20 +2,20 @@
 
 **Status:** PROPOSED
 **Date:** 2026-06-10
-**Owner:** fakoli-state
+**Owner:** anvil
 **Depends on:** event-sourced write path (SL1-RR-1, shipped in #75)
 
 ## Why
 
-fakoli-state's moat is durable, evidence-bearing, project-scoped state. But today that
-state is *machine*-scoped, not *repo*-scoped: `.fakoli-state/events.jsonl` is gitignored,
+anvil's moat is durable, evidence-bearing, project-scoped state. But today that
+state is *machine*-scoped, not *repo*-scoped: `.anvil/events.jsonl` is gitignored,
 so a clone, a second worktree, a teammate, or a CI runner starts blind. The GitHub
 Issues sync bridges some of this, but it is a bespoke bridge to an external system —
 not a property of the state engine itself.
 
 Beads (steveyegge/beads, ~24k stars) demonstrated the right end-state: a git-committed
 JSONL log as the merge-friendly source of truth, with SQLite as a disposable local
-cache, and git itself as the sync, history, and conflict layer. fakoli-state is
+cache, and git itself as the sync, history, and conflict layer. anvil is
 unusually close to this already — the JSONL log **is** our source of truth and the
 SQLite projection **is** rebuildable byte-for-byte via replay. One design decision
 blocks the rest: event IDs.
@@ -57,7 +57,7 @@ MCP accept either form.
 ### 3. Git layout and merging
 
 ```
-.fakoli-state/
+.anvil/
   events.jsonl      ← committed (the state)
   state.db          ← gitignored (disposable projection)
   .gitattributes    ← events.jsonl merge=union
@@ -88,7 +88,7 @@ that no claim-time check can see.
 
 ### 5. Migration
 
-- Schema v4. `fakoli-state migrate --git-events` rewrites the local log with hash IDs
+- Schema v4. `anvil migrate --git-events` rewrites the local log with hash IDs
   (emitting an `id_mapping` table for old references), flips the `.gitignore` entries,
   writes `.gitattributes`, and sets `events.storage: git` in config.
 - `E{N}` mode remains supported indefinitely for existing projects (`events.storage:
@@ -99,7 +99,7 @@ that no claim-time check can see.
 
 - **Dolt / versioned-SQL backends** — git + JSONL + projection is enough; a second
   database technology is surface area without a user.
-- **A background sync daemon** — fakoli-state is invoked, does its work, exits.
+- **A background sync daemon** — anvil is invoked, does its work, exits.
   Reconciliation on initialize() covers catch-up.
 - **Memory-decay compaction of closed items** — different concern (agent context
   curation, not state). Log growth is handled by snapshot-and-archive instead: a

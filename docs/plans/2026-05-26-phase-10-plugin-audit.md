@@ -1,11 +1,11 @@
-# fakoli-state Phase 10 — plugin-dev best-practices audit + 5 new critic agents
+# anvil Phase 10 — plugin-dev best-practices audit + 5 new critic agents
 
-**Goal:** Create 5 new cross-plugin specialist critic agents in fakoli-crew, run their first audit on fakoli-state v1.9.0, apply MUST FIX findings inline, and ship fakoli-state v1.10.0 + fakoli-crew v2.1.0.
+**Goal:** Create 5 new cross-plugin specialist critic agents in fakoli-crew, run their first audit on anvil v1.9.0, apply MUST FIX findings inline, and ship anvil v1.10.0 + fakoli-crew v2.1.0.
 
-**Spec:** `plugins/fakoli-state/docs/specs/2026-05-26-plugin-audit-and-critics.md`
-**Language:** Python (fakoli-state runtime) + Markdown (critic agent specs) + Bash (smoke-test fixtures and runner)
+**Spec:** `plugins/anvil/docs/specs/2026-05-26-plugin-audit-and-critics.md`
+**Language:** Python (anvil runtime) + Markdown (critic agent specs) + Bash (smoke-test fixtures and runner)
 **Crew:** fakoli-crew v2.0.0 (8 agents: critic, guido, herald, keeper, scout, sentinel, smith, welder)
-**Branch:** `feat/fakoli-state-phase-10-audit`
+**Branch:** `feat/anvil-phase-10-audit`
 **Working dir:** `/Users/sekoudoumbouya/ai-code/claude-env/fakoli-plugins`
 
 ---
@@ -16,7 +16,7 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 
 1. **Frontmatter key is `tools:`, not `allowed-tools:`.** The spec mistakenly used `allowed-tools:` (a command-frontmatter key) for agents. All 5 new critic specs use `tools:`. The structure-critic's own check list also corrects this: it MUST flag `allowed-tools:` on agent files as MUST FIX.
 2. **`plugins/fakoli-crew/tests/` does not exist** — needs scaffolding. Task T0 added.
-3. **Hook-critic ambivalence about `set -e`** — plugin-dev's general recommendation is `set -euo pipefail`, but plugins with a non-blocking hook contract (fakoli-state) explicitly forbid `set -e` to preserve graceful degradation. Hook-critic's system prompt MUST detect the plugin's hook contract first (read `hooks.json` and look for "non-blocking" language in plugin docs), then enforce accordingly.
+3. **Hook-critic ambivalence about `set -e`** — plugin-dev's general recommendation is `set -euo pipefail`, but plugins with a non-blocking hook contract (anvil) explicitly forbid `set -e` to preserve graceful degradation. Hook-critic's system prompt MUST detect the plugin's hook contract first (read `hooks.json` and look for "non-blocking" language in plugin docs), then enforce accordingly.
 4. **Recommended non-colliding colors** for the 5 new critics: agent-critic=`magenta`, skill-critic=`teal`, hook-critic=`gray`, mcp-critic=`white`, structure-critic=`brown`. (fakoli-crew currently uses: red, blue, pink, purple, cyan, orange, green, yellow.)
 
 ---
@@ -28,7 +28,7 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 **Intent:** Create the test infrastructure that fakoli-crew lacks today, so the new critic agents have somewhere to land their fixture-based smoke tests.
 
 **Acceptance criteria:**
-- `plugins/fakoli-crew/tests/` directory exists with a `README.md` describing the test conventions (bash test scripts following `plugins/fakoli-state/tests/test_hooks.sh` precedent; no Python dependency added to fakoli-crew).
+- `plugins/fakoli-crew/tests/` directory exists with a `README.md` describing the test conventions (bash test scripts following `plugins/anvil/tests/test_hooks.sh` precedent; no Python dependency added to fakoli-crew).
 - `plugins/fakoli-crew/tests/fixtures/audit-targets/` subdirectory exists, ready for the 5 known-bad fixtures.
 - `plugins/fakoli-crew/tests/test_critics.sh` exists as a bash runner stub that, when executed manually, lists each critic and the manual-verification recipe (which fixture to feed it, which severity to expect). It does NOT attempt to dispatch Claude Code agents from bash (impossible from a shell context).
 
@@ -182,23 +182,23 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 
 ---
 
-### T8 — Run first audit on fakoli-state v1.9.0 (5 critics in parallel)
+### T8 — Run first audit on anvil v1.9.0 (5 critics in parallel)
 
-**Intent:** Dispatch all 5 critics simultaneously against fakoli-state v1.9.0's surface area. Each critic writes findings to its own status file. Read-only; no mutations to fakoli-state files.
+**Intent:** Dispatch all 5 critics simultaneously against anvil v1.9.0's surface area. Each critic writes findings to its own status file. Read-only; no mutations to anvil files.
 
 **Acceptance criteria:**
-- `plugins/fakoli-state/docs/plans/agent-agent-critic-status.md` exists with findings on `plugins/fakoli-state/agents/*.md` (6 agents reviewed).
-- `plugins/fakoli-state/docs/plans/agent-skill-critic-status.md` exists with findings on `plugins/fakoli-state/skills/*/SKILL.md` (7 skills reviewed).
-- `plugins/fakoli-state/docs/plans/agent-hook-critic-status.md` exists with findings on `plugins/fakoli-state/hooks/*.sh` + `hooks.json` (4 hooks + 1 config reviewed). Contract-detection step confirms fakoli-state's non-blocking contract was recognized.
-- `plugins/fakoli-state/docs/plans/agent-mcp-critic-status.md` exists with findings on `plugins/fakoli-state/.mcp.json` + MCP server source (13 tools reviewed).
-- `plugins/fakoli-state/docs/plans/agent-structure-critic-status.md` exists with findings on `plugins/fakoli-state/.claude-plugin/plugin.json`, `pyproject.toml`, `__init__.py`, `README.md`, `CHANGELOG.md`, plus root `.claude-plugin/marketplace.json` and `registry/*.json` entries.
+- `plugins/anvil/docs/plans/agent-agent-critic-status.md` exists with findings on `plugins/anvil/agents/*.md` (6 agents reviewed).
+- `plugins/anvil/docs/plans/agent-skill-critic-status.md` exists with findings on `plugins/anvil/skills/*/SKILL.md` (7 skills reviewed).
+- `plugins/anvil/docs/plans/agent-hook-critic-status.md` exists with findings on `plugins/anvil/hooks/*.sh` + `hooks.json` (4 hooks + 1 config reviewed). Contract-detection step confirms anvil's non-blocking contract was recognized.
+- `plugins/anvil/docs/plans/agent-mcp-critic-status.md` exists with findings on `plugins/anvil/.mcp.json` + MCP server source (13 tools reviewed).
+- `plugins/anvil/docs/plans/agent-structure-critic-status.md` exists with findings on `plugins/anvil/.claude-plugin/plugin.json`, `pyproject.toml`, `__init__.py`, `README.md`, `CHANGELOG.md`, plus root `.claude-plugin/marketplace.json` and `registry/*.json` entries.
 - Each status file uses the same severity rubric (MUST FIX / SHOULD FIX / CONSIDER / NIT) and includes a "Files reviewed" section listing what it actually opened.
 
 **Scope:**
-- read-only audit of fakoli-state v1.9.0 surface area; status files only.
+- read-only audit of anvil v1.9.0 surface area; status files only.
 
 **Agent:** dispatched in parallel — `agent-critic`, `skill-critic`, `hook-critic`, `mcp-critic`, `structure-critic` (all in fakoli-crew once T1-T5 have created them)
-**Verify:** all 5 status files exist and non-empty (`ls -la plugins/fakoli-state/docs/plans/agent-*-critic-status.md | wc -l` == 5).
+**Verify:** all 5 status files exist and non-empty (`ls -la plugins/anvil/docs/plans/agent-*-critic-status.md | wc -l` == 5).
 **Depends on:** T1, T2, T3, T4, T5, T0 (need the agents to exist; tests/ infrastructure not strictly needed for the audit but the bundle ships together)
 
 ---
@@ -208,7 +208,7 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 **Intent:** Read the 5 critic status files, produce a single severity-sorted audit doc with per-critic detail sections and a MUST FIX tracking table.
 
 **Acceptance criteria:**
-- `plugins/fakoli-state/docs/audits/2026-05-26-plugin-audit.md` exists.
+- `plugins/anvil/docs/audits/2026-05-26-plugin-audit.md` exists.
 - Top section: summary line with finding counts per severity.
 - "Findings table (severity-sorted)" with columns: Severity, Critic, Target file, Line, Finding, Action.
 - Five "Per-critic detail" sections containing the verbatim findings from each status file.
@@ -216,10 +216,10 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 - "Items deferred to Phase 11" section listing all SHOULD FIX / CONSIDER / NIT items with file:line + the critic that found each (used to bootstrap `phase-11-backlog.md` in T12).
 
 **Scope:**
-- `plugins/fakoli-state/docs/audits/2026-05-26-plugin-audit.md` (new; `docs/audits/` directory created)
+- `plugins/anvil/docs/audits/2026-05-26-plugin-audit.md` (new; `docs/audits/` directory created)
 
 **Agent:** keeper
-**Verify:** `test -s plugins/fakoli-state/docs/audits/2026-05-26-plugin-audit.md && grep -cE "^## " plugins/fakoli-state/docs/audits/2026-05-26-plugin-audit.md` returns ≥7 sections.
+**Verify:** `test -s plugins/anvil/docs/audits/2026-05-26-plugin-audit.md && grep -cE "^## " plugins/anvil/docs/audits/2026-05-26-plugin-audit.md` returns ≥7 sections.
 **Depends on:** T8
 
 ---
@@ -229,12 +229,12 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 **Intent:** Surface to the user the total MUST FIX count from T9's audit. If > 20, escalate to user with the option to defer some MUST FIX items to Phase 11 (per spec Risk mitigation). If ≤ 20, proceed.
 
 **Acceptance criteria:**
-- A status note in `plugins/fakoli-state/docs/plans/agent-checkpoint-status.md` summarizing: total MUST FIX count, list of file paths affected, recommendation (proceed / escalate).
+- A status note in `plugins/anvil/docs/plans/agent-checkpoint-status.md` summarizing: total MUST FIX count, list of file paths affected, recommendation (proceed / escalate).
 - If MUST FIX > 20: NEEDS_REVIEW status surfaced; do not start T11 until user approves deferral list.
 - If MUST FIX ≤ 20: COMPLETE status; T11 proceeds.
 
 **Scope:**
-- `plugins/fakoli-state/docs/plans/agent-checkpoint-status.md` (new)
+- `plugins/anvil/docs/plans/agent-checkpoint-status.md` (new)
 
 **Agent:** keeper (lightweight — read the audit doc + write a one-page summary)
 **Verify:** Status file exists with one of {COMPLETE, NEEDS_REVIEW}.
@@ -257,7 +257,7 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 - determined dynamically by audit findings; could span any of the audit's reviewed files.
 
 **Agent:** welder (potentially N parallel welders if MUST FIX items affect N disjoint files)
-**Verify:** `grep -c "→ fixed\|→ deferred" plugins/fakoli-state/docs/audits/2026-05-26-plugin-audit.md` >= MUST FIX count from T9.
+**Verify:** `grep -c "→ fixed\|→ deferred" plugins/anvil/docs/audits/2026-05-26-plugin-audit.md` >= MUST FIX count from T9.
 **Depends on:** T10
 
 ---
@@ -267,16 +267,16 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 **Intent:** Materialize the SHOULD FIX / CONSIDER / NIT items from the audit into a Phase 11 backlog doc, following the format of `docs/phase-9-backlog.md`.
 
 **Acceptance criteria:**
-- `plugins/fakoli-state/docs/phase-11-backlog.md` exists.
+- `plugins/anvil/docs/phase-11-backlog.md` exists.
 - Each item has: severity, critic that found it, file:line, finding text, recommended action, target phase (defaults to Phase 11; some may be deferred further).
 - Cross-references the audit doc by anchor.
 - A summary table at top with severity counts.
 
 **Scope:**
-- `plugins/fakoli-state/docs/phase-11-backlog.md` (new)
+- `plugins/anvil/docs/phase-11-backlog.md` (new)
 
 **Agent:** herald
-**Verify:** `test -s plugins/fakoli-state/docs/phase-11-backlog.md && grep -cE "^### " plugins/fakoli-state/docs/phase-11-backlog.md` returns N matching the deferred item count.
+**Verify:** `test -s plugins/anvil/docs/phase-11-backlog.md && grep -cE "^### " plugins/anvil/docs/phase-11-backlog.md` returns N matching the deferred item count.
 **Depends on:** T9
 
 ---
@@ -286,7 +286,7 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 **Intent:** A senior-engineer review of every welder fix applied in T11. Catches over-eager fixes, fixes that introduced new bugs, and SHOULD-FIX items that slipped into MUST-FIX scope.
 
 **Acceptance criteria:**
-- `plugins/fakoli-state/docs/plans/agent-critic-status.md` exists with PASS or NEEDS_REVIEW verdict.
+- `plugins/anvil/docs/plans/agent-critic-status.md` exists with PASS or NEEDS_REVIEW verdict.
 - Reviews every file changed during T11 (file list extracted from `git diff main..HEAD --name-only` or from welder status files).
 - Reports findings using the standard severity rubric. Any new MUST FIX surfaced here triggers a fresh fix-cycle (welder → re-review, max 3 iterations).
 
@@ -294,7 +294,7 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 - read-only review of T11 changes.
 
 **Agent:** fakoli-crew:critic
-**Verify:** `grep -E "^(PASS|NEEDS_REVIEW)" plugins/fakoli-state/docs/plans/agent-critic-status.md`.
+**Verify:** `grep -E "^(PASS|NEEDS_REVIEW)" plugins/anvil/docs/plans/agent-critic-status.md`.
 **Depends on:** T11
 
 ---
@@ -304,38 +304,38 @@ Three corrections from `agent-scout-status.md` that this plan reflects (the spec
 **Intent:** Run the 11 acceptance criteria from the spec as a binary PASS/FAIL scorecard.
 
 **Acceptance criteria:**
-- `plugins/fakoli-state/docs/plans/agent-sentinel-status.md` exists with a scorecard covering all 11 spec acceptance items.
+- `plugins/anvil/docs/plans/agent-sentinel-status.md` exists with a scorecard covering all 11 spec acceptance items.
 - Cites real command output (not summaries) for each PASS.
 - For any FAIL, reports the exact divergence.
 - Final verdict line: COMPLETE (all PASS) or NEEDS_REVIEW (any FAIL).
 
 **Scope:**
-- read-only verification across fakoli-state, fakoli-crew, root marketplace artifacts.
+- read-only verification across anvil, fakoli-crew, root marketplace artifacts.
 
 **Agent:** fakoli-crew:sentinel
-**Verify:** `grep -E "^Final verdict: (COMPLETE|NEEDS_REVIEW)" plugins/fakoli-state/docs/plans/agent-sentinel-status.md`.
+**Verify:** `grep -E "^Final verdict: (COMPLETE|NEEDS_REVIEW)" plugins/anvil/docs/plans/agent-sentinel-status.md`.
 **Depends on:** T11
 
 ---
 
-### T15 — Release prep (fakoli-state v1.10.0 + fakoli-crew v2.1.0)
+### T15 — Release prep (anvil v1.10.0 + fakoli-crew v2.1.0)
 
 **Intent:** Sync versions, write CHANGELOG entries for both plugins, regenerate marketplace + registry, update both README agent tables.
 
 **Acceptance criteria:**
-- `plugins/fakoli-state/.claude-plugin/plugin.json`, `plugins/fakoli-state/bin/pyproject.toml`, `plugins/fakoli-state/bin/src/fakoli_state/__init__.py`, and the fakoli-state entry in `.claude-plugin/marketplace.json` all read `1.10.0`.
+- `plugins/anvil/.claude-plugin/plugin.json`, `plugins/anvil/bin/pyproject.toml`, `plugins/anvil/bin/src/anvil/__init__.py`, and the anvil entry in `.claude-plugin/marketplace.json` all read `1.10.0`.
 - `plugins/fakoli-crew/.claude-plugin/plugin.json` and the fakoli-crew entry in `.claude-plugin/marketplace.json` both read `2.1.0`.
-- `plugins/fakoli-state/CHANGELOG.md` has new `[1.10.0] — 2026-05-26` entry covering: 5 new fakoli-crew critic agents, first audit applied, MUST FIX items closed.
+- `plugins/anvil/CHANGELOG.md` has new `[1.10.0] — 2026-05-26` entry covering: 5 new fakoli-crew critic agents, first audit applied, MUST FIX items closed.
 - `plugins/fakoli-crew/CHANGELOG.md` has new `[2.1.0] — 2026-05-26` entry covering the 5 new critic agents (with brief descriptions).
 - `plugins/fakoli-crew/README.md` agent table grows from 8 to 13 rows (add agent-critic, skill-critic, hook-critic, mcp-critic, structure-critic with one-line descriptions).
-- `plugins/fakoli-state/README.md` version badge updated to 1.10.0.
+- `plugins/anvil/README.md` version badge updated to 1.10.0.
 - `bash scripts/generate-index.sh` runs cleanly; root marketplace.json and registry/*.json reflect both version bumps.
 
 **Scope:**
 - 7 manifest/CHANGELOG/README files + script run.
 
 **Agent:** keeper
-**Verify:** `bash scripts/generate-index.sh --check && grep "1.10.0" plugins/fakoli-state/.claude-plugin/plugin.json plugins/fakoli-state/bin/pyproject.toml plugins/fakoli-state/bin/src/fakoli_state/__init__.py && grep "2.1.0" plugins/fakoli-crew/.claude-plugin/plugin.json`.
+**Verify:** `bash scripts/generate-index.sh --check && grep "1.10.0" plugins/anvil/.claude-plugin/plugin.json plugins/anvil/bin/pyproject.toml plugins/anvil/bin/src/anvil/__init__.py && grep "2.1.0" plugins/fakoli-crew/.claude-plugin/plugin.json`.
 **Depends on:** T13, T14
 
 ---
@@ -394,4 +394,4 @@ Wave 9 (single — release prep, depends on T13 + T14):
 4. **Agent assignment**: smith owns new-file creation (agents + fixtures + scaffold); herald owns docs (RECIPES.md + phase-11-backlog.md); keeper owns consolidation + release; critic + sentinel own review (one each). Welder gets the implementation-mutation work in T11.
 5. **Code-free check**: no function bodies; only intent statements + verifiable acceptance criteria + grep/file-existence verify commands. Color values are configuration, not code.
 
-Plan saved to `plugins/fakoli-state/docs/plans/2026-05-26-phase-10-plugin-audit.md`. Handing off to `/fakoli-flow:execute`.
+Plan saved to `plugins/anvil/docs/plans/2026-05-26-phase-10-plugin-audit.md`. Handing off to `/fakoli-flow:execute`.

@@ -31,10 +31,10 @@ from typing import Any
 
 import pytest
 
-from fakoli_state.claims.manager import ClaimError, ClaimManager
-from fakoli_state.clock import SystemClock
-from fakoli_state.state.models import EventDraft
-from fakoli_state.state.sqlite import SqliteBackend
+from anvil.claims.manager import ClaimError, ClaimManager
+from anvil.clock import SystemClock
+from anvil.state.models import EventDraft
+from anvil.state.sqlite import SqliteBackend
 
 _UTC = UTC
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=_UTC)
@@ -374,9 +374,9 @@ def test_cli_claim_honours_fractional_lease_minutes(tmp_path: Path) -> None:
     """A config with default_lease_minutes: 0.5 yields a ~30 s lease, not 60 min."""
     from typer.testing import CliRunner
 
-    from fakoli_state.cli import app
+    from anvil.cli import app
 
-    state_dir = tmp_path / ".fakoli-state"
+    state_dir = tmp_path / ".anvil"
     state_dir.mkdir()
 
     # Minimal config with a fractional lease.

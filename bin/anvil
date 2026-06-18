@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# anvil — shell wrapper that bridges bin/src/ Python source to Claude Code
+# skills, hooks, and the shell. Ensures uv is synced (idempotent) then execs the
+# CLI module so signals propagate cleanly to the Python process.
+
+# Preserve caller's cwd so the CLI sees the directory the user actually invoked
+# from. Without this, `anvil init` would scaffold .anvil/ inside
+# the plugin's bin/ instead of the user's project.
+ORIGINAL_PWD="$PWD"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! command -v uv > /dev/null 2>&1; then
+    printf 'anvil: uv is required: https://docs.astral.sh/uv/getting-started/installation/\n' >&2
+    exit 127
+fi
+
+# Sync only when uv.lock is missing, pyproject.toml is newer than .venv,
+# or uv.lock is newer than .venv (covers the `git pull` case where only the
+# lock file moves). File-age based, fully idempotent — no cat/grep involved.
+(cd "$BIN_DIR" && {
+    if [ ! -f uv.lock ] || [ pyproject.toml -nt .venv ] || [ uv.lock -nt .venv ]; then
+        uv sync --quiet
+    fi
+})
+
+cd "$ORIGINAL_PWD" || exit 1
+exec uv run --quiet --project "$BIN_DIR" python -m anvil.cli "$@"

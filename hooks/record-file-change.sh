@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 
-# record-file-change.sh — PostToolUse hook for fakoli-state (Phase 4)
+# record-file-change.sh — PostToolUse hook for anvil (Phase 4)
 # Fires after Edit, Write, or NotebookEdit tool calls.
-# Appends a file_changed event to .fakoli-state/events.jsonl.
+# Appends a file_changed event to .anvil/events.jsonl.
 #
 # Phase 4 strategy: prefer the CLI subcommand when available; fall back to a
 # direct JSONL append in shell.  The direct-append path is intentionally simple
 # — it is a well-formed JSON line that the replay engine can process.
-# Wave 2 (guido) must implement: fakoli-state hook record-file-change --file <PATH> --tool <TOOL> --actor <ACTOR>
+# Wave 2 (guido) must implement: anvil hook record-file-change --file <PATH> --tool <TOOL> --actor <ACTOR>
 #
 # Rules: no set -e, no piped grep, always exit 0, complete in < 200ms.
 
-STATE_DIR=".fakoli-state"
+STATE_DIR=".anvil"
 EVENTS_FILE="${STATE_DIR}/events.jsonl"
 
 # Fast-path: no project state, nothing to record.
@@ -70,8 +70,8 @@ fi
 
 # Prefer the CLI subcommand (guido Wave 2 implements this).
 # CLI invocation shape for guido:
-#   fakoli-state hook record-file-change --file <PATH> --tool <TOOL> --actor <ACTOR>
-CLI="${CLAUDE_PLUGIN_ROOT}/bin/fakoli-state"
+#   anvil hook record-file-change --file <PATH> --tool <TOOL> --actor <ACTOR>
+CLI="${CLAUDE_PLUGIN_ROOT}/bin/anvil"
 
 if [ -x "$CLI" ]; then
   "$CLI" hook record-file-change \

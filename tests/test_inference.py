@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.planning.inference — dependency and conflict-group inference.
+"""Tests for anvil.planning.inference — dependency and conflict-group inference.
 
 All tests follow the pure-function contract:
 - Input tasks are never mutated.
@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import datetime
 
-from fakoli_state.planning.inference import (
+from anvil.planning.inference import (
     InferenceResult,
     infer_all,
     infer_conflict_groups,
     infer_dependencies,
 )
-from fakoli_state.state.models import Score, Task, TaskPriority, TaskStatus, Verification
+from anvil.state.models import Score, Task, TaskPriority, TaskStatus, Verification
 
 # ---------------------------------------------------------------------------
 # Helpers

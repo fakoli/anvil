@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "fakoli-state": {
+    "anvil": {
       "type": "stdio",
       "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/fakoli-state-mcp"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/anvil-mcp"]
     }
   }
 }

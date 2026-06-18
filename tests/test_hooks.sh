@@ -2,7 +2,7 @@
 # test_hooks.sh — Smoke tests for check-claim.sh and record-file-change.sh
 #
 # Usage: bash tests/test_hooks.sh
-# CI: add `bash plugins/fakoli-state/tests/test_hooks.sh` to the test matrix.
+# CI: add `bash plugins/anvil/tests/test_hooks.sh` to the test matrix.
 #
 # Strategy: run each hook script directly via bash (no CLAUDE_PLUGIN_ROOT set)
 # so the CLI fallback is skipped and we test the shell logic paths.
@@ -40,7 +40,7 @@ _assert_exit_zero() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup: temporary project directory with .fakoli-state/
+# Setup: temporary project directory with .anvil/
 # ---------------------------------------------------------------------------
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -49,12 +49,12 @@ UNINITIALIZED_DIR="${TMP_DIR}/no-state"
 INITIALIZED_DIR="${TMP_DIR}/with-state"
 
 mkdir -p "$UNINITIALIZED_DIR"
-mkdir -p "${INITIALIZED_DIR}/.fakoli-state"
-touch "${INITIALIZED_DIR}/.fakoli-state/events.jsonl"
-touch "${INITIALIZED_DIR}/.fakoli-state/state.db"
+mkdir -p "${INITIALIZED_DIR}/.anvil"
+touch "${INITIALIZED_DIR}/.anvil/events.jsonl"
+touch "${INITIALIZED_DIR}/.anvil/state.db"
 
 # ---------------------------------------------------------------------------
-# Smoke test 1: check-claim.sh exits 0 when no .fakoli-state/ exists
+# Smoke test 1: check-claim.sh exits 0 when no .anvil/ exists
 # ---------------------------------------------------------------------------
 cd "$UNINITIALIZED_DIR" || exit 1
 STDERR_OUT="$(bash "$CHECK_CLAIM" < /dev/null 2>&1)"
@@ -121,7 +121,7 @@ printf '%s' "$PAYLOAD" | bash "$RECORD_CHANGE" 2>/dev/null
 EXIT_CODE=$?
 _assert_exit_zero "record-file-change: exits 0 in initialized dir (fallback JSONL append)" "$EXIT_CODE"
 
-EVENTS_FILE="${INITIALIZED_DIR}/.fakoli-state/events.jsonl"
+EVENTS_FILE="${INITIALIZED_DIR}/.anvil/events.jsonl"
 if [ -f "$EVENTS_FILE" ] && grep -q "file_changed\|new_file.py" "$EVENTS_FILE" 2>/dev/null; then
   _pass "record-file-change: events.jsonl contains expected content after append"
 else
@@ -156,17 +156,17 @@ CAPTURE_EVIDENCE="${REPO_ROOT}/hooks/capture-evidence.sh"
 # A fresh initialized dir for capture-evidence tests (separate from above to
 # avoid interference with record-file-change tests).
 CE_DIR="${TMP_DIR}/ce-test"
-mkdir -p "${CE_DIR}/.fakoli-state"
-touch "${CE_DIR}/.fakoli-state/state.db"
+mkdir -p "${CE_DIR}/.anvil"
+touch "${CE_DIR}/.anvil/state.db"
 
 # ---------------------------------------------------------------------------
-# Smoke test 11: capture-evidence.sh exits 0 outside any project (.fakoli-state/ absent)
+# Smoke test 11: capture-evidence.sh exits 0 outside any project (.anvil/ absent)
 # ---------------------------------------------------------------------------
 cd "$UNINITIALIZED_DIR" || exit 1
 EXIT_CODE=0
 bash "$CAPTURE_EVIDENCE" < /dev/null 2>/dev/null
 EXIT_CODE=$?
-_assert_exit_zero "capture-evidence: exits 0 outside .fakoli-state/ project" "$EXIT_CODE"
+_assert_exit_zero "capture-evidence: exits 0 outside .anvil/ project" "$EXIT_CODE"
 
 # ---------------------------------------------------------------------------
 # Smoke test 12: capture-evidence.sh exits 0 with stdin tty (no payload)
@@ -188,7 +188,7 @@ EXIT_CODE=$?
 _assert_exit_zero "capture-evidence: exits 0 for non-verification command (echo)" "$EXIT_CODE"
 
 # And orphan.json should NOT have been written for this non-verification command.
-CE_ORPHAN="${CE_DIR}/.fakoli-state/.evidence-buffer/orphan.json"
+CE_ORPHAN="${CE_DIR}/.anvil/.evidence-buffer/orphan.json"
 if [ ! -f "$CE_ORPHAN" ]; then
   _pass "capture-evidence: orphan.json NOT written for non-verification command"
 else
@@ -205,8 +205,8 @@ fi
 # and writes to orphan.json when no active claim
 # ---------------------------------------------------------------------------
 CE2_DIR="${TMP_DIR}/ce-test2"
-mkdir -p "${CE2_DIR}/.fakoli-state"
-touch "${CE2_DIR}/.fakoli-state/state.db"
+mkdir -p "${CE2_DIR}/.anvil"
+touch "${CE2_DIR}/.anvil/state.db"
 
 cd "$CE2_DIR" || exit 1
 PAYLOAD='{"tool_input":{"command":"pytest tests/ -v"},"tool_response":{"stdout":"5 passed","stderr":"","exit_code":0},"session_id":"sess-ce2"}'
@@ -214,7 +214,7 @@ printf '%s' "$PAYLOAD" | bash "$CAPTURE_EVIDENCE" 2>/dev/null
 EXIT_CODE=$?
 _assert_exit_zero "capture-evidence: exits 0 for verification command (pytest)" "$EXIT_CODE"
 
-CE2_ORPHAN="${CE2_DIR}/.fakoli-state/.evidence-buffer/orphan.json"
+CE2_ORPHAN="${CE2_DIR}/.anvil/.evidence-buffer/orphan.json"
 if [ -f "$CE2_ORPHAN" ] && grep -q "pytest" "$CE2_ORPHAN" 2>/dev/null; then
   _pass "capture-evidence: orphan.json written with pytest command captured"
 else
@@ -232,19 +232,19 @@ fi
 # the right subcommand with the right flags.
 # ---------------------------------------------------------------------------
 CC_DIR="${TMP_DIR}/cc-cli-stub"
-mkdir -p "${CC_DIR}/.fakoli-state"
-touch "${CC_DIR}/.fakoli-state/state.db"
+mkdir -p "${CC_DIR}/.anvil"
+touch "${CC_DIR}/.anvil/state.db"
 
 STUB_ROOT="${TMP_DIR}/cc-plugin"
 mkdir -p "${STUB_ROOT}/bin"
-STUB_CLI="${STUB_ROOT}/bin/fakoli-state"
+STUB_CLI="${STUB_ROOT}/bin/anvil"
 STUB_LOG="${TMP_DIR}/cc-cli-args.log"
 
 # Embed the absolute log path into the stub via heredoc expansion (unquoted
 # delimiter) so the stub records to a known file regardless of caller env.
 cat > "$STUB_CLI" <<STUB
 #!/usr/bin/env bash
-# Test stub for fakoli-state CLI — record argv to ${STUB_LOG} and exit 0.
+# Test stub for anvil CLI — record argv to ${STUB_LOG} and exit 0.
 printf '%s\n' "\$*" >> "${STUB_LOG}"
 exit 0
 STUB
@@ -276,8 +276,8 @@ fi
 # (hook must never block even when the test run itself failed)
 # ---------------------------------------------------------------------------
 CE3_DIR="${TMP_DIR}/ce-test3"
-mkdir -p "${CE3_DIR}/.fakoli-state"
-touch "${CE3_DIR}/.fakoli-state/state.db"
+mkdir -p "${CE3_DIR}/.anvil"
+touch "${CE3_DIR}/.anvil/state.db"
 
 cd "$CE3_DIR" || exit 1
 PAYLOAD='{"tool_input":{"command":"pytest tests/ -v"},"tool_response":{"stdout":"1 failed","stderr":"FAILED test_foo.py","exit_code":1},"session_id":"sess-ce3"}'

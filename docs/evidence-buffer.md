@@ -1,8 +1,8 @@
 # Evidence buffer
 
-`.fakoli-state/.evidence-buffer/` is a transient, append-only directory used by
+`.anvil/.evidence-buffer/` is a transient, append-only directory used by
 the `capture-evidence.sh` hook to record bash-command output between the moment
-a verification command runs and the moment `fakoli-state submit` packages that
+a verification command runs and the moment `anvil submit` packages that
 output into a durable `evidence.submitted` event.
 
 Documented as part of closing tech-debt-backlog **CL-15** (originally flagged
@@ -14,7 +14,7 @@ Each file is JSON: one *record* per line in append-only `*.json` files, keyed
 by the active claim ID. The hook writes one file per claim:
 
 ```text
-.fakoli-state/.evidence-buffer/
+.anvil/.evidence-buffer/
 ├── 4F2A.json        # claim 4F2A's captured commands
 ├── 7B91.json        # claim 7B91's captured commands
 └── orphan.json      # commands captured while no active claim matched the actor
@@ -43,8 +43,8 @@ agent's flow needs the long form.
 | Step | Who | Effect |
 |---|---|---|
 | 1. Agent runs `pytest` (or other verification command) | Bash tool | `PostToolUse` hook fires |
-| 2. `hooks/capture-evidence.sh` shells to `fakoli-state hook capture-evidence` | Hook | One JSON line appended to `<claim-id>.json` (or `orphan.json` if no matching active claim) |
-| 3. Agent runs `fakoli-state submit T012 --commands "pytest" --files-changed ...` | CLI | Reads matching buffer file, embeds outputs in `evidence.submitted` event, then **deletes** the buffer file |
+| 2. `hooks/capture-evidence.sh` shells to `anvil hook capture-evidence` | Hook | One JSON line appended to `<claim-id>.json` (or `orphan.json` if no matching active claim) |
+| 3. Agent runs `anvil submit T012 --commands "pytest" --files-changed ...` | CLI | Reads matching buffer file, embeds outputs in `evidence.submitted` event, then **deletes** the buffer file |
 | 4. `submit --output-file` provided directly | CLI | The buffer is bypassed; output is taken from the file the agent supplied |
 
 The submit step is the consume-and-rotate operation: it turns the transient
@@ -67,18 +67,18 @@ record goes to `orphan.json`. This commonly happens when:
 until the user deletes it manually:
 
 ```bash
-rm .fakoli-state/.evidence-buffer/orphan.json
+rm .anvil/.evidence-buffer/orphan.json
 ```
 
 This is a known limitation. The recovery path is `submit --output-file`,
 which lets an agent point at a specific orphan record (or any file) and
 attach it as evidence without going through the buffer. A future
-`fakoli-state evidence prune` command could rotate `orphan.json` on a TTL
+`anvil evidence prune` command could rotate `orphan.json` on a TTL
 basis; tracked separately.
 
 ## Sentinel interaction
 
-The `sentinel` agent (both `fakoli-state` and `fakoli-crew:sentinel`) reads
+The `sentinel` agent (both `anvil` and `fakoli-crew:sentinel`) reads
 the per-claim buffer files when validating evidence completeness. After
 `submit` consumes a buffer, the sentinel sees the durable
 `evidence.submitted` event in `state.db` and `events.jsonl` — the
@@ -88,20 +88,20 @@ intermediate buffer file is gone.
 
 | Trigger | What happens |
 |---|---|
-| `fakoli-state submit T012` succeeds | `<claim-id>.json` for T012's claim is deleted |
-| `fakoli-state release T012` | Buffer file for the released claim is **not** auto-deleted; remains until next submit consumes it or a manual clean |
-| `fakoli-state init --force` | The entire `.evidence-buffer/` directory is preserved (it's user data) |
+| `anvil submit T012` succeeds | `<claim-id>.json` for T012's claim is deleted |
+| `anvil release T012` | Buffer file for the released claim is **not** auto-deleted; remains until next submit consumes it or a manual clean |
+| `anvil init --force` | The entire `.evidence-buffer/` directory is preserved (it's user data) |
 | Process crash mid-write | Append-only JSONL means a torn line is the worst case; subsequent reads skip malformed lines |
 
 ## When to manually clean
 
-- After a hard reset of project state (`rm -rf .fakoli-state/.evidence-buffer/`).
+- After a hard reset of project state (`rm -rf .anvil/.evidence-buffer/`).
 - After resolving an orphan-accumulation issue (e.g., a stuck claim was force-released and never resubmitted).
 - Before sharing a project state snapshot — the buffer is transient and not part of the canonical audit log.
 
 ## See also
 
 - `hooks/capture-evidence.sh` — the bash hook that writes to the buffer.
-- `bin/src/fakoli_state/cli/hooks.py::capture-evidence` — the CLI subcommand the hook calls.
-- `bin/src/fakoli_state/cli/packet_apply.py::submit` — the consume side that drains the buffer.
+- `bin/src/anvil/cli/hooks.py::capture-evidence` — the CLI subcommand the hook calls.
+- `bin/src/anvil/cli/packet_apply.py::submit` — the consume side that drains the buffer.
 - `docs/hooks.md` — the broader hook lifecycle.

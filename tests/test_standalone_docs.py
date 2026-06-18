@@ -1,6 +1,6 @@
 """Standalone-docs self-sufficiency gate (backlog T011 / feature F002).
 
-fakoli-state must be usable *standalone* — driven entirely through its own CLI
+anvil must be usable *standalone* — driven entirely through its own CLI
 and MCP surface, with no `fakoli-flow` or `fakoli-crew` plugin installed. The
 onboarding docs are the contract for that promise: the Getting Started
 walkthrough and the README Quick Start must lead with a crew/flow-free path
@@ -39,7 +39,7 @@ import pytest
 
 
 def _repo_root() -> Path:
-    """Absolute path of the fakoli-state repo root.
+    """Absolute path of the anvil repo root.
 
     ``<root>/tests/test_standalone_docs.py`` → ``parents[1]`` is the root.
     """
@@ -117,7 +117,7 @@ def test_getting_started_walkthrough_is_crew_flow_free() -> None:
     assert not tokens, (
         "docs/how-to/getting-started.md must not reference any flow/crew "
         f"command token (found {sorted(set(tokens))}). The standalone "
-        "walkthrough has to run on the fakoli-state CLI/MCP surface alone. "
+        "walkthrough has to run on the anvil CLI/MCP surface alone. "
         "Refer to the optional siblings by plugin name (fakoli-flow / "
         "fakoli-crew, no colon) and link to "
         "integrating-with-fakoli-flow-and-crew.md instead of naming a "
@@ -128,15 +128,15 @@ def test_getting_started_walkthrough_is_crew_flow_free() -> None:
 def test_getting_started_leads_with_standalone_then_optional() -> None:
     """Standalone walkthrough leads; the Optional integration section follows.
 
-    The first core CLI step (``fakoli-state init``) must appear *before* any
+    The first core CLI step (``anvil init``) must appear *before* any
     explicit Optional integration heading, proving the doc leads with the
     crew/flow-free path rather than front-loading integration.
     """
     text = _getting_started().read_text(encoding="utf-8")
 
-    init_idx = text.find("fakoli-state init")
+    init_idx = text.find("anvil init")
     assert init_idx != -1, (
-        "docs/how-to/getting-started.md should walk through `fakoli-state "
+        "docs/how-to/getting-started.md should walk through `anvil "
         "init` as the first standalone step."
     )
 
@@ -147,7 +147,7 @@ def test_getting_started_leads_with_standalone_then_optional() -> None:
         "additive nature of the siblings is unambiguous."
     )
     assert init_idx < optional_idx, (
-        "The standalone walkthrough (starting at `fakoli-state init`) must "
+        "The standalone walkthrough (starting at `anvil init`) must "
         "lead; the Optional integration section must come after it, not "
         "before."
     )
@@ -211,12 +211,12 @@ def test_readme_quick_start_leads_before_optional_integration() -> None:
 @pytest.mark.parametrize(
     "marker",
     [
-        "fakoli-state init",  # standalone scaffold
-        "fakoli-state prd parse",  # standalone prd parse
-        "fakoli-state plan",  # standalone plan
-        "fakoli-state claim",  # standalone claim
-        "fakoli-state submit",  # standalone evidence
-        "fakoli-state apply",  # standalone finish
+        "anvil init",  # standalone scaffold
+        "anvil prd parse",  # standalone prd parse
+        "anvil plan",  # standalone plan
+        "anvil claim",  # standalone claim
+        "anvil submit",  # standalone evidence
+        "anvil apply",  # standalone finish
     ],
 )
 def test_getting_started_covers_full_standalone_loop(marker: str) -> None:

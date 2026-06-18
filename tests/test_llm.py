@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.planning.llm — Phase 7 Wave 1 LLM abstraction.
+"""Tests for anvil.planning.llm — Phase 7 Wave 1 LLM abstraction.
 
 Coverage:
 - ``LLMResponse`` Pydantic model validates as expected.
@@ -22,7 +22,7 @@ import anthropic
 import pytest
 from anthropic.types import Message, TextBlock, Usage
 
-from fakoli_state.planning.llm import (
+from anvil.planning.llm import (
     AnthropicProvider,
     LLMProvider,
     LLMProviderError,
@@ -475,7 +475,7 @@ class TestAnthropicProviderApiKeyResolution:
     ) -> None:
         """Explicit api_key= overrides the env var."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
-        with _mock.patch("fakoli_state.planning.llm.anthropic.Anthropic") as mock_ctor:
+        with _mock.patch("anvil.planning.llm.anthropic.Anthropic") as mock_ctor:
             AnthropicProvider(api_key="explicit-key")
             mock_ctor.assert_called_once_with(api_key="explicit-key")
 
@@ -483,7 +483,7 @@ class TestAnthropicProviderApiKeyResolution:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
-        with _mock.patch("fakoli_state.planning.llm.anthropic.Anthropic") as mock_ctor:
+        with _mock.patch("anvil.planning.llm.anthropic.Anthropic") as mock_ctor:
             AnthropicProvider()
             mock_ctor.assert_called_once_with(api_key="env-key")
 
@@ -492,6 +492,6 @@ class TestAnthropicProviderApiKeyResolution:
     ) -> None:
         """SDK gets None so it can surface its own helpful auth error."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        with _mock.patch("fakoli_state.planning.llm.anthropic.Anthropic") as mock_ctor:
+        with _mock.patch("anvil.planning.llm.anthropic.Anthropic") as mock_ctor:
             AnthropicProvider()
             mock_ctor.assert_called_once_with(api_key=None)

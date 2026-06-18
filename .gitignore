@@ -15,11 +15,11 @@ dist/
 .coverage
 bin/.coverage
 
-# fakoli-state runtime state (created when running the CLI, tests, or benchmarks)
-.fakoli-state/
-bin/.fakoli-state/
+# anvil runtime state (created when running the CLI, tests, or benchmarks)
+.anvil/
+bin/.anvil/
 packets/
 
 # Agent build scratch space — never commit
-.fakoli-state-build/
+.anvil-build/
 docs/plans/agent-*-status.md

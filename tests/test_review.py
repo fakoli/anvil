@@ -1,4 +1,4 @@
-"""Tests for fakoli_state.review.gates — review gate functions.
+"""Tests for anvil.review.gates — review gate functions.
 
 Coverage targets (>= 90%):
 - evidence_complete() — all decision branches
@@ -10,14 +10,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fakoli_state.review.gates import (
+from anvil.review.gates import (
     DeferredFinding,
     _contains_test_keyword,
     deferred_findings,
     deferred_findings_for_files,
     evidence_complete,
 )
-from fakoli_state.state.models import (
+from anvil.state.models import (
     Evidence,
     Review,
     ReviewDecision,
@@ -538,7 +538,7 @@ class TestWorkPacketSurfacesDeferredFindings:
     """The rendered work packet (markdown + json) surfaces overlapping findings."""
 
     def test_packet_markdown_and_json_include_deferred_finding(self) -> None:
-        from fakoli_state.context.packets import render_packet
+        from anvil.context.packets import render_packet
 
         prior_task = _make_task_with_files(
             task_id="T001", likely_files=["src/auth.py"]
@@ -576,7 +576,7 @@ class TestWorkPacketSurfacesDeferredFindings:
         assert df[0]["overlapping_files"] == ["src/auth.py"]
 
     def test_packet_without_findings_omits_section_backcompat(self) -> None:
-        from fakoli_state.context.packets import render_packet
+        from anvil.context.packets import render_packet
 
         new_task = _make_task_with_files(
             task_id="T002", likely_files=["src/auth.py"]
@@ -662,7 +662,7 @@ class TestDeferredOverlapEndToEnd:
 
         from typer.testing import CliRunner
 
-        from fakoli_state.cli import app
+        from anvil.cli import app
 
         runner = CliRunner()
 
@@ -676,7 +676,7 @@ class TestDeferredOverlapEndToEnd:
 
         # 1. Plan the two-task project.
         assert _invoke(["init", "--name", "Deferred Overlap Test Project"]).exit_code == 0
-        (tmp_path / ".fakoli-state" / "prd.md").write_text(
+        (tmp_path / ".anvil" / "prd.md").write_text(
             _OVERLAP_PRD, encoding="utf-8"
         )
         assert _invoke(["prd", "parse"]).exit_code == 0
@@ -715,7 +715,7 @@ class TestDeferredOverlapEndToEnd:
         assert rej.exit_code == 0, rej.output
 
         # The finding is persisted as a queryable review row on src/app/converter.py.
-        db_path = tmp_path / ".fakoli-state" / "state.db"
+        db_path = tmp_path / ".anvil" / "state.db"
         conn = _sqlite3.connect(str(db_path))
         try:
             review_row = conn.execute(
@@ -732,7 +732,7 @@ class TestDeferredOverlapEndToEnd:
         #    deferred finding must surface, in both markdown and json.
         md_res = _invoke(["packet", "T002", "--format", "md"])
         assert md_res.exit_code == 0, md_res.output
-        md = (tmp_path / ".fakoli-state" / "packets" / "T002.md").read_text(
+        md = (tmp_path / ".anvil" / "packets" / "T002.md").read_text(
             encoding="utf-8"
         )
         assert "Prior unresolved review findings" in md
@@ -742,7 +742,7 @@ class TestDeferredOverlapEndToEnd:
         json_res = _invoke(["packet", "T002", "--format", "json"])
         assert json_res.exit_code == 0, json_res.output
         data = _json.loads(
-            (tmp_path / ".fakoli-state" / "packets" / "T002.json").read_text(
+            (tmp_path / ".anvil" / "packets" / "T002.json").read_text(
                 encoding="utf-8"
             )
         )

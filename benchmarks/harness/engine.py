@@ -1,6 +1,6 @@
-"""Engine layer: own the real fakoli-state binary and stand up a project from a TaskSpec list.
+"""Engine layer: own the real anvil binary and stand up a project from a TaskSpec list.
 
-The benchmark drives the *actual* fakoli-state CLI (the same console script a user
+The benchmark drives the *actual* anvil CLI (the same console script a user
 runs), not a reimplementation. This module locates/builds that binary once and renders
 a PRD from an internal TaskSpec list, then runs the real setup pipeline
 (init -> parse -> review -> approve -> plan -> score -> review tasks) so tasks land in
@@ -43,20 +43,20 @@ class RunResult:
 # --- binary management ------------------------------------------------------
 
 def _plugin_bin_dir() -> Path:
-    # benchmarks/harness/engine.py -> plugins/fakoli-state/bin
+    # benchmarks/harness/engine.py -> plugins/anvil/bin
     return Path(__file__).resolve().parents[2] / "bin"
 
 
 @lru_cache(maxsize=1)
-def fakoli_binary() -> str:
-    """Return an absolute path to a runnable `fakoli-state` console script.
+def anvil_binary() -> str:
+    """Return an absolute path to a runnable `anvil` console script.
 
     Prefers an already-synced venv; otherwise runs `uv sync` once. The resulting
     binary is cwd-independent, so each actor subprocess can run it with its own
     working directory (the project under test).
     """
     bin_dir = _plugin_bin_dir()
-    candidate = bin_dir / ".venv" / "bin" / "fakoli-state"
+    candidate = bin_dir / ".venv" / "bin" / "anvil"
     if candidate.exists():
         return str(candidate)
     if shutil.which("uv") is None:
@@ -73,7 +73,7 @@ def fakoli_binary() -> str:
 def run(args: list[str], cwd: Path, actor: str | None = None,
         timeout: float = 60.0) -> RunResult:
     """Invoke the real CLI. `actor` is threaded through as --actor where relevant."""
-    cmd = [fakoli_binary(), *args]
+    cmd = [anvil_binary(), *args]
     if actor is not None and "--actor" not in args:
         cmd += ["--actor", actor]
     env = {**os.environ, "NO_COLOR": "1"}
@@ -145,7 +145,7 @@ class Project:
 
 def setup_project(root: Path, name: str, tasks: list[TaskSpec],
                   lease_minutes: float = 60.0) -> Project:
-    """Stand up a ready-to-claim fakoli-state project via the real pipeline.
+    """Stand up a ready-to-claim anvil project via the real pipeline.
 
     Raises RuntimeError with captured output if any setup step fails, so a broken
     fixture is loud rather than silently producing zero tasks.
@@ -165,7 +165,7 @@ def setup_project(root: Path, name: str, tasks: list[TaskSpec],
     # Configure a short lease for crash-recovery scenarios.
     _set_lease_minutes(root, lease_minutes)
 
-    (root / ".fakoli-state" / "prd.md").write_text(
+    (root / ".anvil" / "prd.md").write_text(
         render_prd(name, tasks), encoding="utf-8"
     )
 
@@ -193,12 +193,12 @@ def setup_project(root: Path, name: str, tasks: list[TaskSpec],
 
 def _set_lease_minutes(root: Path, minutes: float) -> None:
     """Patch default_lease_minutes in config.yaml (line-level, no yaml dep)."""
-    cfg = root / ".fakoli-state" / "config.yaml"
+    cfg = root / ".anvil" / "config.yaml"
     if not cfg.exists():
         return
     # The engine coerces this via int(str(value)); a fractional string raises and
     # silently falls back to 60. So emit an integer (floor 1 minute = the real lease
-    # granularity everywhere in fakoli-state).
+    # granularity everywhere in anvil).
     value = max(1, int(round(minutes)))
     out = []
     seen = False
@@ -220,7 +220,7 @@ def ready_task_ids(proj: Project) -> list[str]:
 
 def _task_ids_with_status(proj: Project, status: str) -> list[str]:
     import sqlite3
-    db = proj.root / ".fakoli-state" / "state.db"
+    db = proj.root / ".anvil" / "state.db"
     if not db.exists():
         return []
     con = sqlite3.connect(str(db))
@@ -248,7 +248,7 @@ def expire_claims_for(proj: Project, task_id: str) -> int:
     import sqlite3
     from datetime import datetime, timedelta, timezone
     past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    db = proj.root / ".fakoli-state" / "state.db"
+    db = proj.root / ".anvil" / "state.db"
     con = sqlite3.connect(str(db))
     try:
         cur = con.execute(
@@ -265,7 +265,7 @@ def expire_claims_for(proj: Project, task_id: str) -> int:
 def task_status(proj: Project) -> dict[str, str]:
     """Map every task id -> current status, from canonical state."""
     import sqlite3
-    db = proj.root / ".fakoli-state" / "state.db"
+    db = proj.root / ".anvil" / "state.db"
     con = sqlite3.connect(str(db))
     try:
         rows = con.execute("SELECT id, status FROM tasks").fetchall()

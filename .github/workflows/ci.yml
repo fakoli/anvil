@@ -39,7 +39,7 @@ jobs:
         working-directory: bin
         run: uv run pytest -q
 
-      # Coordination benchmark smoke: drives the real fakoli-state CLI against
+      # Coordination benchmark smoke: drives the real anvil CLI against
       # a live SQLite state engine. Uses the venv materialized by `uv sync`
       # above (the harness shells out to `uv run` / the synced CLI).
       - name: Coordination benchmark smoke

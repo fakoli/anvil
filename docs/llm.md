@@ -1,8 +1,8 @@
-# fakoli-state LLM augmentation
+# anvil LLM augmentation
 
 ## What it is
 
-Planning in fakoli-state is deterministic by default: a rule-based PRD parser, a six-dimension
+Planning in anvil is deterministic by default: a rule-based PRD parser, a six-dimension
 scoring engine, and a subset-overlap dependency inferencer turn `prd.md` into reviewed tasks
 without ever calling out to a model. The LLM layer is **strictly additive** — when enabled it
 enriches the deterministic output (longer task descriptions, trade-off summaries on score
@@ -36,7 +36,7 @@ augmentation shape this engine emits). Repeated runs against the same task batch
 Three CLI commands accept the `--use-llm` flag. The deterministic baseline always runs first;
 LLM enrichment is layered on top.
 
-### `fakoli-state plan --use-llm`
+### `anvil plan --use-llm`
 
 Re-parses `prd.md` and emits `feature.created` / `task.created` events as usual. With
 `--use-llm`, short task descriptions (under 50 characters) are extended by the LLM after the
@@ -44,19 +44,19 @@ deterministic parse. The structural fields (id, dependencies, conflict groups, s
 transitions) are never touched by the model.
 
 ```text
-$ fakoli-state plan --use-llm
+$ anvil plan --use-llm
 Planned 4 features, 17 tasks.
 Detected 2 conflict group(s).
 ```
 
-### `fakoli-state score [TASK_ID] --use-llm`
+### `anvil score [TASK_ID] --use-llm`
 
 Computes the six numeric scores deterministically, then asks the LLM for a 1–3 sentence
 trade-off summary appended to the rule-based explanation. **The numeric scores themselves
 are never modified by the LLM.**
 
 ```text
-$ fakoli-state score T012 --use-llm
+$ anvil score T012 --use-llm
 TaskID      Complexity Parallel CtxLoad Blast Review Agent
 ------------------------------------------------------------
 T012                 4        2       3     2      3     4
@@ -64,9 +64,9 @@ T012                 4        2       3     2      3     4
 Scored 1 task(s).
 ```
 
-`fakoli-state show T012` then displays the appended trade-off paragraph under `Explanation`.
+`anvil show T012` then displays the appended trade-off paragraph under `Explanation`.
 
-### `fakoli-state expand TASK_ID --use-llm`
+### `anvil expand TASK_ID --use-llm`
 
 Unlike `plan` and `score`, `expand` **requires** `--use-llm` — the deterministic engine
 never invents sub-tasks (manual authoring as `T001.1`, `T001.2` blocks in `prd.md` is the
@@ -75,7 +75,7 @@ deterministic path). With `--use-llm` and a task of `complexity >= 4`, the LLM p
 into `prd.md`; **it does not mutate state.**
 
 ```text
-$ fakoli-state expand T012 --use-llm
+$ anvil expand T012 --use-llm
 Proposed 3 sub-task(s) for T012. Paste into prd.md as ### TXxx blocks under the same ## Tasks section.
 
 --- Sub-task 1 ---
@@ -95,11 +95,11 @@ as-is.
 The default `--format text` mode (above) emits human-readable per-subtask
 blocks. The new `--format prd` mode emits markdown blocks matching
 [`docs/prd-template.md`](prd-template.md) — paste-ready into the
-`## Tasks` section of `.fakoli-state/prd.md`:
+`## Tasks` section of `.anvil/prd.md`:
 
 ```text
-$ fakoli-state expand T012 --use-llm --format prd
-# 3 sub-task block(s) for T012 — paste into the ## Tasks section of .fakoli-state/prd.md:
+$ anvil expand T012 --use-llm --format prd
+# 3 sub-task block(s) for T012 — paste into the ## Tasks section of .anvil/prd.md:
 
 ### T012.1: Extract JWT validation into middleware
 
@@ -180,8 +180,8 @@ def record_key(
 ```
 
 ```python
-from fakoli_state.planning.llm import RecordedLLMProvider, LLMResponse
-from fakoli_state.planning.scoring import (
+from anvil.planning.llm import RecordedLLMProvider, LLMResponse
+from anvil.planning.scoring import (
     score_task,
     _SCORE_EXPLAIN_MAX_TOKENS,
 )
@@ -245,7 +245,7 @@ the CLI exits cleanly with code 1 and a message pointing at the env var. No part
 written.
 
 ```text
-$ fakoli-state plan --use-llm
+$ anvil plan --use-llm
 Error: --use-llm requires ANTHROPIC_API_KEY in environment. Set it or omit --use-llm.
 ```
 
@@ -290,5 +290,5 @@ re-scored idempotently.
 - [`mcp.md`](mcp.md) — MCP server (does not currently expose LLM augmentation; agents that
   want it call the CLI directly).
 - [`prd-template.md`](prd-template.md) — the deterministic PRD format the parser expects.
-- `specs/2026-05-24-fakoli-state-v0.md` — canonical design spec including the LLM
+- `specs/2026-05-24-anvil-v0.md` — canonical design spec including the LLM
   augmentation contract.

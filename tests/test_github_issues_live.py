@@ -6,14 +6,14 @@ Every test in this module is decorated with ``@pytest.mark.live_github`` and
 is EXCLUDED from the default ``pytest -q`` run by the ``addopts`` filter in
 ``bin/pyproject.toml``. They only run when explicitly selected via
 ``-m live_github`` and are intended to be invoked nightly by the
-``.github/workflows/fakoli-state-live-github.yml`` workflow against a real
+``.github/workflows/anvil-live-github.yml`` workflow against a real
 GitHub test repo. The intent is to catch upstream API drift -- label format
 changes, deprecated endpoints, header renames -- before users do.
 
 Required env when running:
     - ``GITHUB_TOKEN``: PAT with ``repo:read`` + ``issues:write`` on the
-      target test repo. In CI this is ``secrets.FAKOLI_STATE_TEST_GH_TOKEN``.
-    - ``FAKOLI_STATE_TEST_REPO``: ``<owner>/<repo>`` of the scratch repo the
+      target test repo. In CI this is ``secrets.ANVIL_TEST_GH_TOKEN``.
+    - ``ANVIL_TEST_REPO``: ``<owner>/<repo>`` of the scratch repo the
       tests are allowed to create / close issues in. Defaults are intentionally
       absent -- without an explicit repo the tests refuse to run.
 
@@ -33,9 +33,9 @@ import uuid
 
 import pytest
 
-from fakoli_state.state.models import Task, TaskPriority, TaskStatus
-from fakoli_state.sync.clients.github_http import GithubHttpClient
-from fakoli_state.sync.providers.github_issues import (
+from anvil.state.models import Task, TaskPriority, TaskStatus
+from anvil.sync.clients.github_http import GithubHttpClient
+from anvil.sync.providers.github_issues import (
     LABEL_TO_STATUS,
     STATUS_TO_LABEL,
     GitHubIssuesProvider,
@@ -68,9 +68,9 @@ def test_repo() -> str:
     skip here is a defensive belt for the rare case where a developer runs
     ``pytest -m live_github`` locally without first exporting the env vars.
     """
-    repo = os.environ.get("FAKOLI_STATE_TEST_REPO")
+    repo = os.environ.get("ANVIL_TEST_REPO")
     if not repo:
-        pytest.skip("FAKOLI_STATE_TEST_REPO not set")
+        pytest.skip("ANVIL_TEST_REPO not set")
     return repo
 
 
@@ -120,7 +120,7 @@ def _make_task(
     *,
     suffix: str,
     title: str | None = None,
-    description: str = "synthetic body from fakoli-state live tests",
+    description: str = "synthetic body from anvil live tests",
     status: TaskStatus = TaskStatus.in_progress,
 ) -> Task:
     """Build a synthetic Task. Uses the prefix + suffix so cleanup is greppable."""
@@ -283,7 +283,7 @@ def test_label_preservation_in_update(
                 json_body={
                     "name": user_label,
                     "color": "ededed",
-                    "description": "fakoli-state live test scratch label",
+                    "description": "anvil live test scratch label",
                 },
             )
         except Exception:  # noqa: BLE001 -- 422 already-exists is fine

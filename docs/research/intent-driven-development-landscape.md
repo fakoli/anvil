@@ -2,7 +2,7 @@
 
 > A reference map of where "spec-driven" / "intent-driven" agentic development comes
 > from, who is building it in 2025–2026, why everyone converged at once, and where
-> fakoli-state sits in that picture.
+> anvil sits in that picture.
 >
 > **Status:** living reference. Compiled 2026-06-16 from a multi-agent research pass
 > (competitor teardowns of `github/spec-kit` and `DietrichGebert/ponytail`, a
@@ -31,9 +31,9 @@
    generate markdown artifacts (spec / plan / tasks) and hand them to an agent. They
    do **not** maintain durable canonical state, exclusive task leases for parallel
    agents, or evidence-based verification. The few that do (Praetorian's internal
-   platform; fakoli-state) are the exceptions that prove the gap is real.
+   platform; anvil) are the exceptions that prove the gap is real.
 
-4. **fakoli-state's moat is the layer the wave skips.** It arrives at the same
+4. **anvil's moat is the layer the wave skips.** It arrives at the same
    "desired state" thesis but from the *infrastructure* lineage (Terraform), and then
    goes one layer deeper: SQLite canonical state, lease+heartbeat task claiming,
    hook-captured evidence, and three-source reconciliation. That layer is
@@ -86,7 +86,7 @@ is a canonical store that survives the session.
 | **OpenSpec** | Lightweight spec-change workflow | Proposed change specs reviewed before implementation | Moderate, growing | Spec files in repo | Host agent | Human review of change spec |
 | **Pimzino/spec-workflow-mcp** | MCP server for a spec workflow + dashboard | requirements → design → tasks via MCP | Moderate | Files + MCP-served state | Host agent | Dashboard tracking |
 | **Praetorian internal platform** | Deterministic AI orchestration (writeup) | LLM as nondeterministic kernel inside a deterministic runtime | Internal / blog | **Durable** dual-state (ephemeral JSON + persistent YAML), resumable **[V]** | Parallel `developer` agents | **Evidence-based**: independent Reviewer+Tester must pass; lockfile leases `.claude/locks/{agent}.lock` **[V]** |
-| **fakoli-state** | Local-first SQLite state engine + MCP/CLI | Terraform-for-agents: PRD=config, SQLite=state, `apply`=commit | Early / first-party | **Durable canonical** SQLite (WAL) + append-only/hash-chained event log | Lease+heartbeat claims, conflict groups, worktrees | **Evidence contract** per task; hook-captured, gate-enforced |
+| **anvil** | Local-first SQLite state engine + MCP/CLI | Terraform-for-agents: PRD=config, SQLite=state, `apply`=commit | Early / first-party | **Durable canonical** SQLite (WAL) + append-only/hash-chained event log | Lease+heartbeat claims, conflict groups, worktrees | **Evidence contract** per task; hook-captured, gate-enforced |
 
 \* *Traction is approximate and changes fast; treat as order-of-magnitude. Only the
 **[V]**-marked architectural claims were independently verified.*
@@ -103,7 +103,7 @@ every project above:
 3. **Spec-as-Source** — code is auto-generated from specs *only*; the spec is the
    program. (Tessl's ambition; MDA's original dream.)
 
-> Note this spectrum is about the *spec's* durability. fakoli-state adds an orthogonal
+> Note this spectrum is about the *spec's* durability. anvil adds an orthogonal
 > axis the spectrum doesn't capture: the durability of **execution state** — claims,
 > evidence, audit — not just the spec.
 
@@ -138,7 +138,7 @@ commentary):
 
 5. **Multi-agent coordination.** The moment you run more than one agent, you need a shared
    source of truth and a way to stop them colliding. This is what forces the more serious
-   projects (Praetorian, fakoli-state) past scaffolding into leases and locks. **[V]**
+   projects (Praetorian, anvil) past scaffolding into leases and locks. **[V]**
 
 > **The convergent-evolution reading:** these aren't copies of each other. They're
 > independent responses to the same environment — the way eyes evolved independently many
@@ -153,12 +153,12 @@ Sort the field by three capabilities and the picture is stark:
 
 | Capability | Who has it |
 |------------|-----------|
-| **Durable canonical STATE** (survives session reset, lives with the repo, queryable) | Praetorian (dual-state) **[V]**; fakoli-state (SQLite). Kiro/Tessl persist *specs* but not execution state. |
-| **Exclusive task LEASING** for parallel agents (claims, locks, stale reaping) | Praetorian (lockfiles) **[V]**; fakoli-state (lease+heartbeat). **Spec-kit, task-master, BMAD, Agent OS, OpenSpec: none.** |
-| **EVIDENCE-BASED verification** (independent proof, not self-report) | Praetorian (Reviewer+Tester gate) **[V]**; fakoli-state (evidence contract + hook capture). Everyone else: human-in-the-loop or LLM self-grades. **[V]** |
+| **Durable canonical STATE** (survives session reset, lives with the repo, queryable) | Praetorian (dual-state) **[V]**; anvil (SQLite). Kiro/Tessl persist *specs* but not execution state. |
+| **Exclusive task LEASING** for parallel agents (claims, locks, stale reaping) | Praetorian (lockfiles) **[V]**; anvil (lease+heartbeat). **Spec-kit, task-master, BMAD, Agent OS, OpenSpec: none.** |
+| **EVIDENCE-BASED verification** (independent proof, not self-report) | Praetorian (Reviewer+Tester gate) **[V]**; anvil (evidence contract + hook capture). Everyone else: human-in-the-loop or LLM self-grades. **[V]** |
 
 **The headline:** the entire popular tier of the wave is stateless prompt-scaffolding. The
-two systems that close the gap (Praetorian's internal platform and fakoli-state) arrived
+two systems that close the gap (Praetorian's internal platform and anvil) arrived
 there independently — which is the strongest possible external signal that the gap is
 real and that durable state is the defensible layer.
 
@@ -177,19 +177,19 @@ problems:
   not how) + critic gates + wave dispatch. Its own spec names the one thing it cannot do:
   team/task state is **ephemeral**, lost on context reset. That is the gap it hands to
   state.
-- **fakoli-state — the anvil.** The durable, repository-scoped, evidence-bearing state
+- **anvil — the anvil.** The durable, repository-scoped, evidence-bearing state
   layer. SQLite canonical store, lease+heartbeat claims, hook-captured evidence,
   six-dimension scoring, recursive expansion, three-source reconciliation.
 
 **Two things make fakoli's position distinctive in this landscape:**
 
 1. **It came from the infrastructure road, not the spec road.** Where Spec Kit descends
-   from John Lam's LLM-determinism research, fakoli-state descends from Terraform's
+   from John Lam's LLM-determinism research, anvil descends from Terraform's
    *desired-state* model — `plan`/`apply`, a canonical state file, drift detected and
    reported rather than papered over. Same destination, older and more battle-tested
    lineage. (See the author's own writing: "Documentation Is Infrastructure," "Platform
    Engineering Is Product Management," and the explicit Terraform analogy in "Plan, Claim,
-   Apply: Building fakoli-state.")
+   Apply: Building anvil.")
 
 2. **It is built on the layer the wave skips.** Intent-as-source-of-truth is now table
    stakes; spec-kit, Kiro, Tessl and a dozen others have it. Durable, lease-coordinated,
@@ -205,7 +205,7 @@ problems:
   craft (constitution, clarify, checklists-as-"unit-tests-for-English"); ponytail shows
   the power of benchmark-backed proof.
 - **The wedge: integrate, don't compete.** spec-kit/Kiro/task-master all *end* where
-  fakoli-state *begins* — they emit a `tasks.md` and have no execution-coordination layer.
+  anvil *begins* — they emit a `tasks.md` and have no execution-coordination layer.
   Ingest their artifacts as a PRD/task source and the pitch becomes: *"they plan; fakoli
   coordinates the parallel, evidence-gated execution."*
 
@@ -215,7 +215,7 @@ problems:
 
 | Priority | Move | Why |
 |---|---|---|
-| 1 | **Self-benchmark harness** (N agents on a fixture repo, with/without fakoli-state; measure collisions, duplicate work, rework, % tasks with valid evidence) and publish it | Closes the proof gap; no competitor can run this benchmark because they have nothing to measure |
+| 1 | **Self-benchmark harness** (N agents on a fixture repo, with/without anvil; measure collisions, duplicate work, rework, % tasks with valid evidence) and publish it | Closes the proof gap; no competitor can run this benchmark because they have nothing to measure |
 | 2 | **spec-kit / task-master artifact ingestion** (parse `tasks.md` / `tasks.json` as a PRD source) | Turns the 100k★ gorilla into top-of-funnel |
 | 3 | **Pre-claim PRD-quality checklist gate**; wire `fakoli-style` principles ledger as the "constitution" | Closes the only real spec-authoring *craft* gap, reusing parts already built |
 | 4 | **CI drift-canary** for README ↔ registry ↔ marketplace.json | Hardens an existing weakness; ponytail proved the canonical-source + generated-copies + CI-canary pattern |
@@ -258,7 +258,7 @@ Author's own thread (parallel-invention evidence, `sekoudoumbouya` blog):
 - *From Pressing Buttons to Intent-Driven Flow* — fakoli-flow (2026-04-04)
 - *Intent Should Be Durable* / *Building the Engine* — Baara (2026-04-05)
 - *State Is the Product* (2026-04-19)
-- *Plan, Claim, Apply: Building fakoli-state* (2026-04-24)
+- *Plan, Claim, Apply: Building anvil* (2026-04-24)
 - *The Fakoli Style: An Operating Model for Building With Agents* (2026-05-01)
 - *The Anvil, Not the Hammers* (2026-06-10)
 

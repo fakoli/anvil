@@ -1,4 +1,4 @@
-# fakoli-state — Tech Debt Backlog
+# anvil — Tech Debt Backlog
 
 Items deferred from PR-level critic + Greptile reviews. Each entry links the originating PR + finding so the rationale survives. Ordered by priority within section.
 
@@ -32,7 +32,7 @@ Items deferred from PR-level critic + Greptile reviews. Each entry links the ori
 
 ### SL1-RR-1 · A poison canonical line aborts a full replay
 
-**From**: SL-1 Wave 3 critic, surfaced by the replay-equivalence fixture work. **Status**: DONE (branch `feat/fakoli-state-sl1-rr-1-event-sourcing`).
+**From**: SL-1 Wave 3 critic, surfaced by the replay-equivalence fixture work. **Status**: DONE (branch `feat/anvil-sl1-rr-1-event-sourcing`).
 
 The fix went beyond the original Option A (append-JSONL-only-after-COMMIT). It adopted the **full event-sourced write path**: a decide/apply split (`_check_*` / `_write_*` per action), `append(EventDraft) -> Event | None` as the sole production write entry point, log-as-id-authority via `flock` (closing the PR #41 Critic-3 cross-process id-collision race), append-only `events.jsonl` with a sibling `audit.jsonl` for rejections and idempotent no-ops, and strict no-skip-list replay via `_write_*` only. The design also closed the inverse post-COMMIT audit gap (crash between COMMIT and JSONL write). `apply_event`, `next_event_id`, and `PENDING_EVENT_ID` were removed. Tracked in fakoli-style principle **P4** `open_work` — that open work is now resolved.
 
@@ -45,7 +45,7 @@ PR #45/47 Phase 7 deferrals; PR #50 (Phase 9, v1.9.0) closed them.
 
 ### P9-1 · Audit-event honesty — `sync.pull.completed` emitted on deferred branches
 
-**From**: PR #49 critic CONSIDER #1. **Status**: DONE (Phase 9 T5 — `feat/fakoli-state-phase-9`).
+**From**: PR #49 critic CONSIDER #1. **Status**: DONE (Phase 9 T5 — `feat/anvil-phase-9`).
 
 v1.8.0 emitted `sync.pull.completed` for six conflict-resolution branches that did NOT actually mutate local state (`local_wins_deferred`, `remote_wins_deferred`, `prompt_defaulted_to_local`, `prompt_chose_local`, `prompt_chose_remote`, `prompt_skipped`). The JSONL was lying about what happened.
 
@@ -57,7 +57,7 @@ v1.8.0 emitted `sync.pull.completed` for six conflict-resolution branches that d
 
 **From**: PR #49 critic CONSIDER #2. **Status**: DONE (Phase 9 T5).
 
-When the local Task had moved ahead of `last_synced_at` and the remote had not changed, the engine used to set `sync_state="in_sync"` (wrong — the local was clearly ahead). The wrong state meant `fakoli-state sync` (reconciliation) could not surface the task as needing a push.
+When the local Task had moved ahead of `last_synced_at` and the remote had not changed, the engine used to set `sync_state="in_sync"` (wrong — the local was clearly ahead). The wrong state meant `anvil sync` (reconciliation) could not surface the task as needing a push.
 
 **Fix**: the branch now sets `sync_state="local_ahead"` and emits a `sync.push.deferred` audit event with `resolution="local_moved_no_push"` so operators can grep `events.jsonl` for tasks awaiting a follow-up `--push`. 2 new tests in `tests/test_cli_sync.py::TestLocalMovedOnlyEmitsLocalAhead`.
 
@@ -97,7 +97,7 @@ v1.7.0's recorded-provider key was `sha256(system + "\n---\n" + user)` — two r
 
 **From**: Phase 7 C4 deferral. **Status**: DONE (Phase 9 T6).
 
-`fakoli-state expand T012 --use-llm` printed human-readable per-subtask blocks that the user had to manually translate into PRD `### TXxx` markdown before `prd parse`. The translation step was lossy and error-prone.
+`anvil expand T012 --use-llm` printed human-readable per-subtask blocks that the user had to manually translate into PRD `### TXxx` markdown before `prd parse`. The translation step was lossy and error-prone.
 
 **Fix**: added `--format {text,prd}` Typer flag. `--format prd` emits ready-to-paste markdown blocks matching `docs/prd-template.md`'s `## Tasks` schema. `**Feature:**` and `**Priority:**` fields are populated from the parent task's metadata (critic CONSIDER fix — eliminates the manual-edit step). 11 new tests in `tests/test_cli_plan.py` covering both formats + validation + help-text.
 
@@ -129,7 +129,7 @@ These three items MUST land in Phase 6 because the MCP server inherits all of th
 
 ### P6-1 · Backend Protocol gaps — three `backend._conn` reach-throughs in cli.py
 
-**From**: PR #41 Critic-2 (architecture). **Status**: DONE (PR #44, feat/fakoli-state-phase-6-prep).
+**From**: PR #41 Critic-2 (architecture). **Status**: DONE (PR #44, feat/anvil-phase-6-prep).
 
 Three CLI callers bypass the Backend Protocol via `backend._conn`:
 - `_fetch_recent_events` (cli.py:1388) — used by `show TASK_ID`
@@ -160,13 +160,13 @@ Single-CLI usage is race-free today. The MCP server in Phase 6 is the trigger fo
 
 ### P6-3 · `TaskStatus.stale` is structurally unreachable
 
-**From**: PR #41 Critic-2. **Status**: DONE (Option A — feat/fakoli-state-phase-6-prep).
+**From**: PR #41 Critic-2. **Status**: DONE (Option A — feat/anvil-phase-6-prep).
 
 `_handle_claim_stale` transitions the task directly from `claimed/in_progress/blocked` → `ready`, bypassing `TaskStatus.stale` entirely. Option A (delete the dead code) was executed:
 - `TaskStatus.stale` removed from `models.py` enum
 - `task_to_stale()`, `task_stale_to_ready()`, and `_claim_expired()` removed from `transitions.py` and `__all__`
 - `stale_count` removed from the `status` command output (`cli/init_status.py`)
-- Task lifecycle diagram updated in `docs/specs/2026-05-24-fakoli-state-v0.md`
+- Task lifecycle diagram updated in `docs/specs/2026-05-24-anvil-v0.md`
 - Related tests in `test_models.py` and `test_transitions.py` updated
 - `ClaimStatus.stale` is intentionally preserved — claims CAN be stale; tasks cannot.
 
@@ -212,7 +212,7 @@ Zero runtime risk; pure refactor; do it BEFORE Phase 6 adds MCP wiring.
 
 ### CL-1 · check-claim.sh ignores its own CLI subcommand
 
-**From**: PR #41 Critic-2. **Status**: DONE (v1.7.1 — `hooks/check-claim.sh` now invokes `fakoli-state hook check-claim --file --actor` (the Phase 5 per-file subcommand); coarse status-parse fallback fires only when the CLI is unavailable).
+**From**: PR #41 Critic-2. **Status**: DONE (v1.7.1 — `hooks/check-claim.sh` now invokes `anvil hook check-claim --file --actor` (the Phase 5 per-file subcommand); coarse status-parse fallback fires only when the CLI is unavailable).
 
 Phase 4 added `cli.py:hook_check_claim` with full per-file `expected_files` checking. `check-claim.sh` was not updated to call it — still uses the Phase 4 coarse "any active claim → warn" approach. Per-file warning logic in CLI is dead from the hook's perspective.
 
@@ -254,13 +254,13 @@ Phase 4 added `cli.py:hook_check_claim` with full per-file `expected_files` chec
 
 **From**: PR #41 Critic-3. **Status**: OPEN.
 
-`cli.py:22` module docstring lists `conflicts` as Phase 5. The `@app.command` registration is missing. `fakoli-state --help` lies.
+`cli.py:22` module docstring lists `conflicts` as Phase 5. The `@app.command` registration is missing. `anvil --help` lies.
 
 **Fix**: implement the command (depends on CL-4 for actual data).
 
 ---
 
-### CL-6 · `fakoli-state evidence attach` references → already replaced
+### CL-6 · `anvil evidence attach` references → already replaced
 
 **From**: PR #41 Critic-2. **Status**: DONE (PR #41 fixup commit).
 
@@ -270,7 +270,7 @@ Phase 4 added `cli.py:hook_check_claim` with full per-file `expected_files` chec
 
 **From**: PR #41 Critic-1. **Status**: DONE (this PR — state/critic purple → magenta; state/sentinel cyan → gray).
 
-`fakoli-state/agents/critic.md` uses `color: purple` — same as `fakoli-crew:keeper`. `sentinel.md` uses `color: cyan` — same as `fakoli-crew:scout`. When both plugins are installed (the documented expected configuration), the agent picker shows two purple agents and two cyan agents with no visual distinction.
+`anvil/agents/critic.md` uses `color: purple` — same as `fakoli-crew:keeper`. `sentinel.md` uses `color: cyan` — same as `fakoli-crew:scout`. When both plugins are installed (the documented expected configuration), the agent picker shows two purple agents and two cyan agents with no visual distinction.
 
 **Fix**: assign distinct unused colors (e.g., `orange` for critic, `yellow` for sentinel).
 
@@ -305,7 +305,7 @@ Gate recognizes additionally: go test, mvn test, gradle test, make test, python 
 
 Agent running `go test ./...` gets no capture (hook skips it) but the gate passes the requirement. Reviewer sees PASSED with no evidence for that command.
 
-**Fix**: lift the pattern set into Phase 6 config (`.fakoli-state/config.yaml`); both hook and gate read from one source.
+**Fix**: lift the pattern set into Phase 6 config (`.anvil/config.yaml`); both hook and gate read from one source.
 
 ---
 
@@ -401,7 +401,7 @@ Tests an invalid state sequence (`prd.parsed → prd.approved` without `prd.revi
 
 **From**: PR #41 Critic-4. **Status**: OPEN.
 
-`tests/test_cli.py:37-42`: the first `runner.invoke` runs without `chdir(tmp_path)`, then the result is immediately overwritten. Could create `.fakoli-state/` in the test-runner cwd.
+`tests/test_cli.py:37-42`: the first `runner.invoke` runs without `chdir(tmp_path)`, then the result is immediately overwritten. Could create `.anvil/` in the test-runner cwd.
 
 **Fix**: delete the dead first-invoke block.
 
@@ -409,9 +409,9 @@ Tests an invalid state sequence (`prd.parsed → prd.approved` without `prd.revi
 
 ### TQ-5 · `test_version_still_works` hardcodes "1.4.0"
 
-**From**: PR #41 Critic-4. **Status**: DONE (PR #42 fixup — test now imports `__version__` from `fakoli_state`).
+**From**: PR #41 Critic-4. **Status**: DONE (PR #42 fixup — test now imports `__version__` from `anvil`).
 
-Fails on every version bump. Should assert `from fakoli_state import __version__` then `assert __version__ in result.output`.
+Fails on every version bump. Should assert `from anvil import __version__` then `assert __version__ in result.output`.
 
 ---
 
@@ -457,9 +457,9 @@ For each active claim, `manager.py:700-720` calls `backend.get_task(active_claim
 
 ### PS-2 · Snapshots/ directory is dead scaffolding
 
-**From**: PR #41 Critic-2. **Status**: DONE (this PR — `init` no longer pre-creates `.fakoli-state/snapshots/`; the `fakoli-state snapshot` command will create it on first use when implemented).
+**From**: PR #41 Critic-2. **Status**: DONE (this PR — `init` no longer pre-creates `.anvil/snapshots/`; the `anvil snapshot` command will create it on first use when implemented).
 
-`init` creates `.fakoli-state/snapshots/`, prints it, preserves it on `--force`. Nothing writes to it. Either implement `fakoli-state snapshot` (a `sqlite3 .backup` wrapper) or stop creating the directory.
+`init` creates `.anvil/snapshots/`, prints it, preserves it on `--force`. Nothing writes to it. Either implement `anvil snapshot` (a `sqlite3 .backup` wrapper) or stop creating the directory.
 
 ---
 

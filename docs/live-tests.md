@@ -1,6 +1,6 @@
 # Live GitHub integration tests
 
-The fakoli-state plugin ships a small nightly-CI suite that exercises the
+The anvil plugin ships a small nightly-CI suite that exercises the
 real GitHub Issues REST API. It catches upstream contract drift -- label
 format changes, deprecated endpoints, header renames, REST PATCH semantics
 shifts -- before users hit them. These tests are marker-gated and excluded
@@ -11,11 +11,11 @@ the same tests locally, and what residue they leave behind in the test repo.
 
 ## Workflow
 
-The job lives at `.github/workflows/fakoli-state-live-github.yml`. It:
+The job lives at `.github/workflows/anvil-live-github.yml`. It:
 
 - Runs on `cron: 0 6 * * *` (06:00 UTC = 22:00 PST / 02:00 EST).
 - Can be triggered manually via the GitHub Actions "workflow_dispatch" UI.
-- Uses `concurrency: fakoli-state-live-github` so a manual run cancels a
+- Uses `concurrency: anvil-live-github` so a manual run cancels a
   still-running nightly.
 - Holds only the minimal `contents: read` permission.
 
@@ -26,7 +26,7 @@ green automatically. To activate it:
 
 ### 1. Repository secret
 
-Add a repository secret named `FAKOLI_STATE_TEST_GH_TOKEN`. The token must
+Add a repository secret named `ANVIL_TEST_GH_TOKEN`. The token must
 be a fine-grained PAT (or classic PAT) with these scopes against the test
 repo:
 
@@ -38,9 +38,9 @@ secret**.
 
 ### 2. Repository variable (optional)
 
-Add a repository **variable** (not secret) named `FAKOLI_STATE_TEST_REPO`
+Add a repository **variable** (not secret) named `ANVIL_TEST_REPO`
 pointing at the `<owner>/<repo>` slug of the scratch repo the tests should
-exercise. If unset the workflow defaults to `fakoli/fakoli-state-sync-test`.
+exercise. If unset the workflow defaults to `fakoli/anvil-sync-test`.
 
 Path: **Settings -> Secrets and variables -> Actions -> Variables tab ->
 New repository variable**.
@@ -52,8 +52,8 @@ cleanup is best-effort (see below).
 
 ```bash
 export GITHUB_TOKEN=ghp_...                       # your test-repo PAT
-export FAKOLI_STATE_TEST_REPO=fakoli/fakoli-state-sync-test
-cd plugins/fakoli-state/bin
+export ANVIL_TEST_REPO=fakoli/anvil-sync-test
+cd plugins/anvil/bin
 uv run pytest -m live_github -v
 ```
 
@@ -98,14 +98,14 @@ the repo's Labels page when the count gets noisy.
 ## Troubleshooting
 
 - **Workflow notice "Live GitHub tests skipped"** -- the
-  `FAKOLI_STATE_TEST_GH_TOKEN` secret is unset on this repo. Add it (see
+  `ANVIL_TEST_GH_TOKEN` secret is unset on this repo. Add it (see
   above) or accept the skip if drift detection is not desired here.
 - **All tests `SKIPPED` locally** -- you did not export `GITHUB_TOKEN` or
-  `FAKOLI_STATE_TEST_REPO`. The marker gate accepts the run; the fixtures
+  `ANVIL_TEST_REPO`. The marker gate accepts the run; the fixtures
   defensively skip when the env is incomplete.
 - **`AuthenticationFailed` on the first call** -- token lacks
-  `issues:write` on the configured `FAKOLI_STATE_TEST_REPO`. Either widen
-  the token scopes or point `FAKOLI_STATE_TEST_REPO` at a repo the token
+  `issues:write` on the configured `ANVIL_TEST_REPO`. Either widen
+  the token scopes or point `ANVIL_TEST_REPO` at a repo the token
   can write to.
 - **`RateLimitExceeded`** -- nightly runs are well below the 5000-req/hr
   primary limit, so a hit usually means another test or scratch script is

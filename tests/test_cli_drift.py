@@ -1,6 +1,6 @@
-"""Integration tests for `fakoli-state drift` (backlog T026/B26, P1).
+"""Integration tests for `anvil drift` (backlog T026/B26, P1).
 
-``drift`` is the read-only DRIFT VIEW over fakoli-state's three-source
+``drift`` is the read-only DRIFT VIEW over anvil's three-source
 reconciliation: INTENT (plan/tasks) vs STATE (SQLite) vs FILESYSTEM/GIT
 (expected files, agent branches, worktrees, packets). It reuses
 ``ReconciliationEngine.scan()`` in report mode (never ``fix()``), drops the
@@ -13,7 +13,7 @@ Coverage groups:
 * TestOrphanBranchDrift  — orphan agent branch surfaces (git-backed)
 * TestStaleClaimDrift    — an expired-lease active claim surfaces
 * TestProviderless       — drift never needs a configured provider
-* TestStateRootEnv       — FAKOLI_STATE_ROOT is honoured
+* TestStateRootEnv       — ANVIL_ROOT is honoured
 * TestJsonEnvelope       — the v1.23.4 envelope shape
 """
 
@@ -30,7 +30,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from fakoli_state.cli import app
+from anvil.cli import app
 
 runner = CliRunner()
 
@@ -43,7 +43,7 @@ _NOW = _datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
 
 
 def _init_project(root: Path, name: str = "DriftTest") -> None:
-    """Run `fakoli-state init` with cwd == root."""
+    """Run `anvil init` with cwd == root."""
     original = os.getcwd()
     os.chdir(root)
     try:
@@ -55,15 +55,15 @@ def _init_project(root: Path, name: str = "DriftTest") -> None:
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    """An initialized project root (the dir that contains .fakoli-state/)."""
+    """An initialized project root (the dir that contains .anvil/)."""
     _init_project(tmp_path)
     return tmp_path
 
 
 def _open(root: Path) -> Any:
-    from fakoli_state.cli._helpers import _open_backend
+    from anvil.cli._helpers import _open_backend
 
-    return _open_backend(root / ".fakoli-state")
+    return _open_backend(root / ".anvil")
 
 
 def _seed_done_task(
@@ -79,7 +79,7 @@ def _seed_done_task(
     ``likely_files`` are project-root-relative (e.g. ``src/widget.py``) — the
     intent declaration the missing_expected_file check compares against disk.
     """
-    from fakoli_state.state.models import EventDraft
+    from anvil.state.models import EventDraft
 
     b = _open(root)
     try:
@@ -130,7 +130,7 @@ def _seed_done_task(
 
 def _seed_ready_task(root: Path, *, task_id: str = "T001") -> None:
     """Seed a feature + task that stays in 'ready' (precursor for a claim)."""
-    from fakoli_state.state.models import EventDraft
+    from anvil.state.models import EventDraft
 
     b = _open(root)
     try:
@@ -164,7 +164,7 @@ def _seed_ready_task(root: Path, *, task_id: str = "T001") -> None:
 
 def _seed_stale_claim(root: Path, *, claim_id: str = "C001", task_id: str = "T001") -> None:
     """Insert an active claim whose lease already expired (stale)."""
-    from fakoli_state.state.models import EventDraft
+    from anvil.state.models import EventDraft
 
     b = _open(root)
     try:
@@ -354,7 +354,7 @@ class TestProviderless:
 
 
 # ---------------------------------------------------------------------------
-# FAKOLI_STATE_ROOT
+# ANVIL_ROOT
 # ---------------------------------------------------------------------------
 
 
@@ -362,7 +362,7 @@ class TestStateRootEnv:
     def test_drift_honors_state_root_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """FAKOLI_STATE_ROOT -> project A; cwd -> elsewhere; drift reads A."""
+        """ANVIL_ROOT -> project A; cwd -> elsewhere; drift reads A."""
         proj = tmp_path / "proj"
         elsewhere = tmp_path / "elsewhere"
         proj.mkdir()
@@ -370,10 +370,10 @@ class TestStateRootEnv:
         _init_project(proj)
         _seed_done_task(proj, likely_files=["src/widget.py"])
 
-        monkeypatch.setenv("FAKOLI_STATE_ROOT", str(proj))
+        monkeypatch.setenv("ANVIL_ROOT", str(proj))
         monkeypatch.chdir(elsewhere)
 
-        # No --cwd: resolution must fall through to FAKOLI_STATE_ROOT.
+        # No --cwd: resolution must fall through to ANVIL_ROOT.
         r = runner.invoke(app, ["drift", "--json"], catch_exceptions=False)
         assert r.exit_code == 0, r.output
         env = _json_of(r)
@@ -384,10 +384,10 @@ class TestStateRootEnv:
     def test_drift_state_root_missing_dir_errors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """FAKOLI_STATE_ROOT pointing at a dir with no .fakoli-state/ fails loud."""
+        """ANVIL_ROOT pointing at a dir with no .anvil/ fails loud."""
         empty = tmp_path / "empty"
         empty.mkdir()
-        monkeypatch.setenv("FAKOLI_STATE_ROOT", str(empty))
+        monkeypatch.setenv("ANVIL_ROOT", str(empty))
         monkeypatch.chdir(tmp_path)
         r = runner.invoke(app, ["drift"], catch_exceptions=False)
         assert r.exit_code != 0
@@ -433,17 +433,17 @@ class TestJsonEnvelope:
 
 
 class TestOrphanPacketDrift:
-    """A `.fakoli-state/packets/<TASK>.md` with no matching task surfaces.
+    """A `.anvil/packets/<TASK>.md` with no matching task surfaces.
 
-    MUST-FIX 2: the engine's hardcoded ``state_dir / ".fakoli-state" /
+    MUST-FIX 2: the engine's hardcoded ``state_dir / ".anvil" /
     "packets"`` never matched the CLI, which passes ``state_dir`` AS the
-    ``.fakoli-state/`` directory — so it looked at
-    ``.fakoli-state/.fakoli-state/packets`` and ``orphan_packet`` never fired.
-    These CLI-level tests prove it now resolves to ``.fakoli-state/packets``.
+    ``.anvil/`` directory — so it looked at
+    ``.anvil/.anvil/packets`` and ``orphan_packet`` never fired.
+    These CLI-level tests prove it now resolves to ``.anvil/packets``.
     """
 
     def test_orphan_packet_surfaces_human(self, project: Path) -> None:
-        pkt = project / ".fakoli-state" / "packets" / "TZZZ.md"
+        pkt = project / ".anvil" / "packets" / "TZZZ.md"
         pkt.parent.mkdir(parents=True, exist_ok=True)
         pkt.write_text("# orphan work packet\n")
         r = runner.invoke(app, ["drift", "--cwd", str(project)], catch_exceptions=False)
@@ -452,7 +452,7 @@ class TestOrphanPacketDrift:
         assert "TZZZ" in r.output
 
     def test_orphan_packet_surfaces_json(self, project: Path) -> None:
-        pkt = project / ".fakoli-state" / "packets" / "TZZZ.md"
+        pkt = project / ".anvil" / "packets" / "TZZZ.md"
         pkt.parent.mkdir(parents=True, exist_ok=True)
         pkt.write_text("# orphan work packet\n")
         r = runner.invoke(
@@ -471,7 +471,7 @@ class TestOrphanPacketDrift:
     def test_packet_with_matching_task_not_orphan(self, project: Path) -> None:
         """A packet whose task EXISTS in state is not an orphan."""
         _seed_done_task(project, task_id="T001", likely_files=[])
-        pkt = project / ".fakoli-state" / "packets" / "T001.md"
+        pkt = project / ".anvil" / "packets" / "T001.md"
         pkt.parent.mkdir(parents=True, exist_ok=True)
         pkt.write_text("# real packet\n")
         r = runner.invoke(
@@ -483,7 +483,7 @@ class TestOrphanPacketDrift:
 
 
 # ---------------------------------------------------------------------------
-# MUST-FIX 3 — --json pipe-safe on invalid FAKOLI_STATE_ROOT
+# MUST-FIX 3 — --json pipe-safe on invalid ANVIL_ROOT
 # ---------------------------------------------------------------------------
 
 
@@ -491,14 +491,14 @@ class TestBadStateRootJson:
     def test_bad_state_root_json_is_error_envelope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """FAKOLI_STATE_ROOT pointing at a dir with no .fakoli-state/ + --json
+        """ANVIL_ROOT pointing at a dir with no .anvil/ + --json
         must emit a parseable {"ok": false, ...} envelope, not a raw
         ClickException, and exit non-zero."""
         empty = tmp_path / "empty"
         empty.mkdir()
-        monkeypatch.setenv("FAKOLI_STATE_ROOT", str(empty))
+        monkeypatch.setenv("ANVIL_ROOT", str(empty))
         monkeypatch.chdir(tmp_path)
-        # No --cwd: resolution falls through to FAKOLI_STATE_ROOT and raises.
+        # No --cwd: resolution falls through to ANVIL_ROOT and raises.
         r = runner.invoke(app, ["drift", "--json"], catch_exceptions=False)
         assert r.exit_code != 0
         lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
@@ -514,7 +514,7 @@ class TestBadStateRootJson:
         """Without --json the clean human ClickException path is unchanged."""
         empty = tmp_path / "empty"
         empty.mkdir()
-        monkeypatch.setenv("FAKOLI_STATE_ROOT", str(empty))
+        monkeypatch.setenv("ANVIL_ROOT", str(empty))
         monkeypatch.chdir(tmp_path)
         r = runner.invoke(app, ["drift"], catch_exceptions=False)
         assert r.exit_code != 0

@@ -72,7 +72,7 @@ def compute(scenario, rows, completions, statuses, coord_name, crash_recovered=N
 
     # completion
     total = len(scenario.tasks)
-    if coord_name == "fakoli-state":
+    if coord_name == "anvil":
         completed = sum(1 for s in statuses.values() if s in {"done", "accepted"})
     else:
         completed = len({t for _ts, _a, t in dones})

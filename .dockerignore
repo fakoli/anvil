@@ -19,10 +19,10 @@ dist/
 bin/.coverage
 
 # Runtime state — never bake project state into the image; it is bind-mounted.
-.fakoli-state/
-bin/.fakoli-state/
+.anvil/
+bin/.anvil/
 packets/
-.fakoli-state-build/
+.anvil-build/
 
 # VCS, CI, and large dirs the image does not need.
 .git/
