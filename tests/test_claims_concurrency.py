@@ -1,29 +1,25 @@
 """B03 — concurrency regression suite: ZERO double-claims under contention.
 
-This suite is the acceptance harness for B01's atomicity fix (the TOCTOU race
-in ``ClaimManager.claim`` where the file-overlap / conflict_group pre-check ran
-OUTSIDE the atomic claim transaction). B01 moved the authoritative re-check
-INSIDE the ``BEGIN IMMEDIATE`` transaction that writes the claim row, so exactly
-one of N contending claims can ever win.
-
-Where ``test_claim_concurrency.py`` proves the *winner count is 1*, this suite
-hardens the contract from the loser's side: with >=8 threads all racing the
-SAME and OVERLAPPING tasks, it asserts that
+This is the canonical concurrency test module for the claim/lock primitive.
+It consolidates coverage from the earlier ``test_claim_concurrency.py`` (which
+proved winner-count == 1) and adds loser-side hardening:
 
   - EXACTLY ONE winner exists per contended task,
   - every loser returns a CLEAN failed/blocked outcome (a caught ``ClaimError``,
     never a leaked/unexpected exception),
-  - no loser ever produces a second successful claim, and
+  - no loser ever produces a second successful claim,
   - the persisted DB agrees: at most one ACTIVE claim per task, and no two
-    active claims share a file.
+    active claims share a file, and
+  - ``force=True`` still overrides the in-transaction overlap guard, and
+  - the CLI honours ``default_lease_minutes`` from config (B02).
 
-NO mocking: every test drives a real ``SqliteBackend`` (the repo forbids mocking
-the backend). All threads share the ONE backend instance and are released from a
-single ``threading.Barrier`` so they contend as tightly as the GIL allows.
+The atomicity fix (B01) moved the ``expected_files`` / ``conflict_group``
+pre-check INSIDE the ``BEGIN IMMEDIATE`` transaction that writes the claim row,
+so exactly one of N contending claims can ever win. If any assertion here fails
+it means B01 is not actually atomic — the failure output names the contention
+shape and the offending winner/claim count so a human can re-open B01.
 
-If any assertion here fails it means B01 is not actually atomic — the failure
-output names the contention shape and the offending winner/claim count so a
-human can re-open B01.
+NO mocking: every test drives a real ``SqliteBackend``.
 """
 
 from __future__ import annotations
@@ -445,3 +441,105 @@ def test_multi_task_one_winner_each_losers_clean(tmp_path: Path) -> None:
         conn.close()
     finally:
         b.close()
+
+
+# ---------------------------------------------------------------------------
+# (4) force=True overrides the in-transaction overlap guard
+# ---------------------------------------------------------------------------
+
+
+def test_force_overrides_in_transaction_overlap(tmp_path: Path) -> None:
+    """`force=True` claim succeeds despite an active overlapping claim.
+
+    Migrated from test_claim_concurrency.py to preserve coverage.
+    """
+    b = _make_backend(tmp_path)
+    try:
+        _setup_project_and_prd(b)
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        _insert_feature(conn)
+        _insert_task(conn, task_id="T001", likely_files=["shared.py"])
+        _insert_task(conn, task_id="T002", likely_files=["shared.py"])
+        conn.close()
+
+        import pytest as _pytest
+
+        from anvil.claims.manager import ClaimError, ClaimManager
+
+        m1 = ClaimManager(b, SystemClock(), actor="agent-a")
+        m1.claim("T001", expected_files=["shared.py"])
+
+        m2 = ClaimManager(b, SystemClock(), actor="agent-b")
+        # Without force this must raise ClaimError.
+        with _pytest.raises(ClaimError):
+            m2.claim("T002", expected_files=["shared.py"])
+        # With force it must succeed.
+        result = m2.claim("T002", expected_files=["shared.py"], force=True)
+        assert result.claim.task_id == "T002"
+    finally:
+        b.close()
+
+
+# ---------------------------------------------------------------------------
+# (5) CLI claim honours config default_lease_minutes (B02 — sub-minute lease)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_claim_honours_fractional_lease_minutes(tmp_path: Path) -> None:
+    """A config with default_lease_minutes: 0.5 yields a ~30 s lease, not 60 min.
+
+    Migrated from test_claim_concurrency.py to preserve B02 coverage.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import sqlite3 as _sqlite3
+
+    from typer.testing import CliRunner
+
+    from anvil.cli import app
+
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+
+    (state_dir / "config.yaml").write_text(
+        "project_name: demo\n"
+        "project_id: 11111111-1111-1111-1111-111111111111\n"
+        "default_lease_minutes: 0.5\n",
+        encoding="utf-8",
+    )
+
+    b = _make_backend(state_dir)
+    try:
+        _setup_project_and_prd(b)
+        conn = _sqlite3.connect(str(state_dir / "state.db"))
+        _insert_feature(conn)
+        _insert_task(conn, task_id="T001", likely_files=["a.py"])
+        conn.close()
+    finally:
+        b.close()
+
+    runner = CliRunner()
+    before = datetime.now(UTC)
+    result = runner.invoke(
+        app,
+        ["claim", "T001", "--actor", "tester", "--cwd", str(tmp_path)],
+    )
+    after = datetime.now(UTC)
+    assert result.exit_code == 0, result.output
+
+    conn = _sqlite3.connect(str(state_dir / "state.db"))
+    row = conn.execute(
+        "SELECT created_at, lease_expires_at FROM claims WHERE task_id = 'T001'"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    created_at = datetime.fromisoformat(row[0])
+    lease_expires_at = datetime.fromisoformat(row[1])
+    lease_seconds = (lease_expires_at - created_at).total_seconds()
+
+    # 0.5 minutes == 30 seconds.
+    assert 29.0 <= lease_seconds <= 31.0, (
+        f"expected ~30 s lease from default_lease_minutes: 0.5, got {lease_seconds} s"
+    )
+    assert lease_seconds < 120, "lease must not fall back to the 60-min default"
+    assert before - timedelta(seconds=5) <= created_at <= after + timedelta(seconds=5)
