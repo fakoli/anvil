@@ -163,17 +163,7 @@ Confirm the parse and run it:
 
 When the user says yes to continuing into review, hand off to the `prd` skill **by invoking it directly** — do not paste a CLI to-do list. The `prd` skill is designed to drive the `review` → `approve` flow conversationally, with the same one-question-at-a-time discipline this skill uses.
 
-**Anti-pattern to avoid:** ending the skill with a numbered list like "1. Run `prd parse` 2. Run `prd review` 3. Run `prd review --approve` 4. Run `plan`...". That handoff style only makes sense when the work is leaving this session entirely (queued for another agent, scheduled for tomorrow, requires stakeholder review). When the agent and user are in the same conversation, run the next command and present the next decision — do not delegate the typing.
-
-**When to actually hand off CLI commands:** if the user explicitly opts out ("just give me the commands and I'll run them later"), or if the runtime lacks the tool needed to execute them (e.g., MCP-only client with no shell). In those cases, the CLI list is the right output. Otherwise, drive.
-
----
-
-## LLM Augmentation (Optional)
-
-The start-prd skill can use an LLM to generate richer follow-up questions when `ANTHROPIC_API_KEY` is set — for example, suggesting domain-specific follow-ups after Question 5 ("you mentioned a payments feature; should we capture PCI compliance as a non-goal or a requirement?"). This augmentation is optional. The skill is fully usable without an LLM and without any API key: Claude (the Code agent running this skill) drives the interview directly using the question template above.
-
-If you want to use LLM augmentation explicitly, the user can set `ANTHROPIC_API_KEY` in their environment and the skill will surface follow-up suggestions inline. Without the key, the skill stays in the deterministic six-question loop.
+See `/anvil:plan` for the canonical anti-pattern statement on driving commands inline versus handing off CLI lists. **When to actually hand off:** if the user explicitly opts out, or if the runtime lacks the required tool. Otherwise, drive.
 
 ---
 
@@ -202,5 +192,4 @@ If you want to use LLM augmentation explicitly, the user can set `ANTHROPIC_API_
 | Feature | Phase | Status |
 |---|---|---|
 | Six-question interview | Phase 7 | available — pure markdown choreography |
-| LLM-augmented follow-up question generation | Phase 7 | optional — requires `ANTHROPIC_API_KEY`; skill is fully usable without it |
 | `anvil start-prd` CLI command | Phase 7+ | pending — for now, run this skill via `/anvil:start-prd` |

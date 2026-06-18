@@ -192,9 +192,7 @@ Before asking, read the full PRD back to the user (or show a concise structural 
 
 ## Anti-pattern to avoid
 
-Ending this skill with a numbered list like "1. Edit `prd.md` 2. Run `prd parse` 3. Run `prd review` 4. Run `prd review --approve` 5. Run `plan`..." That handoff style only makes sense when the work is leaving this session entirely — queued for another agent, scheduled for tomorrow, blocked on stakeholder review. When the agent and user are in the same conversation, drive each command, surface its output, and present the next decision. Do not delegate the typing.
-
-**When to actually hand off CLI commands:** if the user explicitly opts out ("just give me the commands"), or if the runtime lacks the tool needed to execute them (e.g., MCP-only client with no shell and no `parse_prd` tool). In those cases, a CLI list is the right output. Otherwise, drive.
+The agent drives commands inline; it does not hand the user a numbered CLI to-do list. See `/anvil:plan` for the canonical statement. **When to actually hand off CLI commands:** if the user explicitly opts out, or if the runtime lacks the required tool. Otherwise, drive.
 
 ---
 

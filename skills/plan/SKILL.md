@@ -289,7 +289,6 @@ Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Ru
 - **Planning against an unreviewed PRD.** The `claim_task` gate enforces `prd-status: approved` — but planning against a `draft` PRD produces a task graph that will be replaced on the next parse. Wait for approval before running `plan`.
 - **Running `plan` twice without re-parsing.** A second `plan` invocation on unmodified state will either re-emit duplicate events or error with a conflict. If the PRD has changed, re-parse first. If nothing has changed, skip `plan`.
 - **Treating scores as fixed truth.** The scoring engine uses rule-based heuristics against task fields. A task with a one-word description will score misleadingly. If a score seems wrong (e.g., `blast_radius: 1` on a task that clearly touches a shared schema file), adjust the `**Likely files:**` field in `prd.md`, re-parse, and re-score.
-- **Manually editing `state.db`.** Do not use `sqlite3` directly. Every mutation must flow through the CLI so the change is recorded in `events.jsonl`. Manual edits produce state that cannot be replayed or audited.
 - **Skipping the pause after `plan`.** Jumping straight to `score` and `review tasks` without reviewing the task list means catching structural problems only after the queue is ready. A task graph that doesn't reflect real work is worse than no task graph.
 
 ---

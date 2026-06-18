@@ -156,6 +156,29 @@ The rule: **for every unresolved item, the agent generates the question and prop
 
 ---
 
+## Decision-presentation discipline (canonical)
+
+Whenever any anvil skill surfaces a multi-option choice to the user, present it as a **structured Q&A turn**, not as prose with bullets.
+
+**Use `AskUserQuestion` when running inside Claude Code.** The labeled options become an explicit pick UI and the answer comes back as a known label, so the agent can act unambiguously. For other runtimes, fall back to explicit numbered prompts ("Pick 1 / 2 / 3").
+
+**Anti-pattern:** ending a turn with paragraph-style alternatives that ask for a decision but don't pin down the answer shape. For example:
+
+> "Two options: Cut T014 (planner's recommendation). Cut T008 + T018 (distributed). My recommendation is the first. What's your call?"
+
+Replace with a structured prompt so the answer is one of N labels and the agent knows exactly what to do next:
+
+> 1. Cut T014 + trim T002 (planner's recommendation; lands at ~80h)
+> 2. Cut T008 + T018 + trim T007 (distributed; keeps all features intact)
+> 3. Defer T017 (Wasm network policy; affects F005)
+> 4. Keep all tasks and accept the overrun
+>
+> Pick 1 / 2 / 3 / 4 (or describe).
+
+The rule applies across all skills: any time the agent could present 2+ options for the user to pick, use structured Q&A. Prose-with-bullets that lacks an explicit "pick N" prompt forces the user to type free-form intent the agent then has to interpret — wasted turn.
+
+---
+
 ## Composition with Other Skills
 
 | Position | Skill |
@@ -165,17 +188,3 @@ The rule: **for every unresolved item, the agent generates the question and prop
 | After Step 4 (resolved) | `plan` — continue into task generation now that the PRD is unambiguous |
 | If the user opts out | Return to whatever skill bridged here; proceed without resolving (the soft gate is by design) |
 
----
-
-## Phase 7+ Notes
-
-| Feature | Phase | Status |
-|---|---|---|
-| `anvil prd find-decisions` CLI | v1.14.0 | available |
-| `find_decisions` MCP tool | v1.14.0 | available |
-| `[NEEDS DECISION]` marker detection | v1.14.0 | available |
-| `## Open Questions` detection | v1.14.0 | available |
-| Missing-field detection (empty acceptance_criteria, empty verification) | v1.14.0 | available |
-| `## Decisions` audit-trail section auto-creation | v1.14.0 | available (driven by the skill — not a CLI command) |
-| LLM-assisted option generation when proposing answers | v1.14.0 | inherent — the agent running this skill IS the LLM |
-| Per-requirement / per-feature detection (e.g. empty requirement text) | v1.15+ | pending — detection module has reserved parameters |
