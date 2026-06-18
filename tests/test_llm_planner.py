@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import datetime
+import importlib.util
 
 import pytest
+
+_openai_available = importlib.util.find_spec("openai") is not None
+_skip_no_openai = pytest.mark.skipif(
+    not _openai_available,
+    reason="openai SDK not installed (pip install openai or pip install 'anvil[custom]')",
+)
 
 from anvil.clock import FrozenClock
 from anvil.planning.llm import LLMResponse, RecordedLLMProvider
@@ -97,6 +104,7 @@ class TestResolvePlannerProvider:
 
     # --- explicit config precedence over env ---------------------------
 
+    @_skip_no_openai
     def test_config_provider_wins_over_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -188,6 +196,7 @@ class TestResolvePlannerProviderGreptileFixes:
         with pytest.raises(PlannerProviderUnavailable):
             resolve_planner_provider()
 
+    @_skip_no_openai
     def test_missing_custom_base_url_raises_provider_unavailable_not_valueerror(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -251,6 +260,7 @@ class TestResolvePlannerProviderGreptileFixes:
         # OpenRouter and vLLM are named in the help text.
         assert "OpenRouter" in msg or "vLLM" in msg
 
+    @_skip_no_openai
     def test_custom_with_only_tier_resolves_to_anthropic_id(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -406,6 +416,7 @@ class TestCustomEndpointProvider:
             CustomEndpointProvider(model="", base_url="http://localhost:8000/v1")
         assert "model" in str(exc_info.value).lower()
 
+    @_skip_no_openai
     def test_missing_base_url_and_env_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
