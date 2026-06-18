@@ -123,6 +123,16 @@ HARNESSES: dict[str, Harness] = {
         "zed", "zed", "~/.config/zed/settings.json",
         "home", "json", "AGENTS.md", "project",
     ),
+    "openhands": Harness(
+        "openhands", None, None,
+        "project", "none", ".openhands/microagents/anvil.md", "project",
+        note=(
+            "OpenHands MCP config uses a `stdio_servers` array in `[mcp]` of "
+            "project-root config.toml — not a sub-table; use the snippet at "
+            "packaging/openhands/config.toml.snippet and merge by hand. "
+            "Instruction file is dropped as .openhands/microagents/anvil.md."
+        ),
+    ),
 }
 
 

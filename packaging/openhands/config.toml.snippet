@@ -1,0 +1,24 @@
+# Anvil MCP server config for OpenHands
+#
+# Merge this stanza into your project-root config.toml (or ~/.openhands/config.toml).
+# Format confirmed from OpenHands config.template.toml:
+#   https://github.com/All-Hands-AI/OpenHands/blob/main/config.template.toml
+#
+# Field reference (stdio_servers array entry):
+#   name    = server identifier (string)
+#   command = executable (string)
+#   args    = command-line arguments (array of strings)
+#   env     = optional environment variables (inline table)
+
+[mcp]
+stdio_servers = [
+    {name = "anvil", command = "bash", args = ["/path/to/anvil/bin/anvil-mcp"]},
+]
+
+# If you need to pin the project root (multi-repo setups):
+# stdio_servers = [
+#     {name = "anvil", command = "bash", args = ["/path/to/anvil/bin/anvil-mcp"], env = {ANVIL_ROOT = "/path/to/your/project"}},
+# ]
+#
+# Run `anvil install openhands --write` to auto-write the real absolute path.
+# Run `anvil install openhands --uv-run --write` to use `uv run` instead of bash.
