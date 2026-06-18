@@ -154,6 +154,7 @@ Source for the wedges: [`docs/_positioning.md`](docs/_positioning.md).
 - [`docs/architecture.md`](docs/architecture.md) — layered architecture, lifecycles, audit guarantee
 - [`docs/design.md`](docs/design.md) — design rationale and trade-offs
 - [`docs/how-to/getting-started.md`](docs/how-to/getting-started.md) — end-to-end first-project walkthrough
+- [`docs/how-to/using-anvil-on-any-harness.md`](docs/how-to/using-anvil-on-any-harness.md) — wire Anvil's MCP server into Cursor / Windsurf / Cline / VS Code / Zed / Codex (one command), or drive it from any shell via the CLI. See also [`AGENTS.md`](AGENTS.md).
 - [`docs/cli-reference.md`](docs/cli-reference.md) — every CLI command, flag, and exit code
 - [`docs/roadmap.md`](docs/roadmap.md) — Phase 11 plans, v2.0 and beyond backlog
 - [`docs/mcp.md`](docs/mcp.md) — 24-tool MCP reference with error envelope contract
@@ -187,7 +188,7 @@ uv sync                     # materializes .venv and resolves deps
 uv run anvil --help  # drive the CLI directly
 ```
 
-The wrapper scripts `bin/anvil` and `bin/anvil-mcp` shell out to `uv run`, so once synced you can also add this directory to your Claude Code plugin paths and use the MCP server (`.mcp.json`) as-is.
+The wrapper scripts `bin/anvil` and `bin/anvil-mcp` shell out to `uv run`, so once synced you can also add this directory to your Claude Code plugin paths and use the MCP server (`.mcp.json`) as-is. For other MCP clients run `anvil mcp-config <client>` (Cursor, Windsurf, Cline, VS Code, Zed, Codex) — see [`docs/how-to/using-anvil-on-any-harness.md`](docs/how-to/using-anvil-on-any-harness.md).
 
 ---
 

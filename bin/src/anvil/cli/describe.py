@@ -68,7 +68,10 @@ _COMMAND = "describe"
 # ``__version__`` release (bug fix, docs, internals) that leaves the surface
 # identical. Consumers pin on ``api_version``; ``engine_version`` tells them the
 # exact build.
-API_VERSION = "1"
+#
+# Bumped to "2" when the ``mcp-config`` CLI command was added (a command added
+# to the surface is exactly the documented bump trigger).
+API_VERSION = "2"
 
 
 def describe(
