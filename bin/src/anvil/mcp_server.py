@@ -531,14 +531,25 @@ def list_tasks(
     feature_id: str | None = None,
     claimed_by: str | None = None,
     task_type: str | None = None,
+    cwd: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return tasks filtered by status, feature_id, task_type, and/or claimed_by.
 
     status, feature_id, and task_type are pushed to SQL. claimed_by is an
     in-memory filter applied after retrieval (joins active claims).
     ``task_type`` (T015) scopes to feature / bugfix / refactor / modify.
+
+    Args:
+        status: Filter to one task status.
+        feature_id: Filter to one feature.
+        claimed_by: Filter to tasks with an active claim held by this actor.
+        task_type: Filter to feature / bugfix / refactor / modify (T015).
+        cwd: Project root. Defaults to ``Path.cwd()``. Mirrors the workflow
+            tools (get_project_status / parse_prd / init_project) so a single
+            MCP session can list tasks across projects without resolving to
+            the server's process directory (GAP-01).
     """
-    state_dir = _resolve_state_dir()
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         tasks = backend.list_tasks(

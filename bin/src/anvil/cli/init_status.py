@@ -251,6 +251,21 @@ def init(
             f"{state_dir / 'prd.md'}, "
             "then run `anvil prd parse`."
         )
+        # GAP-02: the parser requires four sections and a specific bold-inline
+        # field format. State them here so the first `prd parse` doesn't fail
+        # blind on a missing heading or a mis-formatted feature/task field.
+        typer.echo("")
+        typer.echo(
+            "Your prd.md must contain these required sections:\n"
+            "  # Project: <Name>\n"
+            "  ## Summary\n"
+            "  ## Goals\n"
+            "  ## Requirements\n"
+            "Optional ## Features / ## Tasks use bold-inline fields, e.g.\n"
+            "  **Feature:** F001   (under a ### Txxx task heading)\n"
+            "  **Requirements:** R001, R002   (under a ### Fxxx feature heading)\n"
+            "See docs/prd-template.md for the full template."
+        )
 
 
 def _apply_init_event(

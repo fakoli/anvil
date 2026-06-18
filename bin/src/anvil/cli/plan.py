@@ -1104,6 +1104,12 @@ def review_tasks(
         clock = SystemClock()
         all_tasks = backend.list_tasks()
 
+        # GAP-09: capture the PRD status while the backend is open so we can
+        # nudge the user to approve a still-draft PRD after promotion (a hint,
+        # not a gate — tasks are still promoted regardless).
+        prd = backend.get_prd()
+        prd_status = prd.status.value if prd is not None else None
+
         drafted_tasks = [t for t in all_tasks if t.status.value == "drafted"]
         reviewed_tasks = [t for t in all_tasks if t.status.value == "reviewed"]
 
@@ -1193,6 +1199,15 @@ def review_tasks(
             typer.echo(f"  {tid}: {reason}")
     else:
         typer.echo(f"\n{total_promoted} total promotion(s). No tasks blocked.")
+
+    # GAP-09: a still-draft PRD after planning + task review is an easy thing
+    # to forget. Surface a one-line hint (never a hard gate) pointing at the
+    # next workflow step so the PRD doesn't silently stay in draft.
+    if prd_status == "draft":
+        typer.echo(
+            "\nHint: PRD is still in draft. Run `anvil prd review` then "
+            "`anvil prd review --approve` to approve it before claiming tasks."
+        )
 
 
 # ---------------------------------------------------------------------------
