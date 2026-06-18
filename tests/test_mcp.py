@@ -493,6 +493,68 @@ class TestListTasks:
         assert tasks[0]["id"] == "T002"
         assert tasks[0]["task_type"] == "bugfix"
 
+    def test_cwd_param_resolves_other_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GAP-01: list_tasks(cwd=PROJECT) targets that project even when the
+        server process cwd is a different (uninitialized) directory.
+
+        Without the cwd param the tool resolved to Path.cwd() and broke across
+        projects; this proves the param threads into _resolve_state_dir(cwd).
+        """
+        # Real project under tmp_path/project; tasks live here.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        state_dir = _init_state_dir(project_dir)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_task(state_dir, task_id="T002", status="blocked")
+
+        # Process cwd is an unrelated, uninitialized directory.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool(
+                        "list_tasks", {"cwd": str(project_dir)}
+                    )
+                )
+
+        tasks = _run(run())
+        ids = {t["id"] for t in tasks}
+        assert ids == {"T001", "T002"}
+
+    def test_cwd_param_combines_with_status_filter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GAP-01: cwd composes with the existing status filter."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        state_dir = _init_state_dir(project_dir)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_task(state_dir, task_id="T002", status="blocked")
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool(
+                        "list_tasks",
+                        {"cwd": str(project_dir), "status": "ready"},
+                    )
+                )
+
+        tasks = _run(run())
+        assert len(tasks) == 1
+        assert tasks[0]["id"] == "T001"
+
 
 # ===========================================================================
 # Tool 3: get_task

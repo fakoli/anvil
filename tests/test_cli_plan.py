@@ -713,3 +713,45 @@ class TestBatchDepsValidation:
         assert result.exit_code == 0
         assert "--add" in result.output
         assert "--remove" in result.output
+
+
+# ---------------------------------------------------------------------------
+# GAP-09 — `review tasks` nudges to approve a still-draft PRD
+# ---------------------------------------------------------------------------
+
+
+class TestReviewTasksDraftPrdHint:
+    """GAP-09: after parse + plan + review-tasks the PRD can still be `draft`
+    with nothing prompting the user to approve it. `review tasks` emits a
+    one-line hint (a nudge, not a hard gate) pointing at `prd review --approve`
+    when the PRD is still in draft.
+    """
+
+    def test_hint_shown_when_prd_still_draft(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Draft Hint Project")
+        _write_prd(tmp_path, _COMPLEX_TASK_PRD)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        # No `prd review` — PRD stays in draft.
+        assert _invoke_cmd(tmp_path, ["plan", "--no-llm"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["score"]).exit_code == 0
+
+        result = _invoke_cmd(tmp_path, ["review", "tasks"])
+        assert result.exit_code == 0, result.output
+        # The promotion still happened (hint, not a gate).
+        assert "Promoted" in result.output
+        # The hint points at the approval command.
+        assert "draft" in result.output.lower()
+        assert "prd review --approve" in result.output
+
+    def test_no_hint_when_prd_approved(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Approved Project")
+        _write_prd(tmp_path, _COMPLEX_TASK_PRD)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["plan", "--no-llm"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["score"]).exit_code == 0
+
+        result = _invoke_cmd(tmp_path, ["review", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "prd review --approve" not in result.output

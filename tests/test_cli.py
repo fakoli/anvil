@@ -80,6 +80,31 @@ class TestInit:
         assert result.exit_code == 0
         assert "Repo Alpha" in result.output
 
+    def test_init_output_states_required_prd_sections(self, tmp_path: Path) -> None:
+        """GAP-02: plain init tells the user the required PRD sections and the
+        bold-inline field format so the first `prd parse` doesn't fail blind."""
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(
+                app,
+                ["init", "--name", "Guidance Project"],
+                catch_exceptions=False,
+            )
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 0, f"init failed: {result.output}"
+        out = result.output
+        # The four required sections must be named.
+        assert "# Project" in out
+        assert "## Summary" in out
+        assert "## Goals" in out
+        assert "## Requirements" in out
+        # The bold-inline field format must be shown.
+        assert "**Feature:**" in out
+        assert "F001" in out
+
     def test_init_refuses_overwrite(self, tmp_path: Path) -> None:
         """Second call to init in same dir exits non-zero without --force."""
         original_cwd = os.getcwd()
