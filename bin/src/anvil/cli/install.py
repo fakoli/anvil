@@ -125,12 +125,13 @@ HARNESSES: dict[str, Harness] = {
     ),
     "openhands": Harness(
         "openhands", None, None,
-        "project", "none", ".openhands/microagents/anvil.md", "project",
+        "project", "none", "AGENTS.md", "project",
         note=(
             "OpenHands MCP config uses a `stdio_servers` array in `[mcp]` of "
             "project-root config.toml — not a sub-table; use the snippet at "
             "packaging/openhands/config.toml.snippet and merge by hand. "
-            "Instruction file is dropped as .openhands/microagents/anvil.md."
+            "Instruction file is the project-root AGENTS.md (the current OpenHands "
+            "convention; the .openhands/microagents/ path is deprecated V0)."
         ),
     ),
 }
