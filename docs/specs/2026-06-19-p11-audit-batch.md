@@ -130,13 +130,21 @@ Themes whose every item resolved in §2 are not repeated. What follows is the
   yet `execute/SKILL.md` and the rest of the plugin treat these as available.
 - **Approach:** drop the "Phase N — pending" framing from `state-ops/SKILL.md`
   Steps 2-5 and the command table; mark these subcommands as available, matching
-  every other skill. The plugin is well past these phases. Smallest correct diff
-  is an in-place edit of `state-ops/SKILL.md` (no new reference file — see
-  Unit-F note on SK-C1). If a single source of truth is wanted, a short
-  `docs/phase-status.md` linked from `state-ops` is acceptable but optional.
-- **Acceptance:** no "pending" status remains for `list`/`show`/`next`/`conflicts`
-  in any `SKILL.md`; `grep -rn "pending" skills/` returns only genuinely-future
-  items (if any); the four subcommands run as documented.
+  every other skill. The plugin is well past these phases. **Also remove or
+  rewrite the bottom "Phase 2 Limitations" section (`:223-248`)** — it still says
+  *"All other commands … will error … until their respective phases land"* and
+  carries a "Pending (do not invoke)" table for `list`/`show`/`next`/`conflicts`.
+  Fixing only the Step headers while leaving this section intact would make the
+  skill describe those commands as available in the body AND "do not invoke" at
+  the bottom — a self-contradiction. Smallest correct diff is an in-place edit of
+  `state-ops/SKILL.md` (no new reference file — see Unit-F note on SK-C1). If a
+  single source of truth is wanted, a short `docs/phase-status.md` linked from
+  `state-ops` is acceptable but optional.
+- **Acceptance:** no "pending"/"do not invoke" status remains for
+  `list`/`show`/`next`/`conflicts` anywhere in `state-ops/SKILL.md` (Steps,
+  command table, AND the bottom limitations section); `grep -rn "pending" skills/`
+  returns only genuinely-future items (if any); the four subcommands run as
+  documented.
 - **Effort:** ~30 min (docs-only, one file).
 - **Dependencies/sequencing:** none. Independent of all other units.
 
@@ -174,8 +182,12 @@ Themes whose every item resolved in §2 are not repeated. What follows is the
     shim (`:612`, `:633`, `:706`).
   - **MC-S4** — `get_next_task(actor: str | None = None)` (`:644`) still accepts
     `actor` and never uses it (contract lie).
-  - **MC-C1** — `_resolve_state_dir(cwd)` is re-resolved per call; no module-level
-    `_STATE_DIR` cache (`_STATE_DIR_NAME` exists at `:291` but path is not cached).
+  - **MC-C1** — `_resolve_state_dir(cwd)` is re-resolved per call. This is
+    **intentional, not a defect**: the docstring (`mcp_server.py:336-339`) states
+    each call resolves state relative to cwd at call time, and tools like
+    `list_tasks` forward a per-call `cwd` so one server can drive multiple
+    projects. The audit's "cache it" suggestion is therefore **rejected** (see
+    Approach). Likely re-classified as won't-fix.
   - **MC-C2** — `_reap_stale` (`:395-403`) swallows all exceptions with a bare
     `pass`; no `logger.warning`.
   - **MC-C3** — `WorkPacketResponse.content: Any` still wide.
@@ -184,9 +196,13 @@ Themes whose every item resolved in §2 are not repeated. What follows is the
   `status: str | None` with a `Literal[...]` matching the 11 `TaskStatus` values
   verbatim. S3 (closes N1): define a `TaskSummary` or reuse the `Task` Pydantic
   model from `state.models` as the return type and drop the `json.loads(...)`
-  shim. S4: remove the unused `actor` param. C1: cache
-  `_STATE_DIR = Path.cwd().resolve() / _STATE_DIR_NAME` at import; helpers return
-  it. C2: add `logger.warning("stale-claim reaping failed: %s", exc)` inside the
+  shim. S4: remove the unused `actor` param. C1: **do NOT cache at import** — an
+  import-time `_STATE_DIR = Path.cwd().resolve()` would silently ignore the
+  per-call `cwd` and lock the server to its start directory, breaking
+  multi-project use. Leave the per-call resolution (the perf saving is
+  negligible); only if a real cost is measured, use `functools.lru_cache` keyed
+  on the resolved `cwd`, never an import-time constant. Treat MC-C1 as won't-fix.
+  C2: add `logger.warning("stale-claim reaping failed: %s", exc)` inside the
   except, keeping the swallow. C3: narrow `Any` → `str | dict[str, Any]`. N2:
   switch to `DependencyEdge.model_validate({"from": …, "to": …})` or annotate.
   **Sequencing note:** the roadmap pairs MC-C2 with `tech-debt-backlog` **CL-3**
