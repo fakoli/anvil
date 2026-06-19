@@ -171,6 +171,65 @@ a rebuildable derived index, never canonical state in `events.jsonl`. Captured a
 fakoli-style principle **P11** (derived indexes live outside the replay boundary;
 distinct from the `P11-*` audit batch below).
 
+### Theme: Workflow substrate (runtime-neutral workflow)
+
+This theme grows **SL-7** (workflow-step) from a Wave 3 spike into a product axis:
+"runtime-neutral **workflow**," the next axis after runtime-neutral **state**. It
+sits on **SL-3** (typed `ProofArtifact`) for the per-step gate and is the forcing
+function for **SL-4** (status-file coordination → events). Full narrative in
+[`docs/specs/2026-06-19-anvil-workflow-substrate.md`](specs/2026-06-19-anvil-workflow-substrate.md).
+
+The framing: today anvil's only front door is the PRD (`PRD → parse → review →
+plan/score → tasks → claim → packet → submit evidence → apply`). The **second
+front door is the workflow/loop itself**. Harness-native orchestration primitives
+(Claude Code dynamic workflows = JS orchestrating subagents; Codex automations =
+scheduled prompts; the OpenAI Agents SDK = code) are ephemeral and
+harness-specific; anvil is the durable, governed state + audit layer underneath
+them. The key refinement: **the PRD _is_ the spec** — for the common case you do
+not hand-author a workflow file, because anvil already turns the PRD into a ready
+queue. The job is to transfer/drive that ready queue into whatever loop or
+automation a runtime offers, so each step runs anvil's governed transitions.
+
+The seam is **`anvil next`** ([`cli/claim.py:500`](../bin/src/anvil/cli/claim.py)),
+which already returns the next ready task or, with `--json`, `{data: {task: null}}`
+on an empty queue (exit 0). The loop body already exists —
+`claim → packet (the contract that teaches the steps) → do the work →
+submit --evidence → apply (gate)` — and the `execute` skill wraps it. Both
+invocation modes are the **same primitive** ("one governed task per invocation"):
+run the body once for `anvil next`'s task (a Codex automation fire / CI / cron), or
+drain until empty (`while anvil next -q; do <body>; done`, e.g. Claude's self-paced
+`/loop` or any shell). Durable state makes both resumable and safe under
+concurrency via single-winner leases.
+
+Why it strengthens anvil: it exercises the wedge (single-winner leases,
+file-conflict detection, evidence gating) under real parallel load; adds a second
+entry point covering the ad-hoc / brownfield ~75% the PRD front door misses;
+collapses the fakoli-flow / fakoli-crew trinity (coordination becomes anvil
+events — SL-4); and keeps loops correct-not-just-fast (leased + evidence-gated
+steps cannot double-claim or fake "done").
+
+- **[WF-1]** `anvil next -q` exit-code seam. **SHIPPED in this PR.** Add a
+  `-q`/`--quiet` flag to `anvil next` ([`cli/claim.py:500`](../bin/src/anvil/cli/claim.py))
+  that gives jq-less shells and automations a branchable exit code: exit 0 if a
+  task is ready, exit 3 if the queue is empty. This is the single missing bit that
+  turns the existing `anvil next` into a loop seam — `while anvil next -q; do …;
+  done` works without parsing JSON.
+- **[WF-2]** Committed loop adapters + how-to. **SHIPPED in this PR.** Worked,
+  committed adapters that drive the WF-1 seam from each runtime — a Claude `/loop`
+  drain, a Codex automation single-fire, a CI/cron drain — plus a how-to that
+  documents the "one governed task per invocation" vs "drain until empty" modes
+  over the same primitive.
+- **[WF-3]** `anvil run-workflow` + `.anvil/workflows/*.yaml` declarative path.
+  **DEFERRED / SPEC-FIRST.** A committed, harness-neutral declarative workflow
+  format (`trigger`, `steps[]`, per-step `run`/`fan_out`/`claim`/`proof`/`needs`/
+  `on_fail`) plus a governed runner that drives each step through anvil's
+  transitions. Scoped **only** to ad-hoc loops _not_ derived from a PRD — the
+  common case is already covered by WF-1/WF-2 driving the PRD's ready queue, so
+  this path is built only if non-PRD loops earn it. Design lives in
+  [`docs/specs/2026-06-19-anvil-workflow-substrate.md`](specs/2026-06-19-anvil-workflow-substrate.md);
+  it extends the SL-7 spike and depends on SL-3 (`ProofArtifact`) for the typed
+  per-step gate.
+
 ---
 
 ## Version: next (v1.11 / v2.0 candidate)
