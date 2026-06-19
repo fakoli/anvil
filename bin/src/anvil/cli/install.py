@@ -861,10 +861,13 @@ def install(
                     "names": [d.name for _, d in skills],
                 },
                 "native": native_results,
-                "automations": {
-                    "status": "PAUSED",
-                    "dirs": [str(a["dir"]) for a in autos],
-                },
+                # Only present when --automations actually installed something, so a
+                # caller can't confuse "none requested" with "installed and paused".
+                **(
+                    {"automations": {"status": "PAUSED",
+                                     "dirs": [str(a["dir"]) for a in autos]}}
+                    if autos else {}
+                ),
             },
         )
         return

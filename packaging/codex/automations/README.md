@@ -5,10 +5,12 @@ defined by `~/.codex/automations/<id>/automation.toml` (cron `rrule`, a `model`,
 an `execution_environment`, and a `prompt`). They are how anvil delivers
 **longer-running, recurring work** — the same project state, worked on a schedule.
 
-These are **templates**. `anvil install codex --automations` materializes them into
-`~/.codex/automations/anvil-<id>-<project>/` with the project path and timestamps
-filled in, **`status = "PAUSED"`** so nothing runs until you review and activate it
-in the Codex app (Automations). Remove them with `anvil install codex --rollback`.
+These are **templates**. `anvil install codex --write --automations` materializes
+them into `~/.codex/automations/<template>-<project-basename>-<hash8>/` (e.g.
+`anvil-work-queue-myrepo-3f9a1c20`) with the project path and timestamps filled in,
+**`status = "PAUSED"`** so nothing runs until you review and activate it in the
+Codex app (Automations). Without `--write` the command is a dry-run that only
+previews what it would create. Remove them with `anvil install codex --rollback`.
 
 | Template | What it does |
 |---|---|
