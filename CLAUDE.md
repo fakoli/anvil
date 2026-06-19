@@ -19,7 +19,9 @@ can be inferred from the code, it does not belong here.
   reviewers — **Greptile** and **GitHub Copilot** — have landed and been addressed
   (fix real findings; reply on the ones you defer and record them in
   `docs/tech-debt-backlog.md`). Wait for both before merging; a PR can sit
-  `BLOCKED` until the second review posts.
+  `BLOCKED` until the second review posts. **Re-reviews are not automatic** — a
+  push does not re-trigger them; request one (`@greptile review`) only when you
+  want changed code re-checked. A finding you fixed directly needs no re-review.
 
 ## Map
 
