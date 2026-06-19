@@ -18,6 +18,7 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 | E8 | Legible Shared Model & External Projection | Auto-generated Mermaid diagrams and opt-in bidirectional GitHub-Issues projection as anti-lock-in positioning. |
 | E9 | WF-3 Substrate & Dogfooding Friction Follow-ups | Sand off the friction surfaced building the WF-3 workflow runner by dogfooding anvil on itself: a programmatic engine write API, a verification-command path doctor check, a relaxed evidence gate, and first-class non-PRD (workflow-origin) tasks. Each item carries researched implementation trade-offs. |
 | E10 | Framework Integration & Cross-Harness Compatibility | Prove the runtime-neutral moat by breadth: thin adapters that let many agent frameworks/harnesses (Claude Code, Codex, CI, Vercel eve, …) *drive* anvil's governed lifecycle while anvil governs (single-winner leases, evidence gate, audit) — never reimplementing framework features or coupling to a vendor. Track + publish the compatibility surface; eventually benchmark across harnesses. Breadth-as-proof, not feature-shoe-in. |
+| E11 | Backlog Generation & Management (first-class, governed) | Make anvil aware of and tooled for the **whole backlog** (not just parsed tasks): a governed `backlog_item` node above requirements + a reusable ideation→item loop that systematizes the brainstorm→research→insight→item flow used to build E9/E10. Research found verified white space — no tool manages a cross-session "what's left" backlog. Stay the governed substrate *under* the loop, not a PM platform. Grounded in [`docs/research/2026-06-19-backlog-management-research.md`](../research/2026-06-19-backlog-management-research.md). |
 
 ---
 
@@ -383,6 +384,25 @@ The strategic thesis made concrete: anvil is the **governed state-of-record bene
 - **Acceptance:** (when unblocked) a benchmark spec + a runnable harness measuring a fixed governed workload's correctness + throughput on at least one runtime, structured so other runtimes are drop-in rows. Until then: the spec + a single-runtime baseline, with the access blocker named.
 - **Likely files:** `bin/benchmarks/` (cross-harness), a `docs/specs/` benchmark spec
 - **Depends on:** B34, B35; **external blocker:** access to the target harnesses
+
+---
+
+## E11 — Backlog Generation & Management (first-class, governed)
+
+The full research is in **[`docs/research/2026-06-19-backlog-management-research.md`](../research/2026-06-19-backlog-management-research.md)** (22-agent deep-research workflow: 5-lane landscape → demand sweep → adversarial verification → synthesis). Headline: **no tool autonomously manages a cross-session "what's left" backlog** — Codex Memories *disclaims* it, Cursor *removed* it, and **Height (the one product that built autonomous whole-backlog grooming) shut down Sep 2025**. anvil's moat maps onto the gap (cross-session `next` awareness, evidence-gated *promotion*, the only reference-class-forecasting corpus = its immutable ledger, markdown↔state-DB duality, insight→item→task→evidence traceability). **Guardrail: stay the governed substrate UNDER the loop — not a PM platform (Height's grave); dedup/re-rank ship as evidence-backed `decisions` suggestions, never silent mutations.**
+
+The build items (the `backlog_item` schema node, the `/anvil:ideate` loop, the Definition-of-Ready gate, `anvil backlog capture/next/promote/sync/dedup/rerank`, the MCP surface, the benchmark) are **deliberately not pre-authored here** — they are defined by B37's spec session, since they depend on the open product forks the research left.
+
+### B37 — Spec the backlog-management feature via structured Q&A → PRD
+
+- **Priority:** P1  **Effort:** M  **Type:** feature (design)  **Status:** NEXT — drive in a dedicated session
+- **Rationale:** The research (full brief: [`docs/research/2026-06-19-backlog-management-research.md`](../research/2026-06-19-backlog-management-research.md)) found verified white space and a defensible wedge, but left genuine product forks that must be decided before building. This is the design step: drive the structured Q&A — the *same* ideation→item loop the feature itself describes (dogfooding) — to resolve the forks and author a PRD/spec, from which the E11 build items get authored.
+- **Open forks to resolve in the Q&A** (research §7.7): (a) is `backlog_item` a new root above PRDs, or a node beside `prds` under `projects`? (b) the **benchmark** that proves it beats "a folder of markdown" (traceability completeness / dedup precision / re-prioritization stability — SL-2-harness-style); (c) the automation-vs-human-gated boundary (DoR strictness; dedup/re-rank as suggestions only); (d) scope-first: capture+ideate loop only, or also ongoing dedup/re-rank/sync; (e) dedup-link representation (self-referential FK vs `conflict_groups` reuse); (f) does `promote` create one PRD fragment per item or batch related items?
+- **Guardrails (do not regress):** governed substrate, *not* a PM platform (Height died); `capture` stays one-command-cheap or people route back to scratch files; dedup/re-rank = appended `decisions` suggestions, never silent auto-merge; additive-only schema migration (version-bump-in-lockstep); a benchmark is required (HN distrusts unmeasured claims).
+- **Acceptance:** a committed PRD/spec in `docs/specs/` that resolves the open forks, defines the `backlog_item` schema (additive migration), the ideation→item loop, the DoR gate, the markdown↔state-DB sync, and the benchmark; the E11 build items (B38+) authored from it.
+- **Likely files:** `docs/specs/<dated>-backlog-management.md`, `docs/backlog/anvil-backlog.md` (E11 build items)
+- **Depends on:** — (research complete; this is the design step)
+- **Reference:** the detailed synopsis — [`docs/research/2026-06-19-backlog-management-research.md`](../research/2026-06-19-backlog-management-research.md).
 
 ---
 
