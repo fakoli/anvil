@@ -2271,6 +2271,20 @@ class TestNextCommand:
         assert result.exit_code == 0, f"next (empty) failed: {result.output}"
         assert "No claimable" in result.output or "no" in result.output.lower()
 
+    def test_next_quiet_exits_3_on_empty_queue(self, tmp_path: Path) -> None:
+        """next -q exits 3 and prints nothing when the queue is empty."""
+        _do_init(tmp_path, name="Empty Project")
+        result = _invoke_cmd(tmp_path, ["next", "-q", "--actor", "agent-test"])
+        assert result.exit_code == 3, f"next -q (empty) failed: {result.output}"
+        assert result.output == ""
+
+    def test_next_quiet_exits_0_when_task_ready(self, tmp_path: Path) -> None:
+        """next -q exits 0 and prints nothing when a task is claimable."""
+        _do_init_and_plan(tmp_path, with_git=False)
+        result = _invoke_cmd(tmp_path, ["next", "-q", "--actor", "agent-test"])
+        assert result.exit_code == 0, f"next -q (ready) failed: {result.output}"
+        assert result.output == ""
+
 
 # ---------------------------------------------------------------------------
 # Phase 4 — hook subcommands

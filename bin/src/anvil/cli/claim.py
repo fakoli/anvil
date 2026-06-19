@@ -510,6 +510,13 @@ def next(  # noqa: A001
         "(feature, bugfix, refactor, modify).",
     ),
     json_output: bool = JSON_OPTION,
+    quiet: bool = typer.Option(  # noqa: B008
+        False,
+        "-q",
+        "--quiet",
+        help="Print nothing; exit 0 if a task is claimable, 3 if the queue "
+        "is empty. Loop seam for jq-less shells.",
+    ),
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
         "--cwd",
@@ -526,6 +533,10 @@ def next(  # noqa: A001
     With ``--json`` emits ``{"ok": true, "command": "next", "data":
     {"task": {...} | null}}`` — ``task`` is null when nothing is claimable
     (exit 0, an empty queue is not an error).
+
+    With ``-q``/``--quiet`` prints nothing and uses the exit code as the
+    signal: 0 if a task is claimable, 3 if the queue is empty (an empty
+    queue is not an error).
     """
     import os
 
@@ -545,6 +556,10 @@ def next(  # noqa: A001
         task = manager.next_claimable(task_type=task_type)
     finally:
         backend.close()
+
+    if quiet:
+        # ponytail: the exit code is the loop seam (`while anvil next -q`).
+        raise typer.Exit(0 if task is not None else 3)
 
     if json_output:
         emit_success(
