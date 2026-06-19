@@ -16,6 +16,7 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 | E6 | Distribution, Migration & Global Config | Upgrade-safe schema/state migration, engine-vs-state separation with a global-config layer, and Docker MCP catalog publishing. |
 | E7 | Verification Feedback Loop & Decision Back-Propagation | Close loops no competitor closes: deferred-finding read-back on file overlap, decision back-propagation to the PRD, batch dependency edits, structured contract fields. |
 | E8 | Legible Shared Model & External Projection | Auto-generated Mermaid diagrams and opt-in bidirectional GitHub-Issues projection as anti-lock-in positioning. |
+| E9 | WF-3 Substrate & Dogfooding Friction Follow-ups | Sand off the friction surfaced building the WF-3 workflow runner by dogfooding anvil on itself: a programmatic engine write API, a verification-command path doctor check, a relaxed evidence gate, and first-class non-PRD (workflow-origin) tasks. Each item carries researched implementation trade-offs. |
 
 ---
 
@@ -86,8 +87,14 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 - **Priority:** P3  **Effort:** S  **Type:** modify
 - **Rationale:** Surfaced 2026-06-19 while dogfooding anvil to plan its own WF-3 work. `anvil init` run at the anvil plugin root fails with `Error: this directory is the anvil plugin root. Run anvil init from your project directory, not from inside the plugin.` That guard is correct (don't seed `.anvil/` into the published plugin), but for the legitimate self-hosting case it gives no next step — the user has to guess that `bin/` (the Python package root, where tests already run) is the right project dir. The refusal also fires *after* an accidental `cd` can leave a stray `.anvil/` in a subdir, so the message should name a concrete fallback.
 - **Acceptance:** `anvil init` at the plugin root still refuses, but the message suggests an explicit project dir (e.g. "to manage anvil's own work, run from `bin/`" or honor an `--allow-plugin-root`/`ANVIL_PROJECT_ROOT` override). Tested: running at the plugin root prints the suggested path and exits non-zero; running in the suggested dir succeeds.
-- **Likely files:** `bin/src/anvil/cli/init.py`, `bin/tests/test_cli.py`
+- **Likely files:** `bin/src/anvil/cli/init_status.py` (guard at `:106-113`), `bin/src/anvil/cli/_helpers.py` (`_is_plugin_root` `:178-192`, `_resolve_base_dir` `:59-87`), `tests/test_cli.py`
 - **Depends on:** —
+- **Implementation trade-offs** (researched 2026-06-19):
+  - The guard is unconditional at `init_status.py:106-113`; detection is `_is_plugin_root` (`<dir>/.claude-plugin/plugin.json` with `name == "anvil"`). `init` passes `cwd=None`, so only `ANVIL_ROOT`/cwd resolve — there is no `--cwd` on `init`.
+  - **Opt 1 — actionable message (S):** glob for a sibling `*/pyproject.toml`, suggest `cd <dir> && anvil init` + the `ANVIL_ROOT=<dir>` hint. Still refuses; purely additive. Trade-off: heuristic suggestion could point at a wrong subdir in unusual layouts.
+  - **Opt 2 — `--allow-plugin-root` escape hatch (S–M):** opt-in bypass. Trade-off: lets users seed `.anvil/` into the plugin repo — the exact thing the guard prevents; needs gitignore hygiene.
+  - **Opt 3 — add `--cwd` to `init` (M):** parity with `status`; `_resolve_base_dir` already supports it. Trade-off: more surface; redundant with `ANVIL_ROOT` but more discoverable.
+  - **Recommendation:** Opt 1 now (no downside); defer 2/3 unless requested. See [E9](#e9--wf-3-substrate--dogfooding-friction-follow-ups) for the sibling WF-3 friction items.
 
 ---
 
@@ -282,6 +289,68 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 - **Acceptance:** `anvil drift` (or `status --drift`) lists divergence between the PRD/spec, the task plan, and the filesystem-or-git, with machine-readable output (`--json`, B10). Each drift entry names the source-of-truth disagreement (e.g. requirement with no task, task with no matching code, code with no task). Tested on a seeded drift fixture: the command reports the injected divergence and exits clean on a non-drifted project.
 - **Likely files:** `bin/src/anvil/cli/drift.py`, `bin/src/anvil/cli/__main__.py`, `bin/src/anvil/sync/reconciliation.py`, `bin/tests/test_cli.py`
 - **Depends on:** B10
+
+---
+
+## E9 — WF-3 Substrate & Dogfooding Friction Follow-ups
+
+Surfaced 2026-06-19 while building the WF-3 declarative workflow runner (PR #28) by dogfooding anvil on its own repo. Each item below carries a researched **Implementation trade-offs** block (options with cost + a recommendation). See also [B29](#b29--anvil-init-at-the-plugin-root-guidance-instead-of-a-bare-refusal-dogfooding-friction) (init guidance), the first item from the same dogfooding pass.
+
+### B30 — `anvil doctor` check: verification commands whose paths don't resolve from the project root
+
+- **Priority:** P2  **Effort:** S  **Type:** feature
+- **Rationale:** A task's `**Verification:**` commands are stored as plain strings with no associated working directory and anvil never executes or validates them — they are recorded verbatim at submit and only substring-matched by the completion gate. With `bin/pyproject.toml` `testpaths = ["../tests"]`, a command written `pytest tests/foo.py` run from `bin/` resolves to the never-collected `bin/tests/` — so it can "pass" by hand yet never run in CI. This caused a real defect during WF-3 (a test landed in `bin/tests/` and would not have run in CI). Anvil has zero awareness of project test layout.
+- **Acceptance:** `anvil doctor` flags any ready task whose verification command references a path (e.g. `tests/foo.py`) that does not exist relative to the project root; exit/report surfaces the task ID and the offending command. Tested with a task whose command points at a non-resolving path.
+- **Likely files:** `bin/src/anvil/cli/doctor.py` (`_diagnose` `:185-227`), `bin/src/anvil/state/models.py` (`Verification` `:263-270`), `tests/test_cli.py`
+- **Depends on:** —
+- **Implementation trade-offs** (researched 2026-06-19):
+  - Confirmed: commands are surfaced verbatim in the packet (`context/packets.py:301-304`), recorded verbatim at submit (`cli/packet_apply.py:333,363`), gated only by substring match (`review/gates.py:190-236`); the capture-evidence hook never reconciles declared-vs-run commands (`cli/hooks.py:149-209`); `doctor` has no path check.
+  - **Opt 1 — path-resolution check (S):** flag verification paths that don't exist relative to project root. Catches the exact `bin/tests/` defect. Trade-off: false positives on cwd-relative or glob/marker-only commands; no notion of the agent's run dir.
+  - **Opt 2 — parse `testpaths` and warn on `tests/` vs `../tests` mismatch (M):** precise. Trade-off: couples anvil to pytest config + the bin-subdir convention; brittle for non-pytest/non-uv projects; scope creep toward a test-runner model.
+  - **Opt 3 — add optional `cwd` to `Verification` (M–L):** documents the run dir at the source. Trade-off: schema migration + three-file version bump + planner must populate; documents rather than detects existing bad entries.
+  - **Recommendation:** Opt 1 now (cheap, real coverage, no pytest coupling); fold in Opt 2's `testpaths` hint only when pytest is detected; Opt 3 as later hardening.
+
+### B31 — Programmatic engine write API: `EvidenceManager` / `ReviewManager` (mirror `ClaimManager`)
+
+- **Priority:** P2  **Effort:** M  **Type:** refactor
+- **Rationale:** Claim/release/renew are a reusable service (`ClaimManager`), but `evidence.submitted` and `task.applied` have no equivalent — their `EventDraft` payloads are hand-built inline in CLI command bodies. The same two payload shapes are now duplicated **3–4×** each: CLI (`cli/packet_apply.py`), MCP (`mcp_server.py`), and the WF-3 runner (`workflows/tasks.py`, which had to re-derive them by reading the CLI source). Any host/automation building on anvil (the WF-3 premise) pays this tax; the copies also risk gating logic diverging.
+- **Acceptance:** Evidence-submit and apply have a reusable programmatic entry point (manager class or builder fns) that the CLI, MCP server, and workflow runner all call instead of hand-building drafts; existing CLI/MCP behavior unchanged; the WF-3 runner's hand-rolled payloads are removed in favor of it.
+- **Likely files:** `bin/src/anvil/cli/packet_apply.py` (`:358-379`, `:739-754`), `bin/src/anvil/mcp_server.py` (`:1056-1075`, `:2623-2638`), `bin/src/anvil/workflows/tasks.py` (`:139-188`), `bin/src/anvil/state/payloads.py`, new `bin/src/anvil/review/` or `bin/src/anvil/evidence/` module
+- **Depends on:** —
+- **Implementation trade-offs** (researched 2026-06-19):
+  - Confirmed: `ClaimManager` builds drafts at `claims/manager.py:459/567/658`; evidence/apply are inline at `packet_apply.py:358-379/739-754`, re-hand-rolled in `mcp_server.py:1056-1075/2623-2638` and `workflows/tasks.py:139-188`. The inline copies also carry non-payload logic (claim lookup, ownership guard, strict-evidence gate, `next_ready`) — only the draft-building is duplicated. All feed `SqliteBackend.append(EventDraft)` validating `EvidenceSubmittedPayload`/`TaskAppliedPayload`.
+  - **Opt 1 — pure builder fns (`build_evidence_draft`/`build_apply_draft`) in `state/drafts.py` (S):** 4 call sites delegate; guards stay put. Trade-off: lowest regression risk but doesn't centralize gates — gating can still diverge.
+  - **Opt 2 — `EvidenceManager`/`ReviewManager` mirroring `ClaimManager` (M):** real consolidation; gate logic moves out of CLI/MCP. Trade-off: moderate CLI-regression risk (strict-evidence + `next_ready` are woven into CLI control flow); new API surface to stabilize.
+  - **Opt 3 — single `EngineService` facade (L):** cleanest long-term seam. Trade-off: highest churn/over-engineering now (YAGNI) for only two missing operations.
+  - **Recommendation:** Opt 2 — matches the proven `ClaimManager` pattern and kills the 3–4× duplication; fall back to Opt 1 if CLI test churn is too high.
+
+### B32 — Relax the evidence gate: allow empty `files_changed` when `commands_run` is non-empty
+
+- **Priority:** P3  **Effort:** S  **Type:** modify
+- **Rationale:** `evidence.submitted` rejects an empty `files_changed` list (`state/sqlite.py:3467-3470`), but a check-only / verification-only step legitimately changes no files. Callers must record a magic placeholder — the WF-3 runner uses `files = outcome.files_changed or ["(none)"]`. The constraint is an audit-honesty gate (a "done" with zero files *and* zero commands is unverifiable) but it over-fires: requiring *some* proof should mean commands **or** files, not files specifically. Origin is an inherited fakoli-state import (`f36ec8c`) with no documented rationale.
+- **Acceptance:** `evidence.submitted` accepts an empty `files_changed` when `commands_run` is non-empty (still rejects when *both* are empty); existing `"(none)"`-style rows remain valid; the WF-3 runner's placeholder is removed. Tested both arms.
+- **Likely files:** `bin/src/anvil/state/sqlite.py` (`_check_evidence_submitted` `:3463-3470`), `bin/src/anvil/workflows/runner.py` (`:189`), `tests/test_*`
+- **Depends on:** —
+- **Implementation trade-offs** (researched 2026-06-19):
+  - Confirmed: the gate is a pre-mutation check in `_check_evidence_submitted`; the model layer is permissive (`payloads.py:319` defaults `files_changed=[]`). The `--files-changed` CLI flag is Typer-required; the `record-file-change` hook writes *separate* events, never auto-filling the submission payload — so empty is a real caller burden.
+  - **Opt 1 — document + bless the `"(none)"` sentinel (S):** zero migration. Trade-off: keeps a magic string; a fake "done" can still pass by typing `"(none)"`.
+  - **Opt 2 — require non-empty `commands_run` *or* `files_changed` (S):** one-line gate change; matches reality (a check step runs commands, changes nothing); honesty preserved (some proof still mandatory); pure loosening, no migration. Trade-off: existing `"(none)"` rows become legacy noise.
+  - **Opt 3 — typed `no_files_changed: bool` field instead of a magic string (M):** most explicit for auditors. Trade-off: payload-schema change + migration/back-compat read for existing rows.
+  - **Recommendation:** Opt 2 — removes the hack with no migration and no honesty loss.
+
+### B33 — First-class non-PRD (workflow-origin) tasks: add a `tasks.origin` column and filter the PRD queue
+
+- **Priority:** P2  **Effort:** S  **Type:** feature
+- **Rationale:** Every task is forced to descend from a PRD feature (`feature_id TEXT NOT NULL REFERENCES features(id)`, `state/schema.py:112`), but WF-3 needs claimable tasks created outside the PRD→plan flow (one per workflow step / fan_out item). T003.1 worked around the FK with a sentinel feature `FWORKFLOW` + a `WT-` id prefix + an `implementation_notes` marker — but the marker is **dead weight**: `is_workflow_task` is never called outside `tasks.py`, and nothing filters origin, so workflow tasks share the `ready` pool and surface in `next_claimable`, `score`, and `list` (they pollute the PRD queue). WF-3's premise is non-PRD loops, so this should be first-class.
+- **Acceptance:** Tasks carry an `origin` (`'prd' | 'workflow'`); `create_workflow_task` sets `'workflow'`; `next_claimable`, `score`, and `list` filter to `origin='prd'` by default (workflow tasks reachable via an explicit flag); the dead `is_workflow_task` marker is replaced by the column. Tested: a workflow task does not appear in `anvil next`/`list`/`score` for PRD work.
+- **Likely files:** `bin/src/anvil/state/schema.py` (`:112`), `bin/src/anvil/state/sqlite.py` (migration block `:1195-1295`), `bin/src/anvil/state/models.py` (`Task` `:352`), `bin/src/anvil/claims/manager.py` (`next_claimable` `:154-201`), `bin/src/anvil/cli/plan.py` (`:740`, `:1372`), `bin/src/anvil/workflows/tasks.py`
+- **Depends on:** —
+- **Implementation trade-offs** (researched 2026-06-19):
+  - Confirmed: migrations are `PRAGMA user_version`-gated (currently v5), additive `ALTER`s per branch. The `WT-` marker labels but excludes nowhere.
+  - **Opt 1 — `origin` column, keep sentinel feature (S):** add `tasks.origin TEXT NOT NULL DEFAULT 'prd'`; filter `origin='prd'` in the 3 query sites. Migration v5→v6, one additive `ALTER … DEFAULT 'prd'` mirroring the existing `task_type` branch — backfill-safe, replay-safe; FK untouched (zero risk). Trade-off: sentinel feature lingers as cosmetic debt.
+  - **Opt 2 — nullable `feature_id` + `origin`, drop sentinel (M):** cleanest model. Trade-off: SQLite can't drop `NOT NULL` via `ALTER` — needs a table-rebuild (create-copy-swap); weakens the FK invariant repo-wide (every `feature_id` consumer must handle `None`).
+  - **Opt 3 — separate `workflow_tasks` table (L):** strongest isolation. Trade-off: forks claim/evidence/scoring code paths — large query/replay surface and ongoing duplication.
+  - **Recommendation:** Opt 1 — additive column + filter; lowest cost/risk, makes the existing dead marker actually load-bearing.
 
 ---
 
