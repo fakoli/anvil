@@ -43,7 +43,7 @@ def _run_in_fake_checkout(tmp_path: Path, *args: str) -> subprocess.CompletedPro
         **os.environ,
         "HOME": str(tmp_path),
         "ANVIL_BIN_DIR": str(tmp_path / "pathdir"),
-        "PATH": f"{stubbin}:{os.environ['PATH']}",
+        "PATH": f"{stubbin}:{os.environ.get('PATH', '')}",
     }
     return subprocess.run(
         ["sh", str(_script()), *args],
@@ -68,6 +68,16 @@ def test_install_script_requires_a_harness_arg() -> None:
     )
     assert r.returncode == 2
     assert "Usage" in r.stderr
+
+
+def test_help_flag_exits_zero_on_stdout() -> None:
+    # An explicit -h/--help is not an error: exit 0, and usage goes to stdout
+    # (a usage *error* exits 2 to stderr).
+    r = subprocess.run(
+        ["sh", str(_script()), "--help"], capture_output=True, text=True
+    )
+    assert r.returncode == 0
+    assert "Usage" in r.stdout
 
 
 def test_install_script_force_updates_cache_and_fails_loud() -> None:

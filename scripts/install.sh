@@ -15,15 +15,18 @@ REPO_URL="https://github.com/fakoli/anvil.git"
 CACHE_DIR="${ANVIL_SRC:-$HOME/.anvil-src}"
 PATH_DIR="${ANVIL_BIN_DIR:-$HOME/.local/bin}"
 
-usage() {
-    echo "Usage: install.sh <harness> [--path]" >&2
-    echo "  harness: codex | cursor | windsurf | cline | vscode | zed | copilot |" >&2
-    echo "           gemini | opencode | roo | amp | continue | goose | openhands |" >&2
-    echo "           openclaw | claude-code" >&2
-    echo "  --path:  also symlink 'anvil' into $PATH_DIR so you can run it" >&2
-    echo "           globally (opt-in, idempotent, never clobbers an existing anvil)" >&2
-    exit 2
+print_usage() {
+    echo "Usage: install.sh <harness> [--path]"
+    echo "  harness: codex | cursor | windsurf | cline | vscode | zed | copilot |"
+    echo "           gemini | opencode | roo | amp | continue | goose | openhands |"
+    echo "           openclaw | claude-code"
+    echo "  --path:  also symlink 'anvil' into $PATH_DIR so you can run it"
+    echo "           globally (opt-in, idempotent, never clobbers an existing anvil)"
 }
+
+# A usage *error* (bad/missing args): help to stderr, non-zero exit. An explicit
+# `-h`/`--help` request instead prints to stdout and exits 0 (see the arg loop).
+usage() { print_usage >&2; exit 2; }
 
 # Opt-in: symlink the checkout's launcher into a PATH dir so `anvil` works
 # globally. Idempotent (re-linking the same target is a no-op) and never clobbers
@@ -32,11 +35,11 @@ link_into_path() {
     src="$1/bin/anvil"
     dest="$PATH_DIR/anvil"
     mkdir -p "$PATH_DIR"
-    if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
+    if [ -L "$dest" ] && [ "$(readlink "$dest" 2>/dev/null)" = "$src" ]; then
         echo "anvil already linked at $dest" >&2
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
-        echo "warning: $dest already exists and isn't anvil's symlink — leaving it." >&2
-        echo "         remove it and re-run with --path to link this checkout." >&2
+        echo "warning: $dest already exists — leaving it untouched." >&2
+        echo "         remove it and re-run with --path to (re)link this checkout." >&2
         return 0
     else
         ln -s "$src" "$dest"
@@ -54,7 +57,7 @@ ADD_TO_PATH=""
 for arg in "$@"; do
     case "$arg" in
         --path) ADD_TO_PATH=1 ;;
-        -h|--help) usage ;;
+        -h|--help) print_usage; exit 0 ;;  # explicit help → stdout, success
         -*) echo "unknown option: $arg" >&2; usage ;;
         *) if [ -z "$HARNESS" ]; then HARNESS="$arg"; else usage; fi ;;
     esac
