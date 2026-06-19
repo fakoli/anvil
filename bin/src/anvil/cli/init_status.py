@@ -28,6 +28,18 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def _suggest_project_dir(plugin_root: Path) -> str | None:
+    """Return the name of an immediate sub-dir that holds a ``pyproject.toml``.
+
+    When `init` is refused at the plugin root, this names a concrete project dir
+    to point the user at (e.g. ``bin`` for anvil's own repo) instead of leaving
+    them to guess (B29). Returns None when no such sibling exists.
+    """
+    for pyproject in sorted(plugin_root.glob("*/pyproject.toml")):
+        return pyproject.parent.name
+    return None
+
+
 def init(
     name: str | None = typer.Option(  # noqa: B008
         None,
@@ -104,12 +116,17 @@ def init(
 
     # Guard: refuse to initialise inside the anvil plugin directory.
     if _is_plugin_root(cwd):
-        typer.echo(
+        suggestion = _suggest_project_dir(cwd)
+        lines = [
             "Error: this directory is the anvil plugin root. "
-            "Run `anvil init` from your project directory, "
-            "not from inside the plugin.",
-            err=True,
-        )
+            "Run `anvil init` from your project directory, not from inside the plugin.",
+        ]
+        if suggestion is not None:
+            lines.append(
+                f"  To manage anvil's own work, run: cd '{suggestion}' && anvil init"
+            )
+        lines.append("  Or set ANVIL_ROOT=<project-dir> to point anvil at it.")
+        typer.echo("\n".join(lines), err=True)
         raise typer.Exit(code=1)
 
     state_dir = cwd / _STATE_DIR_NAME
