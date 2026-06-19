@@ -40,7 +40,7 @@ the on-disk sources + the official URL, and reconcile here. See
 | ↳ installed skills | `~/.codex/skills/<name>/agents/openai.yaml` |
 | ↳ automations | `~/.codex/automations/<id>/automation.toml` |
 | ↳ sessions (rollouts) | `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<UUID>.jsonl` + `~/.codex/session_index.jsonl` |
-| ↳ memories (experimental) | `~/.codex/memories/` (`MEMORY.md`, `memories_1.sqlite`, …) |
+| ↳ memories (experimental) | `~/.codex/memories/` (`MEMORY.md`, `raw_memories.md`, …) + `~/.codex/memories_1.sqlite` (store, at CODEX_HOME root) |
 | Loader source of truth (schemas) | strings compiled into the `codex` binary (`core-skills/src/loader.rs` etc.) |
 
 ---
@@ -83,16 +83,18 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
 
   | key | required | notes |
   | --- | --- | --- |
-  | `display_name` | **yes** | picker chip label; falls back to title-cased folder name if absent |
-  | `short_description` | **yes** | **must be 25–64 chars** (loader hard-errors otherwise) |
+  | `display_name` | conv. | picker chip label; every shipped skill sets it (a folder-name fallback exists, but no on-disk skill omits it) |
+  | `short_description` | conv. | **should be 25–64 chars** — a *scaffolder guideline* (`init_skill.py`), **not** enforced by the runtime loader: 170/760 shipped skills (incl. OpenAI's own) sit outside the range and load fine |
   | `default_prompt` | no | seed prompt; official guidance says reference the skill as `$skill-name` |
   | `icon_large` | no | `./assets/x.png` relative to skill dir (only ~28% of skills set it) |
   | `icon_small` | no | `./assets/x-small.svg` |
   | `brand_color` | no | hex e.g. `"#60a5fa"` — picker badge accent |
 
-  Top-level (siblings of `interface:`, **not** under it): `policy.allow_implicit_invocation`
-  (auto-invoke without a pick — 112/755 skills), `dependencies.tools` (declare MCP deps — 26/755).
-  anvil omits both (no MCP deps; don't want auto-claim). ✓
+  "conv." = conventional: the loader recognizes the key and effectively defaults it; it is not a
+  reproducible hard load error to omit it (no shipped skill does). Top-level (siblings of `interface:`,
+  **not** under it): `policy.allow_implicit_invocation` (auto-invoke without a pick — ~112 skills),
+  `dependencies.tools` (declare MCP deps — 27/760). anvil omits both (no MCP deps; don't want
+  auto-claim). Corpus counts are point-in-time. ✓
 - **Namespacing:** plugin skills are auto-prefixed `plugin_name:` → anvil's appear as
   `anvil:claim`, etc. **Do not** repeat "Anvil" in `display_name` (double-prefix). ✓
 - **anvil:** 8 minimal files shipped this PR. Icons skipped (optional; avoids 8 duplicated
@@ -174,10 +176,11 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
 - **`codex exec`** flags: `-s/--sandbox`, `-c key=value`, `-p/--profile`, `-m/--model`, `-C/--cd`,
   `--add-dir <DIR>`, `--output-schema <FILE>`, `--json` (JSONL events), `-o/--output-last-message <FILE>`,
   `--ephemeral`. No `-a` on `exec` (only `--dangerously-bypass-…`). ✓
-- **`codex review`** / **`codex exec review`**: `--uncommitted`, `--base <BRANCH>`, `--commit <SHA>`,
-  `--title`, `-c`, `-o`. **`codex review` has NO `--json`** → gate by asking the prompt to end with a
-  `VERDICT PASS|FAIL` line and grep the `--output-last-message` file. (`codex exec review` *does* list
-  `--json` but its verdict semantics are unverified.) ✓
+- **`codex review`** flags: `--uncommitted`, `--base <BRANCH>`, `--commit <SHA>`, `--title`, `-c`
+  (`--enable`/`--disable`). It has **no `--json` and no `-o`**. **`codex exec review`** is the
+  capturable variant — it adds `-m/--model`, `--json`, and `-o/--output-last-message`. So to gate
+  programmatically: run **`codex exec review`**, ask the prompt to end with a `VERDICT PASS|FAIL`
+  line, and read the `-o`/`--json` output. Bare `codex review` must be parsed from stdout. ✓
 - **▲ `--output-schema` may be silently ignored when MCP servers are active** (anvil's MCP is
   configured) — prefer calling the anvil CLI inside the run + parsing the last message. Verify live.
 - **anvil:** B41 Phase 3 — `packaging/codex/loops/` (`anvil-exec-queue.sh`, `anvil-review-branch.sh`,
@@ -199,11 +202,13 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
 
 ### Cloud & apply (experimental)
 - **`codex cloud`** `[EXPERIMENTAL]`: `exec` (`--env <ENV_ID>` **required**, `--branch`, `--attempts N`
-  best-of-N), `status`, `list --json --limit 1-20 --cursor`, `apply`, `diff`. Needs a configured env
-  + pushed remote branch. ✓
-- **`codex apply <TASK_ID>`**: `git apply` of a Codex **Cloud** task diff (alias `a`); also
-  `codex cloud apply <TASK_ID> [--attempt N]`. Cloud task ids are a **different namespace** from local
-  session UUIDs. ✓
+  best-of-N), `status`, `list --json --limit 1-20 --cursor`, `apply`, `diff`. `cloud exec` needs a
+  target environment id; environments are an **optional** customization layer (a default universal
+  image exists), and a pushed remote branch is likely but unverified. ▲
+- **`codex apply <TASK_ID>`** (alias `a`): `git apply` of the *latest diff produced by a Codex agent*
+  for that task id (help wording — **not** explicitly Cloud-scoped in `--help`); `codex cloud apply
+  <TASK_ID> [--attempt N]` is the cloud-scoped form. Cloud task ids appear to be a different namespace
+  from local session UUIDs (plausible, not confirmed). ▲
 - **anvil:** keep docs-only / opt-in (fights local-first; separate id namespace). Brief Phase 4.
 - **Source:** `codex cloud --help`; cloud-environments URL above.
 
@@ -218,11 +223,12 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
 
 ### Memory ("memories")
 - **What:** Codex's **native durable cross-thread memory** — *not* a single growing transcript and
-  *not* prompt-bounded. A structured, SQLite-backed background pipeline: `~/.codex/memories/` holds
-  `MEMORY.md` (structured `# Task Group` / `## User preferences` / `## Reusable knowledge` /
-  `## Failures`), `raw_memories.md`, `memory_summary.md`, `rollout_summaries/*.md`, backed by
-  `memories_1.sqlite` (a 2-phase "Memory Writing Agent"). Generated async in the background by Codex
-  itself, secret-redacted; read back via `use_memories`. **Experimental, ON here.** ✓
+  *not* prompt-bounded. A structured, SQLite-backed background job pipeline. Markdown lives in
+  `~/.codex/memories/` (`MEMORY.md` — structured `# Task Group` / `## User preferences` /
+  `## Reusable knowledge` / `## Failures` — plus `raw_memories.md`, `memory_summary.md`,
+  `rollout_summaries/*.md`); the store is **`~/.codex/memories_1.sqlite` at the CODEX_HOME root**
+  (sibling of `memories/`, not inside it; tables `stage1_outputs`, `jobs`). Generated async in the
+  background by Codex, secret-redacted; read back via `use_memories`. **Experimental, ON here.** ✓
 - **Config:** `[features].memories`, `[memories] generate_memories/use_memories`. Inspect flags via
   `codex features list`.
 - **anvil:** Codex's lossy, host-owned analog to anvil's authoritative cross-run state — informative,
@@ -248,7 +254,8 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
 
 ### Other subcommands (lower-priority, captured for completeness)
 - `codex login`/`logout` (+ `login status`) — ChatGPT auth. `codex update` — self-update.
-  `codex completion <shell>` — shell completions. `codex sandbox` — run a command under the sandbox.
+  `codex completion <shell>` — shell completions. `codex sandbox <macos|linux|windows> -- <CMD>` —
+  run a command under the platform sandbox (takes a per-OS subcommand, not a bare command).
 - `codex debug` → `prompt-input` (introspect the assembled instruction layers — handy for verifying
   AGENTS.md precedence), `models`, `app-server`. `codex features list|enable|disable` — the canonical
   feature-flag inspector. `codex mcp-server` / `codex exec-server` — Codex *as* a server.
@@ -261,7 +268,8 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
    `~/.codex/config.toml.corrupt-*` backup proves it — naive line-editing dropped the quotes on
    `[projects]`/`[plugins]` keys). All per-run config goes through `codex … -c key=value` flags or
    Codex's own `mcp add` / `marketplace add` commands.
-2. **`codex review` has no `--json`** — parse a `VERDICT PASS|FAIL` line, never promise structured JSON.
+2. **`codex review` has no `--json`/`-o`** — for a capturable verdict use `codex exec review` (which has
+   both) and parse a `VERDICT PASS|FAIL` line; never promise structured JSON from bare `codex review`.
 3. **Don't ship custom prompt files** (deprecated, user-home-only) or claim the global **`notify`** key.
 4. **Validate model / reasoning_effort against `models_cache.json`** — don't hardcode `gpt-5-codex`.
 

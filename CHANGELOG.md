@@ -56,8 +56,9 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   `/skills` picker and Plugins panel render `anvil:claim` … `anvil:state-ops` with
   human labels and a consistent badge instead of blank/auto-titled entries. Claude
   Code ignores the `agents/` dir, so the skill tree stays dual-harness clean.
-  Validated against the Codex skill loader's real constraints (required keys;
-  `short_description` 25–64 chars). The "bundle hooks into the Codex plugin"
+  Validated against the Codex skill schema (the `interface` keys the loader
+  recognizes; `short_description` within OpenAI's 25–64-char scaffolder
+  guideline). The "bundle hooks into the Codex plugin"
   headline (backlog B41) needed **no packaging change**: Codex installs anvil from
   the repo root, so `hooks/hooks.json` (using `${CLAUDE_PLUGIN_ROOT}`, the same
   variable real Codex plugins use) already ships and runs on Codex.
