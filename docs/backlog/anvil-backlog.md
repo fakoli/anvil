@@ -294,7 +294,7 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 
 ## E9 — WF-3 Substrate & Dogfooding Friction Follow-ups
 
-Surfaced 2026-06-19 while building the WF-3 declarative workflow runner (PR #28) by dogfooding anvil on its own repo. Each item below carries a researched **Implementation trade-offs** block (options with cost + a recommendation). See also [B29](#b29----anvil-init-at-the-plugin-root-guidance-instead-of-a-bare-refusal-dogfooding-friction) (init guidance), the first item from the same dogfooding pass.
+Surfaced 2026-06-19 while building the WF-3 declarative workflow runner (PR #28) by dogfooding anvil on its own repo. Each item below carries a researched **Implementation trade-offs** block (options with cost + a recommendation). See also [B29](#b29--anvil-init-at-the-plugin-root-guidance-instead-of-a-bare-refusal-dogfooding-friction) (init guidance), the first item from the same dogfooding pass.
 
 ### B30 — `anvil doctor` check: verification commands whose paths don't resolve from the project root
 
