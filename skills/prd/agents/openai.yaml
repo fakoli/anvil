@@ -1,0 +1,5 @@
+interface:
+  display_name: "Author a PRD"
+  short_description: "Author, parse, and review a project PRD"
+  default_prompt: "Author, parse, or review this project's anvil PRD so features and tasks can be generated from it."
+  brand_color: "#60a5fa"
