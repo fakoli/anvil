@@ -94,6 +94,12 @@ def load_corpus(corpus_dir: Path = CORPUS_DIR) -> list[Case]:
             raise FileNotFoundError(
                 f"corpus case {meta_path.name} has no sibling diff at {diff_path.name}"
             )
+        if meta["id"] != meta_path.stem:
+            raise ValueError(
+                f"corpus case {meta_path.name}: id {meta['id']!r} does not match "
+                f"the filename stem {meta_path.stem!r} — keep them in sync so the "
+                "diff/json pairing is unambiguous"
+            )
         label = meta["label"]
         if label not in {"bad", "good"}:
             raise ValueError(
@@ -125,7 +131,16 @@ def _removed_lines(diff: str) -> list[str]:
 
 
 def _touches_test_file(diff: str) -> bool:
-    return bool(re.search(r"^\+\+\+ .*test", diff, re.MULTILINE | re.IGNORECASE))
+    # Match a real test-file path component on a `+++` header — a `tests/` dir, a
+    # `test_` prefix, or a `_test.` suffix — NOT any path that merely contains
+    # "test" as a substring (e.g. `src/contest.py`).
+    return bool(
+        re.search(
+            r"^\+\+\+ .*(?:(?:^|/)tests?/|(?:^|/)test_|_test\.)",
+            diff,
+            re.MULTILINE | re.IGNORECASE,
+        )
+    )
 
 
 def mock_backend(case: Case) -> Verdict:

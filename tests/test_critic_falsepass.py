@@ -63,10 +63,10 @@ def test_corpus_contains_every_named_bad_class() -> None:
 
 
 def test_corpus_has_good_controls() -> None:
-    """At least one good control so the false-fail rate is meaningful."""
+    """The design requires two good controls so the false-fail rate is meaningful."""
     cases = cf.load_corpus()
     goods = [c for c in cases if not c.is_bad]
-    assert len(goods) >= 1, "corpus needs >=1 good control to detect over-rejection"
+    assert len(goods) >= 2, "corpus needs >=2 good controls to detect over-rejection"
     assert all(c.defect_class == "none" for c in goods), (
         "good controls should have defect_class 'none'"
     )
