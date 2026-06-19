@@ -46,6 +46,7 @@ Honors the v1.24 ``--json`` envelope and the ``ANVIL_ROOT`` /
 
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -225,10 +226,66 @@ def _diagnose(state_dir: Path) -> list[_Finding]:
         findings.append(_check_claims(backend))
         findings.append(_check_replay(backend, state_dir))
         findings.append(_check_reconciliation(backend, state_dir))
+        findings.append(_check_verification_paths(backend, state_dir.parent))
     finally:
         backend.close()
 
     return findings
+
+
+# A path-shaped token: contains a slash and ends in a known source/text
+# extension, no glob metacharacters (those are intentionally skipped — a glob
+# isn't a concrete path we can resolve).
+_VERIFY_PATH_RE = re.compile(
+    r"[\w./-]+/[\w./-]*\.(?:py|sh|txt|md|json|ya?ml|toml|cfg|ini)\b"
+)
+
+
+def _extract_verification_paths(command: str) -> list[str]:
+    """Return concrete path-shaped tokens from a verification command string.
+
+    Only tokens containing a slash are considered (a bare ``foo.py`` may be
+    cwd-relative and is not the footgun this check targets). A pytest node id
+    (``tests/x.py::test_y``) is matched up to the extension.
+    """
+    return _VERIFY_PATH_RE.findall(command)
+
+
+def _check_verification_paths(backend: SqliteBackend, project_root: Path) -> _Finding:
+    """Flag ready tasks whose verification command paths don't resolve (B30).
+
+    A command like ``pytest tests/foo.py`` run from a project root where tests
+    actually live at ``../tests`` resolves to a non-existent path and would be
+    silently skipped by CI — a "passes by hand, never runs in CI" footgun.
+    """
+    offenders: list[dict[str, str]] = []
+    for task in backend.list_tasks(status="ready"):
+        for command in task.verification.commands:
+            for token in _extract_verification_paths(command):
+                candidate = project_root / token
+                # Accept if the file resolves, or its parent dir exists (covers
+                # a not-yet-created output file under a real directory).
+                if candidate.exists() or (
+                    candidate.parent != project_root and candidate.parent.exists()
+                ):
+                    continue
+                offenders.append({"task": task.id, "command": command, "path": token})
+
+    if not offenders:
+        return _Finding(
+            "verification_paths",
+            _OK,
+            "All ready-task verification command paths resolve from the project root.",
+        )
+    summary = "; ".join(f"{o['task']}: '{o['path']}'" for o in offenders[:5])
+    more = "" if len(offenders) <= 5 else f" (+{len(offenders) - 5} more)"
+    return _Finding(
+        "verification_paths",
+        _WARNING,
+        f"{len(offenders)} verification command path(s) do not resolve from the "
+        f"project root and may be silently skipped by CI: {summary}{more}.",
+        detail={"offenders": offenders, "project_root": str(project_root)},
+    )
 
 
 # ---------------------------------------------------------------------------
