@@ -50,10 +50,11 @@ def test_each_client_emits_expected_top_key(client: str) -> None:
         # TOML: a table header line, not JSON.
         assert "[mcp_servers.anvil]" in result.stdout
     elif client in _YAML_CLIENTS:
-        # YAML output — must parse and mention the anvil server.
+        # YAML output — must parse AND carry 'anvil' as a structural key/value
+        # in the parsed doc (not merely as a comment in the raw text).
         doc = yaml.safe_load(result.stdout)
         assert isinstance(doc, dict)
-        assert "anvil" in result.stdout
+        assert "anvil" in json.dumps(doc)
     else:
         data = json.loads(result.stdout)
         top = _TOP_KEY[client]

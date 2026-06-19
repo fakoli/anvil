@@ -170,7 +170,7 @@ HARNESSES: dict[str, Harness] = {
     ),
     "goose": Harness(
         "goose", None, None,
-        "project", "none", "AGENTS.md", "project",
+        "home", "none", "AGENTS.md", "project",
         note=(
             "Goose MCP servers live under `extensions` in "
             "~/.config/goose/config.yaml (global only) — run "

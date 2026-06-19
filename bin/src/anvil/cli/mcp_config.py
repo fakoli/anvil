@@ -176,7 +176,9 @@ def _goose_block(use_uv_run: bool, root: str | None) -> str:
     }
     if "env" in base:
         ext["envs"] = base["env"]
-    return yaml.safe_dump({"extensions": {_SERVER_ID: ext}}, sort_keys=False)
+    return yaml.safe_dump(
+        {"extensions": {_SERVER_ID: ext}}, sort_keys=False, default_flow_style=False
+    )
 
 
 def build_config(client: str, *, use_uv_run: bool, root: str | None) -> str:
