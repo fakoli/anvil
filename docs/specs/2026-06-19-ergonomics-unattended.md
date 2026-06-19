@@ -26,7 +26,7 @@ This PRD covers three connected pieces: **placement** improvements (§3), an
 ## 2. What anvil already does better than peers (do NOT regress)
 
 - A **SessionStart state hook** (`hooks/detect-state.sh`) peers lack — language +
-  live `anvil status` with graceful degraded fallbacks.
+  live `anvil status` with gracefully degraded fallbacks.
 - An explicit **"no CLI to-do list" discipline** — skills drive commands inline and
   hand off to the next skill by name.
 - **One well-placed gate**: only `apply --approve` demands explicit confirmation;
@@ -163,4 +163,4 @@ test-first), and `finish` (auto-apply/merge vs halt). In **interactive** mode it
 - Autonomy patterns: OpenAI Codex automations (async auto-PR into a morning review
   queue); resolve-loop "implement-then-hold breaking changes"; ralph-loop
   `--max-iterations`; overnight-runaway cost rails ($437 case, budget caps).
-- The six axes + routing rubric: companion scoring PRD §4.
+- The six axes: companion scoring PRD §4. The routing rubric: **this document §5**.

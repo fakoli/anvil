@@ -4,7 +4,7 @@
 **Status:** Draft PRD — authored from a dogfooding session + 4 research streams
 **Plugin:** `anvil`
 **Tracks:** scoring quality (`SL`-adjacent); pairs with [`2026-06-19-ergonomics-unattended.md`](2026-06-19-ergonomics-unattended.md) (routing consumes these scores)
-**Breaking:** YES (schema v6→v7: the six score dimensions change). Migration is additive-then-backfill; see §5.
+**Breaking:** YES (schema v6→v7: the six score dimensions change). Migration is additive-then-backfill; see §9.
 
 ---
 
@@ -61,19 +61,23 @@ keeps the default or sets `api`. Do **not** sniff `CLAUDECODE`/TTY heuristics
 
 Replaces `complexity / parallelizability / context_load / blast_radius /
 review_risk / agent_suitability`. Each scored 1–5 with a one-line justification.
+The **bold label** is the human-readable name; the `snake_case` token in parens is
+the schema field / identifier used everywhere else in this doc and in code.
 
-1. **Structural entanglement** — files touched, import fan-out, cross-module spread,
-   coupling; cyclomatic/cognitive complexity and test coverage of the affected code.
-2. **Conceptual difficulty** — concurrency/distributed state, algorithmic depth,
-   novelty (net-new vs known pattern), specialized domain knowledge.
-3. **Uncertainty** — spec clarity, presence of acceptance criteria, likelihood of
-   requirement change, number of open unknowns needing investigation.
-4. **Verifiability** — can correctness be checked cheaply and deterministically?
-   *Low verifiability RAISES effective difficulty* (no feedback signal → no
-   self-correction).
-5. **Coordination** — people/teams/approvals; sole-owner areas.
-6. **Risk & reversibility** — prod/data blast radius, security/privacy/compliance,
-   migration/backfill, rollback difficulty. One-way doors.
+1. **Structural entanglement** (`structural_entanglement`) — files touched, import
+   fan-out, cross-module spread, coupling; cyclomatic/cognitive complexity and test
+   coverage of the affected code.
+2. **Conceptual difficulty** (`conceptual_difficulty`) — concurrency/distributed
+   state, algorithmic depth, novelty (net-new vs known pattern), specialized domain
+   knowledge.
+3. **Uncertainty** (`uncertainty`) — spec clarity, presence of acceptance criteria,
+   likelihood of requirement change, number of open unknowns needing investigation.
+4. **Verifiability** (`verifiability`) — can correctness be checked cheaply and
+   deterministically? *Low verifiability RAISES effective difficulty* (no feedback
+   signal → no self-correction).
+5. **Coordination** (`coordination`) — people/teams/approvals; sole-owner areas.
+6. **Risk & reversibility** (`risk_reversibility`) — prod/data blast radius,
+   security/privacy/compliance, migration/backfill, rollback difficulty. One-way doors.
 
 These axes are *consumed by score-driven routing* — see the companion ergonomics
 PRD. (That is why "uncertainty" and "verifiability" are first-class: they decide
@@ -165,18 +169,34 @@ The six dims change names/meaning, so this is breaking. Sequence:
 
 1. Add the six new axis columns + keep the old ones for one release (additive ALTER).
 2. Re-express `score_task()` (the rule floor) in the six axes.
-3. Backfill: map old→new where sensible (`blast_radius→risk_reversibility`,
-   `review_risk→verifiability` inverse, `agent_suitability→` inverse of
-   uncertainty+verifiability) for historical rows; mark backfilled rows.
+3. Backfill historical rows with **explicit formulas** on the 1–5 scale (no
+   author-by-author guessing), and mark backfilled rows:
+   - `risk_reversibility := blast_radius` (direct).
+   - `structural_entanglement := context_load` (direct).
+   - `conceptual_difficulty := complexity` (direct).
+   - `verifiability := 6 − review_risk` (**inverse**: high review risk ⇒ low
+     verifiability).
+   - `uncertainty := 3` and `coordination := 3` (**no clean historical source** —
+     default to the neutral midpoint and flag the row for agent re-score).
+   - `agent_suitability` is **dropped as a backfill source**, not mapped: it was
+     itself derived (`6 − complexity`), so it carries no independent signal; its
+     *behavioural* role moves to routing (companion PRD).
 4. Remap dependent thresholds: `auto_expand` (was `complexity≥4`) → "several axes
    ≥4 or conceptual_difficulty≥4"; the old `agent_suitability≤2` flag → routing
    (companion PRD). Add a `task_outcomes` table (§6).
 5. Drop the old columns in the following release. Three-file version bump per
-   CLAUDE.md; replay-equivalence test must pass on the migrated log.
+   CLAUDE.md. **Because `verifiability` is inverse-mapped, literal numeric
+   replay-equivalence is impossible by design** — so the migration's equivalence
+   test asserts **routing equivalence**: every historical task lands in the same
+   routing branch (act / ask / test-first / decompose / halt) before and after,
+   not identical numbers. Numeric replay-equivalence still applies to the
+   direct-mapped axes.
 
 ## 10. Open questions
 
-- Exact old→new axis backfill mapping (some are inverses; some have no clean source).
+- For the two axes with no historical source (`uncertainty`, `coordination`),
+  is "default 3 + flag for agent re-score" (§9.3) right, or should backfilled rows
+  stay null until a re-score runs?
 - Does the rule floor produce all six axes, or only the ones it can compute
   deterministically (leaving the rest agent-only with a "rule: n/a" marker)?
 - Does the diff-flag (`|agent − rule| ≥ 2`) block promotion or just annotate?
