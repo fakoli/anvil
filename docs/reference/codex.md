@@ -12,9 +12,9 @@ this machine is `gpt-5.5` (reasoning `low|medium|high|xhigh`). Codex moves fast 
 re-verify flags with `codex <cmd> --help` and re-read `~/.codex/` before relying on
 any "needs smoke test" item below.
 
-**How to refresh this doc:** fan out research agents (one per section), each reading
-the on-disk sources + the official URL, and reconcile here. See
-[[parallel-research-preference]].
+**How to refresh this doc:** fan out parallel research agents (one per section), each
+reading the on-disk sources + the official URL, then reconcile and adversarially
+fact-check the claims before updating here.
 
 ---
 
