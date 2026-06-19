@@ -1,10 +1,11 @@
 #!/bin/sh
 # Anvil one-line installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/fakoli/anvil/main/scripts/install.sh | sh -s -- <harness>
+#   curl -fsSL https://raw.githubusercontent.com/fakoli/anvil/main/scripts/install.sh | sh -s -- <harness> [--path]
 #
 # Provisions a local anvil checkout (if one isn't already present, kept current on
 # re-runs), then wires anvil into <harness> via `anvil install <harness> --write`.
+# Pass --path to also symlink `anvil` into ~/.local/bin (override: ANVIL_BIN_DIR).
 # Run from inside an anvil checkout and it uses that checkout directly.
 #
 # Prerequisite: `uv` (https://docs.astral.sh/uv/) — the wrappers self-sync deps.
@@ -12,16 +13,52 @@ set -eu
 
 REPO_URL="https://github.com/fakoli/anvil.git"
 CACHE_DIR="${ANVIL_SRC:-$HOME/.anvil-src}"
+PATH_DIR="${ANVIL_BIN_DIR:-$HOME/.local/bin}"
 
 usage() {
-    echo "Usage: install.sh <harness>" >&2
+    echo "Usage: install.sh <harness> [--path]" >&2
     echo "  harness: codex | cursor | windsurf | cline | vscode | zed | copilot |" >&2
     echo "           gemini | opencode | roo | amp | continue | goose | openhands |" >&2
     echo "           openclaw | claude-code" >&2
+    echo "  --path:  also symlink 'anvil' into $PATH_DIR so you can run it" >&2
+    echo "           globally (opt-in, idempotent, never clobbers an existing anvil)" >&2
     exit 2
 }
 
-HARNESS="${1:-}"
+# Opt-in: symlink the checkout's launcher into a PATH dir so `anvil` works
+# globally. Idempotent (re-linking the same target is a no-op) and never clobbers
+# a pre-existing `anvil` the user put there themselves.
+link_into_path() {
+    src="$1/bin/anvil"
+    dest="$PATH_DIR/anvil"
+    mkdir -p "$PATH_DIR"
+    if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
+        echo "anvil already linked at $dest" >&2
+    elif [ -e "$dest" ] || [ -L "$dest" ]; then
+        echo "warning: $dest already exists and isn't anvil's symlink — leaving it." >&2
+        echo "         remove it and re-run with --path to link this checkout." >&2
+        return 0
+    else
+        ln -s "$src" "$dest"
+        echo "Linked anvil -> $dest" >&2
+    fi
+    case ":$PATH:" in
+        *":$PATH_DIR:"*) : ;;
+        *) echo "note: $PATH_DIR isn't on your PATH yet. Add it, e.g.:" >&2
+           echo "        export PATH=\"$PATH_DIR:\$PATH\"" >&2 ;;
+    esac
+}
+
+HARNESS=""
+ADD_TO_PATH=""
+for arg in "$@"; do
+    case "$arg" in
+        --path) ADD_TO_PATH=1 ;;
+        -h|--help) usage ;;
+        -*) echo "unknown option: $arg" >&2; usage ;;
+        *) if [ -z "$HARNESS" ]; then HARNESS="$arg"; else usage; fi ;;
+    esac
+done
 [ -n "$HARNESS" ] || usage
 
 # 1. uv is the only prerequisite.
@@ -52,7 +89,11 @@ else
     ANVIL_DIR="$CACHE_DIR"
 fi
 
-# 3. Wire it into the target harness. For codex/openclaw this drives the harness's
+# 3. Optionally put `anvil` on PATH (before the install so its exit code is the
+#    one we exec into below).
+[ -z "$ADD_TO_PATH" ] || link_into_path "$ANVIL_DIR"
+
+# 4. Wire it into the target harness. For codex/openclaw this drives the harness's
 #    own CLI (it writes its own config); for the rest it merges the MCP config and
 #    splices anvil's AGENTS.md as a removable block — all idempotent and reversible
 #    with `anvil install <harness> --rollback`.
