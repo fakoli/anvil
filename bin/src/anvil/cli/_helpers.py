@@ -17,6 +17,7 @@ import typer
 
 if TYPE_CHECKING:
     from anvil.config import Config
+    from anvil.state.backend import Backend
     from anvil.state.models import Task
     from anvil.state.sqlite import SqliteBackend
 
@@ -135,32 +136,46 @@ def _resolve_state_dir(cwd: Path | None) -> Path:
     return state_dir
 
 
-def _open_backend(state_dir: Path) -> SqliteBackend:
-    """Instantiate a SqliteBackend, call initialize(), and return it.
+def _open_backend(state_dir: Path) -> Backend:
+    """Instantiate the configured backend, call initialize(), and return it.
 
-    The caller is responsible for calling .close() when done — use a try/finally.
+    Selects SqliteBackend (the default) or MySQLBackend based on ``backend:``
+    in config.yaml (read via ``read_backend``, the same soft-load-with-fallback
+    contract as ``read_events_storage``). Both satisfy the Backend Protocol, so
+    every downstream call site is untouched. The caller is responsible for
+    calling .close() when done — use a try/finally.
 
     Args:
         state_dir: Absolute path to the .anvil/ directory.
 
     Returns:
-        An initialized SqliteBackend ready for queries and mutations.
+        An initialized Backend ready for queries and mutations.
     """
     from anvil.clock import SystemClock
-    from anvil.config import read_events_storage
-    from anvil.state.sqlite import SqliteBackend as _SqliteBackend
+    from anvil.config import read_backend, read_events_storage
 
-    db_path = str(state_dir / "state.db")
+    kind, dsn = read_backend(state_dir / "config.yaml")
     events_path = str(state_dir / "events.jsonl")
-    backend = _SqliteBackend(
-        db_path=db_path,
-        events_path=events_path,
-        clock=SystemClock(),
-        # v1.22.0: the storage mode decides the event-id format and the
-        # replay strategy, so it must be resolved BEFORE the backend opens —
-        # not by whichever command happens to read config.yaml later.
-        events_storage=read_events_storage(state_dir / "config.yaml"),
-    )
+    if kind == "mysql":
+        from anvil.state.mysql import MySQLBackend
+
+        backend: Backend = MySQLBackend(
+            dsn=dsn,
+            events_path=events_path,
+            clock=SystemClock(),
+        )
+    else:
+        from anvil.state.sqlite import SqliteBackend as _SqliteBackend
+
+        backend = _SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=events_path,
+            clock=SystemClock(),
+            # v1.22.0: the storage mode decides the event-id format and the
+            # replay strategy, so it must be resolved BEFORE the backend opens —
+            # not by whichever command happens to read config.yaml later.
+            events_storage=read_events_storage(state_dir / "config.yaml"),
+        )
     backend.initialize()
     return backend
 

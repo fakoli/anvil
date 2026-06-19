@@ -229,3 +229,245 @@ PRAGMA user_version = 5;
 
 # Module-level constant so other modules can import without re-invoking the function.
 DDL: str = generate_schema_sql()
+
+
+def generate_schema_sql_mysql() -> list[str]:  # noqa: PLR0915
+    """Return the MySQL 8.0 DDL as a list of individual CREATE TABLE statements.
+
+    Mirrors :func:`generate_schema_sql` table-for-table but emits the MySQL
+    dialect (see docs/specs/2026-06-18-mysql-backend.md §2.5). Differences from
+    the SQLite generator, all mechanical:
+
+    - ``TEXT PRIMARY KEY`` → ``VARCHAR(64)`` (MySQL cannot index/PK a TEXT
+      column without a prefix length; entity ids are short, fixed-shape).
+    - JSON columns stay ``LONGTEXT`` (NOT native ``JSON``) so they round-trip
+      as JSON **strings**, exactly like SQLite. The inherited row-converters in
+      ``MySQLBackend`` do their own ``json.loads`` — switching to native JSON
+      would hand them parsed objects and break that shared code path.
+    - ``DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`` on every table so id and
+      string comparisons are case- and accent-SENSITIVE, matching SQLite's
+      default BINARY collation. A case-insensitive collation would make
+      ``T001``/``t001`` collide and break the ``id != %s`` self-skip in the
+      claim guard (§2.5, the load-bearing collation note).
+    - Indexes are declared INLINE in ``CREATE TABLE`` (MySQL lacks a reliable
+      ``CREATE INDEX IF NOT EXISTS``); ``CREATE TABLE IF NOT EXISTS`` keeps the
+      whole statement idempotent.
+    - The events ``id`` GLOB CHECK is dropped — the id format is produced by
+      code, and the cross-host single-winner correctness does not depend on it.
+    - The ``claims`` table grows a STORED generated column ``active_task_id``
+      plus ``UNIQUE KEY uq_one_active_claim_per_task`` — the engine-enforced,
+      host-independent single-winner backstop (§0/§2.2). NULL when the claim is
+      not ``active``; UNIQUE ignores NULLs, so any number of released/stale
+      claims coexist while at most one ``active`` row per ``task_id`` can exist.
+    - A one-row ``schema_version`` table replaces ``PRAGMA user_version``.
+
+    Returned as a list (not a single ``;``-joined script) because PyMySQL's
+    ``cursor.execute`` runs one statement at a time.
+    """
+    charset = "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
+    return [
+        f"""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INT NOT NULL,
+            PRIMARY KEY (version)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS event_counter (
+            id     TINYINT NOT NULL,
+            n      BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (id)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS projects (
+            id          VARCHAR(64) NOT NULL,
+            name        TEXT NOT NULL,
+            description TEXT NOT NULL,
+            created_at  VARCHAR(40) NOT NULL,
+            updated_at  VARCHAR(40) NOT NULL,
+            PRIMARY KEY (id)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS prds (
+            project_id        VARCHAR(64) NOT NULL,
+            status            VARCHAR(32) NOT NULL DEFAULT 'draft',
+            summary           LONGTEXT NOT NULL,
+            goals             LONGTEXT NOT NULL,
+            non_goals         LONGTEXT NOT NULL,
+            requirements      LONGTEXT NOT NULL,
+            acceptance_criteria LONGTEXT NOT NULL,
+            risks             LONGTEXT NOT NULL,
+            open_questions    LONGTEXT NOT NULL,
+            last_reviewed_at  VARCHAR(40),
+            last_reviewed_by  VARCHAR(255),
+            PRIMARY KEY (project_id)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS requirements (
+            id               VARCHAR(64) NOT NULL,
+            prd_section      TEXT NOT NULL,
+            text             LONGTEXT NOT NULL,
+            source_paragraph LONGTEXT,
+            derived          INT NOT NULL DEFAULT 0,
+            PRIMARY KEY (id)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS features (
+            id           VARCHAR(64) NOT NULL,
+            title        TEXT NOT NULL,
+            description  TEXT NOT NULL,
+            status       VARCHAR(32) NOT NULL DEFAULT 'proposed',
+            requirements LONGTEXT NOT NULL,
+            tasks        LONGTEXT NOT NULL,
+            PRIMARY KEY (id)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id                   VARCHAR(64) NOT NULL,
+            feature_id           VARCHAR(64) NOT NULL,
+            title                TEXT NOT NULL,
+            description          LONGTEXT NOT NULL,
+            status               VARCHAR(32) NOT NULL DEFAULT 'proposed',
+            priority             VARCHAR(32) NOT NULL DEFAULT 'medium',
+            task_type            VARCHAR(32) NOT NULL DEFAULT 'feature',
+            dependencies         LONGTEXT NOT NULL,
+            conflict_groups      LONGTEXT NOT NULL,
+            scores               LONGTEXT NOT NULL,
+            acceptance_criteria  LONGTEXT NOT NULL,
+            implementation_notes LONGTEXT NOT NULL,
+            verification         LONGTEXT NOT NULL,
+            likely_files         LONGTEXT NOT NULL,
+            parent_task_id       VARCHAR(64),
+            created_at           VARCHAR(40) NOT NULL,
+            updated_at           VARCHAR(40) NOT NULL,
+            PRIMARY KEY (id),
+            KEY idx_tasks_status (status),
+            KEY idx_tasks_feature_status (feature_id, status),
+            CONSTRAINT fk_tasks_feature FOREIGN KEY (feature_id)
+                REFERENCES features (id) ON DELETE RESTRICT,
+            CONSTRAINT fk_tasks_parent FOREIGN KEY (parent_task_id)
+                REFERENCES tasks (id) ON DELETE SET NULL
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS claims (
+            id                 VARCHAR(64) NOT NULL,
+            task_id            VARCHAR(64) NOT NULL,
+            claimed_by         VARCHAR(255) NOT NULL,
+            claim_type         VARCHAR(32) NOT NULL DEFAULT 'task',
+            status             VARCHAR(32) NOT NULL DEFAULT 'active',
+            branch             TEXT,
+            worktree_path      TEXT,
+            expected_files     LONGTEXT NOT NULL,
+            created_at         VARCHAR(40) NOT NULL,
+            lease_expires_at   VARCHAR(40) NOT NULL,
+            last_heartbeat_at  VARCHAR(40) NOT NULL,
+            released_at        VARCHAR(40),
+            release_reason     TEXT,
+            active_task_id     VARCHAR(64)
+                AS (CASE WHEN status = 'active' THEN task_id ELSE NULL END) STORED,
+            PRIMARY KEY (id),
+            KEY idx_claims_task_status (task_id, status),
+            UNIQUE KEY uq_one_active_claim_per_task (active_task_id),
+            CONSTRAINT fk_claims_task FOREIGN KEY (task_id)
+                REFERENCES tasks (id) ON DELETE RESTRICT
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS evidence (
+            id                VARCHAR(64) NOT NULL,
+            task_id           VARCHAR(64) NOT NULL,
+            claim_id          VARCHAR(64) NOT NULL,
+            commands_run      LONGTEXT NOT NULL,
+            output_excerpt    LONGTEXT,
+            files_changed     LONGTEXT NOT NULL,
+            pr_url            TEXT,
+            commit_sha        VARCHAR(255),
+            screenshots       LONGTEXT NOT NULL,
+            known_limitations LONGTEXT,
+            submitted_at      VARCHAR(40) NOT NULL,
+            submitted_by      VARCHAR(255) NOT NULL,
+            PRIMARY KEY (id),
+            CONSTRAINT fk_evidence_task FOREIGN KEY (task_id)
+                REFERENCES tasks (id) ON DELETE RESTRICT,
+            CONSTRAINT fk_evidence_claim FOREIGN KEY (claim_id)
+                REFERENCES claims (id) ON DELETE RESTRICT
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS decisions (
+            id               VARCHAR(64) NOT NULL,
+            title            TEXT NOT NULL,
+            context          LONGTEXT NOT NULL,
+            decision         LONGTEXT NOT NULL,
+            consequences     LONGTEXT NOT NULL,
+            created_at       VARCHAR(40) NOT NULL,
+            related_tasks    LONGTEXT NOT NULL,
+            related_features LONGTEXT NOT NULL,
+            PRIMARY KEY (id)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id          VARCHAR(64) NOT NULL,
+            target_kind VARCHAR(32) NOT NULL,
+            target_id   VARCHAR(64) NOT NULL,
+            reviewed_by VARCHAR(255) NOT NULL,
+            decision    VARCHAR(32) NOT NULL,
+            notes       LONGTEXT,
+            created_at  VARCHAR(40) NOT NULL,
+            PRIMARY KEY (id),
+            KEY idx_reviews_target (target_kind, target_id)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS events (
+            id           VARCHAR(64) NOT NULL,
+            timestamp    VARCHAR(40) NOT NULL,
+            actor        VARCHAR(255) NOT NULL,
+            action       VARCHAR(64) NOT NULL,
+            target_kind  VARCHAR(32) NOT NULL,
+            target_id    VARCHAR(64) NOT NULL,
+            payload_json LONGTEXT NOT NULL,
+            seq          INT,
+            PRIMARY KEY (id),
+            KEY idx_events_timestamp (timestamp)
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS sync_mappings (
+            task_id                      VARCHAR(64) NOT NULL,
+            external_system              VARCHAR(64) NOT NULL,
+            external_id                  VARCHAR(255) NOT NULL,
+            external_url                 TEXT,
+            last_synced_at               VARCHAR(40) NOT NULL,
+            sync_state                   VARCHAR(32) NOT NULL DEFAULT 'in_sync',
+            conflict_resolution_strategy VARCHAR(32) NOT NULL DEFAULT 'prompt',
+            provider_metadata_json       LONGTEXT,
+            PRIMARY KEY (task_id, external_system),
+            UNIQUE KEY uq_sync_external (external_system, external_id),
+            KEY idx_sync_mappings_external (external_system, external_id),
+            CONSTRAINT fk_sync_task FOREIGN KEY (task_id)
+                REFERENCES tasks (id) ON DELETE CASCADE
+        ) ENGINE=InnoDB {charset}
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS conflict_groups (
+            id       VARCHAR(64) NOT NULL,
+            name     TEXT NOT NULL,
+            task_ids LONGTEXT NOT NULL,
+            reason   LONGTEXT NOT NULL,
+            PRIMARY KEY (id)
+        ) ENGINE=InnoDB {charset}
+        """,
+    ]
+
+
+# Module-level constant: the MySQL DDL statement list. Imported by the MySQL
+# backend the same way ``DDL`` is imported by the SQLite backend.
+DDL_MYSQL: list[str] = generate_schema_sql_mysql()

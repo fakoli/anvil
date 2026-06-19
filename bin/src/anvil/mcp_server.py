@@ -362,32 +362,48 @@ def _resolve_state_dir(cwd: str | None = None) -> Path:
         raise ToolError(exc.message) from exc
 
 
-def _open_backend(state_dir: Path):  # type: ignore[return]
-    """Open a fresh SqliteBackend for the given state_dir.
+def _open_backend(state_dir: Path) -> Any:
+    """Open a fresh backend (SqliteBackend default, MySQLBackend when configured).
+
+    Selects the implementation from ``backend:`` in config.yaml via
+    ``read_backend`` — the same soft-load-with-fallback contract as
+    ``read_events_storage`` and as ``cli/_helpers._open_backend``. Both backends
+    satisfy the Backend Protocol, so every MCP call site is untouched.
 
     Raises ToolError if the state directory does not exist (project not
     initialized). Caller must call backend.close() in a try/finally.
     """
     from anvil.clock import SystemClock
-    from anvil.config import read_events_storage
-    from anvil.state.sqlite import SqliteBackend
+    from anvil.config import read_backend, read_events_storage
 
     if not state_dir.exists():
         raise ToolError(
             f"anvil not initialized in {state_dir.parent}. "
             "Run `anvil init` in your project root first.",
         )
-    db_path = str(state_dir / "state.db")
+    kind, dsn = read_backend(state_dir / "config.yaml")
     events_path = str(state_dir / "events.jsonl")
-    backend = SqliteBackend(
-        db_path=db_path,
-        events_path=events_path,
-        clock=SystemClock(),
-        # v1.22.0: the storage mode decides the event-id format and the
-        # replay strategy, so it must be resolved BEFORE the backend opens —
-        # mirrors cli/_helpers._open_backend.
-        events_storage=read_events_storage(state_dir / "config.yaml"),
-    )
+    backend: Any
+    if kind == "mysql":
+        from anvil.state.mysql import MySQLBackend
+
+        backend = MySQLBackend(
+            dsn=dsn,
+            events_path=events_path,
+            clock=SystemClock(),
+        )
+    else:
+        from anvil.state.sqlite import SqliteBackend
+
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=events_path,
+            clock=SystemClock(),
+            # v1.22.0: the storage mode decides the event-id format and the
+            # replay strategy, so it must be resolved BEFORE the backend opens —
+            # mirrors cli/_helpers._open_backend.
+            events_storage=read_events_storage(state_dir / "config.yaml"),
+        )
     backend.initialize()
     return backend
 
