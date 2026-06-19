@@ -13,10 +13,14 @@ from __future__ import annotations
 import json
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from anvil.cli import app
 from anvil.cli.mcp_config import CLIENTS
+
+# Clients whose paste-ready config is YAML, not JSON/TOML.
+_YAML_CLIENTS = {"continue", "goose"}
 
 # Default CliRunner keeps stdout/stderr separate (click 8.x), so we can assert
 # stdout is paste-clean while the `# paste into …` hint goes to stderr.
@@ -32,6 +36,8 @@ _TOP_KEY = {
     "vscode": "servers",
     "zed": "context_servers",
     "opencode": "mcp",
+    "roo": "mcpServers",
+    "amp": "amp.mcpServers",
 }
 
 
@@ -43,6 +49,11 @@ def test_each_client_emits_expected_top_key(client: str) -> None:
     if client == "codex":
         # TOML: a table header line, not JSON.
         assert "[mcp_servers.anvil]" in result.stdout
+    elif client in _YAML_CLIENTS:
+        # YAML output — must parse and mention the anvil server.
+        doc = yaml.safe_load(result.stdout)
+        assert isinstance(doc, dict)
+        assert "anvil" in result.stdout
     else:
         data = json.loads(result.stdout)
         top = _TOP_KEY[client]
@@ -143,6 +154,45 @@ def test_opencode_root_uses_environment_key() -> None:
     spec = json.loads(result.stdout)["mcp"]["anvil"]
     assert spec["environment"]["ANVIL_ROOT"] == "/x"
     assert "env" not in spec
+
+
+def test_amp_uses_flat_dotted_key() -> None:
+    """amp emits a single flat `amp.mcpServers` settings key, not a nested table."""
+    result = runner.invoke(app, ["mcp-config", "amp"], catch_exceptions=False)
+    data = json.loads(result.stdout)
+    assert "amp.mcpServers" in data  # literal dotted key
+    assert data["amp.mcpServers"]["anvil"]["args"][-1].endswith("bin/anvil-mcp")
+
+
+def test_continue_is_yaml_block() -> None:
+    """continue emits a YAML block doc with schema v1 + an mcpServers list."""
+    result = runner.invoke(app, ["mcp-config", "continue"], catch_exceptions=False)
+    doc = yaml.safe_load(result.stdout)
+    assert doc["schema"] == "v1"
+    servers = doc["mcpServers"]
+    assert isinstance(servers, list)
+    anvil_srv = next(s for s in servers if s["name"] == "anvil")
+    assert anvil_srv["command"] == "bash"
+    assert anvil_srv["args"][-1].endswith("bin/anvil-mcp")
+
+
+def test_goose_is_yaml_extensions() -> None:
+    """goose emits `extensions.anvil` with stdio shape (cmd, not command)."""
+    result = runner.invoke(app, ["mcp-config", "goose"], catch_exceptions=False)
+    ext = yaml.safe_load(result.stdout)["extensions"]["anvil"]
+    assert ext["type"] == "stdio"
+    assert ext["cmd"] == "bash"  # goose uses cmd, not command
+    assert ext["enabled"] is True
+    assert ext["args"][-1].endswith("bin/anvil-mcp")
+
+
+def test_goose_root_uses_envs_key() -> None:
+    """`--root` injects ANVIL_ROOT under `envs` (goose's env-values key)."""
+    result = runner.invoke(
+        app, ["mcp-config", "--root", "/x", "goose"], catch_exceptions=False
+    )
+    ext = yaml.safe_load(result.stdout)["extensions"]["anvil"]
+    assert ext["envs"]["ANVIL_ROOT"] == "/x"
 
 
 def test_codex_is_toml() -> None:

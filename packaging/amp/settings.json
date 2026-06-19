@@ -1,0 +1,8 @@
+{
+  "amp.mcpServers": {
+    "anvil": {
+      "command": "bash",
+      "args": ["/path/to/anvil/bin/anvil-mcp"]
+    }
+  }
+}

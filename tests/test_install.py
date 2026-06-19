@@ -49,7 +49,8 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
 def test_known_harnesses_present() -> None:
     """The verified harnesses from the spec are all in the registry."""
     for name in ("codex", "copilot", "gemini", "openclaw", "cursor", "windsurf",
-                 "cline", "zed", "openhands", "opencode"):
+                 "cline", "zed", "openhands", "opencode", "roo", "amp",
+                 "continue", "goose"):
         assert name in HARNESSES
 
 
@@ -272,6 +273,40 @@ def test_opencode_merge_preserves_existing_keys(sandbox: dict[str, Path]) -> Non
     assert data["theme"] == "dark"  # unrelated top-level key preserved
     assert "other" in data["mcp"]  # pre-existing server preserved
     assert data["mcp"]["anvil"]["type"] == "local"  # ours added
+
+
+def test_roo_writes_project_mcp_json(sandbox: dict[str, Path]) -> None:
+    """roo install writes .roo/mcp.json (mcpServers) + drops AGENTS.md."""
+    result = runner.invoke(app, ["install", "roo", "--write"], catch_exceptions=False)
+    assert result.exit_code == 0, result.stdout + result.stderr
+    cfg = sandbox["project"] / ".roo" / "mcp.json"
+    assert cfg.is_file(), f"expected {cfg} to exist"
+    spec = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["anvil"]
+    assert spec["args"][-1].endswith("bin/anvil-mcp")
+    assert (sandbox["project"] / "AGENTS.md").is_file()
+
+
+def test_amp_writes_flat_dotted_key(sandbox: dict[str, Path]) -> None:
+    """amp install merges the flat `amp.mcpServers` key into ~/.config/amp/settings.json."""
+    result = runner.invoke(app, ["install", "amp", "--write"], catch_exceptions=False)
+    assert result.exit_code == 0, result.stdout + result.stderr
+    cfg = sandbox["home"] / ".config" / "amp" / "settings.json"
+    assert cfg.is_file(), f"expected {cfg} to exist"
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    # The dotted key is a single flat settings key, not a nested table.
+    assert "amp.mcpServers" in data
+    assert data["amp.mcpServers"]["anvil"]["args"][-1].endswith("bin/anvil-mcp")
+
+
+def test_yaml_harnesses_skip_mcp_write(sandbox: dict[str, Path]) -> None:
+    """continue/goose have no in-place YAML merge writer: MCP is skipped, AGENTS.md dropped."""
+    for harness in ("continue", "goose"):
+        result = runner.invoke(
+            app, ["install", "--json", harness], catch_exceptions=False
+        )
+        data = json.loads(result.stdout.strip())["data"]
+        assert data["mcp"]["action"] == "skipped"
+        assert data["mcp"]["note"]  # note points at `anvil mcp-config <harness>`
 
 
 def test_root_flag_propagates_into_written_block(sandbox: dict[str, Path]) -> None:
