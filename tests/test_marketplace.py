@@ -50,3 +50,10 @@ def test_marketplace_manifest_is_valid_and_wired() -> None:
     )
     target = (root / source).resolve() / ".claude-plugin" / "plugin.json"
     assert target.is_file(), f"source {source!r} does not resolve to a plugin.json ({target})"
+    # Verify the manifest AT THE RESOLVED SOURCE — not the repo-root one — so a
+    # future entry pointing elsewhere can't silently disagree with its plugin.
+    target_name = json.loads(target.read_text(encoding="utf-8")).get("name")
+    assert target_name == entry["name"], (
+        f"plugin.json at source {source!r} is named {target_name!r}, "
+        f"expected {entry['name']!r} (the marketplace entry name)"
+    )
