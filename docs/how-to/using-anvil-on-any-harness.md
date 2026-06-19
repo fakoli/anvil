@@ -95,3 +95,18 @@ It also splices anvil's usage doc into the project `AGENTS.md` as a marked,
 removable block. Undo everything with `anvil install codex --rollback` (it runs
 `codex mcp remove` / `codex plugin marketplace remove` and strips the block). If
 the `codex` CLI isn't on PATH, the commands are printed for you to run.
+
+### Codex automations (recurring work)
+
+Add `--automations` to also install anvil's scheduled-automation templates into
+`~/.codex/automations/` — Codex's native cron-style agent runs, which give anvil
+its longer-running-session story (work the queue, reconcile state on a schedule):
+
+```
+anvil install codex --write --automations
+```
+
+They are installed **`status = "PAUSED"`** with this project's path filled in —
+anvil never auto-activates them. Review and turn them on in the Codex app
+(Automations). `--rollback` removes them. Templates live under
+`packaging/codex/automations/` (`anvil-work-queue`, `anvil-sync-reconcile`).

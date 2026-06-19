@@ -29,11 +29,13 @@ re-serialize (and never mangle) the user's existing config.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -91,6 +93,9 @@ class Harness:
     # Whether this harness reads the neutral `.agents/skills/` drop. False for
     # harnesses that get anvil's skills another way (codex: via its plugin).
     reads_agents_skills: bool = True
+    # Whether `--automations` applies (codex's scheduled-run system). Don't proxy
+    # this off native_installer — a future native harness need not have one.
+    supports_automations: bool = False
 
 
 HARNESSES: dict[str, Harness] = {
@@ -107,6 +112,7 @@ HARNESSES: dict[str, Harness] = {
         ),
         native_installer="codex",
         reads_agents_skills=False,
+        supports_automations=True,
     ),
     "copilot": Harness(
         "copilot", "vscode", ".vscode/mcp.json",
@@ -305,6 +311,41 @@ def _codex_rollback_commands() -> list[list[str]]:
         ["codex", "mcp", "remove", _SERVER_ID],
         ["codex", "plugin", "marketplace", "remove", "anvil"],
     ]
+
+
+def _codex_automation_plan() -> list[dict[str, Any]]:
+    """Render anvil's automation templates for THIS project. Each becomes an
+    isolated `~/.codex/automations/<id>/` dir (own file — no shared state to
+    corrupt), namespaced per project so two projects don't clobber each other's
+    schedule. Returns ``{id, dir, toml}`` per automation; empty if the templates
+    are not on disk (stripped wheel). Codex reads these on its next scan; we ship
+    them ``status = "PAUSED"`` so nothing runs until the user activates it."""
+    src = _repo_root() / "packaging" / "codex" / "automations"
+    if not src.is_dir():
+        return []
+    root = str(_project_root())
+    # Namespace per project: a legible basename PLUS a short path hash, so two
+    # projects sharing a basename ("app", "web", …) never collide into one dir.
+    slug = re.sub(r"[^A-Za-z0-9_-]", "-", _project_root().name) or "project"
+    slug = f"{slug}-{hashlib.sha256(root.encode()).hexdigest()[:8]}"
+    ts = str(int(time.time() * 1000))
+    cwds = json.dumps(root)
+    plan = []
+    for tmpl in sorted(src.glob("*/automation.toml")):
+        aid = f"{tmpl.parent.name}-{slug}"
+        # Substitute {{CWDS}} LAST so a literal "{{TS}}"/"{{ID}}" inside the project
+        # path can't be re-scanned and corrupted by a later replace.
+        rendered = (
+            tmpl.read_text(encoding="utf-8")
+            .replace("{{ID}}", aid)
+            .replace("{{TS}}", ts)
+            .replace("{{CWDS}}", cwds)
+        )
+        plan.append(
+            {"id": aid, "dir": Path.home() / ".codex" / "automations" / aid,
+             "toml": rendered}
+        )
+    return plan
 
 
 def _run_or_print(cmds: list[list[str]], *, run: bool) -> list[dict[str, Any]]:
@@ -646,6 +687,15 @@ def install(
             "Omit to let the harness's cwd decide."
         ),
     ),
+    automations: bool = typer.Option(  # noqa: B008
+        False,
+        "--automations",
+        help=(
+            "Codex only: also install anvil's scheduled-automation templates into "
+            "~/.codex/automations/ (PAUSED — you activate them in the Codex app). "
+            "Removed by --rollback."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
 ) -> None:
     """Write Anvil's MCP config + instruction file for a target harness.
@@ -712,6 +762,13 @@ def install(
             fail(_COMMAND, str(e), code="bad_request", exit_code=2)
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(code=2) from e
+    if automations and not h.supports_automations:
+        msg = f"--automations is Codex-only; {harness} has no automation system."
+        if json_output:
+            fail(_COMMAND, msg, code="bad_request", exit_code=2)
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=2)
+
     # Codex installs natively via its own CLI; other harnesses get the .agents/skills drop.
     native_cmds = (
         _codex_install_commands(use_uv_run=use_uv_run, root=root)
@@ -719,6 +776,7 @@ def install(
         else []
     )
     skills = _skill_pairs() if h.reads_agents_skills else []
+    autos = _codex_automation_plan() if (automations and h.supports_automations) else []
 
     if write:
         # Refuse a DANGLING symlinked dest: writing through it creates a file the
@@ -756,6 +814,18 @@ def install(
             touched.append(_track(Path(instr["path"]), "instruction"))
         for _src, sdest in skills:
             touched.append(_track(sdest, "skill"))
+        # Automations: track ours (so rollback stays exact), but only WRITE dirs we
+        # create fresh — never clobber an existing automation's accrued memory.md or
+        # the user's edits to its schedule. A same-named dir we don't own is left
+        # entirely alone.
+        auto_writes = []
+        for a in autos:
+            exists = a["dir"].exists()
+            if exists and str(a["dir"]) not in manifest["paths"]:
+                continue  # not ours — do not touch
+            touched.append(_track(a["dir"], "automation"))
+            if not exists:
+                auto_writes.append(a)
         _record_writes(harness, touched)  # crash-safe: recorded before any write
 
         if mcp["action"] in ("wrote", "merged"):
@@ -770,6 +840,10 @@ def install(
             _remove(sdest)  # replace ours cleanly (copytree needs a clean dest)
             sdest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(src, sdest)
+        for a in auto_writes:
+            a["dir"].mkdir(parents=True, exist_ok=True)
+            (a["dir"] / "automation.toml").write_text(a["toml"], encoding="utf-8")
+            (a["dir"] / "memory.md").write_text("", encoding="utf-8")
         native_results = _run_or_print(native_cmds, run=True)
     else:
         native_results = _run_or_print(native_cmds, run=False)
@@ -787,6 +861,13 @@ def install(
                     "names": [d.name for _, d in skills],
                 },
                 "native": native_results,
+                # Only present when --automations actually installed something, so a
+                # caller can't confuse "none requested" with "installed and paused".
+                **(
+                    {"automations": {"status": "PAUSED",
+                                     "dirs": [str(a["dir"]) for a in autos]}}
+                    if autos else {}
+                ),
             },
         )
         return
@@ -822,6 +903,18 @@ def install(
         did = "Wrote" if write else "Would write"
         typer.echo(
             f"# Skills ({did} {len(skills)} × SKILL.md) → {skills_base}/anvil-*",
+            err=True,
+        )
+    if autos:
+        did = "Wrote" if write else "Would write"
+        typer.echo(
+            f"# Automations ({did} {len(autos)} PAUSED) "
+            f"→ ~/.codex/automations/{', '.join(a['id'] for a in autos)}",
+            err=True,
+        )
+        typer.echo(
+            "#   These will NOT run until you activate them in the Codex app "
+            "(Automations). Remove with --rollback.",
             err=True,
         )
     if write:

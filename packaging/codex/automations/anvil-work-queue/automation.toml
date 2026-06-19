@@ -1,0 +1,13 @@
+version = 1
+id = "{{ID}}"
+kind = "cron"
+name = "Anvil — work the task queue"
+prompt = "Work the anvil task queue for this project. Use the anvil MCP tools (or the `anvil` CLI): find the next ready task (get_next_task / `anvil next`), claim it, fetch its work packet, implement it to satisfy the acceptance criteria, run the verification commands, then submit completion evidence — never mark work complete without passing evidence. If no task is ready, say so and stop. Work in the provided worktree; open one PR per task and do not merge."
+status = "PAUSED"
+rrule = "FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=9;BYMINUTE=0"
+model = "gpt-5-codex"
+reasoning_effort = "high"
+execution_environment = "worktree"
+cwds = [{{CWDS}}]
+created_at = {{TS}}
+updated_at = {{TS}}

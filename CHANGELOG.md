@@ -43,6 +43,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   picks the right reversal. Non-Codex harnesses also get anvil's skills dropped
   into the neutral `.agents/skills/anvil-*` location read by most harnesses.
 
+- **Codex automations (`anvil install codex --automations`).** Installs anvil's
+  scheduled-automation templates (`anvil-work-queue`, `anvil-sync-reconcile`) into
+  Codex's native `~/.codex/automations/` — recurring agent runs that work the
+  task queue / reconcile state on a cron schedule. They are installed
+  **`status = "PAUSED"`** with the project path filled in (anvil never
+  auto-activates a background run on your subscription — you turn them on in the
+  Codex app), namespaced per project, and tracked by the same backup/manifest so
+  `--rollback` removes them. Templates live under `packaging/codex/automations/`.
+
 - **Surface prior unresolved review findings on file overlap (T017).** When a
   reviewer rejects a task or requests changes at the finish gate, that verdict
   is recorded as a `reject` / `needs_changes` review whose notes carry the

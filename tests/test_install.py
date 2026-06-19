@@ -223,6 +223,92 @@ def test_codex_write_without_cli_says_run_yourself(
     assert "codex not on PATH" in result.stderr
 
 
+def test_codex_automations_installed_paused(sandbox: dict[str, Path]) -> None:
+    """`--automations` materializes the templates into ~/.codex/automations/,
+    PAUSED, with this project's cwds filled in."""
+    import tomllib
+
+    runner.invoke(
+        app, ["install", "codex", "--write", "--automations"], catch_exceptions=False
+    )
+    base = sandbox["home"] / ".codex" / "automations"
+    dirs = sorted(p.name for p in base.iterdir()) if base.is_dir() else []
+    assert dirs, "expected automation dirs"
+    for d in dirs:
+        toml = tomllib.loads((base / d / "automation.toml").read_text())
+        assert toml["status"] == "PAUSED"  # never auto-active
+        assert toml["id"] == d  # id matches dir name
+        assert toml["cwds"] == [str(sandbox["project"])]  # project filled in
+        assert (base / d / "memory.md").is_file()
+
+
+def test_codex_automations_rerun_preserves_live_state(
+    sandbox: dict[str, Path]
+) -> None:
+    """Re-running --automations must NOT clobber an automation's accrued memory.md
+    or the user's edits to automation.toml (review Finding 1)."""
+    runner.invoke(
+        app, ["install", "codex", "--write", "--automations"], catch_exceptions=False
+    )
+    d = next((sandbox["home"] / ".codex" / "automations").iterdir())
+    # Codex accrues run history; the user retunes the automation.
+    (d / "memory.md").write_text("run history line 1\n")
+    (d / "automation.toml").write_text(
+        (d / "automation.toml").read_text() + "\n# user-tuned\n"
+    )
+
+    runner.invoke(
+        app, ["install", "codex", "--write", "--automations"], catch_exceptions=False
+    )
+    assert (d / "memory.md").read_text() == "run history line 1\n"  # not truncated
+    assert "# user-tuned" in (d / "automation.toml").read_text()  # edit preserved
+
+
+def test_codex_automations_namespaced_by_full_path(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two projects that share a basename must render to DIFFERENT automation dirs
+    (review Finding 2 — basename-only namespacing collided)."""
+    def ids_for(root: str) -> set[str]:
+        monkeypatch.setattr(install_mod, "_project_root", lambda: Path(root))
+        return {a["id"] for a in install_mod._codex_automation_plan()}
+
+    a = ids_for("/work/a/app")
+    b = ids_for("/work/b/app")  # same basename "app", different path
+    assert a and b
+    assert a.isdisjoint(b)  # no collision
+
+
+def test_codex_automations_rejected_for_other_harness(
+    sandbox: dict[str, Path]
+) -> None:
+    """`--automations` is Codex-only — other harnesses refuse cleanly."""
+    result = runner.invoke(app, ["install", "cursor", "--write", "--automations"])
+    assert result.exit_code == 2
+    assert "Codex-only" in result.stderr
+
+
+def test_codex_automations_dry_run_writes_nothing(sandbox: dict[str, Path]) -> None:
+    """Without --write, --automations previews but writes no automation dirs."""
+    result = runner.invoke(
+        app, ["install", "codex", "--automations"], catch_exceptions=False
+    )
+    assert "Automations" in result.stderr and "PAUSED" in result.stderr
+    assert not (sandbox["home"] / ".codex" / "automations").exists()
+
+
+def test_codex_automations_removed_on_rollback(sandbox: dict[str, Path]) -> None:
+    """Rollback deletes the automation dirs anvil created."""
+    runner.invoke(
+        app, ["install", "codex", "--write", "--automations"], catch_exceptions=False
+    )
+    base = sandbox["home"] / ".codex" / "automations"
+    assert list(base.iterdir())  # created
+
+    runner.invoke(app, ["install", "codex", "--rollback"], catch_exceptions=False)
+    assert not base.exists() or not list(base.iterdir())  # gone
+
+
 def test_codex_env_flag_in_generated_command(sandbox: dict[str, Path]) -> None:
     """`--root` pins ANVIL_ROOT, which must surface as a `--env` in `mcp add` (#10)."""
     runner.invoke(
