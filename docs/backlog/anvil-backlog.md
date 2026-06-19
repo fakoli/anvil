@@ -406,6 +406,105 @@ The build items (the `backlog_item` schema node, the `/anvil:ideate` loop, the D
 
 ---
 
+## E12 — Harness Experience Maximization
+
+**Decision (2026-06-19):** anvil provides **real, native, tested support for exactly
+three harnesses — Claude Code, Codex, and OpenClaw** — and **MCP-only best-effort**
+for the rest (cursor, windsurf, zed, copilot, opencode, roo, amp, gemini, cline,
+continue, goose, openhands). For the supported three we *maximize the native surface*
+(skills/commands, hooks, scheduled automations, isolated agents) the way the Claude
+Code plugin already does; for the rest we just register the MCP server (native CLI
+where one exists, else the safe JSON config) and **never** touch AGENTS.md or drop
+skills. Driven by the shipped work in #38–#41 (Codex-native, automations, OpenClaw,
+installer hardening) plus two deep-research workflows (Codex `wf_d37724b1`, OpenClaw
+`wf_2d3520af`) that map each harness's native features to anvil integrations.
+
+The two maximization items (B41/B42) are **deliberately not pre-authored in detail** —
+their tasks come from the research workflows' ranked roadmaps. B38–B40 are ready now
+and parallelizable.
+
+### B38 — Harness tiering: MCP-only best-effort for non-supported harnesses
+
+- **Priority:** P1  **Effort:** M  **Type:** feature  **Status:** READY (decided)
+- **Rationale:** Splicing AGENTS.md + dropping skills into a dozen harnesses is the
+  blast-radius/complexity sink behind the config-corruption incident. Collapse the
+  surface: officially-supported = claude-code, codex, openclaw; everyone else gets
+  **only** the MCP server. Builds on the `writes_instructions` Harness flag added in #40.
+- **Acceptance:** non-supported harnesses install ONLY the MCP (native `mcp add` CLI
+  where it exists — survey which do — else the safe JSON merge); no AGENTS.md splice,
+  no `.agents/skills` drop for them. A `tier`/`supported` concept on `Harness`. Tests
+  per tier. `anvil install <unsupported>` clearly labels it best-effort.
+- **Likely files:** `bin/src/anvil/cli/install.py`, `tests/test_install.py`
+- **Depends on:** — (the `writes_instructions` groundwork is merged)
+
+### B39 — Docs reframe + per-harness MCP install/optimize guides
+
+- **Priority:** P1  **Effort:** S  **Type:** docs  **Status:** READY
+- **Rationale:** The harness table reads as "14 equally-supported harnesses"; reframe
+  to "3 truly-supported + MCP-only best-effort," and for the best-effort ones document
+  how to install the MCP and how to optimize anvil's use on each.
+- **Acceptance:** `docs/how-to/using-anvil-on-any-harness.md` (and AGENTS.md notes)
+  state the three-tier support model; each MCP-only harness has a short "install the
+  MCP + optimize" note; `packaging/<harness>/README.md` reconciled.
+- **Likely files:** `docs/how-to/using-anvil-on-any-harness.md`, `packaging/*/README.md`, `AGENTS.md`
+- **Depends on:** B38 (so docs match behavior)
+
+### B40 — `install.sh`: offer to add `anvil` to PATH
+
+- **Priority:** P2  **Effort:** S  **Type:** feature (ergonomics)  **Status:** READY
+- **Rationale:** After the one-line install, users still can't type `anvil` globally
+  (the binary lives in the checkout). Offer to symlink `bin/anvil` into a PATH dir
+  (e.g. `~/.local/bin`) — opt-in, idempotent, with a clear message if PATH needs it.
+- **Acceptance:** `scripts/install.sh` prompts (or `--path` flag) to add `anvil` to
+  PATH; never clobbers an existing `anvil`; valid `sh -n`; test covers the new branch.
+- **Likely files:** `scripts/install.sh`, `tests/test_install_script.py`
+- **Depends on:** —
+
+### B41 — Maximize anvil on Codex (deep native integration)
+
+- **Priority:** P1  **Effort:** L  **Type:** feature  **Status:** BLOCKED on research (`wf_d37724b1`)
+- **Rationale:** Beyond MCP + plugin, exploit Codex's native surface (rich skills +
+  Plugins-panel interface, `notify` lifecycle hooks, automations, `codex exec`/`review`/
+  `cloud`, sessions/profiles/sandbox) for the best loop experience. Sub-tasks (B-numbers)
+  authored from the research workflow's ranked roadmap.
+- **Acceptance:** the research roadmap's quick-wins + top opportunities implemented,
+  tested, and validated against the real `codex` CLI without harming the harness.
+- **Depends on:** research workflow `wf_d37724b1` (Codex maximization)
+
+### B42 — Maximize anvil on OpenClaw (deep native integration)
+
+- **Priority:** P1  **Effort:** L  **Type:** feature  **Status:** BLOCKED on research (`wf_2d3520af`)
+- **Rationale:** OpenClaw uniquely offers `hooks`, `cron`, isolated `agents`/`sandbox`,
+  `channels` (messaging), `commitments`, ACP — features no other harness has. Map
+  anvil's claim/lease/evidence loop onto them (auto-renew leases, scheduled queue-work,
+  task↔isolated-agent, finish-gate-to-channel). Sub-tasks from the research roadmap.
+- **Acceptance:** the research roadmap's quick-wins + top opportunities implemented,
+  tested, and validated against the real `openclaw` CLI without harming the harness.
+- **Depends on:** research workflow `wf_2d3520af` (OpenClaw maximization)
+
+### B43 — HOME-workspace state layout (one shared state.db per project) [P0]
+
+- **Priority:** P0  **Effort:** M  **Type:** dx/architecture  **Status:** CORE DONE (`feat/home-workspace-state`)
+- **Rationale:** Every git worktree got its own gitignored `bin/.anvil/state.db`, so
+  state was stranded per-worktree (the canonical 18-task db lived in one worktree;
+  others said "not initialized"). **Fixed:** the default state dir is now a per-project
+  HOME workspace `~/.anvil/workspaces/<repo>/.anvil/`, keyed by the canonical git repo
+  (`--git-common-dir`), so all worktrees + the main checkout share ONE state.db.
+  `ANVIL_ROOT` stays a literal override; `ANVIL_STATE_LAYOUT=local` keeps legacy in-repo
+  state (and is what the test suite pins). The refactor was shallow — anvil never runs
+  verification commands from `state_dir.parent`, so only the resolver + messages moved.
+- **Done:** resolver in `cli/_helpers.py`; autouse `local` conftest fixture (zero test
+  changes); `tests/test_state_workspace.py`; `docs/how-to/state-location.md`; the user's
+  canonical db seeded into `~/.anvil/workspaces/anvil/`.
+- **Follow-ups (B44):** automatic one-time migration of a legacy `<repo>/.anvil` (or
+  `<repo>/bin/.anvil`) into the workspace on first run; collision handling when two repos
+  share a basename (append a path hash); reconcile the "init refuses the plugin root"
+  logic (no longer needed — state isn't in the repo); update the SessionStart hook
+  message to point at the workspace.
+- **Likely files:** `bin/src/anvil/cli/_helpers.py`, `cli/init_status.py`, `tests/conftest.py`
+
+---
+
 ## Sequencing Note
 
 The critical path to a standalone v1, in order:

@@ -15,6 +15,18 @@ from anvil.clock import FrozenClock
 
 
 @pytest.fixture(autouse=True)
+def _local_state_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the in-repo (`<cwd>/.anvil`) state layout for the whole suite.
+
+    Production defaults to the HOME workspace (`~/.anvil/workspaces/<repo>/`), but
+    the tests' cwd-relative fixtures (chdir into tmp_path, assert `tmp/.anvil`)
+    assume the legacy local layout. Setting ANVIL_STATE_LAYOUT=local keeps every
+    existing test correct AND stops tests from writing into the real ~/.anvil/.
+    """
+    monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
+
+
+@pytest.fixture(autouse=True)
 def _full_mcp_surface():  # type: ignore[no-untyped-def]
     """Isolate every test from the process-global MCP visibility transforms.
 
