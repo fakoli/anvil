@@ -32,7 +32,11 @@ while true; do
 	# 1. Claim the recommended task (single-winner lease + file-conflict check).
 	task="$(anvil next --json | sed -n 's/.*"id"[^"]*"\([^"]*\)".*/\1/p' | head -n1)"
 	[ -n "$task" ] || break
-	anvil claim "$task"
+	# Concurrency: another drainer may have claimed this task between `next` and
+	# here. Skip to the next task instead of aborting the whole loop (`set -e`
+	# would otherwise exit on a lost lease). `next` won't re-recommend a claimed
+	# task, so this can't spin.
+	anvil claim "$task" || continue
 
 	# 2. Fetch the work packet — the contract that teaches the steps,
 	#    acceptance criteria, files in scope, and verification commands.

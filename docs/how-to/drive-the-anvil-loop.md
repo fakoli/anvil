@@ -76,7 +76,8 @@ durable state, so the next invocation resumes from the next ready task. Fits a
 scheduled fire (Codex automation), a cron job, or a single CI step.
 
 ```bash
-anvil next -q || exit 0          # exit 3 (empty) -> nothing to do this run
+# exit 3 = empty (nothing to do, clean); any other non-zero = real error -> propagate
+anvil next -q || { rc=$?; [ "$rc" -eq 3 ] && exit 0; exit "$rc"; }
 task="$(anvil next --json | …)"  # read the id, then run the body once
 ```
 
@@ -86,11 +87,16 @@ Loop the body until the queue empties. Fits a self-paced Claude `/loop` or any
 shell:
 
 ```sh
-while anvil next -q; do
+while true; do
+	# exit 3 = drained (clean stop); other non-zero = real error -> propagate
+	anvil next -q || { rc=$?; [ "$rc" -eq 3 ] && break; exit "$rc"; }
 	# run the body for the recommended task
 done
-# anvil next -q exited 3: queue drained.
+# queue drained
 ```
+
+The committed [`packaging/loops/ci-drain.sh`](../../packaging/loops/ci-drain.sh)
+is the full version (also skips a lost lease so concurrent drainers don't abort).
 
 Durable, leased state makes **both** resumable and safe to run concurrently:
 single-winner leases mean two runners never claim the same task, and a crashed
