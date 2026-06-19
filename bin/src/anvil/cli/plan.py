@@ -944,8 +944,13 @@ def assumptions(
         )
         typer.echo(f"{'':<8} {'':>5} {'':>6} {'':>8}  why: {', '.join(a.reasons)}")
 
+    shown = (
+        f"Showing top {len(ranked)} of {len(requirements)} requirement(s)."
+        if len(ranked) < len(requirements)
+        else f"Showing all {len(requirements)} requirement(s) by priority."
+    )
     typer.echo(
-        f"\nShowing top {len(ranked)} of {len(requirements)} requirement(s). "
+        f"\n{shown} "
         "Advisory only — address the high-priority assumptions before planning."
     )
 

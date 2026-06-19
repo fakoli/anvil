@@ -106,9 +106,12 @@ _HEDGING_RE = re.compile(
 )
 
 # Broad / sweeping scope words — a requirement that claims "all", "every",
-# "any", "fully", "seamless(ly)" is usually under-specified and high-blast.
+# "fully", "seamless(ly)" is usually under-specified and high-blast. Deliberately
+# excludes very common words like "any"/"always"/"never", which fire on
+# well-specified requirements ("must never return null") and produce
+# false-positive "broad scope" signals.
 _BROAD_SCOPE_RE = re.compile(
-    r"\b(all|every|any|always|never|fully|entire|whole|seamless(?:ly)?|"
+    r"\b(all|every|fully|entire|whole|seamless(?:ly)?|"
     r"comprehensive(?:ly)?|robust|scalable|flexible)\b",
     re.IGNORECASE,
 )
@@ -409,7 +412,7 @@ class AssumptionScore(NamedTuple):
     blast_radius: int
     uncertainty: int
     priority: int
-    reasons: list[str]
+    reasons: tuple[str, ...]   # immutable — a NamedTuple field shouldn't be a mutable list
 
 
 def _score_requirement_blast_radius(text: str) -> int:
@@ -486,7 +489,7 @@ def score_requirement_assumption(req: Requirement) -> AssumptionScore:
         blast_radius=blast,
         uncertainty=uncertainty,
         priority=blast * uncertainty,
-        reasons=reasons,
+        reasons=tuple(reasons),
     )
 
 
