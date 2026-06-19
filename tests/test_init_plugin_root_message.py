@@ -39,7 +39,11 @@ def test_suggest_project_dir_none_when_absent(tmp_path: Path):
     assert _suggest_project_dir(tmp_path) is None
 
 
-def test_init_at_plugin_root_refuses_with_suggestion(tmp_path: Path):
+def test_init_at_plugin_root_refuses_with_suggestion(tmp_path: Path, monkeypatch):  # type: ignore[no-untyped-def]
+    # ANVIL_ROOT takes precedence over cwd in _resolve_base_dir; unset it so the
+    # guard actually resolves to tmp_path and fires (else a dev with ANVIL_ROOT
+    # set gets a false pass — Greptile P1).
+    monkeypatch.delenv("ANVIL_ROOT", raising=False)
     _make_plugin_root(tmp_path, with_pkg=True)
     cwd = os.getcwd()
     os.chdir(tmp_path)
@@ -48,13 +52,14 @@ def test_init_at_plugin_root_refuses_with_suggestion(tmp_path: Path):
         assert result.exit_code == 1
         out = result.output
         assert "plugin root" in out
-        assert "cd bin && anvil init" in out  # concrete suggestion
+        assert "cd 'bin' && anvil init" in out  # concrete, quoted suggestion
         assert "ANVIL_ROOT" in out  # override hint
     finally:
         os.chdir(cwd)
 
 
-def test_init_at_plugin_root_without_pkg_still_refuses(tmp_path: Path):
+def test_init_at_plugin_root_without_pkg_still_refuses(tmp_path: Path, monkeypatch):  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("ANVIL_ROOT", raising=False)
     _make_plugin_root(tmp_path, with_pkg=False)
     cwd = os.getcwd()
     os.chdir(tmp_path)

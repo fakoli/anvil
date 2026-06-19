@@ -123,7 +123,7 @@ def init(
         ]
         if suggestion is not None:
             lines.append(
-                f"  To manage anvil's own work, run: cd {suggestion} && anvil init"
+                f"  To manage anvil's own work, run: cd '{suggestion}' && anvil init"
             )
         lines.append("  Or set ANVIL_ROOT=<project-dir> to point anvil at it.")
         typer.echo("\n".join(lines), err=True)
