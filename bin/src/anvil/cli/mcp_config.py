@@ -28,7 +28,14 @@ _COMMAND = "mcp-config"
 # server id used in every client's config
 _SERVER_ID = "anvil"
 
-# (top_key, per_server_extra_dict, fmt) — fmt is "json" or "toml"
+# OpenCode's config carries a $schema hint and a uniquely-shaped server entry
+# (argv-array command, `environment` instead of `env`) — see _build_opencode.
+_OPENCODE_SCHEMA = "https://opencode.ai/config.json"
+
+# (top_key, per_server_extra_dict, fmt) — fmt is "json" or "toml". A handful of
+# clients (opencode) have a server shape that doesn't fit the uniform
+# {command, args[, env]} spec; build_config special-cases those before using the
+# table. Their CLIENTS row still records the top_key so the install merge works.
 CLIENTS: dict[str, tuple[str, dict, str]] = {
     "claude-code": ("mcpServers", {"type": "stdio"}, "json"),
     "cursor": ("mcpServers", {}, "json"),
@@ -37,6 +44,7 @@ CLIENTS: dict[str, tuple[str, dict, str]] = {
     "vscode": ("servers", {"type": "stdio"}, "json"),
     "zed": ("context_servers", {"source": "custom"}, "json"),
     "codex": ("mcp_servers", {}, "toml"),
+    "opencode": ("mcp", {}, "json"),
 }
 
 _TARGET_FILE = {
@@ -47,6 +55,7 @@ _TARGET_FILE = {
     "vscode": ".vscode/mcp.json",
     "zed": "~/.config/zed/settings.json",
     "codex": "~/.codex/config.toml",
+    "opencode": "opencode.json (project) or ~/.config/opencode/opencode.json",
 }
 
 
@@ -91,13 +100,39 @@ def _to_toml(top_key: str, spec: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _opencode_block(use_uv_run: bool, root: str | None) -> str:
+    """OpenCode's ``opencode.json`` uses a uniquely-shaped MCP entry.
+
+    Unlike the uniform ``{command, args[, env]}`` spec, OpenCode wants a single
+    argv array under ``command``, an ``enabled`` flag, ``type: "local"``, and
+    env vars under ``environment`` (not ``env``). It also carries a ``$schema``.
+    """
+    base = _server_spec(use_uv_run, root)
+    spec: dict = {
+        "type": "local",
+        "command": [base["command"], *base["args"]],
+        "enabled": True,
+    }
+    if "env" in base:
+        spec["environment"] = base["env"]
+    return (
+        json.dumps(
+            {"$schema": _OPENCODE_SCHEMA, "mcp": {_SERVER_ID: spec}}, indent=2
+        )
+        + "\n"
+    )
+
+
 def build_config(client: str, *, use_uv_run: bool, root: str | None) -> str:
     """Build the paste-ready config text for *client*.
 
-    The inner server spec is always ``{command, args[, env]}`` pointed at this
+    The inner server spec is usually ``{command, args[, env]}`` pointed at this
     checkout's ``bin/anvil-mcp``; only the envelope differs per client (top key,
-    per-server extras, JSON vs TOML).
+    per-server extras, JSON vs TOML). A few clients have a different server shape
+    entirely and are special-cased.
     """
+    if client == "opencode":
+        return _opencode_block(use_uv_run, root)
     top_key, extra, fmt = CLIENTS[client]
     spec = {**extra, **_server_spec(use_uv_run, root)}
     if fmt == "toml":

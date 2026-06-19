@@ -49,7 +49,7 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
 def test_known_harnesses_present() -> None:
     """The verified harnesses from the spec are all in the registry."""
     for name in ("codex", "copilot", "gemini", "openclaw", "cursor", "windsurf",
-                 "cline", "zed", "openhands"):
+                 "cline", "zed", "openhands", "opencode"):
         assert name in HARNESSES
 
 
@@ -229,6 +229,45 @@ def test_openhands_writes_agents_md_root(sandbox: dict[str, Path]) -> None:
     assert data["mcp"]["action"] == "skipped"
     assert data["mcp"]["path"] is None
     assert data["mcp"]["note"]
+
+
+def test_opencode_writes_config_and_agents(sandbox: dict[str, Path]) -> None:
+    """opencode install merges the anvil server into opencode.json + drops AGENTS.md.
+
+    OpenCode's entry shape is unique: argv-array `command`, `type: "local"`,
+    `enabled: true`.
+    """
+    result = runner.invoke(
+        app, ["install", "opencode", "--write"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    cfg = sandbox["project"] / "opencode.json"
+    assert cfg.is_file(), f"expected {cfg} to exist"
+    spec = json.loads(cfg.read_text(encoding="utf-8"))["mcp"]["anvil"]
+    assert spec["type"] == "local"
+    assert isinstance(spec["command"], list)
+    assert spec["command"][-1].endswith("bin/anvil-mcp")
+    assert spec["enabled"] is True
+    # AGENTS.md is dropped at the project root (read natively by OpenCode).
+    instr = sandbox["project"] / "AGENTS.md"
+    assert instr.read_bytes() == (_repo_root() / "AGENTS.md").read_bytes()
+
+
+def test_opencode_merge_preserves_existing_keys(sandbox: dict[str, Path]) -> None:
+    """Merging into an existing opencode.json keeps unrelated keys + servers."""
+    cfg = sandbox["project"] / "opencode.json"
+    cfg.write_text(
+        json.dumps({"$schema": "x", "theme": "dark", "mcp": {"other": {"type": "local"}}}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app, ["install", "opencode", "--write"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    assert data["theme"] == "dark"  # unrelated top-level key preserved
+    assert "other" in data["mcp"]  # pre-existing server preserved
+    assert data["mcp"]["anvil"]["type"] == "local"  # ours added
 
 
 def test_root_flag_propagates_into_written_block(sandbox: dict[str, Path]) -> None:

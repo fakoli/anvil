@@ -134,6 +134,15 @@ HARNESSES: dict[str, Harness] = {
             "convention; the .openhands/microagents/ path is deprecated V0)."
         ),
     ),
+    "opencode": Harness(
+        "opencode", "opencode", "opencode.json",
+        "project", "json", "AGENTS.md", "project",
+        note=(
+            "opencode.json `mcp` entry uses a single argv array under `command` "
+            "and puts env vars under `environment` (not `env`); AGENTS.md is "
+            "read natively."
+        ),
+    ),
 }
 
 

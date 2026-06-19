@@ -171,3 +171,23 @@ def test_openhands_config_snippet_has_stdio_servers() -> None:
     assert "[mcp]" in text, "snippet must contain [mcp] table header"
     assert "stdio_servers" in text, "snippet must use stdio_servers key"
     assert "anvil" in text, "snippet must reference the anvil server name"
+
+
+# --- opencode: opencode.json (VERIFIED) ------------------------------------
+
+
+def test_opencode_manifest_has_mcp_anvil() -> None:
+    """The committed opencode.json reference parses and carries the anvil server.
+
+    OpenCode shape (confirmed from opencode.ai/config schema): mcp.anvil with
+    type 'local', an argv-array command ending in bin/anvil-mcp, enabled true.
+    """
+    p = _packaging() / "opencode" / "opencode.json"
+    assert p.is_file(), "missing packaging/opencode/opencode.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data.get("$schema") == "https://opencode.ai/config.json"
+    spec = data["mcp"]["anvil"]
+    assert spec["type"] == "local"
+    assert spec["enabled"] is True
+    assert isinstance(spec["command"], list)
+    assert spec["command"][-1].endswith("bin/anvil-mcp")
