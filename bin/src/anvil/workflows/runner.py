@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from anvil.claims.manager import ClaimManager
+from anvil.workflows.proof import CommandProof, proofs_satisfied
 from anvil.workflows.tasks import (
     apply_workflow_task,
     create_workflow_task,
@@ -45,11 +46,18 @@ class WorkflowRunError(Exception):
 
 @dataclass
 class StepOutcome:
-    """What an executor reports back for one step."""
+    """What an executor reports back for one step.
+
+    ``proofs`` carries typed :class:`CommandProof`s. For a step that declares
+    ``proof`` requirements, the runner ignores ``success`` and gates on the
+    typed proofs instead (T004) — "does a passing CommandProof exist," not "did
+    the executor say so."
+    """
 
     success: bool = True
     commands_run: list[str] = field(default_factory=list)
     files_changed: list[str] = field(default_factory=list)
+    proofs: list[CommandProof] = field(default_factory=list)
 
 
 @dataclass
@@ -128,13 +136,24 @@ def run_workflow(
 
         outcome = executor(step)
 
-        if not outcome.success:
+        # Typed gate (T004): a proof-bearing step passes only if every `proof`
+        # requirement has a matching passing CommandProof — the executor's
+        # `success` bool is not trusted for these steps. No-proof steps fall
+        # back to the bool.
+        passed = (
+            proofs_satisfied(step.proof, outcome.proofs)
+            if step.proof
+            else outcome.success
+        )
+
+        if not passed:
             mgr.release(claim.id, reason=f"step '{step.id}' failed")
             if step.on_fail == "reopen":
                 records.append(StepRecord(step.id, task_id, "reopened"))
                 continue
             raise WorkflowRunError(
-                f"step '{step.id}' failed and on_fail is not 'reopen'; aborting run"
+                f"step '{step.id}' failed its proof gate and on_fail is not "
+                "'reopen'; aborting run"
             )
 
         # Evidence requires non-empty commands AND files; record the declarative
@@ -142,6 +161,12 @@ def run_workflow(
         # run-only step with no proof, or a check that changed no files).
         commands = outcome.commands_run or [f"run: {action}"]
         files = outcome.files_changed or ["(none)"]
+        # Record the typed proof verdict so the pass is reconstructable from the
+        # event log (the evidence.submitted payload), not just inferred.
+        proof_excerpt = (
+            "; ".join(f"{p.command} -> exit {p.exit_code}" for p in outcome.proofs)
+            or None
+        )
         evidence_id = submit_workflow_evidence(
             backend,
             task_id=task_id,
@@ -150,6 +175,7 @@ def run_workflow(
             clock=clock,
             commands=commands,
             files_changed=files,
+            output_excerpt=proof_excerpt,
         )
         apply_workflow_task(backend, task_id=task_id, reviewer=reviewer, clock=clock)
         records.append(StepRecord(step.id, task_id, "applied", evidence_id))

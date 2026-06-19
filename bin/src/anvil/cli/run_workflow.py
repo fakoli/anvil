@@ -15,6 +15,7 @@ import typer
 
 from anvil.cli._helpers import _open_backend, _require_state_dir, _resolve_state_dir
 from anvil.workflows.parse import WorkflowParseError, parse_workflow
+from anvil.workflows.proof import CommandProof
 from anvil.workflows.runner import StepOutcome
 from anvil.workflows.runner import run_workflow as _run_workflow
 from anvil.workflows.schema import Step
@@ -24,13 +25,15 @@ def _default_executor(step: Step) -> StepOutcome:
     """Execute a step's declared ``proof`` commands as the work/verification.
 
     Running a step's ``run:`` prompt is a harness concern (an agent); this
-    in-process default executes the declarative ``proof`` commands and reports
-    success when they all pass. A step with no proof is treated as dispatched.
+    in-process default executes the declarative ``proof`` commands and emits a
+    typed :class:`CommandProof` (with the real exit code) for each — the runner's
+    typed gate (T004) decides pass/fail from those. A step with no proof is
+    treated as dispatched.
     """
     if not step.proof:
         return StepOutcome(success=True)
     commands: list[str] = []
-    success = True
+    proofs: list[CommandProof] = []
     for proof in step.proof:
         commands.append(proof.command)
         # ponytail: shell=True is deliberate — a proof is the workflow author's
@@ -39,10 +42,8 @@ def _default_executor(step: Step) -> StepOutcome:
         # a committed, trusted artifact, not untrusted input. If workflows ever
         # accept third-party files, gate this behind an explicit --allow-exec.
         result = subprocess.run(proof.command, shell=True, check=False)  # noqa: S602
-
-        if result.returncode not in proof.passing_exit_codes:
-            success = False
-    return StepOutcome(success=success, commands_run=commands)
+        proofs.append(CommandProof(command=proof.command, exit_code=result.returncode))
+    return StepOutcome(commands_run=commands, proofs=proofs)
 
 
 def run_workflow(
