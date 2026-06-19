@@ -1,9 +1,11 @@
 """Tests for ``anvil install <harness> [--write]`` — the MCP+instruction writer.
 
-``install`` is a thin writer layered on ``mcp-config``: it reuses the same
-``CLIENTS`` envelope (never re-encodes it) and drops the canonical ``AGENTS.md``
-bytes where each harness reads them. Default is a safe dry-run; ``--write`` does
-idempotent merges (JSON/TOML) + an instruction-file overwrite.
+``install`` reuses ``mcp-config``'s ``CLIENTS`` envelope for JSON harnesses and
+splices anvil's ``AGENTS.md`` into a marked, removable block where each harness
+reads it (never a wholesale overwrite). Codex installs natively via its own CLI
+(``codex mcp add`` / ``plugin marketplace add``) — anvil never edits config.toml.
+Every modified file is backed up + logged so ``--rollback`` is exact. Default is
+a safe dry-run; ``--write`` performs the (idempotent) changes.
 
 These drive the command through Typer's ``CliRunner`` (as ``test_mcp_config.py``
 does), with ``HOME`` monkeypatched and the project root pinned via ``ANVIL_ROOT``
@@ -13,14 +15,19 @@ so writes land under ``tmp_path`` and never touch the real machine.
 from __future__ import annotations
 
 import json
-import tomllib
+import sys
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+import anvil.cli.install  # noqa: F401  (ensure submodule is in sys.modules)
 from anvil.cli import app
 from anvil.cli.install import HARNESSES
+
+# `anvil.cli` re-exports the `install` FUNCTION, shadowing the submodule attribute,
+# so `anvil.cli.install` resolves to the function. Grab the real module to patch it.
+install_mod = sys.modules["anvil.cli.install"]
 
 runner = CliRunner()
 
@@ -43,7 +50,20 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("ANVIL_ROOT", str(project))
-    return {"home": home, "project": project}
+
+    # Never shell out to a real `codex` CLI in tests — record the commands a native
+    # install WOULD run instead, so assertions stay hermetic and side-effect-free.
+    ran: list[list[str]] = []
+
+    def _fake_run(cmds: list, *, run: bool) -> list:
+        ran.extend(cmds)
+        return [
+            {"cmd": " ".join(c), "ran": run, "ok": True if run else None, "detail": ""}
+            for c in cmds
+        ]
+
+    monkeypatch.setattr(install_mod, "_run_or_print", _fake_run)
+    return {"home": home, "project": project, "native_cmds": ran}
 
 
 def test_known_harnesses_present() -> None:
@@ -119,58 +139,297 @@ def test_write_json_preserves_unrelated_server(sandbox: dict[str, Path]) -> None
     assert "anvil" in data["mcpServers"]
 
 
-def test_write_toml_codex_preserves_unrelated_table(sandbox: dict[str, Path]) -> None:
-    """codex TOML merge: pre-seeded `[mcp_servers.other]` survives; anvil added."""
+def test_codex_never_touches_config_toml(sandbox: dict[str, Path]) -> None:
+    """Codex goes native: anvil must NOT hand-edit ~/.codex/config.toml (the thing
+    that corrupted it). A pre-existing config is left byte-for-byte untouched."""
     cfg = sandbox["home"] / ".codex" / "config.toml"
     cfg.parent.mkdir(parents=True)
-    cfg.write_text(
-        'model = "gpt-5"\n\n'
-        "[mcp_servers.other]\n"
-        'command = "other-bin"\n'
-        'args = ["--flag"]\n'
+    original = (
+        'model = "gpt-5.5"\n\n'
+        "[projects]\n"
+        '"/Users/me/code/proj" = { trust_level = "trusted" }\n'
     )
+    cfg.write_text(original)
 
     result = runner.invoke(
         app, ["install", "codex", "--write"], catch_exceptions=False
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-
-    parsed = tomllib.loads(cfg.read_text())
-    assert parsed["model"] == "gpt-5"  # top-level scalar preserved
-    assert parsed["mcp_servers"]["other"]["command"] == "other-bin"  # survives
-    assert "anvil" in parsed["mcp_servers"]  # ours added
-    assert parsed["mcp_servers"]["anvil"]["command"] == "bash"
+    assert cfg.read_text() == original  # untouched — Codex writes its own config
 
 
-def test_write_toml_codex_idempotent(sandbox: dict[str, Path]) -> None:
-    """Re-running the codex write keeps a single anvil table (idempotent)."""
-    cfg = sandbox["home"] / ".codex" / "config.toml"
+def test_codex_native_commands_generated(sandbox: dict[str, Path]) -> None:
+    """`install codex --write` drives the Codex CLI: marketplace add + mcp add."""
+    result = runner.invoke(
+        app, ["install", "codex", "--write"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    cmds = [" ".join(c) for c in sandbox["native_cmds"]]
+    # Marketplace source is the public slug (works for any install method), not a
+    # local path that wouldn't resolve from a pip wheel.
+    assert "codex plugin marketplace add fakoli/anvil" in cmds
+    mcp_add = next(c for c in cmds if c.startswith("codex mcp add anvil"))
+    assert "-- bash" in mcp_add and "anvil-mcp" in mcp_add
+
+
+def test_codex_skips_agents_skills_drop(sandbox: dict[str, Path]) -> None:
+    """Codex gets skills via its plugin, so the neutral .agents/skills/ drop is
+    skipped — but AGENTS.md still gets the marked block (Codex reads it)."""
     runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
-    first = cfg.read_text()
+    assert not (sandbox["project"] / ".agents" / "skills").exists()
+    assert "BEGIN ANVIL" in (sandbox["project"] / "AGENTS.md").read_text()
+
+
+def test_codex_rollback_runs_native_removers(sandbox: dict[str, Path]) -> None:
+    """Codex rollback drives `codex mcp remove` + `marketplace remove` and strips
+    our AGENTS.md block."""
+    instr = sandbox["project"] / "AGENTS.md"
+    instr.write_text("# mine\n")
     runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
-    assert cfg.read_text() == first
+    sandbox["native_cmds"].clear()
+
+    runner.invoke(app, ["install", "codex", "--rollback"], catch_exceptions=False)
+    cmds = [" ".join(c) for c in sandbox["native_cmds"]]
+    assert "codex mcp remove anvil" in cmds
+    assert any("marketplace remove" in c for c in cmds)
+    assert instr.read_text() == "# mine\n"  # our block stripped, user content kept
 
 
-def test_instruction_file_is_agents_md_bytes(sandbox: dict[str, Path]) -> None:
-    """The dropped instruction file is byte-equal to the repo AGENTS.md."""
+def test_codex_rollback_without_install_does_not_touch_global(
+    sandbox: dict[str, Path]
+) -> None:
+    """Rolling back codex in a project that never installed it must NOT run the
+    global removers (they'd rip out another project's registration) (#2)."""
+    result = runner.invoke(
+        app, ["install", "codex", "--rollback"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    assert sandbox["native_cmds"] == []  # no removers fired
+    assert "Nothing to roll back" in result.stderr
+
+
+def test_codex_env_flag_in_generated_command(sandbox: dict[str, Path]) -> None:
+    """`--root` pins ANVIL_ROOT, which must surface as a `--env` in `mcp add` (#10)."""
+    runner.invoke(
+        app, ["install", "codex", "--write", "--root", "/work/proj"],
+        catch_exceptions=False,
+    )
+    mcp_add = next(
+        " ".join(c) for c in sandbox["native_cmds"] if c[:3] == ["codex", "mcp", "add"]
+    )
+    assert "--env ANVIL_ROOT=/work/proj" in mcp_add
+
+
+def test_rollback_strips_block_from_adopted_instruction_file(
+    sandbox: dict[str, Path]
+) -> None:
+    """anvil creates AGENTS.md, the user then adopts it (adds their own prose around
+    our block). Rollback must STRIP our block, not delete the file (#1/#8)."""
+    instr = sandbox["project"] / "AGENTS.md"
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    # User adopts the created file, adding prose above and below our block.
+    body = instr.read_text()
+    instr.write_text(f"# My house rules\n\n{body}\nKeep this line too.\n")
+
+    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    assert instr.is_file()  # NOT deleted
+    text = instr.read_text()
+    assert "BEGIN ANVIL" not in text  # our block gone
+    assert "# My house rules" in text  # user prose above survives
+    assert "Keep this line too." in text  # user prose below survives
+
+
+def test_dangling_symlink_dest_is_refused(sandbox: dict[str, Path]) -> None:
+    """A BROKEN symlinked instruction dest is refused — writing through it would
+    create an un-rollback-able footprint (#4). (A valid symlink is allowed.)"""
+    link = sandbox["project"] / "AGENTS.md"
+    link.symlink_to(sandbox["home"] / "nonexistent-target.md")  # dangling
+
+    result = runner.invoke(app, ["install", "cursor", "--write"])
+    assert result.exit_code == 2
+    assert "symlink" in result.stderr.lower()
+
+
+def test_instruction_file_new_is_marked_block(sandbox: dict[str, Path]) -> None:
+    """A fresh instruction file holds the AGENTS.md content inside anvil markers."""
     result = runner.invoke(
         app, ["install", "cursor", "--write"], catch_exceptions=False
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     instr = sandbox["project"] / "AGENTS.md"
     assert instr.is_file()
-    assert instr.read_bytes() == (_repo_root() / "AGENTS.md").read_bytes()
+    text = instr.read_text()
+    assert "BEGIN ANVIL" in text and "END ANVIL" in text
+    # The full AGENTS.md content is present (just wrapped).
+    agents = (_repo_root() / "AGENTS.md").read_text().strip()
+    assert agents in text
 
 
-def test_copilot_instruction_dest_and_bytes(sandbox: dict[str, Path]) -> None:
-    """Copilot's instruction dest is .github/copilot-instructions.md, same bytes."""
+def test_instruction_file_preserves_user_content(sandbox: dict[str, Path]) -> None:
+    """A pre-existing user AGENTS.md is preserved; our block is appended, not over
+    it. Re-running is idempotent (one block) and rollback removes only our block."""
+    instr = sandbox["project"] / "AGENTS.md"
+    instr.write_text("# My rules\nDo not delete this.\n")
+
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    text = instr.read_text()
+    assert text.startswith("# My rules\nDo not delete this.")  # user content first
+    assert "BEGIN ANVIL" in text
+
+    # Idempotent: a second write does not duplicate the block.
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    assert instr.read_text().count("BEGIN ANVIL") == 1
+
+    # Rollback restores the user's original file byte-for-byte.
+    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    assert instr.read_text() == "# My rules\nDo not delete this.\n"
+
+
+def test_copilot_instruction_dest_is_marked_block(sandbox: dict[str, Path]) -> None:
+    """Copilot's instruction dest is .github/copilot-instructions.md with our block."""
     result = runner.invoke(
         app, ["install", "copilot", "--write"], catch_exceptions=False
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     instr = sandbox["project"] / ".github" / "copilot-instructions.md"
     assert instr.is_file()
-    assert instr.read_bytes() == (_repo_root() / "AGENTS.md").read_bytes()
+    text = instr.read_text()
+    assert "BEGIN ANVIL" in text
+    assert (_repo_root() / "AGENTS.md").read_text().strip() in text
+
+
+def test_rollback_restores_config_and_removes_created(
+    sandbox: dict[str, Path],
+) -> None:
+    """Rollback restores a modified JSON config from backup and deletes files we
+    made (cursor — a harness anvil DOES write a config file for)."""
+    cfg = sandbox["home"] / ".cursor" / "mcp.json"
+    cfg.parent.mkdir(parents=True)
+    original = json.dumps({"mcpServers": {"other": {"command": "x"}}})
+    cfg.write_text(original)
+
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    assert "anvil" in json.loads(cfg.read_text())["mcpServers"]
+    assert (sandbox["project"] / "AGENTS.md").is_file()  # created by us
+
+    result = runner.invoke(
+        app, ["install", "cursor", "--rollback"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # Config restored to the user's original (no anvil server).
+    assert cfg.read_text() == original
+    # The instruction file we created is gone.
+    assert not (sandbox["project"] / "AGENTS.md").exists()
+
+
+def test_skills_dropped_into_agents_skills(sandbox: dict[str, Path]) -> None:
+    """Install drops anvil's SKILL.md set into the neutral .agents/skills/ path,
+    namespaced anvil-*, and rollback removes the dirs it created."""
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    skills_base = sandbox["project"] / ".agents" / "skills"
+    sources = sorted(
+        d.name
+        for d in (_repo_root() / "skills").iterdir()
+        if d.is_dir() and (d / "SKILL.md").is_file()
+    )
+    assert sources, "expected anvil to ship skills"
+    for name in sources:
+        skill = skills_base / f"anvil-{name}" / "SKILL.md"
+        assert skill.is_file(), f"expected {skill}"
+
+    # Idempotent re-run: still one dir per skill, no nesting/dupes.
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    assert sorted(p.name for p in skills_base.iterdir()) == [
+        f"anvil-{n}" for n in sources
+    ]
+
+    # Rollback removes the skill dirs we created (and leaves no .anvil-bak litter).
+    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    for name in sources:
+        assert not (skills_base / f"anvil-{name}").exists()
+        assert not (skills_base / f"anvil-{name}{'.anvil-bak'}").exists()
+
+
+def test_skills_preserve_user_owned_skill_dir(sandbox: dict[str, Path]) -> None:
+    """A user's pre-existing .agents/skills/anvil-plan is backed up and restored on
+    rollback (we never silently eat a dir that happens to share our namespace)."""
+    skills_base = sandbox["project"] / ".agents" / "skills"
+    user_skill = skills_base / "anvil-plan"
+    user_skill.mkdir(parents=True)
+    (user_skill / "SKILL.md").write_text("# my own plan skill\n")
+
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    # Ours replaced it for the duration...
+    assert "my own plan skill" not in (user_skill / "SKILL.md").read_text()
+
+    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    # ...but rollback hands the user's original dir back, byte-for-byte.
+    assert (user_skill / "SKILL.md").read_text() == "# my own plan skill\n"
+
+
+def test_instruction_refuses_ambiguous_markers(sandbox: dict[str, Path]) -> None:
+    """A stray END marker (no BEGIN) in user prose must NOT be treated as our block
+    — install refuses rather than risk corrupting/duplicating the file (#7/#13)."""
+    instr = sandbox["project"] / "AGENTS.md"
+    instr.write_text("# notes\nSee <!-- END ANVIL --> for details.\n")
+    before = instr.read_text()
+    result = runner.invoke(app, ["install", "cursor", "--write"])
+    assert result.exit_code != 0  # refused
+    assert instr.read_text() == before  # untouched — no corruption
+
+
+def test_instruction_idempotent_and_faithful_strip(sandbox: dict[str, Path]) -> None:
+    """Re-running yields a byte-identical file (one block), and rollback restores
+    the user's ORIGINAL bytes exactly (#18 faithful strip)."""
+    instr = sandbox["project"] / "AGENTS.md"
+    original = "# my rules\n\nline two\n"
+    instr.write_text(original)
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    once = instr.read_text()
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    assert instr.read_text() == once  # idempotent
+    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    assert instr.read_text() == original  # byte-faithful restore
+
+
+def test_shared_agents_md_across_two_harnesses(sandbox: dict[str, Path]) -> None:
+    """Two harnesses share the project AGENTS.md. Rolling back ONE keeps the block
+    (the other still wants it); rolling back BOTH restores the user's file (#8)."""
+    instr = sandbox["project"] / "AGENTS.md"
+    instr.write_text("# mine\n")
+    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    runner.invoke(app, ["install", "windsurf", "--write"], catch_exceptions=False)
+
+    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    assert "BEGIN ANVIL" in instr.read_text()  # windsurf still references it
+
+    runner.invoke(app, ["install", "windsurf", "--rollback"], catch_exceptions=False)
+    assert instr.read_text() == "# mine\n"  # last release restores the user's file
+
+
+def test_crash_before_writes_completed_is_still_reversible(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If a write crashes mid-install, the manifest was already persisted, so
+    rollback still restores the user's config (#2 crash safety)."""
+    cfg = sandbox["home"] / ".cursor" / "mcp.json"
+    cfg.parent.mkdir(parents=True)
+    original = json.dumps({"mcpServers": {"other": {"command": "x"}}})
+    cfg.write_text(original)
+
+    # Make the skills copy explode AFTER the config + manifest are written. A
+    # scoped context undoes ONLY this patch (not the sandbox's HOME isolation).
+    with monkeypatch.context() as mctx:
+        mctx.setattr(
+            install_mod.shutil, "copytree",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("boom")),
+        )
+        runner.invoke(app, ["install", "cursor", "--write"])  # crashes mid-write
+    assert "anvil" in json.loads(cfg.read_text())["mcpServers"]  # config mutated
+
+    result = runner.invoke(app, ["install", "cursor", "--rollback"])
+    assert result.exit_code == 0
+    assert cfg.read_text() == original  # recoverable despite the crash
 
 
 @pytest.mark.parametrize("harness", ["gemini", "cline"])
@@ -213,7 +472,7 @@ def test_openhands_writes_agents_md_root(sandbox: dict[str, Path]) -> None:
     # Instruction written at the project-root AGENTS.md (current convention).
     instr = sandbox["project"] / "AGENTS.md"
     assert instr.is_file(), f"expected {instr} to exist"
-    assert instr.read_bytes() == (_repo_root() / "AGENTS.md").read_bytes()
+    assert (_repo_root() / "AGENTS.md").read_text().strip() in instr.read_text()
     # The deprecated microagent path is no longer written.
     assert not (sandbox["project"] / ".openhands" / "microagents" / "anvil.md").exists()
     # No MCP config file (mcp_merge="none").
@@ -255,7 +514,7 @@ def test_opencode_writes_config_and_agents(sandbox: dict[str, Path]) -> None:
     assert spec["enabled"] is True
     # AGENTS.md is dropped at the project root (read natively by OpenCode).
     instr = sandbox["project"] / "AGENTS.md"
-    assert instr.read_bytes() == (_repo_root() / "AGENTS.md").read_bytes()
+    assert (_repo_root() / "AGENTS.md").read_text().strip() in instr.read_text()
 
 
 def test_opencode_merge_preserves_existing_keys(sandbox: dict[str, Path]) -> None:
