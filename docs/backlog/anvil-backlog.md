@@ -17,6 +17,7 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 | E7 | Verification Feedback Loop & Decision Back-Propagation | Close loops no competitor closes: deferred-finding read-back on file overlap, decision back-propagation to the PRD, batch dependency edits, structured contract fields. |
 | E8 | Legible Shared Model & External Projection | Auto-generated Mermaid diagrams and opt-in bidirectional GitHub-Issues projection as anti-lock-in positioning. |
 | E9 | WF-3 Substrate & Dogfooding Friction Follow-ups | Sand off the friction surfaced building the WF-3 workflow runner by dogfooding anvil on itself: a programmatic engine write API, a verification-command path doctor check, a relaxed evidence gate, and first-class non-PRD (workflow-origin) tasks. Each item carries researched implementation trade-offs. |
+| E10 | Framework Integration & Cross-Harness Compatibility | Prove the runtime-neutral moat by breadth: thin adapters that let many agent frameworks/harnesses (Claude Code, Codex, CI, Vercel eve, …) *drive* anvil's governed lifecycle while anvil governs (single-winner leases, evidence gate, audit) — never reimplementing framework features or coupling to a vendor. Track + publish the compatibility surface; eventually benchmark across harnesses. Breadth-as-proof, not feature-shoe-in. |
 
 ---
 
@@ -351,6 +352,37 @@ Surfaced 2026-06-19 while building the WF-3 declarative workflow runner (PR #28)
   - **Opt 2 — nullable `feature_id` + `origin`, drop sentinel (M):** cleanest model. Trade-off: SQLite can't drop `NOT NULL` via `ALTER` — needs a table-rebuild (create-copy-swap); weakens the FK invariant repo-wide (every `feature_id` consumer must handle `None`).
   - **Opt 3 — separate `workflow_tasks` table (L):** strongest isolation. Trade-off: forks claim/evidence/scoring code paths — large query/replay surface and ongoing duplication.
   - **Recommendation:** Opt 1 — additive column + filter; lowest cost/risk, makes the existing dead marker actually load-bearing.
+
+---
+
+## E10 — Framework Integration & Cross-Harness Compatibility
+
+The strategic thesis made concrete: anvil is the **governed state-of-record beneath any agent runtime**, not an agent framework. The more runtimes it can govern *without reimplementing them*, the more that claim is proven. Vercel's **eve** (open-source agent framework, 2026-06-17) independently shipped anvil's own bets — durable execution, evals, human-in-the-loop approvals, subagents, replayable structured events — which confirms the layer is real and that eve sits *above* anvil (a framework to build one agent in), not against it. The right response is breadth + honesty, **not** importing eve's (or any vendor's) feature set or deployment coupling.
+
+### B34 — Broaden the runtime/framework adapter family (Vercel eve + others)
+
+- **Priority:** P2  **Effort:** M  **Type:** feature
+- **Rationale:** WF-2 shipped thin loop adapters (`packaging/loops/ci-drain.sh`, `packaging/loops/claude-loop.md`, `packaging/loops/codex-automation.md`) that drive the governed lifecycle (`anvil next -q` → claim → packet → work → submit → apply) from each runtime. eve — and the broader field (LangChain, OpenAI/Claude Agent SDKs) — are exactly the runtimes anvil should *govern*, not compete with. An eve adapter (eve agents as executors, anvil as the audited queue they coordinate through) demonstrates runtime-neutrality and is a natural fit: eve already has per-session durability + approvals, but **lacks anvil's wedge** — multi-agent single-winner leases and evidence-gated (not self-reported) completion. The adapter stays THIN: it drives the existing seam + body, adds no engine change, and couples anvil to no vendor deployment model.
+- **Acceptance:** A committed eve adapter under `packaging/loops/` drives one governed task per invocation through anvil's transitions (mirroring `codex-automation.md`); `docs/how-to/drive-the-anvil-loop.md` lists it. No engine change. A second new-framework adapter (or a documented "copy this pattern" recipe) shows the pattern generalizes.
+- **Design inputs from the eve teardown** (capture so they are not lost — these inform OTHER specs, they are not eve-imports): (1) eve's `needsApproval: ({toolInput}) => …` predicate-gate generalizes anvil's **score-driven routing** — a gate is a function of the action's params; fold into the routing PRD (`docs/specs/2026-06-19-ergonomics-unattended.md` §5). (2) eve's filesystem-first "a file's place *is* its definition" is an input for **WF-3's format** (steps as a directory vs one YAML).
+- **Likely files:** `packaging/loops/eve-*.md`, `docs/how-to/drive-the-anvil-loop.md`, `docs/research/agent-workflow-formats.md`
+- **Depends on:** — (WF-1/WF-2 shipped)
+
+### B35 — Harness compatibility matrix: track + publish which runtimes anvil drives, and how
+
+- **Priority:** P2  **Effort:** S–M  **Type:** feature
+- **Rationale:** As the adapter family grows (B34), the runtime-neutral claim needs a single, **maintained, honest** surface: which harnesses anvil integrates with, at what level (MCP tools / CLI / loop-adapter), and how each interacts with the governed lifecycle (drain / fire-once / in-session). This is both an outward proof of breadth and an internal truth-tracker so the claim can't drift from reality — anvil should *know* its own compatibility, not merely assert it.
+- **Acceptance:** A committed compatibility matrix (in `docs/`, surfaced via `AGENTS.md`/`README`) lists each supported harness × integration surface × interaction model × status (supported / experimental / planned). A check keeps it honest — e.g. every adapter in `packaging/loops/` has a matrix row, and every harness marked "supported" via MCP maps to a real tool. Optionally an `anvil compat` command prints it.
+- **Likely files:** `docs/harness-compatibility.md`, `AGENTS.md`, `README`, a small test asserting matrix↔reality
+- **Depends on:** B34 (grows with the adapter family)
+
+### B36 — Cross-harness performance benchmark (STRETCH — blocked on harness access)
+
+- **Priority:** P3  **Effort:** XL  **Type:** infra  **Status:** STRETCH / BLOCKED-ON-ACCESS
+- **Rationale:** The strongest proof of runtime-neutrality is *measured*: run the same governed workload (e.g. the concurrency-suite shape, or a fixed task queue drained) across multiple harnesses and compare correctness (zero double-claims, zero lost evidence), throughput, and token cost — turning "works on any harness" from a claim into a number. **Honest constraint:** large undertaking, blocked on access to the different harnesses (we do not have them all). Scope down first to a benchmark *interface* (the shape of the measurement) that any single runtime can run, so contributors with access fill in rows over time — rather than one team needing every harness at once.
+- **Acceptance:** (when unblocked) a benchmark spec + a runnable harness measuring a fixed governed workload's correctness + throughput on at least one runtime, structured so other runtimes are drop-in rows. Until then: the spec + a single-runtime baseline, with the access blocker named.
+- **Likely files:** `bin/benchmarks/` (cross-harness), a `docs/specs/` benchmark spec
+- **Depends on:** B34, B35; **external blocker:** access to the target harnesses
 
 ---
 
