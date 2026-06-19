@@ -2285,6 +2285,24 @@ class TestNextCommand:
         assert result.exit_code == 0, f"next -q (ready) failed: {result.output}"
         assert result.output == ""
 
+    def test_next_quiet_real_error_is_not_masked_as_drained(
+        self, tmp_path: Path
+    ) -> None:
+        """next -q on an uninitialized project propagates a real error.
+
+        The loop seam contract (and the ci-drain.sh / drive-the-anvil-loop.md
+        adapters) only treat exit 3 as 'queue empty / clean stop'. A real error
+        such as a missing state dir must surface as a *different* non-zero code
+        so loops propagate it instead of masking it as a clean drain.
+        """
+        # No `anvil init` — the state dir does not exist (a real error).
+        result = _invoke_cmd(tmp_path, ["next", "-q", "--actor", "agent-test"])
+        assert result.exit_code != 0, f"expected non-zero, got: {result.output}"
+        assert result.exit_code != 3, (
+            "real error must NOT use exit 3 (reserved for 'queue empty'); "
+            f"got exit {result.exit_code}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Phase 4 — hook subcommands
