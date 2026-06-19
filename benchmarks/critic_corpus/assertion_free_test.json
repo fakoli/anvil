@@ -1,0 +1,6 @@
+{
+  "id": "assertion_free_test",
+  "label": "bad",
+  "defect_class": "assertion-free-test",
+  "description": "A new test calls the function under test but contains no assert, so it passes regardless of the return value and verifies nothing."
+}

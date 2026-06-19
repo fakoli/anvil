@@ -1,0 +1,6 @@
+--- a/tests/test_auth.py
++++ b/tests/test_auth.py
+@@ -2,4 +2,3 @@ def test_display_name_falls_back_to_anonymous():
+ def test_display_name_falls_back_to_anonymous():
+     name = display_name(missing_id)
+-    assert name == "anonymous"

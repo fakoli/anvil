@@ -1,0 +1,8 @@
+--- a/tests/test_total.py
++++ b/tests/test_total.py
+@@ -1,2 +1,6 @@ from report import total
+ from report import total
++
++
++def test_total_sums_a_basic_list():
++    assert total([1, 2, 3]) == 6

@@ -1,0 +1,6 @@
+{
+  "id": "good_bugfix",
+  "label": "good",
+  "defect_class": "none",
+  "description": "Control: a correct fix that adds an explicit empty-list guard before averaging, preserving behavior and avoiding ZeroDivisionError. The critic should PASS this."
+}
