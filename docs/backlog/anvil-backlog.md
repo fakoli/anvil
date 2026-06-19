@@ -81,6 +81,14 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 - **Likely files:** `bin/src/anvil/cli/claim.py`, `bin/src/anvil/claims/manager.py`, `bin/src/anvil/config.py`, `bin/tests/test_cli.py`
 - **Depends on:** —
 
+### B29 — `anvil init` at the plugin root: guidance instead of a bare refusal (dogfooding friction)
+
+- **Priority:** P3  **Effort:** S  **Type:** modify
+- **Rationale:** Surfaced 2026-06-19 while dogfooding anvil to plan its own WF-3 work. `anvil init` run at the anvil plugin root fails with `Error: this directory is the anvil plugin root. Run anvil init from your project directory, not from inside the plugin.` That guard is correct (don't seed `.anvil/` into the published plugin), but for the legitimate self-hosting case it gives no next step — the user has to guess that `bin/` (the Python package root, where tests already run) is the right project dir. The refusal also fires *after* an accidental `cd` can leave a stray `.anvil/` in a subdir, so the message should name a concrete fallback.
+- **Acceptance:** `anvil init` at the plugin root still refuses, but the message suggests an explicit project dir (e.g. "to manage anvil's own work, run from `bin/`" or honor an `--allow-plugin-root`/`ANVIL_PROJECT_ROOT` override). Tested: running at the plugin root prints the suggested path and exits non-zero; running in the suggested dir succeeds.
+- **Likely files:** `bin/src/anvil/cli/init.py`, `bin/tests/test_cli.py`
+- **Depends on:** —
+
 ---
 
 ## E3 — Portability & Runtime Neutrality

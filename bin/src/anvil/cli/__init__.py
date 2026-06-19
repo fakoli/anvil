@@ -9,6 +9,7 @@ from __future__ import annotations
 import typer
 
 from anvil import __version__
+from anvil.cli.backup import backup, restore
 from anvil.cli.claim import claim, next, release, renew
 from anvil.cli.conflicts import conflicts
 from anvil.cli.describe import describe
@@ -32,8 +33,8 @@ from anvil.cli.plan import (
     show,
 )
 from anvil.cli.prd import prd_app
-from anvil.cli.backup import backup, restore
 from anvil.cli.replay import replay
+from anvil.cli.run_workflow import run_workflow
 from anvil.cli.scan import scan
 from anvil.cli.sync import sync_app
 
@@ -118,6 +119,7 @@ app.command()(packet)
 app.command()(submit)
 app.command()(apply)
 app.command()(replay)
+app.command("run-workflow")(run_workflow)
 app.command()(backup)
 app.command()(restore)
 app.command("migrate-events")(migrate_events)
