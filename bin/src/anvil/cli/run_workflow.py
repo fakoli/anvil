@@ -77,7 +77,7 @@ def run_workflow(
 
     from anvil.clock import SystemClock
 
-    actor = os.environ.get("USER") or "agent"
+    actor = os.environ.get("USER") or os.environ.get("USERNAME") or "agent"
     backend = _open_backend(state_dir)
     try:
         records = _run_workflow(
