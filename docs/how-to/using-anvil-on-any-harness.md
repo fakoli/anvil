@@ -33,6 +33,7 @@ Provisions an anvil checkout (cached at `~/.anvil-src`, or `$ANVIL_SRC`) and run
 | Harness | MCP config written | Instruction file | `--write` |
 |---|---|---|---|
 | `claude-code` | `.mcp.json` (or install the plugin — see below) | `CLAUDE.md`/`AGENTS.md` | ✅ |
+| `openclaw` | `.mcp.json` (manifestless Claude bundle) | `AGENTS.md` | ✅ |
 | `cursor` | `~/.cursor/mcp.json` | `AGENTS.md` | ✅ |
 | `codex` | `~/.codex/config.toml` (`[mcp_servers.anvil]`) | `AGENTS.md` | ✅ |
 | `vscode` / `copilot` | `.vscode/mcp.json` | `.github/copilot-instructions.md` | ✅ |

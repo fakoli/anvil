@@ -36,7 +36,8 @@ if [ -x "./bin/anvil" ] && [ -f "./.claude-plugin/plugin.json" ]; then
     ANVIL_DIR="$(pwd)"
 elif [ -x "$CACHE_DIR/bin/anvil" ]; then
     ANVIL_DIR="$CACHE_DIR"
-    git -C "$ANVIL_DIR" pull --ff-only --quiet || true
+    git -C "$ANVIL_DIR" pull --ff-only --quiet \
+        || echo "warning: couldn't update cached anvil at $ANVIL_DIR — using it as-is." >&2
 else
     echo "Cloning anvil into $CACHE_DIR ..." >&2
     git clone --depth 1 "$REPO_URL" "$CACHE_DIR"
