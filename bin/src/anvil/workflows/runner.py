@@ -29,6 +29,7 @@ from anvil.workflows.tasks import (
 if TYPE_CHECKING:
     from anvil.clock import Clock
     from anvil.state.sqlite import SqliteBackend
+    from anvil.workflows.fanout import FanOutExecutor
     from anvil.workflows.schema import Step, Workflow
 
 __all__ = [
@@ -58,6 +59,8 @@ class StepOutcome:
     commands_run: list[str] = field(default_factory=list)
     files_changed: list[str] = field(default_factory=list)
     proofs: list[CommandProof] = field(default_factory=list)
+    # Items this step produces, consumed by a later step's `fan_out`.
+    items: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -66,7 +69,7 @@ class StepRecord:
 
     step_id: str
     task_id: str
-    status: str  # "applied" | "reopened"
+    status: str  # "applied" | "reopened" | "failed"
     evidence_id: str | None = None
 
 
@@ -110,17 +113,40 @@ def run_workflow(
     actor: str,
     clock: Clock,
     reviewer: str | None = None,
+    fan_out_executor: FanOutExecutor | None = None,
 ) -> list[StepRecord]:
-    """Run ``workflow`` to completion, returning one record per step.
+    """Run ``workflow`` to completion, returning one record per step (or per
+    item for a ``fan_out`` step).
 
     Each successful step yields exactly one `Evidence` row (submit → apply). A
     failing step whose `on_fail` is ``reopen`` releases its task back to `ready`
     and the run continues; any other failure raises :class:`WorkflowRunError`.
+    A ``fan_out`` step expands into one governed task per item (see
+    :mod:`anvil.workflows.fanout`); ``fan_out_executor`` runs each item and
+    defaults to the per-step ``executor``.
     """
+    # Lazy import breaks the runner <-> fanout cycle (fanout imports our types).
+    from anvil.workflows.fanout import resolve_items, run_fan_out
+
     reviewer = reviewer or actor
     records: list[StepRecord] = []
+    step_outputs: dict[str, list[str]] = {}
+
+    def _item_exec(s: Step, item: str) -> StepOutcome:
+        return fan_out_executor(s, item) if fan_out_executor else executor(s)
 
     for step in _toposort(workflow.steps):
+        if step.fan_out is not None:
+            items = resolve_items(step, step_outputs)
+            records.extend(
+                run_fan_out(
+                    backend, step, items,
+                    fan_out_executor=_item_exec,
+                    actor=actor, clock=clock, reviewer=reviewer,
+                )
+            )
+            continue
+
         action = step.run or step.uses_code or step.id
         task_id = create_workflow_task(
             backend,
@@ -179,5 +205,7 @@ def run_workflow(
         )
         apply_workflow_task(backend, task_id=task_id, reviewer=reviewer, clock=clock)
         records.append(StepRecord(step.id, task_id, "applied", evidence_id))
+        # Expose this step's output items to a later step's fan_out.
+        step_outputs[step.id] = outcome.items
 
     return records
