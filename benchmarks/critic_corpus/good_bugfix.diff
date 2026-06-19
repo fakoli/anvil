@@ -1,0 +1,8 @@
+--- a/src/report.py
++++ b/src/report.py
+@@ -9,4 +9,6 @@ def average(items):
+ def average(items):
+     """Mean of items; 0.0 for an empty list."""
++    if not items:
++        return 0.0
+     return total(items) / len(items)

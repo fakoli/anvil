@@ -1,0 +1,6 @@
+{
+  "id": "off_by_one",
+  "label": "bad",
+  "defect_class": "off-by-one",
+  "description": "Loop bound changed from len(items) to len(items) + 1, indexing one past the end and raising IndexError on every non-empty list."
+}

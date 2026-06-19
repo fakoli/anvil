@@ -1,0 +1,6 @@
+{
+  "id": "deleted_assertion",
+  "label": "bad",
+  "defect_class": "deleted-assertion",
+  "description": "The only assert in an existing passing test was deleted, gutting the test's coverage while leaving it green."
+}

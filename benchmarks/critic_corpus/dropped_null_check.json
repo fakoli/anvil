@@ -1,0 +1,6 @@
+{
+  "id": "dropped_null_check",
+  "label": "bad",
+  "defect_class": "dropped-null-check",
+  "description": "The `if user is None` guard was removed, so the function now dereferences a None user and raises AttributeError when the lookup misses."
+}

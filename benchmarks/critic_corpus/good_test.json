@@ -1,0 +1,6 @@
+{
+  "id": "good_test",
+  "label": "good",
+  "defect_class": "none",
+  "description": "Control: a new test that calls the function under test AND asserts the expected result. Real coverage. The critic should PASS this."
+}

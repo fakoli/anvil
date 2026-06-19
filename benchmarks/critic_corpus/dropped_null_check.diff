@@ -1,0 +1,7 @@
+--- a/src/auth.py
++++ b/src/auth.py
+@@ -5,8 +5,6 @@ def display_name(user_id):
+     user = lookup(user_id)
+-    if user is None:
+-        return "anonymous"
+     return user.name

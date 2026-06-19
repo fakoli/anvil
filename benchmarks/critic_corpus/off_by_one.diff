@@ -1,0 +1,9 @@
+--- a/src/report.py
++++ b/src/report.py
+@@ -3,7 +3,7 @@ def total(items):
+     """Sum every element of items."""
+     acc = 0
+-    for i in range(len(items)):
++    for i in range(len(items) + 1):
+         acc += items[i]
+     return acc
