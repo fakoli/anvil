@@ -69,3 +69,41 @@ def backend(state_dir: Path, frozen_clock: FrozenClock):  # type: ignore[no-unty
     b.initialize()
     yield b
     b.close()
+
+
+@pytest.fixture
+def approved_backend(backend, frozen_clock):  # type: ignore[no-untyped-def]
+    """A backend with project + state + an APPROVED PRD — ready for claims.
+
+    Shared by the WF-3 task/runner tests, which need to claim tasks (the claim
+    gate requires an approved PRD).
+    """
+    from anvil.state.models import EventDraft
+
+    t0 = frozen_clock.now()
+
+    def _ev(action, payload, kind, tid):  # type: ignore[no-untyped-def]
+        return EventDraft(
+            timestamp=t0, actor="test", action=action,
+            target_kind=kind, target_id=tid, payload_json=payload,
+        )
+
+    backend.append(_ev(
+        "project.created",
+        {"id": "proj-1", "name": "P", "description": "",
+         "created_at": t0.isoformat(), "updated_at": t0.isoformat()},
+        "project", "proj-1",
+    ))
+    backend.append(_ev("state.initialized", {}, "project", "proj-1"))
+    backend.append(_ev(
+        "prd.parsed",
+        {"project_id": "proj-1", "status": "draft", "summary": "S.",
+         "goals": ["G."], "non_goals": [],
+         "requirements": [{"id": "R001", "prd_section": "requirements",
+                           "text": "R.", "source_paragraph": None, "derived": False}],
+         "acceptance_criteria": ["AC."], "risks": [], "open_questions": []},
+        "prd", "proj-1",
+    ))
+    backend.append(_ev("prd.reviewed", {"project_id": "proj-1", "reviewer": "a"}, "prd", "proj-1"))
+    backend.append(_ev("prd.approved", {"project_id": "proj-1", "approver": "b"}, "prd", "proj-1"))
+    return backend
