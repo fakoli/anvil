@@ -1,0 +1,5 @@
+interface:
+  display_name: "Inspect State"
+  short_description: "Inspect tasks, claims, and blockers"
+  default_prompt: "Show anvil's current project state: tasks, the next claimable task, active claims, file-conflict warnings, and blockers."
+  brand_color: "#60a5fa"

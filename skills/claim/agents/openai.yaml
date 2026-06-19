@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claim a Task"
+  short_description: "Lease the next ready task on a branch"
+  default_prompt: "Claim the next ready anvil task: pick from the ready queue, check for file conflicts, and start work on a fresh git branch."
+  brand_color: "#60a5fa"

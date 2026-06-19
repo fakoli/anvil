@@ -1,0 +1,5 @@
+interface:
+  display_name: "Resolve Decisions"
+  short_description: "Resolve open PRD decisions via Q&A"
+  default_prompt: "Walk the anvil PRD's unresolved decisions and open questions and resolve each one with me, then apply the answers."
+  brand_color: "#60a5fa"

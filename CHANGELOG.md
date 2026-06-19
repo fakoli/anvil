@@ -50,6 +50,26 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Codex skill metadata — anvil's 8 skills now show up named in Codex.** Each
+  skill ships a minimal `agents/openai.yaml` (`interface:` with `display_name`,
+  `short_description`, `default_prompt`, and a `#60a5fa` `brand_color`), so the
+  `/skills` picker and Plugins panel render `anvil:claim` … `anvil:state-ops` with
+  human labels and a consistent badge instead of blank/auto-titled entries. Claude
+  Code ignores the `agents/` dir, so the skill tree stays dual-harness clean.
+  Validated against the Codex skill loader's real constraints (required keys;
+  `short_description` 25–64 chars). The "bundle hooks into the Codex plugin"
+  headline (backlog B41) needed **no packaging change**: Codex installs anvil from
+  the repo root, so `hooks/hooks.json` (using `${CLAUDE_PLUGIN_ROOT}`, the same
+  variable real Codex plugins use) already ships and runs on Codex.
+
+- **Codex feature-surface reference — `docs/reference/codex.md`.** A living map of
+  the Codex CLI surface (plugins, skills, hooks, MCP, config/profiles,
+  sandbox/approval/trust, automations, headless `exec`/`review`, sessions/fork,
+  cloud, app-server, memory, notify, instructions) with, for each, where it's
+  authoritatively documented (on-disk under `~/.codex/` **and** the official URL)
+  and how it relates to anvil — so future work picks Codex surfaces without
+  re-discovering them. Verified against `codex-cli 0.130.0`.
+
 - **Native OpenClaw install.** OpenClaw is its own agent platform (not a Claude
   `.mcp.json` bundle, as the old harness row wrongly assumed) — it manages MCP,
   skills, and plugins through the `openclaw` CLI. `anvil install openclaw` now
