@@ -159,6 +159,15 @@ class ProofRequirement(BaseModel):
     link_contains: str | None = None
     label: str                       # human description for packets / errors
 
+    @model_validator(mode="after")
+    def _command_requirements_pin_a_command(self) -> "ProofRequirement":
+        # A kind=command requirement with command=None can never be satisfied
+        # (CommandProof.command is always a str, so `p.command == None` is always
+        # False) — reject it at construction instead of failing the gate silently.
+        if self.kind is ProofKind.command and self.command is None:
+            raise ValueError("command-kind ProofRequirement requires `command`")
+        return self
+
 
 class Verification(BaseModel):
     model_config = _MODEL_CONFIG
@@ -267,8 +276,11 @@ explicitly.
 ### 3.5 Event payload + storage
 
 `EvidenceSubmittedPayload` (`state/payloads.py:309-324`) gains
-`proofs: list[dict[str, Any]] = []` (the serialized proof artifacts;
-`extra="forbid"` stays). The `_write_evidence_submitted` handler and the evidence
+`proofs: list[ProofArtifact] = Field(default_factory=list)` — the **typed**
+artifacts, validated at write time like every other embedded value object in the
+payload suite (do NOT use `list[dict[str, Any]]`, which would defer validation
+and let a malformed proof through until replay). `default_factory=list` keeps
+pre-SL-3 logs replayable. `extra="forbid"` stays. The `_write_evidence_submitted` handler and the evidence
 SELECT/INSERT (`state/sqlite.py:3450-3576`, columns enumerated at
 `sqlite.py:3565`) gain a `proofs TEXT NOT NULL DEFAULT '[]'` JSON column on the
 `evidence` table (`schema.py:152-165`).
@@ -361,10 +373,14 @@ whose `evidence.submitted` payloads carry no `proofs` — **must still
    defaults to `[]`, and the new `Verification` model accepts a *legacy* shape:
    a `model_validator(mode="before")` on `Verification` maps a bare
    `required_evidence: list[str]` key (if present and `required_proofs` absent)
-   onto an empty `required_proofs`, dropping it from the typed model while
-   preserving the original strings under a `_legacy_required_evidence` extra that
-   the `task.verification_migrated_v6` event (§5.2) later consumes. This makes
-   old logs replay without raising on the now-unknown key.
+   onto an empty `required_proofs`, while preserving the original strings under a
+   **declared, excluded field** — `_legacy_required_evidence: list[str] =
+   Field(default_factory=list, exclude=True)` — that the
+   `task.verification_migrated_v6` event (§5.2) later consumes. It must be a real
+   typed field (NOT a Pydantic "extra"): `_MODEL_CONFIG` sets `extra="forbid"`
+   (`models.py:225-229`), so an undeclared key would raise `ValidationError` on
+   the first pre-SL-3 log. `exclude=True` keeps it out of serialized output so it
+   never re-enters the event stream. This makes old logs replay without raising.
 2. **The migration is itself a replayable event.** Because §5.2 records the
    string→typed conversion as `task.verification_migrated_v6` events appended to
    the log, a full replay of a *migrated* project reconstructs the typed state

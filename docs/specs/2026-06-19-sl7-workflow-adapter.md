@@ -80,11 +80,15 @@ anvil workflow-step T042 \
 
 Sequence (each line is an existing call site):
 
-1. **Claim.** Claim `T042` for `--actor` with `--expected-files` — the same path
-   `anvil claim` uses (`ClaimManager.claim`, reached via `mcp_server.py:757`).
-   The lease gives the workflow exclusivity. If the task is unclaimable (PRD not
-   reviewed — `_can_claim_task`, `transitions.py:121-137`), the wrapper fails
-   loudly *before* running anything.
+1. **Claim (idempotent / attach).** If `--actor` already holds an active claim on
+   `T042`, **reuse it** (optionally renewing the lease) instead of re-claiming —
+   so a script that claimed up front for whole-run exclusivity can still call
+   `workflow-step` for the close-out without a double-claim error. Only when no
+   active claim exists does the wrapper claim afresh via the same path
+   `anvil claim` uses (`ClaimManager.claim`, reached via `mcp_server.py:757`). If
+   the task is unclaimable (PRD not reviewed — `_can_claim_task`,
+   `transitions.py:121-137`) or actively claimed by a *different* actor, the
+   wrapper fails loudly *before* running anything.
 2. **Run.** Execute `--run` in a subprocess, capturing `stdout`, `stderr`, and
    the real `exit_code`. This is the same observation
    `hooks/capture-evidence.sh` makes (`capture-evidence.sh:95-104`) — the wrapper
@@ -196,7 +200,9 @@ anvil decide --actor "$ACTOR" --related-task "$TASK" \
     --decision "Use $best_provider (cost=$best_cost)" \
     --consequences "Other providers' scores recorded as Evidence for audit" >/dev/null
 
-# Capture the final typed proof + submit + apply (the governed close-out):
+# Capture the final typed proof + submit + apply (the governed close-out).
+# workflow-step reuses the claim $ACTOR already holds (idempotent — see §3.1),
+# so this does NOT re-claim an already-claimed task.
 anvil workflow-step "$TASK" --actor "$ACTOR" \
     --run "python3 apply_provider.py $best_provider" \
     --proof-command "python3 apply_provider.py $best_provider"
