@@ -1,30 +1,19 @@
-"""``anvil install <harness> [--write]`` — deliver MCP config + instruction file.
+"""``anvil install <harness> [--write|--rollback]`` — deliver anvil to a harness.
 
-``mcp-config`` already builds the right MCP envelope per client (reusing
-:data:`anvil.cli.mcp_config.CLIENTS` + :func:`build_config`) and resolves the
-real ``bin/anvil-mcp`` absolute path — but it only *prints*. ``install`` is the
-thin writer that closes the delivery gap: per harness it writes/merges the MCP
-config into the harness's real config path and drops the instruction file
-(``AGENTS.md`` or the harness's rule-file name) where that harness reads it.
+``mcp-config`` builds the right MCP envelope per client (reusing
+:data:`anvil.cli.mcp_config.CLIENTS` + :func:`build_config`) but only *prints*.
+``install`` closes the delivery gap, per harness, by the safest available route:
 
-Two artifacts per harness:
+- **Native CLI harnesses** (codex, openclaw): drive the harness's OWN tooling
+  (``codex mcp add`` / ``openclaw mcp add`` + plugin install). The harness writes
+  its own config — anvil never hand-edits it.
+- **File harnesses** (cursor, windsurf, …): merge the MCP block into the harness's
+  JSON config (the ``anvil`` server id replaced in place → idempotent), and splice
+  anvil's ``AGENTS.md`` into a marked, *removable* block — never an overwrite.
 
-1. **MCP config** → written/merged into the harness's real config path, with the
-   server block produced by ``build_config(harness.mcp_client, ...)``.
-2. **Instruction file** → ``AGENTS.md`` copied byte-for-byte to where the harness
-   reads it (e.g. ``.github/copilot-instructions.md`` for Copilot).
-
-Default (no ``--write``) is a **dry-run**: it prints, per target, the exact file
-path and the bytes it *would* write — the natural extension of ``mcp-config``'s
-"print only" posture. ``--write`` performs the writes: idempotent merge for
-JSON/TOML configs (the ``anvil`` server id is replaced in place), overwrite for
-the instruction file (regenerated from ``AGENTS.md``).
-
-The engine is untouched; hooks stay Claude-Code-only (no fake shims for other
-harnesses, matching ``AGENTS.md`` Notes). No new runtime deps: stdlib ``json``,
-``shutil``, ``pathlib`` only. The TOML write textually splices our fixed
-``_to_toml`` block in and leaves the rest of the file byte-for-byte, so we never
-re-serialize (and never mangle) the user's existing config.
+Default (no flag) is a **dry-run** that prints what it would do. ``--write``
+performs it; every modified file is backed up and logged so ``--rollback`` is
+exact. The engine is untouched; hooks stay Claude-Code-only.
 """
 
 from __future__ import annotations
@@ -96,6 +85,9 @@ class Harness:
     # Whether `--automations` applies (codex's scheduled-run system). Don't proxy
     # this off native_installer — a future native harness need not have one.
     supports_automations: bool = False
+    # Whether install splices anvil's instructions into the harness's instruction
+    # file. False for harnesses whose plugin already ships them (openclaw).
+    writes_instructions: bool = True
 
 
 HARNESSES: dict[str, Harness] = {
@@ -130,10 +122,20 @@ HARNESSES: dict[str, Harness] = {
             "(see packaging/gemini/); install only drops AGENTS.md as contextFile."
         ),
     ),
+    # OpenClaw is its OWN platform (not a Claude bundle): it manages MCP, skills,
+    # and plugins through the `openclaw` CLI. We never hand-edit
+    # ~/.openclaw/openclaw.json, and the plugin ships anvil's skills, so we skip
+    # both the instruction splice and the .agents/skills drop.
     "openclaw": Harness(
-        "openclaw", "claude-code", ".mcp.json",
-        "project", "json", "AGENTS.md", "project",
-        note="manifestless Claude bundle; .mcp.json already present.",
+        "openclaw", None, None,
+        "home", "none", "AGENTS.md", "project",
+        note=(
+            "native install via the openclaw CLI (mcp add --no-probe + plugins "
+            "install); openclaw owns its config at ~/.openclaw/."
+        ),
+        native_installer="openclaw",
+        reads_agents_skills=False,
+        writes_instructions=False,
     ),
     # --- already-working print-only clients keep working via mcp-config; ---
     # --- rows added here only as their instruction-file dest is verified.  ---
@@ -286,7 +288,13 @@ def _merge_json(path: Path, client: str, *, use_uv_run: bool, root: str | None) 
 # Codex marketplace source: the public GitHub slug, not the local checkout. It
 # resolves for every install method (curl source checkout AND a pip wheel, which
 # has no local marketplace.json) and is version-stable.
-_CODEX_MARKETPLACE = "fakoli/anvil"
+# anvil's public, Claude-compatible plugin marketplace — resolves for every
+# install method (source checkout AND wheel) and is consumed by both Codex's
+# `plugin marketplace add` and OpenClaw's `plugins install --marketplace`.
+_ANVIL_MARKETPLACE = "fakoli/anvil"
+
+# Human-facing label per native installer (for output lines).
+_NATIVE_LABEL = {"codex": "Codex", "openclaw": "OpenClaw"}
 
 
 def _codex_install_commands(*, use_uv_run: bool, root: str | None) -> list[list[str]]:
@@ -300,7 +308,7 @@ def _codex_install_commands(*, use_uv_run: bool, root: str | None) -> list[list[
         mcp_add += ["--env", f"{k}={v}"]
     mcp_add += ["--", spec["command"], *spec["args"]]
     return [
-        ["codex", "plugin", "marketplace", "add", _CODEX_MARKETPLACE],
+        ["codex", "plugin", "marketplace", "add", _ANVIL_MARKETPLACE],
         mcp_add,
     ]
 
@@ -348,14 +356,68 @@ def _codex_automation_plan() -> list[dict[str, Any]]:
     return plan
 
 
+def _openclaw_install_commands(*, use_uv_run: bool, root: str | None) -> list[list[str]]:
+    """OpenClaw is a standalone platform with its own CLI — never the Claude
+    `.mcp.json` bundle the old row assumed. `mcp add` registers the server (with
+    `--no-probe`, so a cold-start `uv sync` can't time out the save); `plugins
+    install --marketplace` pulls anvil's skills/commands from its Claude-compatible
+    marketplace. OpenClaw owns its config at ~/.openclaw/openclaw.json."""
+    spec = _server_spec(use_uv_run, root)
+    # `--no-probe`: save the server WITHOUT connecting first. The probe has a 30s
+    # timeout, and anvil's wrapper runs `uv sync` on first launch — on a cold venv
+    # that overruns the probe, leaving the server unsaved while the plugin still
+    # installs (a half-install reported as success). OpenClaw validates the server
+    # on first real use; `openclaw mcp doctor`/`probe` are there to check manually.
+    mcp_add = ["openclaw", "mcp", "add", _SERVER_ID, "--no-probe",
+               "--command", spec["command"]]
+    for a in spec["args"]:
+        mcp_add += ["--arg", a]
+    for k, v in spec.get("env", {}).items():
+        mcp_add += ["--env", f"{k}={v}"]
+    # `--force`: refresh the plugin on re-run. Without it OpenClaw prints "plugin
+    # already exists" and exits 0 WITHOUT updating — a re-install silently keeps the
+    # stale version. (mcp add already overwrites; this matches that idempotency.)
+    return [
+        mcp_add,
+        ["openclaw", "plugins", "install", _SERVER_ID,
+         "--marketplace", _ANVIL_MARKETPLACE, "--force"],
+    ]
+
+
+def _openclaw_rollback_commands() -> list[list[str]]:
+    """OpenClaw owns its config, so undo is via its own removers."""
+    return [
+        ["openclaw", "mcp", "unset", _SERVER_ID],
+        ["openclaw", "plugins", "uninstall", _SERVER_ID, "--force"],
+    ]
+
+
+def _native_install_commands(
+    installer: str, *, use_uv_run: bool, root: str | None
+) -> list[list[str]]:
+    if installer == "codex":
+        return _codex_install_commands(use_uv_run=use_uv_run, root=root)
+    if installer == "openclaw":
+        return _openclaw_install_commands(use_uv_run=use_uv_run, root=root)
+    return []
+
+
+def _native_rollback_commands(installer: str) -> list[list[str]]:
+    if installer == "codex":
+        return _codex_rollback_commands()
+    if installer == "openclaw":
+        return _openclaw_rollback_commands()
+    return []
+
+
 def _run_or_print(cmds: list[list[str]], *, run: bool) -> list[dict[str, Any]]:
-    """Run each codex command (when the CLI is present) or just report it. Never
-    raises — a missing/failing codex CLI degrades to printed instructions."""
-    have_codex = shutil.which("codex") is not None
+    """Run each native command (when its CLI is present) or just report it. Never
+    raises — a missing/failing CLI degrades to printed instructions. The binary is
+    each command's own argv[0] (codex / openclaw), not a hardcoded name."""
     results = []
     for cmd in cmds:
         printed = " ".join(cmd)
-        if run and have_codex:
+        if run and shutil.which(cmd[0]) is not None:
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 ok = proc.returncode == 0
@@ -632,12 +694,12 @@ def _plan_actions(
         }
 
     # --- Instruction artifact (AGENTS.md content, spliced non-destructively) ---
-    # Guard the source read: a stripped wheel may not ship AGENTS.md (skills too) —
-    # degrade to "no instruction write" rather than crash. ponytail: real installs
-    # run from a source checkout where it exists; full wheel packaging is tracked.
+    # Skip entirely for harnesses whose plugin already ships anvil's instructions
+    # (openclaw) — we never touch their files. Also guard the source read: a
+    # stripped wheel may not ship AGENTS.md; degrade to "skipped" rather than crash.
     instr_dest = _resolve(h.instr_path, h.instr_scope)
     agents_src = _repo_root() / "AGENTS.md"
-    if not agents_src.is_file():
+    if not h.writes_instructions or not agents_src.is_file():
         return mcp, {"path": str(instr_dest), "action": "skipped", "content": None}
     agents_text = agents_src.read_text(encoding="utf-8")
     instr = {
@@ -723,20 +785,21 @@ def install(
     if rollback:
         # Whether THIS project ever recorded a native install (gate the global
         # removers on it — otherwise rolling back a project that never installed
-        # codex would rip out the global registration another project depends on).
+        # this harness would rip out the global registration another depends on).
         had_install = _install_key(harness) in _load_manifest()["installs"]
         result = _rollback(harness)  # undo file-side footprint (strip AGENTS.md)
-        # Codex's MCP + marketplace are GLOBAL. Only remove them when no OTHER
-        # project still has a codex install recorded (refcount across projects).
+        # A native harness's MCP + plugin are GLOBAL. Only remove them when no
+        # OTHER project still has an install recorded (refcount across projects).
         others = any(
             k.endswith(f"::{harness}") for k in _load_manifest()["installs"]
         )
+        label = _NATIVE_LABEL.get(h.native_installer or "", h.native_installer)
         cli = []
         note = None
         if h.native_installer and had_install and not others:
-            cli = _run_or_print(_codex_rollback_commands(), run=True)
+            cli = _run_or_print(_native_rollback_commands(h.native_installer), run=True)
         elif h.native_installer and others:
-            note = "kept global Codex registration — another project still uses it"
+            note = f"kept global {label} registration — another project still uses it"
 
         if json_output:
             emit_success(
@@ -769,9 +832,10 @@ def install(
         typer.echo(f"Error: {msg}", err=True)
         raise typer.Exit(code=2)
 
-    # Codex installs natively via its own CLI; other harnesses get the .agents/skills drop.
+    # Native harnesses (codex, openclaw) install via their own CLI; others get the
+    # neutral .agents/skills drop.
     native_cmds = (
-        _codex_install_commands(use_uv_run=use_uv_run, root=root)
+        _native_install_commands(h.native_installer, use_uv_run=use_uv_run, root=root)
         if h.native_installer
         else []
     )
@@ -873,14 +937,16 @@ def install(
         return
 
     if native_cmds:
+        label = _NATIVE_LABEL.get(h.native_installer or "", h.native_installer)
+        cli_bin = native_cmds[0][0]
         # Derive the header from whether commands ACTUALLY ran, not the write flag —
-        # `--write` on a host without the `codex` CLI only prints them.
+        # `--write` on a host without the harness CLI only prints them.
         if write and not any(c["ran"] for c in native_results):
-            head = "Run these yourself (codex not on PATH — Codex writes its own config)"
+            head = f"Run these yourself ({cli_bin} not on PATH — {label} writes its own config)"
         elif write:
             head = "Ran"
         else:
-            head = "Run these (Codex writes its own config)"
+            head = f"Run these ({label} writes its own config)"
         typer.echo(f"# {head}:", err=True)
         for c in native_results:
             suffix = "" if c["ok"] in (None, True) else f"  ⚠ {c['detail']}"

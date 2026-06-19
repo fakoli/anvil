@@ -29,6 +29,20 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Native OpenClaw install.** OpenClaw is its own agent platform (not a Claude
+  `.mcp.json` bundle, as the old harness row wrongly assumed) — it manages MCP,
+  skills, and plugins through the `openclaw` CLI. `anvil install openclaw` now
+  drives that CLI: `openclaw mcp add anvil --no-probe --command bash --arg
+  <wrapper>` plus `openclaw plugins install anvil --marketplace fakoli/anvil
+  --force` (skills + commands via anvil's Claude-compatible marketplace).
+  `--no-probe` avoids a cold-start `uv sync` overrunning OpenClaw's 30s connect
+  probe (which would half-install); `--force` refreshes the plugin on re-install.
+  It touches **none** of the user's
+  files — no `.mcp.json`, no `AGENTS.md`, no skills drop — and `--rollback` undoes
+  via `openclaw mcp unset` / `plugins uninstall`, only removing the global
+  registration when no other project still references it. OpenClaw joins Claude
+  Code and Codex as a truly-supported harness.
+
 - **Backups + `anvil install <harness> --rollback`.** Every file an install
   modifies is copied to `<file>.anvil-bak` first and logged to
   `~/.anvil/install-log.json`; `--rollback` undoes the install. Rollback of an
