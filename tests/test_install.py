@@ -243,7 +243,11 @@ def test_opencode_writes_config_and_agents(sandbox: dict[str, Path]) -> None:
     assert result.exit_code == 0, result.stdout + result.stderr
     cfg = sandbox["project"] / "opencode.json"
     assert cfg.is_file(), f"expected {cfg} to exist"
-    spec = json.loads(cfg.read_text(encoding="utf-8"))["mcp"]["anvil"]
+    written = json.loads(cfg.read_text(encoding="utf-8"))
+    # A fresh install seeds the full block, so the $schema hint is preserved
+    # (matches `mcp-config opencode` output + the committed reference).
+    assert written["$schema"] == "https://opencode.ai/config.json"
+    spec = written["mcp"]["anvil"]
     assert spec["type"] == "local"
     assert isinstance(spec["command"], list)
     assert spec["command"][-1].endswith("bin/anvil-mcp")
