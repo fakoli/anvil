@@ -113,7 +113,42 @@ stores `files_changed`, `commit_sha`, review verdict, and reopened status.
 - **Agent path:** retrieve the 3–5 *nearest* past tasks (similarity-selected, not
   random) as few-shot anchors.
 
-## 7. Pitfalls to design against
+## 7. Evaluation — no parameter change ships unmeasured
+
+Changing how tasks are scored without measuring the effect is flying blind. **No
+scoring-parameter or dims change (especially the v6→v7 migration in §9) ships until
+it beats a frozen baseline on a scoring-eval harness.** This *gates* §9.
+
+Reuse the **SL-2 pattern** (the critic false-pass harness): corpus + baseline +
+metric, wired into CI.
+
+- **Corpus — tasks with *revealed* outcomes.** The `task_outcomes` table (§6) is the
+  source. Seed it with completed anvil tasks (this session produced ~12 with real
+  outcomes) plus a hand-labeled set that **must** include the known mis-scores as
+  regression cases: the isolated parser scored `blast_radius=5` (actual: low), and
+  the refactor scored `complexity=2` (actual: ~4, hidden dep).
+- **Ground-truth proxy per axis** — what actually happened: reopened? diff size vs
+  predicted? count of review findings? needed expansion? merge conflicts? — exactly
+  the fields `Evidence` already captures.
+- **Metric** — per-axis prediction error (MAE) + rank correlation (Spearman) vs the
+  actual-proxy, plus a directional check ("did it flag the genuinely high-risk /
+  high-uncertainty ones?"). **Weight `risk_reversibility` and `uncertainty`
+  highest** — routing keys off them, so an error there costs more than one on, say,
+  coordination.
+- **Baseline** — the current rule scorer's error on the corpus, frozen as the bar.
+- **A/B** — run rule vs in-session-agent vs `--use-llm` on the *same* held-out
+  corpus; report deltas. Ship a new scorer only if it beats baseline on the weighted
+  metric by a margin that clears the noise (report confidence intervals; require a
+  minimum corpus size — scoring is small-sample, and over-claiming on thin data is
+  itself a failure, per §8's small-sample pitfall).
+- **Regression guard** — wire the harness into CI like SL-2 so a future change can't
+  silently regress scoring quality.
+
+This closes the loop with calibration: the same `task_outcomes` rows that *train* the
+correction factor (§6) are what the harness *scores against* — the system that
+improves scoring and the system that measures it share one source of truth.
+
+## 8. Pitfalls to design against
 
 1. **Trusting `likely_files` blindly** — both failures came from this. The agent
    must verify the files exist and resolve their *real* graph; an empty/wrong
@@ -124,7 +159,7 @@ stores `files_changed`, `commit_sha`, review verdict, and reopened status.
    calibration signal *separate* from any performance judgement; keep the
    rule-based score as an auditable floor (agent proposes, rails clamp).
 
-## 8. Schema migration (v6 → v7)
+## 9. Schema migration (v6 → v7)
 
 The six dims change names/meaning, so this is breaking. Sequence:
 
@@ -139,7 +174,7 @@ The six dims change names/meaning, so this is breaking. Sequence:
 5. Drop the old columns in the following release. Three-file version bump per
    CLAUDE.md; replay-equivalence test must pass on the migrated log.
 
-## 9. Open questions
+## 10. Open questions
 
 - Exact old→new axis backfill mapping (some are inverses; some have no clean source).
 - Does the rule floor produce all six axes, or only the ones it can compute
@@ -148,7 +183,7 @@ The six dims change names/meaning, so this is breaking. Sequence:
 - Where does the agent's per-axis justification live — `Score.explanation` (today)
   or a structured per-axis field?
 
-## 10. References
+## 11. References
 
 - `bin/src/anvil/planning/scoring.py` (rule scorer + `_augment_explanation` seam),
   `cli/plan.py` (`--use-llm` ~L91-119, `score` ~L686), `state/models.py`
