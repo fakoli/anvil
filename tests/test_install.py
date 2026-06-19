@@ -199,16 +199,22 @@ def test_mcp_none_writes_only_instruction(
     assert data["mcp"]["note"]  # non-empty note
 
 
-def test_openhands_writes_microagent_file(sandbox: dict[str, Path]) -> None:
-    """openhands install drops AGENTS.md bytes at .openhands/microagents/anvil.md."""
+def test_openhands_writes_agents_md_root(sandbox: dict[str, Path]) -> None:
+    """openhands install drops AGENTS.md bytes at the project-root AGENTS.md.
+
+    Current OpenHands reads root AGENTS.md for repo guidelines; the old
+    .openhands/microagents/ path is deprecated V0.
+    """
     result = runner.invoke(
         app, ["install", "openhands", "--write"], catch_exceptions=False
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-    # Instruction written at the OpenHands microagent path, not AGENTS.md root.
-    instr = sandbox["project"] / ".openhands" / "microagents" / "anvil.md"
+    # Instruction written at the project-root AGENTS.md (current convention).
+    instr = sandbox["project"] / "AGENTS.md"
     assert instr.is_file(), f"expected {instr} to exist"
     assert instr.read_bytes() == (_repo_root() / "AGENTS.md").read_bytes()
+    # The deprecated microagent path is no longer written.
+    assert not (sandbox["project"] / ".openhands" / "microagents" / "anvil.md").exists()
     # No MCP config file (mcp_merge="none").
     assert not (sandbox["home"] / ".codex").exists()
     assert not (sandbox["home"] / ".cursor").exists()
