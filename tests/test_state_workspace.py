@@ -38,6 +38,8 @@ def test_worktrees_share_one_home_workspace(
     repo = tmp_path / "myrepo"
     repo.mkdir()
     _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@anvil.test")  # CI has no global identity
+    _git(repo, "config", "user.name", "anvil-test")
     _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
     wt = tmp_path / "wt"
     _git(repo, "worktree", "add", "-q", str(wt), "-b", "feature")
