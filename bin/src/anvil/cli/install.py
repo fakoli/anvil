@@ -6,8 +6,7 @@
 
 - **Native CLI harnesses** (codex, openclaw): drive the harness's OWN tooling
   (``codex mcp add`` / ``openclaw mcp add`` + plugin install). The harness writes
-  its own config — anvil never hand-edits it. ``openclaw mcp add`` even probes the
-  server before saving.
+  its own config — anvil never hand-edits it.
 - **File harnesses** (cursor, windsurf, …): merge the MCP block into the harness's
   JSON config (the ``anvil`` server id replaced in place → idempotent), and splice
   anvil's ``AGENTS.md`` into a marked, *removable* block — never an overwrite.
@@ -124,15 +123,14 @@ HARNESSES: dict[str, Harness] = {
         ),
     ),
     # OpenClaw is its OWN platform (not a Claude bundle): it manages MCP, skills,
-    # and plugins through the `openclaw` CLI. `openclaw mcp add` even probes the
-    # server before saving. We never hand-edit ~/.openclaw/openclaw.json, and the
-    # plugin ships anvil's skills, so we skip both the instruction splice and the
-    # .agents/skills drop.
+    # and plugins through the `openclaw` CLI. We never hand-edit
+    # ~/.openclaw/openclaw.json, and the plugin ships anvil's skills, so we skip
+    # both the instruction splice and the .agents/skills drop.
     "openclaw": Harness(
         "openclaw", None, None,
         "home", "none", "AGENTS.md", "project",
         note=(
-            "native install via the openclaw CLI (mcp add — probed — + plugins "
+            "native install via the openclaw CLI (mcp add --no-probe + plugins "
             "install); openclaw owns its config at ~/.openclaw/."
         ),
         native_installer="openclaw",

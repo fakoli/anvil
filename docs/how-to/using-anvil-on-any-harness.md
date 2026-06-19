@@ -114,7 +114,7 @@ anvil never auto-activates them. Review and turn them on in the Codex app
 ## OpenClaw
 
 OpenClaw is its own agent platform with a full CLI — not a Claude `.mcp.json`
-bundle. anvil installs **natively** and touches **none** of your files:
+bundle. Anvil installs **natively** and touches **none** of your files:
 
 ```
 openclaw mcp add anvil --no-probe --command bash --arg <…>/bin/anvil-mcp   # register the server

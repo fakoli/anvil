@@ -186,8 +186,8 @@ def test_codex_skips_agents_skills_drop(sandbox: dict[str, Path]) -> None:
 
 
 def test_openclaw_native_commands_generated(sandbox: dict[str, Path]) -> None:
-    """OpenClaw installs via its own CLI: `mcp add` (probed) + `plugins install`
-    from anvil's Claude-compatible marketplace."""
+    """OpenClaw installs via its own CLI: `mcp add` (--no-probe) + `plugins
+    install` from anvil's Claude-compatible marketplace."""
     result = runner.invoke(
         app, ["install", "openclaw", "--write"], catch_exceptions=False
     )
