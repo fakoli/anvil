@@ -31,14 +31,18 @@ from anvil.state.models import Score, Task
 
 if TYPE_CHECKING:
     from anvil.planning.llm import LLMProvider
+    from anvil.state.models import Requirement
 
 __all__ = [
     "DEFAULT_RECURSION_DEPTH_CAP",
+    "AssumptionScore",
     "ExpansionCandidate",
     "RecursiveExpansionCandidate",
     "build_expansion_queue",
     "build_recursive_expansion_queue",
     "is_expanded",
+    "rank_assumptions",
+    "score_requirement_assumption",
     "score_task",
     "score_all",
     "suggested_subtask_count",
@@ -80,6 +84,62 @@ _COMPLEXITY_KEYWORDS_RE = re.compile(
 # review_risk: security / auth / permission language in acceptance criteria.
 _SECURITY_KEYWORDS_RE = re.compile(
     r"\b(security|auth|authentication|authoriz|permission)\b", re.IGNORECASE
+)
+
+# ---------------------------------------------------------------------------
+# Assumption (PRD requirement) scoring — SL-6. Deterministic, no LLM.
+# ---------------------------------------------------------------------------
+
+# Unresolved decisions left in the requirement text — the loudest uncertainty
+# signal a PRD author can leave. ``[NEEDS DECISION]`` is the canonical marker;
+# the looser "TBD" / "to be decided" forms catch hand-authored variants.
+_NEEDS_DECISION_RE = re.compile(
+    r"(\[needs[\s_-]*decision\]|\btbd\b|to be (?:decided|determined))",
+    re.IGNORECASE,
+)
+
+# Hedging / vague language — the requirement is not yet pinned down.
+_HEDGING_RE = re.compile(
+    r"\b(maybe|probably|possibly|might|perhaps|somehow|ish|"
+    r"should probably|etc\.?|and so on|or something|tbc|unclear|unsure)\b",
+    re.IGNORECASE,
+)
+
+# Broad / sweeping scope words — a requirement that claims "all", "every",
+# "any", "fully", "seamless(ly)" is usually under-specified and high-blast.
+_BROAD_SCOPE_RE = re.compile(
+    r"\b(all|every|any|always|never|fully|entire|whole|seamless(?:ly)?|"
+    r"comprehensive(?:ly)?|robust|scalable|flexible)\b",
+    re.IGNORECASE,
+)
+
+# Concrete / testable language — lowers uncertainty. A requirement that names
+# numbers, units, comparisons, or an explicit verification verb is pinned down.
+_CONCRETE_RE = re.compile(
+    r"(\b\d+(\.\d+)?\s*(ms|s|sec|seconds?|minutes?|hours?|days?|%|"
+    r"kb|mb|gb|requests?|users?|items?|rows?|chars?|bytes?)\b"
+    r"|<=|>=|==|!=|\bmust\b|\bexactly\b|\bwithin\b|\bat (?:least|most)\b)",
+    re.IGNORECASE,
+)
+
+# High-blast-radius surfaces named in the requirement text. Mirrors the
+# Task blast-radius reasoning (schema/migration/config + auth/security +
+# public-API/data words) but reads the prose rather than likely_files,
+# because a Requirement carries no file list.
+_REQ_BLAST_HIGH_RE = re.compile(
+    r"\b(schema|migration|database|config(?:uration)?|settings|"
+    r"auth(?:entication|oriz\w*)?|security|permission|payment|billing|"
+    r"data\s*loss|delete|destructive|encryption|credential|api|protocol|"
+    r"backward[\s-]*compat\w*|breaking)\b",
+    re.IGNORECASE,
+)
+
+# Medium-blast surfaces — touch shared/cross-cutting concerns but not the
+# catastrophic ones above.
+_REQ_BLAST_MED_RE = re.compile(
+    r"\b(workflow|pipeline|integration|cross[\s-]*cutting|shared|core|"
+    r"every (?:task|user|command)|all (?:tasks|users|commands))\b",
+    re.IGNORECASE,
 )
 
 
@@ -322,6 +382,135 @@ def score_all(
         task.model_copy(update={"scores": score_task(task, provider=provider)})
         for task in tasks
     ]
+
+
+# ---------------------------------------------------------------------------
+# Assumption scoring (SL-6) — rank PRD requirements by blast_radius * uncertainty
+# ---------------------------------------------------------------------------
+
+
+class AssumptionScore(NamedTuple):
+    """A deterministic risk score for one PRD :class:`Requirement` (SL-6).
+
+    The whole point of SL-6 is to surface the assumptions a human should pin
+    down *before* planning: the ones that are both wide-reaching if wrong
+    (``blast_radius``) and not yet nailed down (``uncertainty``). ``priority``
+    is simply ``blast_radius * uncertainty`` (range 1-25) — ranking by it puts
+    the high-blast, low-confidence requirements at the top.
+
+    Both dimensions are 1-5 (the same scale as :class:`anvil.state.models.Score`)
+    and ``reasons`` is a short human-readable list of *why* the requirement
+    scored as uncertain, so the CLI can explain the ranking. Pure data — never
+    persisted, computed on demand from the requirement text.
+    """
+
+    requirement_id: str
+    text: str
+    blast_radius: int
+    uncertainty: int
+    priority: int
+    reasons: list[str]
+
+
+def _score_requirement_blast_radius(text: str) -> int:
+    """Blast-radius (1-5) for a requirement, derived from its prose.
+
+    A Requirement carries no ``likely_files`` (see
+    :class:`anvil.state.models.Requirement`), so we reuse the *spirit* of
+    :func:`_score_blast_radius` against the text instead: naming a
+    schema/migration/auth/data-loss surface is a 5; a shared/cross-cutting
+    workflow is a 3; everything else is the base 2.
+    """
+    if _REQ_BLAST_HIGH_RE.search(text):
+        return 5
+    if _REQ_BLAST_MED_RE.search(text):
+        return 3
+    return 2
+
+
+def score_requirement_assumption(req: Requirement) -> AssumptionScore:
+    """Score a single PRD :class:`Requirement` as a planning assumption (SL-6).
+
+    Deterministic and LLM-free. ``uncertainty`` (1-5) starts at a base 2 and is
+    raised by signals that the requirement is not yet pinned down:
+
+    - an unresolved ``[NEEDS DECISION]`` / ``TBD`` marker (the strongest signal),
+    - hedging / vague language ("maybe", "should probably", "etc."),
+    - broad, sweeping scope words ("all", "every", "fully", "seamless"),
+    - a very short / underspecified statement (few words),
+
+    and *lowered* by concrete, testable language (numbers, units, comparisons,
+    "must" / "within N ms"). The result is clamped to [1, 5].
+
+    ``blast_radius`` (1-5) is read from the same text via
+    :func:`_score_requirement_blast_radius`. ``priority`` is the product — the
+    SL-6 ranking key.
+
+    Pure: reads ``req.text``/``req.id`` only, never mutates, never does I/O.
+    """
+    text = req.text or ""
+    blast = _score_requirement_blast_radius(text)
+
+    uncertainty = 2
+    reasons: list[str] = []
+
+    if _NEEDS_DECISION_RE.search(text):
+        uncertainty += 2
+        reasons.append("unresolved [NEEDS DECISION] / TBD marker")
+    if _HEDGING_RE.search(text):
+        uncertainty += 1
+        reasons.append("hedging / vague language")
+    if _BROAD_SCOPE_RE.search(text):
+        uncertainty += 1
+        reasons.append("broad / sweeping scope")
+
+    # Underspecified: a one-liner with almost no detail is hard to verify.
+    word_count = len(text.split())
+    if word_count <= 6:
+        uncertainty += 1
+        reasons.append(f"underspecified ({word_count} words)")
+
+    # Concrete, testable phrasing is the one signal that *lowers* uncertainty.
+    if _CONCRETE_RE.search(text):
+        uncertainty -= 1
+        reasons.append("has concrete/testable language (−1)")
+
+    uncertainty = _clamp(uncertainty)
+
+    if not reasons:
+        reasons.append("no strong uncertainty signals (baseline)")
+
+    return AssumptionScore(
+        requirement_id=req.id,
+        text=text,
+        blast_radius=blast,
+        uncertainty=uncertainty,
+        priority=blast * uncertainty,
+        reasons=reasons,
+    )
+
+
+def rank_assumptions(
+    requirements: list[Requirement],
+    *,
+    limit: int | None = None,
+) -> list[AssumptionScore]:
+    """Rank PRD requirements by ``blast_radius * uncertainty`` descending (SL-6).
+
+    Ties break by uncertainty descending (a coin-flip assumption beats a
+    confident one at equal priority), then by requirement id ascending so the
+    order is fully deterministic. ``limit`` (when given and > 0) truncates to
+    the top-N highest-risk assumptions; ``None`` / non-positive returns all.
+
+    Pure — no I/O, no mutation. An empty input yields an empty list.
+    """
+    scored = [score_requirement_assumption(r) for r in requirements]
+    scored.sort(
+        key=lambda a: (-a.priority, -a.uncertainty, a.requirement_id)
+    )
+    if limit is not None and limit > 0:
+        return scored[:limit]
+    return scored
 
 
 # ---------------------------------------------------------------------------

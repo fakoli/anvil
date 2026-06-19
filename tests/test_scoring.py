@@ -11,8 +11,20 @@ from __future__ import annotations
 
 import datetime
 
-from anvil.planning.scoring import score_all, score_task
-from anvil.state.models import Score, Task, TaskPriority, TaskStatus, Verification
+from anvil.planning.scoring import (
+    rank_assumptions,
+    score_all,
+    score_requirement_assumption,
+    score_task,
+)
+from anvil.state.models import (
+    Requirement,
+    Score,
+    Task,
+    TaskPriority,
+    TaskStatus,
+    Verification,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -470,3 +482,106 @@ class TestBuildExpansionQueue:
 
         queue = build_expansion_queue([self._scored("T001", 5, title="Big refactor")])
         assert queue[0].title == "Big refactor"
+
+
+# ---------------------------------------------------------------------------
+# Assumption scoring (SL-6) — rank requirements by blast_radius * uncertainty
+# ---------------------------------------------------------------------------
+
+
+def _req(req_id: str, text: str) -> Requirement:
+    """Factory for a PRD Requirement suitable for assumption-scoring tests."""
+    return Requirement(id=req_id, prd_section="requirements", text=text)
+
+
+class TestScoreRequirementAssumption:
+    def test_priority_is_blast_times_uncertainty(self) -> None:
+        score = score_requirement_assumption(
+            _req("R001", "Maybe support every auth provider somehow [NEEDS DECISION]")
+        )
+        assert score.priority == score.blast_radius * score.uncertainty
+        assert 1 <= score.blast_radius <= 5
+        assert 1 <= score.uncertainty <= 5
+
+    def test_needs_decision_marker_raises_uncertainty(self) -> None:
+        marked = score_requirement_assumption(
+            _req("R001", "The system stores user records [NEEDS DECISION]")
+        )
+        clean = score_requirement_assumption(
+            _req("R002", "The system stores user records")
+        )
+        assert marked.uncertainty > clean.uncertainty
+        assert any("NEEDS DECISION" in r or "TBD" in r for r in marked.reasons)
+
+    def test_concrete_testable_language_lowers_uncertainty(self) -> None:
+        vague = score_requirement_assumption(
+            _req("R001", "The API should probably be fast and seamless")
+        )
+        concrete = score_requirement_assumption(
+            _req(
+                "R002",
+                "The API must respond within 200 ms for at least 99% of requests",
+            )
+        )
+        assert concrete.uncertainty < vague.uncertainty
+
+    def test_blast_radius_high_for_schema_language(self) -> None:
+        score = score_requirement_assumption(
+            _req("R001", "Run a database schema migration on startup")
+        )
+        assert score.blast_radius == 5
+
+    def test_blast_radius_base_for_plain_requirement(self) -> None:
+        score = score_requirement_assumption(
+            _req("R001", "Display a green checkmark beside completed items")
+        )
+        assert score.blast_radius == 2
+
+    def test_reasons_never_empty(self) -> None:
+        score = score_requirement_assumption(
+            _req("R001", "Show the user a confirmation dialog before deleting")
+        )
+        assert score.reasons  # always at least the baseline reason
+
+
+class TestRankAssumptions:
+    def test_ranks_uncertain_above_concrete(self) -> None:
+        """The known-uncertain requirement (NEEDS DECISION, no concreteness)
+        ranks above a concrete, testable one of the same blast surface."""
+        uncertain = _req(
+            "R001", "Migrate the auth schema somehow [NEEDS DECISION], maybe later"
+        )
+        concrete = _req(
+            "R002",
+            "Migrate the auth schema in exactly one transaction within 5 seconds",
+        )
+        ranked = rank_assumptions([concrete, uncertain])
+        assert ranked[0].requirement_id == "R001"
+        assert ranked[0].priority > ranked[1].priority
+
+    def test_limit_truncates_to_top_n(self) -> None:
+        reqs = [
+            _req("R001", "All users must always have seamless access [NEEDS DECISION]"),
+            _req("R002", "Maybe cache responses, TBD"),
+            _req("R003", "Render a list of items"),
+        ]
+        ranked = rank_assumptions(reqs, limit=2)
+        assert len(ranked) == 2
+
+    def test_limit_none_or_zero_returns_all(self) -> None:
+        reqs = [_req("R001", "a"), _req("R002", "b"), _req("R003", "c")]
+        assert len(rank_assumptions(reqs, limit=None)) == 3
+        assert len(rank_assumptions(reqs, limit=0)) == 3
+
+    def test_empty_requirements_yields_empty(self) -> None:
+        assert rank_assumptions([]) == []
+
+    def test_deterministic_ordering(self) -> None:
+        reqs = [
+            _req("R003", "Migrate the database schema [NEEDS DECISION]"),
+            _req("R001", "Migrate the database schema [NEEDS DECISION]"),
+            _req("R002", "Migrate the database schema [NEEDS DECISION]"),
+        ]
+        ranked = rank_assumptions(reqs)
+        # Equal priority/uncertainty → id ascending tiebreak.
+        assert [a.requirement_id for a in ranked] == ["R001", "R002", "R003"]
