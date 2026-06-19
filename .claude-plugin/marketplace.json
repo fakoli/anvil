@@ -1,0 +1,17 @@
+{
+  "name": "anvil",
+  "owner": {
+    "name": "Sekou Doumbouya",
+    "url": "https://github.com/fakoli"
+  },
+  "metadata": {
+    "description": "Anvil — local-first, runtime-neutral project state for humans and AI coding agents."
+  },
+  "plugins": [
+    {
+      "name": "anvil",
+      "source": "./",
+      "description": "Local-first, runtime-neutral project state for humans and AI coding agents — turn PRDs into lockable, evidence-backed work packets."
+    }
+  ]
+}

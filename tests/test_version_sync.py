@@ -11,10 +11,10 @@ The three sources that MUST agree (the Python world):
   3. ``.claude-plugin/plugin.json`` — what Claude Code's plugin loader
      reads at install/load
 
-The marketplace.json and registry/*.json entries are derived from
-plugin.json by ``scripts/generate-index.sh`` — they are checked by
-``scripts/validate.sh`` in CI, not by this test. README badges are
-documentation, not source of truth — also not checked here.
+``.claude-plugin/marketplace.json`` deliberately omits ``version`` so it
+inherits from ``plugin.json`` — there is no fourth version string to keep in
+sync (its schema/wiring is guarded by ``tests/test_marketplace.py``). README
+badges are documentation, not a source of truth — also not checked here.
 """
 
 from __future__ import annotations
