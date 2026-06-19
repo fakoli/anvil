@@ -13,8 +13,8 @@ can be inferred from the code, it does not belong here.
   `.env`, keys, tokens, customer data, or internal-only paths in commits.
 - **A version bump touches three files in lockstep** (`tests/test_version_sync.py`
   enforces it): `.claude-plugin/plugin.json`, `bin/pyproject.toml`,
-  `bin/src/anvil/__init__.py`. Add a `CHANGELOG.md` entry. `marketplace.json` and
-  `registry/*.json` mirror `plugin.json` — bump them together.
+  `bin/src/anvil/__init__.py`. Add a `CHANGELOG.md` entry. `marketplace.json`
+  omits `version`, so it inherits from `plugin.json` — nothing to bump there.
 - **One PR per item.** Merge only after CI is green **and** the Greptile review
   has landed and been addressed (fix real findings; reply on the ones you defer
   and record them in `docs/tech-debt-backlog.md`).
