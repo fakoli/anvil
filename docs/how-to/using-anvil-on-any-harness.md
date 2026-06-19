@@ -1,32 +1,59 @@
 # Using Anvil on any coding harness
 
 Anvil's engine does not depend on Claude Code. Any harness can drive the full
-loop through one of two supported surfaces:
+loop through one of two surfaces:
 
-1. **MCP** (Cursor, Windsurf, Cline, VS Code, Zed, Codex, Claude Desktop, …):
-   register the `anvil` server, get all 24 tools.
-2. **CLI** (any shell / any harness that can run commands): `anvil <command>`
-   with `--json` for machine-readable output.
+1. **MCP** — register the `anvil` stdio server, get all 24 tools.
+2. **CLI** — `anvil <command>` with `--json` for machine-readable output.
 
-## 1. Configure the MCP server
+You don't have to wire either by hand: `anvil install <harness>` writes the MCP
+config **and** drops `AGENTS.md` where the harness reads it.
+
+## One command
 
 ```bash
-anvil mcp-config cursor      # or: windsurf | cline | vscode | zed | codex | claude-code
+anvil install <harness>          # dry-run: prints exactly what it would write
+anvil install <harness> --write  # do it (idempotent merge + AGENTS.md)
 ```
 
-This prints a client-specific config block with the server pointed at this checkout's
-`bin/anvil-mcp` by absolute path (no plugin-root token). The command also tells
-you which file to paste it into. Flags:
+Flags: `--root <dir>` pins `ANVIL_ROOT` in the written config; `--uv-run` emits
+the explicit `uv run` invocation instead of the bash wrapper (Windows / no bash).
 
-- `--uv-run` — emit `uv run …` instead of the bash wrapper (Windows / no bash).
-- `--root <dir>` — pin `ANVIL_ROOT` in the config; omit to use the client's cwd.
-- `--json` — emit `{client, target_file, format, config_text}` for scripting.
+### One-liner (no checkout yet)
 
-Client envelope differences are handled for you: `mcpServers` (Cursor/Windsurf/
-Cline/Claude Code), `servers` + `type:stdio` (VS Code), `context_servers`
-(Zed), and `[mcp_servers.anvil]` TOML (Codex).
+```bash
+curl -fsSL https://raw.githubusercontent.com/fakoli/anvil/main/scripts/install.sh | sh -s -- <harness>
+```
 
-## 2. Or just use the CLI
+Provisions an anvil checkout (cached at `~/.anvil-src`, or `$ANVIL_SRC`) and runs
+`anvil install <harness> --write`. Needs `uv` on PATH.
+
+## Supported harnesses
+
+| Harness | MCP config written | Instruction file | `--write` |
+|---|---|---|---|
+| `claude-code` | `.mcp.json` (or install the plugin — see below) | `CLAUDE.md`/`AGENTS.md` | ✅ |
+| `openclaw` | `.mcp.json` (manifestless Claude bundle) | `AGENTS.md` | ✅ |
+| `cursor` | `~/.cursor/mcp.json` | `AGENTS.md` | ✅ |
+| `codex` | `~/.codex/config.toml` (`[mcp_servers.anvil]`) | `AGENTS.md` | ✅ |
+| `vscode` / `copilot` | `.vscode/mcp.json` | `.github/copilot-instructions.md` | ✅ |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | `AGENTS.md` | ✅ |
+| `zed` | `~/.config/zed/settings.json` (`context_servers`) | `AGENTS.md` | ✅ |
+| `opencode` | `opencode.json` (`mcp`, argv-array command) | `AGENTS.md` | ✅ |
+| `roo` | `.roo/mcp.json` | `AGENTS.md` | ✅ |
+| `amp` | `~/.config/amp/settings.json` (`amp.mcpServers`) | `AGENTS.md` | ✅ |
+| `gemini` | ships in `gemini-extension.json` | `AGENTS.md` (contextFile) | instruction only |
+| `cline` | editor-managed settings | `AGENTS.md` | instruction only |
+| `openhands` | `[mcp].stdio_servers` in `config.toml` (merge by hand) | `AGENTS.md` | instruction only |
+| `continue` | `.continue/mcpServers/anvil.yaml` (YAML) | `AGENTS.md` | print + reference |
+| `goose` | `extensions` in `~/.config/goose/config.yaml` (YAML) | `AGENTS.md` | print + reference |
+
+For harnesses without an in-place writer (gemini, cline, openhands, continue,
+goose), run `anvil mcp-config <harness>` to print the paste-ready block — it also
+tells you which file to paste it into — and see the committed reference under
+`packaging/<harness>/`. Aider has no MCP client, so it's intentionally absent.
+
+## Or just use the CLI
 
 ```bash
 anvil init && anvil prd parse && anvil plan && anvil next
@@ -34,12 +61,21 @@ anvil claim T001 && anvil packet T001
 anvil submit T001 --evidence … && anvil apply T001
 ```
 
-Every read command takes `--json`. See `AGENTS.md` for the full MCP-tool ⇄
-CLI-command table, which Codex/Copilot/Cursor/Windsurf/Cline/Gemini read
-natively.
+Every read command takes `--json`. `AGENTS.md` carries the full MCP-tool ⇄
+CLI-command table, which Codex/Copilot/Cursor/Windsurf/Cline/Gemini and the rest
+read natively.
 
-## Claude Code-specific pieces
+## Claude Code
 
-Claude Code's SessionStart/PreToolUse/PostToolUse hooks are Claude-Code-only.
-They automate parts of the workflow, but every state operation remains
-reachable through the CLI or MCP server. See `docs/hooks-reference.md`.
+Two options. Install as a plugin from the marketplace (MCP auto-starts, hooks
+included):
+
+```
+/plugin marketplace add fakoli/anvil
+/plugin install anvil@anvil
+```
+
+…or treat it like any other MCP host with `anvil install claude-code`. The
+SessionStart/PreToolUse/PostToolUse hooks are Claude-Code-only conveniences;
+every state operation stays reachable through the CLI or MCP server on any
+harness. See `docs/hooks-reference.md`.
