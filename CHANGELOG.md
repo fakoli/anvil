@@ -8,6 +8,17 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
+- **State is no longer stranded inside individual git worktrees.** anvil kept
+  `state.db` at `<cwd>/.anvil/` (or `bin/.anvil/`), so every git worktree got its
+  own separate, gitignored database — work tracked in one worktree was invisible in
+  another, and the canonical data ended up trapped in whichever worktree last
+  touched it. The default state dir is now a per-project **home workspace**,
+  `~/.anvil/workspaces/<repo>/.anvil/`, keyed by the canonical git repo
+  (`git rev-parse --git-common-dir`) so **all worktrees + the main checkout share
+  one `state.db`**. `ANVIL_ROOT` is unchanged (a literal `<ANVIL_ROOT>/.anvil`
+  override); `ANVIL_STATE_LAYOUT=local` keeps the legacy in-repo layout. CLI and
+  MCP resolve identically. See `docs/how-to/state-location.md`.
+
 - **The one-line installer no longer runs stale, config-corrupting anvil.**
   `scripts/install.sh` cached a shallow checkout at `~/.anvil-src` and updated it
   with `git pull --ff-only || warn` — a **fail-soft** update. When the shallow

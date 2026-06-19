@@ -39,6 +39,42 @@ _PRD_FILENAME = "prd.md"
 # env value is a misconfiguration that must surface, not be masked.
 _STATE_ROOT_ENV = "ANVIL_ROOT"
 
+# State LAYOUT: where the default (no ANVIL_ROOT, no explicit cwd) state dir lives.
+#   "workspace" (default) — a per-project workspace in the user's HOME, keyed by the
+#     canonical git repo, so EVERY git worktree of a project shares ONE state.db
+#     (fixes state stranded inside individual worktrees).
+#   "local" — the legacy in-repo `<cwd>/.anvil` (opt-in via ANVIL_STATE_LAYOUT=local;
+#     also what the test suite uses so cwd-relative fixtures keep working).
+# ANVIL_ROOT always wins and is always literal (`<ANVIL_ROOT>/.anvil`), in either layout.
+_STATE_LAYOUT_ENV = "ANVIL_STATE_LAYOUT"
+
+
+def _canonical_project_root(loc: Path) -> Path:
+    """The shared project root for a location: the MAIN git worktree root (so all
+    worktrees of one repo map to the same workspace), else ``loc`` itself."""
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(loc), "rev-parse",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            # --git-common-dir points at the MAIN worktree's `.git`; its parent is
+            # the canonical repo root shared by every worktree.
+            return Path(r.stdout.strip()).parent.resolve()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return loc.resolve()
+
+
+def _home_workspace_base(loc: Path) -> Path:
+    """The HOME-dir base (the dir that CONTAINS ``.anvil/``) for a project's shared
+    workspace: ``~/.anvil/workspaces/<repo-name>/``, keyed by the canonical repo."""
+    root = _canonical_project_root(loc)
+    return Path.home() / ".anvil" / "workspaces" / (root.name or "project")
+
 
 class StateRootError(click.ClickException):
     """ANVIL_ROOT is set but does not point at a valid project root.
@@ -77,14 +113,21 @@ def _resolve_base_dir(cwd: Path | None) -> Path:
     where to *create* the project. The existence check (fail-loud on a wrong
     env value) lives in :func:`_resolve_state_dir`, which the read commands use.
     """
-    if cwd is not None:
-        return cwd.resolve()
+    local = os.environ.get(_STATE_LAYOUT_ENV, "workspace").strip().lower() == "local"
 
+    # 1. Explicit cwd wins. In workspace layout it maps to THAT project's shared
+    #    home workspace (so the MCP server + CLI agree from any worktree).
+    if cwd is not None:
+        return cwd.resolve() if local else _home_workspace_base(cwd)
+
+    # 2. ANVIL_ROOT is always a literal override (`<ANVIL_ROOT>/.anvil`).
     env_root = os.environ.get(_STATE_ROOT_ENV)
     if env_root is not None and env_root.strip() != "":
         return Path(env_root).expanduser().resolve()
 
-    return Path.cwd().resolve()
+    # 3. Default: the home workspace shared across all worktrees of the project,
+    #    unless ANVIL_STATE_LAYOUT=local keeps state in-repo (legacy / tests).
+    return Path.cwd().resolve() if local else _home_workspace_base(Path.cwd())
 
 
 def _resolve_state_dir(cwd: Path | None) -> Path:

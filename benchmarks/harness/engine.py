@@ -76,7 +76,10 @@ def run(args: list[str], cwd: Path, actor: str | None = None,
     cmd = [anvil_binary(), *args]
     if actor is not None and "--actor" not in args:
         cmd += ["--actor", actor]
-    env = {**os.environ, "NO_COLOR": "1"}
+    # Each scenario is an isolated git repo with its own in-repo .anvil/; force the
+    # legacy local layout so state stays in `cwd/.anvil` rather than resolving to the
+    # shared ~/.anvil/workspaces/<repo>/ home workspace (the production default).
+    env = {**os.environ, "NO_COLOR": "1", "ANVIL_STATE_LAYOUT": "local"}
     try:
         proc = subprocess.run(
             cmd, cwd=str(cwd), capture_output=True, text=True,
