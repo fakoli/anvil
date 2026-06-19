@@ -15,9 +15,11 @@ can be inferred from the code, it does not belong here.
   enforces it): `.claude-plugin/plugin.json`, `bin/pyproject.toml`,
   `bin/src/anvil/__init__.py`. Add a `CHANGELOG.md` entry. `marketplace.json`
   omits `version`, so it inherits from `plugin.json` — nothing to bump there.
-- **One PR per item.** Merge only after CI is green **and** the Greptile review
-  has landed and been addressed (fix real findings; reply on the ones you defer
-  and record them in `docs/tech-debt-backlog.md`).
+- **One PR per item.** Merge only after CI is green **and** both automated
+  reviewers — **Greptile** and **GitHub Copilot** — have landed and been addressed
+  (fix real findings; reply on the ones you defer and record them in
+  `docs/tech-debt-backlog.md`). Wait for both before merging; a PR can sit
+  `BLOCKED` until the second review posts.
 
 ## Map
 
