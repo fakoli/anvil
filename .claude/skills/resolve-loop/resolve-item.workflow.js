@@ -119,8 +119,9 @@ const impl = await agent(
 
 // 4. Adversarial review — fresh eyes, pass/fail, until clean or 2 rounds.
 phase('Review')
+const MAX_ROUNDS = 2
 let verdict = null
-for (let round = 0; round < 2; round++) {
+for (let round = 0; round < MAX_ROUNDS; round++) {
   const reviews = (await parallel(['correctness', 'over-engineering + edge cases'].map(lens => () =>
     agent(
       `Adversarially review the uncommitted diff in the worktree at ${item.worktree} ` +
@@ -133,11 +134,17 @@ for (let round = 0; round < 2; round++) {
   const blockers = reviews.flatMap(r => r.findings).filter(f => f.severity === 'blocker')
   verdict = { round, pass: reviews.every(r => r.verdict === 'PASS') && blockers.length === 0, reviews }
   if (verdict.pass) break
-  await agent(
-    `Fix these review findings in the worktree at ${item.worktree}. Keep the diff minimal.\n\n` +
-    `${JSON.stringify(reviews.flatMap(r => r.findings), null, 2)}`,
-    { label: `fix:r${round}`, phase: 'Review' }
-  )
+  // Only apply fixes if another review round will follow — otherwise the
+  // worktree would end up ahead of the FAIL verdict we return, with the fix
+  // never re-reviewed. On the last round we return the honest FAIL and let the
+  // caller decide (re-run the loop, or intervene).
+  if (round < MAX_ROUNDS - 1) {
+    await agent(
+      `Fix these review findings in the worktree at ${item.worktree}. Keep the diff minimal.\n\n` +
+      `${JSON.stringify(reviews.flatMap(r => r.findings), null, 2)}`,
+      { label: `fix:r${round}`, phase: 'Review' }
+    )
+  }
 }
 
 return { stage: 'implemented', item: { id: item.id, title: item.title }, choice, impl, verdict }
