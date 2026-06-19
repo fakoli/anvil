@@ -3695,20 +3695,23 @@ class TestPhase5EvidenceAndApplyHandlers:
         finally:
             b.close()
 
-    def test_evidence_submitted_rejects_empty_files_changed(
+    def test_evidence_submitted_allows_empty_files_changed(
         self, tmp_path: Path
     ) -> None:
-        """evidence.submitted with files_changed=[] raises TransactionAborted."""
+        """B32: evidence.submitted with files_changed=[] but non-empty
+        commands_run is accepted — a verification-only step changes no files,
+        and commands_run is the mandatory proof."""
         b = _make_backend(tmp_path)
         try:
             _setup_claimable_task_and_claim(b)
 
             payload = _make_evidence_payload(files_changed=[])
-            with pytest.raises((EventRejected, TransactionAborted), match="files_changed"):
-                b.append(_make_event(
-                    "evidence.submitted", payload,
-                    event_id="E000011", target_kind="task", target_id="T001",
-                ))
+            # No exception: commands_run is the mandatory proof; files may be empty.
+            b.append(_make_event(
+                "evidence.submitted", payload,
+                event_id="E000011", target_kind="task", target_id="T001",
+            ))
+            assert b.get_task("T001").status.value == "needs_review"
         finally:
             b.close()
 
@@ -9472,11 +9475,12 @@ class TestDecideApplyContract:
             _setup_claimable_task_and_claim(b)
             initial_event_count = len(_read_jsonl(events_path))
 
-            # files_changed=[] triggers EventRejected in _check_evidence_submitted.
+            # commands_run=[] triggers EventRejected in _check_evidence_submitted
+            # (the mandatory proof). files_changed=[] alone is now allowed (B32).
             with pytest.raises(EventRejected):
                 b.append(_make_event(
                     "evidence.submitted",
-                    _make_evidence_payload(files_changed=[]),
+                    _make_evidence_payload(commands_run=[]),
                     target_kind="task", target_id="T001",
                 ))
 
