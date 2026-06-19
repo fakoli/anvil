@@ -20,8 +20,11 @@ can be inferred from the code, it does not belong here.
   (fix real findings; reply on the ones you defer and record them in
   `docs/tech-debt-backlog.md`). Wait for both before merging; a PR can sit
   `BLOCKED` until the second review posts. **Re-reviews are not automatic** — a
-  push does not re-trigger them; request one (`@greptile review`) only when you
-  want changed code re-checked. A finding you fixed directly needs no re-review.
+  push does not re-trigger Greptile or Copilot. A finding fixed with a small,
+  direct change needs no re-review. For a **substantial or multi-line fix**,
+  request a re-review so the bots re-check the changed code: **Greptile** via an
+  `@greptile review` comment; **Copilot** by re-requesting its review on the PR
+  (re-request review / `@copilot`).
 
 ## Map
 
