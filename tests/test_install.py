@@ -208,6 +208,21 @@ def test_codex_rollback_without_install_does_not_touch_global(
     assert "Nothing to roll back" in result.stderr
 
 
+def test_codex_write_without_cli_says_run_yourself(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--write` on a host without the `codex` CLI must NOT claim 'Ran:' — the
+    commands were only printed (Greptile P1)."""
+    def _print_only(cmds: list, *, run: bool) -> list:
+        return [{"cmd": " ".join(c), "ran": False, "ok": None, "detail": ""}
+                for c in cmds]
+
+    monkeypatch.setattr(install_mod, "_run_or_print", _print_only)
+    result = runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
+    assert "Ran:" not in result.stderr
+    assert "codex not on PATH" in result.stderr
+
+
 def test_codex_env_flag_in_generated_command(sandbox: dict[str, Path]) -> None:
     """`--root` pins ANVIL_ROOT, which must surface as a `--env` in `mcp add` (#10)."""
     runner.invoke(
@@ -374,7 +389,8 @@ def test_instruction_refuses_ambiguous_markers(sandbox: dict[str, Path]) -> None
     instr.write_text("# notes\nSee <!-- END ANVIL --> for details.\n")
     before = instr.read_text()
     result = runner.invoke(app, ["install", "cursor", "--write"])
-    assert result.exit_code != 0  # refused
+    assert result.exit_code == 2  # clean refusal, not a traceback
+    assert "Error:" in result.stderr and "marker" in result.stderr
     assert instr.read_text() == before  # untouched — no corruption
 
 

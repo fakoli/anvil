@@ -705,7 +705,13 @@ def install(
             typer.echo(f"# {r['action']}: {r['path']}", err=True)
         return
 
-    mcp, instr = _plan_actions(h, use_uv_run=use_uv_run, root=root)
+    try:
+        mcp, instr = _plan_actions(h, use_uv_run=use_uv_run, root=root)
+    except ValueError as e:  # ambiguous markers / self-collision — refuse cleanly
+        if json_output:
+            fail(_COMMAND, str(e), code="bad_request", exit_code=2)
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(code=2) from e
     # Codex installs natively via its own CLI; other harnesses get the .agents/skills drop.
     native_cmds = (
         _codex_install_commands(use_uv_run=use_uv_run, root=root)
@@ -786,7 +792,14 @@ def install(
         return
 
     if native_cmds:
-        head = "Ran" if write else "Run these (Codex writes its own config)"
+        # Derive the header from whether commands ACTUALLY ran, not the write flag —
+        # `--write` on a host without the `codex` CLI only prints them.
+        if write and not any(c["ran"] for c in native_results):
+            head = "Run these yourself (codex not on PATH — Codex writes its own config)"
+        elif write:
+            head = "Ran"
+        else:
+            head = "Run these (Codex writes its own config)"
         typer.echo(f"# {head}:", err=True)
         for c in native_results:
             suffix = "" if c["ok"] in (None, True) else f"  ⚠ {c['detail']}"
