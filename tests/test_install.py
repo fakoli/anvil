@@ -86,8 +86,13 @@ def test_dry_run_writes_nothing(harness: str, sandbox: dict[str, Path]) -> None:
     assert [p for p in home_files if p.is_file()] == []
     assert [p for p in project_files if p.is_file()] == []
 
-    # The intended instruction path is surfaced (on stderr — stdout stays clean).
-    assert "Instruction file" in result.stderr
+    # The dry-run surfaces SOMETHING per harness (on stderr — stdout stays clean):
+    # the instruction path for file-writing harnesses, or the native commands for
+    # the ones that install via their own CLI (codex, openclaw).
+    if HARNESSES[harness].writes_instructions:
+        assert "Instruction file" in result.stderr
+    else:
+        assert "Run these" in result.stderr
 
 
 def test_dry_run_json_envelope(sandbox: dict[str, Path]) -> None:
@@ -178,6 +183,58 @@ def test_codex_skips_agents_skills_drop(sandbox: dict[str, Path]) -> None:
     runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
     assert not (sandbox["project"] / ".agents" / "skills").exists()
     assert "BEGIN ANVIL" in (sandbox["project"] / "AGENTS.md").read_text()
+
+
+def test_openclaw_native_commands_generated(sandbox: dict[str, Path]) -> None:
+    """OpenClaw installs via its own CLI: `mcp add` (probed) + `plugins install`
+    from anvil's Claude-compatible marketplace."""
+    result = runner.invoke(
+        app, ["install", "openclaw", "--write"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    cmds = [" ".join(c) for c in sandbox["native_cmds"]]
+    mcp_add = next(c for c in cmds if c.startswith("openclaw mcp add anvil"))
+    # --no-probe: a cold-venv probe timeout must not block the save (half-install).
+    assert "--no-probe" in mcp_add
+    assert "--command bash" in mcp_add and "anvil-mcp" in mcp_add and "--arg" in mcp_add
+    # --force: re-install refreshes the plugin instead of a silent "already exists".
+    assert "openclaw plugins install anvil --marketplace fakoli/anvil --force" in cmds
+
+
+def test_native_command_failure_is_surfaced(
+    sandbox: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A native command that RAN and failed must show a `⚠` with detail, not pass
+    silently (review Finding 3 — exit-0-with-error misclassification)."""
+    def _failing(cmds: list, *, run: bool) -> list:
+        return [{"cmd": " ".join(c), "ran": True, "ok": False, "detail": "boom"}
+                for c in cmds]
+
+    monkeypatch.setattr(install_mod, "_run_or_print", _failing)
+    result = runner.invoke(app, ["install", "openclaw", "--write"], catch_exceptions=False)
+    assert "⚠" in result.stderr and "boom" in result.stderr
+
+
+def test_openclaw_touches_no_user_files(sandbox: dict[str, Path]) -> None:
+    """OpenClaw owns its own config — anvil must write NO files: no .mcp.json,
+    no AGENTS.md, no .agents/skills (the old row hand-edited .mcp.json + AGENTS.md)."""
+    runner.invoke(app, ["install", "openclaw", "--write"], catch_exceptions=False)
+    assert not (sandbox["project"] / ".mcp.json").exists()
+    assert not (sandbox["project"] / "AGENTS.md").exists()
+    assert not (sandbox["project"] / ".agents").exists()
+    # No backups either — nothing was modified.
+    assert list(sandbox["project"].rglob("*.anvil-bak")) == []
+
+
+def test_openclaw_rollback_runs_native_removers(sandbox: dict[str, Path]) -> None:
+    """OpenClaw rollback undoes via its own removers: `mcp unset` + `plugins
+    uninstall`."""
+    runner.invoke(app, ["install", "openclaw", "--write"], catch_exceptions=False)
+    sandbox["native_cmds"].clear()
+    runner.invoke(app, ["install", "openclaw", "--rollback"], catch_exceptions=False)
+    cmds = [" ".join(c) for c in sandbox["native_cmds"]]
+    assert "openclaw mcp unset anvil" in cmds
+    assert "openclaw plugins uninstall anvil --force" in cmds
 
 
 def test_codex_rollback_runs_native_removers(sandbox: dict[str, Path]) -> None:
