@@ -419,9 +419,11 @@ skills. Driven by the shipped work in #38–#41 (Codex-native, automations, Open
 installer hardening) plus two deep-research workflows (Codex `wf_d37724b1`, OpenClaw
 `wf_2d3520af`) that map each harness's native features to anvil integrations.
 
-The two maximization items (B41/B42) are **deliberately not pre-authored in detail** —
-their tasks come from the research workflows' ranked roadmaps. B38–B40 are ready now
-and parallelizable.
+The two maximization items (B41/B42) are now **fully specced** by their research briefs
+(`docs/research/2026-06-19-maximize-anvil-{codex,openclaw}.md`) — each carries a ranked
+roadmap + verify-before-building list. B38–B40 are ready and parallelizable. Suggested
+order: **B41 Codex quick-wins (openai.yaml + hooks bundle, highest value / lowest risk)
+→ B40 (PATH) → B38+B39 (tiering + docs) → B42 OpenClaw Phase 1**.
 
 ### B38 — Harness tiering: MCP-only best-effort for non-supported harnesses
 
@@ -434,6 +436,16 @@ and parallelizable.
   where it exists — survey which do — else the safe JSON merge); no AGENTS.md splice,
   no `.agents/skills` drop for them. A `tier`/`supported` concept on `Harness`. Tests
   per tier. `anvil install <unsupported>` clearly labels it best-effort.
+- **Implementation notes (from this session's scoping):** within `HARNESSES`, supported =
+  `codex` + `openclaw` (claude-code is the separate plugin path, not a HARNESSES key).
+  Cleanest change = flip the `Harness` defaults to MCP-only (`reads_agents_skills=False`,
+  `writes_instructions=False`) and set `writes_instructions=True` only on `codex`. **Real
+  test churn:** `cursor` is the AGENTS.md/skills example across ~15 tests — switch the
+  instruction-splice tests to `codex` (still splices AGENTS.md) and **delete the
+  `.agents/skills` drop + its tests** — with B38 no harness uses the neutral skills drop
+  anymore (supported harnesses ship skills via their plugin), so that code becomes dead
+  (ponytail: remove it). Add a per-tier test asserting MCP-only harnesses write ONLY the
+  MCP config.
 - **Likely files:** `bin/src/anvil/cli/install.py`, `tests/test_install.py`
 - **Depends on:** — (the `writes_instructions` groundwork is merged)
 
@@ -462,25 +474,71 @@ and parallelizable.
 
 ### B41 — Maximize anvil on Codex (deep native integration)
 
-- **Priority:** P1  **Effort:** L  **Type:** feature  **Status:** BLOCKED on research (`wf_d37724b1`)
-- **Rationale:** Beyond MCP + plugin, exploit Codex's native surface (rich skills +
-  Plugins-panel interface, `notify` lifecycle hooks, automations, `codex exec`/`review`/
-  `cloud`, sessions/profiles/sandbox) for the best loop experience. Sub-tasks (B-numbers)
-  authored from the research workflow's ranked roadmap.
-- **Acceptance:** the research roadmap's quick-wins + top opportunities implemented,
-  tested, and validated against the real `codex` CLI without harming the harness.
-- **Depends on:** research workflow `wf_d37724b1` (Codex maximization)
+- **Priority:** P1  **Effort:** L  **Type:** feature  **Status:** READY (research done) — **spec: [`docs/research/2026-06-19-maximize-anvil-codex.md`](../research/2026-06-19-maximize-anvil-codex.md)**
+- **Rationale:** Beyond MCP + plugin, exploit Codex's native surface for the best loop
+  experience. Research (verified against codex-cli 0.130.0) ranked ~14 distinct bets.
+- **Headline (do first):** **Bundle anvil's existing `hooks/hooks.json` into the Codex
+  plugin.** Codex plugin hooks use the *identical Claude Code hooks.json schema*
+  (confirmed on-machine), and anvil already ships `hooks/hooks.json` + 4 scripts +
+  `cli/hooks.py` — so this is a **packaging move with ZERO engine change** that closes
+  the biggest gap (Codex gets MCP+plugin+automations but no claim-discipline/evidence
+  hooks). SessionStart inject, PreToolUse claim-check, PostToolUse file-record, Bash
+  evidence-capture all port.
+- **Quick wins (S):** (1) per-skill `agents/openai.yaml` for all 8 skills + shared icons,
+  using the REAL minimal schema only (`interface`: display_name, short_description,
+  icon_large, icon_small, default_prompt — NOT the speculative `dependencies.tools`/
+  `policy` blocks) so skills appear named in the `/skills` picker + Plugins panel;
+  (2) rewrite the `anvil-work-queue` automation prompt to drive skills by name + bound
+  `memory.md` to the last ~3 runs.
+- **Follow-ons (M, new engine code):** a Stop-hook evidence gate + PostToolUse heartbeat
+  (one new `anvil hooks ...` subcommand each, cross-harness); `codex exec` / `codex
+  review` runners under `packaging/codex/loops/`.
+- **Hard constraints:** NEVER text-edit `~/.codex/config.toml` (it corrupted it before);
+  all per-run config goes through `codex exec/review -c/-s/-a/-p` flags; `codex review`
+  has NO `--json` (grep a `VERDICT PASS/FAIL` line, don't parse JSON).
+- **Verify before building** (see brief §"verify_before_building"): plugin-bundled hooks
+  need a one-time per-plugin trust toggle (tell the user or they silently no-op); confirm
+  `PLUGIN_ROOT`/`CLAUDE_PLUGIN_ROOT` alias + Stop-hook continuation/`stop_hook_active`;
+  validate the extended openai.yaml keys before using them; confirm the automation skill
+  sigil resolves; keep `codex cloud`/`apply` docs-only (experimental, different id namespace).
+- **Acceptance:** the headline + quick wins shipped, tested, validated against the real
+  `codex` CLI without harming the harness; do NOT ship custom slash-command prompt files
+  (deprecated) or a `notify` key (global/exclusive/taken).
+- **Depends on:** — (research complete)
 
 ### B42 — Maximize anvil on OpenClaw (deep native integration)
 
-- **Priority:** P1  **Effort:** L  **Type:** feature  **Status:** BLOCKED on research (`wf_2d3520af`)
-- **Rationale:** OpenClaw uniquely offers `hooks`, `cron`, isolated `agents`/`sandbox`,
-  `channels` (messaging), `commitments`, ACP — features no other harness has. Map
-  anvil's claim/lease/evidence loop onto them (auto-renew leases, scheduled queue-work,
-  task↔isolated-agent, finish-gate-to-channel). Sub-tasks from the research roadmap.
-- **Acceptance:** the research roadmap's quick-wins + top opportunities implemented,
-  tested, and validated against the real `openclaw` CLI without harming the harness.
-- **Depends on:** research workflow `wf_2d3520af` (OpenClaw maximization)
+- **Priority:** P1  **Effort:** L  **Type:** feature  **Status:** READY (research done) — **spec: [`docs/research/2026-06-19-maximize-anvil-openclaw.md`](../research/2026-06-19-maximize-anvil-openclaw.md)**
+- **Rationale:** OpenClaw uniquely offers `hooks` (BLOCKING, unlike Claude's non-blocking
+  anvil hooks), Gateway `cron` (no model cost, runs with zero active agents), `channels`
+  (Slack/Telegram), isolated `agents` + session `sandbox`, `commitments`, ACP. Research
+  (verified against openclaw 2026.6.6) splits on one fault line: the cron/CLI layer is
+  verified; the native plugin hooks rest on `.d.ts`-only claims and need a smoke test.
+- **Phase 1 — verified cron/CLI layer (ship first, no native plugin):** printed,
+  opt-in `openclaw cron add` recipes — queue-probe (`anvil next -q`, exit 3 on empty,
+  every 10m, zero model cost), nightly `sync`+`drift --json` reconcile, lease-watchdog
+  (`doctor --json` → `sync --fix --yes` on stale-lease signal), finish-gate nudge
+  (`list --status needs_review --json` → `--announce` to a channel). One small net-new
+  CLI verb: **`anvil notify-digest`** (one-line needs_review+blockers summary; prints
+  nothing at count 0). Plus the sandbox-allowlist install note (add anvil tools to
+  `sandbox.tools.allow` or the 24 MCP tools vanish in sandboxed turns).
+- **Phase 2 — native plugin BLOCKING gates (the differentiator, gated on a smoke test):**
+  a `definePluginEntry` plugin (anvil's first) — `before_agent_finalize` finish-gate
+  (block "done" without passing evidence), `after_tool_call` evidence auto-capture,
+  `before_tool_call` claim guard, `session_start` state-banner injection.
+- **Phase 3:** isolated-agent-per-task + session-scoped sandbox (claim.actor = agent =
+  container = branch), work-packet memory recall, channel pings.
+- **Hard constraints:** anvil writes NO files for OpenClaw; cron/agent/config side-effects
+  are PRINTED opt-in, never auto-registered.
+- **Verify before building** (brief §"verify_before_building"): CRITICAL — smoke-test that
+  `before_agent_finalize`/`before_tool_call` actually fire in 2026.6.6 before investing
+  (the names are `.d.ts`-only); `anvil notify-digest` and `anvil claims reap` do NOT exist
+  yet (net-new); `before_tool_call` matches OpenClaw envelopes (`code_mode_exec`,
+  `apply_patch`), not Claude `Edit`/`Write`; confirm cron host PATH + exit-3 propagation;
+  `sandbox list` is 0 (off by default).
+- **Acceptance:** Phase 1 shipped (recipes + `notify-digest`), tested, validated against
+  the real `openclaw` CLI without harming the harness; Phase 2+ gated on the smoke test.
+- **Depends on:** — (research complete)
 
 ### B43 — HOME-workspace state layout (one shared state.db per project) [P0]
 
