@@ -22,6 +22,7 @@ from anvil.cli.mcp_config import mcp_config
 from anvil.cli.migrate import migrate_app, migrate_events
 from anvil.cli.packet_apply import apply, packet, submit
 from anvil.cli.plan import (
+    assumptions,
     deps,
     expand,
     list_tasks,
@@ -104,6 +105,7 @@ app.command()(conflicts)
 app.command()(doctor)
 app.command()(plan)
 app.command()(score)
+app.command()(assumptions)
 app.command()(expand)
 app.command()(deps)
 app.command("list")(list_tasks)

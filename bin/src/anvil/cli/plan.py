@@ -837,6 +837,125 @@ def score(
 
 
 # ---------------------------------------------------------------------------
+# assumptions subcommand (SL-6) — rank PRD requirements by risk before planning
+# ---------------------------------------------------------------------------
+
+
+_ASSUMPTIONS_DEFAULT_LIMIT = 5
+
+
+def assumptions(
+    limit: int = typer.Option(  # noqa: B008
+        _ASSUMPTIONS_DEFAULT_LIMIT,
+        "--limit",
+        "-n",
+        help=(
+            "Show the top-N highest-risk assumptions. Pass 0 (or a negative "
+            f"number) to show all. Default {_ASSUMPTIONS_DEFAULT_LIMIT}."
+        ),
+    ),
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the current working directory.",
+        hidden=True,
+    ),
+) -> None:
+    """Rank PRD requirements by ``blast_radius * uncertainty`` (SL-6).
+
+    Surfaces the highest-blast-radius, lowest-confidence assumptions BEFORE
+    planning so a human can pin them down early. Each requirement gets a
+    deterministic, rule-based ``blast_radius`` and ``uncertainty`` (both 1-5);
+    the ranking key ``priority`` is their product. Uncertainty rises with
+    unresolved ``[NEEDS DECISION]`` / ``TBD`` markers, hedging or vague
+    language, broad sweeping scope, and underspecified one-liners; it falls
+    when the requirement carries concrete, testable language.
+
+    This command is purely ADVISORY — it never blocks claims or mutates state.
+    With ``--json`` it emits ``{"ok": true, "command": "assumptions", "data":
+    {"assumptions": [...], "count": N, "limit": L}}``. A project with no parsed
+    requirements prints a friendly empty result and exits 0.
+    """
+    from anvil.planning.scoring import rank_assumptions
+
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command="assumptions", json_output=json_output)
+
+    backend = _open_backend(state_dir)
+    try:
+        requirements = backend.list_requirements()
+    finally:
+        backend.close()
+
+    # ``--limit 0`` (or negative) means "show all" — normalise to None so the
+    # scorer does not truncate.
+    effective_limit = limit if limit > 0 else None
+    ranked = rank_assumptions(requirements, limit=effective_limit)
+
+    if json_output:
+        emit_success(
+            "assumptions",
+            {
+                "assumptions": [
+                    {
+                        "requirement_id": a.requirement_id,
+                        "text": a.text,
+                        "blast_radius": a.blast_radius,
+                        "uncertainty": a.uncertainty,
+                        "priority": a.priority,
+                        "reasons": a.reasons,
+                    }
+                    for a in ranked
+                ],
+                "count": len(ranked),
+                "limit": limit,
+            },
+        )
+        return
+
+    if not requirements:
+        typer.echo(
+            "No PRD requirements found. Author a `## Requirements` section in "
+            ".anvil/prd.md and run `anvil prd parse` first."
+        )
+        return
+
+    header = "HIGH-RISK ASSUMPTIONS (ranked by blast_radius x uncertainty)"
+    typer.echo(header)
+    typer.echo("-" * len(header))
+    col = (
+        f"{'ReqID':<8} "
+        f"{'Blast':>5} "
+        f"{'Uncert':>6} "
+        f"{'Priority':>8}  "
+        "Assumption"
+    )
+    typer.echo(col)
+    typer.echo("-" * len(col))
+    for a in ranked:
+        title = a.text if len(a.text) <= 50 else a.text[:47] + "..."
+        typer.echo(
+            f"{a.requirement_id:<8} "
+            f"{a.blast_radius:>5} "
+            f"{a.uncertainty:>6} "
+            f"{a.priority:>8}  "
+            f"{title}"
+        )
+        typer.echo(f"{'':<8} {'':>5} {'':>6} {'':>8}  why: {', '.join(a.reasons)}")
+
+    shown = (
+        f"Showing top {len(ranked)} of {len(requirements)} requirement(s)."
+        if len(ranked) < len(requirements)
+        else f"Showing all {len(requirements)} requirement(s) by priority."
+    )
+    typer.echo(
+        f"\n{shown} "
+        "Advisory only — address the high-priority assumptions before planning."
+    )
+
+
+# ---------------------------------------------------------------------------
 # expand subcommand
 # ---------------------------------------------------------------------------
 

@@ -755,3 +755,129 @@ class TestReviewTasksDraftPrdHint:
         result = _invoke_cmd(tmp_path, ["review", "tasks"])
         assert result.exit_code == 0, result.output
         assert "prd review --approve" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# SL-6 — `anvil assumptions` ranks PRD requirements by blast x uncertainty
+# ---------------------------------------------------------------------------
+
+
+# A PRD whose requirements span the risk spectrum: R001 is high-blast +
+# high-uncertainty (schema + [NEEDS DECISION] + hedging), R002 is concrete and
+# low-blast.
+_ASSUMPTIONS_PRD = """\
+# Project: Assumptions Test
+
+## Summary
+
+Project for the assumptions CLI tests.
+
+## Goals
+
+- Surface risky assumptions early.
+
+## Requirements
+
+- R001: Migrate the database schema somehow [NEEDS DECISION], maybe later.
+- R002: Render a list of 10 items, sorted alphabetically.
+
+## Features
+
+### F001: Core
+
+The only feature.
+
+**Requirements:** R001, R002
+
+## Tasks
+
+### T001: Build the thing
+
+**Feature:** F001
+**Priority:** medium
+**Likely files:** src/a.py
+
+**Acceptance criteria:**
+
+- It works.
+
+**Verification:**
+
+- `pytest -q`
+
+Body.
+"""
+
+
+class TestAssumptionsCommand:
+    """SL-6: `anvil assumptions` ranks requirements by blast x uncertainty."""
+
+    def _bootstrap(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Assumptions Project")
+        _write_prd(tmp_path, _ASSUMPTIONS_PRD)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+
+    def test_json_envelope_ranks_uncertain_first(self, tmp_path: Path) -> None:
+        self._bootstrap(tmp_path)
+        result = _invoke_cmd(tmp_path, ["assumptions", "--json"])
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is True
+        assert envelope["command"] == "assumptions"
+        data = envelope["data"]
+        assert data["count"] == 2
+        ranked = data["assumptions"]
+        # The known-uncertain, high-blast R001 ranks above the concrete R002.
+        assert ranked[0]["requirement_id"] == "R001"
+        assert ranked[0]["priority"] >= ranked[1]["priority"]
+        # Envelope carries the per-dimension breakdown + reasons.
+        assert ranked[0]["blast_radius"] >= 1
+        assert ranked[0]["uncertainty"] >= 1
+        assert ranked[0]["reasons"]
+
+    def test_limit_truncates_ranked_list(self, tmp_path: Path) -> None:
+        self._bootstrap(tmp_path)
+        result = _invoke_cmd(tmp_path, ["assumptions", "--limit", "1", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["count"] == 1
+        assert data["assumptions"][0]["requirement_id"] == "R001"
+
+    def test_human_output_lists_assumptions(self, tmp_path: Path) -> None:
+        self._bootstrap(tmp_path)
+        result = _invoke_cmd(tmp_path, ["assumptions"])
+        assert result.exit_code == 0, result.output
+        assert "R001" in result.output
+        assert "Priority" in result.output
+        assert "why:" in result.output
+
+    def test_empty_prd_exits_zero(self, tmp_path: Path) -> None:
+        """A project with no parsed requirements is a friendly no-op, exit 0."""
+        _do_init(tmp_path, name="Empty Assumptions Project")
+        # No prd parse → requirements table is empty.
+        result = _invoke_cmd(tmp_path, ["assumptions"])
+        assert result.exit_code == 0, result.output
+        assert "No PRD requirements" in result.output
+
+    def test_empty_prd_json_exits_zero(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Empty Assumptions JSON Project")
+        result = _invoke_cmd(tmp_path, ["assumptions", "--json"])
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is True
+        assert envelope["data"]["count"] == 0
+        assert envelope["data"]["assumptions"] == []
+
+    def test_is_advisory_never_blocks_claims(self, tmp_path: Path) -> None:
+        """The command is read-only: running it does not change task state."""
+        self._bootstrap(tmp_path)
+        assert _invoke_cmd(tmp_path, ["plan", "--no-llm"]).exit_code == 0
+        before = _invoke_cmd(tmp_path, ["list", "--json"]).output
+        assert _invoke_cmd(tmp_path, ["assumptions"]).exit_code == 0
+        after = _invoke_cmd(tmp_path, ["list", "--json"]).output
+        assert before == after
+
+    def test_help_documents_limit(self) -> None:
+        result = runner.invoke(app, ["assumptions", "--help"])
+        assert result.exit_code == 0
+        assert "--limit" in result.output
