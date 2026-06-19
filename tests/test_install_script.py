@@ -29,3 +29,15 @@ def test_install_script_requires_a_harness_arg() -> None:
     )
     assert r.returncode == 2
     assert "Usage" in r.stderr
+
+
+def test_install_script_force_updates_cache_and_fails_loud() -> None:
+    """A stale cached checkout must be FORCED to latest main, not fail-soft to old
+    code: `pull --ff-only || warn` once kept running pre-fix anvil that corrupted
+    configs. The updater now resets hard to a fetched ref and exits on failure."""
+    text = _script().read_text()
+    assert "pull --ff-only" not in text  # no more fail-soft update
+    assert "reset --hard" in text and "FETCH_HEAD" in text  # force to latest main
+    # The cache-update branch exits non-zero rather than running stale code.
+    update = text.split("elif", 1)[1].split("else", 1)[0]
+    assert "exit 1" in update

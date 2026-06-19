@@ -8,6 +8,16 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
+- **The one-line installer no longer runs stale, config-corrupting anvil.**
+  `scripts/install.sh` cached a shallow checkout at `~/.anvil-src` and updated it
+  with `git pull --ff-only || warn` — a **fail-soft** update. When the shallow
+  pull failed it kept running whatever stale version was cached; a checkout from
+  before the native-install fix still had the old TOML-mangling `install codex`,
+  so re-running the installer could re-corrupt `~/.codex/config.toml`. The updater
+  now **force-syncs** the cache to the latest `main` (`git fetch --depth 1` +
+  `reset --hard FETCH_HEAD`) and **exits loudly** if that fails, rather than
+  silently running an old, harmful version.
+
 - **`anvil install` no longer corrupts a user's config or clobbers their files.**
   The Codex path used to hand-edit `~/.codex/config.toml` by parsing and
   re-emitting the whole file; that mangled inline tables and special-character
