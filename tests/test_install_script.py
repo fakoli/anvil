@@ -38,6 +38,8 @@ def test_install_script_force_updates_cache_and_fails_loud() -> None:
     text = _script().read_text()
     assert "pull --ff-only" not in text  # no more fail-soft update
     assert "reset --hard" in text and "FETCH_HEAD" in text  # force to latest main
-    # The cache-update branch exits non-zero rather than running stale code.
-    update = text.split("elif", 1)[1].split("else", 1)[0]
-    assert "exit 1" in update
+    # Anchor on the unique cache-update error marker, then assert it EXITS nearby
+    # (rather than continuing to run stale code). Robust to other elif/else blocks.
+    marker = "couldn't update the cached anvil"
+    assert marker in text
+    assert "exit 1" in text.split(marker, 1)[1][:300]
