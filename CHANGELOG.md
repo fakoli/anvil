@@ -6,7 +6,42 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- **`anvil install` no longer corrupts a user's config or clobbers their files.**
+  The Codex path used to hand-edit `~/.codex/config.toml` by parsing and
+  re-emitting the whole file; that mangled inline tables and special-character
+  keys (`[projects]` paths, `foo@bar` plugin keys) into invalid TOML — Codex
+  reported "Failed to load plugins". Two layers of fix:
+  - **Codex installs natively now.** `anvil install codex` drives Codex's own CLI
+    (`codex plugin marketplace add` + `codex mcp add`) and lets Codex write its
+    own config — anvil never text-edits `config.toml`. This deletes the fragile
+    TOML splicer entirely (including a latent silent-corruption bug where a
+    `[mcp_servers.anvil]` line inside a triple-quoted string dropped the rest of
+    the file). `--rollback` runs Codex's own removers. anvil's `plugin.json` gains
+    a Codex `interface` block + `skills` pointer so it appears in the Plugins
+    panel and ships its skills natively.
+  - **Instruction files are spliced, not overwritten.** `AGENTS.md` /
+    `copilot-instructions.md` etc. get anvil's content inside a marked, removable
+    `<!-- BEGIN ANVIL -->…<!-- END ANVIL -->` block appended after the user's
+    text; re-running replaces only that block. Ambiguous pre-existing markers
+    make install refuse rather than risk corruption.
+
 ### Added
+
+- **Backups + `anvil install <harness> --rollback`.** Every file an install
+  modifies is copied to `<file>.anvil-bak` first and logged to
+  `~/.anvil/install-log.json`; `--rollback` undoes the install. Rollback of an
+  instruction file **strips only anvil's block**, preserving everything the user
+  wrote around it (before or after install) — it never deletes a file the user
+  has adopted. The log is keyed per project+harness and refcounts shared resources
+  (a project `AGENTS.md` / `.agents/skills/` used by two harnesses is only undone
+  when the last one rolls back); for Codex, the global MCP/marketplace removers
+  only fire when no other project still references them. The record is persisted
+  before any write (crash-safe), directory restores are atomic, broken-symlink
+  destinations are refused, and the manifest tracks each path's kind so rollback
+  picks the right reversal. Non-Codex harnesses also get anvil's skills dropped
+  into the neutral `.agents/skills/anvil-*` location read by most harnesses.
 
 - **Surface prior unresolved review findings on file overlap (T017).** When a
   reviewer rejects a task or requests changes at the finish gate, that verdict

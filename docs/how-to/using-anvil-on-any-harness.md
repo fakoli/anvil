@@ -35,7 +35,7 @@ Provisions an anvil checkout (cached at `~/.anvil-src`, or `$ANVIL_SRC`) and run
 | `claude-code` | `.mcp.json` (or install the plugin — see below) | `CLAUDE.md`/`AGENTS.md` | ✅ |
 | `openclaw` | `.mcp.json` (manifestless Claude bundle) | `AGENTS.md` | ✅ |
 | `cursor` | `~/.cursor/mcp.json` | `AGENTS.md` | ✅ |
-| `codex` | `~/.codex/config.toml` (`[mcp_servers.anvil]`) | `AGENTS.md` | ✅ |
+| `codex` | native: `codex plugin marketplace add` + `codex mcp add` (Codex writes its own config) | `AGENTS.md` | ✅ |
 | `vscode` / `copilot` | `.vscode/mcp.json` | `.github/copilot-instructions.md` | ✅ |
 | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | `AGENTS.md` | ✅ |
 | `zed` | `~/.config/zed/settings.json` (`context_servers`) | `AGENTS.md` | ✅ |
@@ -79,3 +79,19 @@ included):
 SessionStart/PreToolUse/PostToolUse hooks are Claude-Code-only conveniences;
 every state operation stays reachable through the CLI or MCP server on any
 harness. See `docs/hooks-reference.md`.
+
+## Codex
+
+Codex has its own plugin + MCP system, so anvil installs **natively** — it never
+hand-edits `~/.codex/config.toml` (Codex owns that file). `anvil install codex
+--write` runs, on your behalf:
+
+```
+codex plugin marketplace add fakoli/anvil       # skills + commands + Plugins-panel entry
+codex mcp add anvil -- bash <…>/bin/anvil-mcp   # the MCP server
+```
+
+It also splices anvil's usage doc into the project `AGENTS.md` as a marked,
+removable block. Undo everything with `anvil install codex --rollback` (it runs
+`codex mcp remove` / `codex plugin marketplace remove` and strips the block). If
+the `codex` CLI isn't on PATH, the commands are printed for you to run.

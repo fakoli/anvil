@@ -463,6 +463,78 @@ For each active claim, `manager.py:700-720` calls `backend.get_task(active_claim
 
 ---
 
+## Install hardening (Codex-native PR) — deferred review findings
+
+The adversarial review of the install backup/rollback/skills diff confirmed 20
+findings; the criticals/highs were fixed in the PR (Codex-native pivot deleted the
+TOML splicer; instruction markers anchored; crash-safe + per-project + refcounted
+manifest; symlink-safe; atomic restore; pip-read guarded). The lower-severity tail
+is deferred here.
+
+### IN-1 · Rollback of a `created` instruction file deletes it without a content check
+
+**From**: install-safety-review #6, re-confirmed HIGH by install-v2-verify #1/#8.
+**Status**: DONE (this PR).
+
+Fixed: the manifest now records a per-path `kind` (`config`/`instruction`/`skill`),
+and `_rollback` surgically strips only anvil's marked block from instruction files
+(wiring up the previously-dead `_strip_instruction`) instead of blanket-deleting.
+The user's prose — added before OR after install — survives; the file is deleted
+only when stripping leaves nothing. Covered by
+`test_rollback_strips_block_from_adopted_instruction_file`.
+
+### IN-5 · Orphan `.anvil-bak` if a crash lands between `_backup` and `_record_writes`
+
+**From**: install-v2-verify #12. **Status**: OPEN (low).
+
+`_track` physically copies `file→.anvil-bak` while building `touched`; if the
+process dies before `_record_writes` persists the manifest, the backup is orphaned
+(not referenced) and `_backup`'s never-clobber rule pins it as "pristine" on the
+next run. Tiny window. **Fix**: sweep orphan `.anvil-bak` files not referenced by
+the manifest on the next install/rollback, or record intent before copying.
+
+### IN-6 · A failed Codex native command still exits 0
+
+**From**: install-v2-verify (refuted for the supported path). **Status**: OPEN (low).
+
+The marketplace-source half is DONE (this PR): `anvil install codex` now uses the
+public `fakoli/anvil` slug, which resolves for every install method (no dependency
+on a local `.claude-plugin/marketplace.json`). Remaining: when a `codex` command
+actually runs and fails (returncode ≠ 0), `_run_or_print` shows a `⚠` with detail
+but the CLI still exits 0. **Fix**: surface a non-zero exit on a real native-command
+failure (while keeping "codex not on PATH → print → success").
+
+### IN-2 · Markers inside a user code-fence are treated as a real block
+
+**From**: install-safety-review #12. **Status**: OPEN (low).
+
+The anchored `_BLOCK_RE` still matches a well-formed BEGIN/END pair even if the user
+pasted it inside a fenced code block as documentation. We already refuse on *stray*
+or *multiple* markers; a single clean pair inside a fence would still be replaced.
+**Fix**: treat any marker occurrence inside a ``` fence as ambiguous → refuse.
+
+### IN-3 · `--rollback` of a JSON/TOML config with no backup is a no-op ("skipped")
+
+**From**: install-safety-review #16. **Status**: OPEN (low).
+
+If a modified config has no usable backup (shouldn't happen — backups are recorded
+before writes), rollback reports `skipped` and leaves our server entry in place.
+**Fix**: fall back to structural removal of just the `anvil` server key (JSON) /
+`[mcp_servers.anvil]` block (TOML).
+
+### IN-4 · Full wheel packaging of `AGENTS.md` + `skills/`
+
+**From**: install-safety-review #9. **Status**: OPEN (low).
+
+`_plan_actions` now *guards* the `<repo>/AGENTS.md` read (a stripped wheel degrades
+to "no instruction write" instead of crashing), and `_skill_pairs` already returns
+empty when `skills/` is absent. But a `pip install anvil` wheel still wouldn't
+*ship* those files. Real installs run from the curl'd source checkout, so this only
+affects a hypothetical wheel. **Fix**: `force-include` `AGENTS.md` + `skills/` into
+the wheel and load via `importlib.resources`.
+
+---
+
 ## Closed in PR #41 fixup commits (for reference)
 
 - DONE · Greptile #1: `_is_pr_related` bare "pr" substring
