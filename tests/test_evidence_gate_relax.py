@@ -7,6 +7,8 @@ rejected.
 
 from __future__ import annotations
 
+import pytest
+
 from anvil.claims.manager import ClaimManager
 from anvil.state.backend import EventRejected
 from anvil.state.models import EventDraft, TaskStatus
@@ -46,8 +48,5 @@ def test_both_empty_still_rejected(approved_backend, frozen_clock):  # type: ign
             "screenshots": [], "known_limitations": None,
         },
     )
-    try:
+    with pytest.raises(EventRejected):
         approved_backend.append(draft)
-        raise AssertionError("expected EventRejected for both-empty evidence")
-    except EventRejected:
-        pass
