@@ -3460,13 +3460,14 @@ class SqliteBackend:
         gate — it is a side effect of the write and stays there.
         """
         _ = event
+        # At least one proof is mandatory: a non-empty `commands_run`. An empty
+        # `files_changed` is legitimate for a verification-only / check step that
+        # runs commands but changes no files (B32) — the older rule forced a
+        # "(none)" placeholder. Honesty is preserved: a "done" with zero commands
+        # is still rejected.
         if not payload.commands_run:
             raise EventRejected(
                 "evidence.submitted payload requires non-empty 'commands_run'."
-            )
-        if not payload.files_changed:
-            raise EventRejected(
-                "evidence.submitted payload requires non-empty 'files_changed'."
             )
 
         claim_id: str = payload.claim_id
