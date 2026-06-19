@@ -31,6 +31,7 @@ _TOP_KEY = {
     "cline": "mcpServers",
     "vscode": "servers",
     "zed": "context_servers",
+    "opencode": "mcp",
 }
 
 
@@ -114,6 +115,34 @@ def test_zed_top_key() -> None:
     data = json.loads(result.stdout)
     assert "context_servers" in data
     assert data["context_servers"]["anvil"]["source"] == "custom"
+
+
+def test_opencode_shape() -> None:
+    """opencode uses a unique entry: argv-array command, type local, enabled."""
+    from pathlib import Path
+
+    result = runner.invoke(app, ["mcp-config", "opencode"], catch_exceptions=False)
+    assert result.exit_code == 0, result.stdout
+    data = json.loads(result.stdout)
+    assert data["$schema"] == "https://opencode.ai/config.json"
+    spec = data["mcp"]["anvil"]
+    assert spec["type"] == "local"
+    assert spec["enabled"] is True
+    # command is a single argv array, not a command/args split.
+    assert isinstance(spec["command"], list)
+    assert "args" not in spec
+    wrapper = spec["command"][-1]
+    assert wrapper.endswith("bin/anvil-mcp") and Path(wrapper).is_absolute()
+
+
+def test_opencode_root_uses_environment_key() -> None:
+    """`--root` injects ANVIL_ROOT under `environment` (not `env`) for opencode."""
+    result = runner.invoke(
+        app, ["mcp-config", "--root", "/x", "opencode"], catch_exceptions=False
+    )
+    spec = json.loads(result.stdout)["mcp"]["anvil"]
+    assert spec["environment"]["ANVIL_ROOT"] == "/x"
+    assert "env" not in spec
 
 
 def test_codex_is_toml() -> None:

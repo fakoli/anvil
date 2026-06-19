@@ -134,6 +134,15 @@ HARNESSES: dict[str, Harness] = {
             "convention; the .openhands/microagents/ path is deprecated V0)."
         ),
     ),
+    "opencode": Harness(
+        "opencode", "opencode", "opencode.json",
+        "project", "json", "AGENTS.md", "project",
+        note=(
+            "opencode.json `mcp` entry uses a single argv array under `command` "
+            "and puts env vars under `environment` (not `env`); AGENTS.md is "
+            "read natively."
+        ),
+    ),
 }
 
 
@@ -186,14 +195,20 @@ def _merge_json(path: Path, client: str, *, use_uv_run: bool, root: str | None) 
     block = json.loads(build_config(client, use_uv_run=use_uv_run, root=root))
     server_spec = block[top_key][_SERVER_ID]
 
-    existing: dict[str, Any] = {}
+    existing: dict[str, Any]
     if path.is_file():
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             existing = {}
-    if not isinstance(existing, dict):
-        existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+    else:
+        # Fresh file: seed from the generated block so non-server top-level keys
+        # (e.g. opencode's $schema) are written too — matching `mcp-config`
+        # output and the committed reference. No-op for clients whose block is
+        # only the server table.
+        existing = block
 
     servers = existing.get(top_key)
     if not isinstance(servers, dict):

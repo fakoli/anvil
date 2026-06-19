@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "anvil": {
+      "type": "local",
+      "command": ["bash", "/path/to/anvil/bin/anvil-mcp"],
+      "enabled": true
+    }
+  }
+}
