@@ -1,0 +1,16 @@
+# Anvil MCP server for Goose (Block).
+# Merge this `extensions` entry into ~/.config/goose/config.yaml (global only),
+# replacing the placeholder with the absolute path to this checkout's
+# bin/anvil-mcp. Run `anvil mcp-config goose` to print it with the real path.
+#
+# Goose stdio extensions use `cmd` (not `command`) and `type: stdio`; env VALUES
+# go under `envs` (e.g. envs: {ANVIL_ROOT: /path/to/project}).
+extensions:
+  anvil:
+    name: anvil
+    type: stdio
+    cmd: bash
+    args:
+      - /path/to/anvil/bin/anvil-mcp
+    enabled: true
+    timeout: 300

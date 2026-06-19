@@ -1,0 +1,12 @@
+# Continue.dev MCP server for Anvil.
+# Save as .continue/mcpServers/anvil.yaml in your workspace and replace the
+# placeholder with the absolute path to this checkout's bin/anvil-mcp.
+# Run `anvil mcp-config continue` to print this block with the real path.
+name: Anvil
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: anvil
+    command: bash
+    args:
+      - /path/to/anvil/bin/anvil-mcp

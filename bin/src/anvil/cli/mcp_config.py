@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 import typer
+import yaml
 
 import anvil
 from anvil.cli._json import JSON_OPTION, emit_success, fail
@@ -45,6 +46,14 @@ CLIENTS: dict[str, tuple[str, dict, str]] = {
     "zed": ("context_servers", {"source": "custom"}, "json"),
     "codex": ("mcp_servers", {}, "toml"),
     "opencode": ("mcp", {}, "json"),
+    "roo": ("mcpServers", {}, "json"),
+    # Amp uses a single flat dotted settings key (VS Code-style), not a nested
+    # table — so the top_key IS "amp.mcpServers" and the uniform builder works.
+    "amp": ("amp.mcpServers", {}, "json"),
+    # YAML clients are special-cased in build_config; the row records the
+    # nominal top key + the "yaml" format label for the --json envelope.
+    "continue": ("mcpServers", {}, "yaml"),
+    "goose": ("extensions", {}, "yaml"),
 }
 
 _TARGET_FILE = {
@@ -56,6 +65,10 @@ _TARGET_FILE = {
     "zed": "~/.config/zed/settings.json",
     "codex": "~/.codex/config.toml",
     "opencode": "opencode.json (project) or ~/.config/opencode/opencode.json",
+    "roo": ".roo/mcp.json (project)",
+    "amp": "~/.config/amp/settings.json (key amp.mcpServers)",
+    "continue": ".continue/mcpServers/anvil.yaml (project)",
+    "goose": "~/.config/goose/config.yaml (extensions; global only)",
 }
 
 
@@ -123,6 +136,51 @@ def _opencode_block(use_uv_run: bool, root: str | None) -> str:
     )
 
 
+def _continue_block(use_uv_run: bool, root: str | None) -> str:
+    """Continue.dev reads a per-server YAML file at .continue/mcpServers/<n>.yaml.
+
+    The file is a small block doc (``name``/``version``/``schema: v1``) with an
+    ``mcpServers`` list; each entry is ``{name, command, args[, env]}``.
+    """
+    base = _server_spec(use_uv_run, root)
+    server: dict = {
+        "name": _SERVER_ID,
+        "command": base["command"],
+        "args": list(base["args"]),
+    }
+    if "env" in base:
+        server["env"] = base["env"]
+    doc = {
+        "name": "Anvil",
+        "version": "0.0.1",
+        "schema": "v1",
+        "mcpServers": [server],
+    }
+    return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+
+
+def _goose_block(use_uv_run: bool, root: str | None) -> str:
+    """Goose lists MCP servers under ``extensions`` in ~/.config/goose/config.yaml.
+
+    A stdio extension uses ``cmd`` (not ``command``), ``type: stdio``, and env
+    *values* under ``envs`` (not ``env``).
+    """
+    base = _server_spec(use_uv_run, root)
+    ext: dict = {
+        "name": _SERVER_ID,
+        "type": "stdio",
+        "cmd": base["command"],
+        "args": list(base["args"]),
+        "enabled": True,
+        "timeout": 300,
+    }
+    if "env" in base:
+        ext["envs"] = base["env"]
+    return yaml.safe_dump(
+        {"extensions": {_SERVER_ID: ext}}, sort_keys=False, default_flow_style=False
+    )
+
+
 def build_config(client: str, *, use_uv_run: bool, root: str | None) -> str:
     """Build the paste-ready config text for *client*.
 
@@ -133,6 +191,10 @@ def build_config(client: str, *, use_uv_run: bool, root: str | None) -> str:
     """
     if client == "opencode":
         return _opencode_block(use_uv_run, root)
+    if client == "continue":
+        return _continue_block(use_uv_run, root)
+    if client == "goose":
+        return _goose_block(use_uv_run, root)
     top_key, extra, fmt = CLIENTS[client]
     spec = {**extra, **_server_spec(use_uv_run, root)}
     if fmt == "toml":

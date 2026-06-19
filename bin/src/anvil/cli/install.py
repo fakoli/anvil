@@ -143,6 +143,40 @@ HARNESSES: dict[str, Harness] = {
             "read natively."
         ),
     ),
+    "roo": Harness(
+        "roo", "roo", ".roo/mcp.json",
+        "project", "json", "AGENTS.md", "project",
+        note="Roo Code reads project MCP servers from .roo/mcp.json (mcpServers).",
+    ),
+    "amp": Harness(
+        "amp", "amp", "~/.config/amp/settings.json",
+        "home", "json", "AGENTS.md", "project",
+        note=(
+            "Amp uses a flat `amp.mcpServers` settings key (VS Code-style); "
+            "`amp mcp add` is the CLI equivalent."
+        ),
+    ),
+    # YAML configs: no in-place merge writer, so install drops AGENTS.md and
+    # points at `anvil mcp-config <harness>` + the committed reference (same
+    # posture as gemini/openhands).
+    "continue": Harness(
+        "continue", None, None,
+        "project", "none", "AGENTS.md", "project",
+        note=(
+            "Continue reads a per-server YAML file at "
+            ".continue/mcpServers/anvil.yaml — run `anvil mcp-config continue` "
+            "and save the block there (see packaging/continue/)."
+        ),
+    ),
+    "goose": Harness(
+        "goose", None, None,
+        "home", "none", "AGENTS.md", "project",
+        note=(
+            "Goose MCP servers live under `extensions` in "
+            "~/.config/goose/config.yaml (global only) — run "
+            "`anvil mcp-config goose` and merge the block (see packaging/goose/)."
+        ),
+    ),
 }
 
 

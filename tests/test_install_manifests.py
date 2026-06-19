@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 def _repo_root() -> Path:
@@ -191,3 +192,39 @@ def test_opencode_manifest_has_mcp_anvil() -> None:
     assert spec["enabled"] is True
     assert isinstance(spec["command"], list)
     assert spec["command"][-1].endswith("bin/anvil-mcp")
+
+
+# --- roo / amp / continue / goose committed references (VERIFIED) -----------
+
+
+def test_roo_manifest_has_mcp_servers() -> None:
+    p = _packaging() / "roo" / ".roo" / "mcp.json"
+    assert p.is_file(), "missing packaging/roo/.roo/mcp.json"
+    spec = json.loads(p.read_text(encoding="utf-8"))["mcpServers"]["anvil"]
+    assert spec["args"][-1].endswith("bin/anvil-mcp")
+
+
+def test_amp_manifest_uses_flat_dotted_key() -> None:
+    p = _packaging() / "amp" / "settings.json"
+    assert p.is_file(), "missing packaging/amp/settings.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert "amp.mcpServers" in data  # flat dotted key, not nested
+    assert data["amp.mcpServers"]["anvil"]["args"][-1].endswith("bin/anvil-mcp")
+
+
+def test_continue_manifest_is_valid_yaml_block() -> None:
+    p = _packaging() / "continue" / ".continue" / "mcpServers" / "anvil.yaml"
+    assert p.is_file(), "missing packaging/continue/.continue/mcpServers/anvil.yaml"
+    doc = yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert doc["schema"] == "v1"
+    anvil_srv = next(s for s in doc["mcpServers"] if s["name"] == "anvil")
+    assert anvil_srv["command"] == "bash"
+
+
+def test_goose_manifest_has_stdio_extension() -> None:
+    p = _packaging() / "goose" / "config.yaml"
+    assert p.is_file(), "missing packaging/goose/config.yaml"
+    ext = yaml.safe_load(p.read_text(encoding="utf-8"))["extensions"]["anvil"]
+    assert ext["type"] == "stdio"
+    assert ext["cmd"] == "bash"  # goose uses cmd, not command
+    assert ext["enabled"] is True
