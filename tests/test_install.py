@@ -265,6 +265,40 @@ def test_openclaw_touches_no_user_files(sandbox: dict[str, Path]) -> None:
     assert list(sandbox["project"].rglob("*.anvil-bak")) == []
 
 
+def test_openclaw_install_prints_sandbox_note_and_cron_tip(
+    sandbox: dict[str, Path],
+) -> None:
+    """Every openclaw install surfaces the sandbox-allowlist prerequisite and points
+    at the opt-in cron recipes (B42 Phase 1)."""
+    r = runner.invoke(app, ["install", "openclaw"], catch_exceptions=False)
+    assert r.exit_code == 0
+    assert "sandbox.tools.allow" in r.stderr  # the prerequisite note
+    assert "--cron-recipes" in r.stderr  # discovery tip
+    assert "openclaw cron add" not in r.stderr  # recipes only with the opt-in flag
+
+
+def test_openclaw_cron_recipes_printed_never_run(sandbox: dict[str, Path]) -> None:
+    """`--cron-recipes` PRINTS the recipes (incl. notify-digest + queue probe) but
+    anvil registers nothing — honoring the OpenClaw no-files contract."""
+    r = runner.invoke(
+        app, ["install", "openclaw", "--cron-recipes"], catch_exceptions=False
+    )
+    assert r.exit_code == 0
+    assert "openclaw cron add" in r.stderr
+    assert "anvil notify-digest" in r.stderr
+    assert "anvil next -q" in r.stderr
+    # anvil never RAN a cron command — only the mcp/plugin install commands ran.
+    ran = [" ".join(c) for c in sandbox["native_cmds"]]
+    assert not any("cron add" in c for c in ran)
+
+
+def test_cron_recipes_rejected_for_non_openclaw(sandbox: dict[str, Path]) -> None:
+    """`--cron-recipes` is OpenClaw-only (Gateway cron) — others refuse cleanly."""
+    r = runner.invoke(app, ["install", "codex", "--cron-recipes"])
+    assert r.exit_code == 2
+    assert "OpenClaw-only" in r.stderr
+
+
 def test_openclaw_rollback_runs_native_removers(sandbox: dict[str, Path]) -> None:
     """OpenClaw rollback undoes via its own removers: `mcp unset` + `plugins
     uninstall`."""

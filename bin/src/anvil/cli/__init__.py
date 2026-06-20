@@ -21,6 +21,7 @@ from anvil.cli.init_status import init, status
 from anvil.cli.install import install
 from anvil.cli.mcp_config import mcp_config
 from anvil.cli.migrate import migrate_app, migrate_events
+from anvil.cli.notify_digest import notify_digest
 from anvil.cli.packet_apply import apply, packet, submit
 from anvil.cli.plan import (
     assumptions,
@@ -104,6 +105,7 @@ app.command()(drift)
 app.command()(graph)
 app.command()(conflicts)
 app.command()(doctor)
+app.command("notify-digest")(notify_digest)
 app.command()(plan)
 app.command()(score)
 app.command()(assumptions)
