@@ -33,7 +33,7 @@ The install registers four hooks, wires the MCP server, and makes the six plugin
 
 ```bash
 anvil --version
-# → anvil 0.0.8
+# → anvil 0.0.9
 ```
 
 ## Step 2 — Initialize state in your project
