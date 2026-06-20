@@ -50,6 +50,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **`install.sh --path` — put `anvil` on your PATH.** After the one-line install
+  the `anvil` launcher lives inside the checkout, so you can't run it globally.
+  Pass `--path` (e.g. `… | sh -s -- codex --path`) and the installer symlinks
+  `anvil` into `~/.local/bin` (override with `ANVIL_BIN_DIR`) — opt-in, idempotent,
+  and it **never clobbers** a pre-existing `anvil` you put there yourself; it also
+  prints a hint if that dir isn't on your `PATH` yet.
+
 - **Codex skill metadata — anvil's 8 skills now show up named in Codex.** Each
   skill ships a minimal `agents/openai.yaml` (`interface:` with `display_name`,
   `short_description`, `default_prompt`, and a `#60a5fa` `brand_color`), so the
