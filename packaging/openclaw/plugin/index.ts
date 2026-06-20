@@ -144,6 +144,47 @@ async function captureEvidence(
   }
 }
 
+// Cacheable static guidance injected into the system prompt for anvil-tracked
+// projects: primes the agent to use anvil and warns about the finish-gate. Static
+// (same for every anvil project) so it rides the provider's prompt cache.
+const ANVIL_GUIDANCE =
+  "[anvil] This project is tracked by anvil. Pick up work with `anvil next` then " +
+  "`anvil claim <task-id>`; inspect state with `anvil status` / `anvil list`. Before " +
+  "ending your turn on a claimed task, run its verification commands and submit " +
+  "evidence (`anvil submit <task-id>`) — anvil's finish-gate will otherwise block " +
+  "finalization.";
+
+// Memoize the per-workspace decision so before_prompt_build (which fires every
+// turn and is awaited) costs at most ONE `anvil status` probe per session — not a
+// shell-out on every prompt build.
+const guidanceCache = new Map<string, string>();
+
+/** Return the guidance to inject for a workspace, or "" if it is not an anvil
+ *  project. Memoized; probes `anvil status --json` once (exit 0 ⇒ tracked). */
+async function anvilGuidanceFor(workspaceDir: string): Promise<string> {
+  const cached = guidanceCache.get(workspaceDir);
+  if (cached !== undefined) return cached;
+  const tracked = await new Promise<boolean>((resolve) => {
+    let child;
+    try {
+      child = spawn("anvil", ["status", "--json", "--cwd", workspaceDir],
+        { cwd: workspaceDir, env: process.env, stdio: "ignore" });
+    } catch {
+      resolve(false);
+      return;
+    }
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
+  const guidance = tracked ? ANVIL_GUIDANCE : "";
+  guidanceCache.set(workspaceDir, guidance);
+  return guidance;
+}
+
+interface PromptBuildContext {
+  workspaceDir?: string;
+}
+
 export default definePluginEntry({
   id: "anvil-finish-gate",
   name: "anvil finish-gate",
@@ -168,6 +209,23 @@ export default definePluginEntry({
         void captureEvidence(command, exitCode, output, cwd);
       } catch (error) {
         api.logger?.debug?.(`anvil evidence-capture skipped: ${(error as Error)?.message}`);
+      }
+    });
+
+    // before_prompt_build: inject cacheable anvil usage guidance into the system
+    // prompt for anvil-tracked projects. Non-blocking by nature; returns {} (no
+    // injection) for non-anvil projects or any error.
+    api.on("before_prompt_build", async (_event, ctx) => {
+      try {
+        const workspaceDir =
+          typeof (ctx as PromptBuildContext)?.workspaceDir === "string"
+            ? (ctx as PromptBuildContext).workspaceDir
+            : "";
+        if (!workspaceDir) return {};
+        const guidance = await anvilGuidanceFor(workspaceDir);
+        return guidance ? { prependSystemContext: guidance } : {};
+      } catch {
+        return {};
       }
     });
 
