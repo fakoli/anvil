@@ -145,3 +145,28 @@ validates it on first use, or run `openclaw mcp doctor` to check. `--force` make
 re-install refresh the plugin rather than silently keep a stale copy. Undo with
 `anvil install openclaw --rollback` (`openclaw mcp unset` + `openclaw plugins
 uninstall`). If the `openclaw` CLI isn't on PATH, the commands are printed to run.
+
+**Sandbox prerequisite.** If you enable OpenClaw sandboxing, add anvil's MCP tools to
+`sandbox.tools.allow` — otherwise the 24 anvil tools silently vanish in sandboxed
+turns. `anvil install openclaw` prints this reminder.
+
+### Gateway cron recipes (opt-in)
+
+OpenClaw's Gateway runs `cron` jobs with **zero active agents at no model cost** — a
+natural fit for anvil's lazy leases and finish gate. anvil **never registers** any
+cron (the no-files contract); run `anvil install openclaw --cron-recipes` to **print**
+ready-to-paste recipes:
+
+- **Queue probe** (every 10m): `anvil next -q` — exits 3 on an empty queue, so a
+  command-cron stays quiet until there's ready work. No model cost.
+- **Nightly reconcile**: `anvil sync … && anvil sync --fix --yes && anvil drift --json`.
+- **Lease watchdog** (every 15m): `anvil doctor --json || anvil sync --fix --yes` —
+  surfaces/repairs stale claims with zero active agents.
+- **Finish-gate nudge** (every 30m): `openclaw cron add … --announce <channel>
+  --command 'anvil notify-digest'` — `notify-digest` prints a one-line `needs_review`
+  + blockers summary, and **nothing** on a clean queue, so the cron's `--announce`
+  stays silent until something needs attention. (`--announce` is OpenClaw's flag, not
+  anvil's.)
+
+`anvil notify-digest` works on any harness (it's a plain CLI read); `--json` emits the
+counts. It's the small net-new verb the channel/finish-gate recipes build on.

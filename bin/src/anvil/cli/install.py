@@ -396,6 +396,45 @@ def _openclaw_rollback_commands() -> list[list[str]]:
     ]
 
 
+# OpenClaw runs anvil tools through a sandbox when sandboxing is on; without an
+# allowlist entry the 24 MCP tools silently vanish in sandboxed turns. A one-line
+# prerequisite note, surfaced on every openclaw install.
+_OPENCLAW_SANDBOX_NOTE = (
+    "# OpenClaw sandbox: if you enable sandboxing, add anvil's MCP tools to "
+    "`sandbox.tools.allow` (else the 24 anvil tools vanish in sandboxed turns)."
+)
+
+
+def _openclaw_cron_recipes(project_root: str) -> str:
+    """Printed, OPT-IN OpenClaw Gateway cron recipes for anvil — copy/paste the ones
+    you want. anvil NEVER registers these (the no-files contract); the Gateway runs
+    them with zero active agents at no model cost, and anvil's exclusive lease keeps
+    them safe alongside human work. Channels are placeholders to fill in."""
+    cwd = project_root
+    return "\n".join(
+        [
+            "# Opt-in OpenClaw Gateway cron recipes (copy/paste — anvil registers nothing):",
+            "#",
+            "# 1. Queue probe — ready work? (no model cost; `anvil next -q` exits 3 on empty)",
+            f"openclaw cron add --every 10m --command-cwd {cwd} \\",
+            "    --command 'anvil next -q'",
+            "#",
+            "# 2. Nightly reconcile — sync state + report drift (`;` so a failed step",
+            "#    doesn't skip the rest; e.g. no GitHub token still runs --fix + drift)",
+            f"openclaw cron add --cron '0 3 * * *' --command-cwd {cwd} --announce '<channel>' \\",
+            "    --command 'anvil sync github ; anvil sync --fix --yes ; anvil drift --json'",
+            "#",
+            "# 3. Lease watchdog — surface/repair stale claims (every 15m)",
+            f"openclaw cron add --every 15m --command-cwd {cwd} \\",
+            "    --command 'anvil doctor --json || anvil sync --fix --yes'",
+            "#",
+            "# 4. Finish-gate nudge — ping a channel ONLY when review/blockers are pending",
+            f"openclaw cron add --every 30m --command-cwd {cwd} --announce '<channel>' \\",
+            "    --command 'anvil notify-digest'",
+        ]
+    )
+
+
 def _native_install_commands(
     installer: str, *, use_uv_run: bool, root: str | None
 ) -> list[list[str]]:
@@ -746,6 +785,15 @@ def install(
             "Removed by --rollback."
         ),
     ),
+    cron_recipes: bool = typer.Option(  # noqa: B008
+        False,
+        "--cron-recipes",
+        help=(
+            "OpenClaw only: also PRINT opt-in Gateway cron recipes (queue probe, "
+            "nightly reconcile, lease watchdog, finish-gate nudge). anvil never runs "
+            "or registers them — copy/paste the ones you want."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
 ) -> None:
     """Write Anvil's MCP config + instruction file for a target harness.
@@ -815,6 +863,12 @@ def install(
         raise typer.Exit(code=2) from e
     if automations and not h.supports_automations:
         msg = f"--automations is Codex-only; {harness} has no automation system."
+        if json_output:
+            fail(_COMMAND, msg, code="bad_request", exit_code=2)
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=2)
+    if cron_recipes and h.native_installer != "openclaw":
+        msg = f"--cron-recipes is OpenClaw-only; {harness} has no Gateway cron."
         if json_output:
             fail(_COMMAND, msg, code="bad_request", exit_code=2)
         typer.echo(f"Error: {msg}", err=True)
@@ -952,6 +1006,16 @@ def install(
             "(Automations). Remove with --rollback.",
             err=True,
         )
+    if h.native_installer == "openclaw":
+        typer.echo(_OPENCLAW_SANDBOX_NOTE, err=True)
+        if cron_recipes:
+            typer.echo(_openclaw_cron_recipes(str(_project_root())), err=True)
+        else:
+            typer.echo(
+                "#   Tip: --cron-recipes prints opt-in OpenClaw Gateway cron recipes "
+                "(queue probe, nightly reconcile, lease watchdog, finish-gate nudge).",
+                err=True,
+            )
     if write:
         typer.echo(
             f"# Backed up originals to <file>{_BAK_SUFFIX}. "

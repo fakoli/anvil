@@ -70,6 +70,17 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **`anvil notify-digest` + OpenClaw cron recipes (B42 Phase 1).** New
+  `anvil notify-digest` verb — a one-line `needs_review` + blockers summary that
+  prints **nothing** on a clean queue, so a recurring OpenClaw `cron … --announce`
+  stays silent instead of pinging a channel every interval; it always exits 0 (a
+  notifier must never fail a cron run) and `--json` emits the counts.
+  `anvil install openclaw` now surfaces the sandbox-allowlist prerequisite (add
+  anvil's tools to `sandbox.tools.allow`, or the 24 MCP tools vanish in sandboxed
+  turns), and a new `--cron-recipes` flag **prints** opt-in Gateway cron recipes
+  (queue probe, nightly reconcile, lease watchdog, finish-gate nudge) — anvil
+  registers nothing, honoring the OpenClaw no-files contract.
+
 - **`install.sh --path` — put `anvil` on your PATH.** After the one-line install
   the `anvil` launcher lives inside the checkout, so you can't run it globally.
   Pass `--path` (e.g. `… | sh -s -- codex --path`) and the installer symlinks
