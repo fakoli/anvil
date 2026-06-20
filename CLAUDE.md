@@ -15,6 +15,13 @@ can be inferred from the code, it does not belong here.
   enforces it): `.claude-plugin/plugin.json`, `bin/pyproject.toml`,
   `bin/src/anvil/__init__.py`. Add a `CHANGELOG.md` entry. `marketplace.json`
   omits `version`, so it inherits from `plugin.json` — nothing to bump there.
+- **Bump only when you publish, not per commit.** Claude Code pins plugin pickups
+  to the `version` string: an unchanged version means `/plugin marketplace update`
+  is a no-op and users keep running stale code, however many commits landed. So
+  bump the **patch** each time you *publish* — i.e. a backlog list is done and you
+  want folks to pick it up (`0.0.8 → 0.0.9`); reserve **minor/major** for bigger
+  releases. Day-to-day commits between publishes change no version file. To
+  publish, promote the `CHANGELOG.md` `## [Unreleased]` block to the new version.
 - **One PR per item.** Merge only after CI is green **and** both automated
   reviewers — **Greptile** and **GitHub Copilot** — have landed and been addressed
   (fix real findings; reply on the ones you defer and record them in

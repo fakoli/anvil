@@ -6,6 +6,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.0.9] — 2026-06-19
+
 ### Changed
 
 - **Harness install is now tiered: three supported, the rest MCP-only.** Only the
