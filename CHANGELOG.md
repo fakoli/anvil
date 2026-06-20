@@ -22,6 +22,16 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   nothing — honoring the OpenClaw no-files contract). Requires
   `plugins.entries.anvil-finish-gate.hooks.allowConversationAccess=true` and
   `anvil` on the Gateway PATH; hook dispatch verified against OpenClaw 2026.6.6.
+- **OpenClaw `after_tool_call` evidence auto-capture (B42 Phase 2).** The same
+  native plugin now registers an `after_tool_call` hook: when the OpenClaw `exec`
+  tool runs a verification command (pytest / ruff check / mypy / npm test / cargo
+  test / bun test), it forwards the command + exit code + combined output to the
+  existing `anvil hook capture-evidence` verb, appending to the active claim's
+  `.anvil/.evidence-buffer/`. The OpenClaw-native equivalent of anvil's Claude-Code
+  `capture-evidence.sh` PostToolUse hook — a pure fire-and-forget observer that
+  never blocks or fails a tool call. Extractor verified against OpenClaw 2026.6.6's
+  exec result shape (`event.result.details.{exitCode,aggregated,cwd}`; stdout+stderr
+  are combined).
 
 ## [0.0.9] — 2026-06-19
 

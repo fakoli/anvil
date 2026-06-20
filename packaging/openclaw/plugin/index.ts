@@ -1,4 +1,8 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 /**
@@ -81,12 +85,92 @@ function parseEnvelope(stdout: string): { ok?: boolean; data?: Record<string, un
   }
 }
 
+// Only these commands are worth capturing as evidence — mirrors
+// hooks/capture-evidence.sh's VERIFICATION_PATTERNS so the OpenClaw and
+// Claude-Code capture paths agree on what counts.
+const VERIFICATION_PATTERNS = ["pytest", "ruff check", "mypy", "npm test", "cargo test", "bun test"];
+
+function isVerificationCommand(command: string): boolean {
+  return VERIFICATION_PATTERNS.some((p) => command.includes(p));
+}
+
+/** Shape of the OpenClaw `exec` tool's after_tool_call result (verified against
+ *  ~/openclaw-node bash-tools.exec-types.ts: exitCode is numeric, stdout+stderr
+ *  are COMBINED in `aggregated`, no separate streams). */
+interface ExecResult {
+  details?: { exitCode?: number | null; aggregated?: string; cwd?: string };
+}
+
+/** Forward one exec capture to the existing `anvil hook capture-evidence` verb
+ *  (single source of truth for the evidence-buffer format). Best-effort: writes
+ *  the combined output to a temp file, spawns anvil, cleans up. Never throws. */
+// `anvil hook capture-evidence` only reads the first 4000 chars of the stdout
+// file, so cap what we stage to avoid writing megabytes of build log to disk.
+const MAX_OUTPUT_CHARS = 4000;
+
+async function captureEvidence(
+  command: string, exitCode: number, output: string, cwd: string,
+): Promise<void> {
+  // Unpredictable name + 0600 perms: verification output can be sensitive and
+  // lives in a world-readable tmp dir.
+  const tmp = join(tmpdir(), `anvil-ev-${process.pid}-${randomBytes(8).toString("hex")}.txt`);
+  try {
+    await writeFile(tmp, output.slice(0, MAX_OUTPUT_CHARS), { encoding: "utf8", mode: 0o600 });
+  } catch {
+    return; // can't stage output — skip
+  }
+  await new Promise<void>((resolve) => {
+    let child;
+    try {
+      child = spawn(
+        "anvil",
+        ["hook", "capture-evidence", "--command", command, "--exit-code", String(exitCode),
+          "--stdout-file", tmp, "--actor", ANVIL_ACTOR, "--cwd", cwd],
+        // stdio:"ignore" — we never read the child's output; an unconsumed pipe
+        // could fill and block the child, stranding the temp file.
+        { cwd, env: process.env, stdio: "ignore" },
+      );
+    } catch {
+      resolve();
+      return;
+    }
+    child.on("error", () => resolve());
+    child.on("close", () => resolve());
+  });
+  try {
+    await unlink(tmp);
+  } catch {
+    /* best-effort cleanup */
+  }
+}
+
 export default definePluginEntry({
   id: "anvil-finish-gate",
   name: "anvil finish-gate",
   description:
-    "Blocks an agent from finalizing a turn while its claimed anvil task lacks submitted verification evidence.",
+    "anvil's OpenClaw integration: blocks finalizing a turn while a claimed task lacks evidence (before_agent_finalize), and auto-captures verification-command output to the claim's evidence buffer (after_tool_call).",
   register(api) {
+    // after_tool_call: auto-capture verification-command output as evidence. Pure
+    // observer (fire-and-forget); only `exec` tools running a verification command.
+    api.on("after_tool_call", (event) => {
+      try {
+        if (event.toolName !== "exec") return;
+        const command =
+          typeof event.params?.command === "string" ? event.params.command : "";
+        if (!command || !isVerificationCommand(command)) return;
+        const details = (event.result as ExecResult | undefined)?.details;
+        const cwd = typeof details?.cwd === "string" ? details.cwd : "";
+        if (!cwd) return; // can't scope to an anvil project without a cwd
+        const exitCode = typeof details?.exitCode === "number" ? details.exitCode : -1;
+        const output = typeof details?.aggregated === "string" ? details.aggregated : "";
+        // Fire-and-forget: do NOT await — return immediately so the hook never
+        // adds latency to tool completion. captureEvidence swallows its own errors.
+        void captureEvidence(command, exitCode, output, cwd);
+      } catch (error) {
+        api.logger?.debug?.(`anvil evidence-capture skipped: ${(error as Error)?.message}`);
+      }
+    });
+
     api.on("before_agent_finalize", async (event) => {
       // Already revising on this stop cycle: honor the harness budget, don't re-block.
       if (event.stopHookActive) return { action: "continue" as const };
