@@ -61,6 +61,16 @@ claim whose task has missing/incomplete evidence, the hook returns
 `action:"revise"` (bounded to 3 attempts per run, keyed on task+runId) carrying
 anvil's instruction; otherwise it allows finalization.
 
+The same plugin also registers an **`after_tool_call`** hook that auto-captures
+evidence: when the `exec` tool runs a verification command (`pytest`, `ruff
+check`, `mypy`, `npm test`, `cargo test`, `bun test`), it forwards the command +
+exit code + output to `anvil hook capture-evidence`, which appends it to the
+active claim's `.anvil/.evidence-buffer/`. This is the OpenClaw-native equivalent
+of anvil's Claude-Code `capture-evidence.sh` PostToolUse hook. It is a pure
+observer (fire-and-forget) and never blocks or fails a tool call. Note: OpenClaw's
+`exec` result combines stdout+stderr into one stream, so captured output is the
+combined log.
+
 - **`anvil` must be on the Gateway's PATH** — the plugin spawns it (e.g.
   `install.sh --path`).
 - **DEFAULT-OPEN:** no anvil project / no claim for the actor / `anvil` missing /
