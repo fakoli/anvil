@@ -189,3 +189,35 @@ def test_heartbeat_renews_active_claim(approved_backend, frozen_clock, tmp_path,
     r = runner.invoke(app, ["hook", "heartbeat", "--actor", "agent"], catch_exceptions=False)
     assert r.exit_code == 0
     assert claim.id in renewed  # the actor's active claim was renewed
+
+
+def test_heartbeat_only_renews_own_actor_claims(
+    approved_backend, frozen_clock, tmp_path, monkeypatch
+) -> None:
+    """Heartbeat renews ONLY the actor's own claims — never another actor's lease
+    (pins the claimed_by filter; without it a heartbeat would defeat lease handoff)."""
+    from anvil.claims.manager import ClaimManager
+    from anvil.workflows.tasks import create_workflow_task
+
+    t_agent = create_workflow_task(
+        approved_backend, title="a", description="d", actor="agent", clock=frozen_clock,
+    )
+    t_other = create_workflow_task(
+        approved_backend, title="b", description="d", actor="other", clock=frozen_clock,
+    )
+    agent_claim = ClaimManager(approved_backend, frozen_clock, actor="agent").claim(t_agent).claim
+    other_claim = ClaimManager(approved_backend, frozen_clock, actor="other").claim(t_other).claim
+
+    renewed: list[str] = []
+    orig_renew = ClaimManager.renew
+
+    def _spy(self, claim_id):  # noqa: ANN001, ANN202
+        renewed.append(claim_id)
+        return orig_renew(self, claim_id)
+
+    monkeypatch.setattr("anvil.claims.manager.ClaimManager.renew", _spy)
+    _use_backend(monkeypatch, _NoCloseProxy(approved_backend), tmp_path)
+    r = runner.invoke(app, ["hook", "heartbeat", "--actor", "agent"], catch_exceptions=False)
+    assert r.exit_code == 0
+    assert agent_claim.id in renewed
+    assert other_claim.id not in renewed  # NEVER renew another actor's lease
