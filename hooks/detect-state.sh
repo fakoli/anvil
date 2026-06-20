@@ -23,15 +23,18 @@ if [ -d ".anvil" ] || [ -d "bin/.anvil" ]; then
   LEGACY="yes"
 fi
 
-CLI="${CLAUDE_PLUGIN_ROOT}/bin/anvil"
-if [ ! -x "$CLI" ]; then
+# Guard CLAUDE_PLUGIN_ROOT: unset would make CLI resolve to /bin/anvil and could
+# run an unrelated system binary. The -z check short-circuits before -x.
+CLI="${CLAUDE_PLUGIN_ROOT:-}/bin/anvil"
+if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ] || [ ! -x "$CLI" ]; then
   echo "[anvil] Language: $DETECTED_LANG | CLI not available — install anvil bin to enable status"
   exit 0
 fi
 
 # Expected: "active-claims:<N> ready-tasks:<N> blockers:<N> prd-status:<STATUS>"
 # or the literal "uninitialized" when there is no project for this dir.
-STATUS_OUTPUT=$("$CLI" status --hook-format 2>&1)
+# Capture stdout only (2>/dev/null) so stderr noise can't corrupt the equality check.
+STATUS_OUTPUT=$("$CLI" status --hook-format 2>/dev/null)
 STATUS_EXIT=$?
 
 if [ "$STATUS_EXIT" -eq 0 ] && [ -n "$STATUS_OUTPUT" ] && [ "$STATUS_OUTPUT" != "uninitialized" ]; then

@@ -75,11 +75,21 @@ def migrate_workspace(
         })
         return
 
-    # Detect a legacy source: <repo>/.anvil then <repo>/bin/.anvil, first with a db.
+    # Detect a legacy source, first with a state.db: probe the actual location
+    # (which may be a non-main worktree with its OWN stranded .anvil) AND the
+    # canonical repo root, each at .anvil then bin/.anvil. Dedup so loc==root
+    # isn't probed twice.
     legacy_src: Path | None = None
-    for candidate in (root / ".anvil", root / "bin" / ".anvil"):
-        if (candidate / "state.db").is_file():
-            legacy_src = candidate
+    seen: set[Path] = set()
+    for base in (loc.resolve(), root):
+        for candidate in (base / ".anvil", base / "bin" / ".anvil"):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if (candidate / "state.db").is_file():
+                legacy_src = candidate
+                break
+        if legacy_src is not None:
             break
 
     if legacy_src is None:
@@ -111,16 +121,18 @@ def migrate_workspace(
         })
         return
 
-    # Apply: copy into a temp sibling, then atomically rename into place. The
-    # legacy source is never modified.
+    # Apply: copy into a temp sibling (in the SAME parent as the target, so the
+    # rename is intra-filesystem — no EXDEV), then atomically rename into place.
+    # The legacy source is never modified.
+    staging = target_base / ".anvil.migrating"
     try:
         target_base.mkdir(parents=True, exist_ok=True)
-        staging = target_base / ".anvil.migrating"
         if staging.exists():
             shutil.rmtree(staging)
         shutil.copytree(legacy_src, staging)  # dirs_exist_ok=False — staging is fresh
         os.replace(staging, target_anvil)  # atomic; target_anvil confirmed absent above
     except OSError as exc:
+        shutil.rmtree(staging, ignore_errors=True)  # never leave a partial staging dir
         if json_output:
             fail(_COMMAND, str(exc), code="migration_failed")
         typer.echo(f"Error: migration failed: {exc}", err=True)

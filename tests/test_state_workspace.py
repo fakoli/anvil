@@ -99,6 +99,16 @@ def test_existing_bare_key_workspace_is_honored(home: Path, tmp_path: Path) -> N
     assert _resolve_state_dir(plain) == bare  # bare wins — no orphaning
 
 
+def test_partial_bare_workspace_falls_to_hashed(home: Path, tmp_path: Path) -> None:
+    """A bare-name workspace dir WITHOUT a state.db is NOT honored — resolve to the
+    hashed key. The no-orphaning rule is about real dbs, not empty/partial dirs."""
+    plain = tmp_path / "loose"
+    plain.mkdir()
+    (home / ".anvil" / "workspaces" / "loose" / ".anvil").mkdir(parents=True)  # no state.db
+    key = _workspace_key(_canonical_project_root(plain))
+    assert _resolve_state_dir(plain) == home / ".anvil" / "workspaces" / key / ".anvil"
+
+
 def test_same_basename_different_paths_dont_collide(home: Path, tmp_path: Path) -> None:
     """Two projects sharing a basename map to DISTINCT hashed workspaces (B44 fix)."""
     a = tmp_path / "a" / "app"

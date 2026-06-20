@@ -120,3 +120,44 @@ def test_no_legacy_state(home: Path, tmp_path: Path) -> None:
     data = json.loads(r.stdout)["data"]
     assert data["status"] == "no_legacy_state"
     assert not Path(data["target"]).exists()
+
+
+def test_migrated_project_resolves_to_target(home: Path, tmp_path: Path) -> None:
+    """Round-trip: after --yes the project RESOLVES its state to the migrated dir
+    (pins migrate ↔ _resolve_state_dir agreement across keying changes)."""
+    from anvil.cli._helpers import _resolve_state_dir
+
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    _legacy(repo)
+    data = json.loads(_run(repo, "--yes").stdout)["data"]
+    target = Path(data["target"])
+    assert _resolve_state_dir(repo) == target  # the engine reads back what migrate wrote
+    assert (target / "state.db").read_text() == "LEGACY-DB"
+
+
+def test_finds_worktree_stranded_state(home: Path, tmp_path: Path) -> None:
+    """Legacy state stranded INSIDE a non-main worktree (not the canonical root) is
+    found when migrate runs from that worktree — the exact case the layout fixes."""
+    import subprocess
+
+    def _git(cwd: Path, *a: str) -> None:
+        subprocess.run(["git", "-C", str(cwd), *a], check=True, capture_output=True, text=True)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@anvil.test")
+    _git(repo, "config", "user.name", "anvil-test")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", str(wt), "-b", "feat")
+    (wt / ".anvil").mkdir()
+    (wt / ".anvil" / "state.db").write_text("WT-STRANDED-DB")  # stranded in the worktree
+
+    r = runner.invoke(
+        app, ["migrate-workspace", "--json", "--yes", "--cwd", str(wt)], catch_exceptions=False
+    )
+    data = json.loads(r.stdout)["data"]
+    assert data["status"] == "migrated"
+    assert (Path(data["target"]) / "state.db").read_text() == "WT-STRANDED-DB"

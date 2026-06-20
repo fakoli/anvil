@@ -59,6 +59,42 @@ has no active claim). Decision logic is covered by the stub test
 
 ---
 
+## B44 home-workspace (PR #53) — deferred review findings
+
+### B44-1 · Bare-name workspace residual collision (cross-project)
+**Status**: OPEN (deliberate trade-off). `_home_workspace_base`'s dual-key honors a
+pre-existing **bare-name** workspace (`~/.anvil/workspaces/<basename>/`) whenever it
+has a `state.db`, keyed on basename ALONE — it cannot verify the bare dir belongs to
+*this* canonical root (pre-#42 bare dirs carry no origin marker). So a NEW project
+sharing a basename with a pre-existing bare workspace (e.g. a second repo named
+`anvil` vs the live `~/.anvil/workspaces/anvil/`) resolves to that other project's
+db. This is a **strict subset** of the #42 collision (which collided ALL
+same-basename projects); the PR fixes it for new (hashed-key) workspaces and keeps
+it only for pre-existing bare ones. A full fix needs either re-keying existing bare
+workspaces (rejected — risks orphaning the live db) or an origin marker the existing
+markerless bare dirs lack. Behavior pinned by `test_existing_bare_key_workspace_is_honored`
++ `test_partial_bare_workspace_falls_to_hashed`. Close by recording a canonical-root
+origin marker for bare workspaces and matching it before honoring.
+
+### B44-2 · PostToolUse hooks inert under the home-workspace layout
+**Status**: OPEN. `capture-evidence.sh` / `record-file-change.sh` / `heartbeat.sh`
+fast-path on a LOCAL `.anvil` (`[ ! -d .anvil ] && exit 0`), so they no-op under the
+default home-workspace layout (the repo has no local `.anvil`). B44 fixed the
+SessionStart hook (`detect-state.sh`) but NOT these — the fix is a perf-vs-correctness
+trade-off (a per-tool-call CLI spawn vs the cheap local check). Close by giving the
+wrappers a home-workspace-aware fast-path (or a cheap CLI probe) without paying a
+spawn on every tool call in non-anvil projects.
+
+### B44-3 · migrate-workspace copies a live SQLite db without quiescing
+**Status**: OPEN (low risk). `migrate-workspace` copies the whole `.anvil/` (incl.
+`-wal`/`-shm`) of LEGACY in-repo state. If that legacy db were being actively written
+during the (manual, explicit) migrate, the WAL snapshot could be inconsistent. Low
+risk: legacy in-repo state is by definition the old, not-actively-used location, and
+the command is human-invoked. Close by `PRAGMA wal_checkpoint(TRUNCATE)` on the
+source before copy if it ever matters.
+
+---
+
 ## SL-1 (replay integrity) follow-ups
 
 ### SL1-RR-1 · A poison canonical line aborts a full replay

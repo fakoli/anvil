@@ -72,8 +72,8 @@ def _canonical_project_root(loc: Path) -> Path:
 def _workspace_key(root: Path) -> str:
     """Collision-proof workspace key for a canonical repo root: a legible basename
     PLUS a short hash of the absolute path, so two projects sharing a basename
-    (``app``, ``web``) never collide. Mirrors the slug+sha256 recipe in
-    ``install.py`` so the two code paths share one convention."""
+    (``app``, ``web``) never collide. Modeled on the slug+sha256 recipe in
+    ``install.py`` (same collision convention)."""
     import hashlib
     import re
 

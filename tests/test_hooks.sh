@@ -319,6 +319,32 @@ cd "$DS_DIR" || exit 1
 ( unset CLAUDE_PLUGIN_ROOT; bash "$DETECT_STATE" >/dev/null 2>&1 )
 _assert_exit_zero "detect-state: exits 0 with legacy .anvil present" "$?"
 
+# Stub CLI reporting "uninitialized" + a legacy .anvil present → migrate nudge.
+DS_STUB_ROOT="${TMP_DIR}/ds-plugin"
+mkdir -p "${DS_STUB_ROOT}/bin"
+cat > "${DS_STUB_ROOT}/bin/anvil" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${DS_STATUS:-uninitialized}"
+exit 0
+STUB
+chmod +x "${DS_STUB_ROOT}/bin/anvil"
+
+cd "$DS_DIR" || exit 1  # has a legacy .anvil from above
+DS_OUT=$(CLAUDE_PLUGIN_ROOT="$DS_STUB_ROOT" DS_STATUS="uninitialized" bash "$DETECT_STATE" 2>/dev/null)
+if printf '%s' "$DS_OUT" | grep -q 'migrate-workspace'; then
+  _pass "detect-state: legacy + uninitialized → nudges 'anvil migrate-workspace'"
+else
+  _fail "detect-state: expected migrate nudge (got: $DS_OUT)"
+fi
+
+# Stub CLI reporting a live status line → prints the state banner.
+DS_OUT=$(CLAUDE_PLUGIN_ROOT="$DS_STUB_ROOT" DS_STATUS="active-claims:1 ready-tasks:2 blockers:0 prd-status:approved" bash "$DETECT_STATE" 2>/dev/null)
+if printf '%s' "$DS_OUT" | grep -q 'active-claims:1'; then
+  _pass "detect-state: status line → prints the state banner"
+else
+  _fail "detect-state: expected status banner (got: $DS_OUT)"
+fi
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
