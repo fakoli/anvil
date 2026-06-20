@@ -68,20 +68,32 @@ def _evidence(
 
 
 class _StubBackend:
-    """A minimal backend exposing exactly what gate-check reads."""
+    """A minimal backend exposing exactly what gate-check reads.
 
-    def __init__(self, *, claims=(), task=None, evidence=None) -> None:
+    Single-claim tests pass ``task=``/``evidence=`` (returned for any id);
+    multi-claim tests pass ``tasks=``/``evidence_map=`` dicts keyed by task id.
+    """
+
+    def __init__(
+        self, *, claims=(), task=None, evidence=None, tasks=None, evidence_map=None
+    ) -> None:
         self._claims = list(claims)
         self._task = task
         self._evidence = evidence
+        self._tasks = tasks
+        self._evidence_map = evidence_map
 
     def list_active_claims(self) -> list:
         return self._claims
 
-    def get_task(self, _task_id: str):  # noqa: ANN201
+    def get_task(self, task_id: str):  # noqa: ANN201
+        if self._tasks is not None:
+            return self._tasks.get(task_id)
         return self._task
 
-    def get_latest_evidence(self, _task_id: str):  # noqa: ANN201
+    def get_latest_evidence(self, task_id: str):  # noqa: ANN201
+        if self._evidence_map is not None:
+            return self._evidence_map.get(task_id)
         return self._evidence
 
     def close(self) -> None:
@@ -278,19 +290,145 @@ def test_real_backend_continue_with_no_required_evidence(
     approved_backend, frozen_clock, tmp_path, monkeypatch
 ) -> None:
     """Real backend, agent holds a claim but the task requires no evidence =>
-    continue, yet task/claim are resolved (proves the real read path ran)."""
+    continue (exit 0). Exercises the real read path + the empty-required pass."""
     from anvil.claims.manager import ClaimManager
     from anvil.workflows.tasks import create_workflow_task
 
     tid = create_workflow_task(
         approved_backend, title="t", description="d", actor="agent", clock=frozen_clock,
     )
-    claim = ClaimManager(approved_backend, frozen_clock, actor="agent").claim(tid).claim
+    ClaimManager(approved_backend, frozen_clock, actor="agent").claim(tid)
 
     _use(monkeypatch, _NoCloseProxy(approved_backend), tmp_path)
     r = runner.invoke(app, ["gate-check", "--json", "--actor", "agent"], catch_exceptions=False)
     assert r.exit_code == 0
     data = json.loads(r.stdout)["data"]
     assert data["block"] is False
-    assert data["task"] == tid
-    assert data["claim"] == claim.id
+    assert data["task"] is None  # nothing blocks → no task reported
+
+
+# --- review fixes: multi-claim, cwd-scope, human emit, actor default ----------
+
+
+def test_blocks_when_one_of_several_claims_incomplete(tmp_path, monkeypatch) -> None:
+    """Actor holds two claims; WT-1 complete, WT-2 not => block on WT-2 (the gate
+    must check ALL of an actor's claims, not just the first — anvil does not cap
+    claims per actor)."""
+    backend = _StubBackend(
+        claims=[_claim(task_id="WT-1", cid="C1"), _claim(task_id="WT-2", cid="C2")],
+        tasks={
+            "WT-1": _task("WT-1", required=("test output",)),
+            "WT-2": _task("WT-2", required=("PR link",)),
+        },
+        evidence_map={"WT-1": _evidence(commands=("uv run pytest -q",))},  # WT-2: none
+    )
+    _use(monkeypatch, backend, tmp_path)
+    r = runner.invoke(app, ["gate-check", "--json", "--actor", "agent"], catch_exceptions=False)
+    assert r.exit_code == 2
+    data = json.loads(r.stdout)["data"]
+    assert data["block"] is True
+    assert data["task"] == "WT-2"
+    assert data["evidence_gate"]["missing"] == ["PR link"]
+
+
+def test_block_picks_first_incomplete_deterministically(tmp_path, monkeypatch) -> None:
+    """Two incomplete claims, claim order reversed => reports the task-id-sorted
+    first (WT-1) and notes the others (list_active_claims has no ORDER BY)."""
+    backend = _StubBackend(
+        claims=[_claim(task_id="WT-2", cid="C2"), _claim(task_id="WT-1", cid="C1")],
+        tasks={
+            "WT-1": _task("WT-1", required=("PR link",)),
+            "WT-2": _task("WT-2", required=("test output",)),
+        },
+        evidence_map={},  # neither has evidence
+    )
+    _use(monkeypatch, backend, tmp_path)
+    r = runner.invoke(app, ["gate-check", "--json", "--actor", "agent"], catch_exceptions=False)
+    assert r.exit_code == 2
+    data = json.loads(r.stdout)["data"]
+    assert data["task"] == "WT-1"  # sorted, despite reversed claim order
+    assert "1 other" in data["instruction"]
+
+
+def test_active_claim_without_task_row_continues(tmp_path, monkeypatch) -> None:
+    """A claim whose task get_task can't find must not block (anomalous)."""
+    backend = _StubBackend(claims=[_claim(task_id="GONE")], tasks={}, evidence_map={})
+    _use(monkeypatch, backend, tmp_path)
+    r = runner.invoke(app, ["gate-check", "--json", "--actor", "agent"], catch_exceptions=False)
+    assert r.exit_code == 0
+    assert json.loads(r.stdout)["data"]["block"] is False
+
+
+def test_cwd_flag_is_forwarded_to_resolver(tmp_path, monkeypatch) -> None:
+    """--cwd is forwarded to _resolve_state_dir — the mechanism that makes the
+    plugin's explicit --cwd win over a Gateway-level ANVIL_ROOT (the no-false-block
+    fix). _resolve_state_dir ignores ANVIL_ROOT when given an explicit cwd."""
+    seen = {}
+
+    def _spy(cwd):  # noqa: ANN202
+        seen["cwd"] = cwd
+        return tmp_path  # exists
+
+    monkeypatch.setattr(gc_mod, "_resolve_state_dir", _spy)
+    monkeypatch.setattr(gc_mod, "_open_backend", lambda sd: _StubBackend(claims=[]))
+    r = runner.invoke(
+        app, ["gate-check", "--json", "--cwd", "/proj/x", "--actor", "agent"],
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0
+    assert str(seen["cwd"]) == "/proj/x"
+
+
+def test_human_block_prints_instruction(tmp_path, monkeypatch) -> None:
+    backend = _StubBackend(
+        claims=[_claim()], task=_task("WT-1", required=("test output",)), evidence=None
+    )
+    _use(monkeypatch, backend, tmp_path)
+    r = runner.invoke(app, ["gate-check", "--actor", "agent"], catch_exceptions=False)
+    assert r.exit_code == 2
+    assert "anvil submit WT-1" in r.stdout  # human-readable instruction on stdout
+
+
+def test_human_continue_prints_continue_message(tmp_path, monkeypatch) -> None:
+    _use(monkeypatch, _StubBackend(claims=[]), tmp_path)
+    r = runner.invoke(app, ["gate-check", "--actor", "agent"], catch_exceptions=False)
+    assert r.exit_code == 0
+    assert "finalization may proceed" in r.stdout
+
+
+def test_actor_defaults_to_agent_when_user_unset(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("USER", raising=False)
+    backend = _StubBackend(
+        claims=[_claim(actor="agent")],
+        task=_task("WT-1", required=("test output",)), evidence=None,
+    )
+    _use(monkeypatch, backend, tmp_path)
+    r = runner.invoke(app, ["gate-check", "--json"], catch_exceptions=False)  # no --actor
+    data = json.loads(r.stdout)["data"]
+    assert data["actor"] == "agent"
+    assert data["block"] is True
+
+
+def test_actor_defaults_to_user_when_set(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("USER", "alice")
+    backend = _StubBackend(
+        claims=[_claim(actor="alice")],
+        task=_task("WT-1", required=("test output",)), evidence=None,
+    )
+    _use(monkeypatch, backend, tmp_path)
+    r = runner.invoke(app, ["gate-check", "--json"], catch_exceptions=False)  # no --actor
+    data = json.loads(r.stdout)["data"]
+    assert data["actor"] == "alice"
+    assert data["block"] is True
+
+
+def test_json_output_is_exactly_one_line(tmp_path, monkeypatch) -> None:
+    """The OpenClaw plugin's parseEnvelope relies on the envelope being one line."""
+    backend = _StubBackend(
+        claims=[_claim()], task=_task("WT-1", required=("test output",)), evidence=None
+    )
+    _use(monkeypatch, backend, tmp_path)
+    r = runner.invoke(app, ["gate-check", "--json", "--actor", "agent"], catch_exceptions=False)
+    out = r.stdout.strip()
+    assert "\n" not in out
+    assert json.loads(out)["ok"] is True

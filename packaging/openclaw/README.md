@@ -66,10 +66,14 @@ anvil's instruction; otherwise it allows finalization.
 - **DEFAULT-OPEN:** no anvil project / no claim for the actor / `anvil` missing /
   any error ⇒ the agent finalizes normally. The gate never crashes or
   false-blocks a turn.
-- **What "evidence" means:** `gate-check` mirrors anvil's own accept path
+- **What "evidence" means:** `gate-check` uses anvil's own evidence predicate
   (`review.gates.evidence_complete`) — it asserts the task's `required_evidence`
   was *submitted*, **not** that commands exited 0 (anvil records no exit codes on
-  Evidence). A true green-tests gate is a separate, larger change.
+  Evidence). anvil's *accept* gate is advisory by default (`strict_evidence`); the
+  finish-gate enforces submission regardless, to pre-empt the "declare done
+  without evidence" failure mode. A true green-tests gate is a separate, larger
+  change. The gate evaluates **every** active claim the actor holds (anvil does
+  not cap claims per actor) and blocks if any is unverified.
 - **Verify it fires** (the Phase-0 smoke check, already confirmed on OpenClaw
   2026.6.6): `openclaw plugins inspect anvil-finish-gate --runtime --json` should
   list `before_agent_finalize` under `typedHooks` once allowConversationAccess is

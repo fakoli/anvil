@@ -1,29 +1,36 @@
 """``anvil gate-check`` — finish-gate decision for native agent harnesses (B42 Phase 2).
 
 Read-only. Answers one question for an agent that is about to end its turn:
-*does this actor's active claim have evidence satisfying its task's verification,
+*do this actor's active claims have evidence satisfying their tasks' verification,
 or should the agent be told to finish the work first?*
 
 It exists for OpenClaw's native ``before_agent_finalize`` plugin — anvil's first
 blocking gate, stronger than Claude Code's non-blocking hooks. The node plugin
-shells out to ``anvil gate-check --json --actor agent`` cwd-scoped and maps the
+shells out to ``anvil gate-check --json --actor agent --cwd <dir>`` and maps the
 result to ``continue`` / ``revise``. Honors the "anvil writes nothing for
-OpenClaw" contract: this verb only *reads* ``state.db``.
+OpenClaw" contract: this verb makes no anvil writes for OpenClaw — it only reads
+state (opening the backend may apply an idempotent schema migration, same as any
+read verb).
 
 Decision (default-OPEN — invisible unless there is a real reason to block):
 
-* not a tracked anvil project / not initialized      → continue (exit 0)
-* anvil state unavailable (missing / corrupt db)     → continue (exit 0)
-* the actor holds no active claim                     → continue (exit 0)
-* the claimed task's evidence is complete             → continue (exit 0)
-* the claimed task's evidence is missing/incomplete   → **block** (exit 2)
+* not a tracked anvil project / not initialized       → continue (exit 0)
+* anvil state unavailable (open OR read error)         → continue (exit 0)
+* the actor holds no active claim                       → continue (exit 0)
+* every claimed task's evidence is complete             → continue (exit 0)
+* ANY claimed task's evidence is missing/incomplete     → **block** (exit 2)
 
-"Complete" mirrors anvil's own accept path exactly: :func:`review.gates.evidence_complete`
-checks that each ``Task.verification.required_evidence`` item has a corresponding
-field on the submitted ``Evidence``. NOTE: anvil records no command exit codes on
-``Evidence``, so this asserts "evidence was submitted for the claimed
-verification", **not** "the commands exited 0". A true green-tests gate is a
-larger, separate change.
+Multiple claims: anvil does not cap claims per actor, so the gate evaluates
+**every** active claim the actor holds (deterministically, by task id) and blocks
+if any is unverified.
+
+"Complete" uses anvil's own predicate :func:`review.gates.evidence_complete`
+(each ``Task.verification.required_evidence`` item must have a corresponding field
+on the submitted ``Evidence``). NOTE: anvil's *accept* gate is advisory by default
+(``strict_evidence``); this finish-gate enforces evidence **submission**
+regardless, to pre-empt the "declare done without evidence" failure mode. And
+anvil records no command exit codes on ``Evidence``, so this asserts evidence was
+*submitted* for the claimed verification, **not** that the commands exited 0.
 
 Exit codes (so a jq-less host can branch on ``$?``, mirroring ``next -q``)::
 
@@ -47,7 +54,7 @@ from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.review.gates import evidence_complete
 
 if TYPE_CHECKING:
-    from anvil.state.models import Claim
+    from anvil.state.models import Claim, Evidence, Task
 
 __all__ = ["gate_check"]
 
@@ -61,7 +68,7 @@ def gate_check(
         None,
         "--actor",
         help=(
-            "Actor whose active claim to gate. Defaults to $USER or 'agent' "
+            "Actor whose active claims to gate. Defaults to $USER or 'agent' "
             "(the identity an agent harness claims under via MCP/CLI)."
         ),
     ),
@@ -104,10 +111,8 @@ def gate_check(
         ))
         return
 
-    # db unavailable (missing / locked / corrupt) → cannot gate → continue;
-    # never crash a finalize. NOTE the catch is scoped to the backend *open*
-    # only, so a wrong decision predicate still surfaces loudly in tests rather
-    # than being masked into a silently-inert gate.
+    # db unavailable (missing / locked / corrupt) at OPEN time → cannot gate →
+    # continue; never crash a finalize.
     try:
         backend = _open_backend(state_dir)
     except Exception:  # noqa: BLE001 — any open failure means "cannot gate"
@@ -116,62 +121,87 @@ def gate_check(
         ))
         return
 
+    # READ the actor's claims+tasks+evidence inside a guard so a read-time db
+    # fault (corrupt page, locked db, malformed row) also defaults-open instead
+    # of crashing the finalize. The guard is scoped to the *reads* only — the
+    # pure decision below runs OUTSIDE it, so a wrong predicate still surfaces in
+    # tests (and the real-backend block test would flip to exit 0 and fail).
+    rows: list[tuple[Claim, Task | None, Evidence | None]] | None
     try:
-        claim = _active_claim_for(backend, resolved_actor)
-        if claim is None:
-            task_id: str | None = None
-            claim_id: str | None = None
-            passed, missing, instruction = True, [], _CONTINUE_MSG
-        else:
-            claim_id = claim.id
-            task = backend.get_task(claim.task_id)
-            if task is None:
-                # Active claim with no task row — anomalous; do not block on it.
-                task_id = None
-                passed, missing, instruction = True, [], _CONTINUE_MSG
-            else:
-                task_id = task.id
-                evidence = backend.get_latest_evidence(task.id)
-                if evidence is None:
-                    # No evidence yet: missing == everything the task requires.
-                    required = list(task.verification.required_evidence)
-                    passed, missing = (not required), required
-                else:
-                    passed, missing = evidence_complete(task, evidence)
-                instruction = (
-                    _CONTINUE_MSG if passed
-                    else _block_instruction(task_id, resolved_actor, missing)
-                )
+        rows = _read_actor_rows(backend, resolved_actor)
+    except Exception:  # noqa: BLE001 — read-time fault ⇒ cannot gate ⇒ continue
+        rows = None
     finally:
         backend.close()
 
+    if rows is None:
+        _emit(json_output, quiet, _continue_decision(
+            resolved_actor, "anvil state unavailable; finalization may proceed.",
+        ))
+        return
+
+    # Pure decision: evaluate EVERY claim the actor holds; block if any is
+    # unverified. Sorted by task id so "which incomplete task is reported" is
+    # deterministic (list_active_claims has no ORDER BY).
+    incomplete: list[tuple[str, str, list[str]]] = []  # (task_id, claim_id, missing)
+    for claim, task, evidence in rows:
+        if task is None:
+            continue  # active claim with no task row — anomalous; don't block on it
+        if evidence is None:
+            required = list(task.verification.required_evidence)
+            passed, missing = (not required), required
+        else:
+            passed, missing = evidence_complete(task, evidence)
+        if not passed:
+            incomplete.append((task.id, claim.id, missing))
+
+    if not incomplete:
+        _emit(json_output, quiet, _continue_decision(resolved_actor, _CONTINUE_MSG))
+        return
+
+    incomplete.sort(key=lambda x: x[0])
+    task_id, claim_id, missing = incomplete[0]
+    others = len(incomplete) - 1
     _emit(json_output, quiet, {
-        "block": not passed,
-        "action": "continue" if passed else "revise",
+        "block": True,
+        "action": "revise",
         "actor": resolved_actor,
         "task": task_id,
         "claim": claim_id,
-        "evidence_gate": {"passed": passed, "missing": list(missing)},
-        "instruction": instruction,
+        "evidence_gate": {"passed": False, "missing": list(missing)},
+        "instruction": _block_instruction(task_id, resolved_actor, missing, others),
     })
 
 
-def _active_claim_for(backend: Any, actor: str) -> Claim | None:
-    """First ACTIVE claim held by *actor* (the gate only judges this actor's work)."""
+def _read_actor_rows(
+    backend: Any, actor: str
+) -> list[tuple[Claim, Task | None, Evidence | None]]:
+    """Read every active claim held by *actor*, with its task + latest evidence.
+
+    Reads only — the pass/fail judgement happens in the caller (outside the
+    read-error guard) so a predicate bug is never masked into a silent continue.
+    """
+    rows: list[tuple[Claim, Task | None, Evidence | None]] = []
     for claim in backend.list_active_claims():
-        if claim.claimed_by == actor:
-            return claim
-    return None
+        if claim.claimed_by != actor:
+            continue
+        task = backend.get_task(claim.task_id)
+        evidence = backend.get_latest_evidence(task.id) if task is not None else None
+        rows.append((claim, task, evidence))
+    return rows
 
 
-def _block_instruction(task_id: str, actor: str, missing: list[str]) -> str:
+def _block_instruction(task_id: str, actor: str, missing: list[str], others: int) -> str:
     miss = ", ".join(missing) if missing else "verification evidence"
+    extra = (
+        f" (and {others} other claimed task(s) also need evidence)" if others else ""
+    )
     return (
         f"Task {task_id} is claimed by '{actor}' but its verification evidence is "
-        f"incomplete (missing: {miss}). Run the task's verification commands and "
-        f"submit evidence before finishing — e.g. `anvil submit {task_id}` — then "
-        f"end your turn. (anvil checks that required evidence was submitted, not "
-        f"that commands exited 0.)"
+        f"incomplete (missing: {miss}){extra}. Run the task's verification commands "
+        f"and submit evidence before finishing — e.g. `anvil submit {task_id}` — then "
+        f"end your turn. (anvil checks that required evidence was submitted, not that "
+        f"commands exited 0.)"
     )
 
 

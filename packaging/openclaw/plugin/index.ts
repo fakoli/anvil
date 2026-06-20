@@ -33,6 +33,7 @@ const MAX_ATTEMPTS = 3;
 interface AnvilResult {
   code: number | null;
   stdout: string;
+  stderr: string;
   error?: Error;
 }
 
@@ -42,20 +43,25 @@ function runAnvil(args: string[], cwd: string): Promise<AnvilResult> {
     try {
       child = spawn("anvil", args, { cwd, env: process.env });
     } catch (error) {
-      resolve({ code: null, stdout: "", error: error as Error });
+      resolve({ code: null, stdout: "", stderr: "", error: error as Error });
       return;
     }
     let stdout = "";
+    let stderr = "";
     child.stdout?.on("data", (chunk) => {
       stdout += chunk.toString();
     });
-    child.on("error", (error) => resolve({ code: null, stdout, error }));
-    child.on("close", (code) => resolve({ code, stdout }));
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => resolve({ code: null, stdout, stderr, error }));
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
 }
 
-/** Parse the last JSON-looking line — the --json envelope is one line; tolerate
- *  any preamble a wrapper might emit. Returns null if nothing parses. */
+/** Parse the --json envelope. anvil emits exactly one JSON line, but tolerate a
+ *  wrapper preamble (scan for the last JSON-looking line) and a pretty-printed
+ *  multi-line blob (whole-string fallback). Returns null if nothing parses. */
 function parseEnvelope(stdout: string): { ok?: boolean; data?: Record<string, unknown> } | null {
   const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -67,7 +73,12 @@ function parseEnvelope(stdout: string): { ok?: boolean; data?: Record<string, un
       }
     }
   }
-  return null;
+  // Fallback: a multi-line / pretty-printed envelope.
+  try {
+    return JSON.parse(stdout.trim());
+  } catch {
+    return null;
+  }
 }
 
 export default definePluginEntry({
@@ -82,12 +93,20 @@ export default definePluginEntry({
       // No cwd => cannot scope to an anvil project => cannot gate.
       if (!event.cwd) return { action: "continue" as const };
 
-      const res = await runAnvil(["gate-check", "--json", "--actor", ANVIL_ACTOR], event.cwd);
+      // Pass --cwd explicitly: it wins precedence over a Gateway-level ANVIL_ROOT
+      // in anvil's state resolver, so the gate always judges the agent's actual
+      // project (not a stray env var's project). This is the no-false-block fix.
+      const res = await runAnvil(
+        ["gate-check", "--json", "--actor", ANVIL_ACTOR, "--cwd", event.cwd],
+        event.cwd,
+      );
 
       // anvil missing / spawn error / genuine error exit (1, e.g. bad ANVIL_ROOT)
       // => never block. Only 0 (continue) and 2 (block) are gate signals.
       if (res.error || (res.code !== 0 && res.code !== 2)) {
-        api.logger?.debug?.(`anvil finish-gate: gate-check unavailable (code=${res.code}); allowing finalize`);
+        const why = res.error ? res.error.message : `code=${res.code}`;
+        const tail = res.stderr ? ` stderr=${res.stderr.trim().slice(-300)}` : "";
+        api.logger?.debug?.(`anvil finish-gate: gate-check unavailable (${why}); allowing finalize.${tail}`);
         return { action: "continue" as const };
       }
 
