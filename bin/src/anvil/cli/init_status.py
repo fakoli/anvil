@@ -11,6 +11,7 @@ import typer
 
 from anvil.cli._helpers import (
     _STATE_DIR_NAME,
+    _is_local_layout,
     _is_plugin_root,
     _open_backend,
     _resolve_base_dir,
@@ -114,8 +115,13 @@ def init(
     # has no --cwd flag, so we pass None and let the env var (or cwd) decide.
     cwd = _resolve_base_dir(None)
 
-    # Guard: refuse to initialise inside the anvil plugin directory.
-    if _is_plugin_root(cwd):
+    # Guard: refuse to initialise inside the anvil plugin directory — but ONLY
+    # under the legacy local layout, where state would be scaffolded in-repo. In
+    # the default workspace layout init writes to ~/.anvil/... (never into the
+    # repo), so initialising "at the plugin root" is harmless and in fact correct
+    # for anvil-on-anvil dogfooding (B44: the guard was dead in workspace layout —
+    # it checked the resolved HOME base, never a plugin root).
+    if _is_local_layout() and _is_plugin_root(cwd):
         suggestion = _suggest_project_dir(cwd)
         lines = [
             "Error: this directory is the anvil plugin root. "

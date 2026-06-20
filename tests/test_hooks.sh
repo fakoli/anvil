@@ -301,6 +301,24 @@ cd "$HB_DIR" || exit 1
 bash "$HEARTBEAT" < /dev/null 2>/dev/null
 _assert_exit_zero "heartbeat: exits 0 in initialized dir (no CLI / no claim)" "$?"
 
+# ===========================================================================
+# detect-state.sh — SessionStart hook (B44: workspace-aware, no local-.anvil gate).
+# Always exit 0; output is driven by the workspace-aware CLI status, not a cwd dir.
+# ===========================================================================
+DETECT_STATE="${REPO_ROOT}/hooks/detect-state.sh"
+
+# Plain dir, no CLI on PATH (CLAUDE_PLUGIN_ROOT unset → CLI not found) → exit 0.
+cd "$UNINITIALIZED_DIR" || exit 1
+( unset CLAUDE_PLUGIN_ROOT; bash "$DETECT_STATE" >/dev/null 2>&1 )
+_assert_exit_zero "detect-state: exits 0 with no CLI available" "$?"
+
+# Legacy in-repo .anvil present (no CLI) → still exit 0 (non-blocking contract).
+DS_DIR="${TMP_DIR}/ds-test"
+mkdir -p "${DS_DIR}/.anvil"
+cd "$DS_DIR" || exit 1
+( unset CLAUDE_PLUGIN_ROOT; bash "$DETECT_STATE" >/dev/null 2>&1 )
+_assert_exit_zero "detect-state: exits 0 with legacy .anvil present" "$?"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

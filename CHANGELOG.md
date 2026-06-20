@@ -8,6 +8,22 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **HOME-workspace follow-ups (B44).** (1) **`anvil migrate-workspace`** — one-time,
+  safe-first migration of legacy in-repo `<repo>/.anvil/` (or `<repo>/bin/.anvil/`)
+  into the home workspace: dry-run by default (`--yes` to apply), never clobbers an
+  existing home workspace, copies (never moves) so the legacy dir survives, and
+  uses an atomic temp-then-rename so an interrupted copy can't half-populate.
+  (2) **Basename-collision fix (dual-key):** new workspaces are keyed by basename +
+  a path hash (`app-1a2b3c4d`) so two projects sharing a basename no longer collide;
+  a pre-existing **bare-name** workspace is still honored (resolves unchanged — no
+  orphaning of existing state). (3) **Plugin-root init guard** now fires only under
+  the legacy `local` layout (it was dead in workspace layout — it checked the
+  resolved HOME base, never a plugin root); initializing at the plugin root in
+  workspace layout is harmless and correct for anvil-on-anvil dogfooding. (4) The
+  **SessionStart hook** (`detect-state.sh`) is now workspace-aware — it no longer
+  gates on a local `./.anvil` (which the home layout doesn't create) and nudges to
+  `anvil migrate-workspace` when it detects un-migrated legacy in-repo state.
+
 - **Codex/cross-harness hook verbs (B41).** Two new `anvil hook` subcommands, both
   reusing existing engine logic: **`anvil hook heartbeat`** (PostToolUse lease
   renew — renews the actor's active claim lease(s) on tool activity; non-blocking,

@@ -69,3 +69,23 @@ def test_init_at_plugin_root_without_pkg_still_refuses(tmp_path: Path, monkeypat
         assert "ANVIL_ROOT" in result.output  # still gives the override hint
     finally:
         os.chdir(cwd)
+
+
+def test_init_at_plugin_root_allowed_in_workspace_layout(tmp_path: Path, monkeypatch):  # type: ignore[no-untyped-def]
+    """B44: under the default workspace layout the plugin-root guard does NOT fire —
+    state goes to ~/.anvil/... (never into the repo), so init at the plugin root is
+    harmless and correct for anvil-on-anvil dogfooding."""
+    monkeypatch.delenv("ANVIL_ROOT", raising=False)
+    monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")  # override the autouse 'local'
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _make_plugin_root(tmp_path, with_pkg=True)
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        result = runner.invoke(app, ["init", "--name", "X"], catch_exceptions=False)
+        assert result.exit_code == 0, result.output  # NOT refused
+        assert "plugin root" not in result.output
+    finally:
+        os.chdir(cwd)

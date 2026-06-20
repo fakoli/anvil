@@ -69,11 +69,40 @@ def _canonical_project_root(loc: Path) -> Path:
     return loc.resolve()
 
 
+def _workspace_key(root: Path) -> str:
+    """Collision-proof workspace key for a canonical repo root: a legible basename
+    PLUS a short hash of the absolute path, so two projects sharing a basename
+    (``app``, ``web``) never collide. Mirrors the slug+sha256 recipe in
+    ``install.py`` so the two code paths share one convention."""
+    import hashlib
+    import re
+
+    slug = re.sub(r"[^A-Za-z0-9_-]", "-", root.name) or "project"
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:8]
+    return f"{slug}-{digest}"
+
+
 def _home_workspace_base(loc: Path) -> Path:
     """The HOME-dir base (the dir that CONTAINS ``.anvil/``) for a project's shared
-    workspace: ``~/.anvil/workspaces/<repo-name>/``, keyed by the canonical repo."""
+    workspace under ``~/.anvil/workspaces/``, keyed by the canonical repo.
+
+    DUAL-KEY (B44), fully backward-compatible: a pre-existing **bare-name**
+    workspace (``<repo-name>/``, created by the original #42 code) keeps resolving
+    so its db is never orphaned. New projects get the collision-proof hashed key
+    (:func:`_workspace_key`). Only one extra ``exists()`` check, on the default
+    no-explicit-cwd path."""
     root = _canonical_project_root(loc)
-    return Path.home() / ".anvil" / "workspaces" / (root.name or "project")
+    workspaces = Path.home() / ".anvil" / "workspaces"
+    legacy = workspaces / (root.name or "project")
+    if (legacy / ".anvil" / "state.db").exists():
+        return legacy
+    return workspaces / _workspace_key(root)
+
+
+def _is_local_layout() -> bool:
+    """True when ``ANVIL_STATE_LAYOUT=local`` — the legacy in-repo ``<cwd>/.anvil``
+    layout (opt-in / tests). Default is the HOME workspace."""
+    return os.environ.get(_STATE_LAYOUT_ENV, "workspace").strip().lower() == "local"
 
 
 class StateRootError(click.ClickException):
@@ -113,7 +142,7 @@ def _resolve_base_dir(cwd: Path | None) -> Path:
     where to *create* the project. The existence check (fail-loud on a wrong
     env value) lives in :func:`_resolve_state_dir`, which the read commands use.
     """
-    local = os.environ.get(_STATE_LAYOUT_ENV, "workspace").strip().lower() == "local"
+    local = _is_local_layout()
 
     # 1. Explicit cwd wins. In workspace layout it maps to THAT project's shared
     #    home workspace (so the MCP server + CLI agree from any worktree).

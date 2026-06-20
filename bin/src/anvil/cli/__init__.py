@@ -23,6 +23,7 @@ from anvil.cli.init_status import init, status
 from anvil.cli.install import install
 from anvil.cli.mcp_config import mcp_config
 from anvil.cli.migrate import migrate_app, migrate_events
+from anvil.cli.migrate_workspace import migrate_workspace
 from anvil.cli.notify_digest import notify_digest
 from anvil.cli.packet_apply import apply, packet, submit
 from anvil.cli.plan import (
@@ -129,6 +130,7 @@ app.command("run-workflow")(run_workflow)
 app.command()(backup)
 app.command()(restore)
 app.command("migrate-events")(migrate_events)
+app.command("migrate-workspace")(migrate_workspace)
 
 # ---------------------------------------------------------------------------
 # Module entry point
