@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,12 +104,18 @@ interface ExecResult {
 /** Forward one exec capture to the existing `anvil hook capture-evidence` verb
  *  (single source of truth for the evidence-buffer format). Best-effort: writes
  *  the combined output to a temp file, spawns anvil, cleans up. Never throws. */
+// `anvil hook capture-evidence` only reads the first 4000 chars of the stdout
+// file, so cap what we stage to avoid writing megabytes of build log to disk.
+const MAX_OUTPUT_CHARS = 4000;
+
 async function captureEvidence(
   command: string, exitCode: number, output: string, cwd: string,
 ): Promise<void> {
-  const tmp = join(tmpdir(), `anvil-ev-${process.pid}-${Date.now()}.txt`);
+  // Unpredictable name + 0600 perms: verification output can be sensitive and
+  // lives in a world-readable tmp dir.
+  const tmp = join(tmpdir(), `anvil-ev-${process.pid}-${randomBytes(8).toString("hex")}.txt`);
   try {
-    await writeFile(tmp, output, "utf8");
+    await writeFile(tmp, output.slice(0, MAX_OUTPUT_CHARS), { encoding: "utf8", mode: 0o600 });
   } catch {
     return; // can't stage output — skip
   }
@@ -119,7 +126,9 @@ async function captureEvidence(
         "anvil",
         ["hook", "capture-evidence", "--command", command, "--exit-code", String(exitCode),
           "--stdout-file", tmp, "--actor", ANVIL_ACTOR, "--cwd", cwd],
-        { cwd, env: process.env },
+        // stdio:"ignore" — we never read the child's output; an unconsumed pipe
+        // could fill and block the child, stranding the temp file.
+        { cwd, env: process.env, stdio: "ignore" },
       );
     } catch {
       resolve();
@@ -143,7 +152,7 @@ export default definePluginEntry({
   register(api) {
     // after_tool_call: auto-capture verification-command output as evidence. Pure
     // observer (fire-and-forget); only `exec` tools running a verification command.
-    api.on("after_tool_call", async (event) => {
+    api.on("after_tool_call", (event) => {
       try {
         if (event.toolName !== "exec") return;
         const command =
@@ -154,7 +163,9 @@ export default definePluginEntry({
         if (!cwd) return; // can't scope to an anvil project without a cwd
         const exitCode = typeof details?.exitCode === "number" ? details.exitCode : -1;
         const output = typeof details?.aggregated === "string" ? details.aggregated : "";
-        await captureEvidence(command, exitCode, output, cwd);
+        // Fire-and-forget: do NOT await — return immediately so the hook never
+        // adds latency to tool completion. captureEvidence swallows its own errors.
+        void captureEvidence(command, exitCode, output, cwd);
       } catch (error) {
         api.logger?.debug?.(`anvil evidence-capture skipped: ${(error as Error)?.message}`);
       }
