@@ -41,6 +41,17 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   disable via `plugins.entries.anvil-finish-gate.hooks.allowPromptInjection=false`.
   (`session_start` can't inject — it's observation-only — so `before_prompt_build`
   is the injection seam.)
+- **OpenClaw `before_tool_call` claim-guard (B42 Phase 2 — completes Phase 2).** The
+  native plugin's fourth hook: when a mutating tool (`write`/`edit`/`apply_patch`)
+  runs while the actor holds no active anvil claim, it shells out to a new read-only
+  verb **`anvil claim-guard`** and acts per mode. **Default `warn`** (log-only, never
+  blocks — chosen by a 3-model vote as the only false-block-safe non-inert default);
+  opt-in `block` (hard veto) / `require_approval` (interactive only — hard-blocks in
+  headless) / `off`. Editing outside a claim's declared scope only warns (advisory).
+  Default-OPEN on every uncertain path. `before_tool_call` carries no cwd, so the
+  guard reuses the `workspaceDir` cached by `before_prompt_build` (session-keyed),
+  with an absolute-path fallback. `claim-guard` decision pinned by stub +
+  real-`SqliteBackend` tests. The plugin now hosts all four Phase-2 hooks.
 
 ## [0.0.9] — 2026-06-19
 

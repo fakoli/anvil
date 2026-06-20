@@ -11,6 +11,7 @@ import typer
 from anvil import __version__
 from anvil.cli.backup import backup, restore
 from anvil.cli.claim import claim, next, release, renew
+from anvil.cli.claim_guard import claim_guard
 from anvil.cli.conflicts import conflicts
 from anvil.cli.describe import describe
 from anvil.cli.doctor import doctor
@@ -103,6 +104,7 @@ app.command("mcp-config")(mcp_config)
 app.command()(install)
 app.command()(scan)
 app.command()(drift)
+app.command("claim-guard")(claim_guard)
 app.command("gate-check")(gate_check)
 app.command()(graph)
 app.command()(conflicts)

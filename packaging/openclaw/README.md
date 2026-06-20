@@ -81,6 +81,30 @@ nothing for non-anvil projects. Disable it with:
 openclaw config set plugins.entries.anvil-finish-gate.hooks.allowPromptInjection false --strict-json
 ```
 
+A fourth hook, **`before_tool_call`**, is a **claim-guard**: when a mutating tool
+(`write`/`edit`/`apply_patch`) runs while the actor holds no active anvil claim, it
+shells out to `anvil claim-guard` and acts per its configured mode. The default is
+**`warn`** — it only logs (never blocks; `before_tool_call` can't show the agent
+text, so the nudge rides the `before_prompt_build` guidance above). Escalate when
+you want enforcement:
+
+```bash
+# hard-block unclaimed edits (CI / strict):
+openclaw config set plugins.entries.anvil-finish-gate.config.claimGuardMode block --strict-json
+# also guard exec/bash (off by default — no command parser):
+openclaw config set plugins.entries.anvil-finish-gate.config.guardExec true --strict-json
+```
+
+- **Do NOT use `require_approval` in an unattended/headless gateway** — with no
+  approver it auto-resolves to a hard block on the first unclaimed mutation.
+- **Actor alignment:** the guard checks claims under the actor `agent` (override
+  with `ANVIL_GUARD_ACTOR`/`ANVIL_CLAIM_GUARD_MODE` env). If your harness claims
+  under a different identity, `block`/`require_approval` could mis-fire — keep the
+  default `warn` until aligned.
+- Editing a file outside your claim's declared scope only **warns** (advisory —
+  `expected_files` is not exhaustive). The guard is default-OPEN (no project / no
+  cwd / anvil missing / any error ⇒ the tool runs).
+
 - **`anvil` must be on the Gateway's PATH** — the plugin spawns it (e.g.
   `install.sh --path`).
 - **DEFAULT-OPEN:** no anvil project / no claim for the actor / `anvil` missing /
