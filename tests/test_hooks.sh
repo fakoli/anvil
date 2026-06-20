@@ -285,6 +285,22 @@ printf '%s' "$PAYLOAD" | bash "$CAPTURE_EVIDENCE" 2>/dev/null
 EXIT_CODE=$?
 _assert_exit_zero "capture-evidence: exits 0 even when captured command exit_code=1" "$EXIT_CODE"
 
+# ===========================================================================
+# heartbeat.sh — PostToolUse lease heartbeat (B41). Non-blocking: always exit 0.
+# ===========================================================================
+HEARTBEAT="${REPO_ROOT}/hooks/heartbeat.sh"
+
+cd "$UNINITIALIZED_DIR" || exit 1
+bash "$HEARTBEAT" < /dev/null 2>/dev/null
+_assert_exit_zero "heartbeat: exits 0 outside .anvil/ project" "$?"
+
+HB_DIR="${TMP_DIR}/hb-test"
+mkdir -p "${HB_DIR}/.anvil"
+touch "${HB_DIR}/.anvil/state.db"
+cd "$HB_DIR" || exit 1
+bash "$HEARTBEAT" < /dev/null 2>/dev/null
+_assert_exit_zero "heartbeat: exits 0 in initialized dir (no CLI / no claim)" "$?"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

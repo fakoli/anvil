@@ -55,7 +55,8 @@ fact-check the claims before updating here.
 | **Hooks** | ✅ free via root plugin | root `hooks/hooks.json` (`${CLAUDE_PLUGIN_ROOT}`) ships to Codex unchanged |
 | **Automations** | ✅ shipped, PAUSED | `anvil install codex --automations`; never auto-activated |
 | **Headless `exec`/`review` runners** | ⬜ B41 follow-on | `packaging/codex/loops/` (not built yet) |
-| **Stop-gate / heartbeat hooks** | ⬜ B41 follow-on | new `anvil hooks …` subcommands (engine code) |
+| **PostToolUse lease heartbeat** | ✅ shipped (B41) | `anvil hook heartbeat`, wired in `hooks.json` (non-blocking, cross-harness) |
+| **Stop-hook evidence gate** | ✅ verb shipped, OPT-IN (B41) | `anvil hook stop-gate`; NOT auto-wired (blocking) — opt in + `/hooks` trust + verify (below) |
 | **Sessions / fork / cloud** | ⬜ deferred | opt-in, experimental; see brief Phase 4 |
 
 ---
@@ -121,8 +122,17 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
   onboarding text MUST tell users to run `/hooks` and trust anvil's hooks. ✓
 - **anvil:** SessionStart state-inject, PreToolUse claim-check, PostToolUse file-record + Bash
   evidence-capture all port for free via the shared root plugin — **zero packaging change** (all 3
-  events supported). Follow-on (B41 Phase 2): a **`Stop`-hook evidence gate** (`Stop` IS supported on
-  Codex) + PostToolUse lease heartbeat (new `anvil hooks …` subcommands; cross-harness with Claude Code).
+  events supported). **B41 (shipped):** a PostToolUse **lease heartbeat** (`anvil hook heartbeat`,
+  wired, non-blocking) keeps a lazy lease fresh on tool activity.
+- **B41 Stop-gate (OPT-IN, blocking).** `anvil hook stop-gate` is the Codex/Claude analogue of the
+  OpenClaw finish-gate: on `Stop`, if a claimed task lacks submitted evidence it emits
+  `{"decision":"block","reason":…}` + exit 2 to force a continuation. It is **NOT auto-wired** —
+  anvil's bundled hooks are non-blocking by design (`docs/design.md`), and the Codex Stop-block
+  mechanism is **unverified on codex-cli 0.130.0**. To enable: add a `Stop` hook running
+  `anvil hook stop-gate` to your config, run `/hooks` to trust it, and **verify it blocks as
+  expected before relying on it** (if exit-2 is treated as a hook error rather than a block signal,
+  it could disrupt turns). Reuses `gate-check`'s decision logic; default-OPEN; loop-guarded via
+  `stop_hook_active`.
 - **Source:** root `hooks/hooks.json`; cached examples under `~/.codex/plugins/cache/*/hooks/hooks.json`;
   hook loader/trust strings in the `codex` binary.
 

@@ -6,6 +6,7 @@ Internal helpers invoked by the plugin's bash hooks.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import typer
@@ -257,5 +258,144 @@ def hook_capture_evidence(
         raise
     except Exception:  # noqa: BLE001
         pass  # hook must never block the session
+
+    raise typer.Exit(code=0)
+
+
+@hook_app.command("stop-gate")
+def hook_stop_gate(
+    actor: str | None = typer.Option(  # noqa: B008
+        None,
+        "--actor",
+        help="Actor whose active claims to gate. Defaults to $ANVIL_GATE_ACTOR or 'agent'.",
+    ),
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the Stop payload's cwd, then the current dir.",
+        hidden=True,
+    ),
+) -> None:
+    """Stop-hook EVIDENCE GATE for Codex / Claude Code (B41 — OPT-IN).
+
+    The Codex/Claude analogue of the OpenClaw before_agent_finalize finish-gate:
+    when the turn ends with a claimed anvil task that has no submitted verification
+    evidence, emit ``{"decision":"block","reason":...}`` on stdout AND exit 2 (a
+    continuation prompt on stderr too) to force one more pass; otherwise exit 0.
+
+    NOT wired by default — anvil's bundled hooks are non-blocking by design
+    (docs/design.md). Opt in by adding a Stop hook that runs ``anvil hook
+    stop-gate`` (see docs/reference/codex.md), and trust it via ``/hooks``. Reuses
+    ``gate-check``'s decision logic; default-OPEN on every uncertain path; loop-
+    guarded via the payload's ``stop_hook_active``.
+    """
+    import sys
+
+    # Best-effort parse of the Stop payload on stdin (stop_hook_active, cwd).
+    payload: dict[str, object] = {}
+    try:
+        raw = "" if sys.stdin.isatty() else sys.stdin.read()
+        if raw.strip():
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                payload = loaded
+    except Exception:  # noqa: BLE001 — a malformed payload must not break the turn
+        payload = {}
+
+    # Loop guard: already inside a continuation we requested — never re-block.
+    if payload.get("stop_hook_active"):
+        raise typer.Exit(code=0)
+
+    resolved_actor = actor or os.environ.get("ANVIL_GATE_ACTOR") or "agent"
+    payload_cwd = payload.get("cwd")
+    resolved_cwd = cwd
+    if resolved_cwd is None and isinstance(payload_cwd, str) and payload_cwd:
+        resolved_cwd = Path(payload_cwd)
+
+    # Default-OPEN: any resolution/read failure ⇒ allow the turn to end (exit 0).
+    try:
+        from anvil.cli._helpers import _open_backend
+        from anvil.cli.gate_check import _read_actor_rows, decide_from_rows
+
+        state_dir = _resolve_state_dir(resolved_cwd)
+        if not state_dir.exists():
+            raise typer.Exit(code=0)
+        backend = _open_backend(state_dir)
+        try:
+            rows = _read_actor_rows(backend, resolved_actor)
+        finally:
+            backend.close()
+        decision = decide_from_rows(resolved_actor, rows)
+    except typer.Exit:
+        raise
+    except Exception:  # noqa: BLE001 — never break the turn on an anvil error
+        raise typer.Exit(code=0) from None
+
+    if not decision.get("block"):
+        raise typer.Exit(code=0)
+
+    reason = str(decision.get("instruction") or "Submit verification evidence before finishing.")
+    # Emit BOTH contracts: Codex/Claude honor {"decision":"block","reason":...} on
+    # stdout; the exit-2-with-stderr-reason path is the fallback for harnesses that
+    # read the continuation prompt from stderr.
+    typer.echo(json.dumps({"decision": "block", "reason": reason}))
+    typer.echo(reason, err=True)
+    raise typer.Exit(code=2)
+
+
+@hook_app.command("heartbeat")
+def hook_heartbeat(
+    actor: str | None = typer.Option(  # noqa: B008
+        None,
+        "--actor",
+        help="Actor whose claim lease(s) to renew (default $ANVIL_GATE_ACTOR or 'agent').",
+    ),
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the current working directory.",
+        hidden=True,
+    ),
+) -> None:
+    """PostToolUse lease HEARTBEAT (B41) — renew the actor's active claim lease(s)
+    on tool activity so a lazy lease stays fresh while real work is happening.
+
+    Purely side-effecting and non-blocking: always exits 0, swallows every error
+    (an expired lease raises — that is fine, the next claim/reclaim handles it).
+    Wired into the bundled PostToolUse hooks (cross-harness, Claude + Codex).
+    """
+    resolved_actor = actor or os.environ.get("ANVIL_GATE_ACTOR") or "agent"
+    try:
+        from anvil.claims.manager import ClaimManager
+        from anvil.cli._helpers import (
+            _lease_manager_kwargs,
+            _load_config_optional,
+            _open_backend,
+        )
+        from anvil.clock import SystemClock
+
+        state_dir = _resolve_state_dir(cwd)
+        if not state_dir.exists():
+            raise typer.Exit(code=0)
+        clock = SystemClock()
+        backend = _open_backend(state_dir)
+        try:
+            cfg = _load_config_optional(state_dir)
+            lease_kwargs = _lease_manager_kwargs(cfg, lease_override=None)
+            claim_ids = [
+                c.id for c in backend.list_active_claims() if c.claimed_by == resolved_actor
+            ]
+            for claim_id in claim_ids:
+                try:
+                    manager = ClaimManager(backend, clock, actor=resolved_actor, **lease_kwargs)
+                    manager.renew(claim_id)
+                except Exception:  # noqa: BLE001 — expired/contended lease: skip, not fatal
+                    pass
+        finally:
+            backend.close()
+    except typer.Exit:
+        raise
+    except Exception:  # noqa: BLE001 — a heartbeat must never break the session
+        pass
 
     raise typer.Exit(code=0)
