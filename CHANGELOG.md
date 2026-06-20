@@ -8,6 +8,21 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Codex/cross-harness hook verbs (B41).** Two new `anvil hook` subcommands, both
+  reusing existing engine logic: **`anvil hook heartbeat`** (PostToolUse lease
+  renew — renews the actor's active claim lease(s) on tool activity; non-blocking,
+  wired into the bundled `hooks.json`, cross-harness Claude + Codex) and **`anvil
+  hook stop-gate`** (the Codex/Claude analogue of the OpenClaw finish-gate — on
+  `Stop`, emits `{"decision":"block","reason":…}` + exit 2 when a claimed task lacks
+  submitted evidence, reusing `gate-check`'s `decide_from_rows`). The Stop-gate is
+  **OPT-IN, not auto-wired** — anvil's bundled hooks are non-blocking by design and
+  the Codex Stop-block mechanism is unverified on codex-cli 0.130.0; enable it via a
+  documented `/hooks`-trusted recipe after verifying. `gate_check.py` refactored to
+  share `decide_from_rows`. Verb decisions pinned by `tests/test_codex_hooks.py`
+  (incl. a gate-check↔stop-gate parity test); `heartbeat.sh` smoke-tested in
+  `tests/test_hooks.sh`.
+
+
 - **OpenClaw native finish-gate (B42 Phase 2).** anvil's first native OpenClaw
   `definePluginEntry` plugin (`packaging/openclaw/plugin/`): a
   `before_agent_finalize` hook that **blocks an agent from finalizing a turn while

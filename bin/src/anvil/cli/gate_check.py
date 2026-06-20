@@ -56,7 +56,7 @@ from anvil.review.gates import evidence_complete
 if TYPE_CHECKING:
     from anvil.state.models import Claim, Evidence, Task
 
-__all__ = ["gate_check"]
+__all__ = ["_read_actor_rows", "decide_from_rows", "gate_check"]
 
 _COMMAND = "gate-check"
 
@@ -140,9 +140,18 @@ def gate_check(
         ))
         return
 
-    # Pure decision: evaluate EVERY claim the actor holds; block if any is
-    # unverified. Sorted by task id so "which incomplete task is reported" is
-    # deterministic (list_active_claims has no ORDER BY).
+    _emit(json_output, quiet, decide_from_rows(resolved_actor, rows))
+
+
+def decide_from_rows(
+    actor: str, rows: list[tuple[Claim, Task | None, Evidence | None]]
+) -> dict[str, Any]:
+    """The pure finish-gate decision over an actor's claim rows. Shared by
+    ``gate-check`` and the Codex ``anvil hook stop-gate`` so the evidence logic
+    lives in ONE place. Evaluates EVERY claim; blocks if any is unverified, the
+    offending task chosen deterministically (sorted by id — list_active_claims has
+    no ORDER BY). Returns the same decision dict ``gate-check`` emits.
+    """
     incomplete: list[tuple[str, str, list[str]]] = []  # (task_id, claim_id, missing)
     for claim, task, evidence in rows:
         if task is None:
@@ -156,21 +165,20 @@ def gate_check(
             incomplete.append((task.id, claim.id, missing))
 
     if not incomplete:
-        _emit(json_output, quiet, _continue_decision(resolved_actor, _CONTINUE_MSG))
-        return
+        return _continue_decision(actor, _CONTINUE_MSG)
 
     incomplete.sort(key=lambda x: x[0])
     task_id, claim_id, missing = incomplete[0]
     others = len(incomplete) - 1
-    _emit(json_output, quiet, {
+    return {
         "block": True,
         "action": "revise",
-        "actor": resolved_actor,
+        "actor": actor,
         "task": task_id,
         "claim": claim_id,
         "evidence_gate": {"passed": False, "missing": list(missing)},
-        "instruction": _block_instruction(task_id, resolved_actor, missing, others),
-    })
+        "instruction": _block_instruction(task_id, actor, missing, others),
+    }
 
 
 def _read_actor_rows(
