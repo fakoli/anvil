@@ -8,12 +8,16 @@ loop through one of two surfaces:
 
 `anvil install <harness>` wires this up for you, in two tiers:
 
-- **Supported end-to-end** — `claude-code`, `codex`, and `openclaw` — via their
-  native plugin/CLI: skills, commands, and (for codex) anvil's `AGENTS.md` spliced
-  into a marked, removable block.
-- **MCP-only best-effort** — every other harness: install merges **only** the anvil
-  MCP server into the harness's config. No instruction splice, no skills drop. To
-  give the agent anvil's usage guidance, point it at the repo's `AGENTS.md` yourself.
+- **Supported end-to-end** — `claude-code`, `codex`, and `openclaw`. `codex` and
+  `openclaw` install natively via their own CLI (skills, commands, and — for codex —
+  anvil's `AGENTS.md` spliced into a marked, removable block). `claude-code` is the
+  anvil **plugin** itself: install it from the marketplace (see below) or wire
+  `.mcp.json` by hand — there is no `anvil install claude-code`.
+- **MCP-only best-effort** — every other harness: install merges the anvil MCP server
+  into the harness's config **where it can write in place**; for the rest (gemini,
+  cline, openhands, continue, goose) `anvil mcp-config <harness>` prints the block to
+  paste. No instruction splice, no skills drop — point the agent at the repo's
+  `AGENTS.md` for usage guidance.
 
 Why tiers? Splicing instruction files and dropping skills into a dozen harnesses was
 the blast-radius behind a config-corruption incident. The three supported harnesses
@@ -43,7 +47,7 @@ Provisions an anvil checkout (cached at `~/.anvil-src`, or `$ANVIL_SRC`) and run
 
 | Harness | Tier | What `anvil install --write` does |
 |---|---|---|
-| `claude-code` | **supported** | install the plugin (MCP + skills + hooks), or drop `.mcp.json` + `CLAUDE.md`/`AGENTS.md` |
+| `claude-code` | **supported** | the anvil **plugin** — install from the marketplace (MCP + skills + hooks), or add anvil to a project `.mcp.json` by hand (not an `anvil install` target — see below) |
 | `codex` | **supported** | native `codex plugin marketplace add` + `codex mcp add` (skills via plugin) **and** splice `AGENTS.md` |
 | `openclaw` | **supported** | native `openclaw mcp add` + `openclaw plugins install` (plugin ships skills + instructions) |
 | `cursor` | MCP-only | merge MCP → `~/.cursor/mcp.json` |
@@ -88,10 +92,11 @@ included):
 /plugin install anvil@anvil
 ```
 
-…or treat it like any other MCP host with `anvil install claude-code`. The
-SessionStart/PreToolUse/PostToolUse hooks are Claude-Code-only conveniences;
-every state operation stays reachable through the CLI or MCP server on any
-harness. See `docs/hooks-reference.md`.
+…or skip the plugin and wire anvil as a plain MCP server by adding its block to a
+project `.mcp.json` (Claude Code reads it natively) — there is no `anvil install
+claude-code` target. The SessionStart/PreToolUse/PostToolUse hooks are
+Claude-Code-only conveniences; every state operation stays reachable through the CLI
+or MCP server on any harness. See `docs/hooks-reference.md`.
 
 ## Codex
 

@@ -16,7 +16,7 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   ships it). This shrinks the blast radius behind the earlier config-corruption
   incident — anvil no longer writes instruction files into a dozen third-party
   harnesses. To give an MCP-only agent anvil's usage guidance, point it at the
-  repo's `AGENTS.md`. Docs reframed to the three-tier model
+  repo's `AGENTS.md`. Docs reframed to the two-tier model — supported vs MCP-only
   (`docs/how-to/using-anvil-on-any-harness.md`).
 
 ### Removed

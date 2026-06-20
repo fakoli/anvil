@@ -542,12 +542,14 @@ def test_crash_before_writes_completed_is_still_reversible(
 
     # Let the MCP config write LAND, then die the instant it's on disk — the
     # manifest is recorded BEFORE any write, so the mutation must still be
-    # rollback-able. A scoped context undoes ONLY this patch (not HOME isolation).
+    # rollback-able. The patch is class-level (pathlib has no per-instance hook) but
+    # only the EXACT config path raises, so no other write in-process is affected;
+    # the scoped context undoes it (and never touches HOME isolation).
     real_write_text = install_mod.Path.write_text
 
     def _write_then_crash(self: Path, *a: object, **k: object) -> int:
         out = real_write_text(self, *a, **k)
-        if self.name == "mcp.json":
+        if str(self) == str(cfg):
             raise OSError("boom")
         return out
 
