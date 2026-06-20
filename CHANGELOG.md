@@ -32,6 +32,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   never blocks or fails a tool call. Extractor verified against OpenClaw 2026.6.6's
   exec result shape (`event.result.details.{exitCode,aggregated,cwd}`; stdout+stderr
   are combined).
+- **OpenClaw `before_prompt_build` guidance injection (B42 Phase 2).** The native
+  plugin injects a short, **cacheable** anvil-usage note into the system prompt for
+  anvil-tracked projects (how to `claim`/`submit` + a heads-up that the finish-gate
+  blocks finalizing un-evidenced work). Uses `prependSystemContext` (provider
+  prompt-cached) and is gated on a single memoized `anvil status` probe per
+  workspace — no per-turn shell-out. Returns nothing for non-anvil projects;
+  disable via `plugins.entries.anvil-finish-gate.hooks.allowPromptInjection=false`.
+  (`session_start` can't inject — it's observation-only — so `before_prompt_build`
+  is the injection seam.)
 
 ## [0.0.9] — 2026-06-19
 

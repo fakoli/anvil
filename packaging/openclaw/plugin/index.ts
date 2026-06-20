@@ -34,6 +34,11 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 const ANVIL_ACTOR = process.env.ANVIL_GATE_ACTOR || "agent";
 const MAX_ATTEMPTS = 3;
 
+// Every anvil invocation is bounded by a timeout: these hooks run inside the
+// agent loop (before_agent_finalize and before_prompt_build are AWAITED), so a
+// hung `anvil` (locked sqlite, stalled IO) must never block the turn forever.
+const ANVIL_TIMEOUT_MS = 5000;
+
 interface AnvilResult {
   code: number | null;
   stdout: string;
@@ -41,25 +46,49 @@ interface AnvilResult {
   error?: Error;
 }
 
-function runAnvil(args: string[], cwd: string): Promise<AnvilResult> {
+/** Spawn `anvil <args>` in `cwd`, bounded by ANVIL_TIMEOUT_MS. On timeout the
+ *  child is killed and resolved with an error (callers default-open on error).
+ *  `ignoreOutput` uses stdio:"ignore" when the caller only needs the exit code
+ *  (avoids unconsumed pipes filling and blocking the child). Never rejects. */
+function runAnvil(
+  args: string[], cwd: string, opts?: { ignoreOutput?: boolean },
+): Promise<AnvilResult> {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn("anvil", args, { cwd, env: process.env });
+      child = spawn("anvil", args, {
+        cwd, env: process.env, ...(opts?.ignoreOutput ? { stdio: "ignore" } : {}),
+      });
     } catch (error) {
       resolve({ code: null, stdout: "", stderr: "", error: error as Error });
       return;
     }
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const finish = (result: AnvilResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill();
+      } catch {
+        /* already exited */
+      }
+      resolve(result);
+    };
+    const timer = setTimeout(
+      () => finish({ code: null, stdout, stderr, error: new Error("anvil timed out") }),
+      ANVIL_TIMEOUT_MS,
+    );
     child.stdout?.on("data", (chunk) => {
       stdout += chunk.toString();
     });
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("error", (error) => resolve({ code: null, stdout, stderr, error }));
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("error", (error) => finish({ code: null, stdout, stderr, error }));
+    child.on("close", (code) => finish({ code, stdout, stderr }));
   });
 }
 
@@ -119,24 +148,13 @@ async function captureEvidence(
   } catch {
     return; // can't stage output — skip
   }
-  await new Promise<void>((resolve) => {
-    let child;
-    try {
-      child = spawn(
-        "anvil",
-        ["hook", "capture-evidence", "--command", command, "--exit-code", String(exitCode),
-          "--stdout-file", tmp, "--actor", ANVIL_ACTOR, "--cwd", cwd],
-        // stdio:"ignore" — we never read the child's output; an unconsumed pipe
-        // could fill and block the child, stranding the temp file.
-        { cwd, env: process.env, stdio: "ignore" },
-      );
-    } catch {
-      resolve();
-      return;
-    }
-    child.on("error", () => resolve());
-    child.on("close", () => resolve());
-  });
+  // runAnvil bounds this by ANVIL_TIMEOUT_MS (kills a hung child) and uses
+  // stdio:"ignore" so the unconsumed pipe can't block the child.
+  await runAnvil(
+    ["hook", "capture-evidence", "--command", command, "--exit-code", String(exitCode),
+      "--stdout-file", tmp, "--actor", ANVIL_ACTOR, "--cwd", cwd],
+    cwd, { ignoreOutput: true },
+  );
   try {
     await unlink(tmp);
   } catch {
@@ -144,11 +162,45 @@ async function captureEvidence(
   }
 }
 
+// Cacheable static guidance injected into the system prompt for anvil-tracked
+// projects: primes the agent to use anvil and warns about the finish-gate. Static
+// (same for every anvil project) so it rides the provider's prompt cache.
+const ANVIL_GUIDANCE =
+  "[anvil] This project is tracked by anvil. Pick up work with `anvil next` then " +
+  "`anvil claim <task-id>`; inspect state with `anvil status` / `anvil list`. Before " +
+  "ending your turn on a claimed task, run its verification commands and submit " +
+  "evidence (`anvil submit <task-id>`) — anvil's finish-gate will otherwise block " +
+  "finalization.";
+
+// Memoize the per-workspace decision so before_prompt_build (which fires every
+// turn and is awaited) costs at most ONE `anvil status` probe per session — not a
+// shell-out on every prompt build.
+const guidanceCache = new Map<string, string>();
+
+/** Return the guidance to inject for a workspace, or "" if it is not an anvil
+ *  project. Memoized; probes `anvil status --json` once (exit 0 ⇒ tracked). */
+async function anvilGuidanceFor(workspaceDir: string): Promise<string> {
+  const cached = guidanceCache.get(workspaceDir);
+  if (cached !== undefined) return cached;
+  // Timeout-bounded probe (runAnvil kills a hung child) so a stalled `anvil
+  // status` can't block prompt assembly forever. exit 0 ⇒ tracked anvil project.
+  const probe = await runAnvil(["status", "--json", "--cwd", workspaceDir], workspaceDir, {
+    ignoreOutput: true,
+  });
+  const guidance = probe.code === 0 ? ANVIL_GUIDANCE : "";
+  guidanceCache.set(workspaceDir, guidance);
+  return guidance;
+}
+
+interface PromptBuildContext {
+  workspaceDir?: string;
+}
+
 export default definePluginEntry({
   id: "anvil-finish-gate",
   name: "anvil finish-gate",
   description:
-    "anvil's OpenClaw integration: blocks finalizing a turn while a claimed task lacks evidence (before_agent_finalize), and auto-captures verification-command output to the claim's evidence buffer (after_tool_call).",
+    "anvil's OpenClaw integration: blocks finalizing a turn while a claimed task lacks evidence (before_agent_finalize), auto-captures verification-command output to the claim's evidence buffer (after_tool_call), and injects anvil usage guidance into the system prompt for tracked projects (before_prompt_build).",
   register(api) {
     // after_tool_call: auto-capture verification-command output as evidence. Pure
     // observer (fire-and-forget); only `exec` tools running a verification command.
@@ -168,6 +220,23 @@ export default definePluginEntry({
         void captureEvidence(command, exitCode, output, cwd);
       } catch (error) {
         api.logger?.debug?.(`anvil evidence-capture skipped: ${(error as Error)?.message}`);
+      }
+    });
+
+    // before_prompt_build: inject cacheable anvil usage guidance into the system
+    // prompt for anvil-tracked projects. Non-blocking by nature; returns {} (no
+    // injection) for non-anvil projects or any error.
+    api.on("before_prompt_build", async (_event, ctx) => {
+      try {
+        const workspaceDir =
+          typeof (ctx as PromptBuildContext)?.workspaceDir === "string"
+            ? (ctx as PromptBuildContext).workspaceDir
+            : "";
+        if (!workspaceDir) return {};
+        const guidance = await anvilGuidanceFor(workspaceDir);
+        return guidance ? { prependSystemContext: guidance } : {};
+      } catch {
+        return {};
       }
     });
 

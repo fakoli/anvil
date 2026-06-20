@@ -71,6 +71,16 @@ observer (fire-and-forget) and never blocks or fails a tool call. Note: OpenClaw
 `exec` result combines stdout+stderr into one stream, so captured output is the
 combined log.
 
+A third hook, **`before_prompt_build`**, injects a short cacheable anvil-usage note
+into the system prompt for anvil-tracked projects (how to claim/submit + a heads-up
+that the finish-gate blocks finalizing un-evidenced work). It's gated on a single
+memoized `anvil status` probe per workspace (no per-turn shell-out) and returns
+nothing for non-anvil projects. Disable it with:
+
+```bash
+openclaw config set plugins.entries.anvil-finish-gate.hooks.allowPromptInjection false --strict-json
+```
+
 - **`anvil` must be on the Gateway's PATH** — the plugin spawns it (e.g.
   `install.sh --path`).
 - **DEFAULT-OPEN:** no anvil project / no claim for the actor / `anvil` missing /
