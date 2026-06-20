@@ -89,21 +89,28 @@ text, so the nudge rides the `before_prompt_build` guidance above). Escalate whe
 you want enforcement:
 
 ```bash
-# hard-block unclaimed edits (CI / strict):
+# hard-block unclaimed FILE edits (CI / strict):
 openclaw config set plugins.entries.anvil-finish-gate.config.claimGuardMode block --strict-json
-# also guard exec/bash (off by default — no command parser):
+# also flag unclaimed exec/bash — WARN-ONLY even in block mode (off by default):
 openclaw config set plugins.entries.anvil-finish-gate.config.guardExec true --strict-json
 ```
 
-- **Do NOT use `require_approval` in an unattended/headless gateway** — with no
-  approver it auto-resolves to a hard block on the first unclaimed mutation.
-- **Actor alignment:** the guard checks claims under the actor `agent` (override
-  with `ANVIL_GUARD_ACTOR`/`ANVIL_CLAIM_GUARD_MODE` env). If your harness claims
-  under a different identity, `block`/`require_approval` could mis-fire — keep the
-  default `warn` until aligned.
+- **Only `write`/`edit`/`apply_patch` can be hard-blocked.** `exec`/`bash` (when
+  `guardExec=true`) are **warn-only even in `block` mode** — blocking arbitrary
+  commands would also block `anvil next`/`anvil claim`, a claim-acquisition deadlock.
+- **`require_approval` is for interactive gateways.** With the plugin's
+  `timeoutBehavior:"allow"`, an unanswered approval falls **open** after ~30s (it
+  does not hard-block on timeout); but if the gateway has **no approval route**
+  configured, the request resolves to a denial — so prefer `warn` or `block` when
+  unattended.
+- **Actor alignment:** the guard checks claims under the actor `agent` (override via
+  the `ANVIL_GATE_ACTOR` env, shared with the finish-gate; mode via
+  `ANVIL_CLAIM_GUARD_MODE`). If your harness claims under a different identity,
+  `block`/`require_approval` could mis-fire — keep the default `warn` until aligned.
 - Editing a file outside your claim's declared scope only **warns** (advisory —
-  `expected_files` is not exhaustive). The guard is default-OPEN (no project / no
-  cwd / anvil missing / any error ⇒ the tool runs).
+  `expected_files` is not exhaustive; a claim with no declared files is not warned).
+  The guard is default-OPEN (no project / no cwd / anvil missing / any error ⇒ the
+  tool runs).
 
 - **`anvil` must be on the Gateway's PATH** — the plugin spawns it (e.g.
   `install.sh --path`).

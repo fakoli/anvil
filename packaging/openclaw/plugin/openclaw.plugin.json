@@ -18,7 +18,7 @@
       "guardExec": {
         "type": "boolean",
         "default": false,
-        "description": "Also apply the claim-guard to exec/bash tools (default off — there is no command parser, so gating all exec would warn on read-only shell)."
+        "description": "Also flag exec/bash tools run without a claim (default off). WARN-ONLY even in block mode — there is no command parser, and hard-blocking arbitrary commands would also block `anvil claim` (a deadlock)."
       }
     }
   }

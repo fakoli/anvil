@@ -142,7 +142,10 @@ def claim_guard(
         covered |= {_normalize(f) for f in claim.expected_files}
     uncovered = [f for f in file_list if f not in covered]
 
-    if file_list and uncovered:
+    # Only warn "outside scope" when the claim actually DECLARES a scope. An empty
+    # expected_files means scope is unknown, not "covers nothing" — warning on every
+    # edit would be pure noise.
+    if file_list and covered and uncovered:
         _emit(json_output, quiet, {
             "block": False,
             "action": "warn",

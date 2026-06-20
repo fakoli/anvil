@@ -259,13 +259,15 @@ export default definePluginEntry({
   description:
     "anvil's OpenClaw integration: blocks finalizing a turn while a claimed task lacks evidence (before_agent_finalize), auto-captures verification-command output to the claim's evidence buffer (after_tool_call), and injects anvil usage guidance into the system prompt for tracked projects (before_prompt_build).",
   register(api) {
-    // claim-guard mode: per-plugin config → env → default "warn" (the unanimous
-    // safe default — never false-blocks; block/require_approval are opt-in).
+    // claim-guard mode (default "warn" — the unanimous safe default; never
+    // false-blocks). Precedence ENV → per-plugin config → "warn": env wins so an
+    // explicit ANVIL_CLAIM_GUARD_MODE is never shadowed by an injected schema
+    // default in pluginConfig. Invalid values fall through (no silent surprise).
     const cfg = ((api as { pluginConfig?: Record<string, unknown> }).pluginConfig) ?? {};
+    const asMode = (v: unknown): GuardMode | undefined =>
+      (["off", "warn", "require_approval", "block"].includes(String(v)) ? (v as GuardMode) : undefined);
     const CLAIM_GUARD_MODE: GuardMode =
-      (["off", "warn", "require_approval", "block"].includes(String(cfg.claimGuardMode))
-        ? (cfg.claimGuardMode as GuardMode)
-        : (process.env.ANVIL_CLAIM_GUARD_MODE as GuardMode)) || "warn";
+      asMode(process.env.ANVIL_CLAIM_GUARD_MODE) ?? asMode(cfg.claimGuardMode) ?? "warn";
     const GUARD_EXEC = cfg.guardExec === true || process.env.ANVIL_GUARD_EXEC === "true";
 
     // after_tool_call: auto-capture verification-command output as evidence. Pure
@@ -299,7 +301,11 @@ export default definePluginEntry({
         if (!workspaceDir) return {};
         // Cache for the claim-guard (before_tool_call has no cwd of its own).
         const key = sessionKeyOf(pctx);
-        if (key) workspaceBySession.set(key, workspaceDir);
+        if (key) {
+          // Bound growth in a long-lived gateway (sessions accumulate).
+          if (workspaceBySession.size >= 1000) workspaceBySession.clear();
+          workspaceBySession.set(key, workspaceDir);
+        }
         const guidance = await anvilGuidanceFor(workspaceDir);
         return guidance ? { prependSystemContext: guidance } : {};
       } catch {
@@ -321,6 +327,9 @@ export default definePluginEntry({
         const files = filesForToolCall(event);
         const cwd = cwdForToolCall(event, ctx as ToolContext, files);
         if (!cwd) return {}; // cannot scope to a project → allow
+        // If before_prompt_build already probed this workspace as NON-anvil (cached
+        // ""), skip the per-tool-call shell-out entirely.
+        if (guidanceCache.get(cwd) === "") return {};
 
         const args = ["claim-guard", "--json", "--actor", ANVIL_ACTOR, "--cwd", cwd];
         for (const f of files) args.push("--file", f);
@@ -334,12 +343,15 @@ export default definePluginEntry({
         const reason = String(data.reason ?? "Claim an anvil task before editing.");
 
         if (action === "block") {
-          // has-NO-claim — the only escalation-eligible verdict.
-          if (CLAIM_GUARD_MODE === "block") {
+          // has-NO-claim. Escalation (block / requireApproval) is allowed ONLY for
+          // file-mutating tools. exec/bash NEVER escalate — they carry no file to
+          // protect, and hard-blocking arbitrary commands would also block
+          // `anvil next`/`anvil claim` (a claim-acquisition deadlock). exec → warn.
+          if (isFile && CLAIM_GUARD_MODE === "block") {
             api.logger?.info?.(`anvil claim-guard: blocking ${name} — ${reason}`);
             return { block: true, blockReason: reason };
           }
-          if (CLAIM_GUARD_MODE === "require_approval") {
+          if (isFile && CLAIM_GUARD_MODE === "require_approval") {
             return {
               requireApproval: {
                 title: "anvil claim-guard",
@@ -351,8 +363,8 @@ export default definePluginEntry({
               },
             };
           }
-          // warn (default): log only, allow (before_tool_call can't inject text;
-          // the agent is nudged by before_prompt_build guidance instead).
+          // warn (default), or any exec tool: log only, allow. before_tool_call
+          // can't inject text — the agent is nudged by before_prompt_build instead.
           api.logger?.warn?.(`anvil claim-guard: ${name} with no active claim — ${reason}`);
           return {};
         }

@@ -234,6 +234,33 @@ def test_real_backend_blocks_when_no_claim(approved_backend, frozen_clock, tmp_p
     assert json.loads(r.stdout)["data"]["scope"] == "no_claim"
 
 
+def test_cwd_flag_is_forwarded_to_resolver(tmp_path, monkeypatch) -> None:
+    """--cwd is forwarded to _resolve_state_dir — how the plugin's explicit --cwd
+    (cached workspaceDir) scopes the guard despite a stray ANVIL_ROOT."""
+    seen = {}
+
+    def _spy(cwd):  # noqa: ANN202
+        seen["cwd"] = cwd
+        return tmp_path
+
+    monkeypatch.setattr(cg_mod, "_resolve_state_dir", _spy)
+    monkeypatch.setattr(cg_mod, "_open_backend", lambda sd: _StubBackend(claims=[_claim()]))
+    r = runner.invoke(app, ["claim-guard", "--json", "--cwd", "/proj/x", "--actor", "agent"],
+                      catch_exceptions=False)
+    assert r.exit_code == 0
+    assert str(seen["cwd"]) == "/proj/x"
+
+
+def test_empty_expected_files_does_not_warn(tmp_path, monkeypatch) -> None:
+    """A claim that declares NO expected_files can't be scope-judged → allow, not
+    warn (warning on every edit would be pure noise)."""
+    _use(monkeypatch, _StubBackend(claims=[_claim(expected_files=())]), tmp_path)
+    r = runner.invoke(app, ["claim-guard", "--json", "--actor", "agent", "--file", "anything.py"],
+                      catch_exceptions=False)
+    assert r.exit_code == 0
+    assert json.loads(r.stdout)["data"]["action"] == "continue"  # NOT warn
+
+
 def test_real_backend_allows_with_active_claim(approved_backend, frozen_clock, tmp_path, monkeypatch) -> None:
     """Real backend, actor holds an active claim → allow (exit 0)."""
     from anvil.claims.manager import ClaimManager
