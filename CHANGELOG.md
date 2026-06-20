@@ -6,6 +6,23 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **OpenClaw native finish-gate (B42 Phase 2).** anvil's first native OpenClaw
+  `definePluginEntry` plugin (`packaging/openclaw/plugin/`): a
+  `before_agent_finalize` hook that **blocks an agent from finalizing a turn while
+  its claimed anvil task lacks submitted verification evidence** — a blocking gate,
+  stronger than anvil's non-blocking Claude-Code hooks. It shells out to a new
+  read-only verb, **`anvil gate-check --json`**, which reports `block`/`continue`
+  (exit 0 continue / 2 block / 1 error) for the actor's active claim using anvil's
+  own accept-path predicate (`review.gates.evidence_complete`). The gate is
+  **default-open** (no project / no claim / anvil missing ⇒ finalize normally) and
+  **bounded** (revise capped at 3 attempts per run, keyed task+runId). Opt-in
+  install recipe via `anvil install openclaw --finish-gate` (anvil registers
+  nothing — honoring the OpenClaw no-files contract). Requires
+  `plugins.entries.anvil-finish-gate.hooks.allowConversationAccess=true` and
+  `anvil` on the Gateway PATH; hook dispatch verified against OpenClaw 2026.6.6.
+
 ## [0.0.9] — 2026-06-19
 
 ### Changed

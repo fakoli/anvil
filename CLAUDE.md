@@ -32,16 +32,16 @@ can be inferred from the code, it does not belong here.
   want folks to pick it up (`0.0.8 → 0.0.9`); reserve **minor/major** for bigger
   releases. Day-to-day commits between publishes change no version file. To
   publish, promote the `CHANGELOG.md` `## [Unreleased]` block to the new version.
-- **One PR per item.** Merge only after CI is green **and** both automated
-  reviewers — **Greptile** and **GitHub Copilot** — have landed and been addressed
-  (fix real findings; reply on the ones you defer and record them in
-  `docs/tech-debt-backlog.md`). Wait for both before merging; a PR can sit
-  `BLOCKED` until the second review posts. **Re-reviews are not automatic** — a
-  push does not re-trigger Greptile or Copilot. A finding fixed with a small,
-  direct change needs no re-review. For a **substantial or multi-line fix**,
-  request a re-review so the bots re-check the changed code: **Greptile** via an
-  `@greptile review` comment; **Copilot** by re-requesting its review on the PR
-  (re-request review / `@copilot`).
+- **One PR per item.** Merge only after CI is green **and** the automated
+  reviewer — **GitHub Copilot** — has landed and been addressed (fix real
+  findings; reply on the ones you defer and record them in
+  `docs/tech-debt-backlog.md`). A PR can sit `BLOCKED` until the review posts.
+  **Greptile is disabled** (turned off 2026-06-20 to avoid fees) — do **not** wait
+  for it or post `@greptile review`; Copilot is the only bot gate now.
+  **Re-reviews are not automatic** — a push does not re-trigger Copilot. A finding
+  fixed with a small, direct change needs no re-review. For a **substantial or
+  multi-line fix**, re-request Copilot's review on the PR (re-request review /
+  `@copilot`) so it re-checks the changed code.
 
 ## Map
 

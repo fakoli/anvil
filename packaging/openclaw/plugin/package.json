@@ -1,0 +1,9 @@
+{
+  "name": "@fakoli/anvil-finish-gate",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

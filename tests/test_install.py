@@ -299,6 +299,40 @@ def test_cron_recipes_rejected_for_non_openclaw(sandbox: dict[str, Path]) -> Non
     assert "OpenClaw-only" in r.stderr
 
 
+def test_openclaw_install_tips_finish_gate(sandbox: dict[str, Path]) -> None:
+    """A plain openclaw install points at the opt-in --finish-gate recipe but does
+    NOT print the link recipe (that needs the flag) — B42 Phase 2."""
+    r = runner.invoke(app, ["install", "openclaw"], catch_exceptions=False)
+    assert r.exit_code == 0
+    assert "--finish-gate" in r.stderr  # discovery tip
+    assert "plugins install --link" not in r.stderr  # recipe only with the opt-in flag
+
+
+def test_openclaw_finish_gate_recipe_printed_never_linked(
+    sandbox: dict[str, Path],
+) -> None:
+    """`--finish-gate` PRINTS the plugin install recipe (link + enable +
+    allowConversationAccess + restart) but anvil links/registers nothing —
+    honoring the OpenClaw no-files contract."""
+    r = runner.invoke(
+        app, ["install", "openclaw", "--finish-gate"], catch_exceptions=False
+    )
+    assert r.exit_code == 0
+    assert "plugins install --link" in r.stderr
+    assert "anvil-finish-gate" in r.stderr
+    assert "allowConversationAccess" in r.stderr
+    # anvil never RAN a plugin-link command — only the mcp/plugin(server) installs ran.
+    ran = [" ".join(c) for c in sandbox["native_cmds"]]
+    assert not any("--link" in c for c in ran)
+
+
+def test_finish_gate_rejected_for_non_openclaw(sandbox: dict[str, Path]) -> None:
+    """`--finish-gate` is OpenClaw-only (native plugin hooks) — others refuse cleanly."""
+    r = runner.invoke(app, ["install", "codex", "--finish-gate"])
+    assert r.exit_code == 2
+    assert "OpenClaw-only" in r.stderr
+
+
 def test_openclaw_rollback_runs_native_removers(sandbox: dict[str, Path]) -> None:
     """OpenClaw rollback undoes via its own removers: `mcp unset` + `plugins
     uninstall`."""

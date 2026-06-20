@@ -1,0 +1,12 @@
+{
+  "id": "anvil-finish-gate",
+  "name": "anvil finish-gate",
+  "description": "Blocks an agent from finalizing a turn while its claimed anvil task lacks submitted verification evidence.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

@@ -28,6 +28,37 @@ Items deferred from PR-level critic + Greptile reviews. Each entry links the ori
 
 ---
 
+## B42 Phase 2 finish-gate (PR #48) — deferred review findings
+
+From the PR #48 adversarial review. The MUST (ANVIL_ROOT vs `event.cwd` false-block)
+and the SHOULDs (multi-claim coverage, read-time-corruption default-open,
+"mirrors exactly" wording) were fixed in the PR. Deferred NITs:
+
+### FG-1 · OpenClaw plugin `index.ts` has no automated test
+**Status**: OPEN. The node plugin (`packaging/openclaw/plugin/index.ts`) is a thin
+shell-out + JSON→action mapper with no unit test, because CI has no JS toolchain.
+Mitigated: the `gate-check --json` single-line-output coupling that `parseEnvelope`
+relies on is pinned by `test_json_output_is_exactly_one_line`, and `parseEnvelope`
+has a whole-blob fallback. Close by adding a `node:test`/vitest harness (parse +
+handler stubs) and a CI step, **or** accept the Python-side contract test as
+sufficient.
+
+### FG-2 · `gate-check` opens the backend read-write (idempotent migration)
+**Status**: OPEN. `_open_backend` → `SqliteBackend.initialize()` can WAL-write /
+apply a schema migration, so the verb is not a pure reader. Wording softened in the
+docstring/README ("opening may apply an idempotent migration"). Close by adding a
+true read-only/immutable sqlite open path for gate-check if a finalize must never
+touch the user's db.
+
+### FG-3 · No real-backend test for continue-with-COMPLETE-evidence
+**Status**: OPEN. The real-`SqliteBackend` tests cover block + continue-with-no-
+required-evidence, but not "active claim + complete evidence → continue" — awkward
+because `submit_completion_evidence` auto-releases the claim (so the steady state
+has no active claim). Decision logic is covered by the stub test
+`test_continue_when_evidence_complete`.
+
+---
+
 ## SL-1 (replay integrity) follow-ups
 
 ### SL1-RR-1 · A poison canonical line aborts a full replay

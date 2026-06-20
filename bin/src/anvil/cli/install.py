@@ -435,6 +435,40 @@ def _openclaw_cron_recipes(project_root: str) -> str:
     )
 
 
+def _openclaw_finish_gate_recipe() -> str:
+    """Printed, OPT-IN recipe to install anvil's native ``before_agent_finalize``
+    finish-gate plugin into the OpenClaw Gateway. anvil links/registers NOTHING
+    (the no-files contract) — copy/paste the steps you want. The gate blocks an
+    agent from finalizing while its claimed anvil task lacks submitted evidence;
+    it is DEFAULT-OPEN (no anvil project / no claim / ``anvil`` missing => the
+    agent finalizes normally)."""
+    # The plugin ships at <anvil>/packaging/openclaw/plugin. Resolve it relative to
+    # this module when present (full repo / plugin-cache layout); otherwise print a
+    # placeholder pointing at an anvil checkout.
+    plugin_dir = Path(__file__).resolve().parents[4] / "packaging" / "openclaw" / "plugin"
+    shown = str(plugin_dir) if plugin_dir.is_dir() else "<anvil-checkout>/packaging/openclaw/plugin"
+    pid = "anvil-finish-gate"
+    return "\n".join(
+        [
+            "# Opt-in: install anvil's native finish-gate plugin (anvil registers nothing):",
+            "#",
+            "# 1. Link + enable the plugin",
+            f"openclaw plugins install --link '{shown}'",
+            f"openclaw plugins enable {pid}",
+            "#",
+            "# 2. REQUIRED — before_agent_finalize only fires for a non-bundled plugin",
+            "#    once allowConversationAccess is set:",
+            f"openclaw config set plugins.entries.{pid}.hooks.allowConversationAccess true --strict-json",  # noqa: E501
+            "#",
+            "# 3. Restart the Gateway so it loads the plugin",
+            "openclaw gateway restart",
+            "#",
+            "# Note: the Gateway spawns `anvil` from its PATH — ensure anvil is installed",
+            "#   there (e.g. install.sh --path).",
+        ]
+    )
+
+
 def _native_install_commands(
     installer: str, *, use_uv_run: bool, root: str | None
 ) -> list[list[str]]:
@@ -794,6 +828,15 @@ def install(
             "or registers them — copy/paste the ones you want."
         ),
     ),
+    finish_gate: bool = typer.Option(  # noqa: B008
+        False,
+        "--finish-gate",
+        help=(
+            "OpenClaw only: also PRINT the opt-in recipe to install anvil's native "
+            "before_agent_finalize finish-gate plugin (blocks finalizing a claimed "
+            "task that has no submitted evidence). anvil links/registers nothing."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
 ) -> None:
     """Write Anvil's MCP config + instruction file for a target harness.
@@ -869,6 +912,12 @@ def install(
         raise typer.Exit(code=2)
     if cron_recipes and h.native_installer != "openclaw":
         msg = f"--cron-recipes is OpenClaw-only; {harness} has no Gateway cron."
+        if json_output:
+            fail(_COMMAND, msg, code="bad_request", exit_code=2)
+        typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=2)
+    if finish_gate and h.native_installer != "openclaw":
+        msg = f"--finish-gate is OpenClaw-only; {harness} has no native plugin hooks."
         if json_output:
             fail(_COMMAND, msg, code="bad_request", exit_code=2)
         typer.echo(f"Error: {msg}", err=True)
@@ -1014,6 +1063,15 @@ def install(
             typer.echo(
                 "#   Tip: --cron-recipes prints opt-in OpenClaw Gateway cron recipes "
                 "(queue probe, nightly reconcile, lease watchdog, finish-gate nudge).",
+                err=True,
+            )
+        if finish_gate:
+            typer.echo(_openclaw_finish_gate_recipe(), err=True)
+        else:
+            typer.echo(
+                "#   Tip: --finish-gate prints the opt-in recipe to install anvil's "
+                "native before_agent_finalize finish-gate plugin (blocks finalizing a "
+                "claimed task that has no submitted evidence).",
                 err=True,
             )
     if write:

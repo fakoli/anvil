@@ -15,6 +15,7 @@ from anvil.cli.conflicts import conflicts
 from anvil.cli.describe import describe
 from anvil.cli.doctor import doctor
 from anvil.cli.drift import drift
+from anvil.cli.gate_check import gate_check
 from anvil.cli.graph import graph
 from anvil.cli.hooks import hook_app
 from anvil.cli.init_status import init, status
@@ -102,6 +103,7 @@ app.command("mcp-config")(mcp_config)
 app.command()(install)
 app.command()(scan)
 app.command()(drift)
+app.command("gate-check")(gate_check)
 app.command()(graph)
 app.command()(conflicts)
 app.command()(doctor)
