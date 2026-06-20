@@ -1423,7 +1423,12 @@ def init_project(
         name: Project name. Defaults to the cwd basename.
         cwd:  Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _is_plugin_root, _resolve_base_dir, _slug
+    from anvil.cli._helpers import (
+        _is_local_layout,
+        _is_plugin_root,
+        _resolve_base_dir,
+        _slug,
+    )
     from anvil.clock import SystemClock
     from anvil.config import write_default_config
     from anvil.state.models import EventDraft
@@ -1434,7 +1439,10 @@ def init_project(
     # every read tool (get_project_status, etc.) agree on the project dir.
     base = _resolve_base_dir(Path(cwd) if cwd else None)
 
-    if _is_plugin_root(base):
+    # Plugin-root guard only under the legacy local layout (state would land
+    # in-repo). In workspace layout init writes to ~/.anvil/... so this is moot
+    # (B44: the guard checked the resolved HOME base, never a plugin root).
+    if _is_local_layout() and _is_plugin_root(base):
         raise ToolError(
             f"Refusing to initialize anvil in {base}: this is the "
             "plugin root, not a project directory. Pass cwd= a project path.",

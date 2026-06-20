@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from anvil.cli._helpers import _resolve_state_dir
+from anvil.cli._helpers import (
+    _canonical_project_root,
+    _resolve_state_dir,
+    _workspace_key,
+)
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -44,7 +48,10 @@ def test_worktrees_share_one_home_workspace(
     wt = tmp_path / "wt"
     _git(repo, "worktree", "add", "-q", str(wt), "-b", "feature")
 
-    expected = home / ".anvil" / "workspaces" / "myrepo" / ".anvil"
+    # B44 dual-key: a NEW project (no pre-existing bare-name workspace) resolves to
+    # the collision-proof hashed key. Both worktrees share it (same canonical root).
+    key = _workspace_key(_canonical_project_root(repo))
+    expected = home / ".anvil" / "workspaces" / key / ".anvil"
     assert _resolve_state_dir(repo) == expected
     assert _resolve_state_dir(wt) == expected  # the worktree shares it
 
@@ -69,8 +76,45 @@ def test_anvil_root_is_a_literal_override(
     assert _resolve_state_dir(None) == root / ".anvil"
 
 
-def test_non_git_dir_falls_back_to_its_own_name(home: Path, tmp_path: Path) -> None:
-    """Outside a git repo the workspace is keyed by the dir's own name."""
+def test_non_git_dir_uses_hashed_key(home: Path, tmp_path: Path) -> None:
+    """Outside a git repo the workspace is keyed by basename + path hash (B44)."""
     plain = tmp_path / "loose"
     plain.mkdir()
-    assert _resolve_state_dir(plain) == home / ".anvil" / "workspaces" / "loose" / ".anvil"
+    key = _workspace_key(_canonical_project_root(plain))
+    assert key.startswith("loose-")
+    assert _resolve_state_dir(plain) == home / ".anvil" / "workspaces" / key / ".anvil"
+
+
+# --- B44: dual-key (back-compat) + collision -------------------------------
+
+
+def test_existing_bare_key_workspace_is_honored(home: Path, tmp_path: Path) -> None:
+    """A pre-existing BARE-name workspace (created by the original #42 code) keeps
+    resolving — never orphaned by the new hashed key."""
+    plain = tmp_path / "loose"
+    plain.mkdir()
+    bare = home / ".anvil" / "workspaces" / "loose" / ".anvil"
+    bare.mkdir(parents=True)
+    (bare / "state.db").write_text("sentinel")  # an existing db under the bare key
+    assert _resolve_state_dir(plain) == bare  # bare wins — no orphaning
+
+
+def test_partial_bare_workspace_falls_to_hashed(home: Path, tmp_path: Path) -> None:
+    """A bare-name workspace dir WITHOUT a state.db is NOT honored — resolve to the
+    hashed key. The no-orphaning rule is about real dbs, not empty/partial dirs."""
+    plain = tmp_path / "loose"
+    plain.mkdir()
+    (home / ".anvil" / "workspaces" / "loose" / ".anvil").mkdir(parents=True)  # no state.db
+    key = _workspace_key(_canonical_project_root(plain))
+    assert _resolve_state_dir(plain) == home / ".anvil" / "workspaces" / key / ".anvil"
+
+
+def test_same_basename_different_paths_dont_collide(home: Path, tmp_path: Path) -> None:
+    """Two projects sharing a basename map to DISTINCT hashed workspaces (B44 fix)."""
+    a = tmp_path / "a" / "app"
+    b = tmp_path / "b" / "app"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    da = _resolve_state_dir(a)
+    db = _resolve_state_dir(b)
+    assert da != db  # no collision despite the shared 'app' basename

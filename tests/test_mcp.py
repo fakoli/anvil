@@ -1971,6 +1971,44 @@ class TestInitProject:
         with pytest.raises(ToolError, match="already exists|reinitialize"):
             _run(run())
 
+    def test_refuses_plugin_root_under_local_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B44: under the legacy local layout, init_project refuses at the plugin root."""
+        manifest = tmp_path / ".claude-plugin" / "plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"name": "anvil"}', encoding="utf-8")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)  # autouse fixture pins ANVIL_STATE_LAYOUT=local
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("init_project", {})
+
+        with pytest.raises(ToolError, match="plugin root"):
+            _run(run())
+
+    def test_allows_plugin_root_under_workspace_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B44: under the default workspace layout, init at the plugin root does NOT
+        refuse — state goes to ~/.anvil/, never into the repo (dogfooding case)."""
+        manifest = tmp_path / ".claude-plugin" / "plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"name": "anvil"}', encoding="utf-8")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("init_project", {"name": "X"}))
+
+        assert _run(run())["created"] is True  # not refused
+
 
 # ===========================================================================
 # Tool 15: get_project_status
