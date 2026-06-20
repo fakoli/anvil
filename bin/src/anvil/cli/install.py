@@ -4,12 +4,17 @@
 :data:`anvil.cli.mcp_config.CLIENTS` + :func:`build_config`) but only *prints*.
 ``install`` closes the delivery gap, per harness, by the safest available route:
 
+anvil officially supports three harnesses end-to-end — **claude-code** (the plugin),
+**codex**, and **openclaw**; every other harness is **MCP-only best-effort**: it gets
+the anvil MCP server and nothing else. Tiers:
+
 - **Native CLI harnesses** (codex, openclaw): drive the harness's OWN tooling
   (``codex mcp add`` / ``openclaw mcp add`` + plugin install). The harness writes
-  its own config — anvil never hand-edits it.
-- **File harnesses** (cursor, windsurf, …): merge the MCP block into the harness's
-  JSON config (the ``anvil`` server id replaced in place → idempotent), and splice
-  anvil's ``AGENTS.md`` into a marked, *removable* block — never an overwrite.
+  its own config — anvil never hand-edits it. codex additionally gets anvil's
+  ``AGENTS.md`` spliced into a marked, *removable* block; openclaw's plugin ships it.
+- **MCP-only harnesses** (cursor, windsurf, …): best-effort — anvil merges only its
+  MCP block into the harness's JSON config (the ``anvil`` server id replaced in
+  place → idempotent). No instruction splice, no skills drop.
 
 Default (no flag) is a **dry-run** that prints what it would do. ``--write``
 performs it; every modified file is backed up and logged so ``--rollback`` is
@@ -79,22 +84,22 @@ class Harness:
     # When set, install drives the harness's OWN CLI (e.g. `codex mcp add`) instead
     # of hand-editing its config file — safer, and the harness owns its own state.
     native_installer: str | None = None
-    # Whether this harness reads the neutral `.agents/skills/` drop. False for
-    # harnesses that get anvil's skills another way (codex: via its plugin).
-    reads_agents_skills: bool = True
     # Whether `--automations` applies (codex's scheduled-run system). Don't proxy
     # this off native_installer — a future native harness need not have one.
     supports_automations: bool = False
     # Whether install splices anvil's instructions into the harness's instruction
-    # file. False for harnesses whose plugin already ships them (openclaw).
-    writes_instructions: bool = True
+    # file. Default False = MCP-only (best-effort harnesses get just the MCP server);
+    # True only on a supported harness that splices (codex). openclaw's plugin ships
+    # the instructions itself.
+    writes_instructions: bool = False
 
 
 HARNESSES: dict[str, Harness] = {
     # --- VERIFIED formats (full write support) ---
     # Codex manages its own config via `codex mcp add` / `codex plugin marketplace
     # add` — we NEVER text-edit ~/.codex/config.toml (doing so corrupted it). The
-    # plugin ships anvil's skills natively, so we skip the .agents/skills drop.
+    # plugin ships anvil's skills natively; codex is the one supported harness that
+    # still splices anvil's AGENTS.md.
     "codex": Harness(
         "codex", None, None,
         "home", "none", "AGENTS.md", "project",
@@ -103,8 +108,8 @@ HARNESSES: dict[str, Harness] = {
             "config.toml is written by Codex, not anvil."
         ),
         native_installer="codex",
-        reads_agents_skills=False,
         supports_automations=True,
+        writes_instructions=True,
     ),
     "copilot": Harness(
         "copilot", "vscode", ".vscode/mcp.json",
@@ -124,8 +129,8 @@ HARNESSES: dict[str, Harness] = {
     ),
     # OpenClaw is its OWN platform (not a Claude bundle): it manages MCP, skills,
     # and plugins through the `openclaw` CLI. We never hand-edit
-    # ~/.openclaw/openclaw.json, and the plugin ships anvil's skills, so we skip
-    # both the instruction splice and the .agents/skills drop.
+    # ~/.openclaw/openclaw.json, and the plugin ships anvil's skills + instructions,
+    # so we skip the instruction splice.
     "openclaw": Harness(
         "openclaw", None, None,
         "home", "none", "AGENTS.md", "project",
@@ -134,7 +139,6 @@ HARNESSES: dict[str, Harness] = {
             "install); openclaw owns its config at ~/.openclaw/."
         ),
         native_installer="openclaw",
-        reads_agents_skills=False,
         writes_instructions=False,
     ),
     # --- already-working print-only clients keep working via mcp-config; ---
@@ -489,27 +493,11 @@ def _strip_instruction(text: str) -> str | None:
     return remaining if remaining.strip() else None
 
 
-def _skill_pairs() -> list[tuple[Path, Path]]:
-    """(source, dest) for each anvil skill we drop into the harness-neutral
-    ``.agents/skills/`` location (read by nearly every harness). Dests are
-    namespaced ``anvil-<name>`` so we never collide with the user's own skills.
-    Empty when anvil's ``skills/`` is not on disk (e.g. a stripped wheel)."""
-    src = _repo_root() / "skills"
-    if not src.is_dir():
-        return []
-    base = _project_root() / ".agents" / "skills"
-    return [
-        (d, base / f"anvil-{d.name}")
-        for d in sorted(src.iterdir())
-        if d.is_dir() and (d / "SKILL.md").is_file()
-    ]
-
-
 # --- backups + an install log so changes are always reversible ----------------
 #
 # The manifest has two tables. ``paths`` records each absolute path's PRE-anvil
 # state ONCE (first touch wins) plus a refcount of which installs reference it —
-# so a project-root AGENTS.md or skill dir shared by two harnesses is backed up
+# so a project-root AGENTS.md shared by two harnesses is backed up
 # once and only restored when the LAST harness rolls back. ``installs`` maps an
 # install key (project::harness) to the paths it touched, so two projects (or two
 # harnesses) never clobber each other's rollback record.
@@ -832,14 +820,12 @@ def install(
         typer.echo(f"Error: {msg}", err=True)
         raise typer.Exit(code=2)
 
-    # Native harnesses (codex, openclaw) install via their own CLI; others get the
-    # neutral .agents/skills drop.
+    # Native harnesses (codex, openclaw) install via their own CLI.
     native_cmds = (
         _native_install_commands(h.native_installer, use_uv_run=use_uv_run, root=root)
         if h.native_installer
         else []
     )
-    skills = _skill_pairs() if h.reads_agents_skills else []
     autos = _codex_automation_plan() if (automations and h.supports_automations) else []
 
     if write:
@@ -876,8 +862,6 @@ def install(
             touched.append(_track(Path(mcp["path"]), "config"))
         if instr["action"] in ("wrote", "merged"):
             touched.append(_track(Path(instr["path"]), "instruction"))
-        for _src, sdest in skills:
-            touched.append(_track(sdest, "skill"))
         # Automations: track ours (so rollback stays exact), but only WRITE dirs we
         # create fresh — never clobber an existing automation's accrued memory.md or
         # the user's edits to its schedule. A same-named dir we don't own is left
@@ -900,10 +884,6 @@ def install(
             instr_dest = Path(instr["path"])
             instr_dest.parent.mkdir(parents=True, exist_ok=True)
             instr_dest.write_text(instr["content"], encoding="utf-8")
-        for src, sdest in skills:
-            _remove(sdest)  # replace ours cleanly (copytree needs a clean dest)
-            sdest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(src, sdest)
         for a in auto_writes:
             a["dir"].mkdir(parents=True, exist_ok=True)
             (a["dir"] / "automation.toml").write_text(a["toml"], encoding="utf-8")
@@ -920,10 +900,6 @@ def install(
                 "write": write,
                 "mcp": {"path": mcp["path"], "action": mcp["action"], "note": mcp["note"]},
                 "instruction": {"path": instr["path"], "action": instr["action"]},
-                "skills": {
-                    "dest": str(_project_root() / ".agents" / "skills"),
-                    "names": [d.name for _, d in skills],
-                },
                 "native": native_results,
                 # Only present when --automations actually installed something, so a
                 # caller can't confuse "none requested" with "installed and paused".
@@ -962,13 +938,6 @@ def install(
         typer.echo(
             f"# Instruction file ({instr['action']}, anvil block from AGENTS.md) "
             f"→ {instr['path']}",
-            err=True,
-        )
-    if skills:
-        skills_base = _project_root() / ".agents" / "skills"
-        did = "Wrote" if write else "Would write"
-        typer.echo(
-            f"# Skills ({did} {len(skills)} × SKILL.md) → {skills_base}/anvil-*",
             err=True,
         )
     if autos:

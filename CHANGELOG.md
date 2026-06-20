@@ -6,6 +6,26 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Changed
+
+- **Harness install is now tiered: three supported, the rest MCP-only.** Only the
+  harnesses anvil supports end-to-end — **claude-code**, **codex**, **openclaw** —
+  get the full native integration; **every other harness is MCP-only best-effort**:
+  `anvil install <harness>` now merges *only* the anvil MCP server into its config.
+  The `AGENTS.md` instruction splice is kept **only for codex** (openclaw's plugin
+  ships it). This shrinks the blast radius behind the earlier config-corruption
+  incident — anvil no longer writes instruction files into a dozen third-party
+  harnesses. To give an MCP-only agent anvil's usage guidance, point it at the
+  repo's `AGENTS.md`. Docs reframed to the two-tier model — supported vs MCP-only
+  (`docs/how-to/using-anvil-on-any-harness.md`).
+
+### Removed
+
+- **The neutral `.agents/skills/` drop.** No harness used it anymore (supported
+  harnesses ship anvil's skills via their plugin), so install no longer copies
+  `SKILL.md` dirs into `.agents/skills/`, the `--json` install envelope no longer
+  carries a `skills` key, and the dead `Harness.reads_agents_skills` flag is gone.
+
 ### Fixed
 
 - **State is no longer stranded inside individual git worktrees.** anvil kept

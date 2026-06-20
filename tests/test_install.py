@@ -86,13 +86,16 @@ def test_dry_run_writes_nothing(harness: str, sandbox: dict[str, Path]) -> None:
     assert [p for p in home_files if p.is_file()] == []
     assert [p for p in project_files if p.is_file()] == []
 
-    # The dry-run surfaces SOMETHING per harness (on stderr — stdout stays clean):
-    # the instruction path for file-writing harnesses, or the native commands for
-    # the ones that install via their own CLI (codex, openclaw).
-    if HARNESSES[harness].writes_instructions:
+    # The dry-run surfaces SOMETHING per harness (on stderr — stdout stays clean),
+    # by tier: codex previews the AGENTS.md splice; openclaw prints its native
+    # commands; every other (MCP-only best-effort) harness surfaces its MCP line.
+    h = HARNESSES[harness]
+    if h.writes_instructions:
         assert "Instruction file" in result.stderr
-    else:
+    elif h.native_installer:
         assert "Run these" in result.stderr
+    else:
+        assert "MCP config" in result.stderr
 
 
 def test_dry_run_json_envelope(sandbox: dict[str, Path]) -> None:
@@ -109,6 +112,50 @@ def test_dry_run_json_envelope(sandbox: dict[str, Path]) -> None:
     assert data["write"] is False
     assert set(data["mcp"]) == {"path", "action", "note"}
     assert set(data["instruction"]) == {"path", "action"}
+
+
+def test_mcp_only_harness_writes_only_mcp_config(sandbox: dict[str, Path]) -> None:
+    """cursor is MCP-only (best-effort tier): writes ~/.cursor/mcp.json and NOTHING
+    else — no AGENTS.md splice, no .agents/ skills drop."""
+    r = runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    assert r.exit_code == 0, r.stdout + r.stderr
+    assert (sandbox["home"] / ".cursor" / "mcp.json").is_file()  # MCP written
+    assert not (sandbox["project"] / "AGENTS.md").exists()       # no instruction splice
+    assert not (sandbox["project"] / ".agents").exists()         # no skills drop
+    # The JSON envelope marks the instruction skipped and carries no skills key.
+    j = runner.invoke(app, ["install", "--json", "cursor"], catch_exceptions=False)
+    data = json.loads(j.stdout.strip())["data"]
+    assert data["instruction"]["action"] == "skipped"
+    assert "skills" not in data
+
+
+def test_codex_still_splices_agents_md(sandbox: dict[str, Path]) -> None:
+    """codex remains the one supported harness that writes the AGENTS.md block —
+    and never drops the (now-removed) neutral .agents/ skills."""
+    r = runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
+    assert r.exit_code == 0, r.stdout + r.stderr
+    text = (sandbox["project"] / "AGENTS.md").read_text()
+    assert "BEGIN ANVIL" in text
+    assert (_repo_root() / "AGENTS.md").read_text().strip() in text
+    assert not (sandbox["project"] / ".agents").exists()
+
+
+@pytest.mark.parametrize(
+    "harness", ["gemini", "openhands", "continue", "goose", "cline"]
+)
+def test_mcp_only_none_harness_writes_nothing_to_project(
+    harness: str, sandbox: dict[str, Path]
+) -> None:
+    """An MCP-only harness whose MCP ships another way (mcp_merge="none") makes no
+    project-tree writes: no MCP config, no AGENTS.md splice, no skills drop."""
+    r = runner.invoke(app, ["install", harness, "--write"], catch_exceptions=False)
+    assert r.exit_code == 0, r.stdout + r.stderr
+    assert [p for p in sandbox["project"].rglob("*") if p.is_file()] == []
+    data = json.loads(
+        runner.invoke(app, ["install", "--json", harness]).stdout.strip()
+    )["data"]
+    assert data["mcp"]["action"] == "skipped"
+    assert data["instruction"]["action"] == "skipped"
 
 
 def test_write_json_config_idempotent(sandbox: dict[str, Path]) -> None:
@@ -175,14 +222,6 @@ def test_codex_native_commands_generated(sandbox: dict[str, Path]) -> None:
     assert "codex plugin marketplace add fakoli/anvil" in cmds
     mcp_add = next(c for c in cmds if c.startswith("codex mcp add anvil"))
     assert "-- bash" in mcp_add and "anvil-mcp" in mcp_add
-
-
-def test_codex_skips_agents_skills_drop(sandbox: dict[str, Path]) -> None:
-    """Codex gets skills via its plugin, so the neutral .agents/skills/ drop is
-    skipped — but AGENTS.md still gets the marked block (Codex reads it)."""
-    runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
-    assert not (sandbox["project"] / ".agents" / "skills").exists()
-    assert "BEGIN ANVIL" in (sandbox["project"] / "AGENTS.md").read_text()
 
 
 def test_openclaw_native_commands_generated(sandbox: dict[str, Path]) -> None:
@@ -384,12 +423,12 @@ def test_rollback_strips_block_from_adopted_instruction_file(
     """anvil creates AGENTS.md, the user then adopts it (adds their own prose around
     our block). Rollback must STRIP our block, not delete the file (#1/#8)."""
     instr = sandbox["project"] / "AGENTS.md"
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
     # User adopts the created file, adding prose above and below our block.
     body = instr.read_text()
     instr.write_text(f"# My house rules\n\n{body}\nKeep this line too.\n")
 
-    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    runner.invoke(app, ["install", "codex", "--rollback"], catch_exceptions=False)
     assert instr.is_file()  # NOT deleted
     text = instr.read_text()
     assert "BEGIN ANVIL" not in text  # our block gone
@@ -403,7 +442,7 @@ def test_dangling_symlink_dest_is_refused(sandbox: dict[str, Path]) -> None:
     link = sandbox["project"] / "AGENTS.md"
     link.symlink_to(sandbox["home"] / "nonexistent-target.md")  # dangling
 
-    result = runner.invoke(app, ["install", "cursor", "--write"])
+    result = runner.invoke(app, ["install", "codex", "--write"])
     assert result.exit_code == 2
     assert "symlink" in result.stderr.lower()
 
@@ -411,7 +450,7 @@ def test_dangling_symlink_dest_is_refused(sandbox: dict[str, Path]) -> None:
 def test_instruction_file_new_is_marked_block(sandbox: dict[str, Path]) -> None:
     """A fresh instruction file holds the AGENTS.md content inside anvil markers."""
     result = runner.invoke(
-        app, ["install", "cursor", "--write"], catch_exceptions=False
+        app, ["install", "codex", "--write"], catch_exceptions=False
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     instr = sandbox["project"] / "AGENTS.md"
@@ -429,38 +468,25 @@ def test_instruction_file_preserves_user_content(sandbox: dict[str, Path]) -> No
     instr = sandbox["project"] / "AGENTS.md"
     instr.write_text("# My rules\nDo not delete this.\n")
 
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
     text = instr.read_text()
     assert text.startswith("# My rules\nDo not delete this.")  # user content first
     assert "BEGIN ANVIL" in text
 
     # Idempotent: a second write does not duplicate the block.
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
     assert instr.read_text().count("BEGIN ANVIL") == 1
 
     # Rollback restores the user's original file byte-for-byte.
-    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    runner.invoke(app, ["install", "codex", "--rollback"], catch_exceptions=False)
     assert instr.read_text() == "# My rules\nDo not delete this.\n"
-
-
-def test_copilot_instruction_dest_is_marked_block(sandbox: dict[str, Path]) -> None:
-    """Copilot's instruction dest is .github/copilot-instructions.md with our block."""
-    result = runner.invoke(
-        app, ["install", "copilot", "--write"], catch_exceptions=False
-    )
-    assert result.exit_code == 0, result.stdout + result.stderr
-    instr = sandbox["project"] / ".github" / "copilot-instructions.md"
-    assert instr.is_file()
-    text = instr.read_text()
-    assert "BEGIN ANVIL" in text
-    assert (_repo_root() / "AGENTS.md").read_text().strip() in text
 
 
 def test_rollback_restores_config_and_removes_created(
     sandbox: dict[str, Path],
 ) -> None:
-    """Rollback restores a modified JSON config from backup and deletes files we
-    made (cursor — a harness anvil DOES write a config file for)."""
+    """Rollback restores a modified JSON config from backup (cursor — an MCP-only
+    harness anvil writes a config file for, and never an AGENTS.md)."""
     cfg = sandbox["home"] / ".cursor" / "mcp.json"
     cfg.parent.mkdir(parents=True)
     original = json.dumps({"mcpServers": {"other": {"command": "x"}}})
@@ -468,7 +494,7 @@ def test_rollback_restores_config_and_removes_created(
 
     runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
     assert "anvil" in json.loads(cfg.read_text())["mcpServers"]
-    assert (sandbox["project"] / "AGENTS.md").is_file()  # created by us
+    assert not (sandbox["project"] / "AGENTS.md").exists()  # MCP-only: no splice
 
     result = runner.invoke(
         app, ["install", "cursor", "--rollback"], catch_exceptions=False
@@ -476,53 +502,6 @@ def test_rollback_restores_config_and_removes_created(
     assert result.exit_code == 0, result.stdout + result.stderr
     # Config restored to the user's original (no anvil server).
     assert cfg.read_text() == original
-    # The instruction file we created is gone.
-    assert not (sandbox["project"] / "AGENTS.md").exists()
-
-
-def test_skills_dropped_into_agents_skills(sandbox: dict[str, Path]) -> None:
-    """Install drops anvil's SKILL.md set into the neutral .agents/skills/ path,
-    namespaced anvil-*, and rollback removes the dirs it created."""
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
-    skills_base = sandbox["project"] / ".agents" / "skills"
-    sources = sorted(
-        d.name
-        for d in (_repo_root() / "skills").iterdir()
-        if d.is_dir() and (d / "SKILL.md").is_file()
-    )
-    assert sources, "expected anvil to ship skills"
-    for name in sources:
-        skill = skills_base / f"anvil-{name}" / "SKILL.md"
-        assert skill.is_file(), f"expected {skill}"
-
-    # Idempotent re-run: still one dir per skill, no nesting/dupes.
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
-    assert sorted(p.name for p in skills_base.iterdir()) == [
-        f"anvil-{n}" for n in sources
-    ]
-
-    # Rollback removes the skill dirs we created (and leaves no .anvil-bak litter).
-    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
-    for name in sources:
-        assert not (skills_base / f"anvil-{name}").exists()
-        assert not (skills_base / f"anvil-{name}{'.anvil-bak'}").exists()
-
-
-def test_skills_preserve_user_owned_skill_dir(sandbox: dict[str, Path]) -> None:
-    """A user's pre-existing .agents/skills/anvil-plan is backed up and restored on
-    rollback (we never silently eat a dir that happens to share our namespace)."""
-    skills_base = sandbox["project"] / ".agents" / "skills"
-    user_skill = skills_base / "anvil-plan"
-    user_skill.mkdir(parents=True)
-    (user_skill / "SKILL.md").write_text("# my own plan skill\n")
-
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
-    # Ours replaced it for the duration...
-    assert "my own plan skill" not in (user_skill / "SKILL.md").read_text()
-
-    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
-    # ...but rollback hands the user's original dir back, byte-for-byte.
-    assert (user_skill / "SKILL.md").read_text() == "# my own plan skill\n"
 
 
 def test_instruction_refuses_ambiguous_markers(sandbox: dict[str, Path]) -> None:
@@ -531,7 +510,7 @@ def test_instruction_refuses_ambiguous_markers(sandbox: dict[str, Path]) -> None
     instr = sandbox["project"] / "AGENTS.md"
     instr.write_text("# notes\nSee <!-- END ANVIL --> for details.\n")
     before = instr.read_text()
-    result = runner.invoke(app, ["install", "cursor", "--write"])
+    result = runner.invoke(app, ["install", "codex", "--write"])
     assert result.exit_code == 2  # clean refusal, not a traceback
     assert "Error:" in result.stderr and "marker" in result.stderr
     assert instr.read_text() == before  # untouched — no corruption
@@ -543,27 +522,12 @@ def test_instruction_idempotent_and_faithful_strip(sandbox: dict[str, Path]) -> 
     instr = sandbox["project"] / "AGENTS.md"
     original = "# my rules\n\nline two\n"
     instr.write_text(original)
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
     once = instr.read_text()
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
+    runner.invoke(app, ["install", "codex", "--write"], catch_exceptions=False)
     assert instr.read_text() == once  # idempotent
-    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
+    runner.invoke(app, ["install", "codex", "--rollback"], catch_exceptions=False)
     assert instr.read_text() == original  # byte-faithful restore
-
-
-def test_shared_agents_md_across_two_harnesses(sandbox: dict[str, Path]) -> None:
-    """Two harnesses share the project AGENTS.md. Rolling back ONE keeps the block
-    (the other still wants it); rolling back BOTH restores the user's file (#8)."""
-    instr = sandbox["project"] / "AGENTS.md"
-    instr.write_text("# mine\n")
-    runner.invoke(app, ["install", "cursor", "--write"], catch_exceptions=False)
-    runner.invoke(app, ["install", "windsurf", "--write"], catch_exceptions=False)
-
-    runner.invoke(app, ["install", "cursor", "--rollback"], catch_exceptions=False)
-    assert "BEGIN ANVIL" in instr.read_text()  # windsurf still references it
-
-    runner.invoke(app, ["install", "windsurf", "--rollback"], catch_exceptions=False)
-    assert instr.read_text() == "# mine\n"  # last release restores the user's file
 
 
 def test_crash_before_writes_completed_is_still_reversible(
@@ -576,13 +540,21 @@ def test_crash_before_writes_completed_is_still_reversible(
     original = json.dumps({"mcpServers": {"other": {"command": "x"}}})
     cfg.write_text(original)
 
-    # Make the skills copy explode AFTER the config + manifest are written. A
-    # scoped context undoes ONLY this patch (not the sandbox's HOME isolation).
+    # Let the MCP config write LAND, then die the instant it's on disk — the
+    # manifest is recorded BEFORE any write, so the mutation must still be
+    # rollback-able. The patch is class-level (pathlib has no per-instance hook) but
+    # only the EXACT config path raises, so no other write in-process is affected;
+    # the scoped context undoes it (and never touches HOME isolation).
+    real_write_text = install_mod.Path.write_text
+
+    def _write_then_crash(self: Path, *a: object, **k: object) -> int:
+        out = real_write_text(self, *a, **k)
+        if str(self) == str(cfg):
+            raise OSError("boom")
+        return out
+
     with monkeypatch.context() as mctx:
-        mctx.setattr(
-            install_mod.shutil, "copytree",
-            lambda *a, **k: (_ for _ in ()).throw(OSError("boom")),
-        )
+        mctx.setattr(install_mod.Path, "write_text", _write_then_crash)
         runner.invoke(app, ["install", "cursor", "--write"])  # crashes mid-write
     assert "anvil" in json.loads(cfg.read_text())["mcpServers"]  # config mutated
 
@@ -591,67 +563,9 @@ def test_crash_before_writes_completed_is_still_reversible(
     assert cfg.read_text() == original  # recoverable despite the crash
 
 
-@pytest.mark.parametrize("harness", ["gemini", "cline"])
-def test_mcp_none_writes_only_instruction(
-    harness: str, sandbox: dict[str, Path]
-) -> None:
-    """`mcp_merge="none"` harness writes ONLY the instruction file + shows note."""
-    result = runner.invoke(
-        app, ["install", harness, "--write"], catch_exceptions=False
-    )
-    assert result.exit_code == 0, result.stdout + result.stderr
-    # Instruction written.
-    assert (sandbox["project"] / "AGENTS.md").is_file()
-    # No MCP config files anywhere.
-    assert not (sandbox["home"] / ".codex").exists()
-    assert not (sandbox["home"] / ".cursor").exists()
-    # The note is surfaced.
-    assert "skipped" in result.stderr
-
-    # And the --json envelope marks the MCP action as skipped.
-    j = runner.invoke(
-        app, ["install", "--json", harness], catch_exceptions=False
-    )
-    data = json.loads(j.stdout.strip())["data"]
-    assert data["mcp"]["action"] == "skipped"
-    assert data["mcp"]["path"] is None
-    assert data["mcp"]["note"]  # non-empty note
-
-
-def test_openhands_writes_agents_md_root(sandbox: dict[str, Path]) -> None:
-    """openhands install drops AGENTS.md bytes at the project-root AGENTS.md.
-
-    Current OpenHands reads root AGENTS.md for repo guidelines; the old
-    .openhands/microagents/ path is deprecated V0.
-    """
-    result = runner.invoke(
-        app, ["install", "openhands", "--write"], catch_exceptions=False
-    )
-    assert result.exit_code == 0, result.stdout + result.stderr
-    # Instruction written at the project-root AGENTS.md (current convention).
-    instr = sandbox["project"] / "AGENTS.md"
-    assert instr.is_file(), f"expected {instr} to exist"
-    assert (_repo_root() / "AGENTS.md").read_text().strip() in instr.read_text()
-    # The deprecated microagent path is no longer written.
-    assert not (sandbox["project"] / ".openhands" / "microagents" / "anvil.md").exists()
-    # No MCP config file (mcp_merge="none").
-    assert not (sandbox["home"] / ".codex").exists()
-    assert not (sandbox["home"] / ".cursor").exists()
-    # Note is surfaced on stderr.
-    assert "skipped" in result.stderr
-
-    # JSON envelope: MCP action is skipped, non-empty note.
-    j = runner.invoke(
-        app, ["install", "--json", "openhands"], catch_exceptions=False
-    )
-    data = json.loads(j.stdout.strip())["data"]
-    assert data["mcp"]["action"] == "skipped"
-    assert data["mcp"]["path"] is None
-    assert data["mcp"]["note"]
-
-
-def test_opencode_writes_config_and_agents(sandbox: dict[str, Path]) -> None:
-    """opencode install merges the anvil server into opencode.json + drops AGENTS.md.
+def test_opencode_writes_config(sandbox: dict[str, Path]) -> None:
+    """opencode install merges the anvil server into opencode.json (MCP-only — no
+    AGENTS.md splice).
 
     OpenCode's entry shape is unique: argv-array `command`, `type: "local"`,
     `enabled: true`.
@@ -671,9 +585,8 @@ def test_opencode_writes_config_and_agents(sandbox: dict[str, Path]) -> None:
     assert isinstance(spec["command"], list)
     assert spec["command"][-1].endswith("bin/anvil-mcp")
     assert spec["enabled"] is True
-    # AGENTS.md is dropped at the project root (read natively by OpenCode).
-    instr = sandbox["project"] / "AGENTS.md"
-    assert (_repo_root() / "AGENTS.md").read_text().strip() in instr.read_text()
+    # MCP-only: no AGENTS.md splice.
+    assert not (sandbox["project"] / "AGENTS.md").exists()
 
 
 def test_opencode_merge_preserves_existing_keys(sandbox: dict[str, Path]) -> None:
@@ -694,14 +607,14 @@ def test_opencode_merge_preserves_existing_keys(sandbox: dict[str, Path]) -> Non
 
 
 def test_roo_writes_project_mcp_json(sandbox: dict[str, Path]) -> None:
-    """roo install writes .roo/mcp.json (mcpServers) + drops AGENTS.md."""
+    """roo install writes .roo/mcp.json (mcpServers); MCP-only — no AGENTS.md."""
     result = runner.invoke(app, ["install", "roo", "--write"], catch_exceptions=False)
     assert result.exit_code == 0, result.stdout + result.stderr
     cfg = sandbox["project"] / ".roo" / "mcp.json"
     assert cfg.is_file(), f"expected {cfg} to exist"
     spec = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["anvil"]
     assert spec["args"][-1].endswith("bin/anvil-mcp")
-    assert (sandbox["project"] / "AGENTS.md").is_file()
+    assert not (sandbox["project"] / "AGENTS.md").exists()
 
 
 def test_amp_writes_flat_dotted_key(sandbox: dict[str, Path]) -> None:
@@ -717,7 +630,8 @@ def test_amp_writes_flat_dotted_key(sandbox: dict[str, Path]) -> None:
 
 
 def test_yaml_harnesses_skip_mcp_write(sandbox: dict[str, Path]) -> None:
-    """continue/goose have no in-place YAML merge writer: MCP is skipped, AGENTS.md dropped."""
+    """continue/goose have no in-place YAML merge writer: MCP is skipped (and being
+    MCP-only, nothing else is written either)."""
     for harness in ("continue", "goose"):
         result = runner.invoke(
             app, ["install", "--json", harness], catch_exceptions=False

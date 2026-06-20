@@ -1,9 +1,10 @@
 """Drift guard: per-harness instruction copies stay byte-identical to AGENTS.md.
 
 Any committed file that is *meant to be* a copy of ``AGENTS.md`` must be
-byte-identical to it. ``install --write`` regenerates these copies from
-``AGENTS.md``, so the fix for a failure here is a one-command regen — the guard
-stays cheap. Gemini's ``contextFileName`` points at ``AGENTS.md`` itself (not a
+byte-identical to it. These are hand-maintained committed references (the MCP-only
+harnesses no longer auto-splice an instruction file, so ``install`` does not
+regenerate them) — the fix for a failure here is to copy ``AGENTS.md`` over the
+drifted file. Gemini's ``contextFileName`` points at ``AGENTS.md`` itself (not a
 copy), so it is drift-guarded by ``test_install_manifests.py`` asserting the
 manifest field value, not here.
 
@@ -34,8 +35,8 @@ def test_instruction_copies_match_agents_md() -> None:
         p = _repo_root() / rel
         assert p.is_file(), f"missing instruction copy: {rel}"
         assert p.read_bytes() == agents, (
-            f"{rel} has drifted from AGENTS.md — regenerate it "
-            "(`anvil install <harness> --write`)."
+            f"{rel} has drifted from AGENTS.md — copy AGENTS.md over it "
+            "(it's a hand-maintained reference, not install-regenerated)."
         )
 
 

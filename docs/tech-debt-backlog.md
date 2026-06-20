@@ -527,11 +527,12 @@ before writes), rollback reports `skipped` and leaves our server entry in place.
 **From**: install-safety-review #9. **Status**: OPEN (low).
 
 `_plan_actions` now *guards* the `<repo>/AGENTS.md` read (a stripped wheel degrades
-to "no instruction write" instead of crashing), and `_skill_pairs` already returns
-empty when `skills/` is absent. But a `pip install anvil` wheel still wouldn't
-*ship* those files. Real installs run from the curl'd source checkout, so this only
-affects a hypothetical wheel. **Fix**: `force-include` `AGENTS.md` + `skills/` into
-the wheel and load via `importlib.resources`.
+to "no instruction write" instead of crashing). But a `pip install anvil` wheel still
+wouldn't *ship* `AGENTS.md`. Real installs run from the curl'd source checkout, so
+this only affects a hypothetical wheel. **Fix**: `force-include` `AGENTS.md` into the
+wheel and load via `importlib.resources`. (The old neutral `.agents/skills/` drop —
+and its `_skill_pairs` helper — were removed in B38; only the codex `AGENTS.md`
+splice still reads a repo file.)
 
 ---
 

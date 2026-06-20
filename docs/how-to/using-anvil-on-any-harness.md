@@ -6,14 +6,29 @@ loop through one of two surfaces:
 1. **MCP** — register the `anvil` stdio server, get all 24 tools.
 2. **CLI** — `anvil <command>` with `--json` for machine-readable output.
 
-You don't have to wire either by hand: `anvil install <harness>` writes the MCP
-config **and** drops `AGENTS.md` where the harness reads it.
+`anvil install <harness>` wires this up for you, in two tiers:
+
+- **Supported end-to-end** — `claude-code`, `codex`, and `openclaw`. `codex` and
+  `openclaw` install natively via their own CLI (skills, commands, and — for codex —
+  anvil's `AGENTS.md` spliced into a marked, removable block). `claude-code` is the
+  anvil **plugin** itself: install it from the marketplace (see below) or wire
+  `.mcp.json` by hand — there is no `anvil install claude-code`.
+- **MCP-only best-effort** — every other harness: install merges the anvil MCP server
+  into the harness's config **where it can write in place**; for the rest (gemini,
+  cline, openhands, continue, goose) `anvil mcp-config <harness>` prints the block to
+  paste. No instruction splice, no skills drop — point the agent at the repo's
+  `AGENTS.md` for usage guidance.
+
+Why tiers? Splicing instruction files and dropping skills into a dozen harnesses was
+the blast-radius behind a config-corruption incident. The three supported harnesses
+have a stable native surface; everywhere else the MCP server alone delivers the full
+toolset with zero file-format risk.
 
 ## One command
 
 ```bash
 anvil install <harness>          # dry-run: prints exactly what it would write
-anvil install <harness> --write  # do it (idempotent merge + AGENTS.md)
+anvil install <harness> --write  # do it (idempotent MCP merge; +AGENTS.md on codex)
 ```
 
 Flags: `--root <dir>` pins `ANVIL_ROOT` in the written config; `--uv-run` emits
@@ -28,29 +43,30 @@ curl -fsSL https://raw.githubusercontent.com/fakoli/anvil/main/scripts/install.s
 Provisions an anvil checkout (cached at `~/.anvil-src`, or `$ANVIL_SRC`) and runs
 `anvil install <harness> --write`. Needs `uv` on PATH.
 
-## Supported harnesses
+## Harness support
 
-| Harness | MCP config written | Instruction file | `--write` |
-|---|---|---|---|
-| `claude-code` | `.mcp.json` (or install the plugin — see below) | `CLAUDE.md`/`AGENTS.md` | ✅ |
-| `openclaw` | native: `openclaw mcp add` + `openclaw plugins install` (OpenClaw owns its config) | none (plugin ships them) | ✅ |
-| `cursor` | `~/.cursor/mcp.json` | `AGENTS.md` | ✅ |
-| `codex` | native: `codex plugin marketplace add` + `codex mcp add` (Codex writes its own config) | `AGENTS.md` | ✅ |
-| `vscode` / `copilot` | `.vscode/mcp.json` | `.github/copilot-instructions.md` | ✅ |
-| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | `AGENTS.md` | ✅ |
-| `zed` | `~/.config/zed/settings.json` (`context_servers`) | `AGENTS.md` | ✅ |
-| `opencode` | `opencode.json` (`mcp`, argv-array command) | `AGENTS.md` | ✅ |
-| `roo` | `.roo/mcp.json` | `AGENTS.md` | ✅ |
-| `amp` | `~/.config/amp/settings.json` (`amp.mcpServers`) | `AGENTS.md` | ✅ |
-| `gemini` | ships in `gemini-extension.json` | `AGENTS.md` (contextFile) | instruction only |
-| `cline` | editor-managed settings | `AGENTS.md` | instruction only |
-| `openhands` | `[mcp].stdio_servers` in `config.toml` (merge by hand) | `AGENTS.md` | instruction only |
-| `continue` | `.continue/mcpServers/anvil.yaml` (YAML) | `AGENTS.md` | print + reference |
-| `goose` | `extensions` in `~/.config/goose/config.yaml` (YAML) | `AGENTS.md` | print + reference |
+| Harness | Tier | What `anvil install --write` does |
+|---|---|---|
+| `claude-code` | **supported** | the anvil **plugin** — install from the marketplace (MCP + skills + hooks), or add anvil to a project `.mcp.json` by hand (not an `anvil install` target — see below) |
+| `codex` | **supported** | native `codex plugin marketplace add` + `codex mcp add` (skills via plugin) **and** splice `AGENTS.md` |
+| `openclaw` | **supported** | native `openclaw mcp add` + `openclaw plugins install` (plugin ships skills + instructions) |
+| `cursor` | MCP-only | merge MCP → `~/.cursor/mcp.json` |
+| `vscode` / `copilot` | MCP-only | merge MCP → `.vscode/mcp.json` |
+| `windsurf` | MCP-only | merge MCP → `~/.codeium/windsurf/mcp_config.json` |
+| `zed` | MCP-only | merge MCP → `~/.config/zed/settings.json` (`context_servers`) |
+| `opencode` | MCP-only | merge MCP → `opencode.json` (`mcp`, argv-array command) |
+| `roo` | MCP-only | merge MCP → `.roo/mcp.json` |
+| `amp` | MCP-only | merge MCP → `~/.config/amp/settings.json` (`amp.mcpServers`) |
+| `gemini` | MCP-only | MCP ships in `gemini-extension.json` (see `packaging/gemini/`) |
+| `cline` | MCP-only | editor-managed settings — `anvil mcp-config cline` prints the block |
+| `openhands` | MCP-only | `[mcp].stdio_servers` in `config.toml` — `anvil mcp-config openhands` |
+| `continue` | MCP-only | `.continue/mcpServers/anvil.yaml` — `anvil mcp-config continue` |
+| `goose` | MCP-only | `extensions` in `~/.config/goose/config.yaml` — `anvil mcp-config goose` |
 
-For harnesses without an in-place writer (gemini, cline, openhands, continue,
-goose), run `anvil mcp-config <harness>` to print the paste-ready block — it also
-tells you which file to paste it into — and see the committed reference under
+**MCP-only** harnesses get just the anvil MCP server — no `AGENTS.md` splice, no
+skills drop. For those without an in-place writer (gemini, cline, openhands,
+continue, goose), run `anvil mcp-config <harness>` to print the paste-ready block —
+it tells you which file to paste it into — and see the committed reference under
 `packaging/<harness>/`. Aider has no MCP client, so it's intentionally absent.
 
 ## Or just use the CLI
@@ -62,8 +78,9 @@ anvil submit T001 --evidence … && anvil apply T001
 ```
 
 Every read command takes `--json`. `AGENTS.md` carries the full MCP-tool ⇄
-CLI-command table, which Codex/Copilot/Cursor/Windsurf/Cline/Gemini and the rest
-read natively.
+CLI-command table — codex gets it spliced in automatically; for any MCP-only
+harness, point the agent at the repo's `AGENTS.md` (or paste it where the harness
+reads instructions) to give it the same map.
 
 ## Claude Code
 
@@ -75,10 +92,11 @@ included):
 /plugin install anvil@anvil
 ```
 
-…or treat it like any other MCP host with `anvil install claude-code`. The
-SessionStart/PreToolUse/PostToolUse hooks are Claude-Code-only conveniences;
-every state operation stays reachable through the CLI or MCP server on any
-harness. See `docs/hooks-reference.md`.
+…or skip the plugin and wire anvil as a plain MCP server by adding its block to a
+project `.mcp.json` (Claude Code reads it natively) — there is no `anvil install
+claude-code` target. The SessionStart/PreToolUse/PostToolUse hooks are
+Claude-Code-only conveniences; every state operation stays reachable through the CLI
+or MCP server on any harness. See `docs/hooks-reference.md`.
 
 ## Codex
 
