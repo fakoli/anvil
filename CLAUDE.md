@@ -11,10 +11,15 @@ can be inferred from the code, it does not belong here.
   lacks repo permissions; the keyring login works once it is unset.
 - **Never commit secrets or anything confidential.** This is a public repo — no
   `.env`, keys, tokens, customer data, or internal-only paths in commits.
-- **A version bump touches three files in lockstep** (`tests/test_version_sync.py`
+- **A version bump touches three core files in lockstep** (`tests/test_version_sync.py`
   enforces it): `.claude-plugin/plugin.json`, `bin/pyproject.toml`,
-  `bin/src/anvil/__init__.py`. Add a `CHANGELOG.md` entry. `marketplace.json`
-  omits `version`, so it inherits from `plugin.json` — nothing to bump there.
+  `bin/src/anvil/__init__.py` — **and** the per-harness packaging manifests that
+  `tests/test_install_manifests.py` pins to `anvil.__version__`:
+  `packaging/codex/.codex-plugin/plugin.json`,
+  `packaging/codex/.agents/plugins/marketplace.json`, and
+  `packaging/gemini/gemini-extension.json`. Add a `CHANGELOG.md` entry. The root
+  `marketplace.json` omits `version`, so it inherits from `plugin.json` — nothing
+  to bump there.
 - **Bump only when you publish, not per commit.** Claude Code pins plugin pickups
   to the `version` string: an unchanged version means `/plugin marketplace update`
   is a no-op and users keep running stale code, however many commits landed. So
