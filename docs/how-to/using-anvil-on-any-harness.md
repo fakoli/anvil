@@ -159,7 +159,8 @@ ready-to-paste recipes:
 
 - **Queue probe** (every 10m): `anvil next -q` — exits 3 on an empty queue, so a
   command-cron stays quiet until there's ready work. No model cost.
-- **Nightly reconcile**: `anvil sync … && anvil sync --fix --yes && anvil drift --json`.
+- **Nightly reconcile**: `anvil sync … ; anvil sync --fix --yes ; anvil drift --json`
+  (`;` so a failed step — e.g. no GitHub token — doesn't skip the rest).
 - **Lease watchdog** (every 15m): `anvil doctor --json || anvil sync --fix --yes` —
   surfaces/repairs stale claims with zero active agents.
 - **Finish-gate nudge** (every 30m): `openclaw cron add … --announce <channel>
