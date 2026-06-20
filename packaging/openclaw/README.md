@@ -81,6 +81,37 @@ nothing for non-anvil projects. Disable it with:
 openclaw config set plugins.entries.anvil-finish-gate.hooks.allowPromptInjection false --strict-json
 ```
 
+A fourth hook, **`before_tool_call`**, is a **claim-guard**: when a mutating tool
+(`write`/`edit`/`apply_patch`) runs while the actor holds no active anvil claim, it
+shells out to `anvil claim-guard` and acts per its configured mode. The default is
+**`warn`** — it only logs (never blocks; `before_tool_call` can't show the agent
+text, so the nudge rides the `before_prompt_build` guidance above). Escalate when
+you want enforcement:
+
+```bash
+# hard-block unclaimed FILE edits (CI / strict):
+openclaw config set plugins.entries.anvil-finish-gate.config.claimGuardMode block --strict-json
+# also flag unclaimed exec/bash — WARN-ONLY even in block mode (off by default):
+openclaw config set plugins.entries.anvil-finish-gate.config.guardExec true --strict-json
+```
+
+- **Only `write`/`edit`/`apply_patch` can be hard-blocked.** `exec`/`bash` (when
+  `guardExec=true`) are **warn-only even in `block` mode** — blocking arbitrary
+  commands would also block `anvil next`/`anvil claim`, a claim-acquisition deadlock.
+- **`require_approval` is for interactive gateways.** With the plugin's
+  `timeoutBehavior:"allow"`, an unanswered approval falls **open** after ~30s (it
+  does not hard-block on timeout); but if the gateway has **no approval route**
+  configured, the request resolves to a denial — so prefer `warn` or `block` when
+  unattended.
+- **Actor alignment:** the guard checks claims under the actor `agent` (override via
+  the `ANVIL_GATE_ACTOR` env, shared with the finish-gate; mode via
+  `ANVIL_CLAIM_GUARD_MODE`). If your harness claims under a different identity,
+  `block`/`require_approval` could mis-fire — keep the default `warn` until aligned.
+- Editing a file outside your claim's declared scope only **warns** (advisory —
+  `expected_files` is not exhaustive; a claim with no declared files is not warned).
+  The guard is default-OPEN (no project / no cwd / anvil missing / any error ⇒ the
+  tool runs).
+
 - **`anvil` must be on the Gateway's PATH** — the plugin spawns it (e.g.
   `install.sh --path`).
 - **DEFAULT-OPEN:** no anvil project / no claim for the actor / `anvil` missing /

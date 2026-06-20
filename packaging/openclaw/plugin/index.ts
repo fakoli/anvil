@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 /**
@@ -194,7 +194,64 @@ async function anvilGuidanceFor(workspaceDir: string): Promise<string> {
 
 interface PromptBuildContext {
   workspaceDir?: string;
+  sessionKey?: string;
+  sessionId?: string;
 }
+
+interface ToolContext {
+  sessionKey?: string;
+  sessionId?: string;
+}
+
+// --- claim-guard (before_tool_call) -----------------------------------------
+// before_tool_call's event/ctx carry NO cwd, so we cannot locate the anvil
+// project from the tool call alone. before_prompt_build (which fires earlier in
+// the turn) DOES get ctx.workspaceDir — cache it here keyed by session so the
+// guard can scope `anvil claim-guard` to the right project.
+const workspaceBySession = new Map<string, string>();
+
+function sessionKeyOf(ctx: ToolContext | PromptBuildContext | undefined): string {
+  return ctx?.sessionKey || ctx?.sessionId || "";
+}
+
+// Tight allowlist (NOT openclaw's broad isMutatingToolCall): file-mutating tools
+// are always guarded; exec/bash only when guardExec is on (no command parser, so
+// gating all exec would false-warn on read-only shell).
+const FILE_TOOLS = new Set(["write", "edit", "apply_patch"]);
+const EXEC_TOOLS = new Set(["exec", "bash"]);
+const FILE_PARAM_KEYS = ["path", "file_path", "filePath", "filepath", "file"];
+
+function filesForToolCall(event: { params?: Record<string, unknown>; derivedPaths?: readonly string[] }): string[] {
+  const out = new Set<string>();
+  const params = event.params ?? {};
+  for (const key of FILE_PARAM_KEYS) {
+    const v = params[key];
+    if (typeof v === "string" && v) out.add(v);
+  }
+  // apply_patch carries only an opaque patch string in params; the host's
+  // best-effort destination hints live in derivedPaths.
+  for (const p of event.derivedPaths ?? []) {
+    if (typeof p === "string" && p) out.add(p);
+  }
+  return [...out];
+}
+
+/** Resolve the anvil project cwd for a tool call: the session's cached
+ *  workspaceDir (from before_prompt_build), else the dir of any absolute edited
+ *  path, else "" (⇒ guard allows — cannot scope). */
+function cwdForToolCall(event: { params?: Record<string, unknown>; derivedPaths?: readonly string[] }, ctx: ToolContext | undefined, files: string[]): string {
+  const key = sessionKeyOf(ctx);
+  if (key) {
+    const cached = workspaceBySession.get(key);
+    if (cached) return cached;
+  }
+  for (const f of files) {
+    if (isAbsolute(f)) return dirname(f);
+  }
+  return "";
+}
+
+type GuardMode = "off" | "warn" | "require_approval" | "block";
 
 export default definePluginEntry({
   id: "anvil-finish-gate",
@@ -202,6 +259,17 @@ export default definePluginEntry({
   description:
     "anvil's OpenClaw integration: blocks finalizing a turn while a claimed task lacks evidence (before_agent_finalize), auto-captures verification-command output to the claim's evidence buffer (after_tool_call), and injects anvil usage guidance into the system prompt for tracked projects (before_prompt_build).",
   register(api) {
+    // claim-guard mode (default "warn" — the unanimous safe default; never
+    // false-blocks). Precedence ENV → per-plugin config → "warn": env wins so an
+    // explicit ANVIL_CLAIM_GUARD_MODE is never shadowed by an injected schema
+    // default in pluginConfig. Invalid values fall through (no silent surprise).
+    const cfg = ((api as { pluginConfig?: Record<string, unknown> }).pluginConfig) ?? {};
+    const asMode = (v: unknown): GuardMode | undefined =>
+      (["off", "warn", "require_approval", "block"].includes(String(v)) ? (v as GuardMode) : undefined);
+    const CLAIM_GUARD_MODE: GuardMode =
+      asMode(process.env.ANVIL_CLAIM_GUARD_MODE) ?? asMode(cfg.claimGuardMode) ?? "warn";
+    const GUARD_EXEC = cfg.guardExec === true || process.env.ANVIL_GUARD_EXEC === "true";
+
     // after_tool_call: auto-capture verification-command output as evidence. Pure
     // observer (fire-and-forget); only `exec` tools running a verification command.
     api.on("after_tool_call", (event) => {
@@ -228,15 +296,87 @@ export default definePluginEntry({
     // injection) for non-anvil projects or any error.
     api.on("before_prompt_build", async (_event, ctx) => {
       try {
-        const workspaceDir =
-          typeof (ctx as PromptBuildContext)?.workspaceDir === "string"
-            ? (ctx as PromptBuildContext).workspaceDir
-            : "";
+        const pctx = ctx as PromptBuildContext;
+        const workspaceDir = typeof pctx?.workspaceDir === "string" ? pctx.workspaceDir : "";
         if (!workspaceDir) return {};
+        // Cache for the claim-guard (before_tool_call has no cwd of its own).
+        const key = sessionKeyOf(pctx);
+        if (key) {
+          // Bound growth in a long-lived gateway (sessions accumulate).
+          if (workspaceBySession.size >= 1000) workspaceBySession.clear();
+          workspaceBySession.set(key, workspaceDir);
+        }
         const guidance = await anvilGuidanceFor(workspaceDir);
         return guidance ? { prependSystemContext: guidance } : {};
       } catch {
         return {};
+      }
+    });
+
+    // before_tool_call: claim-guard. When a MUTATING tool runs with no active
+    // anvil claim, warn (default) / requireApproval / hard-block per mode. MUST
+    // never throw (the host fails CLOSED on a thrown handler) and default-OPEN on
+    // every uncertain path. Tight allowlist + early-return keep it off the hot path.
+    api.on("before_tool_call", async (event, ctx) => {
+      try {
+        if (CLAIM_GUARD_MODE === "off") return {};
+        const name = String(event.toolName ?? "").toLowerCase();
+        const isFile = FILE_TOOLS.has(name);
+        const isExec = EXEC_TOOLS.has(name);
+        if (!isFile && !(GUARD_EXEC && isExec)) return {}; // not guarded → no shell-out
+        const files = filesForToolCall(event);
+        const cwd = cwdForToolCall(event, ctx as ToolContext, files);
+        if (!cwd) return {}; // cannot scope to a project → allow
+        // If before_prompt_build already probed this workspace as NON-anvil (cached
+        // ""), skip the per-tool-call shell-out entirely.
+        if (guidanceCache.get(cwd) === "") return {};
+
+        const args = ["claim-guard", "--json", "--actor", ANVIL_ACTOR, "--cwd", cwd];
+        for (const f of files) args.push("--file", f);
+        const res = await runAnvil(args, cwd);
+        // anvil missing / timeout / genuine error (exit 1) → allow.
+        if (res.error || (res.code !== 0 && res.code !== 2)) return {};
+        const env = parseEnvelope(res.stdout);
+        const data = env?.ok ? env.data : null;
+        if (!data) return {};
+        const action = data.action;
+        const reason = String(data.reason ?? "Claim an anvil task before editing.");
+
+        if (action === "block") {
+          // has-NO-claim. Escalation (block / requireApproval) is allowed ONLY for
+          // file-mutating tools. exec/bash NEVER escalate — they carry no file to
+          // protect, and hard-blocking arbitrary commands would also block
+          // `anvil next`/`anvil claim` (a claim-acquisition deadlock). exec → warn.
+          if (isFile && CLAIM_GUARD_MODE === "block") {
+            api.logger?.info?.(`anvil claim-guard: blocking ${name} — ${reason}`);
+            return { block: true, blockReason: reason };
+          }
+          if (isFile && CLAIM_GUARD_MODE === "require_approval") {
+            return {
+              requireApproval: {
+                title: "anvil claim-guard",
+                description: reason,
+                severity: "warning" as const,
+                timeoutBehavior: "allow" as const,
+                timeoutMs: 30000,
+                pluginId: "anvil-finish-gate",
+              },
+            };
+          }
+          // warn (default), or any exec tool: log only, allow. before_tool_call
+          // can't inject text — the agent is nudged by before_prompt_build instead.
+          api.logger?.warn?.(`anvil claim-guard: ${name} with no active claim — ${reason}`);
+          return {};
+        }
+        if (action === "warn") {
+          // edit-outside-scope is advisory in every mode — log, never block.
+          api.logger?.info?.(`anvil claim-guard: ${reason}`);
+          return {};
+        }
+        return {}; // continue
+      } catch (error) {
+        api.logger?.debug?.(`anvil claim-guard skipped: ${(error as Error)?.message}`);
+        return {}; // MUST allow — host fails closed on a thrown handler
       }
     });
 

@@ -1,12 +1,25 @@
 {
   "id": "anvil-finish-gate",
   "name": "anvil finish-gate",
-  "description": "anvil's OpenClaw integration: blocks finalizing while a claimed task lacks evidence (before_agent_finalize), auto-captures verification-command output to the claim's evidence buffer (after_tool_call), and injects anvil usage guidance into the system prompt for tracked projects (before_prompt_build).",
+  "description": "anvil's OpenClaw integration: blocks finalizing while a claimed task lacks evidence (before_agent_finalize), auto-captures verification-command output to the claim's evidence buffer (after_tool_call), injects anvil usage guidance into the system prompt for tracked projects (before_prompt_build), and guards mutating tools against editing without an active claim (before_tool_call).",
   "activation": {
     "onStartup": true
   },
   "configSchema": {
     "type": "object",
-    "additionalProperties": false
+    "additionalProperties": false,
+    "properties": {
+      "claimGuardMode": {
+        "type": "string",
+        "enum": ["off", "warn", "require_approval", "block"],
+        "default": "warn",
+        "description": "before_tool_call claim-guard behavior when a mutating tool runs with no active claim. warn (default): log only, never blocks. block: hard-veto the tool (CI/strict). require_approval: route to approval — DO NOT use in a headless gateway (no approver = hard block). off: disable."
+      },
+      "guardExec": {
+        "type": "boolean",
+        "default": false,
+        "description": "Also flag exec/bash tools run without a claim (default off). WARN-ONLY even in block mode — there is no command parser, and hard-blocking arbitrary commands would also block `anvil claim` (a deadlock)."
+      }
+    }
   }
 }
