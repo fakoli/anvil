@@ -391,6 +391,7 @@ _APPLY_KEYS = {
     "evidence_gate",
     "task",
     "next_ready",  # T014
+    "proof_path",  # B48 part 2 — path to the emitted signed AcceptanceProof (or null)
 }
 
 

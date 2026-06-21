@@ -61,17 +61,109 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     return proofs
 
 
+def emit_acceptance_proof(
+    state_dir: Path, backend: object, task_id: str, applied_event: object
+) -> Path | None:
+    """Build, sign, and persist a portable ``AcceptanceProof`` for an accepted task.
+
+    Emitted on acceptance (B48 part 2): a signed receipt binding the task +
+    claim/lease + actor + observed ``CommandProof``s + the event-log range,
+    written to ``<state_dir>/proofs/<task_id>-<event_id>.json`` and verifiable
+    off-host with only the signer's public key (see ``anvil proof verify``).
+
+    File-only by design: the proof is a portable export, not replayable engine
+    state, so it never affects replay determinism. Returns the written path, or
+    ``None`` — this NEVER raises: a signing hiccup must not block acceptance.
+    """
+    try:
+        from anvil import signing
+        from anvil.state.models import AcceptanceProof, CommandProof, EventRange
+
+        evidence = backend.get_latest_evidence(task_id)  # type: ignore[attr-defined]
+        if evidence is None:
+            return None  # nothing submitted to attest to
+        command_results = [p for p in evidence.proofs if isinstance(p, CommandProof)]
+        start_id = backend.first_event_id(task_id) or applied_event.id  # type: ignore[attr-defined]
+        project = backend.get_project()  # type: ignore[attr-defined]
+        project_id = project.id if project is not None else ""
+        private_key, public_key_hex, signer_id = signing.load_or_create_signer()
+        proof = AcceptanceProof(
+            project_id=project_id,
+            task_id=task_id,
+            claim_id=evidence.claim_id,
+            actor=evidence.submitted_by,
+            command_results=command_results,
+            event_range=EventRange(start=start_id, end=applied_event.id),  # type: ignore[attr-defined]
+            created_at=applied_event.timestamp,  # type: ignore[attr-defined]
+            signer_id=signer_id,
+            public_key=public_key_hex,
+        )
+        signing.sign_proof(proof, private_key)
+        proofs_dir = state_dir / "proofs"
+        proofs_dir.mkdir(parents=True, exist_ok=True)
+        out = proofs_dir / f"{task_id}-{applied_event.id}.json"  # type: ignore[attr-defined]
+        out.write_text(proof.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        return out
+    except Exception:  # noqa: BLE001 — emission is best-effort; never block accept
+        return None
+
+
+def _strict_evidence_env() -> bool | None:
+    """Parse ``$ANVIL_STRICT_EVIDENCE`` into a tri-state bool (None = unset).
+
+    Truthy: ``1/true/yes/on``; falsy: ``0/false/no/off`` (case-insensitive). An
+    unset or unrecognized value returns None so the next precedence tier decides.
+    Shared by the CLI and MCP apply paths so they resolve strict identically.
+    """
+    import os
+
+    raw = os.environ.get("ANVIL_STRICT_EVIDENCE")
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def _warn_if_env_overrides_strict_config(env: bool, state_dir: Path) -> None:
+    """Warn when ``$ANVIL_STRICT_EVIDENCE`` DISABLES strict that ``config.yaml``
+    explicitly enabled — the security-reducing override should never be silent.
+
+    Only the *disable* direction warns: enabling strict via the env var (the
+    intended fleet default) is silent, so a fleet that exports the var on every
+    project does not emit noise. No warning either when there is no config (the
+    default is already off, so the env isn't overriding an explicit choice).
+    """
+    if env is not False:
+        return
+    config = _load_config_optional(state_dir)
+    if config is not None and config.strict_evidence:
+        typer.echo(
+            "Warning: ANVIL_STRICT_EVIDENCE is disabling strict-evidence that "
+            "config.yaml enabled (strict_evidence: true). Unset the env var to "
+            "honor the project config.",
+            err=True,
+        )
+
+
 def _resolve_strict_evidence(strict_flag: bool | None, state_dir: Path) -> bool:
     """Resolve the effective strict-evidence mode for this invocation.
 
-    T025/B25 — completion-evidence enforcement precedence:
+    T025/B25 + B48 — completion-evidence enforcement precedence:
 
-        explicit --strict/--no-strict flag  >  config.strict_evidence  >  False
+        --strict/--no-strict flag  >  $ANVIL_STRICT_EVIDENCE  >  config  >  False
+
+    The ``ANVIL_STRICT_EVIDENCE`` env var lets an **autonomous loop / fleet**
+    turn strict mode on for every unattended ``apply`` without editing each
+    project's config (B48 acceptance 1). An explicit per-call flag still wins.
 
     Args:
         strict_flag: The tri-state CLI flag value. ``True`` (--strict) and
             ``False`` (--no-strict) are explicit overrides; ``None`` means the
-            flag was not passed, so the config (then the default) decides.
+            flag was not passed, so the env (then config, then default) decides.
         state_dir: The ``.anvil/`` directory; its ``config.yaml`` is
             soft-loaded for the ``strict_evidence`` field. A missing/broken
             config falls back to ``False`` (advisory), same as everywhere else.
@@ -81,6 +173,10 @@ def _resolve_strict_evidence(strict_flag: bool | None, state_dir: Path) -> bool:
     """
     if strict_flag is not None:
         return strict_flag
+    env = _strict_evidence_env()
+    if env is not None:
+        _warn_if_env_overrides_strict_config(env, state_dir)
+        return env
     config = _load_config_optional(state_dir)
     if config is None:
         return False
@@ -659,6 +755,9 @@ def apply(
                             else None
                         ),
                         "task": dump_model(task),
+                        # No decision in review-only mode, so no proof is emitted;
+                        # carry the key (null) to keep the apply envelope uniform.
+                        "proof_path": None,
                     },
                 )
                 return
@@ -801,7 +900,16 @@ def apply(
             target_id=task_id,
             payload_json=payload,
         )
-        backend.append(draft)
+        applied_event = backend.append(draft)
+
+        # B48 part 2: on acceptance, emit a portable signed AcceptanceProof.
+        # Best-effort and file-only (never blocks the accept, never touches
+        # replayable state).
+        proof_path: Path | None = None
+        if approve and applied_event is not None:
+            proof_path = emit_acceptance_proof(
+                state_dir, backend, task_id, applied_event
+            )
 
         # Re-fetch the post-transition task so the JSON envelope reports the
         # resulting status (done on approve; drafted on reject).
@@ -847,12 +955,15 @@ def apply(
                 ),
                 "task": dump_model(result_task) if result_task is not None else None,
                 "next_ready": apply_next_ready,
+                "proof_path": str(proof_path) if proof_path is not None else None,
             },
         )
         return
 
     if approve:
         typer.echo(f"Task '{task_id}' approved by '{resolved_reviewer}' → done.")
+        if proof_path is not None:
+            typer.echo(f"  Signed proof: {proof_path}")
     else:
         typer.echo(
             f"Task '{task_id}' rejected by '{resolved_reviewer}' → drafted "

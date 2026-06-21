@@ -15,15 +15,22 @@ from anvil.clock import FrozenClock
 
 
 @pytest.fixture(autouse=True)
-def _local_state_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+def _local_state_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
     """Pin the in-repo (`<cwd>/.anvil`) state layout for the whole suite.
 
     Production defaults to the HOME workspace (`~/.anvil/workspaces/<repo>/`), but
     the tests' cwd-relative fixtures (chdir into tmp_path, assert `tmp/.anvil`)
     assume the legacy local layout. Setting ANVIL_STATE_LAYOUT=local keeps every
     existing test correct AND stops tests from writing into the real ~/.anvil/.
+
+    Also redirect ANVIL_KEYS_DIR (B48 part 2 signing) to a per-test temp dir so
+    accepting a task never writes an Ed25519 keypair into the real ~/.anvil/keys/.
     """
     monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
+    keys = tmp_path_factory.mktemp("anvil-keys")
+    monkeypatch.setenv("ANVIL_KEYS_DIR", str(keys))
 
 
 @pytest.fixture(autouse=True)

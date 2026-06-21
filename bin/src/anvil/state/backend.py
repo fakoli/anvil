@@ -184,6 +184,12 @@ class Backend(Protocol):
         most-recent first. Used by `show` to surface task history."""
         ...
 
+    def first_event_id(self, target_id: str) -> str | None:
+        """Return the id of the earliest-recorded event for ``target_id``, or
+        None if it has none. Used to bind an ``AcceptanceProof`` to the
+        event-log range it covers (B48 part 2)."""
+        ...
+
     def get_prd(self) -> PRD | None:
         """Return the current PRD, or None if not yet parsed."""
         ...
