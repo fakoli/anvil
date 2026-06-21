@@ -1,6 +1,6 @@
 # anvil design rationale
 
-> Why anvil is shaped the way it is. Companion to `architecture.md` (what is built). For positioning soundbites see `_positioning.md`; for what is planned next see `roadmap.md`.
+> Why [anvil](https://github.com/fakoli/anvil) is shaped the way it is. Companion to `architecture.md` (what is built). For positioning soundbites see `_positioning.md`; for what is planned next see `roadmap.md`.
 
 This document answers "why was it built this way." Each section names the choice, the alternatives rejected, the trade-off accepted, and where to challenge the decision. `_positioning.md` keeps the positioning summary; this file keeps the engineering rationale.
 
@@ -15,24 +15,24 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 | Terraform concept | anvil equivalent | Where it lives |
 |---|---|---|
 | `.tf` configuration | `prd.md` + parsed `Requirement`/`Feature`/`Task` rows | `.anvil/prd.md`, rows in `state.db` |
-| `terraform.tfstate` | `state.db` — Pydantic-validated SQLite | `.anvil/state.db` |
-| `terraform plan` | `anvil packet T012` — work-packet preview before claim | derived view, not stored |
-| `terraform apply` | `anvil apply T012` — reviewed transition to `done` | `Review` row + `apply.*` event |
+| `terraform.tfstate` | `state.db` (Pydantic-validated SQLite) | `.anvil/state.db` |
+| `terraform plan` | `anvil packet T012` (work-packet preview before claim) | derived view, not stored |
+| `terraform apply` | `anvil apply T012` (reviewed transition to `done`) | `Review` row + `apply.*` event |
 | State locking | `Claim` row with `lease_expires_at` + heartbeat | `claims` table, `BEGIN IMMEDIATE` txn |
 | Drift detection | stale-claim sweep + `sync --fix` reconciliation | `claims/stale.py`, `sync.reconcile` |
 | Workspace | `.anvil/` per repo | created by `anvil init` |
-| Backend protocol | `Backend` Protocol — SQLite ships | `state/backend.py` |
+| Backend protocol | `Backend` Protocol (SQLite ships) | `state/backend.py` |
 
 ### What the analogy gets right
 
 - **Canonical state separate from derived views.** Work packets, markdown plans, dependency graphs are *projected* from the DB on demand, never stored as the source of truth. The same way Terraform regenerates `terraform plan` output from the state file each time.
 - **Plan-before-apply as a hard rhythm.** Agents cannot mark `done` without a `Review` row, the same way Terraform cannot apply without a plan diff.
-- **Drift is detected and reported, not papered over.** Stale claims, orphan branches, sync conflicts surface as explicit `conflicts` or `sync --fix` flows — not silent reconciliation.
+- **Drift is detected and reported, not papered over.** Stale claims, orphan branches, sync conflicts surface as explicit `conflicts` or `sync --fix` flows, not silent reconciliation.
 
 ### Where the analogy stops
 
 - **No resource ownership.** Terraform owns the resources it manages; anvil does not own source code. Agents and humans edit files; anvil records *that* they edited and *what evidence* they produced.
-- **No `destroy` verb.** No resource graph to tear down — only `release --force` for stuck claims, and `apply --reject` to send a task back to drafted.
+- **No `destroy` verb.** No resource graph to tear down: only `release --force` for stuck claims, and `apply --reject` to send a task back to drafted.
 - **No `import` flow.** Existing repos don't have a "state to discover." `init` creates an empty workspace; the PRD authoring flow populates it.
 
 ---
@@ -49,13 +49,13 @@ anvil is to agentic software work what Terraform is to infrastructure: a canonic
 
 ### Trade-offs
 
-- **Accepted:** SQLite is single-writer. Two concurrent claims serialize at the DB level. Fine — claims are a coordination primitive, not a throughput primitive. SQLite handles ~10k writes/sec; we will hit other walls first.
+- **Accepted:** SQLite is single-writer. Two concurrent claims serialize at the DB level. Fine: claims are a coordination primitive, not a throughput primitive. SQLite handles ~10k writes/sec; we will hit other walls first.
 - **Accepted:** schema migrations are our problem, not the user's. We ship a `anvil migrate` command and version the schema explicitly (`docs/migrations.md`).
 - **Lost:** network multi-writer. Two laptops cannot share a `state.db` over a shared drive. That use case is served by sync providers, not by sharing the DB.
 
 ### Why WAL specifically
 
-Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes, blocking all readers. WAL mode lets readers proceed concurrently with a single writer. For our workload — many `anvil status` reads from hooks, occasional `anvil claim` writes from agents — WAL is the right pick. We pay a `wal` + `wal-shm` sidecar file cost in `.anvil/`; both are git-ignored.
+Default SQLite journaling mode (`DELETE`) holds an exclusive lock during writes, blocking all readers. WAL mode lets readers proceed concurrently with a single writer. For our workload (many `anvil status` reads from hooks, occasional `anvil claim` writes from agents) WAL is the right pick. We pay a `wal` + `wal-shm` sidecar file cost in `.anvil/`; both are git-ignored.
 
 ---
 
@@ -74,7 +74,7 @@ A hosted control plane would let us ship a web dashboard, real-time collaboratio
 
 ### Trade-offs
 
-- **Accepted:** cross-machine collaboration goes through sync providers (a projection into GitHub Issues / Linear / Jira), not shared state.db. Slower and lossier than a CRDT — and that audience is buying Linear, not anvil.
+- **Accepted:** cross-machine collaboration goes through sync providers (a projection into GitHub Issues / Linear / Jira), not shared state.db. Slower and lossier than a CRDT, and that audience is buying Linear, not anvil.
 - **Accepted:** if `.anvil/` is git-ignored (sometimes recommended for `state.db` to avoid binary merge conflicts), the canonical state does not survive a `git clone` on a second machine. `events.jsonl` *can* be committed; `replay` rebuilds the DB. The user chooses the trade-off per repo.
 - **Lost:** hosted dashboard and cross-project search. Those are outside the local-first scope.
 
@@ -87,7 +87,7 @@ A hosted control plane would let us ship a web dashboard, real-time collaboratio
 ### Rejected alternatives
 
 - **Assignment by label / issue assignee.** This is how CCPM does it (see competitive gap doc § 1). Works for one human at a time. Fails for two concurrent Claude Code sessions: labels have no expiry, no heartbeat, no `expected_files`.
-- **Branch-name convention (`agent/t012-foo`).** Better than labels but still inadequate — branches do not expire, do not heartbeat, and an agent that forgets to push leaves no claim trace. We *use* `agent/<task>-<slug>` branches as a projection of the canonical claim, not as the claim itself.
+- **Branch-name convention (`agent/t012-foo`).** Better than labels but still inadequate: branches do not expire, do not heartbeat, and an agent that forgets to push leaves no claim trace. We *use* `agent/<task>-<slug>` branches as a projection of the canonical claim, not as the claim itself.
 - **Git-lfs-style file lock.** Wrong granularity. A task often touches files it could not predict. Locking files would block legitimate work. We warn (not block) on `expected_files` overlap.
 
 ### What this buys
@@ -106,7 +106,7 @@ A 1-hour lease without heartbeat means stale claims wait the full hour to releas
 
 ## Why evidence is required
 
-**Choice:** `anvil submit T012` requires a structured `Evidence` payload (see `state/models.py`) with `commands_run`, `files_changed`, `output_excerpt`, exit codes, and optional artifacts. The `sentinel` agent validates it before a task can move to `accepted`. Free-form "tests passed" strings are rejected.
+**Choice:** `anvil submit T012` requires a structured `Evidence` payload (see `state/models.py`) with fields like `commands_run`, `files_changed`, `output_excerpt`, `pr_url`, and `commit_sha` rather than a free-form string. The `sentinel` agent validates it before a task can move to `accepted`. Free-form "tests passed" strings are rejected.
 
 ### Rejected alternatives
 
@@ -115,21 +115,23 @@ A 1-hour lease without heartbeat means stale claims wait the full hour to releas
 
 ### What "structured" means
 
-The `Evidence` Pydantic model requires:
+The `Evidence` Pydantic model captures the following (the *content* fields are optional at the model level; the identifiers `id`/`task_id`/`claim_id` and the `submitted_at`/`submitted_by` metadata are always present; the per-task evidence gate decides which content must be present for a given task):
 
-- `commands_run: list[str]` — every shell command actually executed during work
-- `files_changed: list[str]` — paths touched, cross-checked against `record-file-change.sh` events
-- `output_excerpt: str` — last N lines of test/build output, captured by `capture-evidence.sh`
-- `exit_codes: dict[str, int]` — per-command exit
-- `artifacts: list[Artifact]` — optional screenshots, logs, links
+- `commands_run: list[str]`: the shell commands the agent cites as having run during the work
+- `files_changed: list[str]`: paths touched, cross-checked against `record-file-change.sh` events
+- `output_excerpt: str`: last N lines of test/build output, captured by `capture-evidence.sh`
+- `pr_url` / `commit_sha`: where the work landed
+- `screenshots: list[str]`, `known_limitations: str`: optional supporting context
+
+Note: the shipped model does *not* carry per-command exit codes or a typed `Artifact` type. Adding an exit-code-bearing, portable signed proof record is exactly what backlog item B48 proposes; until it lands, the gate confirms a command was *reported* to run, not that it exited 0.
 
 ### Why hooks capture, not the agent
 
-`capture-evidence.sh` runs as a PostToolUse hook on `Bash` and records every command the agent actually executed (with stdout/stderr/exit). The agent's job is to *cite* what to include in the submission; the hook supplies the ground truth. An agent that fabricates `commands_run: ["pytest"]` without having actually run pytest gets caught because the hook stream does not show a pytest invocation in the claim's window. The split is deliberate: agent-supplied evidence is auditable against system-captured evidence.
+`capture-evidence.sh` runs as a PostToolUse hook on `Bash` and records the verification commands the agent runs that match a hardcoded set of patterns (pytest, ruff, and the like), capturing their output (stdout/stderr/exit). The agent's job is to *cite* what to include in the submission; the hook supplies the ground truth. An agent that fabricates `commands_run: ["pytest"]` without having actually run pytest gets caught because the hook stream does not show a pytest invocation in the claim's window. The split is deliberate: agent-supplied evidence is auditable against system-captured evidence.
 
 ### Trade-off accepted
 
-Submitting evidence is more work than typing "done." That extra step is intentional: it requires the agent to cite commands and files that can be checked against captured hook output. "Quick fix" workflows get `apply --skip-evidence` as an explicit, logged override.
+Submitting evidence is more work than typing "done." That extra step is intentional: it requires the agent to cite commands and files that can be checked against captured hook output. "Quick fix" workflows get `anvil apply --no-strict` (or `strict_evidence: false` in config) as an explicit, logged override.
 
 ---
 
@@ -145,7 +147,7 @@ Submitting evidence is more work than typing "done." That extra step is intentio
 
 ### The principle
 
-From `_positioning.md` § MCP vs plugin: **MCP exposes capabilities; the plugin layer encodes operating discipline.** The MCP tool `claim_task` does not decide *when* to claim, *which* specialist should execute, or *what* evidence is required — those decisions live in skills (`execute/SKILL.md`), agents (`sentinel.md`), and hooks (`check-claim.sh`).
+From `_positioning.md` § MCP vs plugin: **MCP exposes capabilities; the plugin layer encodes operating discipline.** The MCP tool `claim_task` does not decide *when* to claim, *which* specialist should execute, or *what* evidence is required; those decisions live in skills (`execute/SKILL.md`), agents (`sentinel.md`), and hooks (`check-claim.sh`).
 
 ### Trade-off accepted
 
@@ -174,12 +176,12 @@ Both paths are first-class. Neither is the "main" API.
 
 ### Why these six (from design brief § 3)
 
-- `complexity` — gates expand recommendations.
-- `parallelizability` — gates multi-agent dispatch.
-- `context_load` — predicts whether a small-context agent can hold the task.
-- `blast_radius` — predicts review risk and conflict probability.
-- `review_risk` — escalates to human review.
-- `agent_suitability` — routes between Opus / Sonnet / Haiku / local models.
+- `complexity`: gates expand recommendations.
+- `parallelizability`: gates multi-agent dispatch.
+- `context_load`: predicts whether a small-context agent can hold the task.
+- `blast_radius`: predicts review risk and conflict probability.
+- `review_risk`: escalates to human review.
+- `agent_suitability`: routes between Opus / Sonnet / Haiku / local models.
 
 ### Trade-off accepted
 
@@ -191,7 +193,7 @@ Six dimensions is more cognitive load than one. We mitigated by making LLM scori
 
 **Choice:** all bundled, auto-wired hooks (`detect-state.sh`, `check-claim.sh`, `record-file-change.sh`, `capture-evidence.sh`, and the B41 `heartbeat.sh`) `exit 0` regardless of internal failure, do not use `set -e`/`set -u`/`set -o pipefail`, wrap CLI calls with `|| true`, and must complete in <200ms on hot events (PreToolUse / PostToolUse).
 
-**One opt-in exception (B41):** `anvil hook stop-gate` is a *blocking* Stop-hook evidence gate (the Codex/Claude analogue of the OpenClaw finish-gate). It is **deliberately NOT auto-wired** — it ships as a verb + a documented opt-in recipe, consistent with the blocking-gates-are-opt-in stance (the OpenClaw `--finish-gate` works the same way). Blocking is reserved for surfaces the user explicitly enables and verifies; the *default* hook posture stays non-blocking.
+**One opt-in exception (B41):** `anvil hook stop-gate` is a *blocking* Stop-hook evidence gate (the Codex/Claude analogue of the OpenClaw finish-gate). It is **deliberately NOT auto-wired**: it ships as a verb + a documented opt-in recipe, consistent with the blocking-gates-are-opt-in stance (the OpenClaw `--finish-gate` works the same way). Blocking is reserved for surfaces the user explicitly enables and verifies; the *default* hook posture stays non-blocking.
 
 ### Rejected alternative: blocking PreToolUse on claim violations
 
@@ -210,7 +212,7 @@ Warn + log + audit trail. The check-claim hook prints a one-line warning to stde
 Non-blocking does not mean unenforced:
 
 - The `apply` gate is a hard gate. No `Evidence` → no transition to `accepted`. No `Review` → no transition to `done`. The hooks observe; the apply gate enforces.
-- The `claim_task` MCP tool refuses if the PRD is still `draft` or another active claim already holds the task. That refusal is at the engine layer, not in a hook — and the engine layer *does* block.
+- The `claim_task` MCP tool refuses if the PRD is still `draft` or another active claim already holds the task. That refusal is at the engine layer, not in a hook, and the engine layer *does* block.
 - Schema validation in Pydantic models refuses malformed input at every boundary.
 
 The discipline is layered: hooks observe and warn, the engine enforces invariants, the apply gate is the final hard checkpoint.
@@ -218,6 +220,46 @@ The discipline is layered: hooks observe and warn, the engine enforces invariant
 ### Trade-off accepted
 
 Hooks observe and report; the engine enforces state transitions. An agent that ignores warnings and submits evidence anyway is checked at `apply` time by the sentinel, which cross-references `files_changed` against the warning stream. Performance remains a constraint; see `roadmap.md` Theme 3 for the next hot-path pass on the 200ms budget.
+
+---
+
+## Why risk-axis eligibility now, matching later (fleet mode)
+
+> Added 2026-06-20, revised the same day after a code-grounded red-team. Direction,
+> not yet shipped. Tracked as epic **E13**; positioning in `_positioning.md`
+> § "The fleet thesis". An earlier draft specced full capability-matching as the
+> build; the review cut it to an MVP.
+
+**Choice:** multi-runtime execution is *pull*, not a router. Runtimes poll, self-select, claim under a lease, submit evidence. anvil owns *eligibility*; the harness owns *assignment*; anvil never names a model. The MVP eligibility test is the **risk axis only**: `anvil next --max-blast --max-review-risk`, reusing the shipping `fast_lane` ceilings, plus autonomous loops keyed by `--actor`. The eligibility test must be **safe by construction from the first commit (B45)**: a task scored only by a filename regex (untrusted) defaults to **frontier-only**, so a low score never *lowers* the eligibility bar; it can only raise it once a trusted risk label is confirmed. That is the whole first build; let *measured* mis-routing pull richer machinery into existence.
+
+### Why packets, not bigger models, carry local work
+
+A fast local model (measured 200+ tok/s on an RTX 5090) lacks the frontier worldview, so it cannot explore an underspecified task well. A tight, fully-specified anvil **packet** (intent, acceptance criteria, scope, non-goals, exact context) is the worldview substitute: it lets the local model skip exploration and execute a bounded task directly. Packet quality is what turns "fast but dumb" into "fast and sufficient," and tighter packets cut steps, which cuts tokens, which buys back flat-rate capacity. Packet quality is therefore a **first-class, measured workstream**, not a side effect: the bake-off measures packet sufficiency alongside throttle frequency.
+
+### Deliberately deferred (cut from the MVP)
+
+- **Capacity-pools as a first-class concept** is deferred. Before anvil models pools, the two-loop bake-off measures how often each flat-rate pool throttles and whether naive spillover to the local box already suffices. Build the pool concept only if measured throttling shows naive spillover is not enough.
+- **`type` matching:** `TaskType` is a 4-value advisory enum where feature≈refactor; the real work-kind taxonomy is an unbuilt prerequisite.
+- **`tier` axis:** no field exists, and "minimum-sufficient model" is a model-capability judgment anvil must not make. If it returns, it is a pure function of model-neutral dimensions with the runner owning `tier→model`.
+- **profile schema / `--profile` / shared backend / many-runners:** machinery over a loop that already drains the queue. On one box the "market" has two participants, a lookup table, not a market.
+
+### Rejected alternatives
+
+- **Central score-driven router (push).** Puts model knowledge inside anvil and centralizes a call the environment makes better. Pull lets each runtime self-select.
+- **Specialist agents baked into the producer** (the [fakoli-crew](https://github.com/fakoli/fakoli-plugins) tax). The producer *describes* the work; the environment maps it to its own agents.
+
+### Prerequisites before unattended autonomy (red-team, in shipped code)
+
+- **Progress-gated heartbeat + max-claim-age:** `renew()` is unconditional, so a wedged agent heartbeats forever and never reaps.
+- **One `ANVIL_ACTOR` resolver:** claim (`$USER`), heartbeat (`$ANVIL_GATE_ACTOR`), and hooks (`session_id`) resolve the actor three ways, so heartbeat and the finish-gate fail silently *open*.
+- **`strict_evidence` on + a portable, signed proof artifact:** the gate is advisory by default and `Evidence` has no `exit_code` field. The target is a typed proof artifact that is **portable, signed, and bound to task identity plus claim/lease and pull**, not an internal-only blob. Frame this honestly: verification is a *contested* wedge, not a moat anvil holds. Portable proof formats (AGEF, Proof of Insight) and enforced evidence-gates already exist separately, and platforms are absorbing verification; the unoccupied position is the *fusion* of portable signed proof with task/claim/lease/pull, local-first. Learn from AGEF / Proof of Insight; treat it as a bet to execute, not a won position.
+
+### Trade-offs
+
+- **Safe by construction, not bolted on (B45):** risk dimensions are eligibility *ceilings*, but they fire on a filename regex (untrusted): a dangerous change in an innocuously-named file scores low. From the first commit, regex-only-scored tasks default to **frontier-only**; a confirmed risk label is what *relaxes* the bar, never the absence of one.
+- **Concede durable-execution, keep hardening leases (weak-pillar strategy):** anvil does not try to out-engineer Temporal / LangGraph Platform on durable execution. It interoperates and stays local-first SQLite there, while it keeps hardening the lease/claim single-winner semantics, the cheap-to-keep-ahead core. Be honest: anvil is behind on durable state and matched-or-behind on leases today.
+- **Measured, not assumed:** local auto-apply is gated to `needs_review` until local false-pass is measured; the "local is cheaper" case is unproven inside maxed flat-rate subscriptions and must be measured (rate-limit-hit frequency) before it is claimed. The driver is *capacity*, not per-token cost: drain multiple flat-rate pools in parallel and route overflow to the zero-marginal local box, priced against per-token API, not against the flat plan.
+- **Lost (until later):** cross-host pull needs a *self-hosted* backend; single-host SQLite stays the default. When replay verifies state in CI it checks **logical equivalence** (canonical row-ordered dump or per-table content hash), never byte-identical SQLite.
 
 ---
 
@@ -245,7 +287,7 @@ The right time to add the second backend is when a real user has a concrete requ
 
 `LLMProvider` Protocol exists; only `AnthropicProvider` ships.
 
-**Why deferred:** the LLM is used for *augmentation* (PRD parsing, scoring, expansion), never for state mutation. A user without an API key gets the template-based deterministic fallback and loses no correctness — only convenience.
+**Why deferred:** the LLM is used for *augmentation* (PRD parsing, scoring, expansion), never for state mutation. A user without an API key gets the template-based deterministic fallback and loses no correctness, only convenience.
 
 Adding OpenAI or local-LLM providers is a 1-day task when a user asks; shipping all three preemptively means three test matrices and three error-handling code paths for zero current benefit. Same logic as the backend Protocol: the seam exists; the second impl waits for a forcing function.
 
@@ -253,7 +295,7 @@ Adding OpenAI or local-LLM providers is a 1-day task when a user asks; shipping 
 
 The MCP server is the only long-running process and only lives for the duration of an agent session.
 
-**Why not:** a background daemon would solve real problems — heartbeats without explicit `renew` calls, push notifications for sync, scheduled snapshots — at the cost of becoming an operational liability. `launchd` / `systemd` integration, PID files, log rotation, "is it running?" debugging.
+**Why not:** a background daemon would solve real problems (heartbeats without explicit `renew` calls, push notifications for sync, scheduled snapshots) at the cost of becoming an operational liability. `launchd` / `systemd` integration, PID files, log rotation, "is it running?" debugging.
 
 The user's mental model becomes "two things to manage" instead of "one CLI." We accept the trade: agents must heartbeat, sync is polled, snapshots are manual. The MCP server is acceptable because it dies with the agent that spawned it; the user never sees it.
 
@@ -291,11 +333,28 @@ If monitors ever ship, they ship as opt-in `launchd` plists or systemd units, no
 
 ---
 
+### Shared backend for multi-host fleets (deferred; fleet-mode forcing function)
+
+The "Multi-backend abstraction beyond SQLite" note above asks for a forcing function. The **fleet thesis is that forcing function**: a fleet spanning a laptop, a cloud VM, and a local GPU box cannot pull from one job board over single-host SQLite. PR #12 (MySQL/Aurora) is the candidate seam.
+
+**Why still deferred:** two hard sub-problems must be specified first. (1) Lease atomicity: the claim's `BEGIN IMMEDIATE` single-winner guarantee needs a real shared-DB equivalent (`SELECT … FOR UPDATE` / row locks), proven under the concurrency suite. (2) The `events.jsonl` replay guarantee is a local-file contract today; in a multi-host world the event log's location and ownership are an open question. Until both are specified (SPEC-FIRST, `docs/specs/`), shared-backend fleet mode stays opt-in and unbuilt. Solo / local-SQLite remains the default.
+
+### Status of the fleet open questions (post-review, 2026-06-20)
+
+The 2026-06-20 review resolved the open questions by *removing* most of them from the near-term build:
+
+- **Actor identity, promoted to a shipped-bug prerequisite.** No longer a design question: claim (`$USER`), heartbeat (`$ANVIL_GATE_ACTOR`), and hooks (`session_id`) resolve the actor three ways, so heartbeat and the finish-gate fail silently *open* today. One `ANVIL_ACTOR` resolver is a prerequisite (see "Why risk-axis eligibility now" § Prerequisites).
+- **Type vocabulary, deferred (cut from MVP).** `TaskType` is a 4-value advisory enum; the real work-kind taxonomy is an unbuilt prerequisite, so the `type` axis is out of the MVP entirely.
+- **Tier semantics, deferred (cut from MVP).** No `tier` field exists and "minimum-sufficient model" collides with the never-name-a-model invariant; if `tier` ever returns it is a pure function of model-neutral dimensions with the runner owning the `tier→model` map.
+- **Capacity-pools, deferred (measure first).** anvil does not model pools yet. The two-loop bake-off measures throttle frequency per flat-rate pool and whether naive spillover to the local box suffices before any pool concept is built.
+
+---
+
 ## Where to weigh in
 
 If you disagree with anything here, the design is open for argument.
 
-- **For new capability requests** (a sync provider, a new MCP tool, a missing CLI verb): add to `roadmap.md` under the right theme and target version. Include a one-paragraph "why now" — what forcing function makes this the right moment.
+- **For new capability requests** (a sync provider, a new MCP tool, a missing CLI verb): add to `roadmap.md` under the right theme and target version. Include a one-paragraph "why now": what forcing function makes this the right moment.
 - **For cleanups and refactors** (untangle a duplication, fix a hot-path perf budget, close a critic finding): add to `tech-debt-backlog.md` with the origin PR or critic round, severity, and adjacency hints.
 - **For new architectural choices** (a second backend, a daemon, a webhook listener): write a SPEC-FIRST design doc in `docs/specs/` before opening a PR. The roadmap items tagged SPEC-FIRST (P9B-5, P9B-9) are the precedents to mirror.
 - **For positioning-level changes** (the choices in this file): open an issue, link the user evidence that motivated the change, and propose the trade-off explicitly. The choices in this doc are opinionated, but they are based on current evidence and can change.

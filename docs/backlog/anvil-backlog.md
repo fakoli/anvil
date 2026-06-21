@@ -19,6 +19,8 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 | E9 | WF-3 Substrate & Dogfooding Friction Follow-ups | Sand off the friction surfaced building the WF-3 workflow runner by dogfooding anvil on itself: a programmatic engine write API, a verification-command path doctor check, a relaxed evidence gate, and first-class non-PRD (workflow-origin) tasks. Each item carries researched implementation trade-offs. |
 | E10 | Framework Integration & Cross-Harness Compatibility | Prove the runtime-neutral moat by breadth: thin adapters that let many agent frameworks/harnesses (Claude Code, Codex, CI, Vercel eve, …) *drive* anvil's governed lifecycle while anvil governs (single-winner leases, evidence gate, audit) — never reimplementing framework features or coupling to a vendor. Track + publish the compatibility surface; eventually benchmark across harnesses. Breadth-as-proof, not feature-shoe-in. |
 | E11 | Backlog Generation & Management (first-class, governed) | Make anvil aware of and tooled for the **whole backlog** (not just parsed tasks): a governed `backlog_item` node above requirements + a reusable ideation→item loop that systematizes the brainstorm→research→insight→item flow used to build E9/E10. Research found verified white space — no tool manages a cross-session "what's left" backlog. Stay the governed substrate *under* the loop, not a PM platform. Grounded in [`docs/research/2026-06-19-backlog-management-research.md`](../research/2026-06-19-backlog-management-research.md). |
+| E12 | Harness Experience Maximization | Maximize the three natively-supported harnesses (Claude Code, Codex, OpenClaw) with deep hooks/plugins and the HOME-workspace state layout; everyone else gets MCP-only best-effort. Harness tiering + per-harness install/optimize guides. |
+| E13 | Agent Fleet: Capacity-Coordination Pull MVP | Let heterogeneous runtimes (cloud + local) autonomously **pull** risk-eligible work from one backlog and self-select by capability, draining several flat-rate capacity pools in parallel and spilling overflow to a zero-marginal local box. The headline is **capacity coordination across pools + packet quality**; "and the work is verifiable" rides along as a feature, not the moat. Deliberately small after a four-stream adversarial review: risk-axis eligibility + two loops + the safety/trust prerequisites + packet quality, then measure before scaling. This is a **bet to execute**, not a position held: Anvil is behind on durable state (platforms now ship that) and the verification wedge is contested. Grounded in [`docs/research/2026-06-20-agent-fleet-pull-market-landscape.md`](../research/2026-06-20-agent-fleet-pull-market-landscape.md). |
 
 ---
 
@@ -560,6 +562,96 @@ order: **B41 Codex quick-wins (openai.yaml + hooks bundle, highest value / lowes
   logic (no longer needed — state isn't in the repo); update the SessionStart hook
   message to point at the workspace.
 - **Likely files:** `bin/src/anvil/cli/_helpers.py`, `cli/init_status.py`, `tests/conftest.py`
+
+---
+
+## E13 — Agent Fleet: Capacity-Coordination Pull MVP
+
+> Added 2026-06-20 from a four-stream adversarial review (landscape research,
+> narrow-waist stress-test, code-grounded red-team, fakoli-state lineage).
+> Grounded in [`docs/research/2026-06-20-agent-fleet-pull-market-landscape.md`](../research/2026-06-20-agent-fleet-pull-market-landscape.md);
+> design rationale in [`design.md`](../design.md) § "Why risk-axis eligibility now, matching later".
+> **The headline is capacity coordination across pools + packet quality.** The owner
+> is capacity-bound, not per-token-cost-bound: he maxes flat-rate plans and fights
+> rate limits, so the value is draining several flat-rate pools in parallel, routing
+> overflow to a zero-marginal local box (priced against per-token API, not against the
+> flat plan), plus privacy and speed. Do NOT claim per-token arbitrage; the break-even
+> math does not model a maxed flat-rate user. **Packet quality is the worldview
+> substitute:** a tight, fully-specified packet lets a fast local model skip
+> exploration and execute a bounded task well, which also cuts tokens (fewer steps)
+> and buys capacity.
+> **Scope is deliberately small.** The review cut the capability-matching machinery
+> (type/tier/profiles/shared backend) as premature for a solo/one-box workload, and
+> **capacity-pools-as-a-first-class concept is DEFERRED** pending the B50 bake-off's
+> measurement of how often pools throttle and whether naive spillover suffices.
+> The win condition is **personal throughput that survives platform churn**, measured
+> on a real repo, not market share.
+> **This is a bet to execute, not a position held.** Be honest in any positioning
+> work: Anvil is **behind on durable state** (Temporal, Beads/Dolt, LangGraph
+> Platform; and durable state is commoditized by platforms), matched-or-behind on
+> leases, and the **verification wedge is contested** (portable signed proof and
+> enforced evidence-gates already exist separately; platforms are absorbing proof on
+> PRs). Anvil does not yet hold the fusion: its gate is advisory-by-default, it emits
+> no typed/signed/portable artifact, it is single-host SQLite. Treat "and the work is
+> verifiable" as a feature that rides along, never as the moat. Sequence the
+> integrity/safety prerequisites (B46-B48) FIRST: an unproven trust layer cannot be
+> the trust layer.
+
+### B45 — Risk-axis eligibility flag on `anvil next` (the pull-fleet MVP)
+
+- **Priority:** P1  **Effort:** S  **Type:** feature
+- **Rationale:** For one box the whole pull-fleet idea reduces to "a runner pops the next ready task whose risk is within its ceilings." `fast_lane_complexity_max`/`fast_lane_blast_radius_max` already encode ceiling semantics (`config.py`) and `anvil next -q` already gives the exit-0/exit-3 loop seam; this adds the one missing filter. NO new task fields, NO profile schema, NO `tier`/`type`: those are deferred (see epic note + design § "Deliberately deferred"). The eligibility ceiling rides on a filename regex (`schema|migration|config`), which is untrusted input, so the safeguard against routing a dangerous change to the weakest runner must be **safe-by-construction inside this item from the first commit**, not bolted on later.
+- **Acceptance:** `anvil next --max-blast N --max-review-risk M` returns only ready tasks scoring ≤ the ceilings on those dimensions, composing with the existing dependency/priority sort and preserving the `-q` exit codes (0 = eligible task printed, 3 = none eligible). A two-loop test (one ceilinged, one unrestricted) on a seeded backlog shows the high-risk task skipped by the ceilinged caller and taken by the unrestricted one. **Safe-by-construction default:** any task whose blast/review-risk came only from the regex (no human-or-LLM-confirmed risk label) is treated as frontier-only and is ineligible for low-ceiling local runners, so the filter fails safe rather than open. Test: a regex-only-scored task is refused to a low-ceiling local runner from the first commit. The regex-untrusted-input caveat is documented in `--help`.
+- **Likely files:** `bin/src/anvil/cli/claim.py`, `bin/src/anvil/planning/scoring.py`, `bin/src/anvil/config.py`, `tests/test_cli.py`
+- **Depends on:** —
+
+### B46 — Progress-gated heartbeat + max-claim-age (unattended-safety prerequisite)
+
+- **Priority:** P0  **Effort:** S  **Type:** bug
+- **Rationale:** Red-team CRITICAL (H2): the PostToolUse heartbeat calls `renew()` unconditionally on every Edit/Write/Bash, so a wedged agent (e.g. re-running a failing pytest) heartbeats forever, the lease never expires, and the stale-claim reaper never fires. On a one-box fleet a single stuck local runner burns GPU 24/7, blocks the task and its conflict group, and produces nothing. Prerequisite for ANY unattended loop.
+- **Acceptance:** `renew()` extends the lease only when a new `file_changed` or evidence event landed since the last heartbeat (both event types already exist); otherwise it is a no-op. A hard max-claim-age (default 4× base lease) after which `renew()` refuses and the claim becomes reapable. `anvil doctor` surfaces long-lived/over-age claims. Test: a heartbeating-but-no-progress claim goes stale at max-claim-age and is reaped.
+- **Likely files:** `bin/src/anvil/claims/manager.py`, `bin/src/anvil/cli/hooks.py`, `bin/src/anvil/cli/doctor.py`, `tests/test_claims.py`
+- **Depends on:** —
+
+### B47 — Single-source actor identity (`ANVIL_ACTOR`) (unattended-safety prerequisite)
+
+- **Priority:** P0  **Effort:** M  **Type:** bug
+- **Rationale:** Red-team CRITICAL (H3): claim uses `$USER`, heartbeat uses `$ANVIL_GATE_ACTOR`, bundled hooks pass `session_id`. A session that claims under one identity but heartbeats/gates under another renews ZERO claims (lease silently expires mid-work) and the finish-gate, seeing no matching claim, returns `continue`, so unverified work finalizes. Both unattended safeguards fail silently and OPEN under the common CLI-claim/hook-gate config. The design doc already names coherent actor identity a prerequisite.
+- **Acceptance:** One `ANVIL_ACTOR` resolution (explicit env > stable per-runner id in `~/.config/anvil` > deterministic fallback) used identically by claim, MCP, heartbeat, stop-gate, gate-check, and claim-guard, with non-empty validation. A fleet loop refuses to start without a resolvable actor. Test: claim + heartbeat + gate-check under the default config resolve the same actor; a claim by actor A is renewed by A's heartbeat and gated correctly.
+- **Likely files:** `bin/src/anvil/claims/*`, `bin/src/anvil/cli/hooks.py`, `bin/src/anvil/cli/_helpers.py`, `bin/src/anvil/mcp_server.py`, `tests/test_*`
+- **Depends on:** —
+
+### B48 — Portable signed ProofArtifact bound to task/claim identity (the differentiator, as a feature)
+
+- **Priority:** P0  **Effort:** M  **Type:** feature
+- **Rationale:** The one genuinely unoccupied position is the **fusion**: a portable, signed, replayable proof artifact **bound to task identity + claim/lease + pull**, local-first. The pieces exist separately (AGEF and Proof of Insight ship portable proof formats; agentic-os / EviBound / CrewAI enforce evidence gates), so this is a contested wedge to **execute**, not a moat already held. Today Anvil falls short of the fusion in three concrete ways the red-team flagged (H6/H8): `strict_evidence` defaults to false, so as-shipped the gate is advisory and `apply` approves regardless of evidence; `Evidence` has NO `exit_code` field, so the gate verifies a command was *reported* to run, not that it exited 0; and Anvil emits no typed, signed, portable artifact. Closing those is the load-bearing Integrity-First work (SL-1/SL-3) and the highest-leverage move fully in the author's control. Frame the result as "and the work is verifiable," never as "verification is our moat."
+- **Acceptance:** (1) Autonomous loops run with `strict_evidence=true` (apply refuses without complete evidence). (2) `Evidence` gains a typed per-command result (`command`, `exit_code`, `output_sha256`); the gate requires ≥1 passing (`exit_code==0`) command tied to a declared verification command. (3) On acceptance the engine emits a **ProofArtifact**: a typed, self-describing record carrying the task id, claim/lease id, actor, the typed command results + output hashes, and the event-log range it covers, **signed** (detached signature over a canonical serialization) so it is portable and verifiable off-host without trusting the producer. Learn from AGEF / Proof of Insight for the schema and signing envelope. (4) **Replay-equivalence enforced in CI as LOGICAL equivalence:** `replay --from-events` reconstructs state and CI compares a canonical row-ordered dump (or per-table content hash), NOT a byte-for-byte file comparison (byte-identical SQLite is not a deterministic function of the event log and would make CI flaky). Tests: a submit with a non-zero exit code is rejected by the strict gate; an emitted ProofArtifact verifies against its signature and re-verifies after transport to a second host; CI replay reproduces a logically-equivalent DB.
+- **Likely files:** `bin/src/anvil/state/models.py`, `bin/src/anvil/review/gates.py`, `bin/src/anvil/config.py`, `.github/workflows/ci.yml`, `tests/test_*`
+- **Depends on:** —
+
+### B49 — Accept-rate governor + review-debt cap (anti "fast dumb work")
+
+- **Priority:** P1  **Effort:** M  **Type:** feature
+- **Rationale:** Red-team CRITICAL (H1/H5): local quality is unverified and human review is the binding constraint, so review debt can swamp the gain. The plan otherwise routes the most volume through the weakest executor under the least-proven gate, which is the author's stated "fast dumb work" fear. (The regex-only-scored-tasks-default-to-frontier safeguard now lives in B45, where it is safe-by-construction from the first commit.)
+- **Acceptance:** (1) Per-runner-actor rolling accept-rate is a first-class metric; new-claim eligibility is contingent on accept-rate above a floor AND `needs_review` depth below a cap (`next` returns nothing when the human's review queue is saturated). (2) On the Nth reject a task's eligibility floor raises so it escalates instead of recirculating. Test: a runner below the accept-rate floor gets no new work; `next` returns nothing while the review queue is over its cap.
+- **Likely files:** `bin/src/anvil/planning/scoring.py`, `bin/src/anvil/cli/claim.py`, `bin/src/anvil/claims/manager.py`, `tests/test_*`
+- **Depends on:** B45 · gate any scope expansion on B50's measurements
+
+### B50 — Two-loop bake-off: measure before scaling (capacity-pool reality check)
+
+- **Priority:** P1  **Effort:** M  **Type:** infra
+- **Rationale:** Every further fleet abstraction (capability `type`, `tier`, profiles, shared backend, many-runners) must be pulled into existence by *measured* mis-routing, not the market metaphor. **Capacity-pools-as-a-first-class concept is DEFERRED pending this bake-off:** it must measure how often the flat-rate pools actually throttle and whether naive spillover to the local box suffices BEFORE any pool concept is built. The economic premise (capacity, not per-token cost, is the binding constraint) only holds if the author frequently hits rate limits, which is currently unmeasured. Ship the MVP, run it on the real backlog across the $100 Claude + $100 Codex pools plus the local box, let data decide. A 1-day sanity check first (`gh issues` labels + a self-hosted runner + green-CI-as-gate) gets ~80% of "pull, self-select, verify" for free.
+- **Acceptance:** A documented two-week bake-off runbook on the author's real repo capturing: **per-pool rate-limit / throttle frequency** (how often does each flat-rate pool throttle, and does the capacity case exist?), **spillover frequency to the local box** (how often does naive overflow routing fire, and does it suffice without a pool concept?), local false-pass + rework rate (run the SL-2 fault-injection corpus with the LOCAL models graded vs a Sonnet baseline), review-minutes-per-task, `needs_review` depth over time, and cloud-tokens before/after. A short results note lands in `docs/research/`. Explicit kill/pivot trigger recorded: if a platform ships a portable, exportable, vendor-neutral proof+state format that off-cloud non-blessed runtimes can read/write, collapse Anvil into (i) the schema spec + (ii) emit/ingest adapters.
+- **Likely files:** `docs/how-to/` (runbook), `docs/research/` (results note), `tests/` (fault-injection harness, ties to SL-2)
+- **Depends on:** B45, B48
+
+### B51 — Packet quality as a first-class, measured workstream (the worldview substitute)
+
+- **Priority:** P1  **Effort:** M  **Type:** feature
+- **Rationale:** Local open models lack the frontier worldview, but a tight, fully-specified Anvil packet (intent, acceptance criteria, scope, non-goals, exact context) lets a fast local model (measured 200+ tok/s on an RTX 5090) skip exploration and execute a bounded task well. Packet quality is what turns "fast dumb work" into "fast and sufficient," and right-sized packets cut tokens (fewer steps), which directly buys capacity, the binding constraint. This makes packet quality a first-class, MEASURED workstream rather than an afterthought: the better the packet, the more work the local box can safely absorb under B45's ceilings and B49's accept-rate governor.
+- **Acceptance:** `generate_work_packet` produces right-sized packets that explicitly carry intent, acceptance criteria, scope, non-goals, and the exact context a no-exploration runner needs, with the packet sized to the task's score (trivial tasks get lean packets, riskier tasks get fuller context). A measurement harness captures, per packet variant on the real backlog: **token reduction** (tokens-to-completion vs a baseline thin packet) and **local success-rate lift** (local-model accept-rate with the right-sized packet vs the baseline). Results feed the B50 bake-off note. Test: a seeded task with a right-sized packet completes in fewer steps/tokens than the same task with a thin packet, and the harness reports both metrics.
+- **Likely files:** `bin/src/anvil/context/packets.py`, `bin/src/anvil/cli/packet_apply.py`, `bin/src/anvil/mcp_server.py`, `docs/research/` (measurement note), `tests/test_*`
+- **Depends on:** B45 · feeds B50
 
 ---
 
