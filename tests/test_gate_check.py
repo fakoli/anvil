@@ -425,6 +425,7 @@ def test_blocks_when_required_proofs_present_but_no_evidence(
     r = runner.invoke(
         app, ["gate-check", "--json", "--actor", "agent"], catch_exceptions=False
     )
+    assert r.exit_code == 2  # gate-check exits 2 when it blocks
     data = json.loads(r.stdout)["data"]
     assert data["block"] is True
     assert "tests pass" in data["evidence_gate"]["missing"]
