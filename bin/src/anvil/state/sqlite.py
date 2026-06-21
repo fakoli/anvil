@@ -896,6 +896,23 @@ class SqliteBackend:
         ).fetchall()
         return [self._row_to_review(row) for row in rows]
 
+    def list_task_review_decisions(self) -> list[tuple[str, str, str]]:
+        """Return (task_id, decision, created_at_iso) for every task.applied
+        review outcome (decision in 'accepted' / 'rejected'), most-recent first.
+
+        Reads the raw reviews table rather than the Review model: the
+        ``ReviewDecision`` enum covers the PRD/finish-gate vocabulary
+        (approve/reject/needs_changes), whereas task.applied records the
+        accepted/rejected acceptance outcomes the B49 accept-rate governor needs.
+        """
+        conn = self._require_conn()
+        rows = conn.execute(
+            "SELECT target_id, decision, created_at FROM reviews "
+            "WHERE target_kind = 'task' AND decision IN ('accepted', 'rejected') "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
+
     def list_evidence(self) -> list[Evidence]:
         """Return all Evidence rows sorted by id ASC.
 

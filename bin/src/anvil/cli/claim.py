@@ -566,10 +566,24 @@ def next(  # noqa: A001
         _reap_stale_claims(backend)
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)
+        # B49 — accept-rate governor: gate the pull seam on review-debt + the
+        # runner's recent accept-rate, configured from config.yaml (defaults
+        # when absent). Composes with the B45 risk-axis ceilings.
+        from anvil.claims.metrics import AcceptRateMetrics
+
+        cfg = _load_config_optional(state_dir)
+        metrics = AcceptRateMetrics(
+            backend,
+            clock,
+            window_days=cfg.accept_rate_window_days if cfg is not None else 7.0,
+            floor=cfg.accept_rate_floor if cfg is not None else 0.80,
+            needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
+        )
         task = manager.next_claimable(
             task_type=task_type,
             max_blast=max_blast,
             max_review_risk=max_review_risk,
+            metrics=metrics,
         )
     finally:
         backend.close()
