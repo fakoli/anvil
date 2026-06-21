@@ -287,12 +287,21 @@ class Score(BaseModel):
 # ---------------------------------------------------------------------------
 # Typed proof model (SL-3 / B48 acceptance 2) — additive, non-breaking.
 #
-# A proof is something the engine *observed* (a command's real exit code, a
-# diff, a link) or an explicit honour-system *assertion* — typed so the gate
-# can tell them apart. ``CommandProof`` is the load-bearing one: it carries the
-# real ``exit_code``, so a requirement can demand "this command was observed to
-# exit 0", which a free-text claim can never satisfy. See
-# docs/specs/2026-06-19-sl3-proofartifact.md.
+# A proof is a TYPED record of a command result, diff, link, or an explicit
+# honour-system assertion. ``CommandProof`` is the load-bearing one: it carries
+# a real ``exit_code``, so a requirement can demand "command X exited 0" and a
+# free-text claim written into a description/output field cannot satisfy it —
+# that specific hole is closed.
+#
+# TRUST BOUNDARY (read before relying on this for unattended work): a
+# CommandProof is only as trustworthy as whatever WROTE it. It originates from
+# the per-claim evidence buffer that the PostToolUse capture hook appends to;
+# ``output_sha256`` is recorded but the engine does NOT re-run the command or
+# re-hash its output, so the proof is *tamper-evident in transit*, NOT
+# *independently re-executed*. In a harness where the gated agent can write the
+# evidence buffer, a determined agent can fabricate a passing CommandProof.
+# Hardening (re-verify output / out-of-tree append-only buffer / trusted writer)
+# is tracked in docs/tech-debt-backlog.md. See docs/specs/2026-06-19-sl3-proofartifact.md.
 # ---------------------------------------------------------------------------
 
 
@@ -306,7 +315,12 @@ class ProofKind(enum.StrEnum):
 
 
 class CommandProof(BaseModel):
-    """A command the engine observed run: its real exit code + an output hash."""
+    """A typed command result: command, real exit code, and an output hash.
+
+    Captured by the PostToolUse hook and reconciled at submit. Authenticity
+    depends on a trusted hook writer (output_sha256 is recorded, not
+    re-verified) — see the TRUST BOUNDARY note above.
+    """
 
     model_config = _MODEL_CONFIG
 

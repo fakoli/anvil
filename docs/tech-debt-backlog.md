@@ -28,6 +28,43 @@ Items deferred from PR-level critic + Greptile reviews. Each entry links the ori
 
 ---
 
+## E13 agent-fleet (PRs #57–#65) — deferred review findings
+
+From the blind opus-level review of the full E13 body. The confirmed findings
+were addressed in the hardening PR (#65) — the docstring overclaims were
+corrected, the B49 rework-misattribution and strict no-evidence branch were
+fixed, B45's flag was marked experimental, and the governor's withhold reason is
+now surfaced. Genuinely deferred (need more than a docstring/local fix):
+
+### E13-1 · CommandProof authenticity rests on a trusted hook writer (HIGH)
+**Status**: OPEN (docstrings corrected; real hardening deferred). The evidence
+buffer (`.anvil/.evidence-buffer/<claim-id>.json`) is a plaintext file the gated
+agent can write, and `output_sha256` is recorded but never re-verified — so in a
+harness where the agent can write the buffer, a determined agent can fabricate a
+passing `CommandProof`. The "observed, not asserted / non-gameable" docstrings
+were downgraded to an accurate TRUST BOUNDARY note (models.py / gates.py /
+packet_apply._read_command_proofs). Real hardening (any of): (a) the hook writes
+the full captured output somewhere `submit` re-hashes against `output_sha256` and
+rejects mismatches; (b) an out-of-tree / append-only-by-the-hook buffer; (c) a
+trusted out-of-band writer / sandboxed re-execution. All require harness changes
+beyond the engine; pick one once the bake-off (B50) shows whether strict-evidence
+is being relied on for adversarial (not just honest-but-sloppy) agents.
+
+### E13-2 · MCP `get_next_task` bypasses the B45 ceilings and B49 governor
+**Status**: OPEN. `get_next_task` has its own inline candidate logic and does not
+call `next_claimable`, so neither the risk-axis ceilings nor the accept-rate
+governor apply on the MCP pull path (only the CLI `anvil next` is gated). Close by
+unifying `get_next_task` onto `ClaimManager.next_claimable` (passing metrics +
+ceilings) so both pull seams share one gate.
+
+### E13-3 · B45 risk-confirmation source (makes `--max-blast/--max-review-risk` functional)
+**Status**: OPEN. The safe-by-construction gate ships, but nothing sets
+`Score.blast_radius_confirmed` / `review_risk_confirmed`, so ceilinged `next`
+returns nothing for every engine-scored task (flag now marked EXPERIMENTAL in
+`--help`). Close by adding a trusted risk-label source — a plan-time risk
+annotation or an `anvil score --confirm`/MCP path — that sets the flags, then add
+an end-to-end test driving a confirmed task through the real scoring path.
+
 ## B42 Phase 2 finish-gate (PR #48) — deferred review findings
 
 From the PR #48 adversarial review. The MUST (ANVIL_ROOT vs `event.cwd` false-block)

@@ -22,12 +22,15 @@ from anvil.state.models import CommandProof, EventDraft
 def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     """Reconcile the per-claim evidence buffer into typed CommandProofs.
 
-    The capture-evidence hook writes one JSONL record per observed bash command
-    to ``.anvil/.evidence-buffer/<claim-id>.json``. Each well-formed record
+    The capture-evidence hook writes one JSONL record per bash command to
+    ``.anvil/.evidence-buffer/<claim-id>.json``. Each well-formed record
     (carrying ``command`` + ``exit_code`` + ``output_sha256``) becomes a
-    :class:`CommandProof` — the "observed, not asserted" proof the gate trusts.
-    Malformed or partial records (e.g. a pre-SL-3 hook line with no
-    ``output_sha256``) are skipped, never fatal: ``submit`` must still succeed.
+    :class:`CommandProof`. ``output_sha256`` is carried through as-is, NOT
+    re-verified here — the proof is only as trustworthy as the hook that wrote
+    the buffer (see the TRUST BOUNDARY note on the proof models; hardening
+    tracked in docs/tech-debt-backlog.md). Malformed or partial records (e.g. a
+    pre-SL-3 hook line with no ``output_sha256``) are skipped, never fatal:
+    ``submit`` must still succeed.
     """
     import datetime
 
@@ -106,6 +109,17 @@ def emit_acceptance_proof(
         out.write_text(proof.model_dump_json(indent=2) + "\n", encoding="utf-8")
         return out
     except Exception:  # noqa: BLE001 — emission is best-effort; never block accept
+        import logging
+
+        # Best-effort, but not silent: a swallowed signing/serialization bug
+        # would otherwise look identical to "no evidence to attest to". Leave a
+        # breadcrumb so an empty proofs/ dir is diagnosable.
+        logging.getLogger(__name__).warning(
+            "AcceptanceProof emission failed for task %s; task still accepted "
+            "but no signed proof was written",
+            task_id,
+            exc_info=True,
+        )
         return None
 
 
@@ -835,10 +849,17 @@ def apply(
                     gate_passed, gate_missing = evidence_complete(
                         task, strict_evidence_obj
                     )
-                elif task.verification.required_evidence:
+                elif (
+                    task.verification.required_evidence
+                    or task.verification.required_proofs
+                ):
+                    # No evidence row at all but the task demands something —
+                    # fail closed. Check BOTH surfaces (a planner-created task
+                    # declares required_proofs, not required_evidence).
                     gate_passed, gate_missing = (
                         False,
-                        list(task.verification.required_evidence),
+                        list(task.verification.required_evidence)
+                        + [r.label for r in task.verification.required_proofs],
                     )
                 else:
                     gate_passed, gate_missing = True, []

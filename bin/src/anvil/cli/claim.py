@@ -510,18 +510,21 @@ def next(  # noqa: A001
     max_blast: int | None = typer.Option(  # noqa: B008
         None,
         "--max-blast",
-        help="Risk ceiling for a low-risk (e.g. local) runner: only recommend "
-        "tasks whose blast_radius is human/LLM-CONFIRMED and <= N. "
+        help="[EXPERIMENTAL] Risk ceiling for a low-risk (e.g. local) runner: "
+        "only recommend tasks whose blast_radius is human/LLM-CONFIRMED and <= N. "
         "Unconfirmed/unscored tasks are frontier-only (ineligible) even below "
         "the ceiling, so the filter fails SAFE, not open — the blast/review-risk "
-        "heuristics ride on an untrusted filename regex, so an unconfirmed score "
-        "is never trusted to route risk to a weak executor.",
+        "heuristics ride on an untrusted filename regex. NOTE: no risk-confirmation "
+        "source ships yet, so every engine-scored task is currently unconfirmed "
+        "and this returns an EMPTY queue — the safe gate is in place but inert "
+        "for routing until a confirmation source lands (tracked follow-up).",
     ),
     max_review_risk: int | None = typer.Option(  # noqa: B008
         None,
         "--max-review-risk",
-        help="Risk ceiling: only recommend tasks whose review_risk is confirmed "
-        "and <= M (same safe-by-construction semantics as --max-blast).",
+        help="[EXPERIMENTAL] Risk ceiling: only recommend tasks whose review_risk "
+        "is confirmed and <= M (same safe-by-construction semantics as "
+        "--max-blast; likewise inert until a confirmation source ships).",
     ),
     json_output: bool = JSON_OPTION,
     quiet: bool = typer.Option(  # noqa: B008
@@ -585,22 +588,44 @@ def next(  # noqa: A001
             max_review_risk=max_review_risk,
             metrics=metrics,
         )
+        # B49 observability: distinguish a governed withhold (review queue
+        # saturated / runner below the accept-rate floor) from a genuinely empty
+        # queue — otherwise an idle fleet is indistinguishable from a done one.
+        withheld_reason = (
+            metrics.withhold_reason(resolved_actor) if task is None else None
+        )
     finally:
         backend.close()
 
     if quiet:
-        # ponytail: the exit code is the loop seam (`while anvil next -q`).
+        # ponytail: the exit code is the loop seam (`while anvil next -q`). A
+        # governed withhold is still "no work right now" -> exit 3 (the loop
+        # backs off either way); the reason is surfaced in --json / human mode.
         raise typer.Exit(0 if task is not None else 3)
 
     if json_output:
         emit_success(
             "next",
-            {"task": dump_model(task) if task is not None else None},
+            {
+                "task": dump_model(task) if task is not None else None,
+                "withheld_reason": withheld_reason,
+            },
         )
         return
 
     if task is None:
-        typer.echo("No claimable tasks available.")
+        if withheld_reason == "review_queue_saturated":
+            typer.echo(
+                "No work offered: the human review queue is saturated "
+                "(needs_review at the cap). Clear reviews to resume."
+            )
+        elif withheld_reason == "actor_below_floor":
+            typer.echo(
+                f"No work offered: actor '{resolved_actor}' is below the "
+                "accept-rate floor. Let current work clear review first."
+            )
+        else:
+            typer.echo("No claimable tasks available.")
         return
 
     typer.echo(f"Next recommended task: {task.id}")

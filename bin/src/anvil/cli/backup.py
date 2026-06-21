@@ -90,7 +90,7 @@ def restore(
 # ---------------------------------------------------------------------------
 
 
-def _load_config_required(state_dir: Path) -> "Config":
+def _load_config_required(state_dir: Path) -> Config:
     """Load config.yaml and abort loudly if durable_store is not set to 's3'."""
     import yaml
 
@@ -118,7 +118,7 @@ def _load_config_required(state_dir: Path) -> "Config":
     return config
 
 
-def _make_store(config: "Config") -> "DurableStore":
+def _make_store(config: Config) -> DurableStore:
     """Return a DurableStore for the given config, or exit 1 on unknown store.
 
     # ponytail: single dispatch — add elif "gcs" / elif "azure" when those

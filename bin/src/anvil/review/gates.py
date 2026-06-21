@@ -296,6 +296,12 @@ def _proof_satisfies(req: ProofRequirement, proofs: list[ProofArtifact]) -> bool
     ``passing_exit_codes``. There is no substring branch and no field-flattening
     fallback, so an :class:`AssertionProof` carrying the command text cannot
     satisfy it, and a recorded command that exited non-zero is correctly refused.
+
+    Scope of the guarantee: this closes the "free text in a description field
+    satisfies the gate" hole. It does NOT independently re-execute the command —
+    the CommandProof's authenticity rests on a trusted hook writer (see the TRUST
+    BOUNDARY note on the proof models). A harness in which the agent can write the
+    evidence buffer can still fabricate a passing CommandProof.
     """
     if req.kind is ProofKind.command:
         return any(
