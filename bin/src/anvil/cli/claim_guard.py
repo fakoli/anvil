@@ -25,7 +25,6 @@ Exit codes (so a jq-less host can branch on ``$?``)::
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +34,7 @@ from anvil.cli._helpers import (
     StateRootError,
     _open_backend,
     _resolve_state_dir,
+    resolve_actor,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 
@@ -76,7 +76,7 @@ def claim_guard(
     Read-only. Default-open: only blocks (exit 2) when *this actor* holds NO
     active claim; a claim that doesn't cover the file(s) only warns (exit 0).
     """
-    resolved_actor = actor or os.environ.get("USER") or "agent"
+    resolved_actor = resolve_actor(actor)
     file_list = [_normalize(f) for f in (files or [])]
 
     try:

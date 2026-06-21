@@ -8,6 +8,23 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Unified actor identity — one `resolve_actor()` across every claim surface (B47).**
+  Before this, `anvil claim` defaulted to `$USER`, the bundled heartbeat hook
+  passed the Claude `session_id`, gate-check/claim-guard used `$USER`, and the
+  hook verbs used `$ANVIL_GATE_ACTOR` — four different identities. A claim made
+  under one and heartbeated/gated under another renewed **zero** leases (the
+  lease silently expired mid-work) and the finish-gate, seeing no matching claim,
+  failed **OPEN**. Now claim / release / renew / next / heartbeat / stop-gate /
+  gate-check / claim-guard / submit all resolve identity through one
+  `resolve_actor()` with precedence **explicit `--actor` > `$ANVIL_ACTOR` >
+  `$ANVIL_GATE_ACTOR` (legacy) > `$USER` > stable per-runner signing-key
+  fingerprint > `agent`**. The bundled `heartbeat.sh` no longer passes a
+  per-session id — it lets the CLI resolve the same identity the claim used. The
+  stable fingerprint (from B48's keypair) means two headless runners no longer
+  collide on `agent`. Set `$ANVIL_ACTOR` to pin a fleet runner's identity. (MCP
+  tools still **require** an explicit actor by design — an audit-integrity guard
+  against blank attribution.)
+
 - **Max-claim-age cutoff — wedged agents can't hold a lease forever (B46, part 1).**
   `renew()` now refuses once a claim is older than `default_lease_minutes ×
   max_claim_age_multiplier` (new config, default **4×**), even if the agent keeps

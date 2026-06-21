@@ -405,17 +405,29 @@ def test_human_continue_prints_continue_message(tmp_path, monkeypatch) -> None:
     assert "finalization may proceed" in r.stdout
 
 
-def test_actor_defaults_to_agent_when_user_unset(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("USER", raising=False)
+def test_actor_falls_back_to_stable_runner_id_when_no_env(
+    tmp_path, monkeypatch
+) -> None:
+    """B47: with no explicit actor and no $ANVIL_ACTOR/$ANVIL_GATE_ACTOR/$USER,
+    the actor resolves to a STABLE per-runner signing-key fingerprint (16 hex),
+    not the literal 'agent' — so headless runners don't all collide on 'agent'.
+    (ANVIL_KEYS_DIR is redirected to a temp dir by the autouse conftest fixture.)
+    """
+    for var in ("USER", "ANVIL_ACTOR", "ANVIL_GATE_ACTOR"):
+        monkeypatch.delenv(var, raising=False)
     backend = _StubBackend(
-        claims=[_claim(actor="agent")],
-        task=_task("WT-1", required=("test output",)), evidence=None,
+        claims=[], task=_task("WT-1", required=("test output",)), evidence=None
     )
     _use(monkeypatch, backend, tmp_path)
     r = runner.invoke(app, ["gate-check", "--json"], catch_exceptions=False)  # no --actor
     data = json.loads(r.stdout)["data"]
-    assert data["actor"] == "agent"
-    assert data["block"] is True
+    actor = data["actor"]
+    assert actor not in ("", "agent")
+    assert len(actor) == 16
+    assert all(c in "0123456789abcdef" for c in actor)
+    # No claims for the resolved actor -> nothing to gate -> continue (exit 0).
+    assert data["block"] is False
+    assert r.exit_code == 0
 
 
 def test_actor_defaults_to_user_when_set(tmp_path, monkeypatch) -> None:

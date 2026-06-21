@@ -39,7 +39,6 @@ Exit codes (so a jq-less host can branch on ``$?``, mirroring ``next -q``)::
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +48,7 @@ from anvil.cli._helpers import (
     StateRootError,
     _open_backend,
     _resolve_state_dir,
+    resolve_actor,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.review.gates import evidence_complete
@@ -92,7 +92,7 @@ def gate_check(
     Default-open: only blocks when *this actor* holds an active claim whose task
     has missing/incomplete verification evidence. Exits 0 (continue) / 2 (block).
     """
-    resolved_actor = actor or os.environ.get("USER") or "agent"
+    resolved_actor = resolve_actor(actor)
 
     # ANVIL_ROOT set but invalid is a genuine error — surface it (exit 1), and
     # under --json as a parseable envelope (mirrors drift.py).

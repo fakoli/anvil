@@ -13,6 +13,7 @@ from anvil.cli._helpers import (
     _reap_stale_claims,
     _require_state_dir,
     _resolve_state_dir,
+    resolve_actor,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
 from anvil.state.models import CommandProof, EventDraft
@@ -427,12 +428,11 @@ def submit(
     piece of work, or null when none is available. A missing active claim
     yields a ``{"ok": false, ...}`` envelope with exit 1.
     """
-    import os
     import uuid
 
     from anvil.clock import SystemClock
 
-    resolved_actor = actor or os.environ.get("USER") or "agent"
+    resolved_actor = resolve_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="submit", json_output=json_output)
 
