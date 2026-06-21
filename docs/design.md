@@ -115,9 +115,9 @@ A 1-hour lease without heartbeat means stale claims wait the full hour to releas
 
 ### What "structured" means
 
-The `Evidence` Pydantic model captures the following (the fields are optional at the model level, with `submitted_at`/`submitted_by` the only always-present ones; the per-task evidence gate decides which must be present for a given task):
+The `Evidence` Pydantic model captures the following (the *content* fields are optional at the model level; the identifiers `id`/`task_id`/`claim_id` and the `submitted_at`/`submitted_by` metadata are always present; the per-task evidence gate decides which content must be present for a given task):
 
-- `commands_run: list[str]`: every shell command actually executed during work
+- `commands_run: list[str]`: the shell commands the agent cites as having run during the work
 - `files_changed: list[str]`: paths touched, cross-checked against `record-file-change.sh` events
 - `output_excerpt: str`: last N lines of test/build output, captured by `capture-evidence.sh`
 - `pr_url` / `commit_sha`: where the work landed
@@ -127,11 +127,11 @@ Note: the shipped model does *not* carry per-command exit codes or a typed `Arti
 
 ### Why hooks capture, not the agent
 
-`capture-evidence.sh` runs as a PostToolUse hook on `Bash` and records every command the agent actually executed (with stdout/stderr/exit). The agent's job is to *cite* what to include in the submission; the hook supplies the ground truth. An agent that fabricates `commands_run: ["pytest"]` without having actually run pytest gets caught because the hook stream does not show a pytest invocation in the claim's window. The split is deliberate: agent-supplied evidence is auditable against system-captured evidence.
+`capture-evidence.sh` runs as a PostToolUse hook on `Bash` and records the verification commands the agent runs that match the configured patterns (pytest, ruff, and the like), capturing their output (stdout/stderr/exit). The agent's job is to *cite* what to include in the submission; the hook supplies the ground truth. An agent that fabricates `commands_run: ["pytest"]` without having actually run pytest gets caught because the hook stream does not show a pytest invocation in the claim's window. The split is deliberate: agent-supplied evidence is auditable against system-captured evidence.
 
 ### Trade-off accepted
 
-Submitting evidence is more work than typing "done." That extra step is intentional: it requires the agent to cite commands and files that can be checked against captured hook output. "Quick fix" workflows get `apply --skip-evidence` as an explicit, logged override.
+Submitting evidence is more work than typing "done." That extra step is intentional: it requires the agent to cite commands and files that can be checked against captured hook output. "Quick fix" workflows get `anvil apply --no-strict` (or `strict_evidence: false` in config) as an explicit, logged override.
 
 ---
 
