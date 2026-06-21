@@ -146,7 +146,13 @@ class ClaimManager:
     # Main flow
     # ------------------------------------------------------------------
 
-    def next_claimable(self, *, task_type: str | None = None) -> Task | None:
+    def next_claimable(
+        self,
+        *,
+        task_type: str | None = None,
+        max_blast: int | None = None,
+        max_review_risk: int | None = None,
+    ) -> Task | None:
         """Pick the highest-priority claimable Task.
 
         Ordering: priority desc (critical > high > medium > low),
@@ -162,6 +168,14 @@ class ClaimManager:
         ``task_type`` (T015): when given, restrict the candidate pool to that
         type (feature / bugfix / refactor / modify). Omitting it keeps the
         pre-T015 behaviour (all types eligible).
+
+        ``max_blast`` / ``max_review_risk`` (B45): risk-axis ceilings for a
+        low-risk runner. SAFE-BY-CONSTRUCTION — when a ceiling is given, a task
+        is eligible only if that dimension is CONFIRMED (human/LLM, not the
+        filename-regex heuristic) AND scored at or below the ceiling. An
+        unscored, unconfirmed, or over-ceiling task is treated as frontier-only
+        (ineligible), so the filter fails safe rather than routing weakly-scored
+        risk to a local runner. Omitting both keeps the pre-B45 behaviour.
 
         Returns None if no task is claimable.
         """
@@ -199,6 +213,26 @@ class ClaimManager:
             # Skip tasks whose conflict_group already has an active claim.
             if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
                 continue
+
+            # B45 — risk-axis ceilings, safe-by-construction. A ceilinged caller
+            # gets a task only if the dimension is CONFIRMED and within the
+            # ceiling; unscored / unconfirmed / over-ceiling are frontier-only.
+            if max_blast is not None:
+                blast = task.scores.blast_radius
+                if (
+                    blast is None
+                    or blast > max_blast
+                    or not task.scores.blast_radius_confirmed
+                ):
+                    continue
+            if max_review_risk is not None:
+                risk = task.scores.review_risk
+                if (
+                    risk is None
+                    or risk > max_review_risk
+                    or not task.scores.review_risk_confirmed
+                ):
+                    continue
 
             candidates.append(task)
 

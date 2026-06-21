@@ -507,6 +507,22 @@ def next(  # noqa: A001
         help="Only recommend tasks of this type "
         "(feature, bugfix, refactor, modify).",
     ),
+    max_blast: int | None = typer.Option(  # noqa: B008
+        None,
+        "--max-blast",
+        help="Risk ceiling for a low-risk (e.g. local) runner: only recommend "
+        "tasks whose blast_radius is human/LLM-CONFIRMED and <= N. "
+        "Unconfirmed/unscored tasks are frontier-only (ineligible) even below "
+        "the ceiling, so the filter fails SAFE, not open — the blast/review-risk "
+        "heuristics ride on an untrusted filename regex, so an unconfirmed score "
+        "is never trusted to route risk to a weak executor.",
+    ),
+    max_review_risk: int | None = typer.Option(  # noqa: B008
+        None,
+        "--max-review-risk",
+        help="Risk ceiling: only recommend tasks whose review_risk is confirmed "
+        "and <= M (same safe-by-construction semantics as --max-blast).",
+    ),
     json_output: bool = JSON_OPTION,
     quiet: bool = typer.Option(  # noqa: B008
         False,
@@ -550,7 +566,11 @@ def next(  # noqa: A001
         _reap_stale_claims(backend)
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)
-        task = manager.next_claimable(task_type=task_type)
+        task = manager.next_claimable(
+            task_type=task_type,
+            max_blast=max_blast,
+            max_review_risk=max_review_risk,
+        )
     finally:
         backend.close()
 

@@ -273,6 +273,15 @@ class Score(BaseModel):
     review_risk: int | None = Field(default=None, ge=1, le=5)
     agent_suitability: int | None = Field(default=None, ge=1, le=5)
     explanation: str | None = None
+    # B45 — risk-axis eligibility (safe-by-construction). False means the
+    # blast_radius / review_risk score is a heuristic (filename regex / base)
+    # only, NOT human-or-LLM-confirmed. A ceilinged `anvil next --max-blast /
+    # --max-review-risk` treats an unconfirmed (or unscored) task as
+    # frontier-only — ineligible even if the number is within the ceiling — so
+    # the filter fails safe, never routing weakly-scored risk to a local runner.
+    # Defaults False; a confirmation source (a trusted risk label) is a follow-up.
+    blast_radius_confirmed: bool = False
+    review_risk_confirmed: bool = False
 
 
 # ---------------------------------------------------------------------------

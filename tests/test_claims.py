@@ -217,6 +217,18 @@ def _make_manager(
     return ClaimManager(b, c, actor=actor, default_lease_minutes=lease_minutes)
 
 
+def _set_scores(conn: sqlite3.Connection, task_id: str, **fields: object) -> None:
+    """Overwrite a task's Score JSON (the planner doesn't surface risk
+    confirmation, so B45 tests inject it directly — same pattern as the
+    strict-evidence tests inject required_evidence)."""
+    import json as _json
+
+    conn.execute(
+        "UPDATE tasks SET scores = ? WHERE id = ?", (_json.dumps(fields), task_id)
+    )
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # TestNextClaimable
 # ---------------------------------------------------------------------------
@@ -956,6 +968,94 @@ class TestMaxClaimAge:
             encoding="utf-8",
         )
         assert load_config(cfg_path).max_claim_age_multiplier == 2.5
+
+
+# ---------------------------------------------------------------------------
+# TestRiskAxisNext (B45) — safe-by-construction risk-axis eligibility ceilings
+# ---------------------------------------------------------------------------
+
+
+class TestRiskAxisNext:
+    def _setup_scored(self, tmp_path: Path, clock: FrozenClock) -> SqliteBackend:
+        b = _make_backend(tmp_path, clock)
+        _setup_project(b)
+        _setup_prd(b)
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        _insert_feature_raw(conn)
+        for tid in ("A", "B", "C", "D"):
+            _insert_task_raw(conn, task_id=tid, status="ready")
+        # A: confirmed blast 2 (eligible for a <=3 ceiling)
+        _set_scores(conn, "A", blast_radius=2, blast_radius_confirmed=True, complexity=2)
+        # B: blast 2 but UNCONFIRMED (regex/heuristic only) -> frontier-only.
+        # complexity 1 sorts it first, so it wins the UNRESTRICTED next.
+        _set_scores(conn, "B", blast_radius=2, blast_radius_confirmed=False, complexity=1)
+        # C: confirmed blast 5 -> over a <=3 ceiling.
+        _set_scores(conn, "C", blast_radius=5, blast_radius_confirmed=True, complexity=3)
+        # D: no blast score at all -> unscored, frontier-only under a ceiling.
+        _set_scores(conn, "D", complexity=4)
+        conn.close()
+        return b
+
+    def test_unrestricted_next_returns_sort_first_even_if_unconfirmed(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock(_T0)
+        b = self._setup_scored(tmp_path, clock)
+        try:
+            task = _make_manager(b, clock=clock).next_claimable()
+            assert task is not None and task.id == "B"  # complexity 1 sorts first
+        finally:
+            b.close()
+
+    def test_ceiling_admits_only_confirmed_within_ceiling(self, tmp_path: Path) -> None:
+        """The headline two-loop result: the ceilinged caller skips the
+        unconfirmed sort-leader (B), the over-ceiling task (C), and the unscored
+        task (D), taking only the confirmed-within-ceiling task (A)."""
+        clock = _make_clock(_T0)
+        b = self._setup_scored(tmp_path, clock)
+        try:
+            task = _make_manager(b, clock=clock).next_claimable(max_blast=3)
+            assert task is not None and task.id == "A"
+        finally:
+            b.close()
+
+    def test_ceiling_returns_none_when_only_unconfirmed_available(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock(_T0)
+        b = _make_backend(tmp_path, clock)
+        _setup_project(b)
+        _setup_prd(b)
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        _insert_feature_raw(conn)
+        _insert_task_raw(conn, task_id="B", status="ready")
+        _set_scores(conn, "B", blast_radius=2, blast_radius_confirmed=False)
+        conn.close()
+        try:
+            # B scores 2 (<=3) but is unconfirmed -> frontier-only -> None.
+            assert _make_manager(b, clock=clock).next_claimable(max_blast=3) is None
+        finally:
+            b.close()
+
+    def test_review_risk_ceiling_requires_confirmation(self, tmp_path: Path) -> None:
+        clock = _make_clock(_T0)
+        b = _make_backend(tmp_path, clock)
+        _setup_project(b)
+        _setup_prd(b)
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        _insert_feature_raw(conn)
+        _insert_task_raw(conn, task_id="A", status="ready")
+        _set_scores(conn, "A", review_risk=2, review_risk_confirmed=True)
+        conn.close()
+        try:
+            mgr = _make_manager(b, clock=clock)
+            assert mgr.next_claimable(max_review_risk=3).id == "A"  # confirmed <=3
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _set_scores(conn, "A", review_risk=2, review_risk_confirmed=False)
+            conn.close()
+            assert mgr.next_claimable(max_review_risk=3) is None  # now unconfirmed
+        finally:
+            b.close()
 
 
 # ---------------------------------------------------------------------------
