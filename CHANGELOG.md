@@ -8,6 +8,21 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Accept-rate governor + review-debt cap (B49).** Human review is the binding
+  constraint on an unattended fleet, so the pull seam (`anvil next`) now refuses
+  new work when (a) the review queue is saturated — `needs_review` depth >=
+  `needs_review_cap` (default 10) — or (b) the requesting runner's recent
+  accept-rate (over `accept_rate_window_days`, default 7) is below
+  `accept_rate_floor` (default 0.80). A task rejected >= 3 times escalates: it
+  requires a near-perfect (0.95) accept-rate, so it goes to a proven runner or a
+  human instead of recirculating to the same weak executor. The accept-rate is
+  per **runner** (the task's `evidence.submitted_by`, not the reviewer), computed
+  live from review outcomes joined to the work actor; a runner with no track
+  record gets the benefit of the doubt for base work but cannot take escalated
+  tasks. New `AcceptRateMetrics` (`claims/metrics.py`) + `list_task_review_
+  decisions` accessor. (Governs the CLI pull seam; unifying the MCP
+  `get_next_task` advisory path onto the same gate is a tracked follow-up.)
+
 - **Risk-axis eligibility on `anvil next` — the pull-fleet MVP (B45).** `anvil next
   --max-blast N --max-review-risk M` returns only ready tasks scoring at or below
   those ceilings, composing with the existing dependency/priority sort and

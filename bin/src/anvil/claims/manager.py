@@ -41,6 +41,7 @@ from anvil.state.models import (
 )
 
 if TYPE_CHECKING:
+    from anvil.claims.metrics import AcceptRateMetrics
     from anvil.state.backend import Backend
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,7 @@ class ClaimManager:
         task_type: str | None = None,
         max_blast: int | None = None,
         max_review_risk: int | None = None,
+        metrics: AcceptRateMetrics | None = None,
     ) -> Task | None:
         """Pick the highest-priority claimable Task.
 
@@ -184,6 +186,17 @@ class ClaimManager:
         )
         if not ready_tasks:
             return None
+
+        # B49 — accept-rate governor: refuse new work when the human review
+        # queue is saturated, or when THIS runner's recent accept-rate is below
+        # the floor (it stops pulling until its already-submitted work clears
+        # review). A runner with no track record yet is given the benefit of the
+        # doubt for base-floor work (see AcceptRateMetrics).
+        if metrics is not None:
+            if metrics.review_queue_saturated():
+                return None
+            if metrics.actor_below_floor(self._actor):
+                return None
 
         active_claims = self._backend.list_active_claims()
         claimed_task_ids: set[str] = {c.task_id for c in active_claims}
@@ -233,6 +246,14 @@ class ClaimManager:
                     or not task.scores.review_risk_confirmed
                 ):
                     continue
+
+            # B49 — escalate a chronically-rejected task past a runner whose
+            # accept-rate doesn't meet the (raised) bar, so it goes to a proven
+            # actor or a human instead of recirculating to the same weak runner.
+            if metrics is not None and metrics.task_blocked_for_actor(
+                task.id, self._actor
+            ):
+                continue
 
             candidates.append(task)
 

@@ -130,6 +130,14 @@ class Config:
     # stale-claim reaper takes it. Default 4x; raise it for legitimately
     # long-running tasks.
     max_claim_age_multiplier: float = 4.0
+    # B49 — accept-rate governor + review-debt cap. The pull seam (`anvil next`)
+    # refuses new work when the human review queue is saturated
+    # (needs_review depth >= needs_review_cap) or the requesting runner's recent
+    # accept-rate (over the trailing accept_rate_window_days) is below
+    # accept_rate_floor. Guards against "fast dumb work" swamping human review.
+    accept_rate_floor: float = 0.80
+    needs_review_cap: int = 10
+    accept_rate_window_days: float = 7.0
 
     git_ops_mode: Literal["auto", "record_only", "off"] = "auto"
 
@@ -615,6 +623,11 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         max_claim_age_multiplier=float(
             str(data.get("max_claim_age_multiplier", 4))
         ),
+        accept_rate_floor=float(str(data.get("accept_rate_floor", 0.80))),
+        needs_review_cap=int(str(data.get("needs_review_cap", 10))),
+        accept_rate_window_days=float(
+            str(data.get("accept_rate_window_days", 7))
+        ),
         git_ops_mode=git_ops_mode,  # type: ignore[arg-type]
         durability=durability,  # type: ignore[arg-type]
         branch_prefix=branch_prefix,
@@ -957,6 +970,12 @@ default_heartbeat_minutes: 5
 # (B46). After it, renew() refuses even if heartbeating, so a wedged agent
 # cannot hold a lease forever. Raise it for legitimately long-running tasks.
 max_claim_age_multiplier: 4
+# B49 — accept-rate governor. `anvil next` offers no new work when the human
+# review queue is saturated (needs_review depth >= needs_review_cap) or the
+# runner's recent accept-rate (over accept_rate_window_days) is below the floor.
+accept_rate_floor: 0.80
+needs_review_cap: 10
+accept_rate_window_days: 7
 
 # ---------------------------------------------------------------------------
 # Git operations  (auto | record_only | off)
