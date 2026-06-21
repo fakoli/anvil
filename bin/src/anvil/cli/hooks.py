@@ -6,13 +6,13 @@ Internal helpers invoked by the plugin's bash hooks.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import typer
 
 from anvil.cli._helpers import (
     _resolve_state_dir,
+    resolve_actor,
 )
 
 hook_app = typer.Typer(
@@ -319,7 +319,7 @@ def hook_stop_gate(
     if payload.get("stop_hook_active"):
         raise typer.Exit(code=0)
 
-    resolved_actor = actor or os.environ.get("ANVIL_GATE_ACTOR") or "agent"
+    resolved_actor = resolve_actor(actor)
     payload_cwd = payload.get("cwd")
     resolved_cwd = cwd
     if resolved_cwd is None and isinstance(payload_cwd, str) and payload_cwd:
@@ -377,7 +377,7 @@ def hook_heartbeat(
     (an expired lease raises — that is fine, the next claim/reclaim handles it).
     Wired into the bundled PostToolUse hooks (cross-harness, Claude + Codex).
     """
-    resolved_actor = actor or os.environ.get("ANVIL_GATE_ACTOR") or "agent"
+    resolved_actor = resolve_actor(actor)
     try:
         from anvil.claims.manager import ClaimManager
         from anvil.cli._helpers import (

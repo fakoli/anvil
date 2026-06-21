@@ -28,6 +28,53 @@ _STATE_DIR_NAME = ".anvil"
 _PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
 _PRD_FILENAME = "prd.md"
 
+_ACTOR_FALLBACK = "agent"
+
+
+# ---------------------------------------------------------------------------
+# Actor identity (B47) — ONE resolver for claim / heartbeat / gate / guard / MCP
+# ---------------------------------------------------------------------------
+
+
+def resolve_actor(explicit: str | None = None) -> str:
+    """Resolve the actor identity used for claims, heartbeats, and gates.
+
+    B47: every surface that touches a claim must resolve the SAME identity, or a
+    claim made under one actor is heartbeated/gated under another — renewal then
+    renews zero leases and the finish-gate (seeing no matching claim) fails
+    silently OPEN. Before this, ``claim`` used ``$USER``, the bundled heartbeat
+    hook passed the Claude ``session_id``, gate-check/claim-guard used ``$USER``,
+    and the hook verbs used ``$ANVIL_GATE_ACTOR`` — four different identities.
+
+    Precedence::
+
+        explicit arg > $ANVIL_ACTOR > $ANVIL_GATE_ACTOR (legacy) > $USER >
+        per-runner signing-key fingerprint > "agent"
+
+    ``$USER`` is kept so an interactive human keeps their familiar name; the
+    signing-key fingerprint (``anvil.signing.load_or_create_signer``) is a stable
+    per-runner id so two headless runners do not both collapse to ``"agent"``.
+    The fingerprint is resolved lazily and fault-tolerantly — any failure (no
+    crypto, unwritable key dir) falls through rather than breaking a claim/gate.
+
+    Always returns a non-empty, stripped string.
+    """
+    if explicit and explicit.strip():
+        return explicit.strip()
+    for env_var in ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR", "USER"):
+        value = os.environ.get(env_var)
+        if value and value.strip():
+            return value.strip()
+    try:
+        from anvil import signing
+
+        _, _, signer_id = signing.load_or_create_signer()
+        if signer_id:
+            return signer_id
+    except Exception:  # noqa: BLE001 — actor resolution must never crash a claim/gate
+        pass
+    return _ACTOR_FALLBACK
+
 # T005/B07: env override pointing at the PROJECT ROOT (the directory that
 # *contains* .anvil/). Resolution precedence — applied identically by
 # the CLI here and by the MCP server (mcp_server._resolve_state_dir):

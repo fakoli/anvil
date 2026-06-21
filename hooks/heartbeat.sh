@@ -28,33 +28,15 @@ if [ ! -x "$CLI" ]; then
   exit 0
 fi
 
-# Read stdin + extract the session id as the actor proxy — mirrors the sibling
-# hooks (record-file-change/capture-evidence), since claims are held under the
-# harness-supplied identity, not the literal 'agent'.
-PAYLOAD=""
-if [ -t 0 ]; then
-  PAYLOAD="{}"
-else
-  PAYLOAD=$(cat)
+# B47 — do NOT pass a per-session identity here. The heartbeat MUST resolve the
+# same actor that `anvil claim` did, or it renews zero leases (the claim is held
+# under a different actor) and the lease silently expires mid-work. Passing no
+# --actor lets the CLI's single resolver (resolve_actor: $ANVIL_ACTOR >
+# $ANVIL_GATE_ACTOR > $USER > per-runner fingerprint) pick the same identity the
+# claim used. Set $ANVIL_ACTOR in the loop env to pin it explicitly for a fleet.
+if [ -n "$STDIN_DRAIN" ] || [ ! -t 0 ]; then
+  cat >/dev/null 2>&1 || true  # drain stdin so the harness pipe never blocks
 fi
-ACTOR=""
-if command -v python3 >/dev/null 2>&1; then
-  ACTOR=$(HOOK_PAYLOAD="$PAYLOAD" python3 - <<'PYEOF' 2>/dev/null
-import os, json
-raw = os.environ.get('HOOK_PAYLOAD', '')
-try:
-    d = json.loads(raw) if raw.strip() else {}
-except Exception:
-    d = {}
-print(str(d.get('session_id') or '') if isinstance(d, dict) else '')
-PYEOF
-)
-fi
-
-if [ -n "$ACTOR" ]; then
-  "$CLI" hook heartbeat --actor "$ACTOR" >/dev/null 2>&1 || true
-else
-  "$CLI" hook heartbeat >/dev/null 2>&1 || true
-fi
+"$CLI" hook heartbeat >/dev/null 2>&1 || true
 
 exit 0

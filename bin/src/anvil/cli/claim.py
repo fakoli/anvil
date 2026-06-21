@@ -14,6 +14,7 @@ from anvil.cli._helpers import (
     _require_state_dir,
     _resolve_base_dir,
     _resolve_state_dir,
+    resolve_actor,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
 
@@ -83,14 +84,13 @@ def claim(
     dependency/branch/worktree warnings are collected into ``warnings``
     instead of being printed to stderr.
     """
-    import os
 
     from anvil.claims.manager import ClaimError, ClaimManager, ConflictWarning
     from anvil.clock import SystemClock
     from anvil.git_ops.branch import create_branch_for_task, use_named_branch
     from anvil.git_ops.worktree import create_worktree_for_task
 
-    resolved_actor = actor or os.environ.get("USER") or "agent"
+    resolved_actor = resolve_actor(actor)
     # SHOULD-FIX (consistency): resolve the working dir for git branch/worktree
     # ops through the SAME env-aware resolver that picks state_dir, so a claim
     # under ANVIL_ROOT operates on the env project root, not cwd.
@@ -375,12 +375,11 @@ def release(
     {"claim_id": "...", "released": true, "reason": "..." | null}}``.
     A ClaimError yields a ``{"ok": false, ...}`` envelope with exit 1.
     """
-    import os
 
     from anvil.claims.manager import ClaimError, ClaimManager
     from anvil.clock import SystemClock
 
-    resolved_actor = actor or os.environ.get("USER") or "agent"
+    resolved_actor = resolve_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="release", json_output=json_output)
 
@@ -447,12 +446,11 @@ def renew(
     {"claim": {...}}}`` carrying the updated Claim (new lease + heartbeat).
     A ClaimError yields a ``{"ok": false, ...}`` envelope with exit 1.
     """
-    import os
 
     from anvil.claims.manager import ClaimError, ClaimManager
     from anvil.clock import SystemClock
 
-    resolved_actor = actor or os.environ.get("USER") or "agent"
+    resolved_actor = resolve_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="renew", json_output=json_output)
 
@@ -538,12 +536,11 @@ def next(  # noqa: A001
     signal: 0 if a task is claimable, 3 if the queue is empty (an empty
     queue is not an error).
     """
-    import os
 
     from anvil.claims.manager import ClaimManager
     from anvil.clock import SystemClock
 
-    resolved_actor = actor or os.environ.get("USER") or "agent"
+    resolved_actor = resolve_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="next", json_output=json_output)
 
