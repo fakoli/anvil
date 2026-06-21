@@ -405,6 +405,32 @@ def test_human_continue_prints_continue_message(tmp_path, monkeypatch) -> None:
     assert "finalization may proceed" in r.stdout
 
 
+def test_blocks_when_required_proofs_present_but_no_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    """E13 hardening: a task with typed required_proofs and NO evidence row must
+    fail closed at the stop-gate/finish-gate — checking only the legacy
+    required_evidence list (empty for planner tasks) would let it finalize."""
+    from anvil.state.models import ProofKind, ProofRequirement
+
+    req = ProofRequirement(
+        kind=ProofKind.command, command="uv run pytest -q", label="tests pass"
+    )
+    backend = _StubBackend(
+        claims=[_claim()],
+        task=_task("WT-1", required_proofs=(req,)),
+        evidence=None,  # nothing submitted
+    )
+    _use(monkeypatch, backend, tmp_path)
+    r = runner.invoke(
+        app, ["gate-check", "--json", "--actor", "agent"], catch_exceptions=False
+    )
+    assert r.exit_code == 2  # gate-check exits 2 when it blocks
+    data = json.loads(r.stdout)["data"]
+    assert data["block"] is True
+    assert "tests pass" in data["evidence_gate"]["missing"]
+
+
 def test_actor_falls_back_to_stable_runner_id_when_no_env(
     tmp_path, monkeypatch
 ) -> None:

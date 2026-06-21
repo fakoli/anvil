@@ -752,9 +752,10 @@ def _parse_tasks(
                 acceptance_criteria=acceptance_criteria,
                 verification=Verification(
                     commands=verification_commands,
-                    # SL-3 / B48: turn each verification command into a typed,
-                    # non-gameable requirement — the task is accepted only once a
-                    # CommandProof shows the command was observed to exit 0.
+                    # SL-3 / B48: turn each verification command into a typed
+                    # requirement — the task is accepted only once a CommandProof
+                    # records the command exiting 0 (captured by the run hooks;
+                    # authenticity rests on a trusted hook writer).
                     required_proofs=[
                         ProofRequirement(
                             kind=ProofKind.command,

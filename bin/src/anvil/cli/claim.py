@@ -594,6 +594,14 @@ def next(  # noqa: A001
         withheld_reason = (
             metrics.withhold_reason(resolved_actor) if task is None else None
         )
+        # B45 ceilings can also empty the result (and currently always do, since
+        # confirmation is inert). Distinguish that from a truly empty queue too.
+        if (
+            task is None
+            and withheld_reason is None
+            and (max_blast is not None or max_review_risk is not None)
+        ):
+            withheld_reason = "risk_ceiling"
     finally:
         backend.close()
 
@@ -623,6 +631,13 @@ def next(  # noqa: A001
             typer.echo(
                 f"No work offered: actor '{resolved_actor}' is below the "
                 "accept-rate floor. Let current work clear review first."
+            )
+        elif withheld_reason == "risk_ceiling":
+            typer.echo(
+                "No work within the requested risk ceiling. NOTE the risk-axis "
+                "ceilings are EXPERIMENTAL: with no risk-confirmation source yet, "
+                "every task is treated as unconfirmed, so a ceilinged query "
+                "returns nothing (see `anvil next --help`)."
             )
         else:
             typer.echo("No claimable tasks available.")

@@ -204,10 +204,13 @@ def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
 
     Two requirement surfaces are checked, and BOTH must be satisfied:
 
-    1. ``task.verification.required_proofs`` (SL-3 / B48) — typed, non-gameable.
-       A ``command`` requirement is satisfied **only** by a :class:`CommandProof`
-       whose ``exit_code`` is in ``passing_exit_codes``; an ``assertion`` proof
-       can never impersonate a command. See :func:`_proof_satisfies`.
+    1. ``task.verification.required_proofs`` (SL-3 / B48) — typed. A ``command``
+       requirement is satisfied **only** by a :class:`CommandProof` whose
+       ``exit_code`` is in ``passing_exit_codes``; an ``assertion`` proof can't
+       impersonate a command, so free text in a description/output field can't
+       satisfy it. NOTE the authenticity of a CommandProof rests on a trusted
+       hook writer (output_sha256 is recorded, not re-verified) — see the TRUST
+       BOUNDARY note on the proof models and :func:`_proof_satisfies`.
     2. ``task.verification.required_evidence`` (legacy) — free-text substring
        heuristics over the descriptive ``Evidence`` string fields. Kept for
        back-compat; the planner emits typed ``required_proofs`` instead, so this
@@ -273,9 +276,10 @@ def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
             missing.append(item)
 
     # SL-3 / B48 typed path: each requirement is satisfied only by a matching
-    # *observed* proof. This is the non-gameable surface — a command requirement
-    # needs a CommandProof whose exit_code is in the passing set, which a
-    # free-text claim cannot fabricate.
+    # typed proof — a command requirement needs a CommandProof whose exit_code is
+    # in the passing set, so free text in a description field can't satisfy it.
+    # (The proof's authenticity still rests on a trusted hook writer — TRUST
+    # BOUNDARY note on the proof models; output_sha256 is not re-verified here.)
     for req in task.verification.required_proofs:
         if not _proof_satisfies(req, evidence.proofs):
             missing.append(req.label)

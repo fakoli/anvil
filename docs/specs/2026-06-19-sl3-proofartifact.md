@@ -1,4 +1,16 @@
-# SL-3 — Typed `ProofArtifact` (typed evidence, non-gameable gate)
+# SL-3 — Typed `ProofArtifact` (typed evidence gate)
+
+> **Implementation note (2026-06-21) — accuracy correction.** As-shipped (B48
+> parts 1+2), this gate closes the "free text in a description field satisfies a
+> requirement" hole: a `command` requirement is satisfiable only by a typed
+> `CommandProof` with the right `exit_code`. It is NOT fully "non-gameable": the
+> `CommandProof` originates from an agent-writable evidence buffer and
+> `output_sha256` is recorded but never re-verified, so in a harness where the
+> agent can write the buffer a determined agent can fabricate a passing proof.
+> Treat the proof as **tamper-evident in transit; authenticity depends on a
+> trusted hook writer**. The "non-gameable" phrasing below is the original
+> aspiration; the real hardening is tracked as **E13-1** in
+> `docs/tech-debt-backlog.md`.
 
 **Date:** 2026-06-19
 **Status:** Draft — needs approval before implementation
