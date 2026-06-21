@@ -64,6 +64,16 @@ for arg in "$@"; do
 done
 [ -n "$HARNESS" ] || usage
 
+# Claude Code installs anvil as a plugin (skills + hooks + MCP), NOT via
+# `anvil install` — which this script would call and which rejects 'claude-code'.
+# Redirect to the real path instead of failing with a confusing "unknown harness".
+if [ "$HARNESS" = "claude-code" ] || [ "$HARNESS" = "claude" ]; then
+    echo "Claude Code installs anvil as a plugin, not through this script. Run inside Claude Code:"
+    echo "    /plugin marketplace add fakoli/anvil"
+    echo "    /plugin install anvil@anvil"
+    exit 0
+fi
+
 # 1. uv is the only prerequisite.
 if ! command -v uv >/dev/null 2>&1; then
     echo "anvil needs 'uv' — install from https://docs.astral.sh/uv/ then re-run." >&2

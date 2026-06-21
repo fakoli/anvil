@@ -9,12 +9,32 @@ an existing one.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
+
+from anvil.cli.install import HARNESSES
 
 
 def _script() -> Path:
     return Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
+
+
+def test_usage_harness_list_matches_the_registry() -> None:
+    """The hand-typed harness list in install.sh's usage must match the engine's
+    registry — exactly, both directions. install.py derives `--help` and its
+    "unknown harness" error from HARNESSES, so the shell script is the ONE copy
+    that can drift; this caught it advertising `claude-code`/`vscode` that
+    `anvil install` rejected. `claude-code` is allowed: the script special-cases
+    it to the `/plugin marketplace` path instead of calling `anvil install`."""
+    block = _script().read_text().split("harness:", 1)[1].split("--path:", 1)[0]
+    advertised = set(re.findall(r"[a-z][a-z-]+", block)) - {"echo"}
+    valid = set(HARNESSES) | {"claude-code"}
+    assert advertised == valid, (
+        "install.sh usage out of sync with the harness registry — "
+        f"only in script: {sorted(advertised - valid)}; "
+        f"missing from script: {sorted(valid - advertised)}"
+    )
 
 
 def _run_in_fake_checkout(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:

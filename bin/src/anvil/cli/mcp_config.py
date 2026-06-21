@@ -1,10 +1,12 @@
 """``anvil mcp-config <client>`` — print paste-ready MCP server config.
 
-Anvil's MCP server (bin/anvil-mcp) is harness-neutral, but every MCP client
-wants the config in a slightly different envelope. This command prints the
-ready-to-paste block for a target client, with the server pointed at THIS
-checkout's bin/anvil-mcp by absolute path (not ${CLAUDE_PLUGIN_ROOT}), so any
-MCP-capable harness gets the full 24-tool surface.
+Anvil's MCP server is harness-neutral, but every MCP client wants the config in a
+slightly different envelope. This command prints the ready-to-paste block for a
+target client so any MCP-capable harness gets the full 24-tool surface. The server
+command adapts to the install method (see ``_server_spec``): from a source checkout
+or plugin bundle it points at that tree's bin/anvil-mcp by absolute path; from an
+installed package (uv tool/pipx/pip) it emits the ``anvil-mcp`` console script on
+PATH.
 
 Read-only and project-free: it never opens a backend and works from any
 directory (mirrors ``describe``). It only *prints* config — it never mutates the
@@ -80,21 +82,25 @@ def _wrapper_path() -> Path:
 
 def _server_spec(use_uv_run: bool, root: str | None) -> dict:
     wrapper = _wrapper_path()
-    bin_dir = wrapper.parent
-    if use_uv_run:
-        spec: dict = {
-            "command": "uv",
-            "args": [
-                "run",
-                "--project",
-                str(bin_dir),
-                "python",
-                "-m",
-                "anvil.mcp_server",
-            ],
-        }
+    spec: dict
+    if wrapper.is_file():
+        # Source checkout / plugin bundle: the bin/anvil-mcp bash wrapper exists
+        # and self-syncs uv deps. Default to it; --uv-run emits the explicit uv
+        # invocation for bash-less hosts.
+        bin_dir = wrapper.parent
+        if use_uv_run:
+            spec = {
+                "command": "uv",
+                "args": ["run", "--project", str(bin_dir), "python", "-m", "anvil.mcp_server"],
+            }
+        else:
+            spec = {"command": "bash", "args": [str(wrapper)]}
     else:
-        spec = {"command": "bash", "args": [str(wrapper)]}
+        # Installed package (uv tool / pipx / pip): no checkout, so no bash
+        # wrapper on disk. The `anvil-mcp` console script is on PATH and deps are
+        # already installed — emit the bare command (nothing to sync, so --uv-run
+        # is moot here). Mirrors how the openclaw plugin spawns bare `anvil`.
+        spec = {"command": "anvil-mcp", "args": []}
     if root:
         spec["env"] = {"ANVIL_ROOT": root}
     return spec

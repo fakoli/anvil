@@ -24,6 +24,7 @@ exact. The engine is untouched; hooks stay Claude-Code-only.
 from __future__ import annotations
 
 import hashlib
+import importlib.resources
 import json
 import os
 import re
@@ -37,7 +38,6 @@ from typing import Any
 
 import typer
 
-import anvil
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.cli.mcp_config import (
     _SERVER_ID,
@@ -216,6 +216,15 @@ HARNESSES: dict[str, Harness] = {
     ),
 }
 
+# `vscode` is an accepted alias for the copilot row: VS Code (with Copilot) reads
+# the same .vscode/mcp.json the copilot harness writes. Aliasing keeps the
+# documented `anvil install vscode` working without a second, near-identical row.
+# Listing it here also feeds the `--help` text and the "unknown harness" error,
+# which both derive from `HARNESSES` — one source of truth.
+# ponytail: alias, not a distinct row. Split it out only if a non-Copilot VS Code
+# ever needs AGENTS.md instead of .github/copilot-instructions.md.
+HARNESSES["vscode"] = HARNESSES["copilot"]
+
 
 def _project_root() -> Path:
     """Project root: ``ANVIL_ROOT`` env else cwd (mirrors the rest of the CLI)."""
@@ -225,14 +234,21 @@ def _project_root() -> Path:
     return Path.cwd().resolve()
 
 
-def _repo_root() -> Path:
-    """The Anvil checkout root (holds AGENTS.md).
+def _data_dir() -> Path:
+    """Runtime data shipped INSIDE the ``anvil`` package, under ``anvil/_data/``:
+    the canonical ``AGENTS.md`` (instruction-splice source) and the Codex
+    automation templates.
 
-    ``anvil.__file__`` = ``<repo>/bin/src/anvil/__init__.py`` → four ``parent``
-    hops reach the checkout root. This is where the canonical ``AGENTS.md`` lives
-    (the instruction-file source), independent of the user's project root.
+    Resolved via ``importlib.resources`` so it works for BOTH a source checkout
+    (``anvil/_data/`` sits next to the code) and a wheel install (uv tool/pipx/pip
+    unpack package data into site-packages). Replaces the old ``_repo_root()``
+    4-parent walk, which resolved outside any installed package and silently broke
+    the AGENTS.md splice + automations for wheel installs.
+
+    # ponytail: assumes an unpacked install (the only way anvil ships). Switch to
+    # importlib.resources.as_file() if anvil is ever distributed as a zipimport.
     """
-    return Path(anvil.__file__).resolve().parent.parent.parent.parent
+    return Path(str(importlib.resources.files("anvil"))) / "_data"
 
 
 def _resolve(dest: str, scope: str) -> Path:
@@ -329,10 +345,10 @@ def _codex_automation_plan() -> list[dict[str, Any]]:
     """Render anvil's automation templates for THIS project. Each becomes an
     isolated `~/.codex/automations/<id>/` dir (own file — no shared state to
     corrupt), namespaced per project so two projects don't clobber each other's
-    schedule. Returns ``{id, dir, toml}`` per automation; empty if the templates
-    are not on disk (stripped wheel). Codex reads these on its next scan; we ship
-    them ``status = "PAUSED"`` so nothing runs until the user activates it."""
-    src = _repo_root() / "packaging" / "codex" / "automations"
+    schedule. Returns ``{id, dir, toml}`` per automation; empty only if the
+    templates are somehow absent. Codex reads these on its next scan; we ship them
+    ``status = "PAUSED"`` so nothing runs until the user activates it."""
+    src = _data_dir() / "packaging" / "codex" / "automations"
     if not src.is_dir():
         return []
     root = str(_project_root())
@@ -442,11 +458,18 @@ def _openclaw_finish_gate_recipe() -> str:
     agent from finalizing while its claimed anvil task lacks submitted evidence;
     it is DEFAULT-OPEN (no anvil project / no claim / ``anvil`` missing => the
     agent finalizes normally)."""
-    # The plugin ships at <anvil>/packaging/openclaw/plugin. Resolve it relative to
-    # this module when present (full repo / plugin-cache layout); otherwise print a
-    # placeholder pointing at an anvil checkout.
+    # The finish-gate plugin (a Gateway-side TS plugin) ships with the anvil SOURCE
+    # tree, not the Python wheel — resolve it relative to this module when present
+    # (full repo / plugin-cache layout); from a wheel install there is no checkout,
+    # so tell the user where to get it rather than printing a dead local path.
     plugin_dir = Path(__file__).resolve().parents[4] / "packaging" / "openclaw" / "plugin"
-    shown = str(plugin_dir) if plugin_dir.is_dir() else "<anvil-checkout>/packaging/openclaw/plugin"
+    # From a wheel install there is no checkout; point the user at the source clone
+    # rather than a dead local path (the plugin is not in the pip package).
+    shown = (
+        str(plugin_dir)
+        if plugin_dir.is_dir()
+        else "<clone fakoli/anvil>/packaging/openclaw/plugin"
+    )
     pid = "anvil-finish-gate"
     return "\n".join(
         [
@@ -756,10 +779,11 @@ def _plan_actions(
 
     # --- Instruction artifact (AGENTS.md content, spliced non-destructively) ---
     # Skip entirely for harnesses whose plugin already ships anvil's instructions
-    # (openclaw) — we never touch their files. Also guard the source read: a
-    # stripped wheel may not ship AGENTS.md; degrade to "skipped" rather than crash.
+    # (openclaw) — we never touch their files. AGENTS.md ships as package data
+    # (anvil/_data/), so it resolves for both checkout and wheel installs; the
+    # is_file() guard stays defensive (degrade to "skipped" rather than crash).
     instr_dest = _resolve(h.instr_path, h.instr_scope)
-    agents_src = _repo_root() / "AGENTS.md"
+    agents_src = _data_dir() / "AGENTS.md"
     if not h.writes_instructions or not agents_src.is_file():
         return mcp, {"path": str(instr_dest), "action": "skipped", "content": None}
     agents_text = agents_src.read_text(encoding="utf-8")

@@ -13,6 +13,10 @@ repo root (matching ``test_agents_md.py`` / ``test_version_sync.py``).
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -25,6 +29,60 @@ def _repo_root() -> Path:
 
 def _packaging() -> Path:
     return _repo_root() / "packaging"
+
+
+def _pyproject() -> dict:
+    return tomllib.loads((_repo_root() / "bin" / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+# --- packaging as a standard installable tool (uv tool / pipx / pip) ----------
+
+
+def test_pyproject_declares_both_console_scripts() -> None:
+    """A wheel install must expose BOTH `anvil` and `anvil-mcp`. The `anvil-mcp`
+    script is the keystone: without it, every emitted MCP config pointed at the
+    bin/anvil-mcp bash wrapper, which a wheel does not ship."""
+    scripts = _pyproject()["project"]["scripts"]
+    assert scripts.get("anvil") == "anvil.cli:app"
+    assert scripts.get("anvil-mcp") == "anvil.mcp_server:main"
+
+
+def test_pyproject_readme_is_inside_the_build_root() -> None:
+    """`readme = "../README.md"` escaped the bin/ build root and broke `uv build`
+    (sdist->wheel). Keep the readme path inside bin/ so the release pipeline works."""
+    readme = _pyproject()["project"]["readme"]
+    assert not str(readme).startswith(".."), "readme must not escape the bin/ build root"
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv required to build the wheel")
+def test_built_wheel_is_self_sufficient(tmp_path: Path) -> None:
+    """End-to-end guard for the regression the audit found: a pip/uv-tool install
+    must be self-sufficient. Build the wheel and assert it (a) builds at all (the
+    readme/sdist fix), (b) ships AGENTS.md + codex automations as package data, and
+    (c) declares the anvil-mcp entry point. Skips if the build backend is
+    unavailable in this env, but FAILS loudly if the readme path bug returns."""
+    out = tmp_path / "dist"
+    r = subprocess.run(
+        ["uv", "build", "--out-dir", str(out)],
+        cwd=_repo_root() / "bin",
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        if "readme" in r.stderr.lower() or "README" in r.stderr:
+            pytest.fail(f"build broke on the readme path bug again:\n{r.stderr[-600:]}")
+        pytest.skip(f"wheel build unavailable in this env:\n{r.stderr[-300:]}")
+    assert list(out.glob("*.tar.gz")), "sdist not built"
+    wheels = list(out.glob("*.whl"))
+    assert wheels, "wheel not built"
+    with zipfile.ZipFile(wheels[0]) as z:
+        names = set(z.namelist())
+        entry = next(z.read(n).decode() for n in names if n.endswith("entry_points.txt"))
+    assert "anvil/_data/AGENTS.md" in names, "AGENTS.md not shipped as package data"
+    assert any(
+        n.startswith("anvil/_data/packaging/codex/automations/") for n in names
+    ), "codex automation templates not shipped as package data"
+    assert "anvil-mcp = anvil.mcp_server:main" in entry
 
 
 # --- codex: plugin.json (VERIFIED) ---------------------------------------

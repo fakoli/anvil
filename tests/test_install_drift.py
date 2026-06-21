@@ -22,6 +22,10 @@ import pytest
 # Add a row whenever a harness ships an AGENTS.md duplicate.
 COPIES = [
     "packaging/copilot/.github/copilot-instructions.md",
+    # Package data: `anvil install` reads this via importlib.resources so the
+    # instruction splice works from a wheel install (no checkout). Keep it in sync
+    # with the canonical root AGENTS.md.
+    "bin/src/anvil/_data/AGENTS.md",
 ]
 
 
@@ -38,6 +42,22 @@ def test_instruction_copies_match_agents_md() -> None:
             f"{rel} has drifted from AGENTS.md — copy AGENTS.md over it "
             "(it's a hand-maintained reference, not install-regenerated)."
         )
+
+
+def test_codex_automation_package_data_matches_source() -> None:
+    """Codex automation templates ship as package data (anvil/_data/) so a wheel
+    install can find them via importlib.resources. The committed package copy must
+    match the canonical packaging/ tree, file-set and bytes."""
+    src = _repo_root() / "packaging" / "codex" / "automations"
+    pkg = _repo_root() / "bin" / "src" / "anvil" / "_data" / "packaging" / "codex" / "automations"
+    src_files = sorted(p.relative_to(src) for p in src.rglob("*") if p.is_file())
+    pkg_files = sorted(p.relative_to(pkg) for p in pkg.rglob("*") if p.is_file())
+    assert pkg_files == src_files, (
+        "codex automation template file set drifted — re-copy "
+        "packaging/codex/automations into bin/src/anvil/_data/packaging/codex/automations"
+    )
+    for rel in src_files:
+        assert (pkg / rel).read_bytes() == (src / rel).read_bytes(), f"{rel} drifted from source"
 
 
 @pytest.mark.parametrize("rel", COPIES)

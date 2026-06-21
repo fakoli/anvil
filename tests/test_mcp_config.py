@@ -16,8 +16,41 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+import importlib
+
 from anvil.cli import app
-from anvil.cli.mcp_config import CLIENTS
+from anvil.cli.mcp_config import CLIENTS, _server_spec
+
+# anvil.cli re-exports a `mcp_config` FUNCTION that shadows the submodule attribute,
+# so neither `anvil.cli.mcp_config` nor monkeypatch's dotted-string form reach the
+# real module. import_module resolves it from sys.modules unambiguously.
+_mcp_mod = importlib.import_module("anvil.cli.mcp_config")
+
+
+def test_server_spec_uses_console_script_when_no_checkout(monkeypatch, tmp_path) -> None:
+    """Installed package (no bin/anvil-mcp wrapper on disk): emit the `anvil-mcp`
+    console script, NOT a `bash <ghost-path>` that can't launch. This is what makes
+    a uv tool / pipx / pip install produce a working MCP config."""
+    ghost = tmp_path / "absent" / "anvil-mcp"  # does not exist
+    monkeypatch.setattr(_mcp_mod, "_wrapper_path", lambda: ghost)
+    assert _server_spec(use_uv_run=False, root=None) == {"command": "anvil-mcp", "args": []}
+
+
+def test_server_spec_install_mode_ignores_uv_run_and_keeps_root(monkeypatch, tmp_path) -> None:
+    ghost = tmp_path / "absent" / "anvil-mcp"
+    monkeypatch.setattr(_mcp_mod, "_wrapper_path", lambda: ghost)
+    spec = _server_spec(use_uv_run=True, root="/proj")
+    assert spec["command"] == "anvil-mcp"  # uv-run is moot with no checkout to sync
+    assert spec["env"] == {"ANVIL_ROOT": "/proj"}
+
+
+def test_server_spec_uses_bash_wrapper_in_checkout(monkeypatch, tmp_path) -> None:
+    """Source checkout / plugin bundle: the bash wrapper exists, so keep using it
+    (it self-syncs uv deps) — the existing, unchanged behavior."""
+    wrapper = tmp_path / "anvil-mcp"
+    wrapper.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(_mcp_mod, "_wrapper_path", lambda: wrapper)
+    assert _server_spec(use_uv_run=False, root=None) == {"command": "bash", "args": [str(wrapper)]}
 
 # Clients whose paste-ready config is YAML, not JSON/TOML.
 _YAML_CLIENTS = {"continue", "goose"}
