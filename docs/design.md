@@ -106,7 +106,7 @@ A 1-hour lease without heartbeat means stale claims wait the full hour to releas
 
 ## Why evidence is required
 
-**Choice:** `anvil submit T012` requires a structured `Evidence` payload (see `state/models.py`) with `commands_run`, `files_changed`, `output_excerpt`, exit codes, and optional artifacts. The `sentinel` agent validates it before a task can move to `accepted`. Free-form "tests passed" strings are rejected.
+**Choice:** `anvil submit T012` requires a structured `Evidence` payload (see `state/models.py`) with fields like `commands_run`, `files_changed`, `output_excerpt`, `pr_url`, and `commit_sha` rather than a free-form string. The `sentinel` agent validates it before a task can move to `accepted`. Free-form "tests passed" strings are rejected.
 
 ### Rejected alternatives
 
@@ -115,7 +115,7 @@ A 1-hour lease without heartbeat means stale claims wait the full hour to releas
 
 ### What "structured" means
 
-The `Evidence` Pydantic model requires:
+The `Evidence` Pydantic model captures the following (the fields are optional at the model level, with `submitted_at`/`submitted_by` the only always-present ones; the per-task evidence gate decides which must be present for a given task):
 
 - `commands_run: list[str]`: every shell command actually executed during work
 - `files_changed: list[str]`: paths touched, cross-checked against `record-file-change.sh` events
