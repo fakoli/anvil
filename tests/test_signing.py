@@ -131,6 +131,18 @@ def test_verify_rejects_tamper_untrusted_forged_unsigned(tmp_path) -> None:  # t
 # ---------------------------------------------------------------------------
 
 
+def test_verify_rejects_unsupported_algorithm(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A proof declaring a non-ed25519 algorithm is rejected even when the
+    signature itself is valid over its (rsa-labelled) payload."""
+    priv, pub, sid = _signer(tmp_path)
+    proof = _proof(sid, pub)
+    proof.algorithm = "rsa"  # part of signed_payload, so sign AFTER setting it
+    signing.sign_proof(proof, priv)
+    ok, problems = signing.verify_acceptance(proof, {sid})
+    assert ok is False
+    assert any("algorithm" in p for p in problems)
+
+
 def test_proof_verify_cli_trusted_and_untrusted(tmp_path) -> None:  # type: ignore[no-untyped-def]
     priv, pub, sid = _signer(tmp_path)
     proof = _proof(sid, pub)

@@ -6,6 +6,26 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- **E13 hardening from a blind adversarial review.** (1) **Honesty:** the typed
+  evidence proof's "observed, not asserted / non-gameable" docstrings overstated
+  the guarantee — corrected to a TRUST BOUNDARY note (the gate closes the
+  free-text-in-the-same-field hole, but a `CommandProof`'s authenticity rests on
+  a trusted hook writer; `output_sha256` is recorded, not re-verified). Real
+  hardening tracked as E13-1. (2) **B49 rework misattribution:** accept-rate now
+  attributes each review decision to the runner whose submission it actually
+  reviewed (latest at/before the decision), not the task's latest submitter — so
+  a reworked task's rejection stays with the runner who earned it. (3) **B45
+  inertness** is now flagged `[EXPERIMENTAL]` in `--help` (ceilinged `next`
+  returns nothing until a risk-confirmation source ships). (4) **Governor
+  observability:** `anvil next` now surfaces a `withheld_reason`
+  (`review_queue_saturated` / `actor_below_floor`) so a governed withhold is
+  distinguishable from an empty queue. (5) **Strict no-evidence branch** now
+  fails closed on `required_proofs` too (was checking only legacy
+  `required_evidence`). (6) `verify_acceptance` enforces the declared `algorithm`;
+  (7) proof-emission failures are logged, not silently swallowed.
+
 ### Added
 
 - **Two-week bake-off runbook + metrics snapshot (B50).** The gate for everything

@@ -484,7 +484,9 @@ class BedrockProvider:
         # anthropic-sdk-python README, even though Pyright's
         # reportPrivateImportUsage rule flags it as private.
         try:
-            from anthropic import AnthropicBedrock as _AnthropicBedrock  # pyright: ignore[reportPrivateImportUsage]
+            from anthropic import (
+                AnthropicBedrock as _AnthropicBedrock,  # pyright: ignore[reportPrivateImportUsage]
+            )
         except ImportError as exc:
             raise LLMProviderError(
                 "BedrockProvider requires the bedrock extras. Install with:\n"

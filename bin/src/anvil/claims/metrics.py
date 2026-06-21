@@ -13,6 +13,12 @@ pull seam (`anvil next`) refuse new work when:
 Everything is computed LIVE from engine state on each call (no persistence, no
 async jobs). The accept-rate is per RUNNER (the task's evidence.submitted_by —
 the actor who did the work), NOT per reviewer.
+
+Scope: the governor gates the PULL seam (`anvil next` / ClaimManager.
+next_claimable) only. A direct `anvil claim <id>` is intentionally NOT gated —
+an agent that already knows a task id can claim it regardless. A governed fleet
+loop must therefore PULL via `anvil next`, not claim by id. (Unifying the MCP
+get_next_task advisory path onto this gate is a tracked follow-up.)
 """
 
 from __future__ import annotations
@@ -49,8 +55,11 @@ class AcceptRateMetrics:
         self._window = datetime.timedelta(days=window_days)
         self.floor = floor
         self.needs_review_cap = needs_review_cap
-        self._decisions: list[tuple[str, str]] | None = None  # (task_id, decision)
-        self._work_actor: dict[str, str] | None = None  # task_id -> submitter
+        # (task_id, decision, decision_dt) within the window.
+        self._decisions: list[tuple[str, str, datetime.datetime]] | None = None
+        # task_id -> sorted [(submitted_at, submitter)] so a decision can be
+        # attributed to the submission that was actually current when it landed.
+        self._submissions: dict[str, list[tuple[datetime.datetime, str]]] | None = None
 
     # -- lazy loaders -----------------------------------------------------
 
@@ -58,7 +67,7 @@ class AcceptRateMetrics:
         if self._decisions is not None:
             return
         cutoff = self._clock.now() - self._window
-        decisions: list[tuple[str, str]] = []
+        decisions: list[tuple[str, str, datetime.datetime]] = []
         for task_id, decision, created_at_iso in (
             self._backend.list_task_review_decisions()
         ):
@@ -69,14 +78,37 @@ class AcceptRateMetrics:
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=datetime.UTC)
             if ts >= cutoff:
-                decisions.append((task_id, decision))
+                decisions.append((task_id, decision, ts))
         self._decisions = decisions
-        # task -> work actor (latest evidence submitter; list_evidence is id-asc
-        # so the last write for a task wins).
-        actor_by_task: dict[str, str] = {}
+        # task -> chronologically-sorted submissions, so under a rework cycle
+        # (runner A rejected, runner B re-submits and is accepted) each decision
+        # is credited to the runner whose work it actually reviewed — not the
+        # task's latest submitter.
+        submissions: dict[str, list[tuple[datetime.datetime, str]]] = {}
         for ev in self._backend.list_evidence():
-            actor_by_task[ev.task_id] = ev.submitted_by
-        self._work_actor = actor_by_task
+            submissions.setdefault(ev.task_id, []).append(
+                (ev.submitted_at, ev.submitted_by)
+            )
+        for subs in submissions.values():
+            subs.sort(key=lambda pair: pair[0])
+        self._submissions = submissions
+
+    def _submitter_at(self, task_id: str, when: datetime.datetime) -> str | None:
+        """The runner whose evidence submission was current when ``when``'s
+        decision landed — the latest submission at or before the decision."""
+        assert self._submissions is not None
+        subs = self._submissions.get(task_id, [])
+        chosen: str | None = None
+        for submitted_at, submitter in subs:
+            if submitted_at <= when:
+                chosen = submitter
+            else:
+                break
+        # Clock-skew fallback: a decision earlier than any recorded submission
+        # is still attributed to the first (and only plausible) submitter.
+        if chosen is None and subs:
+            chosen = subs[0][1]
+        return chosen
 
     # -- review debt ------------------------------------------------------
 
@@ -91,13 +123,15 @@ class AcceptRateMetrics:
     # -- accept rate ------------------------------------------------------
 
     def accept_rate(self, actor: str) -> float | None:
-        """Fraction of *this runner's* reviewed tasks (in the window) that were
-        accepted, or None if the runner has no reviewed history yet."""
+        """Fraction of *this runner's* reviewed submissions (in the window) that
+        were accepted, or None if the runner has no reviewed history yet. Each
+        decision is attributed to the runner whose submission it reviewed, so a
+        reworked task's rejection stays with the runner who earned it."""
         self._load()
-        assert self._decisions is not None and self._work_actor is not None
+        assert self._decisions is not None
         accepted = total = 0
-        for task_id, decision in self._decisions:
-            if self._work_actor.get(task_id) != actor:
+        for task_id, decision, when in self._decisions:
+            if self._submitter_at(task_id, when) != actor:
                 continue
             total += 1
             if decision == "accepted":
@@ -111,11 +145,23 @@ class AcceptRateMetrics:
         assert self._decisions is not None
         return sum(
             1
-            for tid, decision in self._decisions
+            for tid, decision, _when in self._decisions
             if tid == task_id and decision == "rejected"
         )
 
     # -- gates ------------------------------------------------------------
+
+    def withhold_reason(self, actor: str) -> str | None:
+        """Why the governor would withhold new work from ``actor`` right now, or
+        None if it wouldn't — so a caller can distinguish a governed withhold
+        from a genuinely empty queue. Mirrors the gates in
+        :meth:`ClaimManager.next_claimable`.
+        """
+        if self.review_queue_saturated():
+            return "review_queue_saturated"
+        if self.actor_below_floor(actor):
+            return "actor_below_floor"
+        return None
 
     def actor_below_floor(self, actor: str) -> bool:
         """True if the runner has a track record AND it is below the floor. A

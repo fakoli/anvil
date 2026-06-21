@@ -150,14 +150,18 @@ def verify_acceptance(
 ) -> tuple[bool, list[str]]:
     """Verify an ``AcceptanceProof`` off-host: ``(ok, problems)``.
 
-    Three independent checks, all of which must pass:
-      1. the detached signature is valid for the embedded public key;
-      2. ``signer_id`` is the genuine fingerprint of that public key (so the id
+    Four independent checks, all of which must pass:
+      1. the declared algorithm is one this verifier supports (ed25519) — so a
+         future second algorithm can't steer a verifier into the wrong primitive;
+      2. the detached signature is valid for the embedded public key;
+      3. ``signer_id`` is the genuine fingerprint of that public key (so the id
          can't claim to be someone it isn't);
-      3. the public key is in the trust list (an unknown signer is rejected —
+      4. the public key is in the trust list (an unknown signer is rejected —
          this is what makes verification meaningful without trusting the producer).
     """
     problems: list[str] = []
+    if proof.algorithm != "ed25519":
+        problems.append(f"unsupported signature algorithm: {proof.algorithm!r}")
     if not proof.signature:
         problems.append("proof is unsigned")
     elif not verify(proof.public_key, proof.signed_bytes(), proof.signature):

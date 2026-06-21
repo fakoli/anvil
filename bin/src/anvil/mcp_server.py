@@ -2624,11 +2624,16 @@ def apply_review_decision(
             evidence_obj = backend.get_latest_evidence(task_id)
             if evidence_obj is not None:
                 gate_passed, gate_missing = evidence_complete(task, evidence_obj)
-            elif task.verification.required_evidence:
-                # No evidence at all when something is required is a failure.
+            elif (
+                task.verification.required_evidence
+                or task.verification.required_proofs
+            ):
+                # No evidence at all when something is required is a failure —
+                # check BOTH the legacy string list and the typed proofs.
                 gate_passed, gate_missing = (
                     False,
-                    list(task.verification.required_evidence),
+                    list(task.verification.required_evidence)
+                    + [r.label for r in task.verification.required_proofs],
                 )
             else:
                 gate_passed, gate_missing = True, []

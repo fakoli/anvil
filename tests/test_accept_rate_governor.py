@@ -44,8 +44,14 @@ class _StubBackend:
         return []
 
 
-def _ev(task_id: str, actor: str):  # type: ignore[no-untyped-def]
-    return types.SimpleNamespace(task_id=task_id, submitted_by=actor)
+def _ev(task_id: str, actor: str, submitted_at=None):  # type: ignore[no-untyped-def]
+    # Default submitted_at far in the past so a single submission is always
+    # "current" at any in-window decision; rework tests pass explicit times.
+    return types.SimpleNamespace(
+        task_id=task_id,
+        submitted_by=actor,
+        submitted_at=submitted_at or (_NOW - datetime.timedelta(days=40)),
+    )
 
 
 def _metrics(decisions, evidence, *, needs_review=0, floor=0.80, cap=10):  # type: ignore[no-untyped-def]
@@ -80,6 +86,24 @@ def test_accept_rate_is_per_work_actor() -> None:
     assert m.accept_rate("C") is None  # no reviewed history
 
 
+def test_rework_attributes_each_decision_to_the_runner_who_earned_it() -> None:
+    """Rework cycle: A submits T (rejected), then B re-submits T (accepted).
+    A owns the rejection, B owns the acceptance — NOT both credited to the
+    latest submitter (the blind-review bug)."""
+    t_a_submit = _NOW - datetime.timedelta(days=3)
+    t_a_reject = _NOW - datetime.timedelta(days=2)
+    t_b_submit = _NOW - datetime.timedelta(days=1, hours=12)
+    t_b_accept = _NOW - datetime.timedelta(days=1)
+    decisions = [
+        ("T", "rejected", t_a_reject.isoformat()),
+        ("T", "accepted", t_b_accept.isoformat()),
+    ]
+    evidence = [_ev("T", "A", t_a_submit), _ev("T", "B", t_b_submit)]
+    m = _metrics(decisions, evidence)
+    assert m.accept_rate("A") == 0.0  # A's only reviewed submission was rejected
+    assert m.accept_rate("B") == 1.0  # B's only reviewed submission was accepted
+
+
 def test_accept_rate_excludes_decisions_outside_window() -> None:
     decisions = [
         ("T1", "accepted", _iso(1)),   # in window
@@ -96,6 +120,20 @@ def test_accept_rate_excludes_decisions_outside_window() -> None:
 def test_review_queue_saturation() -> None:
     assert _metrics([], [], needs_review=10, cap=10).review_queue_saturated() is True
     assert _metrics([], [], needs_review=9, cap=10).review_queue_saturated() is False
+
+
+def test_withhold_reason_distinguishes_governed_withhold_from_empty() -> None:
+    # saturated queue
+    assert (
+        _metrics([], [], needs_review=10, cap=10).withhold_reason("a")
+        == "review_queue_saturated"
+    )
+    # actor below floor (2 rejected, rate 0.0 < 0.80)
+    decisions = [("T1", "rejected", _iso(1)), ("T2", "rejected", _iso(1))]
+    evidence = [_ev("T1", "lo"), _ev("T2", "lo")]
+    assert _metrics(decisions, evidence).withhold_reason("lo") == "actor_below_floor"
+    # nothing wrong -> None (a genuinely empty queue, not a governed withhold)
+    assert _metrics([], []).withhold_reason("newcomer") is None
 
 
 # -- floor + escalation ------------------------------------------------------
