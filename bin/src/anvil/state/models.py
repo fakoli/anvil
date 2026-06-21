@@ -337,7 +337,7 @@ class CommandProof(BaseModel):
 
 
 class DiffProof(BaseModel):
-    """A unified diff the engine observed (a later drift check keys on this)."""
+    """A unified diff captured by the hooks (a later drift check keys on this)."""
 
     model_config = _MODEL_CONFIG
 
@@ -409,8 +409,10 @@ class Verification(BaseModel):
     commands: list[str] = Field(default_factory=list)
     manual_steps: list[str] = Field(default_factory=list)
     required_evidence: list[str] = Field(default_factory=list)
-    # SL-3 / B48: typed, non-gameable requirements. Additive — ``required_evidence``
-    # (the legacy free-text substring path) stays for back-compat; the gate
+    # SL-3 / B48: typed requirements — a free-text claim in a description field
+    # can't satisfy a command requirement (authenticity still rests on a trusted
+    # hook writer; see the TRUST BOUNDARY note above). Additive — the legacy
+    # free-text ``required_evidence`` path stays for back-compat; the gate
     # evaluates both. New planners populate ``required_proofs``.
     required_proofs: list[ProofRequirement] = Field(default_factory=list)
 

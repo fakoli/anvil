@@ -157,7 +157,14 @@ def decide_from_rows(
         if task is None:
             continue  # active claim with no task row — anomalous; don't block on it
         if evidence is None:
-            required = list(task.verification.required_evidence)
+            # No evidence row at all -> fail closed if ANYTHING is required.
+            # Check BOTH surfaces: a planner-created task declares typed
+            # required_proofs with required_evidence empty, so checking only the
+            # legacy list would let a proof-gated task finalize with no evidence
+            # (the same fail-open closed in apply / apply_review_decision).
+            required = list(task.verification.required_evidence) + [
+                r.label for r in task.verification.required_proofs
+            ]
             passed, missing = (not required), required
         else:
             passed, missing = evidence_complete(task, evidence)

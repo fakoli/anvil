@@ -29,9 +29,17 @@ def _claim(actor: str = "agent", cid: str = "C1", task_id: str = "WT-1") -> obje
     return types.SimpleNamespace(claimed_by=actor, id=cid, task_id=task_id, expected_files=[])
 
 
-def _task(tid: str = "WT-1", required: tuple[str, ...] = ()) -> object:
+def _task(
+    tid: str = "WT-1",
+    required: tuple[str, ...] = (),
+    required_proofs: tuple[object, ...] = (),
+) -> object:
     return types.SimpleNamespace(
-        id=tid, verification=types.SimpleNamespace(required_evidence=list(required)),
+        id=tid,
+        verification=types.SimpleNamespace(
+            required_evidence=list(required),
+            required_proofs=list(required_proofs),
+        ),
     )
 
 
