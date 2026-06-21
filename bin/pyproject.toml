@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anvil-state"
-version = "0.0.9"
+version = "0.1.0"
 description = "Local-first project state engine: turn rough ideas and PRDs into reviewed, lockable, evidence-backed work packets that humans and AI agents can coordinate on without conflicts."
 readme = "../README.md"
 requires-python = ">=3.11"

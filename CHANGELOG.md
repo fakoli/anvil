@@ -6,6 +6,12 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-06-21
+
+Epic E13 — Agent Fleet: Capacity-Coordination Pull MVP. Signed evidence proofs,
+accept-rate governance, risk-axis routing, packet-quality measurement, and the
+two-week bake-off harness, hardened by two rounds of blind adversarial review.
+
 ### Fixed
 
 - **E13 hardening from a blind adversarial review.** (1) **Honesty:** the typed
