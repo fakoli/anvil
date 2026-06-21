@@ -8,6 +8,19 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Two-week bake-off runbook + metrics snapshot (B50).** The gate for everything
+  bigger: a documented protocol (`docs/how-to/bake-off.md`) to measure — on the
+  real repo across the flat-rate pools + the local box — whether the
+  capacity-coordination premise actually holds *before* any capacity-pool
+  machinery is built. Captures per-pool throttle frequency, spillover frequency,
+  local false-pass/rework (the SL-2 corpus run with local models vs a Sonnet
+  baseline), review-minutes, `needs_review` depth, and cloud-tokens before/after,
+  with an explicit kill/pivot trigger. New `benchmarks/bakeoff_snapshot.py` logs
+  the live in-engine half daily (review debt + per-runner accept-rate (B49) +
+  packet right-sizing savings (B51)); a results-note stub awaits the run in
+  `docs/research/`. **Capacity-pools-as-a-first-class concept stays DEFERRED
+  pending this bake-off's data.**
+
 - **Packet-quality measurement harness (B51).** Packet quality becomes a tracked,
   *measured* workstream: `anvil.context.packet_metrics` quantifies the token
   reduction of right-sized (lightweight) vs full work packets across a backlog —
