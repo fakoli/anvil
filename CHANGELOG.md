@@ -4,6 +4,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ---
 
+## [Unreleased]
+
 ## [0.1.0] — 2026-06-21
 
 Epic E13 — Agent Fleet: Capacity-Coordination Pull MVP. Signed evidence proofs,
