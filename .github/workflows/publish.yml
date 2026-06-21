@@ -1,0 +1,41 @@
+name: publish
+
+# Publish anvil-state to PyPI via Trusted Publishing (OIDC) — no API token stored.
+# Fires when a GitHub Release is published; the version is whatever is committed
+# (bump it via the release PR first, then cut the Release at that tag).
+# Manual runs are allowed too (workflow_dispatch) for re-publishing a failed upload.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: build + publish to PyPI
+    runs-on: ubuntu-latest
+    # Only the canonical repo publishes (never a fork).
+    if: github.repository == 'fakoli/anvil'
+    # Must match the PyPI Trusted Publisher "Environment name".
+    environment: pypi
+    permissions:
+      id-token: write   # REQUIRED: lets the job mint the OIDC token PyPI trusts.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # The package lives in bin/ — build the sdist + wheel into bin/dist/.
+      - name: Build sdist + wheel
+        working-directory: bin
+        run: uv build
+
+      # Trusted publishing: the action exchanges the OIDC token for a short-lived
+      # PyPI credential. No username/password/token needed.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: bin/dist/
