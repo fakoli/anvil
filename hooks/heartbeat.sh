@@ -31,11 +31,13 @@ fi
 # B47 — do NOT pass a per-session identity here. The heartbeat MUST resolve the
 # same actor that `anvil claim` did, or it renews zero leases (the claim is held
 # under a different actor) and the lease silently expires mid-work. Passing no
-# --actor lets the CLI's single resolver (resolve_actor: $ANVIL_ACTOR >
-# $ANVIL_GATE_ACTOR > $USER > per-runner fingerprint) pick the same identity the
-# claim used. Set $ANVIL_ACTOR in the loop env to pin it explicitly for a fleet.
-if [ -n "$STDIN_DRAIN" ] || [ ! -t 0 ]; then
-  cat >/dev/null 2>&1 || true  # drain stdin so the harness pipe never blocks
+# --actor lets the CLI's single resolver pick the same identity the claim used
+# (resolve_actor: $ANVIL_ACTOR > $ANVIL_GATE_ACTOR > $USER > per-runner
+# fingerprint > "agent"). Set $ANVIL_ACTOR in the loop env to pin it for a fleet.
+# Drain a PIPED stdin (the harness may send a JSON payload we no longer use) so
+# the writer never blocks — but never read from a TTY, which would hang.
+if [ ! -t 0 ]; then
+  cat >/dev/null 2>&1 || true
 fi
 "$CLI" hook heartbeat >/dev/null 2>&1 || true
 

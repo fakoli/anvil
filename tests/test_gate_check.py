@@ -420,10 +420,14 @@ def test_actor_falls_back_to_stable_runner_id_when_no_env(
     )
     _use(monkeypatch, backend, tmp_path)
     r = runner.invoke(app, ["gate-check", "--json"], catch_exceptions=False)  # no --actor
-    actor = json.loads(r.stdout)["data"]["actor"]
+    data = json.loads(r.stdout)["data"]
+    actor = data["actor"]
     assert actor not in ("", "agent")
     assert len(actor) == 16
     assert all(c in "0123456789abcdef" for c in actor)
+    # No claims for the resolved actor -> nothing to gate -> continue (exit 0).
+    assert data["block"] is False
+    assert r.exit_code == 0
 
 
 def test_actor_defaults_to_user_when_set(tmp_path, monkeypatch) -> None:
