@@ -6,6 +6,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-06-21
+
 ### Added
 
 - **anvil is now installable as a standard Python tool** (`uv tool install
