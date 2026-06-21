@@ -120,8 +120,10 @@ The `Evidence` Pydantic model requires:
 - `commands_run: list[str]`: every shell command actually executed during work
 - `files_changed: list[str]`: paths touched, cross-checked against `record-file-change.sh` events
 - `output_excerpt: str`: last N lines of test/build output, captured by `capture-evidence.sh`
-- `exit_codes: dict[str, int]`: per-command exit
-- `artifacts: list[Artifact]`: optional screenshots, logs, links
+- `pr_url` / `commit_sha`: where the work landed
+- `screenshots: list[str]`, `known_limitations: str`: optional supporting context
+
+Note: the shipped model does *not* carry per-command exit codes or a typed `Artifact` type. Adding an exit-code-bearing, portable signed proof record is exactly what backlog item B48 proposes; until it lands, the gate confirms a command was *reported* to run, not that it exited 0.
 
 ### Why hooks capture, not the agent
 
