@@ -828,6 +828,135 @@ class TestRenew:
 
 
 # ---------------------------------------------------------------------------
+# TestMaxClaimAge (B46) — a wedged-but-heartbeating claim is capped, not eternal
+# ---------------------------------------------------------------------------
+
+
+class TestMaxClaimAge:
+    def _setup_claim(
+        self,
+        tmp_path: Path,
+        clock: FrozenClock,
+        *,
+        lease_minutes: float,
+        max_age: float | None,
+    ) -> tuple[SqliteBackend, str]:
+        b = _make_backend(tmp_path, clock)
+        _setup_project(b)
+        _setup_prd(b)
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        _insert_feature_raw(conn)
+        _insert_task_raw(conn, task_id="T001", status="ready")
+        conn.close()
+        m = ClaimManager(
+            b,
+            clock,
+            actor="agent-alpha",
+            default_lease_minutes=lease_minutes,
+            max_claim_age_minutes=max_age,
+        )
+        return b, m.claim("T001").claim.id
+
+    def _manager(
+        self, b: SqliteBackend, clock: FrozenClock, *, lease: float, max_age: float
+    ) -> ClaimManager:
+        return ClaimManager(
+            b,
+            clock,
+            actor="agent-alpha",
+            default_lease_minutes=lease,
+            max_claim_age_minutes=max_age,
+        )
+
+    def test_default_max_age_is_4x_base_lease(self) -> None:
+        """No explicit cap -> 4x the base lease, so protection applies even
+        without a config.yaml."""
+        m = ClaimManager(
+            None,  # type: ignore[arg-type]  — __init__ does not touch the backend
+            _make_clock(_T0),
+            actor="a",
+            default_lease_minutes=60,
+        )
+        assert m._max_claim_age_minutes == 240.0  # noqa: SLF001
+
+    def test_renew_allowed_before_max_claim_age(self, tmp_path: Path) -> None:
+        clock = _make_clock(_T0)
+        # Long lease so the lease itself never expires during the test; small cap.
+        b, claim_id = self._setup_claim(
+            tmp_path, clock, lease_minutes=300, max_age=100
+        )
+        try:
+            clock._current = _T0 + timedelta(minutes=99)  # type: ignore[attr-defined]  # under cap
+            renewed = self._manager(b, clock, lease=300, max_age=100).renew(claim_id)
+            assert renewed.lease_expires_at == _T0 + timedelta(minutes=99 + 300)
+        finally:
+            b.close()
+
+    def test_renew_refuses_past_max_claim_age(self, tmp_path: Path) -> None:
+        """Even with the lease still valid, renew refuses once the claim is older
+        than its max age."""
+        clock = _make_clock(_T0)
+        b, claim_id = self._setup_claim(
+            tmp_path, clock, lease_minutes=300, max_age=100
+        )
+        try:
+            clock._current = _T0 + timedelta(minutes=101)  # type: ignore[attr-defined]  # past cap
+            with pytest.raises(ClaimError, match="max age|exceeded"):
+                self._manager(b, clock, lease=300, max_age=100).renew(claim_id)
+        finally:
+            b.close()
+
+    def test_heartbeating_claim_is_refused_at_max_age(self, tmp_path: Path) -> None:
+        """The acceptance scenario: an agent heartbeats to keep the lease alive,
+        but renewal is refused once the claim crosses max-claim-age — so the lease
+        then expires and the stale reaper can take it."""
+        clock = _make_clock(_T0)
+        b, claim_id = self._setup_claim(
+            tmp_path, clock, lease_minutes=60, max_age=100
+        )
+        try:
+            m = self._manager(b, clock, lease=60, max_age=100)
+            # Heartbeat at T+50 keeps the lease alive (extends to T+110).
+            clock._current = _T0 + timedelta(minutes=50)  # type: ignore[attr-defined]
+            renewed = m.renew(claim_id)
+            assert renewed.lease_expires_at == _T0 + timedelta(minutes=110)
+            # At T+101 the claim is past max-age (100) even though the lease
+            # (T+110) is still valid: renewal is refused.
+            clock._current = _T0 + timedelta(minutes=101)  # type: ignore[attr-defined]
+            with pytest.raises(ClaimError, match="max age|exceeded"):
+                m.renew(claim_id)
+        finally:
+            b.close()
+
+    def test_doctor_flags_over_age_claim(self, tmp_path: Path) -> None:
+        from anvil.cli.doctor import _check_max_claim_age
+
+        # Claim created at the frozen past _T0 is far older than any max-age
+        # relative to doctor's real-clock now, so it is flagged over-age.
+        clock = _make_clock(_T0)
+        b, claim_id = self._setup_claim(
+            tmp_path, clock, lease_minutes=60, max_age=None
+        )
+        try:
+            finding = _check_max_claim_age(b, tmp_path)
+            assert finding.severity == "warning"
+            assert finding.detail["total_over_age"] == 1
+            assert finding.detail["over_age"][0]["claim_id"] == claim_id
+        finally:
+            b.close()
+
+    def test_config_loads_max_claim_age_multiplier(self, tmp_path: Path) -> None:
+        from anvil.config import load_config
+
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(
+            "project_name: t\nproject_id: t\nmax_claim_age_multiplier: 2.5\n",
+            encoding="utf-8",
+        )
+        assert load_config(cfg_path).max_claim_age_multiplier == 2.5
+
+
+# ---------------------------------------------------------------------------
 # TestStaleDetection
 # ---------------------------------------------------------------------------
 

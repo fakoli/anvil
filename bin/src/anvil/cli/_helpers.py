@@ -423,6 +423,13 @@ def _lease_manager_kwargs(
         kwargs["default_heartbeat_minutes"] = config.default_heartbeat_minutes
     if lease_override is not None:
         kwargs["default_lease_minutes"] = lease_override
+    # B46 — max-claim-age = effective lease x configured multiplier. Computed
+    # from whichever lease wins (override > config) so --lease scales the cap
+    # too. When config is None, ClaimManager applies its own 4x default.
+    if config is not None and "default_lease_minutes" in kwargs:
+        kwargs["max_claim_age_minutes"] = (
+            kwargs["default_lease_minutes"] * config.max_claim_age_multiplier
+        )
     return kwargs
 
 

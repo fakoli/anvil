@@ -123,6 +123,13 @@ class Config:
     # identically to the pre-float ints.
     default_lease_minutes: float = 60.0
     default_heartbeat_minutes: float = 5.0
+    # B46 — hard max-claim-age as a multiple of the base lease. After
+    # ``default_lease_minutes * max_claim_age_multiplier`` since a claim was
+    # created, ``renew()`` refuses (even if heartbeating), so a wedged agent
+    # cannot hold a lease forever — the claim's lease then expires and the
+    # stale-claim reaper takes it. Default 4x; raise it for legitimately
+    # long-running tasks.
+    max_claim_age_multiplier: float = 4.0
 
     git_ops_mode: Literal["auto", "record_only", "off"] = "auto"
 
@@ -605,6 +612,9 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         default_heartbeat_minutes=float(
             str(data.get("default_heartbeat_minutes", 5))
         ),
+        max_claim_age_multiplier=float(
+            str(data.get("max_claim_age_multiplier", 4))
+        ),
         git_ops_mode=git_ops_mode,  # type: ignore[arg-type]
         durability=durability,  # type: ignore[arg-type]
         branch_prefix=branch_prefix,
@@ -943,6 +953,10 @@ custom_api_key_env:                 # e.g. "OPENROUTER_API_KEY"
 # ---------------------------------------------------------------------------
 default_lease_minutes: 60
 default_heartbeat_minutes: 5
+# Hard cap on a single claim's age = default_lease_minutes x this multiplier
+# (B46). After it, renew() refuses even if heartbeating, so a wedged agent
+# cannot hold a lease forever. Raise it for legitimately long-running tasks.
+max_claim_age_multiplier: 4
 
 # ---------------------------------------------------------------------------
 # Git operations  (auto | record_only | off)

@@ -8,6 +8,18 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Max-claim-age cutoff — wedged agents can't hold a lease forever (B46, part 1).**
+  `renew()` now refuses once a claim is older than `default_lease_minutes ×
+  max_claim_age_multiplier` (new config, default **4×**), even if the agent keeps
+  heartbeating — so the lease then expires and the stale reaper reclaims the task
+  (and frees its conflict group). Protection applies even without a `config.yaml`
+  (ClaimManager defaults to 4× the base lease). `anvil doctor` gains a
+  `max_claim_age` probe that surfaces over-age active claims as a warning. This is
+  the robust half of B46; the progress-gated heartbeat (extend only on observed
+  `file_changed`/evidence) is deferred until `file_changed` emission under the
+  HOME layout (B44-2) and unified actor identity (B47) make it correct rather than
+  fragile (`file_changed` is file-keyed + actor-tagged).
+
 - **Portable signed AcceptanceProof + strict-by-default for loops (B48, part 2 of 2).**
   On acceptance the engine now emits a typed, **signed** `AcceptanceProof` — a
   portable receipt binding the task id, claim/lease id, actor, the observed

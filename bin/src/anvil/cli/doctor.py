@@ -224,6 +224,7 @@ def _diagnose(state_dir: Path) -> list[_Finding]:
 
     try:
         findings.append(_check_claims(backend))
+        findings.append(_check_max_claim_age(backend, state_dir))
         findings.append(_check_replay(backend, state_dir))
         findings.append(_check_reconciliation(backend, state_dir))
         findings.append(_check_verification_paths(backend, state_dir.parent))
@@ -501,6 +502,56 @@ def _check_claims(backend: SqliteBackend) -> _Finding:
         "claims",
         _OK,
         f"{len(active)} active claim(s), none stale.",
+        detail,
+    )
+
+
+def _check_max_claim_age(backend: SqliteBackend, state_dir: Path) -> _Finding:
+    """Surface active claims older than the configured max-claim-age (B46).
+
+    Read-only. An over-age claim will have its next ``renew()`` refused, after
+    which its lease expires and the reaper takes it — so it is bounded, not
+    silently wedged (hence WARNING, not ERROR). Surfacing it lets an operator
+    release it sooner instead of waiting out the lease.
+    """
+    from anvil.cli._helpers import _load_config_optional
+    from anvil.clock import SystemClock
+
+    now = SystemClock().now()
+    cfg = _load_config_optional(state_dir)
+    lease = cfg.default_lease_minutes if cfg is not None else 60.0
+    multiplier = cfg.max_claim_age_multiplier if cfg is not None else 4.0
+    max_age = lease * multiplier
+
+    active = backend.list_active_claims()
+    over_age = [
+        {
+            "claim_id": c.id,
+            "task_id": c.task_id,
+            "age_minutes": round((now - c.created_at).total_seconds() / 60.0, 1),
+            "max_allowed_minutes": max_age,
+        }
+        for c in active
+        if (now - c.created_at).total_seconds() / 60.0 >= max_age
+    ]
+    detail = {
+        "max_claim_age_minutes": max_age,
+        "over_age": over_age,
+        "total_over_age": len(over_age),
+    }
+    if over_age:
+        return _Finding(
+            "max_claim_age",
+            _WARNING,
+            f"{len(over_age)} active claim(s) past max-claim-age ({max_age:g} min); "
+            "renewal is refused for these. Release with `anvil release <task> "
+            "--force` to free the task (and its conflict group) now.",
+            detail,
+        )
+    return _Finding(
+        "max_claim_age",
+        _OK,
+        f"No active claim is past max-claim-age ({max_age:g} min).",
         detail,
     )
 
