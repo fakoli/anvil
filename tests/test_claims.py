@@ -931,14 +931,16 @@ class TestMaxClaimAge:
     def test_doctor_flags_over_age_claim(self, tmp_path: Path) -> None:
         from anvil.cli.doctor import _check_max_claim_age
 
-        # Claim created at the frozen past _T0 is far older than any max-age
-        # relative to doctor's real-clock now, so it is flagged over-age.
+        # Claim created at _T0; inject a deterministic 'now' well past the default
+        # cap (no config -> 60 x 4 = 240 min) so the test never depends on the
+        # real wall clock.
         clock = _make_clock(_T0)
         b, claim_id = self._setup_claim(
             tmp_path, clock, lease_minutes=60, max_age=None
         )
         try:
-            finding = _check_max_claim_age(b, tmp_path)
+            now = _T0 + timedelta(minutes=999)  # 999 > 240 default cap
+            finding = _check_max_claim_age(b, tmp_path, now=now)
             assert finding.severity == "warning"
             assert finding.detail["total_over_age"] == 1
             assert finding.detail["over_age"][0]["claim_id"] == claim_id

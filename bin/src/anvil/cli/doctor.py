@@ -46,6 +46,7 @@ Honors the v1.24 ``--json`` envelope and the ``ANVIL_ROOT`` /
 
 from __future__ import annotations
 
+import datetime
 import re
 import tempfile
 from pathlib import Path
@@ -506,18 +507,25 @@ def _check_claims(backend: SqliteBackend) -> _Finding:
     )
 
 
-def _check_max_claim_age(backend: SqliteBackend, state_dir: Path) -> _Finding:
+def _check_max_claim_age(
+    backend: SqliteBackend,
+    state_dir: Path,
+    now: datetime.datetime | None = None,
+) -> _Finding:
     """Surface active claims older than the configured max-claim-age (B46).
 
     Read-only. An over-age claim will have its next ``renew()`` refused, after
     which its lease expires and the reaper takes it — so it is bounded, not
     silently wedged (hence WARNING, not ERROR). Surfacing it lets an operator
     release it sooner instead of waiting out the lease.
+
+    ``now`` is injectable for deterministic tests; it defaults to the real clock.
     """
     from anvil.cli._helpers import _load_config_optional
     from anvil.clock import SystemClock
 
-    now = SystemClock().now()
+    if now is None:
+        now = SystemClock().now()
     cfg = _load_config_optional(state_dir)
     lease = cfg.default_lease_minutes if cfg is not None else 60.0
     multiplier = cfg.max_claim_age_multiplier if cfg is not None else 4.0
