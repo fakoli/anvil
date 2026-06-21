@@ -113,6 +113,11 @@ class ClaimManager:
         default_heartbeat_minutes: Not used directly; present for future rate-limiting.
     """
 
+    # B46 — default hard max-claim-age as a multiple of the base lease when no
+    # explicit ``max_claim_age_minutes`` is supplied. So the cap applies even
+    # for projects without a config.yaml.
+    DEFAULT_MAX_CLAIM_AGE_MULTIPLIER = 4.0
+
     def __init__(
         self,
         backend: Backend,
@@ -121,12 +126,21 @@ class ClaimManager:
         actor: str,
         default_lease_minutes: float = 60,
         default_heartbeat_minutes: float = 5,
+        max_claim_age_minutes: float | None = None,
     ) -> None:
         self._backend = backend
         self._clock = clock
         self._actor = actor
         self._default_lease = default_lease_minutes
         self._default_heartbeat = default_heartbeat_minutes
+        # B46: a wedged agent that keeps heartbeating must still lose its claim
+        # eventually. ``renew()`` refuses once a claim is older than this, so the
+        # lease then expires and the stale reaper takes it. None -> 4x the lease.
+        self._max_claim_age_minutes = (
+            max_claim_age_minutes
+            if max_claim_age_minutes is not None
+            else default_lease_minutes * self.DEFAULT_MAX_CLAIM_AGE_MULTIPLIER
+        )
 
     # ------------------------------------------------------------------
     # Main flow
@@ -648,6 +662,23 @@ class ClaimManager:
                 f"{claim.lease_expires_at.isoformat()} "
                 f"(now: {now.isoformat()}). "
                 "The lease has already expired; please re-claim the task."
+            )
+
+        # B46 — hard max-claim-age cutoff. A wedged agent that keeps heartbeating
+        # must still lose its claim: once the claim is older than its max age,
+        # renewal is refused regardless of progress, so the lease expires and the
+        # stale reaper takes it. This bounds how long one stuck runner can hold a
+        # task (and its conflict group) to max_claim_age, not forever.
+        max_age_deadline = claim.created_at + datetime.timedelta(
+            minutes=self._max_claim_age_minutes
+        )
+        if now >= max_age_deadline:
+            raise ClaimError(
+                f"Claim '{claim_id}' has exceeded its max age of "
+                f"{self._max_claim_age_minutes:g} min "
+                f"(created {claim.created_at.isoformat()}, now {now.isoformat()}); "
+                "renewal refused. Release and re-claim to continue. This guard "
+                "stops a stuck agent from holding a lease forever."
             )
 
         new_expires = now + datetime.timedelta(minutes=self._default_lease)

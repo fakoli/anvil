@@ -3912,10 +3912,11 @@ class TestDoctorHealthy:
         assert env["data"]["healthy"] is True
         assert env["data"]["worst_severity"] in ("ok", "info")
         checks = {f["check"] for f in env["data"]["findings"]}
-        # All six required diagnostics are present (verification_paths: B30).
+        # All required diagnostics are present (verification_paths: B30;
+        # max_claim_age: B46).
         assert checks == {
-            "state_db", "config", "claims", "replay", "reconciliation",
-            "verification_paths",
+            "state_db", "config", "claims", "max_claim_age", "replay",
+            "reconciliation", "verification_paths",
         }
 
     def test_doctor_reports_schema_and_lease_values(self, tmp_path: Path) -> None:
