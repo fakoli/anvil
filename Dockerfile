@@ -32,10 +32,9 @@ WORKDIR /app
 # --- Dependency layer -------------------------------------------------------
 # Copy only the lockfile + manifest first so the (slow) dependency install layer
 # is cached across source-only edits. The engine's pyproject lives under bin/.
-# README is referenced by pyproject's `readme = "../README.md"`, so it must be
-# present for the build backend to resolve metadata.
-COPY bin/pyproject.toml bin/uv.lock /app/bin/
-COPY README.md /app/README.md
+# pyproject's `readme = "README.md"` is build-root-local, so bin/README.md must
+# sit next to pyproject.toml for the build backend to resolve metadata.
+COPY bin/pyproject.toml bin/uv.lock bin/README.md /app/bin/
 
 # Install runtime dependencies into a project-local .venv without the source yet
 # (--no-install-project). Frozen = honor uv.lock exactly; no provider extras by
