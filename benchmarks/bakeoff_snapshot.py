@@ -25,13 +25,24 @@ from typing import Any
 
 
 def snapshot(state_dir: Path, *, actor: str | None = None) -> dict[str, Any]:
-    """Capture the live, in-engine bake-off metrics for one project."""
+    """Capture the live, in-engine bake-off metrics for one project.
+
+    Raises FileNotFoundError if ``state_dir/state.db`` is absent — fail fast on a
+    wrong path rather than silently initializing an empty DB and logging an
+    all-zero snapshot.
+    """
     from anvil.claims.metrics import AcceptRateMetrics
     from anvil.clock import SystemClock
     from anvil.context.packet_metrics import measure_backlog
     from anvil.state.models import TaskStatus
     from anvil.state.sqlite import SqliteBackend
 
+    db_file = state_dir / "state.db"
+    if not db_file.exists():
+        raise FileNotFoundError(
+            f"no anvil state at {db_file} — pass an initialized project's "
+            ".anvil directory (refusing to create an empty DB)."
+        )
     clock = SystemClock()
     backend = SqliteBackend(
         db_path=str(state_dir / "state.db"),
@@ -69,19 +80,26 @@ def snapshot(state_dir: Path, *, actor: str | None = None) -> dict[str, Any]:
 
 
 def _main(argv: list[str] | None = None) -> int:
+    usage = "usage: python benchmarks/bakeoff_snapshot.py <state_dir> [--actor NAME]"
     args = list(argv if argv is not None else sys.argv[1:])
     actor: str | None = None
     if "--actor" in args:
         i = args.index("--actor")
-        actor = args[i + 1] if i + 1 < len(args) else None
+        if i + 1 >= len(args):
+            print(f"error: --actor requires a value\n{usage}", file=sys.stderr)
+            return 2
+        actor = args[i + 1]
         del args[i : i + 2]
     if not args:
-        print(
-            "usage: python benchmarks/bakeoff_snapshot.py <state_dir> [--actor NAME]",
-            file=sys.stderr,
-        )
+        print(usage, file=sys.stderr)
         return 2
-    print(json.dumps(snapshot(Path(args[0]).expanduser(), actor=actor), indent=2))
+    try:
+        snap = snapshot(Path(args[0]).expanduser(), actor=actor)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    # One compact line so the output appends cleanly to a .jsonl bake-off log.
+    print(json.dumps(snap, separators=(",", ":"), sort_keys=True))
     return 0
 
 
