@@ -8,6 +8,20 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Risk-axis eligibility on `anvil next` — the pull-fleet MVP (B45).** `anvil next
+  --max-blast N --max-review-risk M` returns only ready tasks scoring at or below
+  those ceilings, composing with the existing dependency/priority sort and
+  preserving the `-q` exit codes (0 = a task printed, 3 = none eligible). It is
+  **safe-by-construction from the first commit**: the blast/review-risk scores
+  ride on an untrusted filename regex, so a task is eligible for a ceilinged
+  (low-risk, e.g. local) runner ONLY if that dimension is **confirmed**
+  (`Score.blast_radius_confirmed` / `review_risk_confirmed`, new) *and* within the
+  ceiling — an unscored, unconfirmed, or over-ceiling task is treated as
+  frontier-only (ineligible), so the filter fails safe, never routing
+  weakly-scored risk to a weak executor. Defaults make every task unconfirmed
+  until a trusted risk-label source ships (follow-up), so ceilinged `next` is
+  conservative by design; unrestricted `anvil next` is unchanged.
+
 - **Unified actor identity — one `resolve_actor()` across every claim surface (B47).**
   Before this, `anvil claim` defaulted to `$USER`, the bundled heartbeat hook
   passed the Claude `session_id`, gate-check/claim-guard used `$USER`, and the

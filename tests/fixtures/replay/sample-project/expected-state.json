@@ -139,11 +139,13 @@
       "scores": {
         "agent_suitability": null,
         "blast_radius": null,
+        "blast_radius_confirmed": false,
         "complexity": null,
         "context_load": null,
         "explanation": null,
         "parallelizability": null,
-        "review_risk": null
+        "review_risk": null,
+        "review_risk_confirmed": false
       },
       "status": "done",
       "task_type": "feature",
@@ -171,11 +173,13 @@
       "scores": {
         "agent_suitability": null,
         "blast_radius": null,
+        "blast_radius_confirmed": false,
         "complexity": null,
         "context_load": null,
         "explanation": null,
         "parallelizability": null,
-        "review_risk": null
+        "review_risk": null,
+        "review_risk_confirmed": false
       },
       "status": "ready",
       "task_type": "feature",
@@ -203,11 +207,13 @@
       "scores": {
         "agent_suitability": null,
         "blast_radius": null,
+        "blast_radius_confirmed": false,
         "complexity": null,
         "context_load": null,
         "explanation": null,
         "parallelizability": null,
-        "review_risk": null
+        "review_risk": null,
+        "review_risk_confirmed": false
       },
       "status": "ready",
       "task_type": "feature",
