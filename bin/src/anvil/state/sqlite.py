@@ -1041,6 +1041,21 @@ class SqliteBackend:
             ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
+    def first_event_id(self, target_id: str) -> str | None:
+        """Return the id of the earliest-recorded event for ``target_id``.
+
+        Ordered by ``rowid`` (insertion order) so it is robust across both the
+        local (zero-padded ``E000001``) and git (hash-chained ``E-<hex>``)
+        event-id schemes. Used to bind an ``AcceptanceProof`` to the event-log
+        range it covers. Returns None if the target has no events.
+        """
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT id FROM events WHERE target_id = ? ORDER BY rowid ASC LIMIT 1",
+            (target_id,),
+        ).fetchone()
+        return row[0] if row else None
+
     def get_latest_evidence(self, task_id: str) -> Evidence | None:
         """Return the most recently submitted Evidence for task_id, or None."""
         conn = self._require_conn()

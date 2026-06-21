@@ -67,6 +67,7 @@ version = "0.0.9"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "cryptography" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "pydantic" },
@@ -105,6 +106,7 @@ requires-dist = [
     { name = "anthropic", extras = ["bedrock"], marker = "extra == 'all-providers'", specifier = ">=0.30" },
     { name = "anthropic", extras = ["bedrock"], marker = "extra == 'bedrock'", specifier = ">=0.30" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.26" },
+    { name = "cryptography", specifier = ">=42" },
     { name = "fastmcp" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "openai", marker = "extra == 'all-providers'", specifier = ">=1.0" },

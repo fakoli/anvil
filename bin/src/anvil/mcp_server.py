@@ -453,7 +453,11 @@ def _resolve_strict_evidence(strict: bool | None, state_dir: Path) -> bool:
 
     Precedence (same as the CLI):
 
-        explicit ``strict`` param (True/False)  >  config.strict_evidence  >  False
+        explicit ``strict`` param  >  $ANVIL_STRICT_EVIDENCE  >  config  >  False
+
+    The ``ANVIL_STRICT_EVIDENCE`` env lets an autonomous loop / fleet enforce
+    strict mode across every unattended accept without per-project config
+    (B48 acceptance 1).
 
     Args:
         strict: Tri-state override. ``True``/``False`` are explicit; ``None``
@@ -473,6 +477,16 @@ def _resolve_strict_evidence(strict: bool | None, state_dir: Path) -> bool:
     """
     if strict is not None:
         return strict
+
+    from anvil.cli.packet_apply import (
+        _strict_evidence_env,
+        _warn_if_env_overrides_strict_config,
+    )
+
+    env = _strict_evidence_env()
+    if env is not None:
+        _warn_if_env_overrides_strict_config(env, state_dir)
+        return env
 
     config_path = state_dir / "config.yaml"
     if not config_path.exists():
@@ -2643,7 +2657,7 @@ def apply_review_decision(
         }
 
         try:
-            backend.append(EventDraft(
+            applied_event = backend.append(EventDraft(
                 timestamp=now,
                 actor=reviewer,
                 action="task.applied",
@@ -2653,6 +2667,13 @@ def apply_review_decision(
             ))
         except EventRejected as exc:
             raise ToolError(str(exc)) from exc
+
+        # B48 part 2: on acceptance, emit a portable signed AcceptanceProof
+        # (best-effort, file-only — mirrors the CLI apply path).
+        if approve and applied_event is not None:
+            from anvil.cli.packet_apply import emit_acceptance_proof
+
+            emit_acceptance_proof(state_dir, backend, task_id, applied_event)
 
         # Read fresh status after the backend's auto-promotion (accepted → done
         # on approval, needs_review → drafted on rejection, etc.).

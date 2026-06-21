@@ -532,3 +532,53 @@ class TestTypedProofGateEndToEnd:
         )
         assert res.exit_code != 0
         assert _status(tmp_path, task_id) == "needs_review"
+
+    def test_acceptance_emits_a_verifiable_signed_proof(
+        self, tmp_path: Path
+    ) -> None:
+        """B48 part 2: accepting a task writes a portable signed AcceptanceProof
+        that carries the observed CommandProof and verifies against its signer."""
+        from anvil import signing
+        from anvil.state.models import AcceptanceProof
+
+        task_id = _planned(tmp_path)
+        assert _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test"]
+        ).exit_code == 0
+        _inject_command_proof(tmp_path, task_id, _PLANNED_VERIFY_CMD, exit_code=0)
+        assert _invoke(
+            tmp_path,
+            [
+                "submit", task_id,
+                "--commands", _PLANNED_VERIFY_CMD,
+                "--files-changed", "src/app/converter.py",
+                "--actor", "agent-test",
+            ],
+        ).exit_code == 0
+        res = _invoke(
+            tmp_path,
+            ["apply", task_id, "--approve", "--strict", "--reviewer", "human", "--json"],
+        )
+        assert res.exit_code == 0, res.output
+        proof_path = _json.loads(res.stdout.strip())["data"]["proof_path"]
+        assert proof_path is not None, "acceptance should emit a proof"
+        pf = Path(proof_path)
+        assert pf.exists()
+
+        proof = AcceptanceProof.model_validate_json(pf.read_text(encoding="utf-8"))
+        assert proof.task_id == task_id
+        assert proof.project_id, "proof must be bound to its originating project"
+        assert any(
+            cp.command == _PLANNED_VERIFY_CMD and cp.exit_code == 0
+            for cp in proof.command_results
+        ), "the proof must carry the observed passing command"
+        # verifies against its own signer (trust the embedded signer for the test)
+        ok, problems = signing.verify_acceptance(proof, {proof.signer_id})
+        assert ok, problems
+        # and the CLI verifier accepts it with a matching trust list
+        trust = tmp_path / "trust.txt"
+        trust.write_text(proof.signer_id + "\n", encoding="utf-8")
+        vres = _invoke(
+            tmp_path, ["proof", "verify", proof_path, "--trust", str(trust), "--json"]
+        )
+        assert vres.exit_code == 0, vres.output

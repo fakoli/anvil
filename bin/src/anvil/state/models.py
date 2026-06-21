@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import enum
+import json
 import re
 from typing import (  # noqa: UP035 — TypeAlias required for 3.11 compat
     Annotated,
@@ -69,6 +70,8 @@ __all__ = [
     "Task",
     "Claim",
     "Evidence",
+    "EventRange",
+    "AcceptanceProof",
     "Decision",
     "Review",
     "EventDraft",
@@ -561,6 +564,75 @@ class Evidence(BaseModel):
     @classmethod
     def _validate_utc(cls, v: datetime.datetime) -> datetime.datetime:
         return _require_utc(v, "submitted_at")
+
+
+class EventRange(BaseModel):
+    """The inclusive event-id span an ``AcceptanceProof`` attests to."""
+
+    model_config = _MODEL_CONFIG
+
+    start: EventID  # first event recorded for the task
+    end: EventID  # the task.applied (acceptance) event
+
+
+class AcceptanceProof(BaseModel):
+    """A portable, signed receipt emitted when a task is accepted (B48 part 2).
+
+    Binds the task + claim/lease + actor + the observed ``CommandProof``s + the
+    event-log range, with a detached Ed25519 signature so it verifies off-host
+    with only the public key (plus a trust list). This is the acceptance
+    *envelope* that WRAPS the per-evidence ``ProofArtifact`` union — a distinct
+    concept, hence a distinct name.
+
+    The signature covers :meth:`signed_bytes` — every field EXCEPT the signature
+    envelope (``signer_id`` / ``public_key`` / ``signature``) — so a verifier
+    reconstructs identical bytes from the loaded proof and checks them against
+    the embedded public key.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    format_version: int = 1
+    # project_id binds the proof to its originating project so a signed proof
+    # for a common task id (e.g. "T001") in one repo cannot be replayed as a
+    # proof for the same id in another. Part of the signed payload.
+    project_id: str
+    task_id: TaskID
+    claim_id: ClaimID
+    actor: str
+    command_results: list[CommandProof] = Field(default_factory=list)
+    event_range: EventRange
+    created_at: datetime.datetime
+    # --- signature envelope (NOT covered by the signature) ---
+    algorithm: str = "ed25519"
+    signer_id: str
+    public_key: str  # hex-encoded raw Ed25519 public key
+    # Filled in by signing.sign_proof after construction; "" means unsigned
+    # (verification rejects an empty signature).
+    signature: str = ""  # hex-encoded detached signature over signed_bytes()
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _validate_utc(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "created_at")
+
+    def signed_payload(self) -> dict[str, Any]:
+        """The canonical core the detached signature covers.
+
+        Built from ``model_dump(mode="json")`` minus the signature envelope, so
+        signer and verifier serialize identically regardless of who holds the
+        private key.
+        """
+        payload = self.model_dump(mode="json")
+        for envelope_field in ("signer_id", "public_key", "signature"):
+            payload.pop(envelope_field, None)
+        return payload
+
+    def signed_bytes(self) -> bytes:
+        """Deterministic bytes to sign / verify: canonical JSON of the core."""
+        return json.dumps(
+            self.signed_payload(), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
 
 
 class Decision(BaseModel):

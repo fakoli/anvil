@@ -8,6 +8,24 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Portable signed AcceptanceProof + strict-by-default for loops (B48, part 2 of 2).**
+  On acceptance the engine now emits a typed, **signed** `AcceptanceProof` — a
+  portable receipt binding the task id, claim/lease id, actor, the observed
+  `CommandProof`s, and the event-log range it covers, with a **detached Ed25519
+  signature** over a canonical serialization. It is written to
+  `<state>/proofs/<task>-<event>.json` and verifies **off-host with only the
+  signer's public key** (`anvil proof verify <file> --trust <list>`): the three
+  checks — valid signature, genuine `signer_id` fingerprint, and key in the
+  trust list — make it verifiable *without trusting the producer* (asymmetric,
+  not HMAC). Keys are a per-runner Ed25519 keypair under `~/.anvil/keys/`
+  (override `ANVIL_KEYS_DIR`); the public-key fingerprint is the signer id.
+  Emission is best-effort and **file-only** (never blocks acceptance, never
+  enters replayable state, so replay-equivalence stays deterministic).
+  `ANVIL_STRICT_EVIDENCE` joins the strict-evidence precedence
+  (`--strict` flag > env > config > off) so an autonomous loop/fleet can enforce
+  the evidence gate everywhere without per-project config. `cryptography` is now
+  an explicit dependency. Builds on part 1's typed `CommandProof`s.
+
 - **Typed, observed evidence proofs (SL-3 / B48, part 1 of 2).** The review gate
   no longer has to trust strings. A new typed `ProofArtifact` union
   (`CommandProof` / `DiffProof` / `LinkProof` / `AssertionProof`) is carried on

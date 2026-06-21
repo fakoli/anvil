@@ -37,6 +37,7 @@ from anvil.cli.plan import (
     show,
 )
 from anvil.cli.prd import prd_app
+from anvil.cli.proof import proof_app
 from anvil.cli.replay import replay
 from anvil.cli.run_workflow import run_workflow
 from anvil.cli.scan import scan
@@ -65,6 +66,7 @@ app.add_typer(review_app, name="review")
 app.add_typer(hook_app, name="hook")
 app.add_typer(sync_app, name="sync")
 app.add_typer(migrate_app, name="migrate")
+app.add_typer(proof_app, name="proof")
 
 # ---------------------------------------------------------------------------
 # --version callback
