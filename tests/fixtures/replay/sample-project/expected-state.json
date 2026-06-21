@@ -45,6 +45,7 @@
       "known_limitations": null,
       "output_excerpt": "5 passed",
       "pr_url": null,
+      "proofs": [],
       "screenshots": [],
       "submitted_at": "2026-05-24T18:30:00Z",
       "submitted_by": "agent-alpha",
@@ -151,7 +152,8 @@
       "verification": {
         "commands": [],
         "manual_steps": [],
-        "required_evidence": []
+        "required_evidence": [],
+        "required_proofs": []
       }
     },
     {
@@ -182,7 +184,8 @@
       "verification": {
         "commands": [],
         "manual_steps": [],
-        "required_evidence": []
+        "required_evidence": [],
+        "required_proofs": []
       }
     },
     {
@@ -213,7 +216,8 @@
       "verification": {
         "commands": [],
         "manual_steps": [],
-        "required_evidence": []
+        "required_evidence": [],
+        "required_proofs": []
       }
     }
   ]

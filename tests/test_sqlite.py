@@ -5086,16 +5086,17 @@ class TestSyncMappingHandler:
 
 class TestSchemaVersionPhase8:
     """The bump from SCHEMA_VERSION=1 → 2 → 3 signals Phase 8; 4 is v1.22.0;
-    5 is T015 (non-feature task types — tasks.task_type column).
+    5 is T015 (non-feature task types — tasks.task_type column); 6 is SL-3 / B48
+    (typed proofs — evidence.proofs column).
 
-    v5 adds ``tasks.task_type TEXT NOT NULL DEFAULT 'feature'`` on top of the
-    v4 git-backed-events Phase A schema; v0/v1/v2/v3/v4 are auto-upgraded on
-    first open (see TestSchemaAutoUpgrade below and docs/migrations.md).
+    v6 adds ``evidence.proofs TEXT NOT NULL DEFAULT '[]'`` on top of the v5
+    schema; v0/v1/v2/v3/v4/v5 are auto-upgraded on first open (see
+    TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_five(self) -> None:
-        """The T015 non-feature-task-types ship floor is SCHEMA_VERSION == 5."""
-        assert SCHEMA_VERSION == 5
+    def test_schema_version_is_six(self) -> None:
+        """The SL-3 / B48 typed-proofs ship floor is SCHEMA_VERSION == 6."""
+        assert SCHEMA_VERSION == 6
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -5117,7 +5118,7 @@ class TestSchemaVersionPhase8:
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 5
+            assert v == 6
         finally:
             b.close()
 
@@ -5366,27 +5367,28 @@ class TestGetSyncMappingExternalSystemKwarg:
 
 
 class TestSchemaAutoUpgrade:
-    """SF-6: v0 / v1 / v2 / v3 / v4 → v5 auto-upgrade on initialize().
+    """SF-6: v0 / v1 / v2 / v3 / v4 / v5 → v6 auto-upgrade on initialize().
 
     Pre-Phase-8 dbs are upgraded purely additively — the new sync_mappings
     columns are nullable and the new UNIQUE cannot be violated by any
     pre-existing row. The v4 step (v1.22.0 git-backed events) adds only the
     nullable events.seq column; the v5 step (T015) adds only the
-    DEFAULT-backfilled tasks.task_type column.
+    DEFAULT-backfilled tasks.task_type column; the v6 step (SL-3 / B48) adds
+    only the DEFAULT-backfilled evidence.proofs column.
     """
 
-    def test_fresh_init_yields_v5(self, tmp_path: Path) -> None:
-        """A brand-new initialize() lands on v5 directly (no upgrade fired)."""
+    def test_fresh_init_yields_v6(self, tmp_path: Path) -> None:
+        """A brand-new initialize() lands on v6 directly (no upgrade fired)."""
         b = _make_backend(tmp_path)
         try:
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 5
+            assert v == 6
         finally:
             b.close()
 
-    def test_v1_db_auto_upgrades_to_v5(self, tmp_path: Path) -> None:
+    def test_v1_db_auto_upgrades_to_v6(self, tmp_path: Path) -> None:
         """A db marked user_version=1 (no sync_mappings rows) upgrades to v5."""
         db_path = str(tmp_path / "state.db")
         events_path = str(tmp_path / "events.jsonl")
@@ -5401,7 +5403,7 @@ class TestSchemaAutoUpgrade:
         conn.execute("PRAGMA user_version = 1")
         conn.commit()
         conn.close()
-        # Step 3: reopen — auto-upgrade must fire and bump back to 5.
+        # Step 3: reopen — auto-upgrade must fire and bump back to 6.
         clock2 = _make_clock()
         b2 = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock2)
         b2.initialize()
@@ -5409,11 +5411,11 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(db_path)
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 5
+            assert v == 6
         finally:
             b2.close()
 
-    def test_v2_db_auto_upgrades_to_v5(self, tmp_path: Path) -> None:
+    def test_v2_db_auto_upgrades_to_v6(self, tmp_path: Path) -> None:
         """A db marked user_version=2 upgrades to v5 without losing data."""
         db_path = str(tmp_path / "state.db")
         events_path = str(tmp_path / "events.jsonl")
@@ -5437,14 +5439,14 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(db_path)
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 5
+            assert v == 6
             proj = b2.get_project()
             assert proj is not None
             assert proj.id == "proj-1"
         finally:
             b2.close()
 
-    def test_v3_db_auto_upgrades_to_v5_adding_seq_column(
+    def test_v3_db_auto_upgrades_to_v6_adding_seq_column(
         self, tmp_path: Path
     ) -> None:
         """A db marked user_version=3 gains the nullable events.seq column.
@@ -5483,14 +5485,14 @@ class TestSchemaAutoUpgrade:
                 r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()
             }
             conn.close()
-            assert v == 5
+            assert v == 6
             assert row is not None
             assert row[0] is None, "pre-v4 event rows must keep seq NULL"
             assert "task_type" in cols, "v5 must add tasks.task_type"
         finally:
             b2.close()
 
-    def test_v4_db_auto_upgrades_to_v5_adding_task_type_column(
+    def test_v4_db_auto_upgrades_to_v6_adding_task_type_column(
         self, tmp_path: Path
     ) -> None:
         """A db marked user_version=4 gains tasks.task_type, backfilled to feature.
@@ -5536,9 +5538,49 @@ class TestSchemaAutoUpgrade:
                 "SELECT task_type FROM tasks WHERE id = 'T001'"
             ).fetchone()
             conn.close()
-            assert v == 5
+            assert v == 6
             assert tt is not None
             assert tt[0] == "feature", "pre-v5 rows backfill to 'feature'"
+        finally:
+            b2.close()
+
+    def test_v5_db_auto_upgrades_to_v6_adding_proofs_column(
+        self, tmp_path: Path
+    ) -> None:
+        """A db marked user_version=5 gains evidence.proofs, backfilled to '[]'.
+
+        v5 (T015) is the immediate predecessor of v6 (SL-3 / B48 typed proofs).
+        The DEFAULT '[]' backfills every existing evidence row to "no typed
+        proofs," which is the pre-v6 meaning, so the upgrade is purely additive.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        Path(events_path).touch()
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()
+        b.append(_make_project_event(event_id="E000001"))
+        b.close()
+        # Forge to v5 AND drop the proofs column to simulate a real v5 table
+        # (the fresh DDL above already created the v6 shape).
+        conn = sqlite3.connect(db_path)
+        conn.execute("ALTER TABLE evidence DROP COLUMN proofs")
+        conn.execute("PRAGMA user_version = 5")
+        conn.commit()
+        conn.close()
+        # Reopen — the v5→v6 branch must add proofs and bump.
+        clock2 = _make_clock()
+        b2 = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock2)
+        b2.initialize()
+        try:
+            conn = sqlite3.connect(db_path)
+            v = conn.execute("PRAGMA user_version").fetchone()[0]
+            cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(evidence)").fetchall()
+            }
+            conn.close()
+            assert v == 6
+            assert "proofs" in cols, "v6 must add evidence.proofs"
         finally:
             b2.close()
 
@@ -5572,7 +5614,7 @@ class TestSchemaAutoUpgrade:
             b._conn.execute("PRAGMA user_version = 1")  # noqa: SLF001
             b.initialize()  # takes early-return; _check_schema_version sees v1
             v = b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
-            assert v == 5
+            assert v == 6
         finally:
             b.close()
 
@@ -6439,9 +6481,9 @@ class TestV2ToV3MigrationAppliesColumnAdditions:
             # Default values for previously-absent columns: NULL.
             assert row[0] is None
             assert row[1] is None
-            # user_version is now the current SCHEMA_VERSION (5).
+            # user_version is now the current SCHEMA_VERSION (6).
             v = b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
-            assert v == 5
+            assert v == 6
         finally:
             b.close()
 

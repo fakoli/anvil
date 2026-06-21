@@ -149,6 +149,66 @@ def _require_screenshots_evidence(tmp_path: Path, task_id: str) -> None:
         conn.close()
 
 
+def _clear_requirements(tmp_path: Path, task_id: str) -> None:
+    """Wipe a task's verification so it declares NO requirements at all.
+
+    The planner now emits typed ``required_proofs`` from the verification
+    commands (SL-3 / B48), so a raw planned task is no longer requirement-free.
+    Tests that want the genuine "nothing to satisfy" gate no-op clear them here.
+    """
+    db_path = tmp_path / ".anvil" / "state.db"
+    conn = _sqlite3.connect(str(db_path))
+    try:
+        verification_json = _json.dumps(
+            {
+                "commands": [],
+                "manual_steps": [],
+                "required_evidence": [],
+                "required_proofs": [],
+            }
+        )
+        conn.execute(
+            "UPDATE tasks SET verification = ? WHERE id = ?",
+            (verification_json, task_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _inject_command_proof(
+    tmp_path: Path, task_id: str, command: str, exit_code: int
+) -> None:
+    """Simulate the PostToolUse hook: write a CommandProof to the active claim's
+    evidence buffer so ``anvil submit`` reconciles it into Evidence.proofs."""
+    import datetime as _dt
+    import hashlib as _hashlib
+
+    db_path = tmp_path / ".anvil" / "state.db"
+    conn = _sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT id FROM claims WHERE task_id=? AND status='active' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "no active claim to attach a proof to"
+    buf = tmp_path / ".anvil" / ".evidence-buffer"
+    buf.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "kind": "command",
+        "timestamp": _dt.datetime.now(_dt.UTC).isoformat(),
+        "command": command,
+        "exit_code": exit_code,
+        "output_sha256": _hashlib.sha256(b"out").hexdigest(),
+        "stdout_excerpt": "out",
+        "stderr_excerpt": "",
+        "actor": "agent-test",
+    }
+    (buf / f"{row[0]}.json").write_text(_json.dumps(rec) + "\n", encoding="utf-8")
+
+
 def _status(tmp_path: Path, task_id: str) -> str | None:
     db_path = tmp_path / ".anvil" / "state.db"
     conn = _sqlite3.connect(str(db_path))
@@ -275,9 +335,12 @@ class TestStrictAllowsSufficient:
         assert _status(tmp_path, task_id) == "done"
 
     def test_strict_no_required_evidence_is_noop(self, tmp_path: Path) -> None:
-        """A task with no required_evidence: strict is a no-op → done."""
+        """A task with NO requirements at all: strict is a no-op → done."""
         task_id = _planned(tmp_path)
-        # Do NOT inject required_evidence; default planner task has none.
+        # The planner now emits typed required_proofs from the verification
+        # commands; clear ALL requirements so this exercises the genuine
+        # "nothing to satisfy" no-op path.
+        _clear_requirements(tmp_path, task_id)
         assert _invoke(
             tmp_path, ["claim", task_id, "--actor", "agent-test"]
         ).exit_code == 0
@@ -395,3 +458,77 @@ class TestStrictJsonRejection:
         assert envelope["ok"] is True
         assert envelope["command"] == "apply"
         assert envelope["data"]["decision"] == "rejected"
+
+
+# ===========================================================================
+# (e) SL-3 / B48 — typed CommandProof gate, end to end
+# ===========================================================================
+
+
+# The single verification command the _PRD declares; the planner turns it into a
+# typed command ProofRequirement, so the gate now demands an observed exit-0
+# CommandProof for exactly this command.
+_PLANNED_VERIFY_CMD = "pytest tests/test_converter.py -v"
+
+
+class TestTypedProofGateEndToEnd:
+    """The full observed-proof chain: planner emits required_proofs → hook
+    buffers a CommandProof → submit reconciles it → strict apply enforces it."""
+
+    def test_strict_passes_when_observed_command_exited_zero(
+        self, tmp_path: Path
+    ) -> None:
+        task_id = _planned(tmp_path)
+        assert _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test"]
+        ).exit_code == 0
+        _inject_command_proof(tmp_path, task_id, _PLANNED_VERIFY_CMD, exit_code=0)
+        assert _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                _PLANNED_VERIFY_CMD,
+                "--files-changed",
+                "src/app/converter.py",
+                "--actor",
+                "agent-test",
+            ],
+        ).exit_code == 0
+        res = _invoke(
+            tmp_path,
+            ["apply", task_id, "--approve", "--strict", "--reviewer", "human"],
+        )
+        assert res.exit_code == 0, res.output
+        assert _status(tmp_path, task_id) == "done"
+
+    def test_strict_refuses_when_observed_command_exited_nonzero(
+        self, tmp_path: Path
+    ) -> None:
+        """The closed hole: a recorded command that FAILED (exit 1) must not let
+        the task through the strict gate, even though it 'ran'."""
+        task_id = _planned(tmp_path)
+        assert _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test"]
+        ).exit_code == 0
+        _inject_command_proof(tmp_path, task_id, _PLANNED_VERIFY_CMD, exit_code=1)
+        assert _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                _PLANNED_VERIFY_CMD,
+                "--files-changed",
+                "src/app/converter.py",
+                "--actor",
+                "agent-test",
+            ],
+        ).exit_code == 0
+        res = _invoke(
+            tmp_path,
+            ["apply", task_id, "--approve", "--strict", "--reviewer", "human"],
+        )
+        assert res.exit_code != 0
+        assert _status(tmp_path, task_id) == "needs_review"

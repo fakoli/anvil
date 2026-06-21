@@ -22,6 +22,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from anvil.state.models import ProofArtifact
+
 
 class ProjectCreatedPayload(BaseModel):
     """Payload for 'project.created' — maps directly to the Project model."""
@@ -322,6 +324,10 @@ class EvidenceSubmittedPayload(BaseModel):
     commit_sha: str | None = None
     screenshots: list[Any] = []
     known_limitations: str | None = None
+    # SL-3 / B48: typed proofs, validated at write time (a malformed proof
+    # raises here, not silently at replay). Defaults to [] so pre-SL-3 logs
+    # (no ``proofs`` key) stay replayable.
+    proofs: list[ProofArtifact] = Field(default_factory=list)
 
 
 class TaskAppliedPayload(BaseModel):

@@ -19,7 +19,12 @@ from __future__ import annotations
 import datetime
 import enum
 import re
-from typing import Any, TypeAlias  # noqa: UP035 — TypeAlias required for 3.11 compat
+from typing import (  # noqa: UP035 — TypeAlias required for 3.11 compat
+    Annotated,
+    Any,
+    Literal,
+    TypeAlias,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -47,9 +52,16 @@ __all__ = [
     "KNOWN_EXTERNAL_SYSTEMS",
     "SyncState",
     "ConflictResolutionStrategy",
+    "ProofKind",
     # Models
     "Score",
     "Verification",
+    "CommandProof",
+    "DiffProof",
+    "LinkProof",
+    "AssertionProof",
+    "ProofArtifact",
+    "ProofRequirement",
     "Project",
     "PRD",
     "Requirement",
@@ -260,6 +272,109 @@ class Score(BaseModel):
     explanation: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Typed proof model (SL-3 / B48 acceptance 2) — additive, non-breaking.
+#
+# A proof is something the engine *observed* (a command's real exit code, a
+# diff, a link) or an explicit honour-system *assertion* — typed so the gate
+# can tell them apart. ``CommandProof`` is the load-bearing one: it carries the
+# real ``exit_code``, so a requirement can demand "this command was observed to
+# exit 0", which a free-text claim can never satisfy. See
+# docs/specs/2026-06-19-sl3-proofartifact.md.
+# ---------------------------------------------------------------------------
+
+
+class ProofKind(enum.StrEnum):
+    """Discriminator for the ``ProofArtifact`` union. str-serialisable (house rule)."""
+
+    command = "command"
+    diff = "diff"
+    link = "link"
+    assertion = "assertion"
+
+
+class CommandProof(BaseModel):
+    """A command the engine observed run: its real exit code + an output hash."""
+
+    model_config = _MODEL_CONFIG
+
+    kind: Literal[ProofKind.command] = ProofKind.command
+    command: str
+    exit_code: int
+    output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    captured_at: datetime.datetime
+
+    @field_validator("captured_at", mode="after")
+    @classmethod
+    def _validate_utc(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "captured_at")
+
+
+class DiffProof(BaseModel):
+    """A unified diff the engine observed (a later drift check keys on this)."""
+
+    model_config = _MODEL_CONFIG
+
+    kind: Literal[ProofKind.diff] = ProofKind.diff
+    files_changed: list[str] = Field(default_factory=list)
+    diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    insertions: int = Field(default=0, ge=0)
+    deletions: int = Field(default=0, ge=0)
+
+
+class LinkProof(BaseModel):
+    """An external artifact reference (PR, CI run, screenshot URL)."""
+
+    model_config = _MODEL_CONFIG
+
+    kind: Literal[ProofKind.link] = ProofKind.link
+    url: str
+    label: str | None = None
+
+
+class AssertionProof(BaseModel):
+    """A human/agent attestation — the ONLY honour-system proof, typed as such
+    so the gate can refuse to let it satisfy a ``CommandProof`` requirement."""
+
+    model_config = _MODEL_CONFIG
+
+    kind: Literal[ProofKind.assertion] = ProofKind.assertion
+    statement: str
+    attested_by: str
+
+
+# A serialized proof always carries its ``kind``, so the SQLite JSON column and
+# the events.jsonl payload round-trip through ``TypeAdapter(list[ProofArtifact])``
+# deterministically. ``ProofArtifact`` is a discriminated union, not a BaseModel.
+ProofArtifact = Annotated[
+    CommandProof | DiffProof | LinkProof | AssertionProof,
+    Field(discriminator="kind"),
+]
+
+
+class ProofRequirement(BaseModel):
+    """One typed thing a Task demands before it can be accepted."""
+
+    model_config = _MODEL_CONFIG
+
+    kind: ProofKind
+    # command requirements pin the exact command and the passing exit set:
+    command: str | None = None
+    passing_exit_codes: list[int] = Field(default_factory=lambda: [0])
+    # link requirements may pin a required URL substring (optional):
+    link_contains: str | None = None
+    label: str  # human description for packets / errors
+
+    @model_validator(mode="after")
+    def _command_requirements_pin_a_command(self) -> ProofRequirement:
+        # A kind=command requirement with command=None can never be satisfied
+        # (CommandProof.command is always a str), so reject it at construction
+        # rather than letting the gate fail it silently.
+        if self.kind is ProofKind.command and self.command is None:
+            raise ValueError("command-kind ProofRequirement requires `command`")
+        return self
+
+
 class Verification(BaseModel):
     """Verification instructions embedded on a Task."""
 
@@ -268,6 +383,10 @@ class Verification(BaseModel):
     commands: list[str] = Field(default_factory=list)
     manual_steps: list[str] = Field(default_factory=list)
     required_evidence: list[str] = Field(default_factory=list)
+    # SL-3 / B48: typed, non-gameable requirements. Additive — ``required_evidence``
+    # (the legacy free-text substring path) stays for back-compat; the gate
+    # evaluates both. New planners populate ``required_proofs``.
+    required_proofs: list[ProofRequirement] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +550,10 @@ class Evidence(BaseModel):
     commit_sha: str | None = None
     screenshots: list[str] = Field(default_factory=list)
     known_limitations: str | None = None
+    # SL-3 / B48: typed proofs the gate reads (additive). The legacy string
+    # fields above stay as descriptive metadata; the gate no longer needs them
+    # once a task declares ``required_proofs``.
+    proofs: list[ProofArtifact] = Field(default_factory=list)
     submitted_at: datetime.datetime
     submitted_by: str
 

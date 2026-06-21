@@ -183,29 +183,42 @@ def hook_capture_evidence(
         if not state_dir.exists():
             raise typer.Exit(code=0)
 
-        # Read stdout/stderr excerpts from temp files (up to 4000 chars each).
-        stdout_excerpt = ""
+        import hashlib
+
+        # Read FULL stdout/stderr from temp files. The output hash is over the
+        # full output (before truncation) so output_sha256 records what actually
+        # ran, not a truncated excerpt (SL-3 / B48). The 4000-char excerpts are
+        # kept only as human-readable descriptive metadata.
+        stdout_raw = ""
         if stdout_file is not None:
             try:
-                stdout_excerpt = stdout_file.read_text(encoding="utf-8", errors="replace")[:4000]
+                stdout_raw = stdout_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
 
-        stderr_excerpt = ""
+        stderr_raw = ""
         if stderr_file is not None:
             try:
-                stderr_excerpt = stderr_file.read_text(encoding="utf-8", errors="replace")[:4000]
+                stderr_raw = stderr_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
 
-        # Build the evidence record.
+        output_sha256 = hashlib.sha256(
+            (stdout_raw + stderr_raw).encode("utf-8")
+        ).hexdigest()
+
+        # Build the evidence record — a CommandProof-shaped buffer line that
+        # ``anvil submit`` reconciles into Evidence.proofs. ``kind`` +
+        # ``output_sha256`` are what make it a typed, observed proof.
         now = datetime.datetime.now(datetime.UTC)
         record: dict[str, object] = {
+            "kind": "command",
             "timestamp": now.isoformat(),
             "command": command,
             "exit_code": exit_code,
-            "stdout_excerpt": stdout_excerpt,
-            "stderr_excerpt": stderr_excerpt,
+            "output_sha256": output_sha256,
+            "stdout_excerpt": stdout_raw[:4000],
+            "stderr_excerpt": stderr_raw[:4000],
             "actor": actor,
         }
 

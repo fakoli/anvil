@@ -15,7 +15,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from anvil.state.models import Evidence, Review, ReviewDecision, Task
+from anvil.state.models import (
+    AssertionProof,
+    CommandProof,
+    DiffProof,
+    Evidence,
+    LinkProof,
+    ProofArtifact,
+    ProofKind,
+    ProofRequirement,
+    Review,
+    ReviewDecision,
+    Task,
+)
 
 __all__ = [
     "DeferredFinding",
@@ -188,44 +200,45 @@ def deferred_findings_for_files(
 
 
 def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
-    """Validate that Evidence satisfies Task.verification.required_evidence.
+    """Validate that Evidence satisfies the Task's declared requirements.
 
-    For each item in task.verification.required_evidence (e.g. "test output",
-    "PR link", "screenshots"), checks whether the Evidence has corresponding
-    content using the following substring-match rules:
+    Two requirement surfaces are checked, and BOTH must be satisfied:
 
-    - "test" / "pytest" / "cargo test"   → check evidence.commands_run
-    - "PR" / "pull request"              → check evidence.pr_url
-    - "screenshot"                       → check evidence.screenshots (non-empty)
-    - "files changed"                    → check evidence.files_changed (non-empty)
-    - anything else                      → check evidence.output_excerpt OR
-                                           evidence.known_limitations
+    1. ``task.verification.required_proofs`` (SL-3 / B48) — typed, non-gameable.
+       A ``command`` requirement is satisfied **only** by a :class:`CommandProof`
+       whose ``exit_code`` is in ``passing_exit_codes``; an ``assertion`` proof
+       can never impersonate a command. See :func:`_proof_satisfies`.
+    2. ``task.verification.required_evidence`` (legacy) — free-text substring
+       heuristics over the descriptive ``Evidence`` string fields. Kept for
+       back-compat; the planner emits typed ``required_proofs`` instead, so this
+       list is empty for engine-created tasks. Rules (case-insensitive ``in``):
 
-    The match is case-insensitive and uses substring containment ("in").
-    Conservative: missing if no plausible match is found for the required item.
+       - "test" / "pytest" / "cargo test"   → check evidence.commands_run
+       - "PR" / "pull request"              → check evidence.pr_url
+       - "screenshot"                       → check evidence.screenshots
+       - "files changed"                    → check evidence.files_changed
+       - anything else                      → output_excerpt / known_limitations
 
     Args:
-        task:     The Task whose verification.required_evidence list to check.
+        task:     The Task whose verification requirements to check.
         evidence: The Evidence submitted by the agent.
 
     Returns:
-        A tuple (passed, missing_items) where:
-        - passed       is True if every required item is satisfied.
-        - missing_items is a human-readable list of unsatisfied required items.
-                       Empty list means everything passed.
+        A tuple (passed, missing_items) where ``passed`` is True iff every
+        required item — typed proof and legacy string — is satisfied, and
+        ``missing_items`` lists the unsatisfied ones (typed requirements
+        contribute their ``label``). Empty ``missing_items`` means it passed.
 
     Usage by ``cli apply``:
         passed, missing = evidence_complete(task, evidence)
         if not passed:
             typer.echo(f"Missing evidence: {missing}", err=True)
     """
-    required = task.verification.required_evidence
-    if not required:
-        return True, []
-
     missing: list[str] = []
 
-    for item in required:
+    # Legacy free-text path (dormant for engine-created tasks; kept for
+    # back-compat). Substring heuristics over the descriptive string fields.
+    for item in task.verification.required_evidence:
         item_lower = item.lower()
 
         if _is_test_related(item_lower):
@@ -259,7 +272,49 @@ def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
         if not satisfied:
             missing.append(item)
 
+    # SL-3 / B48 typed path: each requirement is satisfied only by a matching
+    # *observed* proof. This is the non-gameable surface — a command requirement
+    # needs a CommandProof whose exit_code is in the passing set, which a
+    # free-text claim cannot fabricate.
+    for req in task.verification.required_proofs:
+        if not _proof_satisfies(req, evidence.proofs):
+            missing.append(req.label)
+
+    # A legacy required_evidence string and a typed required_proofs label can
+    # coincide; report each missing item once (order-preserving dedup) so the
+    # reviewer doesn't see a confusing duplicate.
+    missing = list(dict.fromkeys(missing))
     return len(missing) == 0, missing
+
+
+def _proof_satisfies(req: ProofRequirement, proofs: list[ProofArtifact]) -> bool:
+    """True iff some proof in ``proofs`` satisfies the typed requirement ``req``.
+
+    The discriminator (``req.kind``) selects the predicate. A ``command``
+    requirement is the load-bearing one: it matches only a :class:`CommandProof`
+    whose ``command`` equals the pinned command AND whose ``exit_code`` is in
+    ``passing_exit_codes``. There is no substring branch and no field-flattening
+    fallback, so an :class:`AssertionProof` carrying the command text cannot
+    satisfy it, and a recorded command that exited non-zero is correctly refused.
+    """
+    if req.kind is ProofKind.command:
+        return any(
+            isinstance(p, CommandProof)
+            and p.command == req.command
+            and p.exit_code in req.passing_exit_codes
+            for p in proofs
+        )
+    if req.kind is ProofKind.diff:
+        return any(isinstance(p, DiffProof) for p in proofs)
+    if req.kind is ProofKind.link:
+        return any(
+            isinstance(p, LinkProof)
+            and (req.link_contains is None or req.link_contains in p.url)
+            for p in proofs
+        )
+    if req.kind is ProofKind.assertion:
+        return any(isinstance(p, AssertionProof) for p in proofs)
+    return False  # pragma: no cover — ProofKind is exhaustive
 
 
 # ---------------------------------------------------------------------------
