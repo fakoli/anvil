@@ -127,7 +127,7 @@ Note: the shipped model does *not* carry per-command exit codes or a typed `Arti
 
 ### Why hooks capture, not the agent
 
-`capture-evidence.sh` runs as a PostToolUse hook on `Bash` and records the verification commands the agent runs that match the configured patterns (pytest, ruff, and the like), capturing their output (stdout/stderr/exit). The agent's job is to *cite* what to include in the submission; the hook supplies the ground truth. An agent that fabricates `commands_run: ["pytest"]` without having actually run pytest gets caught because the hook stream does not show a pytest invocation in the claim's window. The split is deliberate: agent-supplied evidence is auditable against system-captured evidence.
+`capture-evidence.sh` runs as a PostToolUse hook on `Bash` and records the verification commands the agent runs that match a hardcoded set of patterns (pytest, ruff, and the like), capturing their output (stdout/stderr/exit). The agent's job is to *cite* what to include in the submission; the hook supplies the ground truth. An agent that fabricates `commands_run: ["pytest"]` without having actually run pytest gets caught because the hook stream does not show a pytest invocation in the claim's window. The split is deliberate: agent-supplied evidence is auditable against system-captured evidence.
 
 ### Trade-off accepted
 
