@@ -8,6 +8,17 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Packet-quality measurement harness (B51).** Packet quality becomes a tracked,
+  *measured* workstream: `anvil.context.packet_metrics` quantifies the token
+  reduction of right-sized (lightweight) vs full work packets across a backlog —
+  per task and in aggregate (`as_routed_savings_pct`) — runnable from Python or
+  standalone (`python -m anvil.context.packet_metrics <state_dir>`). The renderer
+  already routes by score and the packet already carries intent / acceptance /
+  scope / non-goals / verification; this adds the measurement so right-sizing is
+  tracked, not asserted. Token reduction is the half measurable without a live
+  model; the local-model success-rate lift is measured in the B50 bake-off. See
+  `docs/how-to/packet-quality.md`.
+
 - **Accept-rate governor + review-debt cap (B49).** Human review is the binding
   constraint on an unattended fleet, so the pull seam (`anvil next`) now refuses
   new work when (a) the review queue is saturated — `needs_review` depth >=
