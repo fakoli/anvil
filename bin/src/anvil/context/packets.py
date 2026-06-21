@@ -322,6 +322,14 @@ def _render_markdown(
                 " item; the full task record retains every requirement)_"
             )
         lines.append("")
+    # SL-3 / B48 typed proofs. Rendered in FULL (never fast-lane-trimmed): the
+    # gate enforces every one, so hiding any would let the agent miss a
+    # requirement it is graded on. Each label says what must be *observed*.
+    if task.verification.required_proofs:
+        lines.append("Required proofs (observed, not asserted):")
+        for req in task.verification.required_proofs:
+            lines.append(f"- {req.label}")
+        lines.append("")
     if task.verification.manual_steps:
         lines.append("Manual steps:")
         for step in task.verification.manual_steps:

@@ -8,6 +8,24 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Typed, observed evidence proofs (SL-3 / B48, part 1 of 2).** The review gate
+  no longer has to trust strings. A new typed `ProofArtifact` union
+  (`CommandProof` / `DiffProof` / `LinkProof` / `AssertionProof`) is carried on
+  `Evidence.proofs`, and tasks can declare typed `Verification.required_proofs`.
+  A `command` requirement is satisfiable **only** by a `CommandProof` whose real
+  `exit_code` is in the passing set — so a free-text claim can't fake it, and a
+  recorded command that *failed* (exit != 0) no longer passes the gate. The
+  `capture-evidence` PostToolUse hook now records each command's real exit code
+  and an `output_sha256` over its full output, and `anvil submit` (CLI **and**
+  MCP) reconciles that per-claim buffer into `Evidence.proofs` — proofs are
+  *observed by the engine*, not asserted by the agent. The planner emits a typed
+  command requirement per verification command, so the gate is active for real
+  tasks. **Additive and non-breaking:** the legacy free-text `required_evidence`
+  path is untouched (both surfaces are enforced), so old event logs replay
+  unchanged. Schema **v5 -> v6** (auto-upgrade adds the `evidence.proofs` column,
+  DEFAULT `'[]'`). The portable **signed** ProofArtifact + strict-by-default for
+  autonomous loops land in part 2.
+
 - **HOME-workspace follow-ups (B44).** (1) **`anvil migrate-workspace`** — one-time,
   safe-first migration of legacy in-repo `<repo>/.anvil/` (or `<repo>/bin/.anvil/`)
   into the home workspace: dry-run by default (`--yes` to apply), never clobbers an

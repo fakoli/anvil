@@ -36,7 +36,7 @@ Version history
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 5
+SCHEMA_VERSION: int = 6
 
 
 def get_schema_version() -> int:
@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     commit_sha          TEXT,
     screenshots         TEXT NOT NULL DEFAULT '[]',
     known_limitations   TEXT,
+    proofs              TEXT NOT NULL DEFAULT '[]',
     submitted_at        TEXT NOT NULL,
     submitted_by        TEXT NOT NULL
 );
@@ -223,7 +224,10 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
     reason   TEXT NOT NULL
 );
 
-PRAGMA user_version = 5;
+-- Informational only: ``_apply_ddl`` strips this line and stamps the version
+-- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
+-- so anyone running this DDL by hand gets the right version.
+PRAGMA user_version = 6;
 """
 
 

@@ -15,7 +15,50 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
-from anvil.state.models import EventDraft
+from anvil.state.models import CommandProof, EventDraft
+
+
+def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
+    """Reconcile the per-claim evidence buffer into typed CommandProofs.
+
+    The capture-evidence hook writes one JSONL record per observed bash command
+    to ``.anvil/.evidence-buffer/<claim-id>.json``. Each well-formed record
+    (carrying ``command`` + ``exit_code`` + ``output_sha256``) becomes a
+    :class:`CommandProof` — the "observed, not asserted" proof the gate trusts.
+    Malformed or partial records (e.g. a pre-SL-3 hook line with no
+    ``output_sha256``) are skipped, never fatal: ``submit`` must still succeed.
+    """
+    import datetime
+
+    buffer_file = state_dir / ".evidence-buffer" / f"{claim_id}.json"
+    if not buffer_file.exists():
+        return []
+    try:
+        lines = buffer_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    proofs: list[CommandProof] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
+            if captured_at.tzinfo is None:
+                captured_at = captured_at.replace(tzinfo=datetime.UTC)
+            proofs.append(
+                CommandProof(
+                    command=rec["command"],
+                    exit_code=int(rec["exit_code"]),
+                    output_sha256=rec["output_sha256"],
+                    captured_at=captured_at,
+                )
+            )
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            continue  # skip partial / pre-SL-3 records — never block submit
+    return proofs
 
 
 def _resolve_strict_evidence(strict_flag: bool | None, state_dir: Path) -> bool:
@@ -355,6 +398,11 @@ def submit(
 
         now = clock.now()
 
+        # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
+        # captured by the PostToolUse hook) into typed CommandProofs — the
+        # observed proofs the gate trusts.
+        command_proofs = _read_command_proofs(state_dir, task_claim.id)
+
         payload: dict[str, object] = {
             "task_id": task_id,
             "claim_id": task_claim.id,
@@ -367,6 +415,7 @@ def submit(
             "commit_sha": commit_sha,
             "screenshots": screenshots_list,
             "known_limitations": known_limitations,
+            "proofs": [p.model_dump(mode="json") for p in command_proofs],
         }
 
         draft = EventDraft(
@@ -411,6 +460,7 @@ def submit(
                 commit_sha=commit_sha,
                 screenshots=screenshots_list,
                 known_limitations=known_limitations,
+                proofs=command_proofs,
                 submitted_at=now,
                 submitted_by=resolved_actor,
             )

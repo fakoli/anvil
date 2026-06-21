@@ -1023,6 +1023,7 @@ def submit_completion_evidence(
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
+        from anvil.cli.packet_apply import _read_command_proofs
         from anvil.clock import SystemClock
         from anvil.state.backend import EventRejected
         from anvil.state.models import EventDraft
@@ -1053,6 +1054,11 @@ def submit_completion_evidence(
         clock = SystemClock()
         now = clock.now()
 
+        # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
+        # the PostToolUse hook observed) into typed CommandProofs, so an
+        # MCP-driven submit carries the same observed proofs as the CLI path.
+        command_proofs = _read_command_proofs(state_dir, active_claim.id)
+
         draft = EventDraft(
             timestamp=now,
             actor=actor,
@@ -1071,6 +1077,7 @@ def submit_completion_evidence(
                 "commit_sha": commit_sha,
                 "screenshots": [],
                 "known_limitations": None,
+                "proofs": [p.model_dump(mode="json") for p in command_proofs],
             },
         )
 

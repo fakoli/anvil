@@ -16,6 +16,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v3      | Phase 8 (v1.8.0) | `sync_mappings` adds `UNIQUE(external_system, external_id)`, `external_url` column, `provider_metadata_json` column, FK flipped to `ON DELETE CASCADE`.        |
 | v4      | Git-backed events Phase A (v1.22.0) | `events.id` CHECK widened to accept hash-chained ids (`E-<12 hex>`); nullable `events.seq` column added (replay-assigned display order in git mode; NULL in local mode).      |
 | v5      | Non-feature task types (T015) | `tasks` adds `task_type TEXT NOT NULL DEFAULT 'feature'` so a brownfield PRD can describe bugfix / refactor / modify work. The DEFAULT backfills every existing row to `feature` (the pre-v5 meaning).      |
+| v6      | Typed proofs (SL-3 / B48) | `evidence` adds `proofs TEXT NOT NULL DEFAULT '[]'` — a JSON array of typed `ProofArtifact`s (CommandProof / DiffProof / LinkProof / AssertionProof). The DEFAULT backfills every existing row to "no typed proofs" (the pre-v6 meaning). Additive: legacy string evidence fields stay.      |
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
@@ -84,6 +85,24 @@ that predate the column. New PRDs can declare `**Type:** bugfix` (or
 ```bash
 $ sqlite3 .anvil/state.db "PRAGMA user_version;"
 5
+```
+
+## Typed proofs (SL-3 / B48) — v0–v5 → v6 auto-upgrade
+
+The v6 diff is **purely additive**: `evidence` gains a `proofs` column
+(`ALTER TABLE evidence ADD COLUMN proofs TEXT NOT NULL DEFAULT '[]'`,
+duplicate-column tolerant so a crashed upgrade can re-run). The `DEFAULT '[]'`
+backfills every pre-v6 row to "no typed proofs," which is the correct pre-SL-3
+meaning, so no data is rewritten. The column stores a JSON array of typed
+`ProofArtifact`s — `CommandProof` (command + real `exit_code` + `output_sha256`),
+`DiffProof`, `LinkProof`, `AssertionProof` — which the review gate evaluates
+against a task's `Verification.required_proofs`. The legacy free-text
+`required_evidence` / string evidence fields are untouched (the change is
+additive, not a rename), so old `events.jsonl` logs replay unchanged.
+
+```bash
+$ sqlite3 .anvil/state.db "PRAGMA user_version;"
+6
 ```
 
 ## Explicit migration: `anvil migrate state`

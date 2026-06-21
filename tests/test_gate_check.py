@@ -41,10 +41,17 @@ def _claim(actor: str = "agent", task_id: str = "WT-1", cid: str = "C1") -> obje
     return types.SimpleNamespace(claimed_by=actor, task_id=task_id, id=cid)
 
 
-def _task(tid: str = "WT-1", required: tuple[str, ...] = ()) -> object:
+def _task(
+    tid: str = "WT-1",
+    required: tuple[str, ...] = (),
+    required_proofs: tuple[object, ...] = (),
+) -> object:
     return types.SimpleNamespace(
         id=tid,
-        verification=types.SimpleNamespace(required_evidence=list(required)),
+        verification=types.SimpleNamespace(
+            required_evidence=list(required),
+            required_proofs=list(required_proofs),
+        ),
     )
 
 
@@ -56,6 +63,7 @@ def _evidence(
     files_changed: tuple[str, ...] = (),
     output_excerpt: str | None = None,
     known_limitations: str | None = None,
+    proofs: tuple[object, ...] = (),
 ) -> object:
     return types.SimpleNamespace(
         commands_run=list(commands),
@@ -64,6 +72,7 @@ def _evidence(
         files_changed=list(files_changed),
         output_excerpt=output_excerpt,
         known_limitations=known_limitations,
+        proofs=list(proofs),
     )
 
 

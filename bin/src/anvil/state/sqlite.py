@@ -909,7 +909,7 @@ class SqliteBackend:
             # zero-padded event/id suffix stays within its digit width.
             "SELECT id, task_id, claim_id, commands_run, output_excerpt, "
             "files_changed, pr_url, commit_sha, screenshots, "
-            "known_limitations, submitted_at, submitted_by "
+            "known_limitations, submitted_at, submitted_by, proofs "
             "FROM evidence ORDER BY id ASC"
         ).fetchall()
         return [self._row_to_evidence(row) for row in rows]
@@ -1048,7 +1048,7 @@ class SqliteBackend:
             row = conn.execute(
                 "SELECT id, task_id, claim_id, commands_run, output_excerpt, "
                 "files_changed, pr_url, commit_sha, screenshots, "
-                "known_limitations, submitted_at, submitted_by "
+                "known_limitations, submitted_at, submitted_by, proofs "
                 "FROM evidence "
                 "WHERE task_id = ? "
                 "ORDER BY submitted_at DESC "
@@ -1242,16 +1242,17 @@ class SqliteBackend:
             on_disk = row[0] if row else 0
         if on_disk == SCHEMA_VERSION:
             return
-        if on_disk in (0, 1) and SCHEMA_VERSION == 5:
-            # v0/v1 → v5: no sync_mappings existed pre-v2, so the DDL above
+        if on_disk in (0, 1) and SCHEMA_VERSION == 6:
+            # v0/v1 → v6: no sync_mappings existed pre-v2, so the DDL above
             # created the current-shaped table directly. Retrofit events.seq
-            # (v4) and tasks.task_type (v5), then bump.
+            # (v4), tasks.task_type (v5), and evidence.proofs (v6), then bump.
             self._ensure_events_seq_column(conn)
             self._ensure_task_type_column(conn)
+            self._ensure_evidence_proofs_column(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             return
-        if on_disk == 2 and SCHEMA_VERSION == 5:
-            # v2 → v5: add the three v3 sync_mappings additions that the
+        if on_disk == 2 and SCHEMA_VERSION == 6:
+            # v2 → v6: add the three v3 sync_mappings additions that the
             # IF NOT EXISTS DDL cannot retroactively apply to the v2 table.
             # Each ALTER is wrapped because re-running the migration (e.g.
             # crash-recovery) must remain idempotent — a "duplicate column"
@@ -1282,22 +1283,32 @@ class SqliteBackend:
             )
             self._ensure_events_seq_column(conn)
             self._ensure_task_type_column(conn)
+            self._ensure_evidence_proofs_column(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             return
-        if on_disk == 3 and SCHEMA_VERSION == 5:
-            # v3 → v5: retrofit the nullable events.seq column (v4) and the
-            # tasks.task_type column (v5), then bump. See the docstring for
-            # why the legacy strict events id CHECK stays.
+        if on_disk == 3 and SCHEMA_VERSION == 6:
+            # v3 → v6: retrofit the nullable events.seq column (v4), the
+            # tasks.task_type column (v5), and evidence.proofs (v6), then bump.
+            # See the docstring for why the legacy strict events id CHECK stays.
             self._ensure_events_seq_column(conn)
             self._ensure_task_type_column(conn)
+            self._ensure_evidence_proofs_column(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             return
-        if on_disk == 4 and SCHEMA_VERSION == 5:
-            # v4 → v5 (T015 non-feature task types): purely additive —
-            # tasks gains task_type TEXT NOT NULL DEFAULT 'feature'. The
-            # DEFAULT backfills every existing row to 'feature', which is
-            # exactly the pre-v5 meaning, so no data migration is needed.
+        if on_disk == 4 and SCHEMA_VERSION == 6:
+            # v4 → v6: retrofit task_type (v5) and evidence.proofs (v6). Both
+            # are purely additive — the column DEFAULTs backfill every existing
+            # row to its pre-upgrade meaning, so no data migration is needed.
             self._ensure_task_type_column(conn)
+            self._ensure_evidence_proofs_column(conn)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            return
+        if on_disk == 5 and SCHEMA_VERSION == 6:
+            # v5 → v6 (SL-3 / B48 typed proofs): purely additive — evidence
+            # gains proofs TEXT NOT NULL DEFAULT '[]'. The DEFAULT backfills
+            # every existing evidence row to "no typed proofs," which is the
+            # correct pre-SL-3 meaning, so no data migration is required.
+            self._ensure_evidence_proofs_column(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             return
         raise SchemaMismatch(
@@ -1333,6 +1344,25 @@ class SqliteBackend:
             conn.execute(
                 "ALTER TABLE tasks ADD COLUMN "
                 "task_type TEXT NOT NULL DEFAULT 'feature'"
+            )
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
+    @staticmethod
+    def _ensure_evidence_proofs_column(conn: sqlite3.Connection) -> None:
+        """ALTER evidence ADD COLUMN proofs if missing (v6, idempotent).
+
+        SL-3 / B48 typed proofs. The DEFAULT '[]' backfills every pre-v6 row to
+        "no typed proofs," which is the correct pre-SL-3 meaning, so the column
+        is purely additive. Wrapped in duplicate-column tolerance so re-running
+        the migration after a crash (or a v5-DDL table that already grew the
+        column from the current ``CREATE TABLE``) is a silent no-op.
+        """
+        try:
+            conn.execute(
+                "ALTER TABLE evidence ADD COLUMN "
+                "proofs TEXT NOT NULL DEFAULT '[]'"
             )
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
@@ -3556,6 +3586,10 @@ class SqliteBackend:
         commit_sha: str | None = payload.commit_sha
         screenshots: list[Any] = payload.screenshots or []
         known_limitations: str | None = payload.known_limitations
+        # SL-3 / B48: serialize the typed proofs to the JSON column. The payload
+        # already validated each proof against the discriminated union, so
+        # model_dump(mode="json") round-trips losslessly.
+        proofs_json = json.dumps([p.model_dump(mode="json") for p in payload.proofs])
 
         # INSERT OR IGNORE: idempotent on replay — duplicate evidence.submitted
         # events (after crash mid-transaction) do not produce duplicate rows.
@@ -3564,9 +3598,9 @@ class SqliteBackend:
             INSERT OR IGNORE INTO evidence
                 (id, task_id, claim_id, commands_run, output_excerpt,
                  files_changed, pr_url, commit_sha, screenshots,
-                 known_limitations, submitted_at, submitted_by)
+                 known_limitations, proofs, submitted_at, submitted_by)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 evidence_id,
@@ -3579,6 +3613,7 @@ class SqliteBackend:
                 commit_sha,
                 json.dumps(screenshots),
                 known_limitations,
+                proofs_json,
                 timestamp,
                 submitted_by,
             ),
@@ -4201,15 +4236,22 @@ class SqliteBackend:
         get_latest_evidence:
           0:id  1:task_id  2:claim_id  3:commands_run  4:output_excerpt
           5:files_changed  6:pr_url  7:commit_sha  8:screenshots
-          9:known_limitations  10:submitted_at  11:submitted_by
+          9:known_limitations  10:submitted_at  11:submitted_by  12:proofs
+        ``proofs`` is index 12 (appended last) so the pre-v6 indices are stable;
+        ``len(row) <= 12`` tolerates a row read before the v6 column landed.
         """
         import datetime
 
+        from pydantic import TypeAdapter
+
         from anvil.state.models import Evidence as _Evidence
+        from anvil.state.models import ProofArtifact as _ProofArtifact
 
         submitted_at = datetime.datetime.fromisoformat(row[10])
         if submitted_at.tzinfo is None:
             submitted_at = submitted_at.replace(tzinfo=datetime.UTC)
+        proofs_raw = row[12] if len(row) > 12 else None
+        proofs = TypeAdapter(list[_ProofArtifact]).validate_json(proofs_raw or "[]")
         return _Evidence(
             id=row[0],
             task_id=row[1],
@@ -4221,6 +4263,7 @@ class SqliteBackend:
             commit_sha=row[7],
             screenshots=json.loads(row[8] or "[]"),
             known_limitations=row[9],
+            proofs=proofs,
             submitted_at=submitted_at,
             submitted_by=row[11],
         )

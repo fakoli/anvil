@@ -61,6 +61,8 @@ from typing import TYPE_CHECKING, NamedTuple
 from anvil.state.models import (
     PRD,
     Feature,
+    ProofKind,
+    ProofRequirement,
     Requirement,
     Score,
     Task,
@@ -748,7 +750,21 @@ def _parse_tasks(
                 task_type=task_type,
                 scores=Score(),
                 acceptance_criteria=acceptance_criteria,
-                verification=Verification(commands=verification_commands),
+                verification=Verification(
+                    commands=verification_commands,
+                    # SL-3 / B48: turn each verification command into a typed,
+                    # non-gameable requirement — the task is accepted only once a
+                    # CommandProof shows the command was observed to exit 0.
+                    required_proofs=[
+                        ProofRequirement(
+                            kind=ProofKind.command,
+                            command=cmd,
+                            passing_exit_codes=[0],
+                            label=f"`{cmd}` exits 0",
+                        )
+                        for cmd in verification_commands
+                    ],
+                ),
                 likely_files=likely_files,
                 dependencies=dependencies,
                 created_at=now,
