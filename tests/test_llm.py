@@ -15,6 +15,8 @@ This mirrors the in-process mocking pattern already established by
 
 from __future__ import annotations
 
+import importlib.util as _ilu
+import os
 import unittest.mock as _mock
 from typing import Literal
 
@@ -28,6 +30,12 @@ from anvil.planning.llm import (
     LLMProviderError,
     LLMResponse,
     RecordedLLMProvider,
+)
+
+_agent_sdk_available = _ilu.find_spec("claude_agent_sdk") is not None
+_skip_no_agent_sdk = pytest.mark.skipif(
+    not _agent_sdk_available,
+    reason="claude-agent-sdk not installed (it is a core dep; install it)",
 )
 
 # ---------------------------------------------------------------------------
@@ -495,3 +503,232 @@ class TestAnthropicProviderApiKeyResolution:
         with _mock.patch("anvil.planning.llm.anthropic.Anthropic") as mock_ctor:
             AnthropicProvider()
             mock_ctor.assert_called_once_with(api_key=None)
+
+
+# ---------------------------------------------------------------------------
+# ClaudeAgentSDKProvider — subscription path (mocked claude_agent_sdk.query)
+# ---------------------------------------------------------------------------
+#
+# We patch ``claude_agent_sdk.query`` with a fake async generator yielding real
+# SDK message objects. No CLI, no subprocess, no subscription — the provider's
+# import-deferral means construction never touches the CLI, and the async-drive
+# + usage-mapping logic is exercised against constructed messages.
+
+
+@_skip_no_agent_sdk
+class TestClaudeAgentSDKProvider:
+    """Default provider: maps the Agent SDK message stream to LLMResponse,
+    scrubs the API key for the duration of the call, and wraps failures."""
+
+    def _messages(
+        self,
+        *,
+        text: str = "hello",
+        is_error: bool = False,
+        with_result: bool = True,
+        usage: dict | None = None,
+    ):  # type: ignore[no-untyped-def]
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+        msgs: list = [
+            AssistantMessage(
+                content=[TextBlock(text=text)], model="claude-sonnet-4-6"
+            )
+        ]
+        if with_result:
+            msgs.append(
+                ResultMessage(
+                    subtype="error" if is_error else "success",
+                    duration_ms=1,
+                    duration_api_ms=1,
+                    is_error=is_error,
+                    num_turns=1,
+                    session_id="sess-1",
+                    usage=usage
+                    if usage is not None
+                    else {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "cache_read_input_tokens": 2,
+                    },
+                    result=text,
+                    stop_reason="end_turn",
+                    model_usage={"claude-sonnet-4-6": {}},
+                )
+            )
+        return msgs
+
+    def _patch_query(self, monkeypatch, messages, capture=None):  # type: ignore[no-untyped-def]
+        import claude_agent_sdk
+
+        async def fake_query(*, prompt, options):  # type: ignore[no-untyped-def]
+            if capture is not None:
+                capture["api_key_present"] = "ANTHROPIC_API_KEY" in os.environ
+                capture["system_prompt"] = options.system_prompt
+                capture["model"] = options.model
+                capture["max_turns"] = options.max_turns
+                capture["allowed_tools"] = options.allowed_tools
+            for m in messages:
+                yield m
+
+        monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+    def test_satisfies_protocol(self) -> None:
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        prov: LLMProvider = ClaudeAgentSDKProvider()
+        assert hasattr(prov, "generate")
+
+    def test_model_resolution(self) -> None:
+        from anvil.planning.llm import MODEL_TIERS, ClaudeAgentSDKProvider
+
+        assert ClaudeAgentSDKProvider(tier="opus")._model == MODEL_TIERS["opus"]
+        assert ClaudeAgentSDKProvider(model="custom-id")._model == "custom-id"
+        # Neither model nor tier → None (use the subscription default model).
+        assert ClaudeAgentSDKProvider()._model is None
+
+    def test_generate_maps_result_to_llmresponse(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        self._patch_query(monkeypatch, self._messages(text="hi there"))
+        resp = ClaudeAgentSDKProvider(model="claude-sonnet-4-6").generate(
+            system="S", user="U"
+        )
+        assert resp.text == "hi there"
+        assert resp.input_tokens == 10
+        assert resp.cached_input_tokens == 2
+        assert resp.output_tokens == 5
+        assert resp.model == "claude-sonnet-4-6"
+        assert resp.finish_reason == "end_turn"
+
+    def test_generate_scrubs_key_during_call_and_restores(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
+        cap: dict = {}
+        self._patch_query(monkeypatch, self._messages(), capture=cap)
+        ClaudeAgentSDKProvider().generate(system="SYS", user="U")
+        # Scrubbed for the duration of the SDK call …
+        assert cap["api_key_present"] is False
+        # … and restored afterward.
+        assert os.environ.get("ANTHROPIC_API_KEY") == "sk-test-fake"
+        # The system prompt replaces the CLI default; single-shot, no tools.
+        assert cap["system_prompt"] == "SYS"
+        assert cap["max_turns"] == 1
+        assert cap["allowed_tools"] == []
+
+    def test_error_result_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        self._patch_query(monkeypatch, self._messages(is_error=True))
+        with pytest.raises(LLMProviderError):
+            ClaudeAgentSDKProvider().generate(system="S", user="U")
+
+    def test_no_result_message_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        self._patch_query(monkeypatch, self._messages(with_result=False))
+        with pytest.raises(LLMProviderError):
+            ClaudeAgentSDKProvider().generate(system="S", user="U")
+
+    def test_generate_works_inside_running_event_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """generate() is sync but uses anyio.run(); when called from INSIDE a
+        running event loop it must offload to a worker thread rather than
+        raising 'anyio.run() ... already running'. Proves the
+        _run_blocking_until_complete fallback path."""
+        import anyio
+
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        self._patch_query(monkeypatch, self._messages(text="loop-safe"))
+
+        async def _call() -> LLMResponse:
+            # We are now inside a running loop (anyio.run drives this coro).
+            # Calling the sync generate() here must not raise.
+            return ClaudeAgentSDKProvider().generate(system="S", user="U")
+
+        resp = anyio.run(_call)
+        assert resp.text == "loop-safe"
+
+    def test_prefers_assistant_frame_model_and_stop_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reliable per-turn AssistantMessage (model required, stop_reason
+        populated) wins over the ResultMessage frame, which routinely leaves
+        stop_reason=None and model_usage empty. Without this the response would
+        degrade to finish_reason='end_turn' and model='claude-agent-sdk'."""
+        import claude_agent_sdk
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        async def fake_query(*, prompt, options):  # type: ignore[no-untyped-def]
+            yield AssistantMessage(
+                content=[TextBlock(text="hi")],
+                model="claude-opus-4-8",
+                stop_reason="max_tokens",
+            )
+            # Result frame degraded: no stop_reason, empty model_usage.
+            yield ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id="s",
+                usage={"input_tokens": 1, "output_tokens": 1},
+                result="hi",
+                stop_reason=None,
+                model_usage={},
+            )
+
+        monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+        resp = ClaudeAgentSDKProvider().generate(system="S", user="U")
+        assert resp.model == "claude-opus-4-8"
+        assert resp.finish_reason == "max_tokens"
+
+    def test_error_result_reports_diagnostics_not_bare_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On an error ResultMessage the SDK leaves `result` None but populates
+        errors / api_error_status — surface those instead of 'error result:
+        None'."""
+        import claude_agent_sdk
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        async def fake_query(*, prompt, options):  # type: ignore[no-untyped-def]
+            yield AssistantMessage(
+                content=[TextBlock(text="")], model="claude-sonnet-4-6"
+            )
+            yield ResultMessage(
+                subtype="error_during_execution",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=True,
+                num_turns=1,
+                session_id="s",
+                usage={},
+                result=None,
+                stop_reason=None,
+                model_usage={},
+                errors=["rate limit exceeded"],
+                api_error_status=429,
+            )
+
+        monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+        with pytest.raises(LLMProviderError) as ei:
+            ClaudeAgentSDKProvider().generate(system="S", user="U")
+        msg = str(ei.value)
+        assert "error result: None" not in msg
+        assert "429" in msg
+        assert "rate limit exceeded" in msg

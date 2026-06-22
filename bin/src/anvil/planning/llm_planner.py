@@ -16,27 +16,27 @@ the CLI calls :func:`generate_tasks_markdown`, which calls an LLM to draft
 that ``planning.template.parse_prd`` can consume — round-tripping through the
 same data format avoids duplicating any parsing logic.
 
-Provider precedence (v1.17.0)
------------------------------
+Provider precedence
+-------------------
 :func:`resolve_planner_provider` picks **exactly one** provider per call,
 in this order:
 
 1. **Explicit config** — ``Config.llm_provider`` resolves to one of
-   ``anthropic`` / ``bedrock`` / ``custom``. Always wins when set.
-2. **Env auto-detect** — when config is silent, choose by which credential
-   is present:
-   - ``ANTHROPIC_API_KEY`` → ``anthropic`` (cheapest path; works inside
-     Claude Code, Cursor, Codex, or any shell with the key).
-   - ``AWS_REGION`` / ``AWS_DEFAULT_REGION`` (and the ``anthropic[bedrock]``
-     extras are importable) → ``bedrock``. ``ANTHROPIC_API_KEY`` takes
-     precedence because direct API is cheaper per token; users who want
-     Bedrock pinning even when their key is set MUST set ``llm_provider:
-     bedrock`` in config.
-   - ``CUSTOM_LLM_BASE_URL`` → ``custom``. Same pinning rule applies.
-3. **Fail loudly** with a multi-line message naming every supported path.
-   We do NOT silent-fall-through to a different provider mid-process —
-   that breaks billing predictability and surprises ops teams during
-   incidents (community consensus, May 2026).
+   ``agent-sdk`` / ``anthropic`` / ``bedrock`` / ``custom``. Always wins.
+2. **Default** — when config is silent, the default is ``agent-sdk``: the
+   Claude Agent SDK over the logged-in subscription (no API key). anvil is
+   capacity-bound, not per-token-cost bound, so the subscription path is the
+   default rather than metered API spend.
+3. **Opt-in env fallback** — ``Config.llm_fallback`` (default ``False``)
+   restores the legacy env auto-detect chain *before* falling through to
+   ``agent-sdk``: ``ANTHROPIC_API_KEY`` → ``anthropic``; ``AWS_REGION`` /
+   ``AWS_DEFAULT_REGION`` (with ``anthropic[bedrock]`` importable) →
+   ``bedrock``; ``CUSTOM_LLM_BASE_URL`` → ``custom``; else ``agent-sdk``.
+
+We do NOT silent-fall-through to a *different* provider once one is chosen —
+that breaks billing predictability and surprises ops teams during incidents
+(community consensus, May 2026). ``agent-sdk`` being the guaranteed final
+default means resolution no longer fails for "no provider configured".
 
 Tier resolution
 ---------------
@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING
 from anvil.planning.llm import (
     AnthropicProvider,
     BedrockProvider,
+    ClaudeAgentSDKProvider,
     CustomEndpointProvider,
     LLMProvider,
     LLMProviderError,
@@ -77,11 +78,14 @@ __all__ = [
 
 
 class PlannerProviderUnavailable(Exception):
-    """No LLM provider available across the resolver tier chain.
+    """The chosen LLM provider could not be built.
 
-    Raised when neither Tier 1 (claude-agent-sdk) nor Tier 2
-    (ANTHROPIC_API_KEY + anthropic SDK) can produce a usable provider.
-    Carries a multi-line message naming both setup paths.
+    The default provider (``agent-sdk``) is always *selectable* without any
+    config, so this is no longer raised for "nothing configured". It is raised
+    when a provider that WAS chosen cannot be constructed — e.g. an explicit
+    ``llm_provider: bedrock`` without the ``anthropic[bedrock]`` extra, or an
+    explicit ``custom`` endpoint missing its ``base_url`` / model. Carries an
+    actionable, multi-line message.
     """
 
 
@@ -105,9 +109,10 @@ class TaskGenerationResult:
         task_count: How many ``### TXXX:`` blocks the LLM emitted. Always
             ≥ 1 on a successful return — a zero-task LLM response is a
             :class:`TaskGenerationError`, not a success.
-        provider_used: Short label of which tier produced the answer
-            (``"anthropic"`` today; future ``"claude-agent-sdk"``). Used
-            for CLI output, not for control flow.
+        provider_used: Short label of which provider produced the answer
+            (``"agent-sdk"`` by default; ``"anthropic"`` / ``"bedrock"`` /
+            ``"custom"`` when pinned or env-detected). Used for CLI output,
+            not for control flow.
     """
 
     markdown: str
@@ -122,36 +127,49 @@ class TaskGenerationResult:
 
 def resolve_planner_provider(
     config: Config | None = None,
+    *,
+    model_override: str | None = None,
 ) -> tuple[LLMProvider, str]:
     """Pick exactly one LLM provider for the current process.
 
     Precedence (highest first):
 
-    1. ``config.llm_provider`` explicit (``anthropic``/``bedrock``/``custom``).
-    2. Env auto-detect: ``ANTHROPIC_API_KEY`` → anthropic;
-       ``AWS_REGION``+bedrock-extras → bedrock; ``CUSTOM_LLM_BASE_URL`` →
-       custom.
-    3. Raise :class:`PlannerProviderUnavailable` with a help message.
+    1. ``config.llm_provider`` explicit
+       (``agent-sdk``/``anthropic``/``bedrock``/``custom``).
+    2. Default → ``agent-sdk`` (Claude Agent SDK over the subscription).
+    3. ``config.llm_fallback=True`` restores env auto-detect
+       (``ANTHROPIC_API_KEY`` → anthropic; ``AWS_REGION``+bedrock-extras →
+       bedrock; ``CUSTOM_LLM_BASE_URL`` → custom) before falling through to
+       ``agent-sdk``.
 
     The model id resolves from ``config.llm_model`` (explicit) →
-    ``config.llm_tier`` (opus/sonnet/haiku) → ``DEFAULT_TIER`` (sonnet).
+    ``config.llm_tier`` (opus/sonnet/haiku) → the provider's own default
+    (``DEFAULT_TIER`` sonnet for the API providers; the subscription default
+    for ``agent-sdk``).
 
     Args:
-        config: Optional :class:`anvil.config.Config`. When ``None``,
-            env auto-detect runs against the bare env vars with no overrides
-            — useful for tests and the legacy zero-arg call sites.
+        config: Optional :class:`anvil.config.Config`. When ``None``, the
+            default ``agent-sdk`` provider is returned (no env auto-detect —
+            that requires ``llm_fallback=True`` on a real config).
+        model_override: Optional explicit model id (from the CLI ``--model``
+            flag). When set it wins over ``config.llm_model`` / ``config.llm_tier``
+            for whichever provider family is chosen — a pinned id is a pinned
+            id, so the tier is ignored. ``None`` (the default) falls back to the
+            config's model/tier and then the provider's own default.
 
     Returns:
-        ``(provider, tier_name)`` — tier_name is the resolved provider
-        slug for CLI output (``"anthropic"`` / ``"bedrock"`` / ``"custom"``).
+        ``(provider, tier_name)`` — tier_name is the resolved provider slug
+        for CLI output (``"agent-sdk"`` / ``"anthropic"`` / ``"bedrock"`` /
+        ``"custom"``).
 
     Raises:
-        PlannerProviderUnavailable: No tier produced a usable provider.
+        PlannerProviderUnavailable: The chosen provider could not be built
+            (e.g. a pinned ``bedrock``/``custom`` provider missing its extra
+            or config). Never raised for the default ``agent-sdk`` path.
     """
-    # Stage 1 — pick which PROVIDER family to instantiate.
+    # Stage 1 — pick which PROVIDER family to instantiate. Always non-None:
+    # `agent-sdk` is the guaranteed final default.
     chosen = _choose_provider_family(config)
-    if chosen is None:
-        raise PlannerProviderUnavailable(_no_provider_message())
 
     # Stage 2 — instantiate the chosen family with config-aware knobs.
     #
@@ -161,13 +179,18 @@ def resolve_planner_provider(
     # PlannerProviderUnavailable so the CLI / MCP catch sites (which only
     # know about PlannerProviderUnavailable) surface a clean help message
     # instead of a raw traceback. (critic MUST FIX #1, PR #65)
+    #
+    # `_build_agent_sdk` never raises at construction (the SDK/CLI import is
+    # deferred to generate()), so the default path cannot land in the wrap.
     try:
+        if chosen == "agent-sdk":
+            return _build_agent_sdk(config, model_override), "agent-sdk"
         if chosen == "anthropic":
-            return _build_anthropic(config), "anthropic"
+            return _build_anthropic(config, model_override), "anthropic"
         if chosen == "bedrock":
-            return _build_bedrock(config), "bedrock"
+            return _build_bedrock(config, model_override), "bedrock"
         if chosen == "custom":
-            return _build_custom(config), "custom"
+            return _build_custom(config, model_override), "custom"
     except LLMProviderError as exc:
         raise PlannerProviderUnavailable(
             f"Could not build the {chosen!r} provider: {exc}\n\n"
@@ -183,14 +206,29 @@ def resolve_planner_provider(
     )
 
 
-def _choose_provider_family(config: Config | None) -> str | None:
-    """Pick the provider family slug or return None for the fail path."""
+def _choose_provider_family(config: Config | None) -> str:
+    """Pick the provider family slug.
+
+    1. Explicit ``config.llm_provider`` → wins.
+    2. Else, when ``config.llm_fallback`` is True, run the legacy env
+       auto-detect chain and fall through to ``agent-sdk``.
+    3. Else → ``agent-sdk`` (the default).
+
+    Always returns a non-None family: ``agent-sdk`` is the guaranteed final
+    default, so there is no "no provider" outcome.
+    """
     if config is not None and config.llm_provider is not None:
         return config.llm_provider
 
-    # Env auto-detect. ANTHROPIC_API_KEY wins when set even if AWS_REGION
-    # is also set, because direct API is cheaper per token. Users who want
-    # to force Bedrock when both are present must set llm_provider in config.
+    # Default: subscription-based Agent SDK. Env auto-detect is OFF unless the
+    # project explicitly opts back into it via `llm_fallback: true`.
+    if config is None or not config.llm_fallback:
+        return "agent-sdk"
+
+    # --- opt-in env auto-detect (llm_fallback=True) --------------------
+    # ANTHROPIC_API_KEY wins when set even if AWS_REGION is also set, because
+    # direct API is cheaper per token. Users who want to force Bedrock when
+    # both are present must set llm_provider in config.
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "anthropic"
 
@@ -217,18 +255,38 @@ def _choose_provider_family(config: Config | None) -> str | None:
     if os.environ.get("CUSTOM_LLM_BASE_URL"):
         return "custom"
 
-    return None
+    # Nothing in env matched — fall through to the default.
+    return "agent-sdk"
 
 
-def _build_anthropic(config: Config | None) -> AnthropicProvider:
+def _build_agent_sdk(
+    config: Config | None, model_override: str | None = None
+) -> ClaudeAgentSDKProvider:
+    """Construct the default ClaudeAgentSDKProvider with config-aware model/tier.
+
+    Construction never imports ``claude_agent_sdk`` or touches the ``claude``
+    CLI — that is deferred to ``generate()`` — so this cannot raise for a
+    missing SDK/CLI. When neither ``model_override``, ``llm_model`` nor
+    ``llm_tier`` is set, the provider uses the subscription's own default model
+    (it does NOT force :data:`DEFAULT_TIER`).
+    """
+    model, tier = _resolve_model_args(config, model_override)
+    return ClaudeAgentSDKProvider(model=model, tier=tier)
+
+
+def _build_anthropic(
+    config: Config | None, model_override: str | None = None
+) -> AnthropicProvider:
     """Construct an AnthropicProvider with config-aware model/tier."""
-    model, tier = _resolve_model_args(config)
+    model, tier = _resolve_model_args(config, model_override)
     return AnthropicProvider(model=model, tier=tier)
 
 
-def _build_bedrock(config: Config | None) -> BedrockProvider:
+def _build_bedrock(
+    config: Config | None, model_override: str | None = None
+) -> BedrockProvider:
     """Construct a BedrockProvider with config-aware AWS knobs + model/tier."""
-    model, tier = _resolve_model_args(config)
+    model, tier = _resolve_model_args(config, model_override)
     region = config.bedrock_region if config else None
     profile = config.bedrock_profile if config else None
     return BedrockProvider(
@@ -239,7 +297,9 @@ def _build_bedrock(config: Config | None) -> BedrockProvider:
     )
 
 
-def _build_custom(config: Config | None) -> CustomEndpointProvider:
+def _build_custom(
+    config: Config | None, model_override: str | None = None
+) -> CustomEndpointProvider:
     """Construct a CustomEndpointProvider with config-aware base_url + model.
 
     Wraps ``CustomEndpointProvider``'s setup-time ``ValueError`` (missing
@@ -252,8 +312,9 @@ def _build_custom(config: Config | None) -> CustomEndpointProvider:
     # CustomEndpointProvider docstring — there is no portable default).
     # We accept either llm_model OR llm_tier-mapped via MODEL_TIERS as a
     # convenience: many custom proxies (OpenRouter, LiteLLM) accept
-    # Anthropic-style model ids verbatim.
-    model, tier = _resolve_model_args(config)
+    # Anthropic-style model ids verbatim. A CLI --model (model_override) wins
+    # over both and skips the no-model guard below.
+    model, tier = _resolve_model_args(config, model_override)
 
     # Fail loudly when neither model nor tier is set. The PRIOR behaviour
     # silently defaulted to `claude-sonnet-4-6` on any custom endpoint,
@@ -308,39 +369,23 @@ def _build_custom(config: Config | None) -> CustomEndpointProvider:
         ) from exc
 
 
-def _resolve_model_args(config: Config | None) -> tuple[str | None, str | None]:
-    """Return ``(model, tier)`` from config — passes None when unset.
+def _resolve_model_args(
+    config: Config | None, model_override: str | None = None
+) -> tuple[str | None, str | None]:
+    """Return ``(model, tier)`` from ``model_override`` → config — None when unset.
 
-    The provider's own ``__init__`` handles tier→model mapping and the
-    DEFAULT_TIER fallback. We deliberately do NOT pre-resolve here so the
-    provider's namespace (Bedrock IDs vs direct API IDs) wins.
+    ``model_override`` (the CLI ``--model`` flag) wins over config and makes
+    the tier irrelevant: a pinned id is a pinned id, returned as
+    ``(model_override, None)``. Otherwise the provider's own ``__init__``
+    handles tier→model mapping and the DEFAULT_TIER fallback. We deliberately
+    do NOT pre-resolve the tier here so the provider's namespace (Bedrock IDs
+    vs direct API IDs) wins.
     """
+    if model_override:
+        return model_override, None
     if config is None:
         return None, None
     return config.llm_model, config.llm_tier
-
-
-def _no_provider_message() -> str:
-    """Multi-line help text for the PlannerProviderUnavailable fail path."""
-    return (
-        "No LLM provider configured or auto-detected. Choose one:\n"
-        "\n"
-        "  1. Direct Anthropic API (cheapest):\n"
-        "     export ANTHROPIC_API_KEY=sk-...\n"
-        "\n"
-        "  2. Amazon Bedrock:\n"
-        "     pip install 'anvil[bedrock]'\n"
-        "     export AWS_REGION=us-east-1   # plus boto3 creds\n"
-        "     # or set llm_provider: bedrock in .anvil/config.yaml\n"
-        "\n"
-        "  3. Custom OpenAI-compatible endpoint (vLLM, OpenRouter, …):\n"
-        "     pip install 'anvil[custom]'\n"
-        "     export CUSTOM_LLM_BASE_URL=http://localhost:8000/v1\n"
-        "     export CUSTOM_LLM_API_KEY=...     # if your endpoint needs one\n"
-        "     # or set llm_provider: custom in .anvil/config.yaml\n"
-        "\n"
-        "Then re-run `anvil plan`."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +653,7 @@ def generate_tasks_markdown(
     existing_tasks: list[Task] | None = None,
     provider: LLMProvider | None = None,
     config: Config | None = None,
+    model_override: str | None = None,
     max_tokens: int = 8000,
 ) -> TaskGenerationResult:
     """Generate a ``## Tasks`` markdown section via LLM.
@@ -629,6 +675,9 @@ def generate_tasks_markdown(
             :func:`resolve_planner_provider` so the project's explicit
             ``llm_provider`` / ``llm_tier`` / Bedrock+custom knobs are
             honored. Ignored when ``provider`` is supplied.
+        model_override: Optional explicit model id (from the CLI ``--model``
+            flag) threaded into :func:`resolve_planner_provider`. Wins over
+            config's model/tier. Ignored when ``provider`` is supplied.
         max_tokens: Per-completion ceiling. Default 8000 supports ~20
             tasks with full acceptance criteria + verification.
 
@@ -646,7 +695,9 @@ def generate_tasks_markdown(
     # happy — assigning into the parameter directly inside the if-branch
     # sometimes confuses the type checker on the later attribute access.
     if provider is None:
-        active_provider, tier_name = resolve_planner_provider(config)
+        active_provider, tier_name = resolve_planner_provider(
+            config, model_override=model_override
+        )
     else:
         active_provider, tier_name = provider, "injected"
 

@@ -9,6 +9,13 @@ Public surface
 --------------
 - :class:`LLMResponse` — Pydantic model for a single completion result.
 - :class:`LLMProvider` — typing.Protocol; one method, ``generate``.
+- :class:`ClaudeAgentSDKProvider` — **the default provider.** Drives the
+  bundled Claude Code CLI via ``claude_agent_sdk.query()`` over the logged-in
+  Claude *subscription* (no per-token API key). Needs the ``claude`` CLI on
+  PATH at call time; both the SDK import and a missing CLI surface as
+  :class:`LLMProviderError`. Scrubs ``ANTHROPIC_API_KEY`` / ``CLAUDE_API_KEY``
+  for the duration of the call so a quota-capped key cannot hijack the run
+  (mirrors ``evals/harness.py``).
 - :class:`AnthropicProvider` — direct Anthropic API via the ``anthropic`` SDK.
 - :class:`BedrockProvider` — Anthropic-on-Bedrock via ``anthropic[bedrock]``
   (the SDK's first-party ``AnthropicBedrock`` client). Optional dep; the
@@ -59,7 +66,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import TYPE_CHECKING, Protocol, cast
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 # The anthropic SDK is a hard runtime dep (declared in pyproject.toml);
 # import at module load is fine. The Bedrock and OpenAI-compatible client
@@ -83,6 +91,7 @@ if TYPE_CHECKING:
 __all__ = [
     "LLMResponse",
     "LLMProvider",
+    "ClaudeAgentSDKProvider",
     "AnthropicProvider",
     "BedrockProvider",
     "CustomEndpointProvider",
@@ -261,6 +270,291 @@ def resolve_model_for_tier(
         raise ValueError(
             f"Unknown model tier {tier!r}. Valid tiers: {valid}."
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# ClaudeAgentSDKProvider — subscription auth via the Claude Agent SDK (DEFAULT)
+# ---------------------------------------------------------------------------
+
+
+def _run_blocking_until_complete(drive: Callable[[], Awaitable[None]]) -> None:
+    """Run an async zero-arg function to completion from synchronous code.
+
+    ``anyio.run()`` raises ``RuntimeError`` if an event loop is already running
+    in the calling thread. Every current caller is loop-free — the sync CLI,
+    and the MCP server's tools (which are sync ``def``\\ s that fastmcp runs in
+    a worker thread) — so the common path is a direct ``anyio.run``. If a
+    future caller invokes ``generate()`` from *inside* a running loop, we
+    offload to a worker thread whose ``anyio.run`` creates its own loop, so the
+    provider stays usable from async code too.
+    """
+    import anyio
+
+    try:
+        import asyncio
+
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop in this thread — drive directly.
+        anyio.run(drive)
+        return
+
+    # A loop is already running here. Offload to a worker thread; its
+    # ``anyio.run`` gets a fresh loop. The closure's captured state is read
+    # only after the thread joins (``.result()``), so there is no data race.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(lambda: anyio.run(drive)).result()
+
+
+class ClaudeAgentSDKProvider:
+    """LLMProvider backed by the Claude Agent SDK — **the default provider**.
+
+    Unlike :class:`AnthropicProvider` / :class:`BedrockProvider`, this does NOT
+    call the Anthropic API with a per-token key. It drives the bundled Claude
+    Code CLI through ``claude_agent_sdk.query()`` and authenticates with the
+    logged-in Claude *subscription*. This is the economically-aligned default:
+    anvil is capacity-bound (it rides flat-rate plans), not per-token-cost
+    bound, so the subscription path is preferred over metered API spend.
+
+    Single-shot, no tools: ``max_turns=1``, ``allowed_tools=[]``,
+    ``setting_sources=[]`` (so ambient Claude Code hooks/settings do not leak
+    into the subprocess). The ``system`` prompt *replaces* the CLI's default
+    system prompt entirely — exactly what planning augmentation wants.
+
+    ``ANTHROPIC_API_KEY`` / ``CLAUDE_API_KEY`` are scrubbed from the process
+    environment for the duration of the call, then restored. The SDK's
+    subprocess transport inherits ``os.environ`` and can only ADD keys, never
+    remove an inherited one — so a quota-capped key present in the env would
+    otherwise hijack the run and fail it with a 400 usage-limit error. This
+    mirrors ``evals/harness.py``.
+
+    Requirements (surfaced as :class:`LLMProviderError` at call time, not at
+    construction — so :func:`resolve_planner_provider` can hand back this
+    provider without importing the SDK or needing the CLI):
+
+      * the ``claude-agent-sdk`` package importable, and
+      * the ``claude`` CLI on PATH with an active subscription session.
+
+    Model resolution order:
+      1. Explicit ``model=`` constructor arg.
+      2. ``tier=`` constructor arg, resolved via :data:`MODEL_TIERS`.
+      3. ``None`` → the CLI / subscription default model. (We deliberately do
+         NOT force :data:`DEFAULT_TIER` here: an unconfigured project should
+         get whatever model the subscription defaults to.)
+
+    Note on ``max_tokens`` / ``temperature``: accepted for
+    :class:`LLMProvider` compatibility but NOT forwarded — the Agent SDK / CLI
+    does not expose per-call equivalents the way the Messages API does. Output
+    length and sampling are governed by the CLI / subscription. Planning
+    augmentation runs at ``temperature=0.0`` by convention regardless.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        tier: str | None = None,
+    ) -> None:
+        """Construct a ClaudeAgentSDKProvider.
+
+        Construction never imports ``claude_agent_sdk`` or touches the CLI —
+        the import is deferred to :meth:`generate`. This keeps provider
+        resolution cheap and lets a project hand back the default provider even
+        on a box where the CLI is not yet installed (the error then fires only
+        if augmentation is actually invoked).
+        """
+        if model is not None:
+            self._model: str | None = model
+        elif tier is not None:
+            self._model = resolve_model_for_tier(tier)
+        else:
+            self._model = None
+
+    def generate(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: int = 4096,
+        temperature: float = 0.0,
+    ) -> LLMResponse:
+        """Run a single-shot completion through the Claude Agent SDK.
+
+        See :meth:`LLMProvider.generate`. ``max_tokens`` / ``temperature`` are
+        accepted but not forwarded (see the class docstring).
+        """
+        try:
+            from claude_agent_sdk import (
+                AssistantMessage,
+                ClaudeAgentOptions,
+                ClaudeSDKError,
+                ResultMessage,
+                TextBlock,
+                query,
+            )
+        except ImportError as exc:
+            raise LLMProviderError(
+                "ClaudeAgentSDKProvider needs the `claude-agent-sdk` package "
+                "AND the `claude` CLI on PATH (logged in to a Claude "
+                "subscription). Install/verify with:\n"
+                "    pip install claude-agent-sdk\n"
+                "    claude --version   # the CLI must be installed + logged in\n"
+                "Or pin a different provider via `llm_provider:` in "
+                ".anvil/config.yaml (anthropic | bedrock | custom). If you have "
+                "ANTHROPIC_API_KEY / AWS creds set, add `llm_fallback: true` to "
+                ".anvil/config.yaml to auto-detect and use them instead."
+            ) from exc
+
+        options = ClaudeAgentOptions(
+            system_prompt=system,
+            model=self._model,
+            max_turns=1,
+            allowed_tools=[],
+            permission_mode="bypassPermissions",
+            # Keep ambient Claude Code hooks/settings out of the subprocess —
+            # they flood the run with hook events and can break it.
+            setting_sources=[],
+        )
+
+        collected_text: list[str] = []
+        # Captured-by-closure result fields. A dict avoids `nonlocal` churn for
+        # the nested async driver.
+        captured: dict[str, Any] = {
+            "got_result": False,
+            "is_error": False,
+            "result_text": None,
+            "usage": None,
+            "model": None,
+            "stop_reason": None,
+            # Error diagnostics. ResultMessage.result is None on error subtypes,
+            # so capture errors / api_error_status (and any assistant-frame
+            # error) to report something actionable instead of bare "None".
+            "errors": None,
+            "api_error_status": None,
+            "assistant_error": None,
+        }
+
+        async def _drive() -> None:
+            try:
+                async for message in query(prompt=user, options=options):
+                    if isinstance(message, AssistantMessage):
+                        collected_text.append(
+                            "".join(
+                                b.text
+                                for b in message.content
+                                if isinstance(b, TextBlock)
+                            )
+                        )
+                        # The per-turn assistant frame carries the RELIABLE model
+                        # id (required) and stop_reason. The ResultMessage frame
+                        # often leaves both None (stop_reason is `str | None`,
+                        # model lives only in the optional model_usage map), so
+                        # prefer these and use the result frame only as fallback.
+                        if message.model:
+                            captured["model"] = message.model
+                        if message.stop_reason:
+                            captured["stop_reason"] = message.stop_reason
+                        # An API-level failure (auth/billing/rate-limit) can be
+                        # reported on the assistant frame; record it so it is
+                        # not silently returned as a success.
+                        if getattr(message, "error", None):
+                            captured["assistant_error"] = message.error
+                    elif isinstance(message, ResultMessage):
+                        captured["got_result"] = True
+                        captured["is_error"] = bool(message.is_error)
+                        captured["result_text"] = message.result
+                        captured["usage"] = message.usage
+                        captured["errors"] = getattr(message, "errors", None)
+                        captured["api_error_status"] = getattr(
+                            message, "api_error_status", None
+                        )
+                        # Fallbacks only — the assistant frame (captured above,
+                        # and it arrives first) is authoritative when present.
+                        if not captured["stop_reason"]:
+                            captured["stop_reason"] = message.stop_reason
+                        if not captured["model"]:
+                            # model_usage is a dict keyed by model id; first key
+                            # is the model that produced this single-turn answer.
+                            model_usage = message.model_usage or {}
+                            captured["model"] = next(iter(model_usage), None)
+            except Exception:  # noqa: BLE001
+                # The SDK can emit a trailing terminal control-frame error AFTER
+                # it has already delivered the ResultMessage. If we have the
+                # result, that frame is noise — keep it. Otherwise it is a real
+                # failure: re-raise to be wrapped below.
+                if not captured["got_result"]:
+                    raise
+
+        # Scrub the API-key vars so the inherited subprocess env does not carry
+        # a quota-capped key, then restore.
+        saved = {
+            var: os.environ.pop(var, None)
+            for var in ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY")
+        }
+        try:
+            _run_blocking_until_complete(_drive)
+        except ClaudeSDKError as exc:
+            raise LLMProviderError(
+                f"Claude Agent SDK call failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            # Transport / subprocess errors that are not ClaudeSDKError
+            # subclasses (e.g. an anyio cancellation surfaced as a generic
+            # exception) still get the uniform LLMProviderError wrap.
+            raise LLMProviderError(
+                f"Claude Agent SDK call failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        finally:
+            for var, val in saved.items():
+                if val is not None:
+                    os.environ[var] = val
+
+        if not captured["got_result"]:
+            raise LLMProviderError(
+                "Claude Agent SDK returned no ResultMessage (no completion)."
+            )
+        if captured["is_error"] or captured["assistant_error"]:
+            # Build an actionable diagnostic. `result` is None on error
+            # subtypes, so fall through to errors / api_error_status / the
+            # assistant-frame error rather than reporting bare "None".
+            detail_parts: list[str] = []
+            if captured["result_text"]:
+                detail_parts.append(str(captured["result_text"]))
+            if captured["errors"]:
+                detail_parts.append(f"errors={captured['errors']}")
+            if captured["api_error_status"] is not None:
+                detail_parts.append(f"api_error_status={captured['api_error_status']}")
+            if captured["assistant_error"]:
+                detail_parts.append(f"error={captured['assistant_error']}")
+            detail = "; ".join(detail_parts) or "(no detail reported)"
+            raise LLMProviderError(
+                f"Claude Agent SDK reported an error result: {detail}"
+            )
+
+        # Prefer the accumulated assistant text; fall back to the ResultMessage
+        # ``result`` string (set on a success subtype).
+        text = "".join(collected_text).strip() or (captured["result_text"] or "")
+
+        usage = captured["usage"] or {}
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        cached = int(usage.get("cache_read_input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+
+        try:
+            return LLMResponse(
+                text=text,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached,
+                output_tokens=output_tokens,
+                model=captured["model"] or self._model or "claude-agent-sdk",
+                finish_reason=captured["stop_reason"] or "end_turn",
+            )
+        except ValidationError as exc:
+            raise LLMProviderError(
+                f"Claude Agent SDK response failed schema validation: {exc}"
+            ) from exc
 
 
 # ---------------------------------------------------------------------------

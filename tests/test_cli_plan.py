@@ -79,7 +79,7 @@ def _install_provider(
 
     plan_module = importlib.import_module("anvil.cli.plan")
 
-    def fake_resolve(use_llm: bool, config=None):  # type: ignore[no-untyped-def]
+    def fake_resolve(use_llm: bool, config=None, model=None):  # type: ignore[no-untyped-def]
         return provider_factory() if use_llm else None
 
     monkeypatch.setattr(plan_module, "_resolve_llm_provider", fake_resolve)

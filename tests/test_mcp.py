@@ -2363,7 +2363,7 @@ class TestPlanTasksLlmBackstop:
         monkeypatch.setattr(
             llm_planner,
             "resolve_planner_provider",
-            lambda config=None: (provider, "anthropic"),
+            lambda config=None, *, model_override=None: (provider, "anthropic"),
         )
 
     def test_happy_path_generates_appends_and_reports_llm_flags(
@@ -2415,7 +2415,7 @@ class TestPlanTasksLlmBackstop:
         # stub so an accidental call surfaces as a test failure.
         from anvil.planning import llm_planner
 
-        def _explode(config=None) -> None:  # type: ignore[no-untyped-def]
+        def _explode(config=None, *, model_override=None) -> None:  # type: ignore[no-untyped-def]
             raise AssertionError(
                 "resolve_planner_provider should not be called with use_llm=False"
             )
@@ -2458,7 +2458,7 @@ class TestPlanTasksLlmBackstop:
             "Set ANTHROPIC_API_KEY or install claude-agent-sdk."
         )
 
-        def _raise(config=None) -> None:  # type: ignore[no-untyped-def]
+        def _raise(config=None, *, model_override=None) -> None:  # type: ignore[no-untyped-def]
             raise PlannerProviderUnavailable(sentinel_msg)
 
         monkeypatch.setattr(llm_planner, "resolve_planner_provider", _raise)
@@ -2471,6 +2471,40 @@ class TestPlanTasksLlmBackstop:
         with pytest.raises(
             ToolError, match="ANTHROPIC_API_KEY|claude-agent-sdk"
         ):
+            _run(run())
+
+    def test_generate_llm_provider_error_raises_tool_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A generate()-time ``LLMProviderError`` from the default agent-sdk
+        provider must surface as a clean ``ToolError``, not an unhandled
+        exception. Regression for the agent-sdk default flip: the backstop
+        used to only catch the resolve-time PlannerProviderUnavailable."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir, _PRD_WITHOUT_TASKS_MCP)
+        monkeypatch.chdir(tmp_path)
+
+        from anvil.planning import llm_planner
+        from anvil.planning.llm import LLMProviderError
+
+        class _FailingProvider:
+            def generate(self, **kwargs):  # type: ignore[no-untyped-def]
+                raise LLMProviderError(
+                    "ClaudeAgentSDKProvider needs the `claude` CLI on PATH"
+                )
+
+        monkeypatch.setattr(
+            llm_planner,
+            "resolve_planner_provider",
+            lambda config=None, *, model_override=None: (_FailingProvider(), "agent-sdk"),
+        )
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+                await c.call_tool("plan_tasks", {})
+
+        with pytest.raises(ToolError, match="LLM call failed|claude"):
             _run(run())
 
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anvil-state"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local-first project state engine: turn rough ideas and PRDs into reviewed, lockable, evidence-backed work packets that humans and AI agents can coordinate on without conflicts."
 # Build-root-local README. `../README.md` escaped the bin/ build root and broke
 # `uv build` (sdist->wheel: "Readme file does not exist: ../README.md"). This is
@@ -31,6 +31,12 @@ dependencies = [
     "typer>=0.12",
     "pydantic>=2.6",
     "fastmcp",
+    # Default LLM path: the Claude Agent SDK drives the bundled Claude Code CLI
+    # over the logged-in subscription (no per-token API key). Needs the `claude`
+    # CLI on PATH at call time — the provider surfaces a clear error if absent.
+    "claude-agent-sdk>=0.2",
+    # Direct Anthropic API path (AnthropicProvider/BedrockProvider). Still a core
+    # dep so `llm_provider: anthropic` works out of the box without an extra.
     "anthropic>=0.30",
     "PyYAML>=6.0",
     "httpx>=0.27",

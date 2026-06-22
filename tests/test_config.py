@@ -81,6 +81,24 @@ class TestLoadConfig:
         assert cfg.project_id == "test-id"
         assert cfg.llm_provider is None
         assert cfg.llm_model is None
+        assert cfg.llm_fallback is False
+
+    def test_llm_fallback_parses_bool(self, tmp_path: Path) -> None:
+        cfg = load_config(
+            _write_config(
+                tmp_path / "config.yaml", _minimal_yaml() + "llm_fallback: true\n"
+            )
+        )
+        assert cfg.llm_fallback is True
+
+    def test_llm_fallback_non_bool_raises(self, tmp_path: Path) -> None:
+        """A quoted/typo'd non-bool llm_fallback fails loudly at load (strict
+        validation mirroring auto_expand), not a silent truthy coercion."""
+        bad = _write_config(
+            tmp_path / "config.yaml", _minimal_yaml() + 'llm_fallback: "false"\n'
+        )
+        with pytest.raises(ValueError, match="llm_fallback must be a boolean"):
+            load_config(bad)
 
     def test_load_config_returns_frozen_config(self, tmp_path: Path) -> None:
         """Config is frozen (dataclass frozen=True) — assignment raises FrozenInstanceError."""

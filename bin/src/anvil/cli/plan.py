@@ -1,7 +1,9 @@
 """plan, score, expand, review tasks, list, show commands (Phase 3).
 
 Phase 7 Wave 2: plan / score / expand grow a ``--use-llm`` flag that, when
-set, instantiates an :class:`anvil.planning.llm.AnthropicProvider`
+set, resolves a provider via
+:func:`anvil.planning.llm_planner.resolve_planner_provider` (default:
+:class:`anvil.planning.llm.ClaudeAgentSDKProvider`, the subscription path)
 and threads it into the underlying planning engine functions.  LLM
 augmentation is *additive* — the deterministic baseline always runs first;
 LLM enrichment is layered on top and may fail open with a stderr warning.
@@ -80,8 +82,10 @@ def _load_config_optional(state_dir: Path) -> Config | None:
         # fall-through. (critic SHOULD FIX #3, PR #65)
         typer.echo(
             f"Warning: config.yaml load failed "
-            f"({type(exc).__name__}: {exc}); proceeding with env-only "
-            "LLM resolution. Fix config.yaml and re-run to use config.",
+            f"({type(exc).__name__}: {exc}); proceeding without it. LLM "
+            "resolution falls back to the default agent-sdk provider (env "
+            "auto-detect only runs with llm_fallback: true). Fix config.yaml "
+            "and re-run to use config.",
             err=True,
         )
         return None
@@ -90,18 +94,24 @@ def _load_config_optional(state_dir: Path) -> Config | None:
 def _resolve_llm_provider(
     use_llm: bool,
     config: Config | None = None,
+    model: str | None = None,
 ) -> LLMProvider | None:
     """Return an LLM provider when ``--use-llm`` is set, else None.
 
-    v1.17.0: delegates to :func:`planning.llm_planner.resolve_planner_provider`
-    so the same multi-provider precedence (Anthropic API / Bedrock / custom
-    OpenAI-compatible) applies to ``--use-llm`` augmentation as to the
-    LLM-planner backstop. Single source of truth for provider selection;
+    Delegates to :func:`planning.llm_planner.resolve_planner_provider`
+    so the same provider precedence (default ``agent-sdk``; optional
+    ``anthropic`` / ``bedrock`` / ``custom`` via explicit config or the
+    ``llm_fallback`` env chain) applies to ``--use-llm`` augmentation as to
+    the LLM-planner backstop. Single source of truth for provider selection;
     no more divergent env-var checks per call site.
 
-    Exits with code 1 if ``--use-llm`` is set but no provider can be
-    resolved — the error message from ``resolve_planner_provider`` lists
-    every supported path.
+    The default ``agent-sdk`` provider always resolves, so the only exit-1
+    path here is an explicitly-pinned ``bedrock``/``custom`` provider that
+    cannot be built — the ``PlannerProviderUnavailable`` message names the
+    fix.
+
+    ``model`` is the optional ``--model`` CLI override; it is threaded as
+    ``model_override`` and wins over the project's ``llm_model`` / ``llm_tier``.
     """
     if not use_llm:
         return None
@@ -114,7 +124,7 @@ def _resolve_llm_provider(
     )
 
     try:
-        provider, _tier = resolve_planner_provider(config)
+        provider, _tier = resolve_planner_provider(config, model_override=model)
     except PlannerProviderUnavailable as exc:
         typer.echo(f"Error: --use-llm cannot resolve a provider.\n{exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -193,9 +203,22 @@ def plan(
         False,
         "--use-llm",
         help=(
-            "Augment planning with an LLM (Anthropic). Requires "
-            "ANTHROPIC_API_KEY in environment. Deterministic output is "
-            "always produced first; LLM enrichment is additive."
+            "Augment planning with an LLM. Defaults to your Claude "
+            "subscription via the Agent SDK (no API key; needs the `claude` "
+            "CLI). Deterministic output is always produced first; LLM "
+            "enrichment is additive."
+        ),
+    ),
+    model: str | None = typer.Option(  # noqa: B008
+        None,
+        "--model",
+        help=(
+            "Override the LLM model for this run (wins over config "
+            "llm_model/llm_tier). agent-sdk: a CLI model name like 'sonnet'/"
+            "'opus' or a full id; anthropic/bedrock: a model id; custom: the "
+            "route name your endpoint serves. Applies to both --use-llm "
+            "augmentation and the no-tasks backstop. Omit to use the "
+            "configured tier/model or the subscription default."
         ),
     ),
     no_llm: bool = typer.Option(  # noqa: B008
@@ -248,6 +271,7 @@ def plan(
     """
     from anvil.clock import SystemClock
     from anvil.planning.inference import infer_all
+    from anvil.planning.llm import LLMProviderError
     from anvil.planning.llm_planner import (
         PlannerProviderUnavailable,
         TaskGenerationError,
@@ -293,7 +317,7 @@ def plan(
     # backstop below.
     config = _load_config_optional(state_dir)
 
-    provider = _resolve_llm_provider(use_llm, config)
+    provider = _resolve_llm_provider(use_llm, config, model=model)
     parsed = parse_prd(markdown, prd_id="prd", provider=provider)
 
     # Non-fatal parse errors are surfaced as warnings during plan.
@@ -332,6 +356,7 @@ def plan(
                 features=parsed.features,
                 requirements=parsed.requirements,
                 config=config,
+                model_override=model,
             )
         except PlannerProviderUnavailable as exc:
             if json_output:
@@ -346,6 +371,17 @@ def plan(
                     code="task_generation_error",
                 )
             typer.echo(f"Error: LLM task generation failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except LLMProviderError as exc:
+            # The default agent-sdk provider always *resolves* but can fail at
+            # generate() time (missing `claude` CLI / SDK, bad --model, transport
+            # error). Before the agent-sdk default flip this surfaced as a
+            # PlannerProviderUnavailable at resolve time (caught above); now it
+            # is an LLMProviderError from generate(). Catch it for the same clean
+            # exit-1 instead of letting it escape as a raw traceback.
+            if json_output:
+                fail("plan", f"LLM call failed: {exc}", code="llm_error")
+            typer.echo(f"Error: LLM call failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
         # Idempotency: only append `## Tasks` when the file does not
@@ -688,8 +724,18 @@ def score(
         "--use-llm",
         help=(
             "Augment the rule-based explanation with an LLM-written trade-off "
-            "summary (Anthropic). Requires ANTHROPIC_API_KEY. The numeric "
-            "scores themselves are never modified by the LLM."
+            "summary. Defaults to your Claude subscription via the Agent SDK "
+            "(no API key; needs the `claude` CLI). The numeric scores "
+            "themselves are never modified by the LLM."
+        ),
+    ),
+    model: str | None = typer.Option(  # noqa: B008
+        None,
+        "--model",
+        help=(
+            "Override the LLM model for this run (wins over config "
+            "llm_model/llm_tier). See `anvil plan --help` for the per-provider "
+            "model-name conventions."
         ),
     ),
     json_output: bool = JSON_OPTION,
@@ -719,7 +765,16 @@ def score(
     _require_state_dir(state_dir, command="score", json_output=json_output)
 
     config = _load_config_optional(state_dir)
-    provider = _resolve_llm_provider(use_llm, config)
+    # `--model` only takes effect on the LLM path; warn rather than silently
+    # ignore it when `--use-llm` is absent (score otherwise runs the
+    # deterministic scorer and the override is a no-op).
+    if model and not use_llm:
+        typer.echo(
+            "Warning: --model has no effect without --use-llm; "
+            "the deterministic scorer ignores it.",
+            err=True,
+        )
+    provider = _resolve_llm_provider(use_llm, config, model=model)
 
     backend = _open_backend(state_dir)
     try:
@@ -1051,10 +1106,20 @@ def expand(
         False,
         "--use-llm",
         help=(
-            "Use LLM augmentation (Anthropic) to propose 2-5 sub-tasks. "
-            "Requires ANTHROPIC_API_KEY. Only tasks with complexity at/above "
-            "the configured `auto_expand_threshold` (default 4) are "
-            "decomposed; lower-complexity tasks return no proposals."
+            "Use LLM augmentation to propose 2-5 sub-tasks. Defaults to your "
+            "Claude subscription via the Agent SDK (no API key; needs the "
+            "`claude` CLI). Only tasks with complexity at/above the configured "
+            "`auto_expand_threshold` (default 4) are decomposed; "
+            "lower-complexity tasks return no proposals."
+        ),
+    ),
+    model: str | None = typer.Option(  # noqa: B008
+        None,
+        "--model",
+        help=(
+            "Override the LLM model for this run (wins over config "
+            "llm_model/llm_tier). See `anvil plan --help` for the per-provider "
+            "model-name conventions."
         ),
     ),
     format: str = typer.Option(  # noqa: B008, A002 — Typer convention; A002 ok for CLI flag
@@ -1108,7 +1173,7 @@ def expand(
     _require_state_dir(state_dir)
 
     config = _load_config_optional(state_dir)
-    provider = _resolve_llm_provider(use_llm, config)
+    provider = _resolve_llm_provider(use_llm, config, model=model)
 
     # v1.21.0 — the expansion gate honors the project's configured
     # threshold instead of the historical hardcoded ``complexity >= 4``.

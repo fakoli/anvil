@@ -279,22 +279,24 @@ the same PRD.
 ### Setup
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
 anvil plan --use-llm
 ```
 
-The default model is `claude-sonnet-4-6`. Prompt caching is on by default — the system
-block is sent with an ephemeral cache breakpoint, so repeated runs against the same task
-batch pay only for new user tokens within the 5-minute cache window.
+That's it — the default provider is your Claude subscription via the Agent SDK (no API
+key). It just needs the `claude` CLI on PATH and logged in. To use a metered API key,
+AWS Bedrock, or a custom OpenAI-compatible endpoint instead, pin `llm_provider:` in
+`.anvil/config.yaml` (or set `llm_fallback: true` to restore env auto-detection); see
+[`../llm-providers.md`](../llm-providers.md). The model defaults to the subscription's own
+default; pin one with `--model`, `llm_tier`, or `llm_model`.
 
 ### Failure mode
 
-Missing API key with `--use-llm` exits cleanly with code 1 — no partial state is written:
-
-```text
-$ anvil plan --use-llm
-Error: --use-llm requires ANTHROPIC_API_KEY in environment. Set it or omit --use-llm.
-```
+The default `agent-sdk` provider always resolves (no key required), so `--use-llm` no
+longer exits 1 for a missing `ANTHROPIC_API_KEY`. Resolution fails with code 1 only when
+an explicitly-pinned provider can't be built (e.g. `llm_provider: bedrock` without the
+`anthropic[bedrock]` extra, or a `custom` endpoint missing its `base_url`/model); the
+message names the fix. If the `claude` CLI is absent at call time, the provider raises a
+clear error telling you to install/login to Claude Code or pin a different provider.
 
 Mid-operation LLM errors fall back to deterministic-only output with a warning to
 stderr. The operation does not abort. See [`../llm.md` → Failure mode](../llm.md#failure-mode)

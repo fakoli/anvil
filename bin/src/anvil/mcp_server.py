@@ -1886,8 +1886,10 @@ def plan_tasks(
 
     When the PRD has features but no ``## Tasks`` section, the LLM planner
     drafts tasks, appends them to prd.md, and re-parses (set use_llm=False to
-    opt out and keep the deterministic parse). The provider is resolved from
-    .anvil/config.yaml, else env auto-detect; see docs/llm-providers.md.
+    opt out and keep the deterministic parse). The provider defaults to the
+    Claude subscription via the Agent SDK; pin anthropic/bedrock/custom in
+    .anvil/config.yaml, or set llm_fallback: true for env auto-detect. See
+    docs/llm-providers.md.
 
     PRD parse errors surface as warnings; LLM failures raise ToolError rather
     than returning a silent zero-count.
@@ -1902,6 +1904,7 @@ def plan_tasks(
     """
     from anvil.clock import SystemClock
     from anvil.planning.inference import infer_all
+    from anvil.planning.llm import LLMProviderError
     from anvil.planning.llm_planner import (
         PlannerProviderUnavailable,
         TaskGenerationError,
@@ -1996,6 +1999,15 @@ def plan_tasks(
             )
         except PlannerProviderUnavailable as exc:
             raise ToolError(str(exc)) from exc
+        except LLMProviderError as exc:
+            # The default agent-sdk provider always resolves but can fail at
+            # generate() time (missing `claude` CLI / SDK, bad model, transport
+            # error) — an LLMProviderError, not the resolve-time
+            # PlannerProviderUnavailable. Surface it as a clean ToolError so the
+            # client gets the actionable message instead of an unhandled
+            # exception. (The message names the fix: install/login to Claude
+            # Code or pin a provider.)
+            raise ToolError(f"LLM call failed: {exc}") from exc
         except TaskGenerationError as exc:
             # mcp-critic SHOULD FIX from PR #63: TaskGenerationError's
             # message can include up to 500 chars of raw LLM output (see

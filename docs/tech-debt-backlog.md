@@ -669,6 +669,60 @@ splice still reads a repo file.)
 
 ---
 
+## Agent SDK provider (PR #78) — deferred `/code-review max` findings
+
+The agent-sdk default-provider change shipped with a multi-agent review; the
+real, in-scope findings were fixed in PR #78. These were deferred (pre-existing,
+inherent, or low-value) with rationale.
+
+### AS-1 · `_load_config_optional` silently downgrades a pinned provider on a malformed config
+
+**From**: /code-review max #3. **Status**: OPEN (medium).
+
+When `.anvil/config.yaml` is unreadable/malformed, `_load_config_optional`
+warns to stderr and returns `None`; the resolver then defaults to `agent-sdk`,
+so a project that pinned `llm_provider: bedrock` (for compliance/data residency)
+silently runs against the Claude subscription. Pre-existing: the
+swallow-and-return-`None` design predates the agent-sdk flip (before it, the
+`None` path env-detected `anthropic` or hard-failed — also not honoring the
+pin). **Fix**: on a *malformed* (vs absent) config, fail loudly for LLM
+resolution rather than falling through to the default. Broad blast radius
+(`_load_config_optional` feeds every command), so deferred from the PR.
+
+### AS-2 · `ClaudeAgentSDKProvider` drops `max_tokens` / `temperature`
+
+**From**: /code-review max #4. **Status**: OPEN (low).
+
+The Agent SDK / `claude` CLI exposes no per-call `max_tokens` / `temperature`
+equivalent, so the provider accepts them for `LLMProvider` compatibility but
+does not forward them (documented in the class docstring). Output length is
+governed by the prompt (e.g. score's "1-3 sentence" instruction) + the
+subscription. **Fix (if needed)**: map to `output_config.effort` /
+`task_budget`, or formalize the divergence in the `LLMProvider` contract.
+
+### AS-3 · `score --use-llm` emits a per-task fail-open warning when the `claude` CLI is absent
+
+**From**: /code-review max #5. **Status**: OPEN (low).
+
+With the keyless agent-sdk default, `score --use-llm` on a box without the CLI
+fails open per task (deterministic scores still written), logging one stderr
+warning per task. **Fix**: dedupe to a single warning per run, or short-circuit
+the augmentation after the first provider failure.
+
+### AS-4 · thread-offload runs the `claude` subprocess in a worker-thread event loop
+
+**From**: /code-review max #14. **Status**: OPEN (low, defensive).
+
+`_run_blocking_until_complete`'s running-loop fallback offloads
+`anyio.run(query(...))` to a `ThreadPoolExecutor` worker; spawning the CLI
+subprocess via asyncio in a non-main thread relies on Python 3.11's
+`ThreadedChildWatcher` (works on 3.11). The branch is currently reached only by
+tests — no in-tree caller invokes `generate()` from inside a running loop.
+**Fix (if a real async caller appears)**: verify subprocess spawn under the
+worker-thread loop across supported platforms.
+
+---
+
 ## Closed in PR #41 fixup commits (for reference)
 
 - DONE · Greptile #1: `_is_pr_related` bare "pr" substring
