@@ -35,7 +35,10 @@ jobs:
 
       # Trusted publishing: the action exchanges the OIDC token for a short-lived
       # PyPI credential. No username/password/token needed.
+      # Pinned to an immutable commit (not the moving release/v1 branch) since this
+      # step holds id-token: write — supply-chain hardening per the action's own
+      # guidance. Bump the SHA + comment together when updating.
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         with:
           packages-dir: bin/dist/
