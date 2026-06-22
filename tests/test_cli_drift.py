@@ -604,3 +604,45 @@ class TestHomeWorkspaceLayout:
         missing = [i for i in env["data"]["drift"]
                    if i["category"] == "missing_expected_file"]
         assert missing == [], env
+
+    def test_drift_handles_repo_root_docs_and_bin_src_package(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.setenv("HOME", str(home))
+
+        checkout = tmp_path / "checkout"
+        (checkout / "bin" / "src" / "anvil").mkdir(parents=True)
+        (checkout / "bin" / "pyproject.toml").write_text("[project]\nname='x'\n")
+        (checkout / "bin" / "src" / "anvil" / "widget.py").write_text("ok\n")
+        (checkout / "docs").mkdir()
+        (checkout / "docs" / "design.md").write_text("ok\n")
+        (checkout / "tests").mkdir()
+        (checkout / "tests" / "test_widget.py").write_text("ok\n")
+
+        _init_project(checkout)
+
+        from anvil.cli._helpers import _resolve_state_dir
+
+        state_dir = _resolve_state_dir(checkout)
+        _seed_done_task(
+            checkout,
+            likely_files=[
+                "src/anvil/widget.py",
+                "docs/design.md",
+                "tests/test_widget.py",
+            ],
+            state_dir=state_dir,
+        )
+
+        r = runner.invoke(
+            app, ["drift", "--json", "--cwd", str(checkout)],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+        env = _json_of(r)
+        missing = [i for i in env["data"]["drift"]
+                   if i["category"] == "missing_expected_file"]
+        assert missing == [], env

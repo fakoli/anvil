@@ -112,6 +112,65 @@ def _resolve_expected_file(rel: str, project_root: Path) -> Path:
     return resolved
 
 
+def _expected_file_candidates(rel: str, project_root: Path) -> list[Path]:
+    """Return the intended on-disk location plus diagnostics for a likely file.
+
+    Most projects have exactly one root, so the first candidate is the normal
+    project-root-relative resolution. Anvil's own repository is slightly more
+    interesting: docs/tests live at the checkout root, while the installable
+    Python package lives under ``bin/`` and historical task plans refer to
+    package files as ``src/...``.
+
+    Keep the first candidate strict: drift checks only that selected path. Extra
+    entries are diagnostic breadcrumbs, not loose aliases. This avoids hiding a
+    real missing root-level ``src/...`` file just because a same-named file
+    exists under ``bin/src/...``.
+    """
+    candidates = [_resolve_expected_file(rel, project_root)]
+    cleaned = rel.removeprefix("./")
+    candidate = Path(cleaned)
+    if candidate.is_absolute():
+        return candidates
+
+    parts = candidate.parts
+    first = parts[0] if parts else ""
+    child_package_root = project_root / "bin"
+
+    if (
+        first == "src"
+        and (child_package_root / "pyproject.toml").exists()
+        and not _prefix_exists_or_tracked(project_root, "src")
+    ):
+        candidates.insert(0, _resolve_expected_file(rel, child_package_root))
+
+    repo_root_prefixes = {
+        ".github", "assets", "benchmarks", "docs", "evals", "hooks",
+        "packaging", "scripts", "skills", "tests",
+    }
+    if (
+        project_root.name == "bin"
+        and first in repo_root_prefixes
+        and (project_root.parent / ".git").exists()
+        and not _prefix_exists_or_tracked(project_root, first)
+    ):
+        candidates.insert(0, _resolve_expected_file(rel, project_root.parent))
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path not in seen:
+            out.append(path)
+            seen.add(path)
+    return out
+
+
+def _prefix_exists_or_tracked(project_root: Path, prefix: str) -> bool:
+    """True when a path prefix exists on disk or is still tracked by git."""
+    return (project_root / prefix).exists() or _git_has_tracked_prefix(
+        project_root, prefix,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public models — DiscrepancyKind / Severity / Discrepancy / Report / FixAction
 # ---------------------------------------------------------------------------
@@ -583,8 +642,9 @@ class ReconciliationEngine:
 
         Only terminal tasks are scanned: a ``ready`` or ``in_progress`` task
         whose files don't exist yet is the *normal* mid-flight state, not
-        drift. Paths resolve relative to ``state_dir`` (the project root) and
-        absolute paths are honoured as-is. The check is read-only — no
+        drift. Paths resolve relative to the checkout root, with a package-root
+        fallback for repos whose installable package lives under ``bin/``.
+        Absolute paths are honoured as-is. The check is read-only — no
         :meth:`fix` handler exists for it (it is intentionally NOT in
         ``_apply_fix``), because "the spec says a file should exist but it
         doesn't" has no safe automatic remediation: only a human can decide
@@ -602,9 +662,11 @@ class ReconciliationEngine:
                 # Normalise WITHOUT corrupting dotfiles: strip only a leading
                 # ``./`` prefix, never leading dots (``.env`` stays ``.env``),
                 # and resolve safely under the project root (no ``..`` escape).
-                candidate = _resolve_expected_file(rel, project_root)
+                candidates = _expected_file_candidates(rel, project_root)
+                candidate = candidates[0]
                 if candidate.exists():
                     continue
+                searched = ", ".join(str(path) for path in candidates)
                 out.append(Discrepancy(
                     kind=DiscrepancyKind.missing_expected_file,
                     severity=Severity.warning,
@@ -613,7 +675,7 @@ class ReconciliationEngine:
                     description=(
                         f"Task '{task.id}' is status={task.status} but its "
                         f"expected file {rel!r} does not exist on disk "
-                        f"(looked at {candidate}). The plan promised this "
+                        f"(looked at {searched}). The plan promised this "
                         "artefact; the code no longer matches the intent."
                     ),
                     suggested_fix=(
@@ -624,6 +686,7 @@ class ReconciliationEngine:
                         "task_id": task.id,
                         "expected_file": rel,
                         "resolved_path": str(candidate),
+                        "searched_paths": [str(path) for path in candidates],
                         "status": str(task.status),
                     },
                 ))
@@ -906,6 +969,25 @@ def _git_list_branches(cwd: Path) -> list[str]:
     if r.returncode != 0:
         return []
     return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+
+def _git_has_tracked_prefix(cwd: Path, prefix: str) -> bool:
+    """Return whether git tracks any path under *prefix* in *cwd*."""
+    if shutil.which("git") is None:
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "ls-files", "--", prefix],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if r.returncode != 0:
+        return False
+    return any(line.strip() for line in r.stdout.splitlines())
 
 
 def _git_list_worktrees(cwd: Path) -> list[dict[str, str]]:

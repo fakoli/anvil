@@ -807,6 +807,116 @@ class TestMissingExpectedFile:
         finally:
             b.close()
 
+    def test_package_root_fallback_handles_bin_src_layout(
+        self, tmp_path: Path,
+    ) -> None:
+        """Anvil keeps docs/tests at checkout root but package code in bin/src."""
+        workspace = tmp_path / "workspaces" / "proj-abcd1234"
+        state_dir = workspace / ".anvil"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        checkout = tmp_path / "code" / "anvil"
+        (checkout / "bin" / "src" / "anvil").mkdir(parents=True)
+        (checkout / "bin" / "pyproject.toml").write_text("[project]\nname='x'\n")
+        (checkout / "bin" / "src" / "anvil" / "widget.py").write_text("ok\n")
+        (checkout / "docs").mkdir()
+        (checkout / "docs" / "design.md").write_text("ok\n")
+        (checkout / "tests").mkdir()
+        (checkout / "tests" / "test_widget.py").write_text("ok\n")
+
+        b = _make_backend(state_dir)
+        try:
+            self._setup_terminal_task_with_files(
+                b,
+                likely_files=[
+                    "src/anvil/widget.py",
+                    "docs/design.md",
+                    "tests/test_widget.py",
+                ],
+            )
+            engine = ReconciliationEngine(
+                b, state_dir=state_dir, clock=_make_clock(),
+                project_root=checkout,
+            )
+            assert [d for d in engine.scan().discrepancies
+                    if d.kind == DiscrepancyKind.missing_expected_file] == []
+        finally:
+            b.close()
+
+    def test_bin_src_homonym_does_not_hide_missing_root_src(
+        self, tmp_path: Path,
+    ) -> None:
+        """If a root src tree exists, likely_files remain strict to that root."""
+        checkout = tmp_path / "anvil"
+        (checkout / "src" / "anvil").mkdir(parents=True)
+        (checkout / "bin" / "src" / "anvil").mkdir(parents=True)
+        (checkout / "bin" / "pyproject.toml").write_text("[project]\nname='x'\n")
+        (checkout / "bin" / "src" / "anvil" / "widget.py").write_text("ok\n")
+
+        state_dir = tmp_path / "state" / ".anvil"
+        state_dir.mkdir(parents=True)
+        b = _make_backend(state_dir)
+        try:
+            self._setup_terminal_task_with_files(
+                b, likely_files=["src/anvil/widget.py"],
+            )
+            engine = ReconciliationEngine(
+                b, state_dir=state_dir, clock=_make_clock(),
+                project_root=checkout,
+            )
+            missing = [d for d in engine.scan().discrepancies
+                       if d.kind == DiscrepancyKind.missing_expected_file]
+            assert [(d.payload["task_id"], d.payload["expected_file"])
+                    for d in missing] == [("T001", "src/anvil/widget.py")]
+            assert missing[0].payload["resolved_path"].endswith(
+                "src/anvil/widget.py"
+            )
+            assert "/bin/src/" not in missing[0].payload["resolved_path"]
+        finally:
+            b.close()
+
+    def test_bin_src_homonym_does_not_hide_deleted_tracked_root_src(
+        self, tmp_path: Path,
+    ) -> None:
+        """A tracked root src tree deleted from disk still owns src/ intent."""
+        checkout = tmp_path / "anvil"
+        (checkout / "src" / "anvil").mkdir(parents=True)
+        (checkout / "src" / "anvil" / "widget.py").write_text("old\n")
+        (checkout / "bin" / "src" / "anvil").mkdir(parents=True)
+        (checkout / "bin" / "pyproject.toml").write_text("[project]\nname='x'\n")
+        (checkout / "bin" / "src" / "anvil" / "widget.py").write_text("ok\n")
+        subprocess.run(["git", "init", "--quiet"], cwd=checkout, check=True)
+        subprocess.run(["git", "add", "src/anvil/widget.py"], cwd=checkout, check=True)
+        subprocess.run(
+            [
+                "git", "-c", "user.email=test@example.com",
+                "-c", "user.name=test", "commit", "--quiet", "-m", "track-src",
+            ],
+            cwd=checkout,
+            check=True,
+        )
+        (checkout / "src" / "anvil" / "widget.py").unlink()
+        (checkout / "src" / "anvil").rmdir()
+        (checkout / "src").rmdir()
+
+        state_dir = tmp_path / "state" / ".anvil"
+        state_dir.mkdir(parents=True)
+        b = _make_backend(state_dir)
+        try:
+            self._setup_terminal_task_with_files(
+                b, likely_files=["src/anvil/widget.py"],
+            )
+            engine = ReconciliationEngine(
+                b, state_dir=state_dir, clock=_make_clock(),
+                project_root=checkout,
+            )
+            missing = [d for d in engine.scan().discrepancies
+                       if d.kind == DiscrepancyKind.missing_expected_file]
+            assert [(d.payload["task_id"], d.payload["expected_file"])
+                    for d in missing] == [("T001", "src/anvil/widget.py")]
+            assert "/bin/src/" not in missing[0].payload["resolved_path"]
+        finally:
+            b.close()
+
     # -- MUST-FIX 1: dot-rooted paths must not be corrupted by lstrip("./") --
 
     @pytest.mark.parametrize(
