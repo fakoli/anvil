@@ -439,16 +439,29 @@ class ClaudeAgentSDKProvider:
                                 if isinstance(b, TextBlock)
                             )
                         )
+                        # The per-turn assistant frame carries the RELIABLE model
+                        # id (required) and stop_reason. The ResultMessage frame
+                        # often leaves both None (stop_reason is `str | None`,
+                        # model lives only in the optional model_usage map), so
+                        # prefer these and use the result frame only as fallback.
+                        if message.model:
+                            captured["model"] = message.model
+                        if message.stop_reason:
+                            captured["stop_reason"] = message.stop_reason
                     elif isinstance(message, ResultMessage):
                         captured["got_result"] = True
                         captured["is_error"] = bool(message.is_error)
                         captured["result_text"] = message.result
                         captured["usage"] = message.usage
-                        captured["stop_reason"] = message.stop_reason
-                        # model_usage is a dict keyed by model id; the first key
-                        # is the model that produced this single-turn answer.
-                        model_usage = message.model_usage or {}
-                        captured["model"] = next(iter(model_usage), None)
+                        # Fallbacks only — the assistant frame (captured above,
+                        # and it arrives first) is authoritative when present.
+                        if not captured["stop_reason"]:
+                            captured["stop_reason"] = message.stop_reason
+                        if not captured["model"]:
+                            # model_usage is a dict keyed by model id; first key
+                            # is the model that produced this single-turn answer.
+                            model_usage = message.model_usage or {}
+                            captured["model"] = next(iter(model_usage), None)
             except Exception:  # noqa: BLE001
                 # The SDK can emit a trailing terminal control-frame error AFTER
                 # it has already delivered the ResultMessage. If we have the

@@ -657,3 +657,40 @@ class TestClaudeAgentSDKProvider:
 
         resp = anyio.run(_call)
         assert resp.text == "loop-safe"
+
+    def test_prefers_assistant_frame_model_and_stop_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reliable per-turn AssistantMessage (model required, stop_reason
+        populated) wins over the ResultMessage frame, which routinely leaves
+        stop_reason=None and model_usage empty. Without this the response would
+        degrade to finish_reason='end_turn' and model='claude-agent-sdk'."""
+        import claude_agent_sdk
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        async def fake_query(*, prompt, options):  # type: ignore[no-untyped-def]
+            yield AssistantMessage(
+                content=[TextBlock(text="hi")],
+                model="claude-opus-4-8",
+                stop_reason="max_tokens",
+            )
+            # Result frame degraded: no stop_reason, empty model_usage.
+            yield ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id="s",
+                usage={"input_tokens": 1, "output_tokens": 1},
+                result="hi",
+                stop_reason=None,
+                model_usage={},
+            )
+
+        monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+        resp = ClaudeAgentSDKProvider().generate(system="S", user="U")
+        assert resp.model == "claude-opus-4-8"
+        assert resp.finish_reason == "max_tokens"

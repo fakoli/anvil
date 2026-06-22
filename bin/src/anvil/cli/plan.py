@@ -82,8 +82,10 @@ def _load_config_optional(state_dir: Path) -> Config | None:
         # fall-through. (critic SHOULD FIX #3, PR #65)
         typer.echo(
             f"Warning: config.yaml load failed "
-            f"({type(exc).__name__}: {exc}); proceeding with env-only "
-            "LLM resolution. Fix config.yaml and re-run to use config.",
+            f"({type(exc).__name__}: {exc}); proceeding without it. LLM "
+            "resolution falls back to the default agent-sdk provider (env "
+            "auto-detect only runs with llm_fallback: true). Fix config.yaml "
+            "and re-run to use config.",
             err=True,
         )
         return None
@@ -269,6 +271,7 @@ def plan(
     """
     from anvil.clock import SystemClock
     from anvil.planning.inference import infer_all
+    from anvil.planning.llm import LLMProviderError
     from anvil.planning.llm_planner import (
         PlannerProviderUnavailable,
         TaskGenerationError,
@@ -368,6 +371,17 @@ def plan(
                     code="task_generation_error",
                 )
             typer.echo(f"Error: LLM task generation failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        except LLMProviderError as exc:
+            # The default agent-sdk provider always *resolves* but can fail at
+            # generate() time (missing `claude` CLI / SDK, bad --model, transport
+            # error). Before the agent-sdk default flip this surfaced as a
+            # PlannerProviderUnavailable at resolve time (caught above); now it
+            # is an LLMProviderError from generate(). Catch it for the same clean
+            # exit-1 instead of letting it escape as a raw traceback.
+            if json_output:
+                fail("plan", f"LLM call failed: {exc}", code="llm_error")
+            typer.echo(f"Error: LLM call failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
         # Idempotency: only append `## Tasks` when the file does not

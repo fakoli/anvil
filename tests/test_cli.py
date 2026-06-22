@@ -1379,6 +1379,47 @@ class TestPlanLlmBackstop:
         assert "ANTHROPIC_API_KEY" in combined
         assert "claude-agent-sdk" in combined
 
+    def test_backstop_llm_provider_error_exits_1_cleanly(
+        self,
+        tmp_path: Path,
+        monkeypatch,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """A generate()-time ``LLMProviderError`` from the default agent-sdk
+        provider (e.g. missing `claude` CLI / bad --model) must exit 1 with a
+        clean ``Error: LLM call failed`` message — not escape as a raw
+        traceback. Regression for the agent-sdk default flip: pre-flip this
+        case raised PlannerProviderUnavailable at resolve time (caught); now it
+        is an LLMProviderError from generate(), which the backstop didn't
+        catch."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITHOUT_TASKS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+
+        from anvil.planning import llm_planner
+        from anvil.planning.llm import LLMProviderError
+
+        class _FailingProvider:
+            def generate(self, **kwargs):  # type: ignore[no-untyped-def]
+                raise LLMProviderError(
+                    "ClaudeAgentSDKProvider needs the `claude` CLI on PATH"
+                )
+
+        monkeypatch.setattr(
+            llm_planner,
+            "resolve_planner_provider",
+            lambda config=None, *, model_override=None: (_FailingProvider(), "agent-sdk"),
+        )
+
+        result = _invoke_cmd(tmp_path, ["plan"])
+        assert result.exit_code == 1, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        # Clean, actionable error — not an uncaught LLMProviderError traceback.
+        assert "LLM call failed" in combined
+        assert "claude" in combined
+        assert not isinstance(result.exception, LLMProviderError)
+
     def test_idempotent_second_run_does_not_re_append(
         self,
         tmp_path: Path,

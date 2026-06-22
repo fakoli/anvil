@@ -2473,6 +2473,40 @@ class TestPlanTasksLlmBackstop:
         ):
             _run(run())
 
+    def test_generate_llm_provider_error_raises_tool_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A generate()-time ``LLMProviderError`` from the default agent-sdk
+        provider must surface as a clean ``ToolError``, not an unhandled
+        exception. Regression for the agent-sdk default flip: the backstop
+        used to only catch the resolve-time PlannerProviderUnavailable."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir, _PRD_WITHOUT_TASKS_MCP)
+        monkeypatch.chdir(tmp_path)
+
+        from anvil.planning import llm_planner
+        from anvil.planning.llm import LLMProviderError
+
+        class _FailingProvider:
+            def generate(self, **kwargs):  # type: ignore[no-untyped-def]
+                raise LLMProviderError(
+                    "ClaudeAgentSDKProvider needs the `claude` CLI on PATH"
+                )
+
+        monkeypatch.setattr(
+            llm_planner,
+            "resolve_planner_provider",
+            lambda config=None, *, model_override=None: (_FailingProvider(), "agent-sdk"),
+        )
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+                await c.call_tool("plan_tasks", {})
+
+        with pytest.raises(ToolError, match="LLM call failed|claude"):
+            _run(run())
+
 
 # ===========================================================================
 # Tool 19: score_tasks
