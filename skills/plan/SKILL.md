@@ -13,10 +13,10 @@ Convert an approved PRD into a queue of agent-ready tasks. This skill drives fou
 
 - Immediately after `anvil prd review --approve` — the PRD is approved and the task graph does not yet exist.
 - After a significant PRD revision that adds new `## Features` or `## Tasks` sections — re-plan to generate the updated task graph.
-- When `anvil status` shows `prd-status: approved` but `ready-tasks: 0` and no tasks exist yet.
+- When `anvil status` shows `PRD: approved` but `Tasks: 0 total (0 ready, ...)` and no tasks exist yet.
 - When tasks exist but none have scores — scoring was skipped or the plan was never completed.
 
-**Do not use this skill for re-scoring individual tasks, managing claims, or adjusting task status after work has started.** Once tasks are `ready`, proceed to `/anvil:execute` (Phase 5). Use `/anvil:state-ops` for inspection at any point.
+**Do not use this skill for re-scoring individual tasks, managing claims, or adjusting task status after work has started.** Once tasks are `ready`, proceed to `/anvil:execute`. Use `/anvil:state-ops` for inspection at any point.
 
 ---
 
@@ -28,18 +28,22 @@ The PRD must be parsed and in at least `reviewed` status. Confirm before proceed
 anvil status
 ```
 
-Look for `prd-status: reviewed` or `prd-status: approved`. If `prd-status: draft` or `prd-status: none`, proceed to `/anvil:prd` first.
+Plain `anvil status` prints a `PRD: <status>` line. Look for `PRD: reviewed` or
+`PRD: approved`. If it reads `PRD: draft` or `PRD: none`, proceed to `/anvil:prd`
+first. (The compact `prd-status:` token only appears under `anvil status
+--hook-format`, which the SessionStart hook consumes; you want the plain output
+here.)
 
-Phase 3 commands used in this skill:
+Commands used in this skill (all ship in 0.1.1):
 
-| Command | Phase | Status |
-|---|---|---|
-| `anvil plan` | Phase 3 | available |
-| `anvil score [TASK_ID]` | Phase 3 | available |
-| `anvil expand TASK_ID --use-llm` | Phase 7 | available |
-| `anvil review tasks` | Phase 3 | available |
-| `anvil list [--status X]` | Phase 3 | available |
-| `anvil show TASK_ID` | Phase 3 | available |
+| Command | Purpose |
+|---|---|
+| `anvil plan` | Generate features and tasks from the parsed PRD |
+| `anvil score [TASK_ID]` | Score tasks across six dimensions |
+| `anvil expand TASK_ID --use-llm` | Propose sub-tasks for an oversized task |
+| `anvil review tasks` | Promote tasks drafted → reviewed → ready |
+| `anvil list [--status X]` | List tasks |
+| `anvil show TASK_ID` | Print full task detail |
 
 ---
 
@@ -85,15 +89,17 @@ Reads the parsed PRD from `state.db` and emits `feature.created` and `task.creat
 1. If the PRD has features+requirements but no `## Tasks` section, `plan` calls the LLM itself to generate them (instead of silently returning `0 tasks` and forcing the agent to dispatch a separate planner subagent).
 2. If tasks were removed from the PRD between parses, `plan` emits `task.deleted` events automatically so state.db stays in sync (instead of leaving orphans behind). Same for features. Safe statuses (proposed / drafted / ready) prune silently; unsafe statuses (claimed / in_progress / needs_review / …) fail loudly with a clear list and the `--prune-force` escape hatch. Tasks with claims/evidence rows can NEVER be deleted at the SQL layer (the audit history is FK-protected by schema).
 
-The output line tells you what happened:
+The output line tells you what happened. A plain run prints `Planned N features, M tasks.`; when the LLM backstop fired, the line names the count and the exact PRD file it appended to:
 
 ```
-Planned 3 features, 19 tasks (19 generated via LLM (anthropic), appended to .anvil/prd.md)
+Planned 3 features, 19 tasks (19 generated via LLM (anthropic), appended to /home/you/.anvil/workspaces/<key>/.anvil/prd.md).
 ```
 
-When you see `(N generated via LLM ...)`, surface it explicitly in chat so the user knows their `prd.md` was modified:
+The `appended to <path>` segment echoes the real PRD file location, which lives in the HOME workspace under the default layout — read it off this line rather than assuming an in-repo path.
 
-> Plan generated 3 features and 19 tasks. The PRD had no `## Tasks` section, so I generated them via LLM and appended a `## Tasks` block to `.anvil/prd.md` (auditable on disk). Want to review the generated tasks before continuing? (show me / looks good / I want to edit first)
+When you see `(N generated via LLM ...)`, surface it explicitly in chat so the user knows their PRD was modified:
+
+> Plan generated 3 features and 19 tasks. The PRD had no `## Tasks` section, so I generated them via LLM and appended a `## Tasks` block to the PRD file (the path is echoed in the `appended to …` line, auditable on disk). Want to review the generated tasks before continuing? (show me / looks good / I want to edit first)
 
 If the LLM call fails (no `ANTHROPIC_API_KEY`, network failure, malformed response), the CLI exits non-zero with a clear message. **Do not paper over a failure by dispatching the planner subagent as a workaround** — surface the error to the user and ask whether they want to set up the LLM path or author tasks manually in `## Tasks`.
 
@@ -181,7 +187,7 @@ Two score signals still warrant explicit attention in chat (these are NOT auto-h
 anvil expand T001 --use-llm --format prd
 ```
 
-For each queued task: run the expand command, take the returned `### T00X.N` blocks, apply them to the `## Tasks` section of `.anvil/prd.md` (drop or keep the parent block per the parser's behavior — confirm before removing), then re-run the pipeline once at the end:
+For each queued task: run the expand command, take the returned `### T00X.N` blocks, apply them to the `## Tasks` section of the PRD file (the path `anvil prd parse` echoes as `PRD source:` — it lives in the HOME workspace under the default layout, not in-repo), dropping or keeping the parent block per the parser's behavior — confirm before removing. Then re-run the pipeline once at the end:
 
 ```bash
 anvil prd parse
@@ -232,15 +238,26 @@ Promotes tasks through `drafted → reviewed → ready`. The gate checks two con
 1. `acceptance_criteria` is non-empty.
 2. `verification.commands` is non-empty (at least one shell command).
 
-Tasks that pass both conditions are promoted to `ready`. Tasks that fail the gate stay at `drafted` with a failure reason printed. For example:
+Tasks that pass both conditions are promoted to `ready`. Tasks that fail the gate stay at `drafted` with a failure reason printed. A clean run prints:
 
 ```
-T004: BLOCKED — verification.commands is empty
-T005: PROMOTED to ready
-T006: PROMOTED to ready
+Promoted 3 task(s) to reviewed.
+Promoted 3 task(s) to ready.
+
+6 total promotion(s). No tasks blocked.
 ```
 
-For each blocked task, surface the exact missing field in chat — do not just report "blocked". Propose the fix inline, apply it to `prd.md` after confirmation, re-parse, and re-run `review tasks` yourself. Do not retry without fixing the underlying gap — the gate will block on the same condition again.
+A run with a gate failure prints the blocked task and its exact reason:
+
+```
+Promoted 0 task(s) to reviewed.
+Promoted 0 task(s) to ready.
+
+Blocked 1 task(s):
+  T004: Task 'T004' cannot move to 'reviewed': verification.commands (must be non-empty).
+```
+
+For each blocked task, surface the exact missing field in chat — do not just report "blocked". Propose the fix inline, apply it to the PRD after confirmation (edit the `## Tasks` block in the file `anvil prd parse` echoes as `PRD source:`), re-parse, and re-run `review tasks` yourself. Do not retry without fixing the underlying gap — the gate will block on the same condition again.
 
 When the gate passes for every expected task, run `anvil list --status ready` yourself and present the queue:
 
@@ -272,7 +289,7 @@ Run `anvil show TASK_ID` yourself whenever a task looks suspicious — a title t
 anvil show T003
 ```
 
-Surface the result inline: title, description, acceptance criteria, verification commands, all six score dimensions, `expected_files`, and dependency chain. These are planning issues that are far cheaper to fix before claiming than after.
+Surface the result inline. `anvil show` prints these sections: title, feature, status, priority, the six-dimension `Scores` breakdown (with an `Explanation` block), `Dependencies`, `Conflict Groups`, `Acceptance Criteria`, `Verification Commands`, `Likely Files`, `Active Claims`, and `Recent Events`. (The JSON form exposes the task's `likely_files` and `description` fields — note `likely_files`, not `expected_files`; `expected_files` is a claim-level field, not a task field.) These are planning issues that are far cheaper to fix before claiming than after.
 
 ---
 
@@ -286,7 +303,7 @@ Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Ru
 
 ## Common Pitfalls
 
-- **Planning against an unreviewed PRD.** The `claim_task` gate enforces `prd-status: approved` — but planning against a `draft` PRD produces a task graph that will be replaced on the next parse. Wait for approval before running `plan`.
+- **Planning against an unreviewed PRD.** The claim gate requires the PRD to be `reviewed` *or* `approved` (only `draft`/`rejected` block) — but planning against a `draft` PRD produces a task graph that will be replaced on the next parse. Get the PRD to at least `reviewed` before running `plan`.
 - **Running `plan` twice without re-parsing.** A second `plan` invocation on unmodified state will either re-emit duplicate events or error with a conflict. If the PRD has changed, re-parse first. If nothing has changed, skip `plan`.
 - **Treating scores as fixed truth.** The scoring engine uses rule-based heuristics against task fields. A task with a one-word description will score misleadingly. If a score seems wrong (e.g., `blast_radius: 1` on a task that clearly touches a shared schema file), adjust the `**Likely files:**` field in `prd.md`, re-parse, and re-score.
 - **Skipping the pause after `plan`.** Jumping straight to `score` and `review tasks` without reviewing the task list means catching structural problems only after the queue is ready. A task graph that doesn't reflect real work is worse than no task graph.
@@ -299,21 +316,23 @@ Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Ru
 |---|---|
 | Before this skill | `/anvil:prd` — PRD must be at least `reviewed` |
 | After Step 1 (plan) | `/anvil:state-ops` — inspect the raw task graph before scoring |
-| After Step 5 (ready queue confirmed) | `/anvil:execute` (Phase 5) — agents can now claim and work tasks |
+| After Step 5 (ready queue confirmed) | `/anvil:execute` — agents can now claim and work tasks |
 | If `show TASK_ID` reveals complexity at/above `auto_expand_threshold` | Expand in Step 3, then re-run `score` and `review tasks` |
 
 ---
 
-## Phase 3 Limitations
+## Command Reference
 
-| Feature | Phase | Status |
-|---|---|---|
-| `anvil plan` | Phase 3 | available |
-| `anvil score` | Phase 3 | available |
-| `anvil review tasks` | Phase 3 | available |
-| `anvil list` | Phase 3 | available |
-| `anvil show TASK_ID` | Phase 3 | available |
-| `anvil expand TASK_ID --use-llm` (auto-generate subtasks) | Phase 7 | available — driven automatically by the Step 2 EXPANSION QUEUE |
-| `anvil score --use-llm` (LLM-augmented scoring) | Phase 7 | pending — rule-based scoring is default |
-| `anvil next` (pick highest-priority claimable task) | Phase 4 | pending — use `list --status ready` instead |
-| Planner agent (`agents/planner.md`) | Phase 3 | available — dispatched by plan when needed |
+Every command this skill names ships in 0.1.1. Notes on the LLM-augmented and
+adjacent commands:
+
+| Command | Notes |
+|---|---|
+| `anvil plan` | Generates features and tasks; LLM backstop fills a missing `## Tasks` section |
+| `anvil score` | Rule-based by default; `--use-llm` appends a trade-off summary (numeric scores unchanged) |
+| `anvil review tasks` | Promotes drafted → reviewed → ready |
+| `anvil list` | Columns: TaskID, Title, Status, Priority, Type, Score, Feature |
+| `anvil show TASK_ID` | Full task detail, including `Likely Files` |
+| `anvil expand TASK_ID --use-llm` | Proposes 2-5 sub-tasks; driven automatically by the Step 2 EXPANSION QUEUE |
+| `anvil next` | Picks the highest-priority claimable task without claiming it |
+| Planner agent (`agents/planner.md`) | Dispatched by `plan` when the PRD has no `## Tasks` section |

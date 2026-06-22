@@ -1,11 +1,11 @@
 ---
 name: resolve-decisions
-description: Walk the PRD's unresolved items — `[NEEDS DECISION]` markers, `## Open Questions`, and missing acceptance-criteria or verification fields — and drive each one as a Q&A turn with the user, proposing concrete options when possible and applying the chosen answer to `.anvil/prd.md`. Use this skill when `anvil prd find-decisions` reports unresolved items, or when other skills (prd, plan) detect decisions blocking progress.
+description: Walk the PRD's unresolved items — `[NEEDS DECISION]` markers, `## Open Questions`, and missing acceptance-criteria or verification fields — and drive each one as a Q&A turn with the user, proposing concrete options when possible and applying the chosen answer with `anvil prd resolve-decision`. Use this skill when `anvil prd find-decisions` reports unresolved items, or when other skills (prd, plan) detect decisions blocking progress.
 ---
 
 # Resolve Decisions — Walk Open Items as Q&A
 
-Turn every `[NEEDS DECISION]` marker, unresolved `## Open Question`, or missing acceptance-criterion into a one-question conversational turn — propose options when the surrounding context lets you, accept the user's pick, and apply the answer to `prd.md`. The agent does the framing and the typing; the user does the deciding.
+Turn every `[NEEDS DECISION]` marker, unresolved `## Open Question`, or missing acceptance-criterion into a one-question conversational turn — propose options when the surrounding context lets you, accept the user's pick, and apply the answer with `anvil prd resolve-decision`. The agent does the framing and the typing; the user does the deciding. Let the CLI own the file write: it locates the decision by id, rewrites the right span without touching unrelated content, and records the resolution as an event.
 
 The anti-pattern this skill exists to prevent: handing the user a list of "open questions to resolve in your editor first" and then waiting. An LLM's strength over a CLI is turning *blocked on a decision* into *let me ask you the right question*. Pasting a to-do list of unresolved decisions is the same failure mode as pasting a to-do list of CLI commands.
 
@@ -24,18 +24,16 @@ The anti-pattern this skill exists to prevent: handing the user a list of "open 
 
 ## Prerequisites
 
-`.anvil/prd.md` must exist and parse cleanly. Confirm:
+The project must be initialized and the PRD must parse cleanly. Confirm init first, then parse:
 
 ```bash
+anvil status >/dev/null 2>&1 || echo MISSING
 anvil prd parse 2>&1 | tail -3
 ```
 
-The detector is at `bin/src/anvil/planning/decisions.py`; the CLI surface is `anvil prd find-decisions`; the MCP equivalent is the `find_decisions` tool.
+If `anvil status` reports MISSING, the project is not initialized — route back to the bridging skill rather than guessing a path. State lives in the HOME workspace by default (`anvil status` prints the resolved state directory on its `Path:` line), so never reach for a literal in-repo `.anvil/...` file.
 
-| Command | Phase | Status |
-|---|---|---|
-| `anvil prd find-decisions` | Phase 7+ | available (v1.14.0) |
-| `find_decisions` MCP tool | Phase 7+ | available (v1.14.0) |
+The detector lives in the `anvil.planning.decisions` module; the CLI surface is `anvil prd find-decisions` (read-only scan) plus `anvil prd resolve-decision` (writes the answer back); the MCP equivalent of the scan is the `find_decisions` tool. Confirm any command with `anvil <cmd> --help`.
 
 ---
 
@@ -75,7 +73,22 @@ Iterate the decision list in the order the detector returned (it is deliberately
 >
 > Pick (1 / 2 / 3 / or describe your own).
 
-On the answer, rewrite the marker inline in `.anvil/prd.md`. For option 1: replace `[NEEDS DECISION: which encoding?]` with `(decision: UTF-8 only)` (or just inline the answer prose if it reads better). Preserve the rest of the sentence verbatim. Save the file, then move on.
+On the answer, apply it with `anvil prd resolve-decision`, passing the decision id from the scan and the chosen answer. The CLI does the inline rewrite for you (it replaces `[NEEDS DECISION: which encoding?]` with the resolution and leaves the rest of the sentence verbatim), saves the PRD wherever it lives, and records a `prd.decision_resolved` event:
+
+```bash
+anvil prd resolve-decision ND-001 --resolution "UTF-8 only"
+```
+
+The CLI echoes the rewrite so you can confirm it landed, then move on:
+
+```
+Resolved ND-001 (needs_decision) in /…/.anvil/prd.md.
+  section:  Requirements (line 13)
+  before:   - R001: The system must validate inputs [NEEDS DECISION: which encoding?].
+  after:    - R001: The system must validate inputs UTF-8 only.
+  recorded: E000010 (prd.decision_resolved)
+Run `anvil prd parse` to refresh state.db.
+```
 
 **For an `open_question` item:**
 
@@ -90,14 +103,24 @@ On the answer, rewrite the marker inline in `.anvil/prd.md`. For option 1: repla
 >
 > Pick (1 / 2 / 3 / 4 / or describe).
 
-On the answer, **move the resolved item from `## Open Questions` to a new `## Decisions` section** (create it if it does not exist, just above `## Risks` or at the end of the file). The `## Decisions` entry takes the form:
+On the answer, apply it with `anvil prd resolve-decision`. The CLI **moves the resolved item out of `## Open Questions` and into a `## Decisions` section** (creating that section if it does not exist) and records the event, so you do not edit the file by hand:
 
-```markdown
-- **OQ001 (resolved 2026-05-26):** Which serialization format for the packet cache?
-  → **Decision:** MessagePack. Rationale: ~3× smaller on disk; user accepted the `msgpack` dependency over JSON's bigger files.
+```bash
+anvil prd resolve-decision OQ001 --resolution "MessagePack — ~3x smaller on disk; accepted the msgpack dependency over JSON's bigger files."
 ```
 
-This preserves the audit trail — future re-reads can see *what was unclear at draft time* and *what was decided*. Delete the original bullet from `## Open Questions`. If the resolution materially affects a requirement or feature, also add or update the relevant `R00N:` or `F00N:` block — surface this to the user inline: *"This decision also implies R007 should change to read X instead of Y; want me to update R007 too?"*
+The CLI writes the `## Decisions` entry as `- **<question>** → **Decision:** <resolution>` and echoes what changed:
+
+```
+Resolved OQ001 (open_question) in /…/.anvil/prd.md.
+  section:  ## Open Questions → ## Decisions
+  before:   - Which serialization format should we use for the on-disk packet cache?
+  after:    - **Which serialization format should we use for the on-disk packet cache?** → **Decision:** MessagePack — ~3x smaller…
+  recorded: E000011 (prd.decision_resolved)
+Run `anvil prd parse` to refresh state.db.
+```
+
+This preserves the audit trail — future re-reads can see *what was unclear at draft time* and *what was decided*. If the resolution materially affects a requirement or feature, surface that to the user inline: *"This decision also implies R007 should change to read X instead of Y; want me to update R007 too?"*, then resolve the corresponding `[NEEDS DECISION]` marker (or, if there is none, ask the user to revise that requirement directly).
 
 **For a `missing_field` item:**
 
@@ -112,7 +135,13 @@ This preserves the audit trail — future re-reads can see *what was unclear at 
 >
 > Add (1) only, (1+2), (1+2+3), or (4) describe?
 
-On the answer, edit the relevant `### T012:` block in `.anvil/prd.md` to add an `**Acceptance criteria:**` field with the chosen bullets. Same pattern for missing `**Verification:**` commands — propose 2-3 candidate `pytest` / shell invocations based on the likely files, accept the pick, write them in.
+On the answer, apply each chosen bullet with `anvil prd resolve-decision` against the missing-field id from the scan (`MF-T012-AC` for acceptance criteria, `MF-T012-V` for verification). The CLI appends the bullet under the task's `### T012:` block, so call it once per bullet:
+
+```bash
+anvil prd resolve-decision MF-T012-AC --resolution "On 429/503, the client retries up to 3 times with exponential backoff (1s/2s/4s)."
+```
+
+Same pattern for a missing verification command (`MF-T012-V`) — propose 2-3 candidate `pytest` / shell invocations based on the likely files, accept the pick, and resolve each one. The CLI records a `prd.decision_resolved` event per call and echoes the edit.
 
 **On any decision the LLM cannot propose options for** (the context is too thin, the question is too open), do not invent options. Ask the open-ended question and accept whatever answer the user gives:
 
@@ -123,11 +152,11 @@ On the answer, edit the relevant `### T012:` block in `.anvil/prd.md` to add an 
 
 ### Step 3 — Re-parse after the batch is resolved
 
-Once every decision is answered (or the user explicitly skips the remaining ones), drive a re-parse yourself so the canonical state catches up:
+Each `anvil prd resolve-decision` call already edited the PRD and recorded an event, but it does not refresh `state.db`; that is what `anvil prd parse` does. Once every decision is answered (or the user explicitly skips the remaining ones), drive a re-parse yourself so the canonical state catches up:
 
-> All N decisions have been applied to `.anvil/prd.md`. Re-parsing to refresh state.db — ready? (yes / wait, I want to re-read the file first)
+> All N decisions have been applied to the PRD. Re-parsing to refresh state.db — ready? (yes / wait, I want to re-read the PRD first)
 
-On `yes`, invoke `anvil prd parse`. Surface the new counts. If the re-parse surfaces fresh errors (e.g. you accidentally broke the markdown structure during inline rewrites), drive a fix immediately — do not hand the user a "go fix it in the editor" message. Read the parse error, identify which edit caused it, propose the corrected text, ask the user to confirm, apply.
+On `yes`, invoke `anvil prd parse`. Surface the new counts. If the re-parse surfaces fresh errors, drive a fix immediately — do not hand the user a "go fix it in the editor" message. Read the parse error, identify which span is wrong, and resolve it with `anvil prd resolve-decision` (or, if the break is outside any decision span, propose the corrected text and apply it once the user confirms).
 
 After re-parse, optionally re-run `anvil prd find-decisions` to confirm the unresolved count is 0 (or to surface anything the resolution exposed — e.g., a `needs_decision` rewrite that introduced a new field with empty acceptance criteria).
 
@@ -150,7 +179,7 @@ On `3`, confirm and stop.
 
 Ending the skill with a message like *"OQ001 (success criterion) and OQ006 (time budget) should be resolved before planning. Open `.anvil/prd.md` in your editor to fix them, then re-run `anvil prd parse` and `anvil plan`."* That handoff treats an unresolved decision like a known bug instead of a question the agent could have asked. The whole point of an LLM agent inside the conversation is that it can frame the right question with concrete options — pasting the list of unresolved items as a to-do is forfeiting that strength.
 
-The rule: **for every unresolved item, the agent generates the question and proposes 2-4 candidate answers (when context allows). The user picks. The agent writes the answer to the file.** No "open the editor" handoffs unless the user explicitly opts out.
+The rule: **for every unresolved item, the agent generates the question and proposes 2-4 candidate answers (when context allows). The user picks. The agent applies the answer with `anvil prd resolve-decision`.** No "open the editor" handoffs unless the user explicitly opts out.
 
 **When to actually hand off to the editor:** if the user says "let me think about these — I'll edit them directly later," or if a decision is genuinely too cross-cutting to express as a single Q&A turn (e.g., "redesign the whole authentication architecture"). In those cases, list the unresolved items compactly, point the user at `anvil prd find-decisions` so they can re-surface the list later, and stop.
 

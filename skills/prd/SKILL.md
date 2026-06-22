@@ -15,7 +15,7 @@ Write the contract that everything downstream depends on. The PRD is the single 
 - Revising the PRD after stakeholder feedback changes the scope or acceptance criteria.
 - Recovering after a scope change mid-project — re-anchor what the work is before resuming claims.
 - Before any invocation of `/anvil:plan` — planning reads from a parsed PRD; authoring must come first.
-- When `anvil status` reports `prd-status: draft` or `prd-status: none` and the project can't proceed.
+- When `anvil status` reports `PRD: draft` or `PRD: none` and the project can't proceed.
 - When a co-authored PRD is ready for a formal review and approval step.
 
 **Do not use this skill to generate or score tasks.** Once the PRD is approved, proceed to `/anvil:plan` for the task graph. This skill only authors, parses, and reviews requirements.
@@ -24,57 +24,47 @@ Write the contract that everything downstream depends on. The PRD is the single 
 
 ## Prerequisites
 
-`.anvil/` must exist. Confirm before proceeding:
+The project must be initialized. State lives in the HOME workspace by default (`~/.anvil/workspaces/<key>/.anvil/...`), not in the repo, so check init through the CLI rather than a literal path:
 
 ```bash
-ls .anvil/state.db 2>/dev/null || echo "MISSING: run anvil init first"
+anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
 ```
 
-If `state.db` is absent, run:
+If it reports `MISSING`, run:
 
 ```bash
 anvil init --name "<project-name>"
 ```
 
-Phase 3 commands used in this skill:
+`anvil init` echoes the workspace paths and the prd.md location it expects (`Next step: author your PRD at <path>`). `anvil status` prints a `Path:` line with the active `.anvil` directory; use that whenever you need to read or write the PRD, not a hardcoded in-repo path.
 
-| Command | Phase | Status |
-|---|---|---|
-| `anvil prd parse` | Phase 3 | available |
-| `anvil prd review` | Phase 3 | available |
-| `anvil prd review --approve` | Phase 3 | available |
-
-The structured template at `docs/prd-template.md` (relative to the plugin root) is the canonical contract. The parser enforces it — any deviation from the required sections produces a `ParseError`.
+The structured template at `docs/prd-template.md` (relative to the plugin root) is the canonical contract. The parser enforces it — any deviation from the required sections produces a parse error.
 
 ---
 
 ## Workflow
 
-### Step 1 — Author or update `.anvil/prd.md`
+### Step 1 — Author or update the PRD
 
-Drive this step inline. Check the filesystem for an existing PRD before suggesting any edit — the subsequent `anvil prd parse` step (Step 2) is destructive and replaces every `Requirement`, `Feature`, and `Task` row in `state.db`.
+Drive this step inline. Check for an existing PRD before suggesting any edit — the subsequent `anvil prd parse` step (Step 2) is destructive and replaces every `Requirement`, `Feature`, and `Task` row in `state.db`.
 
-Run the existence check yourself (Bash, MCP filesystem tool, or whichever read primitive the runtime exposes):
-
-```bash
-ls .anvil/prd.md 2>/dev/null
-```
+First resolve the PRD path from the CLI (it lives under the workspace, not the repo). `anvil status` prints a `Path:` line with the active `.anvil` directory; the PRD is `prd.md` inside it. `anvil init` also echoes the exact location (`Next step: author your PRD at <path>`). Read that file with whatever read primitive the runtime exposes (Bash, MCP filesystem tool).
 
 **If the file exists**, do not edit or re-parse without confirmation. Read the file, surface a one-line summary (first heading and total line count are usually enough), and ask:
 
-> `.anvil/prd.md` already exists (`<first-heading>`, `<N>` lines). Open it for editing, save the current copy as a backup first, or leave it alone? (edit / save-as-backup / cancel)
+> The PRD already exists (`<first-heading>`, `<N>` lines). Open it for editing, save the current copy as a backup first, or leave it alone? (edit / save-as-backup / cancel)
 
 - On `edit` — read the file in full, propose changes inline (show diffs in chat), and apply them once the user confirms. Do not shell out to `$EDITOR` and wait — drive the edits in the conversation.
 - On `cancel` — stop. Confirm the PRD is untouched; offer to run `/anvil:state-ops` to inspect current PRD status.
-- On `save-as-backup` — copy the existing file to `.anvil/prd.md.bak`, then proceed with inline edits as above.
+- On `save-as-backup` — copy the existing PRD to `prd.md.bak` in the same workspace directory, then proceed with inline edits as above.
 
-**If the file does not exist**, author it inline. Compose the draft in the conversation (using the structure below), present it to the user for approval, then write it directly to `.anvil/prd.md`. Do not tell the user to open `$EDITOR` themselves.
+**If the file does not exist**, author it inline. Compose the draft in the conversation (using the structure below), present it to the user for approval, then write it directly to the PRD path the CLI reported. Do not tell the user to open `$EDITOR` themselves.
 
 The canonical structure is defined in `docs/prd-template.md`. Required sections — the parser fails without them:
 
 - `# Project: <Name>` — H1 title, first line of the file
 - `## Summary` — one prose paragraph
-- `## Goals` — bulleted list, at least one item
+- `## Goals` — only the `## Goals` heading must be present (an empty list under it still parses), but author at least one concrete goal
 - `## Requirements` — bulleted list of `R001: ...` items
 
 Optional sections that should be present in any non-trivial PRD:
@@ -105,21 +95,21 @@ Invoke the parse yourself once the file is written — do not hand the user a co
 anvil prd parse
 ```
 
-This reads `.anvil/prd.md`, validates structure, and writes `Requirement`, `Feature`, and `Task` entities to `state.db`. PRD status becomes `draft`. Surface the parser output inline in the same message so the user sees the result without a context switch.
+This reads the workspace `prd.md` (the command echoes `PRD source: <path>`; pass `--file PATH` to point elsewhere), validates structure, and writes `Requirement`, `Feature`, and `Task` entities to `state.db`. PRD status becomes `draft`. Surface the parser output inline in the same message so the user sees the result without a context switch.
 
-**On parse error:** the parser surfaces each `ParseError` with the section name and, where possible, the line number. Existing `state.db` content is preserved — no silent rollback of previous good state. Read the error, propose the fix to `prd.md` inline, apply it after confirmation, and re-run `prd parse` yourself.
+**On parse error:** the parser prints a line per problem in the form `Parse error [## Section:0]: <message>`, then exits with `Error: PRD parse failed with N error(s). Fix the issues above and re-run.` Existing `state.db` content is preserved (no silent rollback of previous good state). Read the error, propose the fix inline, apply it after confirmation, and re-run `prd parse` yourself.
 
 Common parse errors:
 
-- `missing required section: Summary` — the `## Summary` heading is absent or has no body
-- `missing required section: Goals (must have at least one item)` — the list is empty
-- `ParseError: duplicate ID R003` — the same requirement ID appears twice; renumber
-- A task block has a `**Feature:** F002` reference but no `### F002:` heading exists in `## Features`
+- `Parse error [## Summary:0]: Missing required '## Summary' section.` (the heading is absent)
+- `Parse error [## Goals:0]: Missing required '## Goals' section.` (only the `## Goals` heading is required; an empty list under it still parses)
+- `Parse error [## Requirements:0]: Missing required '## Requirements' section.` (the heading is absent)
+- A duplicate requirement ID (the same `R00N:` twice) aborts the write with a unique-constraint error; renumber so each ID is distinct
 
-**On success:** the command prints a summary. Present the counts to the user and confirm they match expectations:
+**On success:** the command prints a summary line (and the `PRD source:` path). Present the counts to the user and confirm they match expectations:
 
 ```
-parsed 6 requirements, 3 features, 8 tasks
+Parsed 6 requirements, 3 features, 8 tasks.
 ```
 
 > Parsed 6 requirements, 3 features, 8 tasks. Counts look right? Ready for me to run `prd review`? (yes / let me check first)
@@ -182,7 +172,7 @@ Before asking, read the full PRD back to the user (or show a concise structural 
 
 > The PRD is reviewed. Approving it is permanent and opens the claim gate. Ready to approve? (yes / no / let me re-read first)
 
-- **On `yes`** — invoke `anvil prd review --approve` yourself, surface the output, then run `anvil status` and confirm `prd-status: approved`. Tell the user the project is ready for `/anvil:plan` and ask whether to drive that skill next.
+- **On `yes`** — invoke `anvil prd review --approve` yourself (it prints `PRD approved by '<reviewer>'.`), surface the output, then run `anvil status` and confirm it shows `PRD: approved`. Tell the user the project is ready for `/anvil:plan` and ask whether to drive that skill next.
 - **On `no`** — stop. The PRD stays in `reviewed`; the user can come back to it later.
 - **On `let me re-read first`** — wait. When the user signals ready, return to the confirm prompt above.
 
@@ -200,7 +190,7 @@ The agent drives commands inline; it does not hand the user a numbered CLI to-do
 
 The PRD will change. Here is the safe sequence for updates:
 
-1. Edit `.anvil/prd.md` with the revised content. Before any destructive re-parse, confirm the user intends to overwrite the existing `Requirement`/`Feature`/`Task` rows. Mirror the Step 1 overwrite-gate pattern: show the user a one-line summary (heading + line count) of the current `prd.md`, and prompt `proceed / cancel / save-as-backup` before running `prd parse`. On `save-as-backup`, copy `.anvil/prd.md` to `.anvil/prd.md.bak` first.
+1. Edit the workspace `prd.md` with the revised content (resolve its path from the `Path:` line of `anvil status` or the `PRD source:` line `prd parse` echoes). Before any destructive re-parse, confirm the user intends to overwrite the existing `Requirement`/`Feature`/`Task` rows. Mirror the Step 1 overwrite-gate pattern: show the user a one-line summary (heading + line count) of the current PRD, and prompt `proceed / cancel / save-as-backup` before running `prd parse`. On `save-as-backup`, copy the PRD to `prd.md.bak` in the same workspace directory first.
 2. Run `anvil prd parse` again. Re-parse replaces all `Requirement`, `Feature`, and `Task` entities — it is not a merge.
 3. Re-run `anvil prd review` if the changes are material (added/removed requirements, changed acceptance criteria, altered feature scope).
 4. Re-run `anvil prd review --approve` for significant scope changes. Minor editorial corrections (typo fixes, clarified wording, unchanged structure) do not require re-approval.
@@ -229,7 +219,7 @@ Avoid editing a task's acceptance criteria or scope while that task is `claimed`
 ## Common Pitfalls
 
 - **Parsing a thinking-out-loud draft.** `prd.md` is not a scratchpad. Parse only when the document is intended as a real spec. Parsing a half-formed draft seeds `state.db` with garbage requirements that downstream planning will dutifully score and promote.
-- **Approving without re-reading.** Run `cat .anvil/prd.md` before invoking `--approve`. An approval event is permanent in `events.jsonl`. It cannot be undone without replaying from a snapshot.
+- **Approving without re-reading.** Read the full PRD (resolve its path from the `Path:` line of `anvil status` or the `PRD source:` line `prd parse` echoes) before invoking `--approve`. An approval event is permanent in `events.jsonl`. It cannot be undone without replaying from a snapshot.
 - **Skipping `## Non-Goals`.** The planner agent uses non-goals to bound task generation. Without them, tasks may sprawl into adjacent features. Even one item is better than none.
 - **Tasks without verification commands.** The `review tasks` gate (in the plan skill) requires at least one item under `**Verification:**`. Add shell commands — `pytest tests/test_foo.py`, `python -m mymodule --help` — so the gate does not block the entire queue.
 - **Re-parsing with active claims and no coordination.** This silently replaces task rows. Agents holding those tasks will find their task ID in an unexpected state on next heartbeat. Always check `anvil status` before re-parsing.
@@ -243,16 +233,10 @@ Avoid editing a task's acceptance criteria or scope while that task is `claimed`
 | Before this skill | Usually none — prd is the entry point for new projects |
 | After Step 2 (parse success) | `/anvil:state-ops` to verify counts and structure |
 | After Step 4 (approved) | `/anvil:plan` to generate features, tasks, and scores |
-| If `anvil status` shows `prd-status: draft` | Return here to complete review and approval |
+| If `anvil status` shows `PRD: draft` | Return here to complete review and approval |
 
 ---
 
-## Phase 3 Limitations
+## Related entry points
 
-| Feature | Phase |
-|---|---|
-| `anvil prd parse` | Phase 3 — available |
-| `anvil prd review` | Phase 3 — available |
-| `anvil prd review --approve` | Phase 3 — available |
-| LLM-assisted drafting via `--use-llm` | Phase 7 — pending |
-| `anvil start-prd` CLI command | Phase 7 — pending |
+This skill assumes a draft `prd.md` already exists (or that you author one inline). If the user has only a rough idea and no PRD yet, bootstrap one first with `/anvil:start-prd`, which interviews the user and writes a `prd.md` that `anvil prd parse` can consume. To drive unresolved `[NEEDS DECISION]` markers and open questions surfaced after parse, use `/anvil:resolve-decisions`.

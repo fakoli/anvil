@@ -27,14 +27,15 @@ One or more tasks in `needs_review`. Confirm before proceeding:
 anvil list --status needs_review
 ```
 
-Each row shows `TaskID`, title, `claimed_by`, claim duration, and `files_changed` count. Phase 5 commands used in this skill:
+The table columns are `TaskID`, `Title`, `Status`, `Priority`, `Type`, `Score`, `Feature`. (To see who claimed a task and what the evidence was, run `anvil show TASK_ID` and `anvil apply TASK_ID`; see Step 2.) Commands used in this skill:
 
-| Command | Phase | Status |
-|---|---|---|
-| `anvil list --status needs_review` | Phase 3 | available |
-| `anvil show TASK_ID` | Phase 3 | available |
-| `anvil apply TASK_ID --approve` | Phase 5 | available |
-| `anvil apply TASK_ID --reject --reason "..."` | Phase 5 | available |
+| Command | What it does |
+|---|---|
+| `anvil list --status needs_review` | List tasks awaiting review |
+| `anvil show TASK_ID` | Print full task detail (criteria, scores, likely files) |
+| `anvil apply TASK_ID` | Review-only: show the evidence gate without deciding |
+| `anvil apply TASK_ID --approve` | Approve: needs_review → done |
+| `anvil apply TASK_ID --reject --reason "..."` | Reject: needs_review → drafted |
 
 ---
 
@@ -55,42 +56,43 @@ When multiple tasks are ready, apply them in dependency order: tasks with no dep
 
 ---
 
-### Step 2 — Inspect each task's evidence
+### Step 2 — Inspect each task's detail and evidence gate
+
+Two reads, both layout-aware:
 
 ```bash
 anvil show TASK_ID
+anvil apply TASK_ID
 ```
 
-Example:
+`anvil show TASK_ID` prints the task detail: title, feature, status, the six-dimension `Scores` (with an explanation block), `Dependencies`, `Conflict Groups`, `Acceptance Criteria`, `Verification Commands`, `Likely Files`, `Active Claims`, and `Recent Events` (where `evidence.submitted` confirms evidence was recorded). It does **not** print the evidence contents; for that, read the submission and the gate.
 
-```bash
-anvil show T012
-```
-
-The output surfaces: `acceptance_criteria`, `evidence.commands_run` (with exit codes), `files_changed` (list), `output_excerpt` (first and last lines of captured output), and `pr_url` if one was linked at submit time.
-
-Read all of it before invoking `apply`. The Review engine pre-checks `evidence_complete` against the task's `required_evidence` list; missing items are flagged in the `show` output:
+`anvil apply TASK_ID` with no `--approve`/`--reject` flag is **review-only**: it reports the task is awaiting review and prints the evidence gate without changing anything:
 
 ```
-Evidence status: INCOMPLETE
-Missing:        pytest -x (no evidence captured)
+Task 'T012' awaiting review (status: needs_review).
+
+Evidence gate: INCOMPLETE — missing items for required_evidence:
+  - `pytest -x` exits 0
+
+Pass --approve to accept or --reject --reason TEXT to reject.
 ```
 
-An `INCOMPLETE` flag means the agent ran verification commands outside the hook window or the `capture-evidence.sh` hook did not fire. Do not apply an incomplete evidence row without understanding why — the gap may indicate the verification was never actually run.
+An `INCOMPLETE` gate means a required-evidence item was not captured: the agent ran verification commands outside the hook window or the `capture-evidence.sh` hook did not fire. Do not approve over an incomplete gate without understanding why; the gap may indicate the verification was never actually run. (The gate is **advisory** by default: `--approve` still proceeds. Run `anvil apply --strict` to refuse approval while the gate is incomplete.)
 
-For tasks where the evidence looks complete:
+Before approving:
 
-- Confirm every acceptance criterion has a corresponding command that exited 0.
-- Confirm `files_changed` matches what the acceptance criteria required — a task that was supposed to modify `src/claims/manager.py` but shows only `tests/` in `files_changed` is suspicious.
-- If a `pr_url` is linked, open the PR and scan the diff to spot anything the evidence summary missed.
+- Confirm every acceptance criterion (from `anvil show`) has a corresponding verification command that exited 0.
+- Confirm the files the agent changed match what the acceptance criteria required: a task that was supposed to modify `src/claims/manager.py` but only touched `tests/` is suspicious. The submitted `--files-changed` list appears in the `anvil submit` output and the task's `evidence.submitted` event.
+- If a PR URL was linked at submit time (`anvil submit --pr-url`), open the PR and scan the diff to spot anything the evidence summary missed.
 
 ---
 
 ### Step 3 — Pick a disposition (the hard handoff gate)
 
-This is the one place in the entire anvil workflow where the agent must wait for explicit user confirmation before executing the next command. `apply --approve` writes a permanent `Review` row to `state.db` and an immutable `task.applied` event to `events.jsonl` — it is the formal "ship it" gate. The agent must not run it on inference.
+This is the one place in the entire anvil workflow where the agent must wait for explicit user confirmation before executing the next command. `apply --approve` transitions the task and appends an immutable `task.applied` event to the append-only event log (and on approval writes a signed acceptance proof); it is the formal "ship it" gate. The agent must not run it on inference.
 
-After surfacing the evidence summary in Step 2, present the disposition options conversationally and ask the user to pick — then run the chosen command yourself:
+After surfacing the task detail and evidence gate from Step 2, present the disposition options conversationally and ask the user to pick — then run the chosen command yourself:
 
 > The evidence for **T012** is summarized above. How should this be dispositioned?
 > 1. **Accept and ship** — verification exited 0, evidence is complete, diff matches acceptance criteria.
@@ -106,9 +108,9 @@ Based on the answer, drive the corresponding command yourself rather than asking
 
 Confirm one more time before invoking the gate — this is the irreversible-via-audit point:
 
-> Approving will transition T012 `needs_review → accepted → done` and append a permanent `task.applied` event with you as the approver. Confirm? (yes / no)
+> Approving will transition T012 `needs_review → done` (through `accepted`) and append a permanent `task.applied` event with you as the approver. Confirm? (yes / no)
 
-On `yes`, invoke `anvil apply T012 --approve` (or the `apply_review_decision` MCP tool when available). Surface the response inline. Then ask whether to drive Step 4 (the ship sequence — git merge) now or later. On `no`, return to the disposition prompt.
+On `yes`, invoke `anvil apply T012 --approve` (or the equivalent `apply_review_decision` MCP tool). The command prints `Task 'T012' approved by '<reviewer>' → done.` and the path to a signed proof under the workspace's `proofs/` directory. Surface the response inline. Then ask whether to drive Step 4 (the ship sequence, i.e. the git merge) now or later. On `no`, return to the disposition prompt.
 
 #### On "reject" (2)
 
@@ -116,7 +118,7 @@ Ask for a concrete reason before invoking:
 
 > Reject T012 with which reason? Concrete is required — "pytest -x reports 3 failures in test_retry.py" is good; "not done" is not.
 
-Once the user supplies a reason, invoke `anvil apply T012 --reject --reason "<their reason>"` directly. Surface the response. The task transitions `needs_review → rejected → drafted` and the original branch + Evidence row are preserved in the audit log. Tell the user the task is back at `drafted` and ask whether to re-trigger `review tasks` or leave it for the agent to fix the underlying issue.
+Once the user supplies a reason, invoke `anvil apply T012 --reject --reason "<their reason>"` directly. The command prints `Task 'T012' rejected by '<reviewer>' → drafted (rejection recorded; task returned to 'drafted' for rework).` and echoes the reason. Surface the response. The rejection is recorded as a `task.applied` event and the original branch + evidence are preserved in the audit log. Tell the user the task is back at `drafted` and ask whether to re-trigger `anvil review tasks` or leave it for the agent to fix the underlying issue.
 
 #### On "hold" (3)
 
@@ -124,7 +126,7 @@ Do not invoke `apply` at all. Capture the open questions inline:
 
 > What context do we need before this can be dispositioned? I will add it to the task notes so the next review has the full picture.
 
-Once the user lists the open questions, append them to the task's `implementation_notes` via the appropriate state-engine path (until Phase 6 ships a `decision` CLI subcommand, edit `prd.md`, re-parse, and coordinate with the next reviewer directly — drive that loop yourself). Then loop back to Step 2.
+Once the user lists the open questions, record them. There is no CLI subcommand for editing a task's notes in place, so capture the context where the next reviewer will see it: edit the PRD at the path `anvil prd parse` echoes as `PRD source:`, re-run `anvil prd parse`, and coordinate with the next reviewer directly; drive that loop yourself. (PRD-level decision markers can be resolved with `anvil prd resolve-decision`; see `/anvil:resolve-decisions`.) Then loop back to Step 2.
 
 #### On "discard" (4)
 
@@ -136,7 +138,7 @@ Invoke `anvil apply T012 --reject --reason "discarded — <their reason>"` direc
 
 > The work is discarded. Delete the branch `agent/t012-<slug>` now? (yes / no)
 
-On `yes`, run `git branch -D agent/t012-<slug>` yourself. On `no`, leave the branch intact and tell the user the audit log retains the `Evidence` row and rejection `Review` row regardless.
+On `yes`, run `git branch -D agent/t012-<slug>` yourself. On `no`, leave the branch intact and tell the user the audit log retains the `evidence.submitted` and rejection `task.applied` events regardless.
 
 **The rule:** the agent picks the question, the user picks the answer, the agent runs the command. The handoff is the *decision*, not the *typing*.
 
@@ -166,7 +168,7 @@ Closes anvil:T012 — add-retry-backoff
 git branch -d agent/t012-add-retry-backoff
 ```
 
-Branches accumulate. After a task is `done` and its branch is merged, delete it. `anvil sync` (Phase 8) will flag undeleted agent branches as orphans.
+Branches accumulate. After a task is `done` and its branch is merged, delete it. `anvil drift` reports undeleted `agent/<task>-<slug>` branches as orphan branches, so they will resurface there until cleaned up.
 
 anvil does not auto-merge. The deliberate separation between `apply` (state transition) and `merge` (git operation) means the reviewer controls the merge strategy, PR template, and commit message — without the tool imposing a workflow.
 
@@ -174,17 +176,17 @@ anvil does not auto-merge. The deliberate separation between `apply` (state tran
 
 ### Step 5 — Sync to external tracker (optional)
 
-If the project has an external sync provider configured and the task is now at `status=done`, see [`docs/github-sync.md`](../../docs/github-sync.md) for the full CLI surface and conflict-resolution strategies. Otherwise, skip this step — the local `state.db` + `events.jsonl` is the canonical record.
+If the project has an external sync provider configured and the task is now at `status=done`, run `anvil sync github` to push the disposition to GitHub Issues (use `--task TASK_ID` to scope to one task); see [`docs/github-sync.md`](../../docs/github-sync.md) for the full CLI surface and conflict-resolution strategies. Otherwise, skip this step; anvil's local state store is the canonical record.
 
 ---
 
 ## Common Pitfalls
 
-- **Applying without reading the evidence.** `evidence_complete` is a heuristic based on `required_evidence` fields — it checks presence, not correctness. The diff and the output excerpt are the ground truth. Read them.
+- **Applying without reading the evidence.** The `Evidence gate` shown by `anvil apply TASK_ID` is a presence check against the task's `required_evidence`: it checks that items were captured, not that they are correct. The diff and the submitted commands are the ground truth. Read them.
 - **Rejecting without a `--reason`.** The flag is required. A rejection without a reason leaves the next agent (or the next session of the same agent) without context for why the task failed review. Concrete reasons prevent duplicate mistakes.
 - **Applying out of dependency order.** If T013 depends on T012, apply T012 first and merge it before applying T013. Applying in the wrong order creates a branch that cannot be cleanly merged until its dependency lands on main.
-- **Forgetting to delete merged branches.** Agent branches accumulate. After merge, `git branch -d` the branch. Running `anvil sync` (Phase 8) will report stale agent branches, but it is easier to clean up immediately.
-- **Manually editing `state.db` to change a task status.** Use `anvil apply` so the `Review` row and status transition are recorded in `events.jsonl`. Direct edits produce state that cannot be replayed or audited.
+- **Forgetting to delete merged branches.** Agent branches accumulate. After merge, `git branch -d` the branch. `anvil drift` will report stale `agent/<task>-<slug>` branches as orphans, but it is easier to clean up immediately.
+- **Hand-editing the state store to change a task status.** Use `anvil apply` so the disposition and status transition are recorded as a `task.applied` event in the append-only log. Direct edits to the database produce state that cannot be replayed or audited.
 
 For **decision-presentation discipline** — how to surface multi-option dispositions (accept/reject/hold/discard) as structured Q&A — see the canonical description in `/anvil:resolve-decisions`. The same pattern applies to any choice this skill surfaces.
 
@@ -203,15 +205,15 @@ Before invoking `anvil apply`, you may dispatch the plugin-local `sentinel` agen
 
 ---
 
-## Phase 5 Limitations
+## Scope and limitations
 
-| Feature | Phase | Status |
-|---|---|---|
-| `anvil apply TASK_ID --approve` | Phase 5 | available |
-| `anvil apply TASK_ID --reject --reason "..."` | Phase 5 | available |
-| `anvil list --status needs_review` | Phase 3 | available |
-| `anvil show TASK_ID` (with evidence) | Phase 5 | available |
-| LLM-assisted disposition recommendation | Phase 7 | pending |
-| GitHub Issues mirror (close issue when task done) | Phase 8 | pending |
-| `anvil decision` CLI subcommand | Phase 6 | pending |
-| Automated PR creation on accept | Phase 8 | pending (use `gh pr create` manually) |
+The review-and-ship commands are all available:
+
+- `anvil list --status needs_review`, `anvil show TASK_ID`, and `anvil apply TASK_ID` (review-only, `--approve`, `--reject --reason "..."`).
+- GitHub Issues sync is available via `anvil sync github` (see Step 5).
+- A pass/fail review recommendation is available via the plugin-local `sentinel` agent (see "Composition with Other Skills"); it supplements, never replaces, the human decision.
+
+What `finish` deliberately does **not** do:
+
+- **No auto-merge and no auto-PR.** `apply` is a state transition only; the git merge / PR is yours to drive (Step 4). This separation is intentional: the reviewer owns the merge strategy and commit message.
+- **No in-place task-note editor.** To attach context on a "hold" disposition, edit the PRD and re-parse (Step 3, "hold").
