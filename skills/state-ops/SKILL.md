@@ -25,19 +25,25 @@ State-ops is NOT for authoring or reviewing PRDs — use the `prd` skill. State-
 
 ## Prerequisites
 
-The project must have run `anvil init` at least once. Check for the sentinel file:
+The project must have run `anvil init` at least once. Check with `anvil status`,
+which is **layout-aware** — it resolves the default HOME workspace
+(`~/.anvil/workspaces/…`) OR a local in-repo `.anvil/`. A raw `ls .anvil/state.db`
+is WRONG under the default workspace layout (state is not in the repo) and will
+report "missing" even when the project is initialized:
 
 ```bash
-ls .anvil/state.db 2>/dev/null || echo "MISSING: run anvil init first"
+anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
 ```
 
-If `.anvil/state.db` does not exist, refuse to proceed and tell the caller to run:
+If `anvil status` exits non-zero (it prints `not initialized`), refuse to proceed
+and tell the caller to run:
 
 ```bash
 anvil init --name "<project-name>"
 ```
 
-Do not attempt to read state, list tasks, or call any other `anvil` command until `state.db` is confirmed present.
+`anvil status` is the only command to run before init is confirmed — do not list
+tasks or mutate state until it reports the project is initialized.
 
 ---
 

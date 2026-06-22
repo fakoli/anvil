@@ -22,13 +22,16 @@ Produce a parseable PRD from an unstructured prompt by interviewing the user one
 
 ## Prerequisites
 
-`.anvil/` must exist. Confirm before proceeding:
+The project must be initialized. Confirm with `anvil status`, which is layout-aware
+(it resolves the default HOME workspace or a local in-repo `.anvil/`); a raw
+`ls .anvil/state.db` is wrong under the default workspace layout (state lives in
+`~/.anvil/workspaces/…`) and reports "missing" even when initialized:
 
 ```bash
-ls .anvil/state.db 2>/dev/null || echo "MISSING: run anvil init first"
+anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
 ```
 
-If `state.db` is absent, run:
+If it exits non-zero, run:
 
 ```bash
 anvil init --name "<project-name>"
