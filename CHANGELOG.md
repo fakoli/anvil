@@ -6,6 +6,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Changed
+
+- **`scripts/install.sh` now installs from PyPI via `uv tool` instead of cloning a
+  checkout.** The one-liner runs `uv tool install anvil-state` (which puts `anvil`
+  + `anvil-mcp` on PATH) then `anvil install <harness>`. Dropped the `~/.anvil-src`
+  clone/cache, the `git reset --hard` updater, and the `--path` symlink flag — `uv
+  tool` handles install, upgrade, and PATH placement. README, getting-started, and
+  the cross-harness guide now lead with `uv tool install anvil-state`.
+
 ## [0.1.1] — 2026-06-21
 
 ### Added

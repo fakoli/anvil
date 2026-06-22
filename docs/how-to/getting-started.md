@@ -36,6 +36,11 @@ anvil --version
 # → anvil 0.1.1
 ```
 
+> **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
+> `uv tool install anvil-state` (or `pipx install anvil-state`) — then wire your
+> harness with `anvil install <harness>`. See
+> [using anvil on any harness](using-anvil-on-any-harness.md).
+
 ## Step 2 — Initialize state in your project
 
 ```bash
