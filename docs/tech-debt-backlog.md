@@ -132,6 +132,35 @@ source before copy if it ever matters.
 
 ---
 
+## Drift workspace-layout (PR #74) — deferred review findings
+
+PR #74 fixed the overloaded-`state_dir` bug class (drift/doctor resolved
+checkout-relative paths against the shared workspace state dir). Two non-blocking
+review findings were deferred:
+
+### DW-1 · `_resolve_project_root` takes `cwd` verbatim (subdir footgun)
+
+**From**: PR #74 multi-lens review #5. **Status**: OPEN (low, pre-existing).
+
+Running `drift`/`sync`/`doctor` from a repo SUBDIRECTORY (e.g. `<repo>/bin`) makes
+repo-root-relative `likely_files` resolve to `<repo>/bin/bin/src/widget.py` and
+false-flag. Pre-existing: the legacy path had identical cwd-relative behaviour, and
+`_resolve_state_dir` already requires `<cwd>/.anvil` to exist so local layout was
+never run from a subdir either. **Fix**: derive the root via
+`git -C <cwd> rev-parse --show-toplevel`, falling back to `cwd.resolve()`.
+
+### DW-2 · `_resolve_project_root` duplicates the `_resolve_base_dir` precedence ladder
+
+**From**: PR #74 multi-lens review #6. **Status**: OPEN (low, no behavioural bug).
+
+`_resolve_project_root` re-implements the explicit-cwd / `ANVIL_ROOT` / `Path.cwd()`
+precedence inline (minus the workspace remap), so the two could drift if precedence
+ever changes. Kept separate deliberately — collapsing it onto `_resolve_base_dir`
+needs a `local_layout: bool` kwarg, i.e. MORE branching, not less. **Fix (optional)**:
+add a cross-link comment, or only unify if a third caller appears.
+
+---
+
 ## SL-1 (replay integrity) follow-ups
 
 ### SL1-RR-1 · A poison canonical line aborts a full replay
