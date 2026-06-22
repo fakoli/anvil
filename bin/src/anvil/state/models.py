@@ -39,6 +39,9 @@ __all__ = [
     "DecisionID",
     "ReviewID",
     "EventID",
+    "PRDID",
+    # Constants
+    "DEFAULT_PRD_ID",
     # Enums
     "PRDStatus",
     "FeatureStatus",
@@ -92,6 +95,12 @@ EvidenceID: TypeAlias = str
 DecisionID: TypeAlias = str
 ReviewID: TypeAlias = str
 EventID: TypeAlias = str  # monotonic E000001 (local) or hash-chained E-3f9a2c4d71be (git)
+# PRD identity: 'default' for the implicit/migrated PRD, human-chosen
+# (e.g. 'v0.2') for named PRDs.
+PRDID: TypeAlias = str
+
+# The single default PRD that owns all rows on a pre-multi-PRD (migrated) DB.
+DEFAULT_PRD_ID = "default"
 
 # v1.22.0 — git-backed events (Phase A). Hash-chained event ids are
 # "E-" + sha256(parent_id ‖ canonical_json(payload) ‖ actor ‖ ts)[:12];
@@ -444,6 +453,18 @@ class PRD(BaseModel):
 
     model_config = _MODEL_CONFIG
 
+    # Identity / release fields (v0.3 multi-PRD, Phase 0). All default so reading
+    # a v6 prds row that predates these columns still constructs. ``exclude=True``
+    # keeps Phase 0 purely additive with NO behavior change: these fields are
+    # constructible and readable in memory, but are omitted from ``model_dump()``
+    # so the existing v6 event payloads / snapshot blobs stay byte-identical and
+    # the ``extra="forbid"`` payload models in payloads.py do not reject them.
+    # Wiring them into the schema / payloads / sqlite is a later task (T002+).
+    id: PRDID = Field(default=DEFAULT_PRD_ID, exclude=True)
+    title: str = Field(default="", exclude=True)
+    target_version: str | None = Field(default=None, exclude=True)
+    target_tag: str | None = Field(default=None, exclude=True)
+    is_default: bool = Field(default=False, exclude=True)
     status: PRDStatus = PRDStatus.draft
     summary: str = ""
     goals: list[str] = Field(default_factory=list)
@@ -454,6 +475,8 @@ class PRD(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
     last_reviewed_at: datetime.datetime | None = None
     last_reviewed_by: str | None = None
+    created_at: datetime.datetime | None = Field(default=None, exclude=True)
+    updated_at: datetime.datetime | None = Field(default=None, exclude=True)
 
     @field_validator("last_reviewed_at", mode="after")
     @classmethod
@@ -464,6 +487,15 @@ class PRD(BaseModel):
             return _require_utc(v, "last_reviewed_at")
         return v
 
+    @field_validator("created_at", "updated_at", mode="after")
+    @classmethod
+    def _validate_created_updated_utc(
+        cls, v: datetime.datetime | None
+    ) -> datetime.datetime | None:
+        if v is not None:
+            return _require_utc(v, "created_at / updated_at")
+        return v
+
 
 class Requirement(BaseModel):
     """A single atomic requirement derived from a section of the PRD."""
@@ -471,6 +503,7 @@ class Requirement(BaseModel):
     model_config = _MODEL_CONFIG
 
     id: RequirementID
+    prd_id: PRDID = Field(default=DEFAULT_PRD_ID, exclude=True)
     prd_section: str
     text: str
     source_paragraph: str | None = None
@@ -483,6 +516,7 @@ class Feature(BaseModel):
     model_config = _MODEL_CONFIG
 
     id: FeatureID
+    prd_id: PRDID = Field(default=DEFAULT_PRD_ID, exclude=True)
     title: str
     description: str
     status: FeatureStatus = FeatureStatus.proposed
@@ -497,6 +531,7 @@ class Task(BaseModel):
 
     id: TaskID
     feature_id: FeatureID
+    prd_id: PRDID = Field(default=DEFAULT_PRD_ID, exclude=True)
     title: str
     description: str
     status: TaskStatus = TaskStatus.proposed
