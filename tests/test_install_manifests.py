@@ -77,7 +77,9 @@ def test_built_wheel_is_self_sufficient(tmp_path: Path) -> None:
     assert wheels, "wheel not built"
     with zipfile.ZipFile(wheels[0]) as z:
         names = set(z.namelist())
-        entry = next(z.read(n).decode() for n in names if n.endswith("entry_points.txt"))
+        eps = [n for n in names if n.endswith("entry_points.txt")]
+        assert eps, "wheel ships no entry_points.txt"
+        entry = z.read(eps[0]).decode()
     assert "anvil/_data/AGENTS.md" in names, "AGENTS.md not shipped as package data"
     assert any(
         n.startswith("anvil/_data/packaging/codex/automations/") for n in names
