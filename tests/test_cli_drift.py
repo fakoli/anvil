@@ -60,10 +60,10 @@ def project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _open(root: Path) -> Any:
+def _open(root: Path, state_dir: Path | None = None) -> Any:
     from anvil.cli._helpers import _open_backend
 
-    return _open_backend(root / ".anvil")
+    return _open_backend(state_dir if state_dir is not None else root / ".anvil")
 
 
 def _seed_done_task(
@@ -73,15 +73,18 @@ def _seed_done_task(
     feature_id: str = "F001",
     likely_files: list[str] | None = None,
     status: str = "done",
+    state_dir: Path | None = None,
 ) -> None:
     """Seed a feature + task and walk it to a terminal status.
 
     ``likely_files`` are project-root-relative (e.g. ``src/widget.py``) — the
     intent declaration the missing_expected_file check compares against disk.
+    Pass ``state_dir`` when the DB is not at ``root/.anvil`` (HOME-workspace
+    layout, where state lives under ``~/.anvil/workspaces/<key>/.anvil``).
     """
     from anvil.state.models import EventDraft
 
-    b = _open(root)
+    b = _open(root, state_dir)
     try:
         b.append(EventDraft(
             timestamp=_NOW, actor="test", action="feature.created",
@@ -547,3 +550,57 @@ class TestOrphanWorktreeFileLabel:
         item = wt_items[0]
         assert item["file"] is None, item
         assert item["path"] is not None and item["path"].endswith("wt-t099-ghost")
+
+
+# ---------------------------------------------------------------------------
+# TestHomeWorkspaceLayout — the CLI must resolve likely_files against the real
+# CHECKOUT, not the shared workspace state dir. This is the ONLY drift test that
+# runs the default (workspace) layout, so it is what pins the four CLI call
+# sites that thread `project_root` (drift / sync x2 / doctor). Under the
+# suite-wide `ANVIL_STATE_LAYOUT=local` default, checkout == state_dir.parent, so
+# the wiring is a no-op and reverting it leaves every other test green.
+# ---------------------------------------------------------------------------
+
+
+class TestHomeWorkspaceLayout:
+    def test_drift_resolves_files_against_checkout_not_workspace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.cli._helpers import _resolve_state_dir
+
+        # Force the production HOME-workspace layout, with HOME redirected into
+        # tmp so the shared workspace lands under tmp, never the real ~/.anvil.
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.setenv("HOME", str(home))
+
+        # The real checkout lives elsewhere and DOES contain the expected file.
+        checkout = tmp_path / "checkout"
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "widget.py").write_text("ok\n")
+
+        _init_project(checkout)
+
+        # State landed in the shared workspace, NOT under the checkout — assert
+        # the split is real, else this test would prove nothing.
+        state_dir = _resolve_state_dir(checkout)
+        assert home in state_dir.parents, state_dir
+        assert checkout not in state_dir.parents, state_dir
+
+        _seed_done_task(
+            checkout, likely_files=["src/widget.py"], state_dir=state_dir,
+        )
+
+        r = runner.invoke(
+            app, ["drift", "--json", "--cwd", str(checkout)],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+        env = _json_of(r)
+        # The file exists in the checkout -> no missing_expected_file. If the CLI
+        # reverted to deriving the root from state_dir it would probe the
+        # workspace base and false-flag this file.
+        missing = [i for i in env["data"]["drift"]
+                   if i["category"] == "missing_expected_file"]
+        assert missing == [], env

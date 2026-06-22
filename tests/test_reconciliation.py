@@ -740,6 +740,54 @@ class TestMissingExpectedFile:
         finally:
             b.close()
 
+    def test_workspace_layout_resolves_files_against_checkout_not_state_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        """HOME-workspace layout: the state dir is a SEPARATE shared directory,
+        not the checkout. ``likely_files`` must resolve against the explicit
+        ``project_root`` (the real checkout where the files live), NOT against the
+        state dir's parent.
+
+        Regression guard for the live Codex bug: ``anvil drift`` reported false
+        ``missing_expected_file`` warnings because it probed
+        ``~/.anvil/workspaces/<key>/`` (the workspace base) for files that exist
+        in the actual checkout (``<repo>/bin/src/...``).
+        """
+        # State lives in a shared workspace dir, NOT under the checkout.
+        workspace = tmp_path / "workspaces" / "proj-abcd1234"
+        state_dir = workspace / ".anvil"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        # The real checkout is somewhere else entirely; the file DOES exist there.
+        checkout = tmp_path / "code" / "myrepo"
+        (checkout / "bin" / "src").mkdir(parents=True)
+        (checkout / "bin" / "src" / "widget.py").write_text("ok\n")
+        b = _make_backend(state_dir)
+        try:
+            self._setup_terminal_task_with_files(
+                b, likely_files=["bin/src/widget.py"],
+            )
+            # Without project_root, the legacy derivation strips ``.anvil`` and
+            # probes the workspace base -> false positive (the old bug).
+            legacy = ReconciliationEngine(
+                b, state_dir=state_dir, clock=_make_clock(),
+            )
+            legacy_missing = [d for d in legacy.scan().discrepancies
+                              if d.kind == DiscrepancyKind.missing_expected_file]
+            assert [(d.payload["task_id"], d.payload["expected_file"])
+                    for d in legacy_missing] == [("T001", "bin/src/widget.py")], (
+                "expected the legacy state-dir derivation to false-flag exactly "
+                "the seeded file"
+            )
+            # With the explicit checkout root, the file is found -> no drift.
+            engine = ReconciliationEngine(
+                b, state_dir=state_dir, clock=_make_clock(),
+                project_root=checkout,
+            )
+            assert [d for d in engine.scan().discrepancies
+                    if d.kind == DiscrepancyKind.missing_expected_file] == []
+        finally:
+            b.close()
+
     def test_missing_expected_file_fix_raises_not_implemented(
         self, tmp_path: Path,
     ) -> None:

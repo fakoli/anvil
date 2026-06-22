@@ -44,6 +44,7 @@ from anvil.cli._helpers import (
     StateRootError,
     _open_backend,
     _require_state_dir,
+    _resolve_project_root,
     _resolve_state_dir,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
@@ -90,7 +91,7 @@ def drift(
     _require_state_dir(state_dir, command=_COMMAND, json_output=json_output)
     backend = _open_backend(state_dir)
     try:
-        items = _collect_local_drift(backend, state_dir)
+        items = _collect_local_drift(backend, state_dir, _resolve_project_root(cwd))
     finally:
         backend.close()
 
@@ -106,13 +107,19 @@ def drift(
 # ---------------------------------------------------------------------------
 
 
-def _collect_local_drift(backend: Any, state_dir: Path) -> list[Discrepancy]:
+def _collect_local_drift(
+    backend: Any, state_dir: Path, project_root: Path
+) -> list[Discrepancy]:
     """Run ``ReconciliationEngine.scan()`` and keep only local drift kinds.
 
     Crucially this passes ``configured_providers=[]`` so the scan never
     produces the provider-dependent kinds, then filters the result to
     :data:`LOCAL_DRIFT_KINDS` as a belt-and-braces guard. Order is preserved
     from the engine (kind ASC, target_id ASC) so output is deterministic.
+
+    ``project_root`` is the git checkout the plan-declared ``likely_files``
+    resolve against — distinct from ``state_dir``, which under the HOME-workspace
+    layout is a shared ``~/.anvil/workspaces/<key>/.anvil`` dir, not the checkout.
     """
     from anvil.clock import SystemClock
     from anvil.sync.reconciliation import (
@@ -127,6 +134,7 @@ def _collect_local_drift(backend: Any, state_dir: Path) -> list[Discrepancy]:
         # No providers: drift is local-only and must work without a
         # configured GitHub/Linear/etc. integration.
         configured_providers=[],
+        project_root=project_root,
     )
     report: ReconciliationReport = engine.scan()
     return [d for d in report.discrepancies if d.kind in LOCAL_DRIFT_KINDS]

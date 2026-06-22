@@ -254,6 +254,20 @@ def _resolve_state_dir(cwd: Path | None) -> Path:
     return state_dir
 
 
+def _resolve_project_root(cwd: Path | None) -> Path:
+    """Return the project CHECKOUT root — where plan-declared ``likely_files``
+    live. Like :func:`_resolve_base_dir` (explicit ``cwd`` > ``ANVIL_ROOT`` >
+    ``Path.cwd()``) but NEVER remapped to the shared ``~/.anvil/workspaces``
+    state dir, which under the HOME-workspace layout is not the git checkout.
+    """
+    if cwd is not None:
+        return cwd.resolve()
+    env_root = os.environ.get(_STATE_ROOT_ENV)
+    if env_root is not None and env_root.strip() != "":
+        return Path(env_root).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
 def _open_backend(state_dir: Path) -> SqliteBackend:
     """Instantiate a SqliteBackend, call initialize(), and return it.
 

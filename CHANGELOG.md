@@ -6,6 +6,30 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- **`anvil drift` / `sync` / `doctor` mis-resolved checkout-relative paths
+  against the SHARED state directory under the default HOME-workspace layout.**
+  Root cause: `state_dir` was overloaded as both the state location
+  (`~/.anvil/workspaces/<key>/.anvil`) and the git checkout root, which the
+  HOME-workspace migration split apart. Three symptoms, all fixed:
+  - **False `missing_expected_file` drift** — plan-declared `likely_files`
+    (e.g. `bin/src/widget.py`) were probed under the workspace base instead of
+    the checkout, so every expected-file check false-failed.
+  - **False `doctor` verification-path WARNINGs** — `doctor` resolved
+    ready-task verification-command paths against the workspace base too.
+  - **Silently dead `orphan_branch` / `orphan_worktree` drift** — the git
+    scans ran in the state dir, which is not a git repo under this layout, so
+    `_is_git_repo()` returned False and those two drift kinds never fired.
+  The reconciliation engine now resolves a single `project_root` (the checkout,
+  threaded from each CLI command's `--cwd`/cwd) and uses it for both the
+  expected-file checks and the git scans; packets stay under `state_dir` (they
+  are anvil-managed state). Library/test callers that pass the project root as
+  `state_dir` keep the legacy strip-`.anvil` derivation. Regression guards: an
+  engine-level workspace-split case (`tests/test_reconciliation.py`) and a
+  CLI-level one running the real HOME-workspace layout
+  (`tests/test_cli_drift.py`) that pins all four call sites.
+
 ### Changed
 
 - **`scripts/install.sh` now installs from PyPI via `uv tool` instead of cloning a
