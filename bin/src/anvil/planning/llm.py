@@ -402,7 +402,9 @@ class ClaudeAgentSDKProvider:
                 "    pip install claude-agent-sdk\n"
                 "    claude --version   # the CLI must be installed + logged in\n"
                 "Or pin a different provider via `llm_provider:` in "
-                ".anvil/config.yaml (anthropic | bedrock | custom)."
+                ".anvil/config.yaml (anthropic | bedrock | custom). If you have "
+                "ANTHROPIC_API_KEY / AWS creds set, add `llm_fallback: true` to "
+                ".anvil/config.yaml to auto-detect and use them instead."
             ) from exc
 
         options = ClaudeAgentOptions(
@@ -426,6 +428,12 @@ class ClaudeAgentSDKProvider:
             "usage": None,
             "model": None,
             "stop_reason": None,
+            # Error diagnostics. ResultMessage.result is None on error subtypes,
+            # so capture errors / api_error_status (and any assistant-frame
+            # error) to report something actionable instead of bare "None".
+            "errors": None,
+            "api_error_status": None,
+            "assistant_error": None,
         }
 
         async def _drive() -> None:
@@ -448,11 +456,20 @@ class ClaudeAgentSDKProvider:
                             captured["model"] = message.model
                         if message.stop_reason:
                             captured["stop_reason"] = message.stop_reason
+                        # An API-level failure (auth/billing/rate-limit) can be
+                        # reported on the assistant frame; record it so it is
+                        # not silently returned as a success.
+                        if getattr(message, "error", None):
+                            captured["assistant_error"] = message.error
                     elif isinstance(message, ResultMessage):
                         captured["got_result"] = True
                         captured["is_error"] = bool(message.is_error)
                         captured["result_text"] = message.result
                         captured["usage"] = message.usage
+                        captured["errors"] = getattr(message, "errors", None)
+                        captured["api_error_status"] = getattr(
+                            message, "api_error_status", None
+                        )
                         # Fallbacks only — the assistant frame (captured above,
                         # and it arrives first) is authoritative when present.
                         if not captured["stop_reason"]:
@@ -498,10 +515,22 @@ class ClaudeAgentSDKProvider:
             raise LLMProviderError(
                 "Claude Agent SDK returned no ResultMessage (no completion)."
             )
-        if captured["is_error"]:
+        if captured["is_error"] or captured["assistant_error"]:
+            # Build an actionable diagnostic. `result` is None on error
+            # subtypes, so fall through to errors / api_error_status / the
+            # assistant-frame error rather than reporting bare "None".
+            detail_parts: list[str] = []
+            if captured["result_text"]:
+                detail_parts.append(str(captured["result_text"]))
+            if captured["errors"]:
+                detail_parts.append(f"errors={captured['errors']}")
+            if captured["api_error_status"] is not None:
+                detail_parts.append(f"api_error_status={captured['api_error_status']}")
+            if captured["assistant_error"]:
+                detail_parts.append(f"error={captured['assistant_error']}")
+            detail = "; ".join(detail_parts) or "(no detail reported)"
             raise LLMProviderError(
-                f"Claude Agent SDK reported an error result: "
-                f"{captured['result_text']!r}"
+                f"Claude Agent SDK reported an error result: {detail}"
             )
 
         # Prefer the accumulated assistant text; fall back to the ResultMessage

@@ -537,6 +537,23 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         )
     auto_expand = auto_expand_raw
 
+    # ``llm_fallback`` uses the same strict bool validation as ``auto_expand``
+    # (NOT the loose ``bool(data.get(...))`` coercion) so a quoted ``"false"``
+    # or a typo surfaces at load time instead of silently flipping env
+    # auto-detection on.
+    llm_fallback_raw = data.get("llm_fallback", False)
+    if llm_fallback_raw is None:
+        # A blank YAML value (the default template ships `llm_fallback:` with
+        # no value) reads as None — treat it as the default False, like an
+        # absent key. A non-bool *value* (e.g. the string "false") still fails.
+        llm_fallback_raw = False
+    if not isinstance(llm_fallback_raw, bool):
+        raise ValueError(
+            f"llm_fallback must be a boolean, got "
+            f"{type(llm_fallback_raw).__name__} ({resolved})."
+        )
+    llm_fallback = llm_fallback_raw
+
     auto_expand_threshold = _validate_auto_expand_threshold(
         data.get("auto_expand_threshold", DEFAULT_AUTO_EXPAND_THRESHOLD),
         resolved,
@@ -619,7 +636,7 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         project_name=str(data["project_name"]),
         project_id=str(data["project_id"]),
         llm_provider=llm_provider_value,
-        llm_fallback=bool(data.get("llm_fallback", False)),
+        llm_fallback=llm_fallback,
         llm_model=_str_or_none(data.get("llm_model")),
         llm_tier=llm_tier_value,
         bedrock_region=_str_or_none(data.get("bedrock_region")),
@@ -967,7 +984,7 @@ events_path: events.jsonl
 # ---------------------------------------------------------------------------
 llm_provider:                       # agent-sdk | anthropic | bedrock | custom (blank = agent-sdk)
 llm_fallback:                       # true = env auto-detect before agent-sdk (default false)
-llm_tier:                           # opus | sonnet | haiku (blank = subscription/provider default)
+llm_tier:                           # opus|sonnet|haiku; blank=sonnet, agent-sdk=sub default
 llm_model:                          # explicit model id (overrides tier)
 
 # Bedrock-only knobs (ignored unless llm_provider resolves to "bedrock").

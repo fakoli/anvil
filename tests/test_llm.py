@@ -694,3 +694,41 @@ class TestClaudeAgentSDKProvider:
         resp = ClaudeAgentSDKProvider().generate(system="S", user="U")
         assert resp.model == "claude-opus-4-8"
         assert resp.finish_reason == "max_tokens"
+
+    def test_error_result_reports_diagnostics_not_bare_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On an error ResultMessage the SDK leaves `result` None but populates
+        errors / api_error_status — surface those instead of 'error result:
+        None'."""
+        import claude_agent_sdk
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+        from anvil.planning.llm import ClaudeAgentSDKProvider
+
+        async def fake_query(*, prompt, options):  # type: ignore[no-untyped-def]
+            yield AssistantMessage(
+                content=[TextBlock(text="")], model="claude-sonnet-4-6"
+            )
+            yield ResultMessage(
+                subtype="error_during_execution",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=True,
+                num_turns=1,
+                session_id="s",
+                usage={},
+                result=None,
+                stop_reason=None,
+                model_usage={},
+                errors=["rate limit exceeded"],
+                api_error_status=429,
+            )
+
+        monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+        with pytest.raises(LLMProviderError) as ei:
+            ClaudeAgentSDKProvider().generate(system="S", user="U")
+        msg = str(ei.value)
+        assert "error result: None" not in msg
+        assert "429" in msg
+        assert "rate limit exceeded" in msg

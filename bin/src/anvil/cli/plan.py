@@ -765,6 +765,15 @@ def score(
     _require_state_dir(state_dir, command="score", json_output=json_output)
 
     config = _load_config_optional(state_dir)
+    # `--model` only takes effect on the LLM path; warn rather than silently
+    # ignore it when `--use-llm` is absent (score otherwise runs the
+    # deterministic scorer and the override is a no-op).
+    if model and not use_llm:
+        typer.echo(
+            "Warning: --model has no effect without --use-llm; "
+            "the deterministic scorer ignores it.",
+            err=True,
+        )
     provider = _resolve_llm_provider(use_llm, config, model=model)
 
     backend = _open_backend(state_dir)
