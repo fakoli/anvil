@@ -15,6 +15,7 @@ import os
 import sqlite3
 from pathlib import Path
 
+import pytest
 from click.testing import Result
 from typer.testing import CliRunner
 
@@ -1266,7 +1267,7 @@ class TestPlanLlmBackstop:
         monkeypatch.setattr(
             llm_planner,
             "resolve_planner_provider",
-            lambda config=None: (provider, "anthropic"),
+            lambda config=None, *, model_override=None: (provider, "anthropic"),
         )
 
     def test_happy_path_generates_appends_and_reparses(
@@ -1320,7 +1321,7 @@ class TestPlanLlmBackstop:
         # raising stub so any accidental invocation surfaces in the test.
         from anvil.planning import llm_planner
 
-        def _explode(config=None) -> None:  # type: ignore[no-untyped-def]
+        def _explode(config=None, *, model_override=None) -> None:  # type: ignore[no-untyped-def]
             raise AssertionError(
                 "resolve_planner_provider should not be called with --no-llm"
             )
@@ -1363,7 +1364,7 @@ class TestPlanLlmBackstop:
             "Either set ANTHROPIC_API_KEY or install claude-agent-sdk."
         )
 
-        def _raise(config=None) -> None:  # type: ignore[no-untyped-def]
+        def _raise(config=None, *, model_override=None) -> None:  # type: ignore[no-untyped-def]
             raise PlannerProviderUnavailable(sentinel_msg)
 
         monkeypatch.setattr(llm_planner, "resolve_planner_provider", _raise)
@@ -1547,10 +1548,10 @@ class TestExpand:
         assert "use-llm" in combined.lower() or "--use-llm" in combined
 
 # Note: a previous test asserted `expand --use-llm` exits 1 unconditionally.
-# Phase 7 Wave 2 implemented --use-llm, so the test was stale and only passed
-# by accident (empty state OR missing ANTHROPIC_API_KEY). The missing-key
-# branch is now covered properly by
-# TestUseLlmRequiresApiKey::test_expand_use_llm_without_env_exits_1 below.
+# Phase 7 Wave 2 implemented --use-llm. The default provider is now the keyless
+# Claude Agent SDK (subscription auth), so `--use-llm` no longer requires
+# ANTHROPIC_API_KEY and does not exit 1 for a missing key — see
+# TestUseLlmDefaultProvider below.
 
 
 # ---------------------------------------------------------------------------
@@ -3127,52 +3128,83 @@ class TestUseLlmFlagHelp:
         assert "--use-llm" in result.output
 
 
-class TestUseLlmRequiresApiKey:
-    """Without ANTHROPIC_API_KEY, --use-llm must exit 1 with a clean message."""
+class TestUseLlmDefaultProvider:
+    """The default --use-llm provider is the keyless Claude Agent SDK.
 
-    def test_plan_use_llm_without_env_exits_1(
+    Previously --use-llm without ANTHROPIC_API_KEY exited 1 (the old default
+    was the direct Anthropic API). The default is now ``agent-sdk`` —
+    subscription auth, no API key — so resolution succeeds and the command
+    runs. We patch ``claude_agent_sdk.query`` so the test exercises the real
+    resolver + provider path without spawning the actual ``claude`` CLI.
+    """
+
+    def _patch_agent_sdk_query(self, monkeypatch, text: str, capture=None) -> None:  # type: ignore[no-untyped-def]
+        claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+        async def fake_query(*, prompt, options):  # type: ignore[no-untyped-def]
+            if capture is not None:
+                capture["model"] = options.model
+            yield AssistantMessage(
+                content=[TextBlock(text=text)], model="claude-sonnet-4-6"
+            )
+            yield ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id="sess-cli",
+                usage={"input_tokens": 5, "output_tokens": 5},
+                result=text,
+                stop_reason="end_turn",
+                model_usage={"claude-sonnet-4-6": {}},
+            )
+
+        monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+
+    def test_score_use_llm_without_key_runs_via_agent_sdk(
         self, tmp_path: Path, monkeypatch  # type: ignore[no-untyped-def]
     ) -> None:
+        """No ANTHROPIC_API_KEY → resolves the keyless agent-sdk default and
+        exits 0 (no longer the old exit-1 missing-key failure)."""
+        pytest.importorskip("claude_agent_sdk")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        _do_init(tmp_path)
-        _write_prd(tmp_path, _FULL_PRD_CONTENT)
-        _invoke_cmd(tmp_path, ["prd", "parse"])
+        self._patch_agent_sdk_query(monkeypatch, "A concise trade-off note.")
 
-        result = _invoke_cmd(tmp_path, ["plan", "--use-llm"])
-        assert result.exit_code == 1
-        combined = result.output + (
-            result.stderr if hasattr(result, "stderr") and result.stderr else ""
-        )
-        assert "ANTHROPIC_API_KEY" in combined
-
-    def test_score_use_llm_without_env_exits_1(
-        self, tmp_path: Path, monkeypatch  # type: ignore[no-untyped-def]
-    ) -> None:
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         _do_init(tmp_path)
         _write_prd(tmp_path, _FULL_PRD_CONTENT)
         _invoke_cmd(tmp_path, ["prd", "parse"])
         _invoke_cmd(tmp_path, ["plan"])
 
         result = _invoke_cmd(tmp_path, ["score", "--use-llm"])
-        assert result.exit_code == 1
+        assert result.exit_code == 0, result.output
         combined = result.output + (
             result.stderr if hasattr(result, "stderr") and result.stderr else ""
         )
-        assert "ANTHROPIC_API_KEY" in combined
+        # The old contract is gone: no missing-key error.
+        assert "ANTHROPIC_API_KEY" not in combined
 
-    def test_expand_use_llm_without_env_exits_1(
+    def test_score_use_llm_model_flag_threads_to_provider(
         self, tmp_path: Path, monkeypatch  # type: ignore[no-untyped-def]
     ) -> None:
+        """`--model X` reaches the agent-sdk provider as the CLI model id
+        (ClaudeAgentOptions.model), proving the flag threads end-to-end."""
+        pytest.importorskip("claude_agent_sdk")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        _do_init(tmp_path)
+        cap: dict = {}
+        self._patch_agent_sdk_query(monkeypatch, "note", capture=cap)
 
-        result = _invoke_cmd(tmp_path, ["expand", "T001", "--use-llm"])
-        assert result.exit_code == 1
-        combined = result.output + (
-            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _FULL_PRD_CONTENT)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        _invoke_cmd(tmp_path, ["plan"])
+
+        result = _invoke_cmd(
+            tmp_path, ["score", "--use-llm", "--model", "claude-haiku-4-5"]
         )
-        assert "ANTHROPIC_API_KEY" in combined
+        assert result.exit_code == 0, result.output
+        assert cap.get("model") == "claude-haiku-4-5"
 
 
 class TestUseLlmRecordedProvider:
@@ -3193,7 +3225,7 @@ class TestUseLlmRecordedProvider:
 
         plan_module = importlib.import_module("anvil.cli.plan")
 
-        def fake_resolve(use_llm: bool, config=None):  # type: ignore[no-untyped-def]
+        def fake_resolve(use_llm: bool, config=None, model=None):  # type: ignore[no-untyped-def]
             return provider_factory() if use_llm else None
 
         monkeypatch.setattr(plan_module, "_resolve_llm_provider", fake_resolve)
@@ -3455,7 +3487,7 @@ This is a refactor that touches architecture across many modules.
         # provider, install_provider's fake would raise (it asserts use_llm).
         sentinel_raised = []
 
-        def fake_resolve(use_llm: bool, config=None):  # type: ignore[no-untyped-def]
+        def fake_resolve(use_llm: bool, config=None, model=None):  # type: ignore[no-untyped-def]
             if use_llm:
                 sentinel_raised.append("called")
             return None

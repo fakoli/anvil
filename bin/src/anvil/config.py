@@ -52,24 +52,36 @@ class Config:
     project_id: str
 
     # ---------------------------------------------------------------------
-    # LLM provider selection (v1.17.0).
+    # LLM provider selection.
     #
     # Precedence applied by ``planning.llm_planner.resolve_planner_provider``:
     #
-    # 1. ``llm_provider`` explicit in this config → wins.
-    # 2. Env auto-detect when ``llm_provider`` is None:
-    #    - ANTHROPIC_API_KEY  → "anthropic"  (direct API, cheapest path)
+    # 1. ``llm_provider`` explicit in this config → wins. One of
+    #    ``agent-sdk`` / ``anthropic`` / ``bedrock`` / ``custom``.
+    # 2. Otherwise the default is ``agent-sdk`` — the Claude Agent SDK over
+    #    the logged-in subscription (no API key). anvil is capacity-bound,
+    #    not per-token-cost bound, so the subscription path is the default.
+    # 3. ``llm_fallback: true`` (default false) restores the legacy env
+    #    auto-detect chain *before* falling through to ``agent-sdk``:
+    #    - ANTHROPIC_API_KEY  → "anthropic"  (direct API)
     #    - AWS_REGION (or AWS_DEFAULT_REGION) with no ANTHROPIC_API_KEY
     #      AND ``anthropic[bedrock]`` installed → "bedrock"
     #    - CUSTOM_LLM_BASE_URL → "custom"
-    # 3. Fail loudly.
+    #    - else → "agent-sdk"
     #
-    # We do NOT silent-fail across providers when one is misconfigured —
-    # community consensus (research/2026) is that silent fallback breaks
-    # cost predictability and surprises ops teams during incidents. Pick
-    # one per process; re-launch to switch.
+    # We do NOT silent-fail across providers once one is chosen — community
+    # consensus (research/2026) is that silent fallback breaks cost
+    # predictability and surprises ops teams during incidents. Pick one per
+    # process; re-launch to switch.
     # ---------------------------------------------------------------------
-    llm_provider: Literal["anthropic", "bedrock", "custom"] | None = None
+    llm_provider: Literal["agent-sdk", "anthropic", "bedrock", "custom"] | None = None
+
+    # Opt back into env-based provider auto-detection (the pre-agent-sdk
+    # behavior). Default ``False``: with no explicit ``llm_provider``, anvil
+    # uses ``agent-sdk`` and does NOT consult ANTHROPIC_API_KEY / AWS_REGION /
+    # CUSTOM_LLM_BASE_URL. Set ``True`` to let those env vars pick the provider
+    # again (with ``agent-sdk`` as the final fallback).
+    llm_fallback: bool = False
 
     # Explicit model id (overrides ``llm_tier``). Pass when you need a
     # specific Anthropic-API id (``claude-opus-4-7-20260124``), a Bedrock
@@ -568,12 +580,12 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
     # at load time so misconfigs surface during `init`, not during plan.
     llm_provider_raw = _str_or_none(data.get("llm_provider"))
     if llm_provider_raw is not None:
-        llm_provider_value: Literal["anthropic", "bedrock", "custom"] | None = (
-            _validate_literal(  # type: ignore[assignment]
-                llm_provider_raw,
-                ("anthropic", "bedrock", "custom"),
-                "llm_provider",
-            )
+        llm_provider_value: (
+            Literal["agent-sdk", "anthropic", "bedrock", "custom"] | None
+        ) = _validate_literal(  # type: ignore[assignment]
+            llm_provider_raw,
+            ("agent-sdk", "anthropic", "bedrock", "custom"),
+            "llm_provider",
         )
     else:
         llm_provider_value = None
@@ -607,6 +619,7 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         project_name=str(data["project_name"]),
         project_id=str(data["project_id"]),
         llm_provider=llm_provider_value,
+        llm_fallback=bool(data.get("llm_fallback", False)),
         llm_model=_str_or_none(data.get("llm_model")),
         llm_tier=llm_tier_value,
         bedrock_region=_str_or_none(data.get("bedrock_region")),
@@ -926,17 +939,24 @@ db_path: state.db
 events_path: events.jsonl
 
 # ---------------------------------------------------------------------------
-# LLM integration (optional — leave blank to use CLI without LLM features)
+# LLM integration (optional — used by `anvil plan/score/expand --use-llm`)
 #
-# `llm_provider` picks ONE of: anthropic | bedrock | custom. When blank,
-# anvil auto-detects from the environment:
-#   ANTHROPIC_API_KEY → anthropic    (direct API; cheapest path)
+# `llm_provider` picks ONE of: agent-sdk | anthropic | bedrock | custom.
+# When blank, the default is `agent-sdk` — the Claude Agent SDK driving the
+# bundled `claude` CLI over your logged-in subscription (no API key). This is
+# the capacity-bound default; it needs the `claude` CLI on PATH at call time.
+#
+# `llm_fallback: true` (default false) restores env auto-detection before
+# falling through to agent-sdk:
+#   ANTHROPIC_API_KEY → anthropic    (direct API)
 #   AWS_REGION + anthropic[bedrock] installed → bedrock
 #   CUSTOM_LLM_BASE_URL → custom     (any OpenAI-compatible /v1 endpoint)
+#   else → agent-sdk
 #
 # `llm_tier` (opus | sonnet | haiku) sets the default tier across the
 # project; per-call overrides win. `llm_model` is an explicit model-id
-# override that bypasses tier resolution entirely.
+# override that bypasses tier resolution entirely. For agent-sdk, leaving
+# both blank uses the subscription's own default model.
 #
 # Tier-mapping defaults (refreshed 2026-05-26):
 #   opus   → claude-opus-4-7        (us.anthropic.claude-opus-4-7   on Bedrock)
@@ -945,8 +965,9 @@ events_path: events.jsonl
 #
 # See docs/llm-providers.md for the full setup guide.
 # ---------------------------------------------------------------------------
-llm_provider:                       # anthropic | bedrock | custom (blank = auto)
-llm_tier:                           # opus | sonnet | haiku (blank = sonnet)
+llm_provider:                       # agent-sdk | anthropic | bedrock | custom (blank = agent-sdk)
+llm_fallback:                       # true = env auto-detect before agent-sdk (default false)
+llm_tier:                           # opus | sonnet | haiku (blank = subscription/provider default)
 llm_model:                          # explicit model id (overrides tier)
 
 # Bedrock-only knobs (ignored unless llm_provider resolves to "bedrock").

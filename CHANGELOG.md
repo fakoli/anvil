@@ -6,6 +6,50 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-06-22
+
+### Added
+
+- **Claude Agent SDK LLM provider — now the default for `--use-llm`.** A new
+  `ClaudeAgentSDKProvider` drives the bundled `claude` CLI via
+  `claude_agent_sdk.query()` over the logged-in Claude **subscription** instead
+  of a per-token `ANTHROPIC_API_KEY`. This matches anvil's economics — it is
+  capacity-bound (rides flat-rate plans), not per-token-cost bound — so the
+  subscription path is the default rather than metered API spend. The provider
+  scrubs `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` for the duration of the call
+  (so a quota-capped key cannot hijack the run) and runs single-shot with no
+  tools. `claude-agent-sdk` is now a core dependency; it needs the `claude` CLI
+  on PATH at call time (a missing CLI/SDK surfaces as a clean `LLMProviderError`
+  naming the fix). The previous providers (`anthropic`, `bedrock`, `custom`)
+  are all still available — pin one via `llm_provider:` in `.anvil/config.yaml`.
+- **`llm_fallback` config knob (default `false`).** With no explicit
+  `llm_provider`, anvil now defaults to `agent-sdk` and does NOT consult
+  `ANTHROPIC_API_KEY` / `AWS_REGION` / `CUSTOM_LLM_BASE_URL`. Set
+  `llm_fallback: true` to restore the legacy env auto-detect chain (anthropic →
+  bedrock → custom) before falling through to `agent-sdk`. Because `agent-sdk`
+  is the guaranteed final default, provider resolution no longer fails with
+  "no provider configured".
+- **`--model` flag on `plan` / `score` / `expand`.** Overrides the LLM model
+  for one run (wins over `llm_model` / `llm_tier`); threads through to both the
+  `--use-llm` augmentation and `plan`'s no-tasks backstop. For `agent-sdk` it
+  accepts a CLI model name (`sonnet`/`opus`) or a full id; for `anthropic` /
+  `bedrock`, a model id; for `custom`, the route name the endpoint serves.
+
+### Changed
+
+- **`ClaudeAgentSDKProvider` is now safe to call from inside a running event
+  loop.** `generate()` is synchronous but drives the SDK via `anyio.run()`,
+  which raises if a loop is already running. It now detects a running loop and
+  offloads to a worker thread (the sync CLI and the MCP server's sync tools are
+  unaffected — they take the direct path). Keeps the provider usable from async
+  callers without the previous footgun.
+- **`scripts/install.sh` now installs from PyPI via `uv tool` instead of cloning a
+  checkout.** The one-liner runs `uv tool install anvil-state` (which puts `anvil`
+  + `anvil-mcp` on PATH) then `anvil install <harness>`. Dropped the `~/.anvil-src`
+  clone/cache, the `git reset --hard` updater, and the `--path` symlink flag — `uv
+  tool` handles install, upgrade, and PATH placement. README, getting-started, and
+  the cross-harness guide now lead with `uv tool install anvil-state`.
+
 ### Fixed
 
 - **`anvil drift` / `sync` / `doctor` mis-resolved checkout-relative paths
@@ -29,15 +73,6 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   engine-level workspace-split case (`tests/test_reconciliation.py`) and a
   CLI-level one running the real HOME-workspace layout
   (`tests/test_cli_drift.py`) that pins all four call sites.
-
-### Changed
-
-- **`scripts/install.sh` now installs from PyPI via `uv tool` instead of cloning a
-  checkout.** The one-liner runs `uv tool install anvil-state` (which puts `anvil`
-  + `anvil-mcp` on PATH) then `anvil install <harness>`. Dropped the `~/.anvil-src`
-  clone/cache, the `git reset --hard` updater, and the `--path` symlink flag — `uv
-  tool` handles install, upgrade, and PATH placement. README, getting-started, and
-  the cross-harness guide now lead with `uv tool install anvil-state`.
 
 ## [0.1.1] — 2026-06-21
 

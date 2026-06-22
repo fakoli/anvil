@@ -35,40 +35,70 @@ _FROZEN = FrozenClock(datetime.datetime(2026, 5, 26, 12, 0, tzinfo=datetime.UTC)
 # ---------------------------------------------------------------------------
 
 
+def _fallback_cfg(**kwargs: object):  # type: ignore[no-untyped-def]
+    """A Config with env auto-detect re-enabled (llm_fallback=True)."""
+    from anvil.config import Config
+
+    return Config(
+        project_name="t",
+        project_id="t",
+        llm_fallback=True,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
 class TestResolvePlannerProvider:
-    """v1.17.0 — multi-provider precedence + env auto-detect + config wins."""
+    """Provider precedence: agent-sdk default + explicit config + opt-in env."""
 
-    # --- env auto-detect path (no config supplied) ---------------------
+    # --- default path (no config, fallback off) ------------------------
 
-    def test_anthropic_chosen_when_api_key_set(
+    def test_default_is_agent_sdk_with_no_config(self) -> None:
+        """No config at all → the agent-sdk subscription provider."""
+        provider, tier = resolve_planner_provider()
+        assert tier == "agent-sdk"
+        assert hasattr(provider, "generate")
+
+    def test_default_ignores_api_key_when_fallback_off(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ANTHROPIC_API_KEY alone in env → anthropic."""
+        """ANTHROPIC_API_KEY in env is IGNORED unless llm_fallback=True —
+        the default stays agent-sdk."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-not-real")
+        provider, tier = resolve_planner_provider()
+        assert tier == "agent-sdk"
+
+    # --- opt-in env auto-detect path (llm_fallback=True) ---------------
+
+    def test_anthropic_chosen_when_api_key_set_and_fallback_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """llm_fallback=True + ANTHROPIC_API_KEY alone → anthropic."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-not-real")
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         monkeypatch.delenv("CUSTOM_LLM_BASE_URL", raising=False)
-        provider, tier = resolve_planner_provider()
+        provider, tier = resolve_planner_provider(_fallback_cfg())
         assert tier == "anthropic"
         assert hasattr(provider, "generate")
 
     def test_anthropic_wins_over_aws_when_both_set(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When both ANTHROPIC_API_KEY and AWS_REGION are set, direct API
-        wins because it's cheaper per token. Users who want Bedrock pinning
-        must set llm_provider in config."""
+        """With fallback on and both ANTHROPIC_API_KEY and AWS_REGION set,
+        direct API wins because it's cheaper per token. Users who want
+        Bedrock pinning must set llm_provider in config."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
-        provider, tier = resolve_planner_provider()
+        provider, tier = resolve_planner_provider(_fallback_cfg())
         assert tier == "anthropic"
 
     def test_custom_chosen_when_only_custom_base_url_fails_loud_without_model(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """CUSTOM_LLM_BASE_URL alone picks the custom family but MUST fail
-        loud (PlannerProviderUnavailable) because a custom endpoint cannot
-        safely default its model — see critic MUST FIX #2 (PR #65).
+        """fallback on + CUSTOM_LLM_BASE_URL alone picks the custom family
+        but MUST fail loud (PlannerProviderUnavailable) because a custom
+        endpoint cannot safely default its model — see critic MUST FIX #2
+        (PR #65).
 
         Pairs with ``test_custom_with_only_tier_resolves_to_anthropic_id``
         below which exercises the happy path where the user provides a
@@ -80,27 +110,46 @@ class TestResolvePlannerProvider:
         monkeypatch.setenv("CUSTOM_LLM_BASE_URL", "http://localhost:8000/v1")
 
         with pytest.raises(PlannerProviderUnavailable) as exc_info:
-            resolve_planner_provider()
+            resolve_planner_provider(_fallback_cfg())
 
         msg = str(exc_info.value)
         # Help text must name the config keys the user can fix.
         assert "llm_model" in msg or "llm_tier" in msg
 
-    def test_raises_when_nothing_configured(
+    def test_fallback_on_with_empty_env_falls_through_to_agent_sdk(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No config + no env vars → fail loudly with a help message that
-        names every supported provider path."""
+        """llm_fallback=True but no env signal → fall through to the
+        agent-sdk default rather than raising."""
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
         monkeypatch.delenv("CUSTOM_LLM_BASE_URL", raising=False)
-        with pytest.raises(PlannerProviderUnavailable) as exc_info:
-            resolve_planner_provider()
-        msg = str(exc_info.value)
-        assert "ANTHROPIC_API_KEY" in msg
-        assert "Bedrock" in msg or "bedrock" in msg
-        assert "CUSTOM_LLM_BASE_URL" in msg
+        provider, tier = resolve_planner_provider(_fallback_cfg())
+        assert tier == "agent-sdk"
+
+    # --- model_override (the CLI --model flag) -------------------------
+
+    def test_model_override_on_default_agent_sdk(self) -> None:
+        """--model with no config → agent-sdk provider built with that id."""
+        provider, tier = resolve_planner_provider(model_override="my-pinned-id")
+        assert tier == "agent-sdk"
+        assert provider._model == "my-pinned-id"  # type: ignore[attr-defined]
+
+    def test_model_override_wins_over_config_model_and_tier(self) -> None:
+        """model_override beats both config.llm_model and config.llm_tier."""
+        from anvil.config import Config
+
+        cfg = Config(
+            project_name="t",
+            project_id="t",
+            llm_provider="anthropic",
+            llm_tier="haiku",
+            llm_model="cfg-model-id",
+        )
+        provider, tier = resolve_planner_provider(cfg, model_override="override-id")
+        assert tier == "anthropic"
+        assert provider._model == "override-id"  # type: ignore[attr-defined]
 
     # --- explicit config precedence over env ---------------------------
 
@@ -175,6 +224,11 @@ class TestResolvePlannerProviderGreptileFixes:
         install. Only boto3 (the transitive dep of `anthropic[bedrock]`) is
         the right presence signal. Simulate boto3 missing by patching
         builtins.__import__ to raise ImportError for boto3.
+
+        Exercised via llm_fallback=True (env auto-detect is otherwise off).
+        Without boto3 the chain skips bedrock and falls through to the
+        agent-sdk default rather than mis-picking bedrock and crashing at
+        construction time.
         """
         import builtins
 
@@ -191,10 +245,9 @@ class TestResolvePlannerProviderGreptileFixes:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
 
-        # Without boto3 the autodetect should fall through to "no provider",
-        # not pick bedrock and then crash at construction time.
-        with pytest.raises(PlannerProviderUnavailable):
-            resolve_planner_provider()
+        provider, tier = resolve_planner_provider(_fallback_cfg())
+        assert tier == "agent-sdk"
+        assert hasattr(provider, "generate")
 
     @_skip_no_openai
     def test_missing_custom_base_url_raises_provider_unavailable_not_valueerror(
@@ -817,7 +870,7 @@ A description.
         monkeypatch.setattr(
             planner_mod,
             "resolve_planner_provider",
-            lambda config=None: (recorded, "anthropic"),
+            lambda config=None, *, model_override=None: (recorded, "anthropic"),
         )
 
         result = generate_tasks_markdown(

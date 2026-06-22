@@ -13,21 +13,28 @@ a deterministic value. Every operation succeeds without an API key; the LLM is o
 
 ## Configuration
 
-Set one environment variable:
+The **default provider is the Claude Agent SDK** over your logged-in Claude
+subscription — no API key. If Claude Code is installed and logged in (`claude`
+on PATH), `--use-llm` just works. anvil scrubs `ANTHROPIC_API_KEY` /
+`CLAUDE_API_KEY` for the duration of the call so a quota-capped key cannot
+hijack the run.
 
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-```
+To use a metered API key, AWS Bedrock, or a custom OpenAI-compatible endpoint
+instead, pin `llm_provider:` in `.anvil/config.yaml` (or set `llm_fallback:
+true` to restore env auto-detection). See
+[`docs/llm-providers.md`](llm-providers.md) for the full setup and precedence.
 
-The default model is `claude-sonnet-4-6` — light enough for planning augmentation, strong
-enough for structured JSON proposals. Override via the constructor (`AnthropicProvider(model=...)`)
-when calling the provider directly; the CLI does not currently expose a `--model` flag.
+Model selection: leave `llm_tier` / `llm_model` blank to use the subscription's
+default model on `agent-sdk`, or the `sonnet` tier default on the API
+providers. Set `llm_tier` (`opus`/`sonnet`/`haiku`) or an explicit `llm_model`
+to pin one.
 
-**Prompt caching is on by default.** Every Anthropic call sends the system block with
-`cache_control: {"type": "ephemeral"}` (one breakpoint, system block only — sufficient for the
-augmentation shape this engine emits). Repeated runs against the same task batch hit the
-5-minute ephemeral cache and pay only for new user tokens. This is required by the
-`superpowers:claude-api` skill rule and is wired in `AnthropicProvider.generate`.
+**Prompt caching** is enabled on the direct-API and Bedrock paths: every
+Anthropic-family call sends the system block with
+`cache_control: {"type": "ephemeral"}` so repeated runs against the same task
+batch hit the 5-minute ephemeral cache. The `agent-sdk` and custom paths do not
+set this field (the subscription CLI and OpenAI-compatible servers handle
+caching themselves).
 
 ---
 
@@ -240,14 +247,14 @@ responses fall back to `[]` with a stderr warning.
 
 ## Failure mode
 
-**Missing API key.** If `--use-llm` is passed without `ANTHROPIC_API_KEY` in the environment,
-the CLI exits cleanly with code 1 and a message pointing at the env var. No partial state is
-written.
-
-```text
-$ anvil plan --use-llm
-Error: --use-llm requires ANTHROPIC_API_KEY in environment. Set it or omit --use-llm.
-```
+**Provider not usable.** The default `agent-sdk` provider always *resolves*
+(no key required), so `--use-llm` no longer exits 1 for a missing
+`ANTHROPIC_API_KEY`. Resolution fails with code 1 only when an explicitly
+pinned provider can't be built — e.g. `llm_provider: bedrock` without the
+`anthropic[bedrock]` extra, or a `custom` endpoint missing its `base_url` /
+model. The message names the fix. If the `claude` CLI is absent at call time,
+the `agent-sdk` provider raises a clear `LLMProviderError` telling you to
+install/login to Claude Code or pin a different provider.
 
 **Mid-operation LLM error.** If the LLM call fails after the deterministic baseline has
 already produced a valid result (network error, rate limit, malformed model response), the

@@ -1,50 +1,85 @@
 # LLM providers
 
-anvil's planning features (`--use-llm`, the LLM-driven task-generation backstop, `expand --use-llm`, `score --use-llm`) can be backed by three different LLM provider families. This guide covers how to set each one up and how the precedence rule picks between them.
+anvil's planning features (`--use-llm`, the LLM-driven task-generation backstop, `expand --use-llm`, `score --use-llm`) can be backed by four different LLM provider families. This guide covers how to set each one up and how the precedence rule picks between them.
 
-> **TL;DR.** Set `ANTHROPIC_API_KEY` in your env and everything works. Move to Bedrock or a custom OpenAI-compatible endpoint when your org needs it.
+> **TL;DR.** Do nothing — the default is the **Claude Agent SDK** over your logged-in Claude subscription (no API key). It just needs the `claude` CLI on PATH. Pin `anthropic` / `bedrock` / `custom` in `.anvil/config.yaml` when your org needs a metered API, AWS, or a local endpoint instead.
 
 ---
 
 ## Provider matrix
 
-| Provider | When to use | Optional extras | Config key |
+| Provider | When to use | Extras | Config key |
 | --- | --- | --- | --- |
-| **Direct Anthropic API** | Default. Cheapest per-token path. Works inside Claude Code, Cursor, Codex, or any shell with the key. | None (`anthropic` is a hard dep). | `llm_provider: anthropic` |
-| **Amazon Bedrock** | Your org pins LLM calls to AWS for compliance, billing, or data-residency reasons. | `pip install 'anvil[bedrock]'` (adds `anthropic[bedrock]` + boto3). | `llm_provider: bedrock` |
-| **Custom OpenAI-compatible** | You're on vLLM, LiteLLM proxy, OpenRouter, Together, Groq, Azure OpenAI, or a self-hosted endpoint that speaks `/v1/chat/completions`. | `pip install 'anvil[custom]'` (adds `openai`). | `llm_provider: custom` |
+| **Claude Agent SDK** | **Default.** Rides your Claude *subscription* (no per-token key). anvil is capacity-bound, not per-token-cost bound, so this is the default. | None (`claude-agent-sdk` is a core dep); needs the `claude` CLI on PATH. | `llm_provider: agent-sdk` |
+| **Direct Anthropic API** | You want metered per-token billing against an `ANTHROPIC_API_KEY` (CI without a subscription session, etc.). | None (`anthropic` is a core dep). | `llm_provider: anthropic` |
+| **Amazon Bedrock** | Your org pins LLM calls to AWS for compliance, billing, or data-residency reasons. | `pip install 'anvil-state[bedrock]'` (adds `anthropic[bedrock]` + boto3). | `llm_provider: bedrock` |
+| **Custom OpenAI-compatible** | You're on vLLM, LiteLLM proxy, OpenRouter, Together, Groq, Azure OpenAI, or a self-hosted endpoint that speaks `/v1/chat/completions`. | `pip install 'anvil-state[custom]'` (adds `openai`). | `llm_provider: custom` |
 
 ---
 
 ## Precedence — who picks the provider
 
-`anvil plan` (and every other LLM-touching CLI / MCP tool) walks this order to pick **exactly one** provider per process:
+`anvil plan` (and every other LLM-touching CLI / MCP tool) picks **exactly one** provider per process:
 
-1. **Explicit `llm_provider` in `.anvil/config.yaml`** — always wins.
-2. **Env auto-detect** (only if config is silent):
+1. **Explicit `llm_provider` in `.anvil/config.yaml`** — always wins (`agent-sdk` / `anthropic` / `bedrock` / `custom`).
+2. **Default → `agent-sdk`.** With no explicit provider, anvil uses the Claude Agent SDK over the subscription. It does **not** consult `ANTHROPIC_API_KEY` / `AWS_REGION` / `CUSTOM_LLM_BASE_URL` by default.
+3. **Opt-in env fallback.** Set `llm_fallback: true` to restore the legacy env auto-detect chain *before* falling through to `agent-sdk`:
    - `ANTHROPIC_API_KEY` set → **anthropic**.
    - `AWS_REGION` (or `AWS_DEFAULT_REGION`) set **and** `anthropic[bedrock]` extras installed → **bedrock**. The direct API still wins when both are present because direct is cheaper per token; pin Bedrock in config to override.
    - `CUSTOM_LLM_BASE_URL` set → **custom**.
-3. **Fail explicitly** with a multi-line message naming every supported path. anvil never silently falls through to a different provider mid-process; silent fallback breaks billing predictability and can surprise operators during incidents.
+   - nothing matched → **agent-sdk**.
+
+anvil never silently falls through to a *different* provider once one is chosen; silent fallback breaks billing predictability and can surprise operators during incidents. Because `agent-sdk` is the guaranteed final default, resolution never fails with "no provider configured".
 
 ---
 
-## Direct Anthropic API (default)
+## Claude Agent SDK (default)
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-anvil plan
+# Just works, given Claude Code is installed and logged in:
+anvil plan --use-llm
 ```
 
-That's all. The default install includes the `anthropic` SDK.
+The default install includes `claude-agent-sdk`. At call time anvil drives the bundled `claude` CLI via `claude_agent_sdk.query()` and authenticates with your logged-in Claude **subscription** — there is no `ANTHROPIC_API_KEY` to set. anvil scrubs `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` from the environment for the duration of the call so a quota-capped key cannot hijack the run.
 
-To pin a tier:
+Requirements (surfaced as a clean error at call time if missing):
+
+- the `claude` CLI on PATH, logged in to an active subscription session (`claude --version` to verify).
+
+To pin a model (otherwise the subscription's own default model is used):
+
+```yaml
+# .anvil/config.yaml
+llm_provider: agent-sdk     # optional — this is already the default
+llm_tier: sonnet            # opus | sonnet | haiku (maps to a model id)
+# or:
+llm_model: claude-opus-4-7  # explicit id (overrides tier)
+```
+
+Leaving both `llm_tier` and `llm_model` blank lets the subscription pick its default model.
+
+---
+
+## Direct Anthropic API
+
+This is the metered per-token path. It is **no longer the default** — you must
+pin it (or enable `llm_fallback`), because the keyless `agent-sdk` default does
+not consult `ANTHROPIC_API_KEY`.
 
 ```yaml
 # .anvil/config.yaml
 llm_provider: anthropic
 llm_tier: sonnet      # opus | sonnet | haiku (blank = sonnet)
 ```
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+anvil plan --use-llm
+```
+
+The `anthropic` SDK ships in the default install, so no extra is needed. (Or,
+to keep config untouched, set `llm_fallback: true` and an `ANTHROPIC_API_KEY`
+in env — see Precedence above.)
 
 To pin an explicit model id (overrides tier):
 
@@ -179,7 +214,7 @@ Use `llm_model` (explicit id) only when:
 - You're on a custom endpoint that requires a non-standard model name (OpenRouter routes, vLLM-served local models).
 - You want a model outside the Opus/Sonnet/Haiku trio.
 
-Precedence within a provider: `llm_model` > `llm_tier` > the provider's `DEFAULT_TIER` (Sonnet).
+Precedence within a provider: `llm_model` > `llm_tier` > the provider's default. For the API providers that default is `DEFAULT_TIER` (Sonnet); for `agent-sdk` it is the subscription's own default model (no tier is forced).
 
 ---
 

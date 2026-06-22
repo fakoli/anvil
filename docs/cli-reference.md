@@ -66,8 +66,9 @@
   - `0` — success (including informational no-op states like "no tasks to
     score" or `status --hook-format` on an uninitialised project).
   - `1` — state / gate / validation error (task not found, gate failed,
-    `--use-llm` without `ANTHROPIC_API_KEY`, parse errors, mutually exclusive
-    flag conflicts, missing required `--reason`, etc.).
+    `--use-llm` with an explicitly-pinned provider that can't be built, parse
+    errors, mutually exclusive flag conflicts, missing required `--reason`,
+    etc.).
   - `2` — operator-input required. Currently emitted only by
     `sync` / `sync github` / `sync provider` when one or more tasks parked
     awaiting `manual_merge` resolution.
@@ -105,7 +106,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.1.1`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.1.2`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -313,26 +314,34 @@ tasks that have already advanced past `drafted`.
 
 **Flags:**
 
-- `--use-llm` *(flag)* — augment planning with Anthropic Claude. Requires
-  `ANTHROPIC_API_KEY` in the environment. Deterministic output is always
-  produced first; LLM enrichment is additive (it enriches task descriptions
-  shorter than the 50-character threshold). LLM failures fall back to the
-  deterministic description with a stderr warning — `plan` never aborts on
-  LLM failure.
+- `--use-llm` *(flag)* — augment planning with an LLM. Defaults to your Claude
+  subscription via the Agent SDK (no API key; needs the `claude` CLI on PATH);
+  pin `anthropic` / `bedrock` / `custom` via `llm_provider:` in
+  `.anvil/config.yaml`. Deterministic output is always produced first; LLM
+  enrichment is additive (it enriches task descriptions shorter than the
+  50-character threshold). LLM failures fall back to the deterministic
+  description with a stderr warning — `plan` never aborts on LLM failure.
+- `--model NAME` *(default: unset)* — override the LLM model for this run
+  (wins over `llm_model` / `llm_tier`); applies to both `--use-llm`
+  augmentation and the no-tasks backstop. For agent-sdk a CLI name like
+  `sonnet`/`opus` or a full id; for anthropic/bedrock a model id; for custom
+  the route name your endpoint serves.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
 
 - `0` — planning succeeded. Prints `Planned N features, M tasks.` and any
   detected conflict-group count.
-- `1` — `prd.md` not found or unreadable; or `--use-llm` was passed without
-  `ANTHROPIC_API_KEY` in environment.
+- `1` — `prd.md` not found or unreadable; or an explicitly-pinned provider
+  (`llm_provider: bedrock`/`custom`) could not be built (missing extra or
+  config). The default agent-sdk provider needs no key, so a missing
+  `ANTHROPIC_API_KEY` is *not* an error.
 
 **Example:**
 
 ```bash
 anvil plan
-anvil plan --use-llm        # requires ANTHROPIC_API_KEY
+anvil plan --use-llm        # default: your Claude subscription (no API key)
 ```
 
 **See also:** [`anvil score`](#score) and
@@ -356,15 +365,21 @@ event per task and prints a summary table.
 **Flags:**
 
 - `--use-llm` *(flag)* — append the rule-based explanation with a 1-3
-  sentence trade-off summary from the LLM. Requires `ANTHROPIC_API_KEY`. The
-  numeric scores themselves are never modified by the LLM.
+  sentence trade-off summary from the LLM. Defaults to your Claude
+  subscription via the Agent SDK (no API key; needs the `claude` CLI); pin a
+  different provider via `llm_provider:`. The numeric scores themselves are
+  never modified by the LLM.
+- `--model NAME` *(default: unset)* — override the LLM model for this run
+  (wins over `llm_model` / `llm_tier`). See [`anvil plan`](#plan) for the
+  per-provider name conventions.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
 
 - `0` — scoring completed (including the "no tasks require scoring" no-op).
-- `1` — specified `TASK_ID` not found; or `--use-llm` was passed without
-  `ANTHROPIC_API_KEY` in environment.
+- `1` — specified `TASK_ID` not found; or an explicitly-pinned
+  (`bedrock`/`custom`) provider could not be built. The default agent-sdk
+  provider needs no key.
 
 **Example:**
 
@@ -394,7 +409,12 @@ state — proposals are printed for the human to paste into `prd.md`.
 
 - `--use-llm` *(required)* — without this flag, `expand` exits 1 with the
   message pointing at the manual-authoring fallback. With it, the LLM is
-  asked for 2-5 independently-claimable sub-task proposals.
+  asked for 2-5 independently-claimable sub-task proposals. Defaults to your
+  Claude subscription via the Agent SDK (no API key; needs the `claude` CLI);
+  pin a provider via `llm_provider:`.
+- `--model NAME` *(default: unset)* — override the LLM model for this run
+  (wins over `llm_model` / `llm_tier`). See [`anvil plan`](#plan) for the
+  per-provider name conventions.
 - `--format {text,prd}` *(default: `text`)* — `text` prints a human-readable
   per-subtask block; `prd` renders markdown blocks matching
   [`docs/prd-template.md`](prd-template.md) — paste-ready into the `## Tasks`
@@ -407,7 +427,8 @@ state — proposals are printed for the human to paste into `prd.md`.
 - `0` — proposals printed (or the task is below the complexity threshold —
   this is a non-error no-op).
 - `1` — `--use-llm` was not passed; or `--format` was not one of
-  `text` / `prd`; or `TASK_ID` not found; or `ANTHROPIC_API_KEY` is missing.
+  `text` / `prd`; or `TASK_ID` not found; or an explicitly-pinned
+  (`bedrock`/`custom`) provider could not be built.
 
 **Example:**
 
