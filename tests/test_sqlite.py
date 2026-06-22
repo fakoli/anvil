@@ -5095,8 +5095,8 @@ class TestSchemaVersionPhase8:
     """
 
     def test_schema_version_is_six(self) -> None:
-        """The SL-3 / B48 typed-proofs ship floor is SCHEMA_VERSION == 6."""
-        assert SCHEMA_VERSION == 6
+        """The v0.3 multi-PRD foundation ship floor is SCHEMA_VERSION == 7."""
+        assert SCHEMA_VERSION == 7
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -5118,7 +5118,7 @@ class TestSchemaVersionPhase8:
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b.close()
 
@@ -5384,7 +5384,7 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b.close()
 
@@ -5411,7 +5411,7 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(db_path)
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b2.close()
 
@@ -5439,7 +5439,7 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(db_path)
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
             proj = b2.get_project()
             assert proj is not None
             assert proj.id == "proj-1"
@@ -5485,7 +5485,7 @@ class TestSchemaAutoUpgrade:
                 r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()
             }
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
             assert row is not None
             assert row[0] is None, "pre-v4 event rows must keep seq NULL"
             assert "task_type" in cols, "v5 must add tasks.task_type"
@@ -5538,7 +5538,7 @@ class TestSchemaAutoUpgrade:
                 "SELECT task_type FROM tasks WHERE id = 'T001'"
             ).fetchone()
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
             assert tt is not None
             assert tt[0] == "feature", "pre-v5 rows backfill to 'feature'"
         finally:
@@ -5579,7 +5579,7 @@ class TestSchemaAutoUpgrade:
                 r[1] for r in conn.execute("PRAGMA table_info(evidence)").fetchall()
             }
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
             assert "proofs" in cols, "v6 must add evidence.proofs"
         finally:
             b2.close()
@@ -5614,7 +5614,7 @@ class TestSchemaAutoUpgrade:
             b._conn.execute("PRAGMA user_version = 1")  # noqa: SLF001
             b.initialize()  # takes early-return; _check_schema_version sees v1
             v = b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b.close()
 
@@ -6483,7 +6483,7 @@ class TestV2ToV3MigrationAppliesColumnAdditions:
             assert row[1] is None
             # user_version is now the current SCHEMA_VERSION (6).
             v = b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b.close()
 
@@ -6552,6 +6552,261 @@ class TestV2ToV3MigrationAppliesColumnAdditions:
             # New optional fields default cleanly.
             assert stored.external_url is None
             assert stored.provider_metadata == {}
+        finally:
+            b.close()
+
+
+class TestV6ToV7Migration:
+    """T004 — the v6 -> v7 multi-PRD persistence-foundation migration.
+
+    A real v6 db has a SINGLE-row ``prds`` table keyed on ``project_id`` and
+    ``requirements`` / ``features`` / ``tasks`` / ``sync_mappings`` with no
+    ``prd_id`` partition column. The migration must:
+      * rebuild ``prds`` with the single-column ``id`` PK + identity/release
+        columns, adopting the existing row as ``id='default'`` is_default=1;
+      * ALTER-backfill ``prd_id='default'`` onto every existing requirement /
+        feature / task / sync_mapping row in one statement each (zero data loss
+        — the row counts are invariant);
+      * stamp ``user_version = 7``;
+      * be idempotent (re-running it after a simulated crash does not error).
+    """
+
+    def _stand_up_v6_db(self, db_path: str, events_path: str) -> None:
+        """Create a real v6-shaped db (singleton prds keyed on project_id, no
+        prd_id columns) with a project, prd, 2 requirements, a feature, 2 tasks
+        and a sync_mapping, then stamp user_version=6.
+        """
+        Path(events_path).touch()
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE prds (
+                project_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'draft',
+                summary TEXT NOT NULL DEFAULT '',
+                goals TEXT NOT NULL DEFAULT '[]',
+                non_goals TEXT NOT NULL DEFAULT '[]',
+                requirements TEXT NOT NULL DEFAULT '[]',
+                acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                risks TEXT NOT NULL DEFAULT '[]',
+                open_questions TEXT NOT NULL DEFAULT '[]',
+                last_reviewed_at TEXT, last_reviewed_by TEXT
+            );
+            CREATE TABLE requirements (
+                id TEXT PRIMARY KEY, prd_section TEXT NOT NULL, text TEXT NOT NULL,
+                source_paragraph TEXT, derived INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE features (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                requirements TEXT NOT NULL DEFAULT '[]', tasks TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                feature_id TEXT NOT NULL REFERENCES features(id) ON DELETE RESTRICT,
+                title TEXT NOT NULL, description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                priority TEXT NOT NULL DEFAULT 'medium',
+                task_type TEXT NOT NULL DEFAULT 'feature',
+                dependencies TEXT NOT NULL DEFAULT '[]',
+                conflict_groups TEXT NOT NULL DEFAULT '[]',
+                scores TEXT NOT NULL DEFAULT '{}',
+                acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                implementation_notes TEXT NOT NULL DEFAULT '[]',
+                verification TEXT NOT NULL DEFAULT '{}',
+                likely_files TEXT NOT NULL DEFAULT '[]',
+                parent_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE evidence (
+                id TEXT PRIMARY KEY, task_id TEXT NOT NULL, claim_id TEXT NOT NULL,
+                commands_run TEXT NOT NULL DEFAULT '[]', output_excerpt TEXT,
+                files_changed TEXT NOT NULL DEFAULT '[]', pr_url TEXT, commit_sha TEXT,
+                screenshots TEXT NOT NULL DEFAULT '[]', known_limitations TEXT,
+                proofs TEXT NOT NULL DEFAULT '[]',
+                submitted_at TEXT NOT NULL, submitted_by TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
+                action TEXT NOT NULL, target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}', seq INTEGER
+            );
+            CREATE TABLE sync_mappings (
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                external_system TEXT NOT NULL, external_id TEXT NOT NULL,
+                external_url TEXT, last_synced_at TEXT NOT NULL,
+                sync_state TEXT NOT NULL DEFAULT 'in_sync',
+                conflict_resolution_strategy TEXT NOT NULL DEFAULT 'prompt',
+                provider_metadata_json TEXT,
+                PRIMARY KEY (task_id, external_system),
+                UNIQUE (external_system, external_id)
+            );
+            CREATE TABLE claims (id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                claimed_by TEXT NOT NULL, claim_type TEXT NOT NULL DEFAULT 'task',
+                status TEXT NOT NULL DEFAULT 'active', branch TEXT, worktree_path TEXT,
+                expected_files TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL, last_heartbeat_at TEXT NOT NULL,
+                released_at TEXT, release_reason TEXT);
+            CREATE TABLE decisions (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                context TEXT NOT NULL, decision TEXT NOT NULL, consequences TEXT NOT NULL,
+                created_at TEXT NOT NULL, related_tasks TEXT NOT NULL DEFAULT '[]',
+                related_features TEXT NOT NULL DEFAULT '[]');
+            CREATE TABLE reviews (id TEXT PRIMARY KEY, target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL, reviewed_by TEXT NOT NULL, decision TEXT NOT NULL,
+                notes TEXT, created_at TEXT NOT NULL);
+            CREATE TABLE conflict_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                task_ids TEXT NOT NULL DEFAULT '[]', reason TEXT NOT NULL);
+            """
+        )
+        iso = _T0.isoformat()
+        conn.execute(
+            "INSERT INTO projects (id, name, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("proj-1", "Proj", "desc", iso, iso),
+        )
+        conn.execute(
+            "INSERT INTO prds (project_id, status, summary, last_reviewed_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("proj-1", "reviewed", "the summary", iso),
+        )
+        conn.execute(
+            "INSERT INTO requirements (id, prd_section, text) VALUES (?, ?, ?)",
+            ("R001", "Goals", "req one"),
+        )
+        conn.execute(
+            "INSERT INTO requirements (id, prd_section, text) VALUES (?, ?, ?)",
+            ("R002", "Goals", "req two"),
+        )
+        conn.execute(
+            "INSERT INTO features (id, title, description) VALUES (?, ?, ?)",
+            ("F001", "Feat", "fdesc"),
+        )
+        for tid in ("T001", "T002"):
+            conn.execute(
+                "INSERT INTO tasks (id, feature_id, title, description, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (tid, "F001", tid, "tdesc", iso, iso),
+            )
+        conn.execute(
+            "INSERT INTO sync_mappings (task_id, external_system, external_id, "
+            "last_synced_at) VALUES (?, ?, ?, ?)",
+            ("T001", "github_issues", "gh-1", iso),
+        )
+        conn.execute("PRAGMA user_version = 6")
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _counts(db_path: str) -> dict[str, int]:
+        conn = sqlite3.connect(db_path)
+        try:
+            return {
+                t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in ("requirements", "features", "tasks", "sync_mappings")
+            }
+        finally:
+            conn.close()
+
+    def test_v6_to_v7_backfills_default_prd_and_preserves_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """Upgrading a v6 db mints the default PRD and backfills prd_id with no
+        row loss; user_version becomes 7 and the prds PK is the single-col id.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+        before = self._counts(db_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                # user_version stamped to 7.
+                assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+                # prds: exactly one default row, keyed on single-col id.
+                prds = conn.execute(
+                    "SELECT id, is_default, summary, project_id, created_at "
+                    "FROM prds"
+                ).fetchall()
+                assert len(prds) == 1
+                assert prds[0][0] == "default"
+                assert prds[0][1] == 1
+                assert prds[0][2] == "the summary"
+                assert prds[0][3] == "proj-1"
+                # created_at backfilled from COALESCE(last_reviewed_at, ...).
+                assert prds[0][4] == _T0.isoformat()
+                # The PK is the single ``id`` column (NOT composite / project_id).
+                pk_cols = [
+                    r[1]
+                    for r in conn.execute("PRAGMA table_info(prds)").fetchall()
+                    if r[5]  # pk flag
+                ]
+                assert pk_cols == ["id"]
+                # Every entity row backfilled to the default partition.
+                for table in ("requirements", "features", "tasks"):
+                    rows = conn.execute(
+                        f"SELECT DISTINCT prd_id FROM {table}"
+                    ).fetchall()
+                    assert rows == [("default",)], (table, rows)
+                # sync_mapping prd_id backfilled via the task join; entity_kind.
+                sm = conn.execute(
+                    "SELECT prd_id, entity_kind FROM sync_mappings"
+                ).fetchall()
+                assert sm == [("default", "task")]
+                # requirements lineage columns exist and default to NULL.
+                lineage = conn.execute(
+                    "SELECT revision_introduced, revision_superseded "
+                    "FROM requirements"
+                ).fetchall()
+                assert all(r == (None, None) for r in lineage)
+            finally:
+                conn.close()
+        finally:
+            b.close()
+
+        # Row-count invariant: nothing was lost.
+        assert self._counts(db_path) == before
+
+    def test_v6_to_v7_is_idempotent(self, tmp_path: Path) -> None:
+        """Re-running the v6->v7 step on an already-migrated db is a no-op.
+
+        Simulates a crash that left the db migrated but the user_version not yet
+        observed: we force user_version back to 6 and re-run _check_schema_version
+        directly. The rebuild guard (is_default already present) and the
+        duplicate-column-tolerant ALTERs must make this a clean no-op.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates to v7
+        try:
+            assert b._conn is not None  # noqa: SLF001
+            before = self._counts(db_path)
+            # Force the on-disk marker back to 6 and re-run the migration on the
+            # already-v7-shaped tables — must not raise.
+            b._conn.execute("PRAGMA user_version = 6")  # noqa: SLF001
+            b._check_schema_version(pre_ddl_version=6)  # noqa: SLF001
+            assert (
+                b._conn.execute("PRAGMA user_version").fetchone()[0] == 7  # noqa: SLF001
+            )
+            # Still exactly one default prd, still no row loss.
+            prds = b._conn.execute(  # noqa: SLF001
+                "SELECT id, is_default FROM prds"
+            ).fetchall()
+            assert len(prds) == 1
+            assert prds[0][0] == "default"
+            assert prds[0][1] == 1
+            assert self._counts(db_path) == before
         finally:
             b.close()
 
