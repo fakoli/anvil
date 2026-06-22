@@ -107,7 +107,9 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
   `matcher` on tool name; `command`/`timeout`). Codex **auto-discovers `hooks/hooks.json`** from the
   plugin root — no manifest key needed (a `hooks` key is supported but optional; Codex's own
   scaffolder emits `"hooks": "./hooks.json"` under `.codex-plugin/`). Every cached real plugin
-  (handoff, fakoli-state, hookify, …) uses bare discovery. ✓
+  (handoff, fakoli-state, hookify, …) uses bare discovery. The runtime parser is strict: the root
+  object of `hooks/hooks.json` must contain `hooks` only; top-level metadata such as `description`
+  is rejected before hook review. ✓
 - **Plugin-root var:** the binary honors **`${CLAUDE_PLUGIN_ROOT}`** (also `PLUGIN_ROOT`; **no**
   `CODEX_PLUGIN_ROOT`) — anvil's existing var is correct, no fallback needed. ✓
 - **Events fired (0.130.0):** `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,

@@ -1,5 +1,4 @@
 {
-  "description": "Detects project state, enforces claim discipline, and records file changes",
   "hooks": {
     "SessionStart": [
       {

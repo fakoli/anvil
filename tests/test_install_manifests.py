@@ -126,6 +126,19 @@ def test_codex_mcp_json_matches_codex_envelope() -> None:
     assert spec["args"][-1].endswith("bin/anvil-mcp")
 
 
+def test_codex_hooks_json_has_no_top_level_metadata() -> None:
+    """Codex's hook loader rejects unknown top-level keys.
+
+    Keep the shipped plugin hook manifest to the strict runtime shape so fresh
+    Codex installs do not fail with "unknown field `description`, expected
+    `hooks`".
+    """
+    p = _repo_root() / "hooks" / "hooks.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert set(data) == {"hooks"}
+    assert isinstance(data["hooks"], dict)
+
+
 # --- codex: marketplace.json (VERIFIED) ----------------------------------
 
 
