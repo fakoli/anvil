@@ -34,14 +34,25 @@ anvil install <harness> --write  # do it (idempotent MCP merge; +AGENTS.md on co
 Flags: `--root <dir>` pins `ANVIL_ROOT` in the written config; `--uv-run` emits
 the explicit `uv run` invocation instead of the bash wrapper (Windows / no bash).
 
-### One-liner (no checkout yet)
+### Install the CLI (no checkout)
+
+Install the published package — it provides `anvil` and `anvil-mcp` on PATH — then
+wire a harness:
+
+```bash
+uv tool install anvil-state        # or: pipx install anvil-state
+anvil install <harness> --write
+```
+
+Or do both in one shot:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fakoli/anvil/main/scripts/install.sh | sh -s -- <harness>
 ```
 
-Provisions an anvil checkout (cached at `~/.anvil-src`, or `$ANVIL_SRC`) and runs
-`anvil install <harness> --write`. Needs `uv` on PATH.
+Both need `uv` on PATH and nothing is cloned. `uv`'s tool-bin dir (usually
+`~/.local/bin`) must be on your PATH so the harness can launch `anvil-mcp` from the
+config this writes.
 
 ## Harness support
 

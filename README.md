@@ -179,18 +179,33 @@ Source for this comparison: [`docs/_positioning.md`](docs/_positioning.md).
 
 Installs the plugin, registers the four hooks, wires the MCP server, and makes the five agents discoverable to Claude Code at next session start.
 
-### Standalone clone (CLI / MCP without the plugin layer)
+### Standalone via `uv tool` (any harness)
 
-The Python engine, CLI, and MCP server are fully self-contained under `bin/` and need only [uv](https://docs.astral.sh/uv/):
+Install the published package — it provides the `anvil` CLI and the `anvil-mcp` MCP server, no checkout needed (only [uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv tool install anvil-state        # or: pipx install anvil-state
+anvil install <harness>            # wire anvil into Codex, Cursor, VS Code, ...
+```
+
+Or wire a harness in one line (installs `anvil-state` via `uv tool`, then runs `anvil install`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fakoli/anvil/main/scripts/install.sh | sh -s -- <harness>
+```
+
+For MCP clients without an in-place writer, `anvil mcp-config <client>` prints the paste-ready block — see [`docs/how-to/using-anvil-on-any-harness.md`](docs/how-to/using-anvil-on-any-harness.md).
+
+### From source (development)
+
+The engine, CLI, and MCP server are self-contained under `bin/`:
 
 ```bash
 git clone https://github.com/fakoli/anvil.git
 cd anvil/bin
 uv sync                     # materializes .venv and resolves deps
-uv run anvil --help  # drive the CLI directly
+uv run anvil --help         # drive the CLI directly
 ```
-
-The wrapper scripts `bin/anvil` and `bin/anvil-mcp` shell out to `uv run`, so once synced you can also add this directory to your Claude Code plugin paths and use the MCP server (`.mcp.json`) as-is. For other MCP clients run `anvil mcp-config <client>` (Cursor, Windsurf, Cline, VS Code, Zed, Codex) — see [`docs/how-to/using-anvil-on-any-harness.md`](docs/how-to/using-anvil-on-any-harness.md).
 
 ---
 

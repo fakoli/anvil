@@ -1,9 +1,9 @@
 """Guard the one-line installer ``scripts/install.sh``.
 
-Cheap, network-free checks: the script is valid POSIX sh, running it with no
-harness argument prints usage and exits 2 *before* it touches uv/git/network, and
-the opt-in ``--path`` flag links ``anvil`` into a PATH dir without ever clobbering
-an existing one.
+Cheap, network-free checks: the script is valid POSIX sh, its advertised harness
+list matches the engine registry, ``claude-code`` redirects to the plugin flow, a
+missing harness arg exits 2, and — with stubbed ``uv``/``anvil`` on PATH — it
+installs the published package via ``uv tool`` and then wires the target harness.
 """
 
 from __future__ import annotations
@@ -22,12 +22,11 @@ def _script() -> Path:
 
 def test_usage_harness_list_matches_the_registry() -> None:
     """The hand-typed harness list in install.sh's usage must match the engine's
-    registry — exactly, both directions. install.py derives `--help` and its
+    registry — exactly, both directions. install.py derives ``--help`` and its
     "unknown harness" error from HARNESSES, so the shell script is the ONE copy
-    that can drift; this caught it advertising `claude-code`/`vscode` that
-    `anvil install` rejected. `claude-code` is allowed: the script special-cases
-    it to the `/plugin marketplace` path instead of calling `anvil install`."""
-    block = _script().read_text().split("harness:", 1)[1].split("--path:", 1)[0]
+    that can drift; ``claude-code`` is allowed (the script special-cases it to the
+    ``/plugin marketplace`` path instead of calling ``anvil install``)."""
+    block = _script().read_text().split("harness:", 1)[1].split("}", 1)[0]
     advertised = set(re.findall(r"[a-z][a-z-]+", block)) - {"echo"}
     valid = set(HARNESSES) | {"claude-code"}
     assert advertised == valid, (
@@ -37,115 +36,62 @@ def test_usage_harness_list_matches_the_registry() -> None:
     )
 
 
-def _run_in_fake_checkout(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run install.sh against a fake in-place checkout, fully offline.
-
-    install.sh detects an in-checkout run (``./bin/anvil`` + ``./.claude-plugin/
-    plugin.json``) and uses it directly — no git/network. Stub ``bin/anvil`` makes
-    the terminal ``exec anvil install`` a harmless no-op, and a stub ``uv`` on PATH
-    satisfies the prerequisite check without depending on a real uv. ``ANVIL_BIN_DIR``
-    points the --path symlink at a temp dir we can assert on.
-    """
-    (tmp_path / "bin").mkdir(exist_ok=True)  # exist_ok: idempotency test re-runs in place
-    anvil = tmp_path / "bin" / "anvil"
-    anvil.write_text("#!/bin/sh\nexit 0\n")  # no-op stub for the final exec
-    anvil.chmod(0o755)
-    (tmp_path / ".claude-plugin").mkdir(exist_ok=True)
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text("{}\n")
-
-    stubbin = tmp_path / "stubbin"
-    stubbin.mkdir(exist_ok=True)
-    uv = stubbin / "uv"
-    uv.write_text("#!/bin/sh\nexit 0\n")
-    uv.chmod(0o755)
-
-    env = {
-        **os.environ,
-        "HOME": str(tmp_path),
-        "ANVIL_BIN_DIR": str(tmp_path / "pathdir"),
-        "PATH": f"{stubbin}:{os.environ.get('PATH', '')}",
-    }
-    return subprocess.run(
-        ["sh", str(_script()), *args],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-
-
 def test_install_script_is_valid_sh() -> None:
-    r = subprocess.run(
-        ["sh", "-n", str(_script())], capture_output=True, text=True
-    )
+    r = subprocess.run(["sh", "-n", str(_script())], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 
 def test_install_script_requires_a_harness_arg() -> None:
-    # No arg → usage + exit 2, before any uv/git/network work.
-    r = subprocess.run(
-        ["sh", str(_script())], capture_output=True, text=True
-    )
+    # No arg → usage + exit 2, before any uv/network work.
+    r = subprocess.run(["sh", str(_script())], capture_output=True, text=True)
     assert r.returncode == 2
     assert "Usage" in r.stderr
 
 
 def test_help_flag_exits_zero_on_stdout() -> None:
-    # An explicit -h/--help is not an error: exit 0, and usage goes to stdout
-    # (a usage *error* exits 2 to stderr).
-    r = subprocess.run(
-        ["sh", str(_script()), "--help"], capture_output=True, text=True
-    )
+    # An explicit -h/--help is not an error: exit 0, usage to stdout.
+    r = subprocess.run(["sh", str(_script()), "--help"], capture_output=True, text=True)
     assert r.returncode == 0
     assert "Usage" in r.stdout
 
 
-def test_install_script_force_updates_cache_and_fails_loud() -> None:
-    """A stale cached checkout must be FORCED to latest main, not fail-soft to old
-    code: `pull --ff-only || warn` once kept running pre-fix anvil that corrupted
-    configs. The updater now resets hard to a fetched ref and exits on failure."""
-    text = _script().read_text()
-    assert "pull --ff-only" not in text  # no more fail-soft update
-    assert "reset --hard" in text and "FETCH_HEAD" in text  # force to latest main
-    # Anchor on the unique cache-update error marker, then assert it EXITS nearby
-    # (rather than continuing to run stale code). Robust to other elif/else blocks.
-    marker = "couldn't update the cached anvil"
-    assert marker in text
-    assert "exit 1" in text.split(marker, 1)[1][:300]
+def test_claude_code_redirects_to_plugin_marketplace() -> None:
+    # claude-code is not an `anvil install` target — redirect to the plugin flow
+    # (exit 0), not try to install it. Runs before the uv check, so no stubs.
+    r = subprocess.run(["sh", str(_script()), "claude-code"], capture_output=True, text=True)
+    assert r.returncode == 0
+    assert "/plugin marketplace add fakoli/anvil" in r.stdout
 
 
-def test_path_flag_links_anvil_into_path_dir(tmp_path: Path) -> None:
-    r = _run_in_fake_checkout(tmp_path, "codex", "--path")
+def _run_with_stubs(
+    tmp_path: Path, *args: str
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run install.sh with stub ``uv`` + ``anvil`` on PATH that log their argv, so
+    we can assert the install path without the network or the real tools."""
+    stub = tmp_path / "stubbin"
+    stub.mkdir()
+    calls = tmp_path / "calls.log"
+    uv = stub / "uv"
+    uv.write_text(
+        "#!/bin/sh\n"
+        f'printf "uv %s\\n" "$*" >> "{calls}"\n'
+        # `uv tool dir --bin` is only consulted on the not-on-PATH branch.
+        f'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then echo "{stub}"; fi\n'
+        "exit 0\n"
+    )
+    uv.chmod(0o755)
+    anvil = stub / "anvil"
+    anvil.write_text("#!/bin/sh\n" f'printf "anvil %s\\n" "$*" >> "{calls}"\nexit 0\n')
+    anvil.chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub}:{os.environ.get('PATH', '')}", "HOME": str(tmp_path)}
+    r = subprocess.run(["sh", str(_script()), *args], capture_output=True, text=True, env=env)
+    return r, (calls.read_text() if calls.exists() else "")
+
+
+def test_script_installs_from_pypi_then_wires_harness(tmp_path: Path) -> None:
+    r, logged = _run_with_stubs(tmp_path, "codex")
     assert r.returncode == 0, r.stderr
-    link = tmp_path / "pathdir" / "anvil"
-    assert link.is_symlink()
-    assert os.readlink(link) == str(tmp_path / "bin" / "anvil")
-    assert "Linked anvil ->" in r.stderr
-
-
-def test_no_path_flag_does_not_link(tmp_path: Path) -> None:
-    r = _run_in_fake_checkout(tmp_path, "codex")
-    assert r.returncode == 0, r.stderr
-    assert not (tmp_path / "pathdir" / "anvil").exists()
-
-
-def test_path_flag_never_clobbers_an_existing_anvil(tmp_path: Path) -> None:
-    # A real `anvil` the user already placed on PATH must survive untouched.
-    pathdir = tmp_path / "pathdir"
-    pathdir.mkdir()
-    existing = pathdir / "anvil"
-    existing.write_text("the user's own anvil\n")
-    r = _run_in_fake_checkout(tmp_path, "codex", "--path")
-    assert r.returncode == 0, r.stderr
-    assert not existing.is_symlink()  # left as-is, not replaced by a symlink
-    assert existing.read_text() == "the user's own anvil\n"
-    assert "already exists" in r.stderr
-
-
-def test_path_flag_is_idempotent(tmp_path: Path) -> None:
-    assert _run_in_fake_checkout(tmp_path, "codex", "--path").returncode == 0
-    r2 = _run_in_fake_checkout(tmp_path, "codex", "--path")
-    assert r2.returncode == 0, r2.stderr
-    link = tmp_path / "pathdir" / "anvil"
-    assert link.is_symlink()
-    assert "already linked" in r2.stderr
+    # Installs the published package via uv tool (idempotent / upgrading re-run)...
+    assert "tool install" in logged and "anvil-state" in logged
+    # ...then wires the harness through the installed `anvil`.
+    assert "install codex --write" in logged
