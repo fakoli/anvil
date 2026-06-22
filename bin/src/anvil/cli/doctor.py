@@ -56,6 +56,7 @@ import typer
 
 from anvil.cli._helpers import (
     StateRootError,
+    _resolve_project_root,
     _resolve_state_dir,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
@@ -156,7 +157,7 @@ def doctor(
         )
         raise typer.Exit(code=1)
 
-    findings = _diagnose(state_dir)
+    findings = _diagnose(state_dir, _resolve_project_root(cwd))
 
     worst = _worst_severity(findings)
     healthy = worst != _ERROR
@@ -184,8 +185,12 @@ def doctor(
 # ---------------------------------------------------------------------------
 
 
-def _diagnose(state_dir: Path) -> list[_Finding]:
+def _diagnose(state_dir: Path, project_root: Path | None = None) -> list[_Finding]:
     """Run every probe in order and return the finding list.
+
+    ``project_root`` is the git checkout that plan-declared ``likely_files``
+    resolve against (distinct from ``state_dir`` under the HOME-workspace
+    layout); it flows to the reconciliation probe.
 
     The schema/state.db probe runs first because its outcome decides whether
     the backend-dependent probes (claims, replay, reconciliation) can run. When
@@ -227,8 +232,13 @@ def _diagnose(state_dir: Path) -> list[_Finding]:
         findings.append(_check_claims(backend))
         findings.append(_check_max_claim_age(backend, state_dir))
         findings.append(_check_replay(backend, state_dir))
-        findings.append(_check_reconciliation(backend, state_dir))
-        findings.append(_check_verification_paths(backend, state_dir.parent))
+        findings.append(_check_reconciliation(backend, state_dir, project_root))
+        # Verification-command paths are CHECKOUT-relative, same as likely_files:
+        # under the HOME-workspace layout state_dir.parent is the workspace base,
+        # not the checkout, so resolve against the threaded project_root.
+        findings.append(
+            _check_verification_paths(backend, project_root or state_dir.parent)
+        )
     finally:
         backend.close()
 
@@ -707,7 +717,9 @@ def _check_replay(backend: SqliteBackend, state_dir: Path) -> _Finding:
 # ---------------------------------------------------------------------------
 
 
-def _check_reconciliation(backend: SqliteBackend, state_dir: Path) -> _Finding:
+def _check_reconciliation(
+    backend: SqliteBackend, state_dir: Path, project_root: Path | None = None
+) -> _Finding:
     """Summarize local git/fs/db reconciliation drift (the ``drift`` view).
 
     Reuses ``ReconciliationEngine.scan()`` with no providers and filters to
@@ -726,6 +738,7 @@ def _check_reconciliation(backend: SqliteBackend, state_dir: Path) -> _Finding:
         state_dir=state_dir,
         clock=SystemClock(),
         configured_providers=[],
+        project_root=project_root,
     )
     report = engine.scan()
     local = [d for d in report.discrepancies if d.kind in LOCAL_DRIFT_KINDS]

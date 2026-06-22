@@ -300,9 +300,23 @@ class ReconciliationEngine:
         clock: Clock | None = None,
         drift_threshold_days: int = _DEFAULT_DRIFT_THRESHOLD_DAYS,
         configured_providers: list[str] | None = None,
+        project_root: Path | None = None,
     ) -> None:
         self._backend = backend
         self._state_dir = state_dir
+        # The git CHECKOUT root: what ``likely_files`` resolve against AND the
+        # working tree the orphan-branch / orphan-worktree git scans run in.
+        # Under the HOME-workspace layout the state dir is a SHARED
+        # ``~/.anvil/workspaces/<key>/.anvil`` directory that is NOT a checkout,
+        # so it can't be used for either. CLI callers pass the real checkout;
+        # library/test callers that pass the project root AS ``state_dir`` leave
+        # this ``None`` and fall back to the legacy strip-``.anvil`` derivation.
+        # (Packets are anvil-managed state and stay under ``state_dir`` — see
+        # ``_scan_orphan_packets`` — so they deliberately do NOT use this.)
+        self._checkout_root = (
+            project_root if project_root is not None
+            else _derive_project_root(state_dir)
+        )
         if clock is None:
             # Local import keeps the module load light.
             from anvil.clock import SystemClock
@@ -394,9 +408,9 @@ class ReconciliationEngine:
 
     def _scan_orphan_branches(self) -> list[Discrepancy]:
         """``agent/t*-*`` branches whose task id is not in the SQLite store."""
-        if not _is_git_repo(self._state_dir):
+        if not _is_git_repo(self._checkout_root):
             return []
-        branches = _git_list_branches(self._state_dir)
+        branches = _git_list_branches(self._checkout_root)
         known_task_ids = {t.id.lower() for t in self._backend.list_tasks()}
         out: list[Discrepancy] = []
         for branch in branches:
@@ -471,9 +485,9 @@ class ReconciliationEngine:
 
     def _scan_orphan_worktrees(self) -> list[Discrepancy]:
         """Worktrees pointing at ``agent/t*-*`` branches whose task is gone."""
-        if not _is_git_repo(self._state_dir):
+        if not _is_git_repo(self._checkout_root):
             return []
-        worktrees = _git_list_worktrees(self._state_dir)
+        worktrees = _git_list_worktrees(self._checkout_root)
         known_task_ids = {t.id.lower() for t in self._backend.list_tasks()}
         active_claims_by_task = {
             c.task_id.lower() for c in self._backend.list_active_claims()
@@ -577,11 +591,9 @@ class ReconciliationEngine:
         whether to rewrite the file, amend the plan, or reopen the task.
         """
         _terminal = {"done", "accepted"}
-        # ``likely_files`` are PROJECT-ROOT-relative (e.g. ``src/widget.py``),
-        # not ``.anvil/``-relative. The CLI passes ``state_dir`` as the
-        # ``.anvil/`` directory while the test/engine callers pass the
-        # project root directly, so derive the root under both conventions.
-        project_root = _derive_project_root(self._state_dir)
+        # ``likely_files`` are CHECKOUT-relative (e.g. ``src/widget.py``), not
+        # ``.anvil/``-relative — resolve against the checkout root.
+        project_root = self._checkout_root
         out: list[Discrepancy] = []
         for task in self._backend.list_tasks():
             if str(task.status) not in _terminal:
@@ -806,7 +818,7 @@ class ReconciliationEngine:
         branch = d.payload.get("branch") or d.target_id
         _git_run(
             ["git", "branch", "-D", branch],
-            cwd=self._state_dir,
+            cwd=self._checkout_root,
         )
 
     def _fix_orphan_packet(self, d: Discrepancy) -> None:
@@ -818,7 +830,7 @@ class ReconciliationEngine:
         wt_path = d.payload.get("path") or d.target_id
         _git_run(
             ["git", "worktree", "remove", "--force", wt_path],
-            cwd=self._state_dir,
+            cwd=self._checkout_root,
         )
 
     def _fix_stale_claim(self, d: Discrepancy) -> None:

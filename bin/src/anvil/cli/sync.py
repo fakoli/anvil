@@ -43,6 +43,7 @@ import yaml
 from anvil.cli._helpers import (
     _open_backend,
     _require_state_dir,
+    _resolve_project_root,
     _resolve_state_dir,
 )
 
@@ -133,10 +134,11 @@ def sync_default(
         return
 
     state_dir = _resolve_state_dir(cwd)
+    project_root = _resolve_project_root(cwd)
     _require_state_dir(state_dir)
     backend = _open_backend(state_dir)
     try:
-        report = _run_reconciliation(backend, state_dir)
+        report = _run_reconciliation(backend, state_dir, project_root)
         _print_reconciliation_report(report)
 
         if not fix:
@@ -159,7 +161,9 @@ def sync_default(
                 typer.echo("Aborted.")
                 raise typer.Exit(code=_EXIT_OK)
 
-        actions = _apply_reconciliation_fixes(backend, state_dir, report)
+        actions = _apply_reconciliation_fixes(
+            backend, state_dir, report, project_root
+        )
         _print_fix_actions(actions)
     finally:
         backend.close()
@@ -1429,8 +1433,15 @@ def _resolve_configured_providers(state_dir: Path) -> list[str]:
 def _run_reconciliation(
     backend: SqliteBackend,
     state_dir: Path,
+    project_root: Path | None = None,
 ) -> Any:
-    """Build a ReconciliationEngine and run scan()."""
+    """Build a ReconciliationEngine and run scan().
+
+    ``project_root`` is the git checkout that plan-declared ``likely_files``
+    resolve against (see :func:`_resolve_project_root`); it is distinct from
+    ``state_dir`` under the HOME-workspace layout. ``None`` falls back to the
+    legacy strip-``.anvil`` derivation for in-repo callers.
+    """
     from anvil.clock import SystemClock
 
     # Configured providers list flows from the project's config (Phase 9
@@ -1445,6 +1456,7 @@ def _run_reconciliation(
         state_dir=state_dir,
         clock=SystemClock(),
         configured_providers=configured,
+        project_root=project_root,
     )
     return engine.scan()
 
@@ -1453,6 +1465,7 @@ def _apply_reconciliation_fixes(
     backend: SqliteBackend,
     state_dir: Path,
     report: Any,
+    project_root: Path | None = None,
 ) -> list[Any]:
     """Build the engine again and call .fix() on the report."""
     from anvil.clock import SystemClock
@@ -1464,6 +1477,7 @@ def _apply_reconciliation_fixes(
         state_dir=state_dir,
         clock=SystemClock(),
         configured_providers=configured,
+        project_root=project_root,
     )
     return engine.fix(report)
 
