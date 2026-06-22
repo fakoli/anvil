@@ -11,10 +11,9 @@ from __future__ import annotations
 import datetime
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from math import sqrt
-from typing import Literal, TypeAlias
+from math import isfinite, sqrt
+from typing import Literal, TypeAlias, cast
 
-from anvil.planning.scoring import score_task
 from anvil.state.models import Score, Task, TaskPriority, TaskStatus, Verification
 
 ScoreAxis: TypeAlias = Literal[
@@ -57,6 +56,7 @@ class ActualProxyOutcome:
 
     scores: AxisScores
     evidence: str
+    source: str
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,9 @@ class ScoringCorpusCase:
     task: Task
     predicted_scores: AxisScores
     actual_outcome: ActualProxyOutcome
+    source_task_id: str | None = None
+    source_evidence_id: str | None = None
+    source_commit: str | None = None
     regression_label: str | None = None
 
 
@@ -177,10 +180,22 @@ def _scores(**kwargs: int) -> AxisScores:
         value = kwargs.get(axis)
         if value is None:
             raise ValueError(f"missing score for axis {axis!r}")
-        if value < 1 or value > 5:
-            raise ValueError(f"score for axis {axis!r} must be in [1, 5]")
         scores[axis] = value
-    return scores
+    return _validate_axis_scores("scores", scores)
+
+
+def _validate_axis_scores(label: str, scores: Mapping[ScoreAxis, int]) -> AxisScores:
+    values: dict[ScoreAxis, int] = {}
+    for axis in SCORE_AXES:
+        if axis not in scores:
+            raise ValueError(f"{label} missing score for axis {axis!r}")
+        value = scores[axis]
+        if not isinstance(value, int):
+            raise ValueError(f"{label} score for axis {axis!r} must be an int")
+        if value < 1 or value > 5:
+            raise ValueError(f"{label} score for axis {axis!r} must be in [1, 5]")
+        values[axis] = value
+    return values
 
 
 def _axis_scores_payload(scores: AxisScores) -> dict[str, int]:
@@ -218,7 +233,12 @@ DEFAULT_CORPUS: tuple[ScoringCorpusCase, ...] = (
                 "Observed parser-only change stayed isolated; no schema/data "
                 "migration behavior changed."
             ),
+            source=(
+                "docs/specs/2026-06-19-scoring-agent.md section 7 known mis-score: "
+                "isolated parser scored blast_radius=5"
+            ),
         ),
+        source_task_id="seed-isolated-parser",
         regression_label="known-miss: isolated parser scored high blast",
     ),
     ScoringCorpusCase(
@@ -251,7 +271,12 @@ DEFAULT_CORPUS: tuple[ScoringCorpusCase, ...] = (
                 "Implementation needed hidden dependency updates and review "
                 "iteration beyond the single-file estimate."
             ),
+            source=(
+                "docs/specs/2026-06-19-scoring-agent.md section 7 known mis-score: "
+                "hidden dependency scored complexity=2"
+            ),
         ),
+        source_task_id="seed-hidden-dependency",
         regression_label="known-miss: hidden dependency scored low complexity",
     ),
     ScoringCorpusCase(
@@ -281,7 +306,9 @@ DEFAULT_CORPUS: tuple[ScoringCorpusCase, ...] = (
                 agent_suitability=2,
             ),
             evidence="Review confirmed high-risk permission behavior despite narrow files.",
+            source="seeded completed-task proxy: security review findings",
         ),
+        source_task_id="seed-security-permission-gate",
     ),
     ScoringCorpusCase(
         id="cli-output-polish",
@@ -310,7 +337,9 @@ DEFAULT_CORPUS: tuple[ScoringCorpusCase, ...] = (
                 agent_suitability=4,
             ),
             evidence="CLI-only rendering work stayed small but serialized with CLI tests.",
+            source="seeded completed-task proxy: CLI rendering task",
         ),
+        source_task_id="seed-cli-output-polish",
     ),
     ScoringCorpusCase(
         id="docs-only-guidance-update",
@@ -339,7 +368,9 @@ DEFAULT_CORPUS: tuple[ScoringCorpusCase, ...] = (
                 agent_suitability=5,
             ),
             evidence="Docs-only edit had no code blast radius and no review findings.",
+            source="seeded completed-task proxy: docs-only task",
         ),
+        source_task_id="seed-docs-only-guidance-update",
     ),
 )
 
@@ -365,9 +396,18 @@ def score_to_axis_scores(score: Score) -> AxisScores:
         value = getattr(score, axis)
         if value is None:
             raise ValueError(f"scorer did not produce {axis!r}")
-        if value < 1 or value > 5:
-            raise ValueError(f"score for axis {axis!r} must be in [1, 5]")
-        values[axis] = value
+        values[axis] = cast(int, value)
+    return _validate_axis_scores("score", values)
+
+
+def _validated_case_scores(case: ScoringCorpusCase) -> AxisScores:
+    values = _validate_axis_scores(f"{case.id} actual outcome", case.actual_outcome.scores)
+    if not case.actual_outcome.evidence.strip():
+        raise ValueError(f"{case.id} actual outcome evidence is empty")
+    if not case.actual_outcome.source.strip():
+        raise ValueError(f"{case.id} actual outcome source is empty")
+    if case.source_task_id is None or not case.source_task_id.strip():
+        raise ValueError(f"{case.id} source_task_id is required")
     return values
 
 
@@ -378,6 +418,9 @@ def _validate_axis_weights(axis_weights: Mapping[ScoreAxis, float]) -> None:
     non_positive = [axis for axis, weight in axis_weights.items() if weight <= 0]
     if non_positive:
         raise ValueError(f"axis weights must be positive: {', '.join(non_positive)}")
+    non_finite = [axis for axis, weight in axis_weights.items() if not isfinite(weight)]
+    if non_finite:
+        raise ValueError(f"axis weights must be finite: {', '.join(non_finite)}")
 
 
 def _average_ranks(values: Sequence[float]) -> list[float]:
@@ -415,6 +458,8 @@ def spearman_rank_correlation(predicted: Sequence[int], actual: Sequence[int]) -
         raise ValueError("predicted and actual must have the same length")
     if len(predicted) < 2:
         return 1.0
+    if len(set(predicted)) == 1 or len(set(actual)) == 1:
+        return 1.0 if list(predicted) == list(actual) else 0.0
     return round(_pearson(_average_ranks(predicted), _average_ranks(actual)), 4)
 
 
@@ -431,15 +476,16 @@ def evaluate_predictions(
 
     case_results: list[ScoringCaseResult] = []
     for case, predicted in predictions:
-        actual = case.actual_outcome.scores
+        predicted = _validate_axis_scores(f"{case.id} prediction", predicted)
+        actual = _validated_case_scores(case)
         absolute_error = {
             axis: abs(predicted[axis] - actual[axis])
             for axis in SCORE_AXES
         }
         case_results.append(ScoringCaseResult(
             case_id=case.id,
-            predicted_scores=dict(predicted),
-            actual_scores=dict(actual),
+            predicted_scores=predicted,
+            actual_scores=actual,
             absolute_error=absolute_error,
         ))
 
@@ -489,7 +535,7 @@ def evaluate_scorer(
 ) -> ScoringEvaluationReport:
     """Run ``scorer`` over the corpus and report prediction quality."""
     predictions = [
-        (case, score_to_axis_scores(scorer(case.task)))
+        (case, score_to_axis_scores(scorer(case.task.model_copy(deep=True))))
         for case in corpus
     ]
     return evaluate_predictions(
@@ -518,8 +564,11 @@ def is_worse_than_baseline(
     baseline: FrozenBaseline = FROZEN_RULE_BASELINE,
     tolerance: float = 0.0,
 ) -> bool:
-    """Return True when ``report`` misses the frozen weighted-MAE bar."""
-    return report.weighted_mae > baseline.weighted_mae + tolerance
+    """Return True when ``report`` misses any frozen baseline gate."""
+    return (
+        report.weighted_mae > baseline.weighted_mae + tolerance
+        or report.high_risk_recall < baseline.high_risk_recall - tolerance
+    )
 
 
 def assert_not_worse_than_baseline(
@@ -529,10 +578,21 @@ def assert_not_worse_than_baseline(
     tolerance: float = 0.0,
 ) -> None:
     """Raise if a candidate scorer regresses the frozen baseline."""
-    if is_worse_than_baseline(report, baseline=baseline, tolerance=tolerance):
+    failures: list[str] = []
+    if report.weighted_mae > baseline.weighted_mae + tolerance:
+        failures.append(
+            f"weighted_mae={report.weighted_mae} is worse than "
+            f"{baseline.weighted_mae}"
+        )
+    if report.high_risk_recall < baseline.high_risk_recall - tolerance:
+        failures.append(
+            f"high_risk_recall={report.high_risk_recall} is worse than "
+            f"{baseline.high_risk_recall}"
+        )
+    if failures:
         raise AssertionError(
-            f"{report.scorer_name} weighted_mae={report.weighted_mae} is worse "
-            f"than {baseline.name} weighted_mae={baseline.weighted_mae}"
+            f"{report.scorer_name} regressed {baseline.name}: "
+            + "; ".join(failures)
         )
 
 
@@ -555,7 +615,6 @@ __all__ = [
     "evaluate_predictions",
     "evaluate_scorer",
     "is_worse_than_baseline",
-    "score_task",
     "score_to_axis_scores",
     "spearman_rank_correlation",
 ]
