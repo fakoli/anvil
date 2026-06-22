@@ -26,15 +26,15 @@ An active claim by the current actor on `TASK_ID`. Verify before proceeding:
 anvil list --status claimed
 ```
 
-If the task does not appear, claim it first via `/anvil:claim`. Phase 5 commands used in this skill:
+If the task does not appear, claim it first via `/anvil:claim`. Commands used in this skill:
 
-| Command | Phase | Status |
-|---|---|---|
-| `anvil packet TASK_ID` | Phase 5 | available |
-| `anvil submit TASK_ID` | Phase 5 | available |
-| `anvil apply TASK_ID` | Phase 5 | available (human-only) |
-| `anvil renew CLAIM_ID` | Phase 4 | available |
-| `anvil release CLAIM_ID` | Phase 4 | available |
+| Command | Role |
+|---|---|
+| `anvil packet TASK_ID` | render the work packet |
+| `anvil submit TASK_ID` | record completion evidence |
+| `anvil apply TASK_ID` | human review gate |
+| `anvil renew CLAIM_ID` | extend the lease heartbeat |
+| `anvil release CLAIM_ID` | return the task to the pool |
 
 ---
 
@@ -52,7 +52,7 @@ Example:
 anvil packet T012
 ```
 
-Writes `.anvil/packets/T012.md` with the full operating context for this task: intent, acceptance criteria, likely files in scope, prior decisions, verification commands, and the output contract. The packet is a derived view regenerated from canonical state — it reflects the current snapshot of `state.db`, not a cached copy.
+The CLI echoes where it wrote the file (`Wrote packet to <path>`). That path lives under the active state layout (the HOME workspace by default, e.g. `~/.anvil/workspaces/<key>/.anvil/packets/T012.md`), not necessarily in-repo. The packet holds the full operating context for this task: goal, acceptance criteria, likely files in scope, constraints, verification commands, and the update protocol. It is a derived view regenerated from canonical state, so it reflects the current snapshot, not a cached copy.
 
 Read the packet immediately after fetching it. The acceptance criteria in the packet are the contract that `submit` validates against. Skipping the packet and working from memory or from `show TASK_ID` output risks submitting evidence that misses a required item.
 
@@ -96,7 +96,7 @@ Commit incrementally to the claim's branch:
 agent/t012-add-retry-backoff
 ```
 
-(Or whatever branch prefix the project configured — v1.15.0 made `branch_prefix` host-project-configurable via `.anvil/config.yaml`. The default is `agent/`.)
+(Or whatever branch prefix the project configured. The `branch_prefix` config key is host-project-configurable in the active layout's `config.yaml`; the default is `agent/`, and `anvil claim` echoes the actual branch on its `Branch:` line.)
 
 Incremental commits create a recoverable trail. If the agent session is interrupted, the commits survive on the branch and the work does not need to restart from zero.
 
@@ -125,7 +125,9 @@ anvil renew C004
 Renewing extends `lease_expires_at` by another 60 minutes from now and updates `last_heartbeat_at`. Run this every 5 minutes during active work — set a timer at the start of a long session. A missed heartbeat does not immediately lose the claim; the stale detector fires on the next CLI or MCP operation. Once the lease has expired, the task returns to `ready` and another agent can claim it mid-work.
 
 ```
-Renewed C004: lease extended to 2026-05-25T14:35:00Z
+Renewed claim 'C004'.
+  New lease until: 2026-05-25T14:35:00.000000+00:00
+  Last heartbeat:  2026-05-25T13:35:00.000000+00:00
 ```
 
 Only the owning actor can renew. To check remaining lease time without renewing:
@@ -170,7 +172,7 @@ anvil submit T012 \
   --pr-url https://github.com/org/repo/pull/42
 ```
 
-`--commands` is a comma-separated list of the verification commands that were run. `--files-changed` is a comma-separated list of files the agent touched. `--output-file` attaches a log file to the Evidence row. `--pr-url` links the branch's PR if one exists.
+`--commands` and `--files-changed` are both **required** and **repeatable**: pass the flag once per value (one occurrence == one value, so commands or paths with embedded commas survive intact), or pass a single comma-separated occurrence for the simple case shown above. `--output-file` attaches a log file to the Evidence row. `--pr-url` links the branch's PR if one exists.
 
 `submit` does the following atomically:
 
@@ -181,12 +183,18 @@ anvil submit T012 \
 The CLI prints the evidence summary immediately:
 
 ```
-Submitted T012: add-retry-backoff
-Evidence:  E000041
-Commands:  pytest -x (exit 0), ruff check src/ (exit 0)
-Files:     2 changed
-Status:    needs_review
+Evidence submitted for task 'T012'.
+  Evidence ID:  EV066F22C4
+  Claim ID:     C004 (auto-released)
+  Submitted by: agent
+  Commands:     ['pytest -x', 'ruff check src/']
+  Files:        ['src/anvil/claims/manager.py', 'src/anvil/cli.py']
+
+Task 'T012' status → needs_review.
+Run `anvil apply T012` when ready for human review.
 ```
+
+If the task declares `required_evidence` that the submission does not satisfy, the CLI appends an `Evidence gate: INCOMPLETE` block listing the missing items. That is advisory at submit time but blocks a strict `apply`.
 
 Review the printed evidence summary before walking away. If a field looks wrong (wrong file list, missing command), inspect with `anvil show T012` and coordinate with the human reviewer before they invoke `apply`.
 
@@ -236,7 +244,7 @@ The `--reason` string is stored in the Claim row and logged in `events.jsonl`. A
 anvil packet T012
 ```
 
-The command overwrites the previous `.anvil/packets/T012.md`. Re-read the packet before continuing.
+The command overwrites the previous packet file (the CLI re-echoes `Wrote packet to <path>`). Re-read the packet before continuing.
 
 ---
 
@@ -261,15 +269,16 @@ The command overwrites the previous `.anvil/packets/T012.md`. Re-read the packet
 
 ---
 
-## Phase 5 Limitations
+## Surface Notes
 
-| Feature | Phase | Status |
-|---|---|---|
-| `anvil packet TASK_ID` | Phase 5 | available |
-| `anvil submit TASK_ID` | Phase 5 | available |
-| `anvil apply TASK_ID` | Phase 5 | available (human-only) |
-| `capture-evidence.sh` hook (PostToolUse Bash) | Phase 5 | available |
-| LLM-assisted self-review on submit | Phase 7 | pending |
-| MCP `generate_work_packet` (JSON form via MCP) | Phase 6 | pending |
-| `anvil conflicts` (full conflict map) | Phase 5 | available |
-| Per-file scope check refinement in `check-claim.sh` | Phase 5 | available — warns per claim's likely_files scope |
+Every command in this loop ships in the current engine. The execution surface is:
+
+| Surface | Where |
+|---|---|
+| `anvil packet TASK_ID` | renders the packet; `--format json` for the machine form |
+| `anvil submit TASK_ID` | records evidence and auto-releases the claim |
+| `anvil apply TASK_ID` | human review gate (accept / reject) |
+| `anvil conflicts` | persisted conflict groups (overlapping likely_files) |
+| `capture-evidence.sh` hook | PostToolUse Bash; buffers verification output |
+| `check-claim.sh` hook | PreToolUse Edit/Write/NotebookEdit; warns per claim's likely_files scope |
+| MCP `generate_work_packet` | the packet over MCP for tools/agents that consume it programmatically |

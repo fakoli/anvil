@@ -12,7 +12,7 @@ Produce a parseable PRD from an unstructured prompt by interviewing the user one
 ## When to Use
 
 - The user has an idea ("I want to build a CLI that converts CSV to Parquet") but no PRD yet.
-- `anvil status` reports `prd-status: none` and the user is not ready to write the template by hand.
+- `anvil status` reports `PRD: none` (or `anvil status --hook-format` shows `prd-status:none`) and the user is not ready to write the template by hand.
 - A rough scope was discussed in chat and now needs to be captured as a structured document.
 - The user explicitly asks to "start a PRD", "draft requirements", "author a PRD", or "spec out" a project before planning.
 
@@ -22,13 +22,16 @@ Produce a parseable PRD from an unstructured prompt by interviewing the user one
 
 ## Prerequisites
 
-`.anvil/` must exist. Confirm before proceeding:
+anvil must be initialized for this project. State lives in the HOME workspace by
+default (`~/.anvil/workspaces/<key>/.anvil/...`), not in an in-repo `.anvil/`, so
+detect init via the CLI rather than by looking for a local file. Confirm before
+proceeding:
 
 ```bash
-ls .anvil/state.db 2>/dev/null || echo "MISSING: run anvil init first"
+anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
 ```
 
-If `state.db` is absent, run:
+If it reports `MISSING`, run:
 
 ```bash
 anvil init --name "<project-name>"
@@ -126,27 +129,37 @@ Add a `## Features` section only when the user named distinct groupings. Add a `
 
 **Show the draft to the user before writing.** Present the full proposed `prd.md` content inline (or as a fenced markdown block) and ask:
 
-> Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to `.anvil/prd.md`.
+> Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to the workspace (`$ANVIL_DIR/prd.md`, the path `anvil status` echoes).
 
 Wait for explicit approval. Apply any requested edits in-place and re-present until the user accepts.
 
-### Step 3 — Write `.anvil/prd.md`
+### Step 3 — Write the PRD into the workspace
 
-Once the user has approved the draft, check whether `.anvil/prd.md` already exists:
+The PRD does not live in an in-repo `.anvil/`. Resolve the layout-aware location
+first: `anvil status` echoes a `Path:` line pointing at the active `.anvil`
+directory (in the HOME workspace by default), and the PRD belongs at `prd.md`
+inside it. Capture that directory before touching any file:
 
 ```bash
-ls .anvil/prd.md 2>/dev/null
+ANVIL_DIR=$(anvil status | sed -n 's/^Path:[[:space:]]*//p')
+```
+
+Once the user has approved the draft, check whether a PRD already exists at
+`$ANVIL_DIR/prd.md`:
+
+```bash
+test -f "$ANVIL_DIR/prd.md" && echo EXISTS
 ```
 
 **If the file exists**, do not overwrite without confirmation. Show the user a one-line summary of the existing file (first heading, line count) and ask:
 
-> `.anvil/prd.md` already exists. Overwrite it with the new draft? (yes / no / save-as-backup)
+> A PRD already exists at `$ANVIL_DIR/prd.md`. Overwrite it with the new draft? (yes / no / save-as-backup)
 
-- On `yes` — write the new draft to `.anvil/prd.md`.
-- On `no` — stop. Tell the user the draft was not written; offer to save it to a sibling path (e.g., `.anvil/prd.draft.md`).
-- On `save-as-backup` — copy the existing file to `.anvil/prd.md.bak` first, then write the new draft to `.anvil/prd.md`.
+- On `yes`: write the new draft to `$ANVIL_DIR/prd.md`.
+- On `no`: stop. Tell the user the draft was not written; offer to save it to a sibling path (e.g., `$ANVIL_DIR/prd.draft.md`).
+- On `save-as-backup`: copy the existing file to `$ANVIL_DIR/prd.md.bak` first, then write the new draft to `$ANVIL_DIR/prd.md`.
 
-**If the file does not exist**, write the draft directly to `.anvil/prd.md`.
+**If the file does not exist**, write the draft directly to `$ANVIL_DIR/prd.md`.
 
 ### Step 4 — Parse the draft and continue into the `prd` skill
 
@@ -154,12 +167,15 @@ After the file is written, drive the parse inline rather than handing the user a
 
 Confirm the parse and run it:
 
-> Draft written to `.anvil/prd.md`. Ready to parse it into `state.db`? (yes / no / let me edit first)
+> Draft written to the workspace (`$ANVIL_DIR/prd.md`). Ready to parse it into `state.db`? (yes / no / let me edit first)
 
-- **On `yes`** — invoke `anvil prd parse` (via Bash, the MCP `parse_prd` tool when available, or whichever tool the runtime exposes). Surface the result inline. The user sees the parse output in the same conversation, not after a context switch:
-  > Parsed 6 requirements, 3 features, 8 tasks. Any unexpected counts? The next step is `prd review` — want me to drive that with you now? (yes / not yet)
-- **On `no`** — stop. Confirm the file is on disk at `.anvil/prd.md` and tell the user it is theirs to refine.
-- **On `let me edit first`** — wait. When the user signals they are ready, return to the confirm step above and run the parse.
+- **On `yes`**: invoke `anvil prd parse` (via Bash, the MCP `parse_prd` tool when available, or whichever tool the runtime exposes). It reads the workspace `prd.md` by default and prints a count line plus a `PRD source:` line echoing the file it read. Surface the result inline. The user sees the parse output in the same conversation, not after a context switch. For example, `anvil prd parse` prints:
+  > Parsed 6 requirements, 3 features, 8 tasks.
+  > PRD source: /Users/you/.anvil/workspaces/<key>/.anvil/prd.md
+
+  Then ask: Any unexpected counts? The next step is `prd review`, want me to drive that with you now? (yes / not yet)
+- **On `no`**: stop. Confirm the file is on disk (at the `$ANVIL_DIR/prd.md` path `anvil status` echoes) and tell the user it is theirs to refine.
+- **On `let me edit first`**: wait. When the user signals they are ready, return to the confirm step above and run the parse.
 
 When the user says yes to continuing into review, hand off to the `prd` skill **by invoking it directly** — do not paste a CLI to-do list. The `prd` skill is designed to drive the `review` → `approve` flow conversationally, with the same one-question-at-a-time discipline this skill uses.
 
@@ -171,8 +187,9 @@ See `/anvil:plan` for the canonical anti-pattern statement on driving commands i
 
 - **Asking 20 questions at once.** A wall of questions produces a wall of one-word answers. Stay strictly at one question per message — even if it feels slow.
 - **Writing the PRD without showing the user a draft for review.** The interview answers are raw input; the translation into PRD bullets is interpretive. Always show the draft and wait for explicit approval before writing the file.
-- **Overwriting an existing `.anvil/prd.md` without confirmation.** A silent overwrite can destroy a hand-authored PRD that took hours to craft. Always check for an existing file and prompt before clobbering.
-- **Auto-running `anvil prd parse` after writing.** The user should read the draft on disk before parsing. Hand off the next-step command; do not invoke it.
+- **Overwriting an existing workspace `prd.md` without confirmation.** A silent overwrite can destroy a hand-authored PRD that took hours to craft. Resolve the path the CLI echoes (`anvil status` `Path:` line), check for an existing file, and prompt before clobbering.
+- **Assuming the PRD lives in an in-repo `.anvil/`.** State is in the HOME workspace by default. Never `ls`/`cat`/`test` a literal in-repo `.anvil/prd.md`; resolve the path from `anvil status` (the `Path:` line) or let `anvil prd parse` find it.
+- **Parsing without first showing the user the assembled draft.** The user must approve the draft content in chat before you write and parse it. Once approved, driving `anvil prd parse` inline (Step 4) is the intended flow; do not make the user run it by hand.
 - **Skipping `## Non-Goals` because the user said "none".** Record "none identified" as an explicit bullet instead of omitting the section. Visibility matters for the planner and for reviewers.
 
 ---
@@ -187,9 +204,9 @@ See `/anvil:plan` for the canonical anti-pattern statement on driving commands i
 
 ---
 
-## Phase 7 Notes
+## Notes
 
-| Feature | Phase | Status |
-|---|---|---|
-| Six-question interview | Phase 7 | available — pure markdown choreography |
-| `anvil start-prd` CLI command | Phase 7+ | pending — for now, run this skill via `/anvil:start-prd` |
+This is a skill, not a CLI command; there is no `anvil start-prd`. The
+six-question interview is pure markdown choreography, and everything it touches
+ships today: `anvil init`, `anvil status`, and `anvil prd parse`. Invoke it via
+`/anvil:start-prd`.

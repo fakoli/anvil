@@ -14,10 +14,10 @@
 #   .tool_name         — e.g. "Edit", "Write", "NotebookEdit"
 #   .session_id        — session identifier (used as actor proxy when no claim actor available)
 
-STATE_DIR=".anvil"
-
-# Fast-path: no project state, nothing to check.
-if [ ! -d "$STATE_DIR" ]; then
+# Fast-path: no anvil state anywhere, nothing to check. anvil's DEFAULT layout
+# is the HOME workspace (~/.anvil/workspaces/<key>/); the in-repo .anvil/ (or
+# bin/.anvil/) is opt-in only. Fast-path out only when NONE of those exist.
+if [ ! -d ".anvil" ] && [ ! -d "bin/.anvil" ] && [ ! -d "${HOME:-/nonexistent}/.anvil/workspaces" ]; then
   exit 0
 fi
 
@@ -73,7 +73,7 @@ fi
 # real per-file scope check against `expected_files` on every active claim
 # and only warns when FILE is in another agent's claim — superseding the
 # Phase 4 coarse "any active claim → warn" approach.
-CLI="${CLAUDE_PLUGIN_ROOT}/bin/anvil"
+CLI="${CLAUDE_PLUGIN_ROOT:-/nonexistent}/bin/anvil"
 
 if [ ! -x "$CLI" ]; then
   # CLI not available — degrade silently; never break the session.

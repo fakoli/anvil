@@ -2,8 +2,13 @@
 
 Anvil is a local-first, backend-neutral **project-state engine**: it turns PRDs
 into reviewed, lockable, evidence-backed work packets that humans and AI agents
-can coordinate on without conflicts. State lives in SQLite under
-`.anvil/` (event-sourced; `events.jsonl` is the log). Two equivalent surfaces:
+can coordinate on without conflicts. State lives in SQLite inside a `.anvil/`
+dir (event-sourced; `events.jsonl` is the log). By default that dir is a
+per-project workspace in your HOME (`~/.anvil/workspaces/<key>/.anvil/`), shared
+across every git worktree of the repo; opt into the legacy in-repo `<cwd>/.anvil`
+with `ANVIL_STATE_LAYOUT=local`. Either way, let the CLI resolve the path: run a
+command and read the location it echoes; never assume an in-repo `.anvil/`. Two
+equivalent surfaces:
 
 - **CLI** — `bin/anvil <command>` (single mutator, no harness dependency).
 - **MCP** — `bin/anvil-mcp` (24 FastMCP stdio tools). Run
@@ -20,14 +25,16 @@ init → author/parse PRD → review → plan + score → claim → work packet 
 submit evidence → apply review verdict.
 
 ```bash
-anvil init                 # scaffold .anvil/
-# author .anvil/prd.md (see docs/prd-template.md), then:
-anvil prd parse && anvil review prd approve
+anvil init                 # scaffold state; echoes the prd.md path to author
+# author the prd.md at the path init printed (see docs/prd-template.md), then:
+anvil prd parse            # echoes 'PRD source: <path>'
+anvil prd review           # draft → reviewed
+anvil prd review --approve # reviewed → approved
 anvil plan && anvil score
 anvil next                 # pick a ready task
 anvil claim T001           # lease it, get a branch
 anvil packet T001          # work packet; do the work
-anvil submit T001 --evidence …
+anvil submit T001 --commands "pytest -q" --files-changed src/x.py
 anvil apply T001           # apply the review verdict
 ```
 
@@ -39,7 +46,7 @@ anvil apply T001           # apply the review verdict
 | Project status | `get_project_status` | `anvil status` |
 | Project summary | `get_project_summary` | `anvil status --json` |
 | Parse PRD | `parse_prd` | `anvil prd parse` |
-| Review PRD | `review_prd` | `anvil review prd …` |
+| Review PRD | `review_prd` | `anvil prd review …` |
 | Plan tasks | `plan_tasks` | `anvil plan` |
 | Score tasks | `score_tasks` | `anvil score` |
 | Review tasks | `review_tasks` | `anvil review tasks …` |
@@ -52,11 +59,11 @@ anvil apply T001           # apply the review verdict
 | Release claim | `release_task` | `anvil release <id>` |
 | Renew claim lease | `renew_claim` | `anvil renew <id>` |
 | Work packet | `generate_work_packet` | `anvil packet <id>` |
-| Submit progress | `submit_progress` | `anvil submit <id> --progress …` |
-| Submit evidence | `submit_completion_evidence` | `anvil submit <id> --evidence …` |
+| Submit progress | `submit_progress` | (MCP-only; no CLI flag) |
+| Submit evidence | `submit_completion_evidence` | `anvil submit <id> --commands … --files-changed …` |
 | Update task status | `update_task_status` | (via claim/submit/apply flow) |
 | File-conflict check | `check_conflicts` | `anvil conflicts` |
-| Dependency graph | `get_dependency_graph` | `anvil graph` / `anvil deps` |
+| Dependency graph | `get_dependency_graph` | `anvil graph` |
 | Edit dependencies | `edit_dependencies` | `anvil deps --add/--remove` |
 | Describe surface | `describe_surface` | `anvil describe` |
 

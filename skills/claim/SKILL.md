@@ -5,7 +5,7 @@ description: Acquire an exclusive lease on an anvil task — pick from the ready
 
 # Claim — Acquire an Exclusive Lease
 
-Turn a `ready` task into an active claim: a row in `state.db` with a 60-minute lease, a branch checked out, and hooks watching every file touch. This is the entry point to the agentic execution loop. Nothing moves to `claimed` without going through here.
+Turn a `ready` task into an active claim: a persisted claim record with a 60-minute lease, a branch checked out, and hooks watching every file touch. This is the entry point to the agentic execution loop. Nothing moves to `claimed` without going through here.
 
 ---
 
@@ -15,32 +15,33 @@ Turn a `ready` task into an active claim: a row in `state.db` with a 60-minute l
 - When resuming after an interrupted session — check `anvil status` first, then re-claim if the previous lease has expired and the task returned to `ready`.
 - When coordinating parallel agents — each agent claims a separate task; `claim` enforces the conflict gate.
 
-**Do not use this skill to inspect the queue without taking work** — use `/anvil:state-ops` for that. Do not use this skill to submit completed work — that is the Phase 5 `finish` skill.
+**Do not use this skill to inspect the queue without taking work**; use `/anvil:state-ops` for that. Do not use this skill to submit completed work; that is the `finish` skill.
 
 ---
 
 ## Prerequisites
 
-`.anvil/state.db` must exist and the PRD must be in `reviewed` or `approved` status. Confirm before proceeding:
+anvil must be initialized and the PRD must be in `reviewed` or `approved` status. Confirm before proceeding:
 
 ```bash
+anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
 anvil status
 ```
 
-Look for `prd-status: approved`. The claim gate enforces this — `anvil claim` raises `ClaimError` when `prd-status` is `draft` or `none`. If the PRD is not approved, proceed to `/anvil:prd` first.
+Plain `anvil status` prints a `PRD:` line; look for `PRD:           reviewed` or `PRD:           approved`. The claim gate enforces this: `anvil claim` raises `ClaimError` when the PRD is in `draft`, `rejected`, or absent. `reviewed` and `approved` both pass. If the PRD is still `draft`, run `anvil prd review` (or `--approve`) first, or proceed to `/anvil:prd`.
 
-Phase 4 commands used in this skill:
+Commands used in this skill (all ship today; confirm any with `anvil <cmd> --help`):
 
-| Command | Phase | Status |
-|---|---|---|
-| `anvil next` | Phase 4 | available |
-| `anvil claim TASK_ID` | Phase 4 | available |
-| `anvil release CLAIM_ID` | Phase 4 | available |
-| `anvil renew CLAIM_ID` | Phase 4 | available |
-| `anvil show TASK_ID` | Phase 3 | available |
-| `anvil list --status ready` | Phase 3 | available |
+| Command | Purpose |
+|---|---|
+| `anvil next` | Pick the highest-priority claimable task without claiming it |
+| `anvil claim TASK_ID` | Acquire an exclusive lease and create a branch |
+| `anvil release CLAIM_ID` | Release a claim, returning the task to `ready` |
+| `anvil renew CLAIM_ID` | Extend the lease heartbeat |
+| `anvil show TASK_ID` | Print full task detail |
+| `anvil list --status ready` | List the ready queue |
 
-Git is optional. When a git repo is present in the project root, `claim` automatically creates the branch `agent/<task_id_lower>-<slug>`. Without git, claim still succeeds — the record is written to `state.db` and the branch field is left `null`.
+Git is optional. When a git repo is present in the project root, `claim` automatically creates the branch `agent/<task_id_lower>-<slug>`. Without git, claim still succeeds: the record is written to state and the branch field is left `null`.
 
 ---
 
@@ -58,7 +59,7 @@ Returns the single highest-priority `ready` task with no unmet dependencies and 
 
 If the user wants to see the full ready queue rather than the top pick, run `anvil list --status ready` yourself and present it.
 
-If `next` returns nothing, the queue is empty, fully claimed, or PRD-gated. Run `anvil status` yourself and diagnose inline — read `prd-status`, `ready-tasks`, and `active-claims`, then tell the user what's blocking and what to do about it. A non-zero `ready-tasks` count alongside a non-`approved` `prd-status` means the PRD gate is blocking all claims — the ready count is accurate, but the gate is closed.
+If `next` returns nothing, the queue is empty, fully claimed, or PRD-gated. Run `anvil status` yourself and diagnose inline: read the `PRD:` line, the `Tasks:` line (`N total (M ready, ...)`), and the `Active claims:` count, then tell the user what's blocking and what to do about it. A non-zero ready count alongside a `PRD:` that is neither `reviewed` nor `approved` means the PRD gate is blocking all claims; the ready count is accurate, but the gate is closed.
 
 ---
 
@@ -70,18 +71,18 @@ Once `next` returns a candidate (or the user picks one from the ready queue), ru
 anvil show T012
 ```
 
-Returns: title, intent, acceptance criteria, verification commands, all six score dimensions (`complexity`, `parallelizability`, `context_load`, `blast_radius`, `review_risk`, `agent_suitability`), `expected_files`, dependency chain, and any active claim on this task.
+Returns: title, feature, status, priority, all six score dimensions (`complexity`, `parallelizability`, `context_load`, `blast_radius`, `review_risk`, `agent_suitability`) with explanation, dependency chain, conflict groups, acceptance criteria, verification commands, `Likely Files`, any active claim on this task, and recent events.
 
 Audit the result inline and surface anything that should give the user pause before the claim fires:
 
 - The acceptance criteria are concrete and independently verifiable — not aspirational descriptions.
-- `complexity` is 3 or under. A score of 4 or 5 means the task should have been expanded via `anvil expand` during planning. Claiming an oversized task and then abandoning it mid-way wastes the lease window.
+- `complexity` is 3 or under. A score of 4 or 5 means the task should have been expanded via `anvil expand --use-llm` during planning. Claiming an oversized task and then abandoning it mid-way wastes the lease window.
 - `agent_suitability` matches the current executor. A score of 1 or 2 signals that the task requires architectural judgment, significant human context, or decisions that a model is likely to get wrong. Defer those tasks.
-- `expected_files` does not include files that look like they belong to a different subsystem — a sign the task scope drifted during authoring.
+- `Likely Files` does not include files that look like they belong to a different subsystem, which would be a sign the task scope drifted during authoring.
 
 Present the inspection summary and ask:
 
-> T012 looks claimable: acceptance criteria concrete, complexity 3, agent_suitability 4, expected_files scoped to `src/retry/`. Proceed to claim? (yes / show me more / pick a different task)
+> T012 looks claimable: acceptance criteria concrete, complexity 3, agent_suitability 4, likely files scoped to `src/retry/`. Proceed to claim? (yes / show me more / pick a different task)
 
 This step costs nothing and prevents the most common source of wasted claims.
 
@@ -97,14 +98,15 @@ anvil claim T012
 
 The manager checks two conflict conditions before issuing the lease:
 
-1. **File overlap** — another active claim by a different actor has at least one file in common with `expected_files` of T012.
-2. **Conflict group** — T012 belongs to a `conflict_group` that already has an active claim on a sibling task.
+1. **File overlap**: another active claim by a different actor has at least one file in common with the `likely_files` of T012.
+2. **Conflict group**: T012 belongs to a `conflict_group` that already has an active claim on a sibling task.
 
-If either condition is true and `--force` is not passed, `claim` raises `ClaimError` and prints the overlapping claim ID, the other actor's identity, and the overlapping files. Example:
+If either condition is true and `--force` is not passed, `claim` refuses (exit 1) and prints the overlapping claim ID, the other actor's identity, and the overlapping files. Example:
 
 ```
-ClaimError: Task 'T012' conflicts with active claims: claim C003 by agent-scout
-(files: ['src/anvil/state/backend.py']). Use --force to override.
+Warning: task 'T012' has file conflicts with active claims:
+  Claim C003 by 'agent-scout': overlapping files: ['src/anvil/state/backend.py']
+Pass --force to override and claim anyway.
 ```
 
 Surface the conflict in chat. If it is acceptable — for example, the other actor owns C003 on a read-only research task and T012 writes to a different function in the same file — ask the user explicitly before forcing:
@@ -117,7 +119,7 @@ On `yes`, re-run with `--force` yourself:
 anvil claim T012 --force
 ```
 
-The override is logged as a warning in `events.jsonl` with the actor identity, the claim being forced, and the overlapping files. Every forced claim is auditable.
+The override is logged as a warning (actor identity, the claim being forced, and the overlapping files), and the resulting `claim.created` event records the claim itself. Every forced claim is auditable.
 
 ---
 
@@ -126,13 +128,15 @@ The override is logged as a warning in `events.jsonl` with the actor identity, t
 A clean claim (no conflicts, or `--force` accepted) prints the claim result. Surface it inline:
 
 ```
-Claimed T012: add-retry-backoff
-Claim ID:     C004
-Branch:       agent/t012-add-retry-backoff
-Lease:        60 min (expires 2026-05-24T19:00:00Z)
+Claimed task 'T012' as 'agent'.
+  Claim ID:    C0FCF72C8
+  Lease until: 2026-05-24T19:00:00.000000+00:00
+  Branch:      agent/t012-add-retry-backoff
+
+Run `anvil renew C0FCF72C8` to extend the lease before it expires.
 ```
 
-The task transitions from `ready` to `claimed` in `state.db`. Two events are appended to `events.jsonl`: `claim.created` and `task.status_changed`.
+The actor defaults to `$USER` (or `agent`); pass `--actor` to override. The task transitions from `ready` to `claimed`, and two events are appended to the event log: `claim.created` and `task.status_changed`.
 
 If the user wants a separate git worktree (useful when running two agents in parallel from the same repo without checkout conflicts), invoke `--worktree` yourself:
 
@@ -142,13 +146,18 @@ anvil claim T012 --worktree
 
 This creates `../wt-t012/` with the branch already checked out. Each worktree is fully independent — no stashing required when switching between tasks.
 
-Without a git repo present, `claim` still succeeds and prints:
+Without a git repo present, `claim` still succeeds. It prints a warning to stderr and omits the `Branch:` line:
 
 ```
-Warning: not a git repository — no branch created (record-only mode).
+Warning: git branch not created — not a git repository
+Claimed task 'T012' as 'agent'.
+  Claim ID:    C0FCF72C8
+  Lease until: 2026-05-24T19:00:00.000000+00:00
+
+Run `anvil renew C0FCF72C8` to extend the lease before it expires.
 ```
 
-The claim is valid. Work proceeds in the repo root. The branch field on the Claim row is left `null`. Tell the user inline what mode the claim is in (branch vs. record-only) so there is no surprise later.
+The claim is valid. Work proceeds in the repo root. The branch field on the Claim row is left `null`. Tell the user inline whether a branch was created so there is no surprise later.
 
 ---
 
@@ -165,13 +174,15 @@ Two hooks run automatically during this phase (`check-claim.sh` and `record-file
 The default lease is 60 minutes. For sessions longer than 55 minutes, renew before the lease expires. Invoke renewal yourself whenever the agent notices the timer:
 
 ```bash
-anvil renew C004
+anvil renew C0FCF72C8
 ```
 
 Renewing extends `lease_expires_at` by another 60 minutes from now and updates `last_heartbeat_at`. The command errors if the lease is already expired — re-claiming is the only option at that point.
 
 ```
-Renewed C004: lease extended to 2026-05-24T20:05:00Z
+Renewed claim 'C0FCF72C8'.
+  New lease until: 2026-05-24T20:05:00.000000+00:00
+  Last heartbeat:  2026-05-24T19:05:00.000000+00:00
 ```
 
 Automated agents should renew every 5 minutes. A missed heartbeat does not immediately lose the claim — the lease detector runs on the next CLI or MCP operation. Once the lease expires, the task returns to `ready` and any agent can claim it.
@@ -180,23 +191,35 @@ Only the owning actor can renew a claim. To release another actor's stale claim,
 
 ---
 
-### Step 7 — Submit when complete (Phase 5)
+### Step 7 — Submit when complete
 
 Once verification passes and the work is ready to leave the agent's hands, drive the submit yourself. Read the verification output, summarize what was completed, and ask the user to acknowledge before submitting:
 
-> T012 verification passed: 14 tests added, retry-backoff implemented in `src/retry/backoff.py`, no other files touched. Ready to submit? Submitting transitions T012 to `needs_review` and auto-releases C004. (yes / not yet / let me re-check)
+> T012 verification passed: 14 tests added, retry-backoff implemented in `src/retry/backoff.py`, no other files touched. Ready to submit? Submitting transitions T012 to `needs_review` and auto-releases the claim. (yes / not yet / let me re-check)
 
-On `yes`, invoke `anvil submit TASK_ID` yourself and surface the output:
+On `yes`, invoke `anvil submit TASK_ID` yourself. `submit` requires `--commands` (the verification command(s) that were run) and `--files-changed` (the files modified); both are repeatable, so pass each flag once per value:
 
 ```bash
-anvil submit T012
+anvil submit T012 --commands "pytest tests/test_backoff.py -v" --files-changed "src/retry/backoff.py"
 ```
 
-`submit` reads the evidence packet from `events.jsonl`, transitions the task to `needs_review`, and auto-releases the claim. Tell the user the task is now in `needs_review` and ask whether to hand off to `/anvil:finish` for the apply gate.
+It transitions the task to `needs_review`, auto-releases the claim, and prints the evidence record plus a gate check:
 
-**The hard handoff lives in `finish`, not here.** `anvil apply TASK_ID --approve` is the only command in this leg of the lifecycle that requires explicit user confirmation before the agent runs it. That gate lives in `/anvil:finish` — invoke that skill rather than running `apply --approve` from here.
+```
+Evidence submitted for task 'T012'.
+  Evidence ID:  EVB5F89694
+  Claim ID:     C0FCF72C8 (auto-released)
+  Submitted by: agent
+  Commands:     ['pytest tests/test_backoff.py -v']
+  Files:        ['src/retry/backoff.py']
 
-If Phase 5 `submit` is not yet available in the running environment, fall back to the explicit Phase 4 release flow: run `anvil release C004` yourself (see Step 8), confirm the task is back in `ready`, and tell the user the PR/merge step is theirs.
+Task 'T012' status → needs_review.
+Run `anvil apply T012` when ready for human review.
+```
+
+Tell the user the task is now in `needs_review` and ask whether to hand off to `/anvil:finish` for the apply gate.
+
+**The hard handoff lives in `finish`, not here.** `anvil apply TASK_ID --approve` is the only command in this leg of the lifecycle that requires explicit user confirmation before the agent runs it. That gate lives in `/anvil:finish`; invoke that skill rather than running `apply --approve` from here.
 
 ---
 
@@ -204,20 +227,20 @@ If Phase 5 `submit` is not yet available in the running environment, fall back t
 
 When work must stop before completion — blocked on an upstream issue, deprioritized, or handed off — invoke release yourself so the task returns to the pool. Always ask the user for a reason first so the audit trail is informative:
 
-> Releasing C004. What's the reason? (e.g., "blocked: upstream T009 not merged")
+> Releasing C0FCF72C8. What's the reason? (e.g., "blocked: upstream T009 not merged")
 
 Then run:
 
 ```bash
-anvil release C004 --reason "blocked: upstream T009 not merged"
+anvil release C0FCF72C8 --reason "blocked: upstream T009 not merged"
 ```
 
-The `--reason` string is stored in `release_reason` on the Claim row and logged in `events.jsonl`. Another agent can then pick up the task via `anvil next`.
+The CLI confirms with `Released claim 'C0FCF72C8'.` and a `Reason:` line. The reason is stored on the Claim row and logged in the event log. Another agent can then pick up the task via `anvil next`.
 
 To release a claim held by a different actor (use sparingly — logged in audit trail), confirm with the user before forcing:
 
 ```bash
-anvil release C004 --force
+anvil release C0FCF72C8 --force
 ```
 
 `--force` bypasses the actor-ownership check and also allows releasing claims in non-`active` states (e.g., `stale`). Every forced release is recorded with the releasing actor's identity.
@@ -236,7 +259,7 @@ For **decision-presentation discipline** — how to surface multi-option choices
 
 ## Common Pitfalls
 
-- **Claiming while PRD is still `draft`.** The claim gate checks `prd-status` and raises `ClaimError` before touching anything else. Run `anvil prd review --approve` first.
+- **Claiming while PRD is still `draft`.** The claim gate checks the PRD status and raises `ClaimError` before touching anything else (only `reviewed` or `approved` pass). Run `anvil prd review` (then `--approve` if you want it approved) first.
 - **Ignoring the `agent_suitability` score.** Claiming a task scored `1` or `2` with a small or local model burns 60 minutes and produces output that needs complete rework. Check `anvil show TASK_ID` before committing.
 - **Skipping the heartbeat on long sessions.** Leases expire silently. The task returns to `ready` and another agent can claim it while work is still in progress. Set a timer and run `anvil renew CLAIM_ID` every 5 minutes.
 - **Calling `renew` after the lease has already expired.** `renew` raises `ClaimError` on an expired lease — the lease cannot be extended retroactively. Re-claim the task after it returns to `ready`.
@@ -248,27 +271,23 @@ For **decision-presentation discipline** — how to surface multi-option choices
 | Position | Skill |
 |---|---|
 | Before this skill | `/anvil:plan` must have produced `ready` tasks; optionally `/anvil:state-ops` to read the queue first |
-| After claiming | Work the branch, heartbeat, complete; then Phase 5 `finish` for submit + ship |
-| If `show TASK_ID` reveals `complexity >= 4` | Return to `/anvil:plan` and expand the task before claiming |
+| After claiming | Work the branch, heartbeat, complete; then `/anvil:finish` for submit + ship |
+| If `show TASK_ID` reveals `complexity >= 4` | Return to `/anvil:plan` and expand the task (`anvil expand --use-llm`) before claiming |
 | If `next` returns nothing | `/anvil:state-ops` to diagnose — check `status`, `list --status drafted`, trace blockers |
 
 ---
 
-## Phase 4 Limitations
+## Scope notes
 
-`submit` and `apply` ship in Phase 5. Until then, the claim lifecycle ends at `release` — no automated transition to `done`.
+Every command named in this skill ships today; confirm any with `anvil <cmd> --help`. The full claim, submit, and apply lifecycle is available: `submit` auto-releases the claim and moves the task to `needs_review`, and `/anvil:finish` drives `apply`.
 
-| Feature | Phase | Status |
-|---|---|---|
-| `anvil next` | Phase 4 | available |
-| `anvil claim TASK_ID` | Phase 4 | available |
-| `anvil claim TASK_ID --worktree` | Phase 4 | available |
-| `anvil release CLAIM_ID` | Phase 4 | available |
-| `anvil renew CLAIM_ID` | Phase 4 | available |
-| `check-claim.sh` hook (PreToolUse) | Phase 4 | available |
-| `record-file-change.sh` hook (PostToolUse) | Phase 4 | available |
-| `anvil submit TASK_ID` (auto-release + needs_review) | Phase 5 | pending |
-| `anvil apply TASK_ID` (evidence review + done) | Phase 5 | pending |
-| `anvil conflicts` (full conflict map across all active claims) | Phase 5 | pending |
-| Per-file scope check refinement in `check-claim.sh` | Phase 5 | pending — current hook warns on any active claim, not per-claim file scope |
-| PR creation / commit assistance | Out of scope | anvil coordinates work; it does not write code |
+| Surface | Notes |
+|---|---|
+| `anvil next` / `anvil claim` / `anvil release` / `anvil renew` | Core claim lifecycle |
+| `anvil claim TASK_ID --worktree` | Optional independent worktree at `../wt-<task_id>/` |
+| `anvil submit TASK_ID` | Records evidence (`--commands` + `--files-changed` required), auto-releases, moves task to `needs_review` |
+| `anvil apply TASK_ID` | Human review gate (`needs_review` → accepted → done, or rejected); lives in `/anvil:finish` |
+| `anvil conflicts` | Lists the persisted conflict groups |
+| `check-claim.sh` hook (PreToolUse) | Per-file scope check against active claims via `anvil hook check-claim` |
+| `record-file-change.sh` hook (PostToolUse) | Records touched files against the active claim |
+| PR creation / commit assistance | Out of scope: anvil coordinates work; it does not write code |

@@ -7,14 +7,10 @@
 # Rules (anvil hook contract — docs/design.md "Why hooks are non-blocking"):
 # no set -e, no piped grep, always exit 0, complete in < 200ms.
 #
-# NOTE: mirrors the existing wrappers' LOCAL .anvil fast-path, so it is inert
-# under the default HOME-workspace layout until B44 centralizes a
-# home-workspace-aware fast-path across all hooks.
-
-STATE_DIR=".anvil"
-
-# Fast-path: no local project state, nothing to renew.
-if [ ! -d "$STATE_DIR" ]; then
+# Fast-path: no anvil state anywhere, nothing to renew. anvil's DEFAULT layout
+# is the HOME workspace (~/.anvil/workspaces/<key>/); the in-repo .anvil/ (or
+# bin/.anvil/) is opt-in only. Fast-path out only when NONE of those exist.
+if [ ! -d ".anvil" ] && [ ! -d "bin/.anvil" ] && [ ! -d "${HOME:-/nonexistent}/.anvil/workspaces" ]; then
   exit 0
 fi
 
@@ -23,7 +19,7 @@ fi
 if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
   exit 0
 fi
-CLI="${CLAUDE_PLUGIN_ROOT}/bin/anvil"
+CLI="${CLAUDE_PLUGIN_ROOT:-/nonexistent}/bin/anvil"
 if [ ! -x "$CLI" ]; then
   exit 0
 fi

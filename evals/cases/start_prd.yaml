@@ -1,0 +1,72 @@
+# Behavioral eval case: the start-prd skill, happy path.
+#
+# Promise of the start-prd skill (skills/start-prd/SKILL.md): given a rough idea
+# and the six interview answers, it authors a parseable PRD into the workspace
+# (the path `anvil status` echoes), then parses it so `prd-status` advances
+# none -> draft. We feed the six answers inline so the agent does not block
+# waiting on a human, then assert anvil's own state matches the promise.
+
+id: start_prd_happy_path
+skill: start-prd
+description: >
+  Drive a real agent through the start-prd flow and assert anvil reaches the
+  promised state: a parsed PRD (prd_status == draft) written to the workspace
+  with the required sections, and a prd.parsed event in the append-only log.
+
+project_name: token-echo-cli
+
+# Tools the agent is allowed to use. start-prd only needs to write a file and
+# shell to the anvil CLI; Read/Edit are included so it can inspect/fix its draft.
+allowed_tools:
+  - Bash
+  - Read
+  - Write
+  - Edit
+
+max_turns: 25
+timeout_seconds: 600
+
+# The six interview answers, fed inline (Q1..Q6 from the skill). The harness
+# wraps these with the skill body and an instruction to run the flow
+# non-interactively (do not ask the human; use these answers).
+interview_answers:
+  q1_idea: >
+    A tiny command-line tool that echoes a fixed token to stdout so downstream
+    smoke tests can confirm the binary is wired up.
+  q2_users: An internal engineering team.
+  q3_success: Running the tool with no arguments prints the token ANVIL and exits 0.
+  q4_non_goals: No configuration-file support and no network access in v1.
+  q5_must_haves: >
+    Print the literal token ANVIL to stdout; exit with status code 0 on success.
+  q6_risks: None identified.
+
+# Deterministic assertions over anvil's OWN state after the run.
+assertions:
+  # The skill's headline promise: a parsed PRD advances prd-status none -> draft.
+  - check: status_field
+    field: prd_status
+    equals: draft
+
+  # The PRD landed in the workspace the CLI echoes (resolved as <scratch>/.anvil).
+  - check: file_exists
+    file: prd.md
+
+  # ...and it has the sections the parser requires (so it was authored, not stubbed).
+  - check: file_contains
+    file: prd.md
+    needles:
+      - "# Project:"
+      - "## Summary"
+      - "## Goals"
+      - "## Requirements"
+      - "## Acceptance Criteria"
+
+  # The canonical state files exist.
+  - check: file_exists
+    file: state.db
+  - check: file_exists
+    file: events.jsonl
+
+  # The append-only log recorded the parse — the action the prd parse path emits.
+  - check: events_contains_action
+    action: prd.parsed

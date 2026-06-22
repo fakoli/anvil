@@ -11,11 +11,10 @@
 #
 # Rules: no set -e, no piped grep, always exit 0, complete in < 200ms.
 
-STATE_DIR=".anvil"
-EVENTS_FILE="${STATE_DIR}/events.jsonl"
-
-# Fast-path: no project state, nothing to record.
-if [ ! -d "$STATE_DIR" ]; then
+# Fast-path: no anvil state anywhere, nothing to record. anvil's DEFAULT layout
+# is the HOME workspace (~/.anvil/workspaces/<key>/); the in-repo .anvil/ (or
+# bin/.anvil/) is opt-in only. Fast-path out only when NONE of those exist.
+if [ ! -d ".anvil" ] && [ ! -d "bin/.anvil" ] && [ ! -d "${HOME:-/nonexistent}/.anvil/workspaces" ]; then
   exit 0
 fi
 
@@ -89,7 +88,7 @@ fi
 # Prefer the CLI subcommand (guido Wave 2 implements this).
 # CLI invocation shape for guido:
 #   anvil hook record-file-change --file <PATH> --tool <TOOL> --actor <ACTOR>
-CLI="${CLAUDE_PLUGIN_ROOT}/bin/anvil"
+CLI="${CLAUDE_PLUGIN_ROOT:-/nonexistent}/bin/anvil"
 
 if [ -x "$CLI" ]; then
   "$CLI" hook record-file-change \
@@ -108,10 +107,16 @@ fi
 # Direct-append fallback: EVENT_LINE was built by json.dumps inside the python3
 # pass above — backslashes, quotes, newlines, and unicode are all properly escaped.
 # No hand-rolled JSON interpolation occurs here.
-
-# Append atomically-ish: write to a temp file, then append.
-# True atomic append on HFS+/APFS requires flock; for Phase 4 the simple append
-# is acceptable — race conditions between concurrent hooks are exceedingly rare.
-printf '%s\n' "$EVENT_LINE" >> "$EVENTS_FILE" 2>/dev/null
+#
+# Guard: only direct-append into a LOCAL in-repo .anvil/ when one already exists.
+# Under the default HOME-workspace layout there is no in-repo .anvil/, and we must
+# NEVER create a stray ./.anvil — the layout-aware CLI above is the primary writer.
+if [ -d ".anvil" ]; then
+  EVENTS_FILE=".anvil/events.jsonl"
+  # Append atomically-ish: write to a temp file, then append.
+  # True atomic append on HFS+/APFS requires flock; for Phase 4 the simple append
+  # is acceptable — race conditions between concurrent hooks are exceedingly rare.
+  printf '%s\n' "$EVENT_LINE" >> "$EVENTS_FILE" 2>/dev/null
+fi
 
 exit 0

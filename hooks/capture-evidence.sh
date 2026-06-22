@@ -24,11 +24,10 @@
 #   .tool_response.exit_code — integer exit code
 #   .session_id            — session identifier used as actor proxy
 
-STATE_DIR=".anvil"
-EVIDENCE_DIR="${STATE_DIR}/.evidence-buffer"
-
-# Fast-path: no project state, nothing to capture.
-if [ ! -d "$STATE_DIR" ]; then
+# Fast-path: no anvil state anywhere, nothing to capture. anvil's DEFAULT layout
+# is the HOME workspace (~/.anvil/workspaces/<key>/); the in-repo .anvil/ (or
+# bin/.anvil/) is opt-in only. Fast-path out only when NONE of those exist.
+if [ ! -d ".anvil" ] && [ ! -d "bin/.anvil" ] && [ ! -d "${HOME:-/nonexistent}/.anvil/workspaces" ]; then
   exit 0
 fi
 
@@ -151,7 +150,7 @@ fi
 # The hook passes --stdout-file / --stderr-file (temp files) rather than
 # inlining content because excerpts can be multi-line and avoid quoting issues.
 
-CLI="${CLAUDE_PLUGIN_ROOT}/bin/anvil"
+CLI="${CLAUDE_PLUGIN_ROOT:-/nonexistent}/bin/anvil"
 
 if [ -x "$CLI" ]; then
   STDOUT_TMP=$(mktemp 2>/dev/null) || STDOUT_TMP=""
@@ -196,14 +195,20 @@ fi
 #   2. Write to .evidence-buffer/<claim-id>.json if a claim is found.
 #   3. Fall back to orphan.json if no active claim exists for that actor.
 
-mkdir -p "$EVIDENCE_DIR" 2>/dev/null
+# Guard: only direct-write into a LOCAL in-repo .anvil/ when one already exists.
+# Under the default HOME-workspace layout there is no in-repo .anvil/, and we must
+# NEVER create a stray ./.anvil — the layout-aware CLI above is the primary writer.
+if [ -d ".anvil" ]; then
+  EVIDENCE_DIR=".anvil/.evidence-buffer"
+  mkdir -p "$EVIDENCE_DIR" 2>/dev/null
 
-EVIDENCE_FILE="${EVIDENCE_DIR}/orphan.json"
+  EVIDENCE_FILE="${EVIDENCE_DIR}/orphan.json"
 
-# EVIDENCE_LINE was pre-built as a valid JSON string by the extraction python3
-# pass above — no second interpreter spawn needed.
-if [ -n "$EVIDENCE_LINE" ]; then
-  printf '%s\n' "$EVIDENCE_LINE" >> "$EVIDENCE_FILE" 2>/dev/null
+  # EVIDENCE_LINE was pre-built as a valid JSON string by the extraction python3
+  # pass above — no second interpreter spawn needed.
+  if [ -n "$EVIDENCE_LINE" ]; then
+    printf '%s\n' "$EVIDENCE_LINE" >> "$EVIDENCE_FILE" 2>/dev/null
+  fi
 fi
 
 exit 0
