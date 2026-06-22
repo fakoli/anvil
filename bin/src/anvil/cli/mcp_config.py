@@ -1,10 +1,12 @@
 """``anvil mcp-config <client>`` — print paste-ready MCP server config.
 
-Anvil's MCP server (bin/anvil-mcp) is harness-neutral, but every MCP client
-wants the config in a slightly different envelope. This command prints the
-ready-to-paste block for a target client, with the server pointed at THIS
-checkout's bin/anvil-mcp by absolute path (not ${CLAUDE_PLUGIN_ROOT}), so any
-MCP-capable harness gets the full 24-tool surface.
+Anvil's MCP server is harness-neutral, but every MCP client wants the config in a
+slightly different envelope. This command prints the ready-to-paste block for a
+target client so any MCP-capable harness gets the full 24-tool surface. The server
+command adapts to the install method (see ``_server_spec``): from a source checkout
+or plugin bundle it points at that tree's bin/anvil-mcp by absolute path; from an
+installed package (uv tool/pipx/pip) it emits the ``anvil-mcp`` console script on
+PATH.
 
 Read-only and project-free: it never opens a backend and works from any
 directory (mirrors ``describe``). It only *prints* config — it never mutates the
@@ -80,21 +82,25 @@ def _wrapper_path() -> Path:
 
 def _server_spec(use_uv_run: bool, root: str | None) -> dict:
     wrapper = _wrapper_path()
-    bin_dir = wrapper.parent
-    if use_uv_run:
-        spec: dict = {
-            "command": "uv",
-            "args": [
-                "run",
-                "--project",
-                str(bin_dir),
-                "python",
-                "-m",
-                "anvil.mcp_server",
-            ],
-        }
+    spec: dict
+    if wrapper.is_file():
+        # Source checkout / plugin bundle: the bin/anvil-mcp bash wrapper exists
+        # and self-syncs uv deps. Default to it; --uv-run emits the explicit uv
+        # invocation for bash-less hosts.
+        bin_dir = wrapper.parent
+        if use_uv_run:
+            spec = {
+                "command": "uv",
+                "args": ["run", "--project", str(bin_dir), "python", "-m", "anvil.mcp_server"],
+            }
+        else:
+            spec = {"command": "bash", "args": [str(wrapper)]}
     else:
-        spec = {"command": "bash", "args": [str(wrapper)]}
+        # Installed package (uv tool / pipx / pip): no checkout, so no bash
+        # wrapper on disk. The `anvil-mcp` console script is on PATH and deps are
+        # already installed — emit the bare command (nothing to sync, so --uv-run
+        # is moot here). Mirrors how the openclaw plugin spawns bare `anvil`.
+        spec = {"command": "anvil-mcp", "args": []}
     if root:
         spec["env"] = {"ANVIL_ROOT": root}
     return spec
@@ -184,8 +190,10 @@ def _goose_block(use_uv_run: bool, root: str | None) -> str:
 def build_config(client: str, *, use_uv_run: bool, root: str | None) -> str:
     """Build the paste-ready config text for *client*.
 
-    The inner server spec is usually ``{command, args[, env]}`` pointed at this
-    checkout's ``bin/anvil-mcp``; only the envelope differs per client (top key,
+    The inner server spec is usually ``{command, args[, env]}``; the command
+    adapts to the install method (see ``_server_spec``) — a source checkout /
+    plugin bundle points at its ``bin/anvil-mcp``, an installed package emits the
+    ``anvil-mcp`` console script. Only the envelope differs per client (top key,
     per-server extras, JSON vs TOML). A few clients have a different server shape
     entirely and are special-cased.
     """
@@ -228,9 +236,10 @@ def mcp_config(
     """Print paste-ready MCP server config for a target client.
 
     Read-only and project-free (mirrors ``describe``): never opens a backend,
-    works from any directory. The printed block points the ``anvil`` server at
-    this checkout's ``bin/anvil-mcp`` by absolute path so any MCP-capable harness
-    gets the full tool surface — no ``${CLAUDE_PLUGIN_ROOT}`` token.
+    works from any directory. The printed ``anvil`` server command adapts to the
+    install method (see ``_server_spec``): a checkout / plugin tree points at its
+    ``bin/anvil-mcp`` by absolute path, an installed package emits the
+    ``anvil-mcp`` console script — either way, no ``${CLAUDE_PLUGIN_ROOT}`` token.
     """
     if client not in CLIENTS:
         msg = f"unknown client '{client}'. Choose one of: {', '.join(CLIENTS)}."

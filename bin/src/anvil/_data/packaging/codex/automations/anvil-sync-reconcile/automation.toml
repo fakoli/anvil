@@ -1,0 +1,13 @@
+version = 1
+id = "{{ID}}"
+kind = "cron"
+name = "Anvil — reconcile state"
+prompt = "Run anvil's state reconciliation for this project. Run `anvil sync` (read-only) to detect drift between the SQLite state, the filesystem (packets/, evidence buffer, worktrees), and git (branches, claims). Report any orphan branches, stale claims, orphan packets, or missing sync mappings. Only apply fixes with `anvil sync --fix --yes` when the drift is clearly safe to remediate; otherwise summarize the drift and recommend next actions."
+status = "PAUSED"
+rrule = "FREQ=WEEKLY;BYDAY=MO;BYHOUR=8;BYMINUTE=0"
+model = "gpt-5-codex"
+reasoning_effort = "high"
+execution_environment = "worktree"
+cwds = [{{CWDS}}]
+created_at = {{TS}}
+updated_at = {{TS}}

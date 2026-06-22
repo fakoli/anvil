@@ -4,9 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anvil-state"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first project state engine: turn rough ideas and PRDs into reviewed, lockable, evidence-backed work packets that humans and AI agents can coordinate on without conflicts."
-readme = "../README.md"
+# Build-root-local README. `../README.md` escaped the bin/ build root and broke
+# `uv build` (sdist->wheel: "Readme file does not exist: ../README.md"). This is
+# the package-focused PyPI long description; the full repo README stays at root.
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
@@ -60,6 +63,10 @@ all-providers = [
 
 [project.scripts]
 anvil = "anvil.cli:app"
+# The MCP server as a real console script so a wheel install (uv tool/pipx/pip)
+# exposes a launchable `anvil-mcp` on PATH. Without this, every emitted MCP config
+# pointed at the bin/anvil-mcp bash wrapper, which a wheel does not ship.
+anvil-mcp = "anvil.mcp_server:main"
 
 [dependency-groups]
 dev = [
@@ -73,6 +80,10 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
+# Ships src/anvil with its non-.py package data (py.typed + _data/AGENTS.md +
+# _data/packaging/codex/automations). The installer reads _data via
+# importlib.resources, so a wheel MUST carry it — do not add an exclude that drops
+# _data. Guarded by tests/test_install_manifests.py::test_built_wheel_is_self_sufficient.
 packages = ["src/anvil"]
 
 [tool.ruff]

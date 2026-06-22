@@ -6,6 +6,37 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-06-21
+
+### Added
+
+- **anvil is now installable as a standard Python tool** (`uv tool install
+  anvil-state` / `pipx install anvil-state` / `pip install anvil-state`). The
+  package now ships an `anvil-mcp` console script alongside `anvil`, and the MCP
+  config that `anvil install <harness>` / `anvil mcp-config` emit adapts to the
+  install method: a source checkout / plugin bundle still points at that tree's
+  `bin/anvil-mcp` wrapper, while an installed package emits the `anvil-mcp`
+  console script (on PATH). Previously a wheel install produced a working CLI but
+  a dead MCP integration (every config pointed at a non-existent `bin/anvil-mcp`).
+
+### Fixed
+
+- **`scripts/install.sh` advertised harnesses the engine rejected.** Its usage
+  list named `claude-code` and `vscode`, both of which `anvil install` failed
+  with "unknown harness" (exit 2). `claude-code` now redirects to the
+  `/plugin marketplace add fakoli/anvil` flow (its real install path), `vscode`
+  is an accepted alias for the copilot config, and a new test pins the script's
+  list to the harness registry so it can't drift again.
+- **`anvil install` from a wheel silently skipped the AGENTS.md splice and Codex
+  automations.** Both were read by walking 4 parents up from `anvil.__file__`
+  (correct only in a checkout; in a wheel it resolved outside the package). They
+  now ship as package data under `anvil/_data/` and are read via
+  `importlib.resources`, so the instruction splice and `--automations` work for
+  any install method.
+- **`uv build` failed** (`readme = "../README.md"` escaped the `bin/` build root,
+  breaking the sdist→wheel step). The package now uses a build-root-local
+  `bin/README.md`, so the full sdist+wheel build succeeds.
+
 ## [0.1.0] — 2026-06-21
 
 Epic E13 — Agent Fleet: Capacity-Coordination Pull MVP. Signed evidence proofs,
