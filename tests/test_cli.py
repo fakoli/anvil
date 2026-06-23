@@ -4320,6 +4320,278 @@ class TestPlanCrossPrdConflictGroups:
 
 
 # ---------------------------------------------------------------------------
+# T019 — CLI `--prd` wiring on next / list / show / packet / score / prd review
+# ---------------------------------------------------------------------------
+
+
+def _seed_two_prd_project(tmp_path: Path) -> str:
+    """Build a two-PRD project for CLI `--prd` tests and return the project_id.
+
+    The DEFAULT PRD is created through the real `prd parse` flow (so it is a
+    proper ``is_default=1`` row with the real project_id), then a named ``v0.2``
+    PRD row plus one ready task per partition are raw-inserted — the same raw
+    seeding pattern test_claims.py uses, because the planner doesn't mint named
+    PRDs yet. Tasks are seeded READY so `next` can pick them.
+
+    Layout after this returns:
+      * default PRD ('default', is_default=1, approved) -> task T001 (ready)
+      * named PRD   ('v0.2',    is_default=0, draft)    -> task v0.2:T900 (ready)
+    """
+    _do_init(tmp_path)
+    _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+    assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+    # default PRD: draft -> reviewed -> approved (so the default review tests
+    # start from a known status and the named-PRD tests don't collide).
+    assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+    assert _invoke_cmd(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
+
+    db = tmp_path / ".anvil" / "state.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        project_id = conn.execute(
+            "SELECT project_id FROM prds WHERE is_default = 1"
+        ).fetchone()[0]
+        # Named v0.2 PRD row (draft, not default).
+        conn.execute(
+            "INSERT INTO prds (id, project_id, status, is_default) "
+            "VALUES ('v0.2', ?, 'draft', 0)",
+            (project_id,),
+        )
+        # A feature both tasks can hang off (FK target).
+        conn.execute(
+            "INSERT OR IGNORE INTO features "
+            "(id, title, description, status, requirements, tasks) "
+            "VALUES ('F001', 'F', 'desc', 'proposed', '[]', '[]')"
+        )
+        for task_id, prd_id in (("T001", "default"), ("v0.2:T900", "v0.2")):
+            conn.execute(
+                """INSERT INTO tasks
+                (id, feature_id, prd_id, title, description, status, priority,
+                 dependencies, conflict_groups, scores, acceptance_criteria,
+                 implementation_notes, verification, likely_files,
+                 created_at, updated_at)
+                VALUES (?, 'F001', ?, ?, 'desc', 'ready', 'medium',
+                        '[]', '[]', '{}', '[]', '[]', '{}', '[]',
+                        '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')""",
+                (task_id, prd_id, f"Task {task_id}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return project_id
+
+
+class TestT019PrdScopedCliCommands:
+    """T019: the `--prd` flag (and its $ANVIL_PRD env twin) on the READ/filter
+    CLI surfaces — next / list / show / packet / score / prd review. The
+    manager- and MCP-level tests cover the methods; these pin the CLI wiring
+    itself (PRD_OPTION envvar, resolve_prd_id, the show/packet mismatch guard,
+    and the default-sentinel collapse) so a regression there fails CI.
+    """
+
+    # ---- list ---------------------------------------------------------------
+
+    def test_list_prd_scopes_to_named_partition(self, tmp_path: Path) -> None:
+        """`list --prd v0.2` shows only the v0.2 task, not the default one."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["list", "--prd", "v0.2", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        ids = {t["id"] for t in data["tasks"]}
+        assert ids == {"v0.2:T900"}, ids
+
+    def test_list_prd_default_scopes_to_default_partition(
+        self, tmp_path: Path
+    ) -> None:
+        """`list --prd default` shows only the default task."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["list", "--prd", "default", "--json"])
+        assert result.exit_code == 0, result.output
+        ids = {t["id"] for t in json.loads(result.output)["data"]["tasks"]}
+        assert ids == {"T001"}, ids
+
+    def test_list_no_prd_lists_all_partitions(self, tmp_path: Path) -> None:
+        """Without --prd, list spans all PRDs (pre-T019 behaviour)."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["list", "--json"])
+        assert result.exit_code == 0, result.output
+        ids = {t["id"] for t in json.loads(result.output)["data"]["tasks"]}
+        assert ids == {"T001", "v0.2:T900"}, ids
+
+    # ---- next ---------------------------------------------------------------
+
+    def test_next_prd_scopes_candidate_pool(self, tmp_path: Path) -> None:
+        """`next --prd v0.2` recommends a v0.2 task, never the default one."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["next", "--prd", "v0.2", "--json"])
+        assert result.exit_code == 0, result.output
+        task = json.loads(result.output)["data"]["task"]
+        assert task is not None and task["id"] == "v0.2:T900", task
+
+    def test_next_prd_default_scopes_to_default(self, tmp_path: Path) -> None:
+        """`next --prd default` recommends only the default task."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["next", "--prd", "default", "--json"])
+        assert result.exit_code == 0, result.output
+        task = json.loads(result.output)["data"]["task"]
+        assert task is not None and task["id"] == "T001", task
+
+    # ---- show ---------------------------------------------------------------
+
+    def test_show_prd_match_renders_task(self, tmp_path: Path) -> None:
+        """`show v0.2:T900 --prd v0.2` matches the task's partition → renders."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(
+            tmp_path, ["show", "v0.2:T900", "--prd", "v0.2", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"]["task"]["id"] == "v0.2:T900"
+
+    def test_show_prd_mismatch_is_not_found(self, tmp_path: Path) -> None:
+        """`show T001 --prd v0.2` — T001 lives in the default PRD, so the
+        mismatch guard rejects the cross-PRD read with a not_found error.
+
+        Regression guard for the cross-PRD read-leak the guard prevents: if the
+        guard is dropped/inverted, this would render T001 and the test fails.
+        """
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["show", "T001", "--prd", "v0.2", "--json"])
+        assert result.exit_code == 1, result.output
+        err = json.loads(result.output)["error"]
+        assert err["code"] == "not_found", err
+        assert "belongs to PRD 'default'" in err["message"], err["message"]
+
+    # ---- packet -------------------------------------------------------------
+
+    def test_packet_prd_mismatch_is_error(self, tmp_path: Path) -> None:
+        """`packet T001 --prd v0.2` raises the same cross-PRD mismatch error."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["packet", "T001", "--prd", "v0.2"])
+        assert result.exit_code == 1, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "belongs to PRD 'default'" in combined, combined
+
+    def test_packet_prd_match_succeeds(self, tmp_path: Path) -> None:
+        """`packet v0.2:T900 --prd v0.2` matches the partition → exit 0."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["packet", "v0.2:T900", "--prd", "v0.2"])
+        assert result.exit_code == 0, result.output
+
+    # ---- score --------------------------------------------------------------
+
+    def test_score_prd_scopes_to_named_partition(self, tmp_path: Path) -> None:
+        """`score --prd v0.2` (deterministic scorer) scores only the v0.2 task;
+        the default T001 stays unscored (its scores JSON is untouched)."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["score", "--prd", "v0.2"])
+        assert result.exit_code == 0, result.output
+
+        db = tmp_path / ".anvil" / "state.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            scores = dict(
+                conn.execute("SELECT id, scores FROM tasks").fetchall()
+            )
+        finally:
+            conn.close()
+        # Default task untouched; named task scored.
+        assert scores["T001"] == "{}", scores["T001"]
+        assert scores["v0.2:T900"] != "{}", scores["v0.2:T900"]
+
+    # ---- prd review ---------------------------------------------------------
+
+    def test_prd_review_prd_scopes_to_named_partition(
+        self, tmp_path: Path
+    ) -> None:
+        """`prd review --prd v0.2` transitions ONLY the v0.2 PRD (draft ->
+        reviewed); the default PRD (already approved) is untouched."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["prd", "review", "--prd", "v0.2"])
+        assert result.exit_code == 0, result.output
+
+        db = tmp_path / ".anvil" / "state.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            status = dict(conn.execute("SELECT id, status FROM prds").fetchall())
+        finally:
+            conn.close()
+        assert status["v0.2"] == "reviewed", status
+        assert status["default"] == "approved", status
+
+    # ---- $ANVIL_PRD env path (PRD_OPTION envvar wiring) ---------------------
+
+    def test_anvil_prd_env_scopes_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$ANVIL_PRD is the env twin of --prd: with it set and no flag, list
+        scopes to that PRD (proves PRD_OPTION's envvar wiring on the CLI)."""
+        _seed_two_prd_project(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+        result = _invoke_cmd(tmp_path, ["list", "--json"])
+        assert result.exit_code == 0, result.output
+        ids = {t["id"] for t in json.loads(result.output)["data"]["tasks"]}
+        assert ids == {"v0.2:T900"}, ids
+
+    # ---- default sentinel collapse ('prd' -> 'default') --------------------
+
+    def test_list_prd_sentinel_prd_matches_default(self, tmp_path: Path) -> None:
+        """`list --prd prd` — 'prd' is the parse-time spelling of the default
+        PRD, whose tasks are stored with prd_id='default'. The read surface must
+        collapse the sentinel so this scopes to the default task, not an empty
+        result against a nonexistent id='prd'.
+        """
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["list", "--prd", "prd", "--json"])
+        assert result.exit_code == 0, result.output
+        ids = {t["id"] for t in json.loads(result.output)["data"]["tasks"]}
+        assert ids == {"T001"}, ids
+
+    def test_next_prd_sentinel_prd_matches_default(self, tmp_path: Path) -> None:
+        """`next --prd prd` narrows to the default partition, not an empty pool."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["next", "--prd", "prd", "--json"])
+        assert result.exit_code == 0, result.output
+        task = json.loads(result.output)["data"]["task"]
+        assert task is not None and task["id"] == "T001", task
+
+    def test_show_prd_sentinel_prd_matches_default_task(
+        self, tmp_path: Path
+    ) -> None:
+        """`show T001 --prd prd` must NOT raise a false 'belongs to PRD default,
+        not prd' mismatch — the sentinel collapses to 'default' before the guard.
+        """
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["show", "T001", "--prd", "prd", "--json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"]["task"]["id"] == "T001"
+
+    def test_packet_prd_sentinel_prd_matches_default_task(
+        self, tmp_path: Path
+    ) -> None:
+        """`packet T001 --prd prd` succeeds (no false cross-PRD mismatch)."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["packet", "T001", "--prd", "prd"])
+        assert result.exit_code == 0, result.output
+
+    def test_prd_review_prd_sentinel_prd_finds_default(
+        self, tmp_path: Path
+    ) -> None:
+        """`prd review --prd prd` resolves the DEFAULT PRD instead of erroring
+        with 'No PRD found in state' against a nonexistent id='prd'. The default
+        PRD here is already approved, so review reports it cannot re-review —
+        the point is it FINDS the PRD (no not-found error)."""
+        _seed_two_prd_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["prd", "review", "--prd", "prd"])
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        # The default PRD must be FOUND — never the 'No PRD found' not-found path.
+        assert "No PRD found in state" not in combined, combined
+
+
+# ---------------------------------------------------------------------------
 # replay command
 # ---------------------------------------------------------------------------
 

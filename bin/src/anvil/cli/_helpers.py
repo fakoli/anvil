@@ -194,6 +194,25 @@ def resolve_prd_id(backend: SqliteBackend, explicit: str | None = None) -> str:
         f"Pass --prd <id> or set {_PRD_ENV}."
     )
 
+
+def canonical_prd_id(prd_id: str) -> str:
+    """Collapse a default-PRD sentinel to the STORED model id (``'default'``).
+
+    ``resolve_prd_id`` returns an explicit ``--prd``/``$ANVIL_PRD`` value
+    verbatim, so the parse-time sentinel ``'prd'`` (a documented spelling of the
+    default PRD, per ``_DEFAULT_PRD_IDS`` / ``prd_source_path`` / ``parse_prd``)
+    survives unchanged. But every persisted row stores the default PRD with
+    ``id='default'`` (the write path collapses ``'prd'`` via
+    ``template._model_prd_id``). Read/filter/review surfaces that look a PRD up
+    by id (``get_prd``) or compare against a stored ``prd_id``
+    (``list_tasks(prd_id=...)``, ``task.prd_id != ...``) must therefore collapse
+    the sentinel first, or ``--prd prd`` spuriously misses the default partition.
+    Named (non-default) ids pass through unchanged.
+    """
+    from anvil.state.models import DEFAULT_PRD_ID
+
+    return DEFAULT_PRD_ID if prd_id in _DEFAULT_PRD_IDS else prd_id
+
 # T005/B07: env override pointing at the PROJECT ROOT (the directory that
 # *contains* .anvil/). Resolution precedence — applied identically by
 # the CLI here and by the MCP server (mcp_server._resolve_state_dir):

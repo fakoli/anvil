@@ -8,12 +8,15 @@ from pathlib import Path
 import typer
 
 from anvil.cli._helpers import (
+    PRD_OPTION,
     _load_config_optional,
     _open_backend,
     _reap_stale_claims,
     _require_state_dir,
     _resolve_state_dir,
+    canonical_prd_id,
     resolve_actor,
+    resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
 from anvil.state.models import CommandProof, EventDraft
@@ -233,6 +236,7 @@ def packet(
         "-f",
         help="Output format: md (default) or json.",
     ),
+    prd: str | None = PRD_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
         "--cwd",
@@ -240,7 +244,13 @@ def packet(
         hidden=True,
     ),
 ) -> None:
-    """Render a work packet for TASK_ID and write it to .anvil/packets/."""
+    """Render a work packet for TASK_ID and write it to .anvil/packets/.
+
+    ``--prd`` (T019) asserts the task belongs to the named PRD partition: an
+    explicit ``--prd``/``$ANVIL_PRD`` that doesn't match the task's ``prd_id``
+    is a not-found error (the ``get_task`` lookup is unscoped because task IDs
+    are globally unique). Omitting it keeps the pre-T019 behaviour unchanged.
+    """
     from anvil.context.packets import fast_lane_packet, render_packet
 
     state_dir = _resolve_state_dir(cwd)
@@ -255,6 +265,20 @@ def packet(
         if task is None:
             typer.echo(f"Error: task '{task_id}' not found.", err=True)
             raise typer.Exit(code=1)
+
+        # T019: when a PRD is explicitly named, assert the task lives in that
+        # partition (get_task is unscoped because task IDs are unique). Collapse
+        # the default sentinel ('prd') so `--prd prd` matches a task stored with
+        # prd_id='default' instead of raising a false mismatch.
+        if prd:
+            scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd))
+            if task.prd_id and task.prd_id != scoped_prd_id:
+                typer.echo(
+                    f"Error: task '{task_id}' belongs to PRD '{task.prd_id}', "
+                    f"not '{scoped_prd_id}'.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
 
         # Fetch the parent feature via the Backend protocol.
         feature = backend.get_feature(task.feature_id)

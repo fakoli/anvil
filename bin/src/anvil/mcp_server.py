@@ -676,12 +676,21 @@ def get_task(task_id: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def get_next_task(actor: str | None = None) -> dict[str, Any] | None:
+def get_next_task(
+    actor: str | None = None, prd_id: str | None = None
+) -> dict[str, Any] | None:
     """Return the single highest-priority ready task that has no overlapping
     active claim, or null if none is claimable.
 
     Ordering: critical > high > medium > low; tiebreak agent_suitability desc,
     then id asc.
+
+    ``prd_id`` (T019) scopes the CANDIDATE pool to one PRD partition while the
+    exclusion sets (active claims, done-deps, active conflict groups) still span
+    ALL PRDs — cross-PRD coordination, same contract as ``next --prd`` / the CLI
+    ``ClaimManager.next_claimable(prd_id=...)``. ``None`` keeps the all-PRDs
+    behaviour. ``actor`` is currently unused by the ranking (the file-overlap
+    exclusion lives on the stricter finish-surface helper).
     """
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -689,13 +698,28 @@ def get_next_task(actor: str | None = None) -> dict[str, Any] | None:
         # Read-only listers don't reap (per module docstring); MCP clients
         # call get_project_summary or a mutating tool to trigger reaping.
 
-        # Single full-table fetch + in-memory partition; halves the SQLite
-        # round-trips on this hot path versus calling list_tasks(status=...)
-        # then list_tasks() again for the done/conflict sets.
+        # T019: resolve which PRD to scope candidates to (explicit > $ANVIL_PRD;
+        # None when neither names one -> all PRDs, byte-identical to pre-T019).
+        # Collapse the default sentinel ('prd') so prd_id='prd' matches tasks
+        # stored with prd_id='default' rather than narrowing to an empty pool.
+        from anvil.cli._helpers import canonical_prd_id
+
+        scoped_prd_id = (
+            canonical_prd_id(_resolve_prd_id(backend, prd_id)) if prd_id else None
+        )
+
+        # Single full-table fetch + in-memory partition; the EXCLUSION sets are
+        # always built from ALL PRDs (coordination is cross-PRD), then the
+        # candidate pool is narrowed to ``scoped_prd_id`` when one is named.
         all_tasks = backend.list_tasks()
         if not all_tasks:
             return None
-        ready_tasks = [t for t in all_tasks if t.status.value == "ready"]
+        ready_tasks = [
+            t
+            for t in all_tasks
+            if t.status.value == "ready"
+            and (scoped_prd_id is None or t.prd_id == scoped_prd_id)
+        ]
         if not ready_tasks:
             return None
 
@@ -705,7 +729,8 @@ def get_next_task(actor: str | None = None) -> dict[str, Any] | None:
             t.id for t in all_tasks if t.status.value == "done"
         }
 
-        # Build active conflict groups.
+        # Build active conflict groups from ALL PRDs so a candidate in the
+        # scoped partition still collides with a claim held in another PRD.
         active_conflict_groups: set[str] = set()
         for t in all_tasks:
             if t.id in claimed_task_ids:
@@ -1444,6 +1469,13 @@ class InitProjectResponse(BaseModel):
     project_name: str
     state_dir: str
     created: bool
+    # T019: the default PRD partition a freshly-scaffolded project owns. A new
+    # project has no parsed PRD yet, so this is always the reserved default id —
+    # the partition `parse_prd` / `plan_tasks` write into when no prd_id is named.
+    # REQUIRED (no field default): init_project must set it explicitly, so a
+    # regression that drops the assignment fails construction rather than being
+    # masked by a field default that silently supplies 'default'.
+    prd_id: str
 
 
 @mcp.tool(tags={PLANNING_TAG})
@@ -1541,11 +1573,14 @@ def init_project(
     finally:
         backend.close()
 
+    from anvil.state.models import DEFAULT_PRD_ID
+
     return InitProjectResponse(
         project_id=project_id,
         project_name=project_name,
         state_dir=str(state_dir),
         created=True,
+        prd_id=DEFAULT_PRD_ID,
     )
 
 
@@ -1658,6 +1693,7 @@ class ParsePrdResponse(BaseModel):
 @mcp.tool(tags={PLANNING_TAG})
 def parse_prd(
     file: str | None = None,
+    prd_id: str | None = None,
     cwd: str | None = None,
 ) -> ParsePrdResponse:
     """Parse the PRD markdown into requirements/features/tasks and emit
@@ -1666,9 +1702,18 @@ def parse_prd(
     operational failures (missing/unreadable file, project not initialized).
 
     Args:
-        file: PRD path (absolute or cwd-relative). Defaults to .anvil/prd.md.
+        file: PRD path (absolute or cwd-relative). Defaults to .anvil/prd.md
+            (or .anvil/prds/<prd_id>.md when prd_id names a non-default PRD).
+        prd_id: PRD partition to parse (multi-PRD, T019). Mirrors the CLI
+            ``--prd`` flag: a non-default id reads ``.anvil/prds/<id>.md`` and
+            stamps the partition into the prd.parsed event so only that PRD's
+            rows are (re)written. ``None`` / 'default' / 'prd' keep the bare
+            ``.anvil/prd.md`` source + default partition, byte-identical to the
+            pre-multi-PRD event. Ignored for the source path when ``file`` is
+            given (but still honoured for the partition).
         cwd:  Project root. Defaults to Path.cwd().
     """
+    from anvil.cli._helpers import _DEFAULT_PRD_IDS, prd_source_path
     from anvil.clock import SystemClock
     from anvil.planning.template import parse_prd as _parse_prd_impl
     from anvil.state.models import EventDraft
@@ -1680,13 +1725,18 @@ def parse_prd(
             "Call init_project first.",
         )
 
+    # T019: the parse-time prd_id controls id shape AND the partition the event
+    # writes into — mirrors cli/prd.py. None collapses to the 'prd' sentinel
+    # (the default PRD); an explicit non-default id scopes the parse.
+    parse_prd_id = prd_id.strip() if (prd_id and prd_id.strip()) else "prd"
+
     if file is not None:
         prd_path = Path(file)
         if not prd_path.is_absolute():
             base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
             prd_path = (base / prd_path).resolve()
     else:
-        prd_path = state_dir / _PRD_FILENAME
+        prd_path = prd_source_path(state_dir, parse_prd_id)
 
     if not prd_path.exists():
         raise ToolError(
@@ -1699,7 +1749,7 @@ def parse_prd(
     except OSError as exc:
         raise ToolError(f"Cannot read {prd_path}: {exc}") from exc
 
-    result = _parse_prd_impl(markdown, prd_id="prd")
+    result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
 
     # Surface errors in the response without short-circuiting the event.
     # When errors exist we skip emission (mirrors the CLI which exits 1
@@ -1747,6 +1797,18 @@ def parse_prd(
             "open_questions": result.prd.open_questions,
         }
 
+        # Named PRD: stamp the partition so the handler writes ONLY this PRD's
+        # rows (mirrors cli/prd.py). The default PRD omits these keys so the
+        # payload stays byte-identical to the pre-multi-PRD event. Gate on the
+        # RESOLVED parse_prd_id so the reserved 'default'/'prd' sentinels take
+        # the default (no-stamp) branch (see cli/prd.py for the invariant).
+        if parse_prd_id not in _DEFAULT_PRD_IDS:
+            payload["prd_id"] = result.prd.id
+            payload["is_default"] = False
+            payload["title"] = result.prd.title
+            payload["target_version"] = result.prd.target_version
+            payload["target_tag"] = result.prd.target_tag
+
         backend.append(EventDraft(
             timestamp=now,
             actor="anvil-mcp",
@@ -1788,6 +1850,7 @@ def review_prd(
     approve: bool = False,
     reviewer: str = "human",
     notes: str | None = None,
+    prd_id: str | None = None,
     cwd: str | None = None,
 ) -> ReviewPrdResponse:
     """Advance the PRD review state: draft → reviewed (default), or reviewed →
@@ -1797,8 +1860,14 @@ def review_prd(
         approve:  True moves reviewed → approved; False moves draft → reviewed.
         reviewer: Identity recorded in the event payload.
         notes:    Optional reviewer notes (recorded on prd.reviewed only).
+        prd_id:   PRD partition to review (multi-PRD, T019). Mirrors the CLI
+            ``prd review --prd``: resolves which PRD's status to check via
+            ``get_prd`` and stamps that id into the emitted event so the handler
+            mutates only that PRD's row. ``None`` resolves the single/default
+            PRD, byte-identical to pre-T019 on a single-PRD project.
         cwd:      Project root. Defaults to Path.cwd().
     """
+    from anvil.cli._helpers import _DEFAULT_PRD_IDS, canonical_prd_id
     from anvil.clock import SystemClock
     from anvil.state.backend import EventRejected
     from anvil.state.models import EventDraft
@@ -1812,7 +1881,12 @@ def review_prd(
 
     backend = _open_backend(state_dir)
     try:
-        prd = backend.get_prd()
+        # T019: resolve which PRD this review targets (explicit > $ANVIL_PRD >
+        # single/default), then read THAT PRD's status. Collapse the default
+        # sentinel ('prd') to the stored id ('default') so prd_id='prd' finds
+        # the default PRD row instead of looking up a nonexistent id='prd'.
+        resolved_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+        prd = backend.get_prd(resolved_prd_id)
         if prd is None:
             raise ToolError(
                 "No PRD found in state. Run parse_prd first.",
@@ -1820,6 +1894,13 @@ def review_prd(
         from_status = prd.status.value
         project = backend.get_project()
         project_id = project.id if project is not None else "project"
+
+        # Stamp prd_id into the payload only for a named (non-default) PRD so the
+        # default-PRD event stays byte-identical to the pre-multi-PRD payload.
+        def _scope(payload: dict[str, Any]) -> dict[str, Any]:
+            if prd.id not in _DEFAULT_PRD_IDS:
+                payload["prd_id"] = prd.id
+            return payload
 
         if approve:
             if from_status != "reviewed":
@@ -1830,7 +1911,9 @@ def review_prd(
                 )
             action = "prd.approved"
             to_status = "approved"
-            payload: dict[str, Any] = {"project_id": project_id, "approver": reviewer}
+            payload: dict[str, Any] = _scope(
+                {"project_id": project_id, "approver": reviewer}
+            )
         else:
             if from_status != "draft":
                 raise ToolError(
@@ -1840,11 +1923,13 @@ def review_prd(
                 )
             action = "prd.reviewed"
             to_status = "reviewed"
-            payload = {
-                "project_id": project_id,
-                "reviewer": reviewer,
-                "notes": notes,
-            }
+            payload = _scope(
+                {
+                    "project_id": project_id,
+                    "reviewer": reviewer,
+                    "notes": notes,
+                }
+            )
 
         clock = SystemClock()
         now = clock.now()
@@ -1899,6 +1984,7 @@ def plan_tasks(
     cwd: str | None = None,
     use_llm: bool = True,
     prune_force: bool = False,
+    prd_id: str | None = None,
 ) -> PlanTasksResponse:
     """Run the planner over the current PRD: generate features and tasks, infer
     dependencies and conflict groups, then promote proposed tasks to drafted.
@@ -1920,7 +2006,14 @@ def plan_tasks(
         prune_force: When True, delete orphan tasks that advanced past
             ``ready`` (default False raises ToolError so claim/evidence
             history is not lost silently).
+        prd_id: PRD partition to plan (multi-PRD, T019). Mirrors the CLI
+            ``plan --prd``: a non-default id reads ``.anvil/prds/<id>.md``,
+            scopes orphan-prune to that partition, and stamps the partition into
+            every feature/task event. ``None`` / 'default' / 'prd' keep the bare
+            ``.anvil/prd.md`` source + default partition, byte-identical to the
+            pre-multi-PRD behaviour.
     """
+    from anvil.cli._helpers import prd_source_path
     from anvil.clock import SystemClock
     from anvil.planning.inference import infer_all
     from anvil.planning.llm import LLMProviderError
@@ -1940,7 +2033,12 @@ def plan_tasks(
             "Call init_project first.",
         )
 
-    prd_path = state_dir / _PRD_FILENAME
+    # T019: the parse-time prd_id controls id shape AND the source path +
+    # partition plan scopes to (mirrors cli/plan.py). None collapses to the
+    # 'prd' sentinel (the default PRD).
+    parse_prd_id = prd_id.strip() if (prd_id and prd_id.strip()) else "prd"
+
+    prd_path = prd_source_path(state_dir, parse_prd_id)
     if not prd_path.exists():
         raise ToolError(
             f"PRD file not found at {prd_path}. "
@@ -1987,7 +2085,7 @@ def plan_tasks(
                 file=sys.stderr,
             )
 
-    result = _parse_prd_impl(markdown, prd_id="prd")
+    result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
     warnings = [
         ParseErrorEntry(section=e.section, line=e.line, message=e.message)
         for e in result.errors
@@ -2069,7 +2167,7 @@ def plan_tasks(
             markdown = prd_path.read_text(encoding="utf-8")
         except OSError as exc:
             raise ToolError(f"Cannot re-read {prd_path}: {exc}") from exc
-        result = _parse_prd_impl(markdown, prd_id="prd")
+        result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
         llm_generated = True
         llm_provider = gen_result.provider_used
 
@@ -2088,6 +2186,20 @@ def plan_tasks(
 
         clock = SystemClock()
 
+        # T019: the partition this plan run owns. ``result.prd.id`` is the MODEL
+        # prd_id ('default' for the default PRD, else the named id) already
+        # collapsed from the 'prd' parse sentinel. Orphan-prune scopes to this
+        # partition so tasks in OTHER PRDs are never pruned just because they
+        # are absent from this PRD's prd.md. Mirrors cli/plan.py.
+        scope_prd_id = result.prd.id
+
+        def _with_prd_id(payload: dict[str, Any], model_prd_id: str) -> dict[str, Any]:
+            # prd_id is Field(exclude=True) on Feature/Task, so model_dump drops
+            # it. Stamp it back so the SQL handler writes the row into THIS PRD's
+            # partition instead of defaulting to 'default'.
+            payload["prd_id"] = model_prd_id
+            return payload
+
         # --------------------------------------------------------------
         # Orphan-prune (v1.15.0). Shares planning._plan_helpers with the
         # CLI — see that module's docstring for the multi-critic review
@@ -2101,9 +2213,9 @@ def plan_tasks(
         )
 
         classification = classify_orphans(
-            backend.list_tasks(),
+            backend.list_tasks(prd_id=scope_prd_id),
             {t.id for t in result.tasks},
-            backend.list_features(),
+            backend.list_features(prd_id=scope_prd_id),
             {f.id for f in result.features},
         )
 
@@ -2146,7 +2258,9 @@ def plan_tasks(
                     action="feature.created",
                     target_kind="feature",
                     target_id=feature.id,
-                    payload_json=feature.model_dump(mode="json"),
+                    payload_json=_with_prd_id(
+                        feature.model_dump(mode="json"), feature.prd_id
+                    ),
                 ))
             except EventRejected as exc:
                 raise ToolError(str(exc)) from exc
@@ -2161,7 +2275,9 @@ def plan_tasks(
                     action="task.created",
                     target_kind="task",
                     target_id=task.id,
-                    payload_json=task.model_dump(mode="json"),
+                    payload_json=_with_prd_id(
+                        task.model_dump(mode="json"), task.prd_id
+                    ),
                 ))
             except EventRejected as exc:
                 raise ToolError(str(exc)) from exc
@@ -2177,7 +2293,9 @@ def plan_tasks(
                     action="task.created",
                     target_kind="task",
                     target_id=inferred_task.id,
-                    payload_json=inferred_task.model_dump(mode="json"),
+                    payload_json=_with_prd_id(
+                        inferred_task.model_dump(mode="json"), inferred_task.prd_id
+                    ),
                 ))
             except EventRejected as exc:
                 raise ToolError(str(exc)) from exc

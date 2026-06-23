@@ -802,6 +802,65 @@ class TestGetNextTask:
         task = _run(run())
         assert task["id"] == "T001"
 
+    def test_prd_id_narrows_candidates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """T019: get_next_task(prd_id='v0.2') only returns tasks in that PRD —
+        a higher-priority default-PRD task is invisible once the pool is scoped."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="approved", prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready", priority="high",
+                  prd_id="default")
+        _add_task(state_dir, task_id="T900", status="ready", priority="low",
+                  prd_id="v0.2")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[Any, Any]:
+            async with Client(mcp) as c:
+                unscoped = _data(await c.call_tool("get_next_task", {}))
+                scoped = _data(
+                    await c.call_tool("get_next_task", {"prd_id": "v0.2"})
+                )
+                return unscoped, scoped
+
+        unscoped, scoped = _run(run())
+        assert unscoped["id"] == "T001"  # high-priority default-PRD task wins
+        assert scoped["id"] == "T900"    # candidate pool narrowed to v0.2
+
+    def test_prd_id_scoped_pick_skips_cross_prd_active_claim_collision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """T019 core: get_next_task(prd_id='v0.1') builds the conflict-group
+        exclusion from ALL PRDs first, so a v0.1 candidate colliding with an
+        ACTIVE v0.2 claim is skipped while a non-colliding v0.1 task is still
+        returned."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="approved", prd_id="v0.1", is_default=0)
+        _add_prd(state_dir, status="approved", prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        # ACTIVE claim on a v0.2 task in the shared conflict_group.
+        _add_task(state_dir, task_id="T800", status="claimed",
+                  conflict_groups=["CG-shared"], prd_id="v0.2")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T800")
+        # v0.1 candidate in the SAME group → must be skipped (cross-PRD).
+        _add_task(state_dir, task_id="T100", status="ready", priority="high",
+                  conflict_groups=["CG-shared"], prd_id="v0.1")
+        # v0.1 candidate with no collision → must be returned.
+        _add_task(state_dir, task_id="T101", status="ready", priority="low",
+                  conflict_groups=["CG-T101"], prd_id="v0.1")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool("get_next_task", {"prd_id": "v0.1"})
+                )
+
+        task = _run(run())
+        assert task is not None
+        assert task["id"] == "T101"
+
 
 # ===========================================================================
 # Tool 5: claim_task
@@ -2000,6 +2059,14 @@ class TestInitProject:
         assert resp["created"] is True
         assert resp["project_name"] == "From MCP"
         assert resp["project_id"] == "from-mcp"
+        # T019: init_project reports the default PRD partition a fresh project
+        # owns. prd_id is a REQUIRED field on InitProjectResponse (no field
+        # default), so dropping the explicit `prd_id=DEFAULT_PRD_ID` assignment
+        # in init_project raises a construction error rather than being masked
+        # by a field default that would still serialize 'default'.
+        from anvil.state.models import DEFAULT_PRD_ID
+
+        assert resp["prd_id"] == DEFAULT_PRD_ID
         state_dir = tmp_path / ".anvil"
         assert state_dir.exists()
         assert (state_dir / "state.db").exists()
@@ -2162,6 +2229,57 @@ class TestParsePrd:
         with pytest.raises(ToolError, match="PRD file not found|prd.md"):
             _run(run())
 
+    def test_prd_id_scopes_to_named_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T019: parse_prd(prd_id='v0.2') reads .anvil/prds/v0.2.md and stamps
+        the v0.2 partition so its rows land under id='v0.2', is_default=0 —
+        leaving the default PRD partition untouched."""
+        state_dir = _init_state_dir(tmp_path)
+        # Default PRD already parsed.
+        _write_prd_file(state_dir)
+        # Named PRD source under the prds/ collection.
+        prds_dir = state_dir / "prds"
+        prds_dir.mkdir(exist_ok=True)
+        (prds_dir / "v0.2.md").write_text(_MINIMAL_PRD, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[Any, Any]:
+            async with Client(mcp) as c:
+                default_resp = _data(await c.call_tool("parse_prd", {}))
+                named_resp = _data(
+                    await c.call_tool("parse_prd", {"prd_id": "v0.2"})
+                )
+                return default_resp, named_resp
+
+        default_resp, named_resp = _run(run())
+        assert named_resp["errors"] == []
+        assert named_resp["requirement_count"] == 2
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            # The named PRD row exists and is NOT the default.
+            named = b.get_prd("v0.2")
+            assert named is not None
+            assert named.id == "v0.2"
+            assert named.is_default is False
+            # The default PRD still resolves and stays the default.
+            default = b.get_prd()
+            assert default is not None
+            assert default.id == "default"
+            # Named PRD requirements landed in the v0.2 partition.
+            v02_reqs = b.list_requirements(prd_id="v0.2")
+            assert len(v02_reqs) == 2
+        finally:
+            b.close()
+
 
 # ===========================================================================
 # Tool 17: review_prd
@@ -2220,6 +2338,43 @@ class TestReviewPrd:
 
         with pytest.raises(ToolError, match="reviewed|draft"):
             _run(run())
+
+    def test_prd_id_reviews_only_named_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T019: review_prd(prd_id='v0.2') transitions ONLY the v0.2 PRD —
+        the default PRD keeps its status, proving the per-PRD scoping."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="draft")  # default PRD
+        _add_prd(state_dir, status="draft", prd_id="v0.2", is_default=0)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool(
+                        "review_prd", {"prd_id": "v0.2", "reviewer": "alice"}
+                    )
+                )
+
+        resp = _run(run())
+        assert resp["from_status"] == "draft"
+        assert resp["to_status"] == "reviewed"
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            assert b.get_prd("v0.2").status.value == "reviewed"
+            # Default PRD is untouched.
+            assert b.get_prd("default").status.value == "draft"
+        finally:
+            b.close()
 
 
 # ===========================================================================
@@ -2286,6 +2441,52 @@ class TestPlanTasks:
 
         with pytest.raises(ToolError, match="No PRD found in state"):
             _run(run())
+
+    def test_prd_id_plans_into_named_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T019: plan_tasks(prd_id='v0.2') reads .anvil/prds/v0.2.md, parses +
+        plans into the v0.2 partition, and stamps prd_id on its task rows —
+        without touching the default PRD's tasks."""
+        state_dir = _init_state_dir(tmp_path)
+        # Default PRD: parse + plan so it owns its own tasks.
+        _write_prd_file(state_dir)
+        # Named PRD source.
+        prds_dir = state_dir / "prds"
+        prds_dir.mkdir(exist_ok=True)
+        (prds_dir / "v0.2.md").write_text(_MINIMAL_PRD, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+                await c.call_tool("plan_tasks", {})
+                await c.call_tool("parse_prd", {"prd_id": "v0.2"})
+                return _data(await c.call_tool("plan_tasks", {"prd_id": "v0.2"}))
+
+        plan = _run(run())
+        assert plan["feature_count"] == 1
+        assert plan["task_count"] == 2
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            # Named-PRD tasks landed in the v0.2 partition (ids are prefixed).
+            v02_tasks = b.list_tasks(prd_id="v0.2")
+            assert len(v02_tasks) == 2
+            assert all(t.prd_id == "v0.2" for t in v02_tasks)
+            assert {t.id for t in v02_tasks} == {"v0.2:T001", "v0.2:T002"}
+            # Default-PRD tasks are unchanged and stay in the default partition.
+            default_tasks = b.list_tasks(prd_id="default")
+            assert {t.id for t in default_tasks} == {"T001", "T002"}
+        finally:
+            b.close()
 
 
 # ===========================================================================
