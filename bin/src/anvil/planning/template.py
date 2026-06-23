@@ -59,6 +59,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 from anvil.state.models import (
+    DEFAULT_PRD_ID,
     PRD,
     Feature,
     ProofKind,
@@ -100,6 +101,14 @@ _DESCRIPTION_ENRICH_MAX_TOKENS = 400
 DESCRIPTION_SHORT_THRESHOLD = 50
 # Backwards-compat alias for any internal/test imports of the private name.
 _DESCRIPTION_SHORT_THRESHOLD = DESCRIPTION_SHORT_THRESHOLD
+
+# The default ``prd_id`` for ``parse_prd``. When ``prd_id`` equals this
+# sentinel the parser keeps the historical BARE id shape (``T001``, ``F001``,
+# ``R001``) byte-identical to the pre-multi-PRD parser; any other ``prd_id``
+# makes every minted id PREFIXED (``v0.2:T001``). Keeping the default PRD's ids
+# bare deliberately limits the blast radius of prefixed ids to newly-named PRDs
+# (a `^T\d+` matcher in claims/skills/drift still matches the default PRD).
+DEFAULT_PARSE_PRD_ID = "prd"
 
 # ---------------------------------------------------------------------------
 # Public data types
@@ -230,6 +239,66 @@ def _auto_id(prefix: str, index: int) -> str:
     return f"{prefix}{index:03d}"
 
 
+def _is_default_prd(prd_id: str) -> bool:
+    """True when ``prd_id`` denotes the implicit/default PRD.
+
+    Two spellings reach the parser for the same concept: the public ``parse_prd``
+    default sentinel (``DEFAULT_PARSE_PRD_ID == "prd"``, what every current
+    caller passes) and the stored model id (``DEFAULT_PRD_ID == "default"``).
+    Either one keeps ids BARE.
+    """
+    return prd_id in (DEFAULT_PARSE_PRD_ID, DEFAULT_PRD_ID)
+
+
+def _normalize_id(raw_id: str, prd_id: str) -> str:
+    """Resolve a raw id to its canonical form for the active ``prd_id``.
+
+    The default PRD keeps BARE ids byte-identical to the pre-multi-PRD parser;
+    any named PRD gets a ``<prd_id>:`` prefix. The rules, in order:
+
+    * default PRD (``_is_default_prd``) → return ``raw_id`` unchanged (bare).
+    * ``raw_id`` is already prefixed with ``<prd_id>:`` → return it unchanged
+      (author wrote the prefix explicitly; no double-prefixing, no warning).
+    * otherwise → return ``<prd_id>:<raw_id>``.
+
+    This is what lets a bare cross-ref (``**Feature:** F001``) resolve against a
+    prefixed feature id (``v0.2:F001``) within the same PRD: callers normalise
+    both the minted id and the reference through this helper, so they land on
+    the same canonical string.
+    """
+    if _is_default_prd(prd_id):
+        return raw_id
+    prefix = f"{prd_id}:"
+    if raw_id.startswith(prefix):
+        return raw_id
+    return f"{prefix}{raw_id}"
+
+
+def _strip_prd_prefix(raw_id: str, prd_id: str) -> str:
+    """Strip a leading ``<prd_id>:`` prefix from an author-written id.
+
+    Used so an author may write either the bare (``F001``) or the explicitly
+    prefixed (``v0.2:F001``) form in a heading or cross-ref; both collapse to
+    the same bare token before ``_normalize_id`` re-applies the canonical
+    prefix. No-op for the default PRD.
+    """
+    if _is_default_prd(prd_id):
+        return raw_id
+    prefix = f"{prd_id}:"
+    if raw_id.startswith(prefix):
+        return raw_id[len(prefix):]
+    return raw_id
+
+
+def _model_prd_id(prd_id: str) -> str:
+    """Resolve the value to store in a model's ``prd_id`` field.
+
+    The default sentinel(s) collapse to ``DEFAULT_PRD_ID`` so the parse-time
+    ``"prd"`` sentinel never leaks into persisted state; named PRDs pass through.
+    """
+    return DEFAULT_PRD_ID if _is_default_prd(prd_id) else prd_id
+
+
 def _has_meaningful_content(body: list[str]) -> bool:
     """True when a section body has any non-blank, non-comment-only line.
 
@@ -322,6 +391,92 @@ def _extract_bullet_list(body: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Release / target-version parsing
+# ---------------------------------------------------------------------------
+
+# A "**Release:** ..." field line. The colon may sit inside (``**Release:**``)
+# or outside (``**Release**:``) the bold markers, mirroring _FIELD_RE.
+_RELEASE_FIELD_RE = re.compile(
+    r"^\*\*\s*release\s*:?\s*\*\*\s*:?\s*(.*)$", re.IGNORECASE
+)
+# An inline tag qualifier on a release value: "v0.2.0 (tag: v0.2)" or
+# "v0.2.0 (v0.2)". The parenthetical sets target_tag; the leading token sets
+# target_version.
+_RELEASE_TAG_RE = re.compile(r"^(.*?)\s*\(\s*(?:tag\s*:\s*)?([^)]+?)\s*\)\s*$")
+
+
+def _split_release_value(value: str) -> tuple[str | None, str | None]:
+    """Split a release value into ``(target_version, target_tag)``.
+
+    Accepted forms (all round-trip into the PRD release fields):
+
+    * ``v0.2.0``                 → version=v0.2.0, tag=None
+    * ``v0.2.0 (tag: v0.2)``     → version=v0.2.0, tag=v0.2
+    * ``v0.2.0 (v0.2)``          → version=v0.2.0, tag=v0.2
+
+    An empty value yields ``(None, None)``.
+    """
+    value = value.strip()
+    if not value:
+        return None, None
+    m = _RELEASE_TAG_RE.match(value)
+    if m:
+        version = m.group(1).strip() or None
+        tag = m.group(2).strip() or None
+        return version, tag
+    return value, None
+
+
+def _parse_release(
+    sections: dict[str, tuple[int, list[str]]],
+) -> tuple[str | None, str | None]:
+    """Extract ``(target_version, target_tag)`` from the PRD.
+
+    Two equivalent spellings are recognised (absent => ``(None, None)``):
+
+    * A ``## Release`` section. The first ``**Version:**`` / ``**Tag:**`` field
+      lines win; otherwise the first non-blank bullet/line is the version, and
+      an inline ``(tag: ...)`` qualifier sets the tag.
+    * A ``**Release:** <value>`` field line anywhere in the ## Summary section
+      (the natural home for a one-line release marker).
+    """
+    # 1. Dedicated ## Release section.
+    rel_block = sections.get("release")
+    if rel_block is not None:
+        version: str | None = None
+        tag: str | None = None
+        for raw in rel_block[1]:
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            m_field = _FIELD_RE.match(stripped)
+            if m_field:
+                key = m_field.group(1).strip().lower().rstrip(":")
+                val = m_field.group(2).strip()
+                if key == "version" and val:
+                    version = val
+                elif key == "tag" and val:
+                    tag = val
+                continue
+            # First non-field, non-blank line (possibly a bullet) is the value.
+            if version is None and tag is None:
+                m_bullet = _BULLET_RE.match(stripped)
+                content = m_bullet.group(1).strip() if m_bullet else stripped
+                version, tag = _split_release_value(content)
+        return version, tag
+
+    # 2. A "**Release:**" field line, conventionally under ## Summary.
+    summary_block = sections.get("summary")
+    if summary_block is not None:
+        for raw in summary_block[1]:
+            m = _RELEASE_FIELD_RE.match(raw.strip())
+            if m:
+                return _split_release_value(m.group(1))
+
+    return None, None
+
+
+# ---------------------------------------------------------------------------
 # Requirement parsing
 # ---------------------------------------------------------------------------
 
@@ -330,12 +485,18 @@ def _parse_requirements(
     body: list[str],
     start_line: int,
     errors: list[ParseError],
+    prd_id: str,
 ) -> list[Requirement]:
     """Parse the ## Requirements section body into Requirement models.
 
     Items may be:
     - "- R001: text"  (explicit ID)
     - "- text"        (auto-assign ID)
+
+    ``prd_id`` controls id shape: the default PRD keeps bare ids; any named PRD
+    gets a ``<prd_id>:`` prefix (see ``_normalize_id``). Author-written explicit
+    ids may be bare (``R001``) or already prefixed (``v0.2:R001``); both land on
+    the same canonical id.
     """
     reqs: list[Requirement] = []
     auto_index = 1
@@ -348,14 +509,17 @@ def _parse_requirements(
         if not m_bullet:
             continue
         content = m_bullet.group(1).strip()
+        # Let an author write the id either bare or already prd-prefixed.
+        content = _strip_prd_prefix(content, prd_id)
         m_id = _REQ_ID_RE.match(content)
         if m_id:
-            req_id = m_id.group(1).upper()
+            raw_id = m_id.group(1).upper()
             text = m_id.group(2).strip()
         else:
-            req_id = _auto_id("R", auto_index)
+            raw_id = _auto_id("R", auto_index)
             text = content
 
+        req_id = _normalize_id(raw_id, prd_id)
         auto_index += 1
 
         if not text:
@@ -371,6 +535,7 @@ def _parse_requirements(
         reqs.append(
             Requirement(
                 id=req_id,
+                prd_id=_model_prd_id(prd_id),
                 prd_section="requirements",
                 text=text,
             )
@@ -419,8 +584,14 @@ def _parse_features(
     start_line: int,
     known_req_ids: set[str],
     errors: list[ParseError],
+    prd_id: str,
 ) -> list[Feature]:
-    """Parse all ### FXxx: Title blocks within ## Features."""
+    """Parse all ### FXxx: Title blocks within ## Features.
+
+    ``prd_id`` controls id shape (see ``_normalize_id``). Feature ids and the
+    ``**Requirements:**`` cross-refs are both normalised so bare refs resolve
+    against the (possibly prefixed) requirement ids minted for this PRD.
+    """
     features: list[Feature] = []
     auto_index = 1
     blocks = _parse_h3_blocks(body, start_line)
@@ -452,10 +623,13 @@ def _parse_features(
     for block_line, heading, block_lines in blocks:
         m_h3 = _H3_RE.match(f"### {heading}")
         if m_h3:
-            raw_id = m_h3.group(1)
+            # Let the author write the id bare (F001) or prd-prefixed
+            # (v0.2:F001); strip the prefix before pattern-matching so both
+            # spellings hit the same branch and re-prefix uniformly below.
+            raw_id = _strip_prd_prefix(m_h3.group(1), prd_id)
             title = m_h3.group(2).strip()
             if _FEAT_ID_RE.match(raw_id):
-                feat_id = raw_id.upper()
+                feat_id = _normalize_id(raw_id.upper(), prd_id)
             else:
                 if _is_malformed_id_prefix(raw_id, "F"):
                     errors.append(
@@ -473,10 +647,10 @@ def _parse_features(
                         )
                     )
                 # ID-looking prefix doesn't match pattern — treat whole heading as title.
-                feat_id = _auto_id("F", auto_index)
+                feat_id = _normalize_id(_auto_id("F", auto_index), prd_id)
                 title = heading
         else:
-            feat_id = _auto_id("F", auto_index)
+            feat_id = _normalize_id(_auto_id("F", auto_index), prd_id)
             title = heading
 
         auto_index += 1
@@ -493,7 +667,13 @@ def _parse_features(
                 key = m_field.group(1).strip().lower().rstrip(":")
                 val = m_field.group(2).strip()
                 if key == "requirements":
-                    req_ids = [r.strip().upper() for r in val.split(",") if r.strip()]
+                    # Normalise each cross-ref so a bare ``R001`` resolves
+                    # against this PRD's (possibly prefixed) requirement ids.
+                    req_ids = [
+                        _normalize_id(_strip_prd_prefix(r.strip(), prd_id).upper(), prd_id)
+                        for r in val.split(",")
+                        if r.strip()
+                    ]
                 # Other fields on features are ignored at parse time.
             elif raw:
                 description_parts.append(raw)
@@ -518,6 +698,7 @@ def _parse_features(
         features.append(
             Feature(
                 id=feat_id,
+                prd_id=_model_prd_id(prd_id),
                 title=title,
                 description=description,
                 requirements=req_ids,
@@ -538,6 +719,7 @@ def _parse_tasks(
     known_feat_ids: set[str],
     errors: list[ParseError],
     clock: Clock,
+    prd_id: str,
 ) -> list[Task]:
     """Parse all ### TXxx: Title blocks within ## Tasks.
 
@@ -545,6 +727,10 @@ def _parse_tasks(
     cannot accidentally regress to ``datetime.now()``. ``parse_prd`` supplies
     a ``SystemClock`` when callers do not pass one, preserving backwards
     compatibility at the public-API boundary.
+
+    ``prd_id`` controls id shape (see ``_normalize_id``). Task ids, the
+    ``**Feature:**`` cross-ref, and ``**Dependencies:**`` are all normalised so
+    bare refs resolve against this PRD's (possibly prefixed) ids.
     """
     tasks: list[Task] = []
     auto_index = 1
@@ -581,10 +767,11 @@ def _parse_tasks(
     for block_line, heading, block_lines in blocks:
         m_h3 = _H3_RE.match(f"### {heading}")
         if m_h3:
-            raw_id = m_h3.group(1)
+            # Accept a bare (T001) or prd-prefixed (v0.2:T001) heading id.
+            raw_id = _strip_prd_prefix(m_h3.group(1), prd_id)
             title = m_h3.group(2).strip()
             if _TASK_ID_RE.match(raw_id):
-                task_id = raw_id.upper()
+                task_id = _normalize_id(raw_id.upper(), prd_id)
             else:
                 if _is_malformed_id_prefix(raw_id, "T"):
                     errors.append(
@@ -601,10 +788,10 @@ def _parse_tasks(
                             ),
                         )
                     )
-                task_id = _auto_id("T", auto_index)
+                task_id = _normalize_id(_auto_id("T", auto_index), prd_id)
                 title = heading
         else:
-            task_id = _auto_id("T", auto_index)
+            task_id = _normalize_id(_auto_id("T", auto_index), prd_id)
             title = heading
 
         auto_index += 1
@@ -637,7 +824,11 @@ def _parse_tasks(
                 val = m_field.group(2).strip()
 
                 if key == "feature":
-                    feature_id = val.upper()
+                    # Normalise so a bare ``F001`` cross-ref resolves against
+                    # this PRD's (possibly prefixed) feature ids.
+                    feature_id = _normalize_id(
+                        _strip_prd_prefix(val, prd_id).upper(), prd_id
+                    )
                 elif key == "priority":
                     try:
                         priority = TaskPriority(val.lower())
@@ -675,13 +866,15 @@ def _parse_tasks(
                     likely_files = [f.strip() for f in val.split(",") if f.strip()]
                 elif key == "dependencies":
                     # v1.16.0 — explicit semantic dependencies. Comma-separated
-                    # TaskIDs (e.g. "T001, T002"). Normalised to upper-case.
+                    # TaskIDs (e.g. "T001, T002"). Normalised to upper-case and
+                    # to this PRD's id shape so a bare ``T002`` ref resolves
+                    # against a prefixed task id (``v0.2:T002``).
                     # Unknown-ID validation happens in a post-loop pass at the
                     # end of _parse_tasks once every task ID in this section
                     # has been collected (allows forward refs within the same
                     # ## Tasks section).
                     dependencies = [
-                        d.strip().upper()
+                        _normalize_id(_strip_prd_prefix(d.strip(), prd_id).upper(), prd_id)
                         for d in val.split(",")
                         if d.strip()
                     ]
@@ -742,6 +935,7 @@ def _parse_tasks(
         tasks.append(
             Task(
                 id=task_id,
+                prd_id=_model_prd_id(prd_id),
                 feature_id=feature_id,
                 title=title,
                 description=description,
@@ -1068,7 +1262,7 @@ def parse_acceptance_grammar(criteria: list[str]) -> list[AcceptanceClause]:
 def parse_prd(
     markdown: str,
     *,
-    prd_id: str = "prd",  # noqa: ARG001 — reserved for future multi-PRD support
+    prd_id: str = DEFAULT_PARSE_PRD_ID,
     provider: LLMProvider | None = None,
     clock: Clock | None = None,
 ) -> ParseResult:
@@ -1076,9 +1270,14 @@ def parse_prd(
 
     Args:
         markdown: The full PRD markdown source.
-        prd_id:   Reserved for future multi-PRD support. Currently accepted
-                  for API stability but not surfaced anywhere downstream
-                  (not threaded into ParseError messages or any other path).
+        prd_id:   Identity of the PRD being parsed. Load-bearing: the default
+                  PRD (``DEFAULT_PARSE_PRD_ID`` / ``DEFAULT_PRD_ID``) keeps BARE
+                  ids (``T001``, ``F001``, ``R001``) byte-identical to the
+                  pre-multi-PRD parser; any named PRD (e.g. ``"v0.2"``) prefixes
+                  every minted id with ``<prd_id>:`` (``v0.2:T001``) and stamps
+                  ``Requirement/Feature/Task.prd_id``. Author-written ids may be
+                  bare or already prefixed; bare cross-refs resolve within the
+                  same PRD via ``_normalize_id``.
         provider: Optional LLM provider used to enrich short Task descriptions
                   (Phase 7 Wave 2).  Pure-deterministic when ``None``.
         clock:    Optional Clock used to stamp ``Task.created_at`` /
@@ -1158,10 +1357,12 @@ def parse_prd(
             )
         )
     else:
+        # A "**Release:** ..." marker may live inside ## Summary; it is pulled
+        # out into the PRD release fields below, so exclude it from the prose.
         summary = " ".join(
             line.strip()
             for line in summary_block[1]
-            if line.strip()
+            if line.strip() and not _RELEASE_FIELD_RE.match(line.strip())
         ).strip()
 
     # --- Required: ## Goals ---------------------------------------------
@@ -1197,7 +1398,7 @@ def parse_prd(
         )
     else:
         requirements = _parse_requirements(
-            req_block[1], req_block[0], errors
+            req_block[1], req_block[0], errors, prd_id
         )
 
     known_req_ids = {r.id for r in requirements}
@@ -1220,8 +1421,16 @@ def parse_prd(
     if oq_block is not None:
         open_questions = _extract_bullet_list(oq_block[1])
 
+    # --- Optional: Release marker ---------------------------------------
+    # A "**Release:**" line (in ## Summary) or a dedicated "## Release" section
+    # round-trips into PRD.target_version / PRD.target_tag; absent => None/None.
+    target_version, target_tag = _parse_release(sections)
+
     # --- Build PRD model ------------------------------------------------
     prd = PRD(
+        id=_model_prd_id(prd_id),
+        target_version=target_version,
+        target_tag=target_tag,
         summary=summary,
         goals=goals,
         non_goals=non_goals,
@@ -1236,7 +1445,7 @@ def parse_prd(
     feat_block = sections.get("features")
     if feat_block is not None:
         features = _parse_features(
-            feat_block[1], feat_block[0], known_req_ids, errors
+            feat_block[1], feat_block[0], known_req_ids, errors, prd_id
         )
 
     known_feat_ids = {f.id for f in features}
@@ -1246,7 +1455,7 @@ def parse_prd(
     task_block = sections.get("tasks")
     if task_block is not None:
         tasks = _parse_tasks(
-            task_block[1], task_block[0], known_feat_ids, errors, clock
+            task_block[1], task_block[0], known_feat_ids, errors, clock, prd_id
         )
 
     # --- Link task IDs back onto their Features -------------------------
