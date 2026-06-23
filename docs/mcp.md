@@ -998,11 +998,12 @@ Every failure raises a FastMCP `ToolError`. The message is a human-readable stri
 describing what failed, what was expected, and what the agent should do next. There is no
 outer envelope — `ToolError` is surfaced directly to the MCP client.
 
-Example error message from `claim_task` when the PRD gate fires:
+Example error message from `claim_task` when the PRD gate fires (the task's
+owning PRD is not yet reviewed/approved; enforced by ClaimManager's per-PRD gate):
 
 ```
-Cannot claim task 'T012': PRD is in 'draft' status. The PRD must be reviewed or approved
-before tasks can be claimed.
+Task 'T012' cannot be claimed: PRD must be in {'reviewed', 'approved'}, got 'draft'.
+Review and approve the PRD before claiming tasks.
 ```
 
 Example error message from `update_task_status` when the transition is invalid:
