@@ -40,12 +40,16 @@ repo. No ``.db`` file is tracked.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from anvil.clock import FrozenClock
-from anvil.state.models import EventDraft
+from anvil.state import models, payloads
+from anvil.state.models import DEFAULT_PRD_ID, EventDraft
 from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
 
@@ -329,3 +333,264 @@ def test_no_tracked_db_artifacts_under_fixture_dir() -> None:
         "Expected: audit.jsonl, events.jsonl, expected-state.json."
     )
     assert not any(p.suffix == ".db" for p in _FIXTURE_DIR.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# T006 — SINGLE-PRD replay-equivalence oracle (SL-1)
+#
+# The 2-PRD byte-compare half is DEFERRED to Phase 6: serialize_state still
+# emits a SINGLETON ``prd`` and does not enumerate multiple PRDs, so a
+# byte-identical comparison of a directly-built 2-PRD backend against its
+# replay is not yet expressible. This phase scopes the oracle to the
+# single-PRD case (pre-v7 logs collapse to the 'default' partition) and leaves
+# a clearly-marked xfail stub for the 2-PRD half (see test below).
+#
+# Because ``prd_id`` is ``Field(exclude=True)`` on the entity models, it does
+# NOT appear in ``serialize_state`` output yet (Phase 2, T008-T010). These
+# tests therefore assert the partition by querying the DB DIRECTLY.
+# ---------------------------------------------------------------------------
+
+# Entity tables whose ``prd_id`` column carries ``NOT NULL DEFAULT 'default'``
+# in the v7 DDL, so a fresh-schema REPLAY (whose write-handlers do not yet
+# persist prd_id — that is Phase 2 / T010) collapses every row into the default
+# partition via the column DEFAULT.
+_DEFAULT_BACKED_TABLES = ("tasks", "features", "requirements")
+
+# All v7 prd-partitioned tables, including ``sync_mappings``. NOTE: under v7,
+# ``sync_mappings.prd_id`` is NULLABLE with NO column DEFAULT — the v6->v7
+# MIGRATION backfills it via a task-join UPDATE, but a REPLAY of a pre-v7 log
+# leaves it NULL until the sync_mapping write-handler threads prd_id (Phase 2,
+# T010 — explicitly out of scope here). The single-PRD oracle therefore asserts
+# 'default' on the DEFAULT-backed tables and NULL-on-replay for sync_mappings.
+_PRD_PARTITIONED_TABLES = (*_DEFAULT_BACKED_TABLES, "sync_mappings")
+
+
+def _prd_id_or_none(db_path: str, table: str) -> list[str | None]:
+    """Return DISTINCT ``prd_id`` values (including NULL) for ``table``, sorted
+    with NULL first — read DIRECTLY, not via serialize_state."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            f"SELECT DISTINCT prd_id FROM {table}"  # noqa: S608
+        ).fetchall()
+        return sorted((r[0] for r in rows), key=lambda v: (v is not None, v))
+    finally:
+        conn.close()
+
+
+def _distinct_prd_ids(db_path: str, table: str) -> list[str]:
+    """Return the DISTINCT ``prd_id`` values present in ``table``, sorted.
+
+    Reads the SQLite db DIRECTLY (read-only) — NOT via serialize_state — because
+    ``prd_id`` is ``Field(exclude=True)`` on the entity models and so is absent
+    from the serialized snapshot in Phase 1.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            f"SELECT DISTINCT prd_id FROM {table} ORDER BY prd_id"  # noqa: S608
+        ).fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+
+def _row_count(db_path: str, table: str) -> int:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])  # noqa: S608
+    finally:
+        conn.close()
+
+
+def test_pre_v7_log_replays_every_row_into_default_prd(tmp_path: Path) -> None:
+    """SINGLE-PRD oracle: a PRE-v7 events.jsonl (no prd_id keys) replayed from
+    empty onto the v7 schema lands EVERY entity row under prd_id='default'.
+
+    The committed fixture events.jsonl predates v7 — it carries zero ``prd_id``
+    keys (asserted below as a guard) — so it is the canonical pre-v7 log for
+    this oracle. After replay, every tasks/features/requirements/sync_mappings
+    row must belong to the single default PRD partition. Asserted by querying
+    the DB DIRECTLY, because ``prd_id`` is excluded from serialize_state.
+    """
+    # Guard: the fixture really is pre-v7 (no prd_id keys anywhere).
+    raw_text = _EVENTS_PATH.read_text(encoding="utf-8")
+    assert "prd_id" not in raw_text, (
+        "the replay fixture events.jsonl now carries a 'prd_id' key — it is no "
+        "longer a PRE-v7 log, so it cannot anchor the single-PRD oracle. Pick a "
+        "different pre-v7 fixture or regenerate without prd_id keys."
+    )
+
+    replay = _make_backend(tmp_path)
+    db_path = str(tmp_path / "state.db")
+    try:
+        replay.replay_from_empty(str(_EVENTS_PATH))
+
+        # The v7 schema is stamped (replay re-creates the schema on open).
+        assert replay.get_schema_version() == 7
+
+        # The scenario produced real rows in every partitioned table (vacuity
+        # guard — an all-empty DB would pass the 'every row is default' check
+        # vacuously).
+        assert _row_count(db_path, "tasks") == 3
+        assert _row_count(db_path, "features") >= 1
+        assert _row_count(db_path, "requirements") >= 1
+        assert _row_count(db_path, "sync_mappings") >= 1
+
+        # Every row in a DEFAULT-backed table belongs to the single default PRD
+        # partition (the column DEFAULT does the backfill on a fresh-schema
+        # replay).
+        for table in _DEFAULT_BACKED_TABLES:
+            assert _distinct_prd_ids(db_path, table) == [DEFAULT_PRD_ID], (
+                f"{table} has rows outside the default PRD partition after "
+                f"replaying a pre-v7 log: {_distinct_prd_ids(db_path, table)!r}"
+            )
+
+        # sync_mappings.prd_id is NULL on a pre-v7 REPLAY: its v7 column is
+        # nullable with no DEFAULT, and the write-handler does not thread prd_id
+        # until Phase 2 (T010). The v6->v7 MIGRATION backfills it to 'default'
+        # via a task-join UPDATE — covered by TestV6ToV7Migration in
+        # test_sqlite.py — but replay does not run that UPDATE. Asserting NULL
+        # here pins the genuine Phase 1 state instead of papering over it.
+        assert _prd_id_or_none(db_path, "sync_mappings") == [None], (
+            "sync_mappings.prd_id changed on a pre-v7 replay — Phase 1 leaves it "
+            "NULL (no column DEFAULT; write-handler prd_id is Phase 2/T010). If "
+            "the write-handler now threads prd_id, move this to assert 'default' "
+            "and update the Phase 1 scope note."
+        )
+    finally:
+        replay.close()
+
+
+def test_replay_matches_migrated_db_single_default_prd(tmp_path: Path) -> None:
+    """The replay-reconstructed state matches the migrated-DB shape: a single
+    default PRD owns every row, and row counts agree between two independent
+    replays (the migrated-DB equivalent for a pre-v7 log is, by construction,
+    the same single-default partition).
+
+    Row counts are the cross-check the packet asks for: the default PRD owns
+    every row and no row is lost or duplicated relative to a second replay.
+    """
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+
+    backend_a = _make_backend(dir_a)
+    backend_b = _make_backend(dir_b)
+    db_a = str(dir_a / "state.db")
+    db_b = str(dir_b / "state.db")
+    try:
+        backend_a.replay_from_empty(str(_EVENTS_PATH))
+        backend_b.replay_from_empty(str(_EVENTS_PATH))
+
+        for table in _PRD_PARTITIONED_TABLES:
+            # Same row count across the two independent replays …
+            assert _row_count(db_a, table) == _row_count(db_b, table), table
+
+        # … and every row in a DEFAULT-backed table belongs to the default PRD.
+        for table in _DEFAULT_BACKED_TABLES:
+            assert _distinct_prd_ids(db_a, table) == [DEFAULT_PRD_ID], table
+            assert _distinct_prd_ids(db_b, table) == [DEFAULT_PRD_ID], table
+
+        # sync_mappings.prd_id is NULL on replay in Phase 1 (see the single-PRD
+        # oracle above) — assert it stays consistent across both replays rather
+        # than asserting 'default' the replay write-path does not yet produce.
+        assert (
+            _prd_id_or_none(db_a, "sync_mappings")
+            == _prd_id_or_none(db_b, "sync_mappings")
+            == [None]
+        )
+
+        # The prds table holds exactly one row, the default PRD (id='default').
+        #
+        # On a pre-v7 REPLAY the prd.parsed write-handler now creates the row
+        # with is_default=1 (BUG 001 fix — the UPSERT INSERT path stamps the v7
+        # identity columns), matching what the v6->v7 MIGRATION mints. So both
+        # the replay and migration paths converge on the same single-default
+        # partition: exactly one prds row, id='default', is_default=1.
+        conn = sqlite3.connect(f"file:{db_a}?mode=ro", uri=True)
+        try:
+            prds = conn.execute("SELECT id, is_default FROM prds").fetchall()
+        finally:
+            conn.close()
+        assert prds == [(DEFAULT_PRD_ID, 1)]
+    finally:
+        backend_a.close()
+        backend_b.close()
+
+
+def test_default_prd_id_is_single_source_for_migration_and_payloads() -> None:
+    """DEFAULT_PRD_ID is THE single source of the 'default' partition literal.
+
+    A pre-v7 log replays into the same partition the v6->v7 migration mints, so
+    the migration backfill literal and the payload-default literal MUST both be
+    ``DEFAULT_PRD_ID``. We assert:
+
+    * the constant value is exactly 'default';
+    * the migration backfill literal (in _m_to_v7's source) equals the constant;
+    * the payload prd_id defaults all resolve to the constant.
+
+    If these ever diverge, a pre-v7 replay would fork from the migrated DB.
+    """
+    # 1. The constant value.
+    assert models.DEFAULT_PRD_ID == "default"
+    assert DEFAULT_PRD_ID == "default"
+
+    # 2. The migration backfill literal equals the constant. The v6->v7 ALTERs
+    #    backfill via ``DEFAULT '<literal>'`` in raw SQL; that literal must be
+    #    DEFAULT_PRD_ID or a pre-v7 log forks from the migrated DB. We assert the
+    #    literal text the migration emits matches the constant.
+    import inspect
+
+    from anvil.state import sqlite as sqlite_mod
+
+    # The migration body lives in _m_to_v7_body (wrapped atomically by
+    # _m_to_v7 — BUG 002 fix); inspect both so the literal check sees the
+    # actual ALTER/INSERT SQL, not just the wrapper.
+    migration_src = inspect.getsource(
+        sqlite_mod.SqliteBackend._m_to_v7
+    ) + inspect.getsource(sqlite_mod.SqliteBackend._m_to_v7_body)
+    assert f"DEFAULT '{DEFAULT_PRD_ID}'" in migration_src, (
+        "the v6->v7 migration no longer backfills prd_id with the "
+        f"DEFAULT_PRD_ID literal {DEFAULT_PRD_ID!r}. The migration backfill and "
+        "DEFAULT_PRD_ID must stay the SINGLE source, or pre-v7 replay forks "
+        "from the migrated DB."
+    )
+    # And the prds default row id literal.
+    assert f"'{DEFAULT_PRD_ID}'" in migration_src
+
+    # 3. The payload prd_id defaults resolve to the same constant. Each pre-v7
+    #    payload that scopes an entity defaults prd_id to DEFAULT_PRD_ID so a log
+    #    with no prd_id key collapses into the default partition.
+    for payload_cls in (
+        payloads.PrdParsedPayload,
+        payloads.FeatureCreatedPayload,
+        payloads.TaskCreatedPayload,
+    ):
+        default = payload_cls.model_fields["prd_id"].default
+        assert default == DEFAULT_PRD_ID, (
+            f"{payload_cls.__name__}.prd_id defaults to {default!r}, not the "
+            f"DEFAULT_PRD_ID constant {DEFAULT_PRD_ID!r}."
+        )
+
+
+@pytest.mark.xfail(
+    reason=(
+        "2-PRD byte-compare oracle is DEFERRED to Phase 6: serialize_state "
+        "still emits a SINGLETON 'prd' and does not enumerate multiple PRDs, so "
+        "json.dumps(serialize_state(b), sort_keys=True) cannot yet be "
+        "byte-identical between a directly-built 2-PRD backend and its "
+        "replay_from_empty. Implement once serialize_state enumerates a sorted "
+        "'prds' collection (Phase 6); do NOT change serialize_state here."
+    ),
+    strict=True,
+    run=False,
+)
+def test_two_prd_replay_byte_equivalence_phase6() -> None:  # pragma: no cover
+    """TODO(Phase 6): directly-build a 2-PRD backend, replay_from_empty over the
+    same events, and assert json.dumps(serialize_state(b), sort_keys=True) is
+    byte-identical between the two. Blocked on serialize_state multi-PRD
+    enumeration (the singleton 'prd' key must become a sorted 'prds' list).
+    """
+    raise NotImplementedError("Phase 6: serialize_state multi-PRD enumeration")

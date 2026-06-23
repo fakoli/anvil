@@ -47,6 +47,7 @@ Honors the v1.24 ``--json`` envelope and the ``ANVIL_ROOT`` /
 from __future__ import annotations
 
 import datetime
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -252,6 +253,42 @@ _VERIFY_PATH_RE = re.compile(
     r"[\w./-]+/[\w./-]*\.(?:py|sh|txt|md|json|ya?ml|toml|cfg|ini)\b"
 )
 
+# A `cd <dir>` segment mutates the cwd for everything after it in the same shell.
+# Verification commands routinely start `cd bin && uv run pytest …`, so path
+# tokens must resolve against the cd'd directory, not the project root.
+_CD_RE = re.compile(r"^cd\s+(\S+)$")
+
+
+def _command_paths(command: str, project_root: Path) -> list[tuple[str, Path]]:
+    """Return (path_token, effective_cwd) for each path-shaped token in ``command``.
+
+    Tracks a leading ``cd <dir>`` so a token in ``cd bin && uv run pytest
+    ../tests/x.py`` resolves against ``<root>/bin`` (mirroring how the command
+    runs), not the project root, while a bin-relative ``tests/x.py`` (missing
+    from bin/) is still flagged. ``cd`` persists across ``&&`` within a
+    statement; cwd resets to the project root at each ``;`` boundary, matching
+    the common multi-statement re-cd pattern ``cd bin && A; cd bin && B`` (each
+    statement starts fresh from the repo root). With no ``cd`` the cwd stays the
+    project root (unchanged behaviour).
+
+    Best-effort heuristic, not a shell: it does NOT model ``cd`` inside a
+    subshell ``(cd bin && ...)``, a quoted/space-containing target, ``cd``
+    chained with ``||`` / pipes / env-prefixes, or ``&&``/``;`` embedded in a
+    quoted argument; such tokens resolve against the current cwd. The check is
+    advisory, so an occasional mis-resolve on those rare shapes is tolerable.
+    """
+    out: list[tuple[str, Path]] = []
+    for statement in command.split(";"):
+        cwd = project_root
+        for segment in statement.split("&&"):
+            seg = segment.strip()
+            cd_match = _CD_RE.match(seg)
+            if cd_match:
+                cwd = cwd / cd_match.group(1)
+                continue
+            out.extend((token, cwd) for token in _extract_verification_paths(seg))
+    return out
+
 
 def _extract_verification_paths(command: str) -> list[str]:
     """Return concrete path-shaped tokens from a verification command string.
@@ -273,12 +310,17 @@ def _check_verification_paths(backend: SqliteBackend, project_root: Path) -> _Fi
     offenders: list[dict[str, str]] = []
     for task in backend.list_tasks(status="ready"):
         for command in task.verification.commands:
-            for token in _extract_verification_paths(command):
-                candidate = project_root / token
+            for token, base in _command_paths(command, project_root):
+                # Normalise so a `..` token (cd bin && ... ../tests/x.py) collapses
+                # lexically — the target resolves even when the cd'd dir is absent
+                # on disk (e.g. a decoupled state workspace). base honours cd <dir>.
+                candidate = Path(os.path.normpath(base / token))
                 # Accept if the file resolves, or its parent dir exists (covers
-                # a not-yet-created output file under a real directory).
+                # a not-yet-created output file under a real directory). ``base``
+                # honours a leading ``cd <dir>`` so ``cd bin && … ../tests/x.py``
+                # resolves against bin/, matching how the command runs.
                 if candidate.exists() or (
-                    candidate.parent != project_root and candidate.parent.exists()
+                    candidate.parent != base and candidate.parent.exists()
                 ):
                     continue
                 offenders.append({"task": task.id, "command": command, "path": token})

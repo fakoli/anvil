@@ -723,6 +723,25 @@ worker-thread loop across supported platforms.
 
 ---
 
+## VP-1 · `anvil doctor` verification_paths false-positives under a decoupled `ANVIL_ROOT` workspace
+
+**From**: v0.3 T011 follow-up (per-PRD gate session). **Status**: OPEN (low, advisory-only).
+
+`_check_verification_paths` resolves a task's verification-command path tokens
+against the "project root" returned by `_resolve_project_root`. With `ANVIL_ROOT`
+pointing at a dedicated task workspace decoupled from the code checkout (e.g.
+`~/.anvil/releases/anvil-v0.3`), `_resolve_project_root(None)` returns that
+workspace dir, which contains no `bin/` or `tests/` — so EVERY path token is
+flagged "does not resolve from the project root" (false positive). The cwd-aware
+`cd bin && …` fix landed this session makes the check correct when project_root
+IS a checkout; this is the orthogonal "state dir != checkout" gap (same class as
+PR #74). **Fix**: give doctor a real checkout signal distinct from the state-root
+`ANVIL_ROOT` (resolve the nearest git checkout from cwd, or add `--checkout`), and
+resolve verification/likely-files paths against it. Until then the warning is
+advisory and harmless.
+
+---
+
 ## Closed in PR #41 fixup commits (for reference)
 
 - DONE · Greptile #1: `_is_pr_related` bare "pr" substring

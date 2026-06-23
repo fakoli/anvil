@@ -822,12 +822,17 @@ class SqliteBackend:
         status: str | None = None,
         feature_id: str | None = None,
         task_type: str | None = None,
+        prd_id: str | None = None,
     ) -> list[Task]:
-        """Return tasks, optionally filtered by status, feature_id, task_type.
+        """Return tasks, optionally filtered by status, feature_id, task_type, prd_id.
 
         ``task_type`` (T015) pushes a ``task_type = ?`` clause to SQL so the
         ready queue / list surfaces can scope to feature / bugfix / refactor /
         modify work. Omitting it keeps the pre-T015 behaviour (all types).
+
+        ``prd_id`` (T009) is the multi-PRD partition filter: ``None`` means all
+        PRDs (the pre-T009 behaviour — byte-identical for existing callers),
+        an explicit id adds ``prd_id = ?``.
         """
         conn = self._require_conn()
         clauses: list[str] = []
@@ -841,6 +846,9 @@ class SqliteBackend:
         if task_type is not None:
             clauses.append("task_type = ?")
             params.append(task_type)
+        if prd_id is not None:
+            clauses.append("prd_id = ?")
+            params.append(prd_id)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(f"SELECT * FROM tasks {where}", params).fetchall()
         return [self._row_to_task(row, conn) for row in rows]
@@ -932,28 +940,83 @@ class SqliteBackend:
         ).fetchall()
         return [self._row_to_evidence(row) for row in rows]
 
-    def list_requirements(self) -> list[Requirement]:
-        """Return all Requirement rows sorted by id ASC.
+    def list_requirements(
+        self, *, prd_id: str | None = None
+    ) -> list[Requirement]:
+        """Return Requirement rows sorted by id ASC.
 
         The id-based ordering is deterministic because requirement IDs are
         assigned at prd.parsed time and never mutate.  prd.parsed is
         destructive — it deletes and re-inserts all rows — so the result
         always reflects the current parse, in stable id order.
+
+        ``prd_id`` (T009) is the multi-PRD partition filter: ``None`` means all
+        PRDs (byte-identical to the pre-T009 call), an explicit id adds
+        ``WHERE prd_id = ?``.
         """
         conn = self._require_conn()
+        where = "WHERE prd_id = ? " if prd_id is not None else ""
+        params: tuple[str, ...] = (prd_id,) if prd_id is not None else ()
         rows = conn.execute(
             "SELECT id, prd_section, text, source_paragraph, derived "
-            "FROM requirements ORDER BY id ASC"
+            f"FROM requirements {where}ORDER BY id ASC",
+            params,
         ).fetchall()
         return [self._row_to_requirement(row) for row in rows]
 
-    def get_prd(self) -> PRD | None:
-        """Return the current PRD, or None if not yet created."""
+    def get_prd(self, prd_id: str | None = None) -> PRD | None:
+        """Return a PRD, or None if not found.
+
+        ``prd_id is None`` (the legacy no-arg call shape used by the 12 existing
+        call sites) resolves the ``is_default = 1`` row — the single PRD on a
+        single-PRD DB. ``ORDER BY id`` keeps the result deterministic if more
+        than one default row ever existed (the ``ux_prds_default`` partial unique
+        index makes that impossible per project, but the ORDER BY costs nothing
+        and removes the ambiguity by construction).
+
+        An explicit ``prd_id`` resolves ``WHERE id = ?`` — the partition lookup
+        T008 adds for the multi-PRD phases.
+        """
         conn = self._require_conn()
-        row = conn.execute("SELECT * FROM prds").fetchone()
+        if prd_id is None:
+            row = conn.execute(
+                "SELECT * FROM prds WHERE is_default = 1 ORDER BY id LIMIT 1"
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM prds WHERE id = ? LIMIT 1", (prd_id,)
+            ).fetchone()
         if row is None:
             return None
         return self._row_to_prd(row)
+
+    def list_prds(self) -> list[PRD]:
+        """Return every PRD ordered by ``id`` ASC (deterministic for replay)."""
+        conn = self._require_conn()
+        rows = conn.execute("SELECT * FROM prds ORDER BY id").fetchall()
+        return [self._row_to_prd(row) for row in rows]
+
+    def default_prd_id(self) -> str | None:
+        """Return the ``is_default = 1`` PRD's id, or None if no PRD exists."""
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT id FROM prds WHERE is_default = 1 ORDER BY id LIMIT 1"
+        ).fetchone()
+        return row[0] if row else None
+
+    def get_prd_for_task(self, task: Task) -> PRD | None:
+        """Return the PRD that OWNS ``task``, resolved via ``task.prd_id`` (T011).
+
+        Reads ``task.prd_id`` directly (no ``Feature`` join) and resolves it with
+        ``get_prd(prd_id)`` — a single-column partition lookup. When the task
+        carries no ``prd_id`` it falls back to the default PRD via the plain
+        ``get_prd()`` (``is_default = 1``) resolver. On a single-PRD DB every
+        task's ``prd_id`` is the default id, so this returns the same PRD the
+        legacy no-arg ``get_prd()`` did — behaviour is unchanged there.
+        """
+        if not task.prd_id:
+            return self.get_prd()
+        return self.get_prd(task.prd_id)
 
     def get_project(self) -> Project | None:
         """Return the Project record, or None if not initialised."""
@@ -995,12 +1058,20 @@ class SqliteBackend:
             tasks=json.loads(row[5] or "[]"),
         )
 
-    def list_features(self) -> list[Feature]:
-        """Return all Feature rows ordered by ID — see Protocol docstring."""
+    def list_features(self, *, prd_id: str | None = None) -> list[Feature]:
+        """Return Feature rows ordered by ID — see Protocol docstring.
+
+        ``prd_id`` (T009) is the multi-PRD partition filter: ``None`` means all
+        PRDs (byte-identical to the pre-T009 call), an explicit id adds
+        ``WHERE prd_id = ?``.
+        """
         conn = self._require_conn()
+        where = "WHERE prd_id = ? " if prd_id is not None else ""
+        params: tuple[str, ...] = (prd_id,) if prd_id is not None else ()
         rows = conn.execute(
             "SELECT id, title, description, status, requirements, tasks "
-            "FROM features ORDER BY id"
+            f"FROM features {where}ORDER BY id",
+            params,
         ).fetchall()
         return [
             Feature(
@@ -2364,19 +2435,30 @@ class SqliteBackend:
         risks = payload.risks
         open_questions = payload.open_questions
 
+        # The payload-level prd_id is the authoritative partition this parse
+        # writes into (DEFAULT_PRD_ID='default' for a pre-v7 replay or a
+        # single-PRD project). Requirement rows are stamped with it so a
+        # per-PRD re-parse clears and rewrites only its own partition.
+        prd_id: str = payload.prd_id
+
         requirement_objects: list[Requirement] = [
             Requirement.model_validate(req_data) for req_data in requirements_raw
         ]
         requirement_ids = [r.id for r in requirement_objects]
 
-        # Upsert the default PRD row (BUG 001). Under the v7 single-column PK
-        # (``id TEXT PRIMARY KEY DEFAULT 'default'``) a bare INSERT OR REPLACE
-        # that omitted id/is_default/created_at/updated_at would collide on the
-        # migrated ``id='default'`` row and, being a DELETE+INSERT, reset
-        # is_default 1→0 and wipe created_at/updated_at — destroying the v7
-        # migration's COALESCE backfill and the ux_prds_default invariant on
-        # the first re-parse. Use an explicit UPSERT that writes ONLY the v6
-        # content columns on conflict, preserving is_default and created_at.
+        # Upsert the PRD row keyed on ``id`` = ``prd_id`` (BUG 001). Under the v7
+        # single-column PK (``id TEXT PRIMARY KEY DEFAULT 'default'``) a bare
+        # INSERT OR REPLACE that omitted id/is_default/created_at/updated_at
+        # would collide on the migrated ``id='default'`` row and, being a
+        # DELETE+INSERT, reset is_default 1→0 and wipe created_at/updated_at —
+        # destroying the v7 migration's COALESCE backfill and the
+        # ux_prds_default invariant on the first re-parse. Use an explicit UPSERT
+        # that writes ONLY the v6 content columns on conflict, preserving
+        # is_default / created_at / the identity columns of the existing row.
+        #
+        # For a pre-v7 replay the payload defaults (prd_id='default',
+        # is_default=True, title='', target_version/target_tag=None) reproduce
+        # the prior literal INSERT byte-for-byte, so the golden is unchanged.
         #
         # ``now`` comes from the event timestamp (the backend's injected clock
         # source — see the many ``event.timestamp.isoformat()`` write handlers)
@@ -2385,14 +2467,16 @@ class SqliteBackend:
         conn.execute(
             """
             INSERT INTO prds
-                (id, project_id, status, summary, goals, non_goals,
+                (id, project_id, title, status, summary, goals, non_goals,
                  requirements, acceptance_criteria, risks, open_questions,
                  last_reviewed_at, last_reviewed_by,
+                 target_version, target_tag,
                  is_default, created_at, updated_at)
             VALUES
-                ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
+                title = excluded.title,
                 status = excluded.status,
                 summary = excluded.summary,
                 goals = excluded.goals,
@@ -2403,10 +2487,14 @@ class SqliteBackend:
                 open_questions = excluded.open_questions,
                 last_reviewed_at = excluded.last_reviewed_at,
                 last_reviewed_by = excluded.last_reviewed_by,
+                target_version = excluded.target_version,
+                target_tag = excluded.target_tag,
                 updated_at = excluded.updated_at
             """,
             (
+                prd_id,
                 project_id,
+                payload.title,
                 status,
                 summary,
                 json.dumps(goals),
@@ -2415,26 +2503,36 @@ class SqliteBackend:
                 json.dumps(acceptance_criteria),
                 json.dumps(risks),
                 json.dumps(open_questions),
+                payload.target_version,
+                payload.target_tag,
+                1 if payload.is_default else 0,
                 now,
                 now,
             ),
         )
 
-        # Destructive re-parse of requirements — use SAVEPOINT so failure is
-        # atomic within the outer transaction.
+        # Destructive re-parse of requirements, SCOPED to this PRD's partition —
+        # use SAVEPOINT so failure is atomic within the outer transaction. The
+        # scoped DELETE (WHERE prd_id = ?) clears only this PRD's requirements so
+        # a per-PRD re-parse never wipes another partition; the default PRD
+        # clears exactly 'default'. (Pre-v7 replay: prd_id='default', so the
+        # WHERE matches every row the prior unscoped DELETE removed.)
         conn.execute("SAVEPOINT prd_requirements_replace")
         try:
-            conn.execute("DELETE FROM requirements")
+            conn.execute(
+                "DELETE FROM requirements WHERE prd_id = ?", (prd_id,)
+            )
             for req in requirement_objects:
                 conn.execute(
                     """
                     INSERT INTO requirements
-                        (id, prd_section, text, source_paragraph, derived)
+                        (id, prd_id, prd_section, text, source_paragraph, derived)
                     VALUES
-                        (?, ?, ?, ?, ?)
+                        (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         req.id,
+                        prd_id,
                         req.prd_section,
                         req.text,
                         req.source_paragraph,
@@ -2480,9 +2578,13 @@ class SqliteBackend:
         `reviews WHERE decision='approve'` to determine approval state.
         """
         project_id: str = payload.project_id
+        prd_id: str = payload.prd_id
         reviewer: str = payload.reviewer
         timestamp: str = event.timestamp.isoformat()
 
+        # Scope to project_id AND id so a multi-PRD project mutates only the
+        # named PRD. Pre-v7 replay: prd_id='default' matches the single migrated
+        # row, so the result is byte-identical to the old project_id-only UPDATE.
         conn.execute(
             """
             UPDATE prds
@@ -2490,9 +2592,9 @@ class SqliteBackend:
                    last_reviewed_at = ?,
                    last_reviewed_by = ?,
                    updated_at = ?
-             WHERE project_id = ?
+             WHERE project_id = ? AND id = ?
             """,
-            (timestamp, reviewer, timestamp, project_id),
+            (timestamp, reviewer, timestamp, project_id, prd_id),
         )
 
     def _check_prd_approved(
@@ -2523,10 +2625,13 @@ class SqliteBackend:
         decision='approve' AND target_kind='prd'.
         """
         project_id: str = payload.project_id
+        prd_id: str = payload.prd_id
         approver: str = payload.approver
         event_id: str = event.id
         timestamp: str = event.timestamp.isoformat()
 
+        # Scope to project_id AND id (see _write_prd_reviewed). Pre-v7 replay:
+        # prd_id='default' matches the single migrated row → byte-identical.
         conn.execute(
             """
             UPDATE prds
@@ -2534,9 +2639,9 @@ class SqliteBackend:
                    last_reviewed_at = ?,
                    last_reviewed_by = ?,
                    updated_at = ?
-             WHERE project_id = ?
+             WHERE project_id = ? AND id = ?
             """,
-            (timestamp, approver, timestamp, project_id),
+            (timestamp, approver, timestamp, project_id, prd_id),
         )
 
         review_id = f"RV-{event_id}"
@@ -2586,6 +2691,10 @@ class SqliteBackend:
         _ = event
         feature = Feature.model_validate(payload.model_dump(mode="json"))
         data = feature.model_dump(mode="json")
+        # prd_id is Field(exclude=True) on the model, so it is NOT in
+        # model_dump(); read it as the in-memory attribute and write the column
+        # explicitly. Pre-v7 replay carries the DEFAULT_PRD_ID='default' default.
+        prd_id = feature.prd_id
         # Use INSERT ... ON CONFLICT DO UPDATE (UPSERT) instead of INSERT OR
         # REPLACE to avoid violating the ON DELETE RESTRICT FK from tasks.
         # INSERT OR REPLACE is equivalent to DELETE + INSERT which trips the FK
@@ -2593,10 +2702,11 @@ class SqliteBackend:
         conn.execute(
             """
             INSERT INTO features
-                (id, title, description, status, requirements, tasks)
+                (id, prd_id, title, description, status, requirements, tasks)
             VALUES
-                (:id, :title, :description, :status, :requirements, :tasks)
+                (:id, :prd_id, :title, :description, :status, :requirements, :tasks)
             ON CONFLICT(id) DO UPDATE SET
+                prd_id       = excluded.prd_id,
                 title        = excluded.title,
                 description  = excluded.description,
                 status       = excluded.status,
@@ -2605,6 +2715,7 @@ class SqliteBackend:
             """,
             {
                 "id": data["id"],
+                "prd_id": prd_id,
                 "title": data["title"],
                 "description": data["description"],
                 "status": data["status"],
@@ -4308,19 +4419,38 @@ class SqliteBackend:
         `plan` is re-run after work has begun.
         """
         data = task.model_dump(mode="json")
+        # prd_id is Field(exclude=True) — read it as the in-memory attribute and
+        # write the column explicitly (pre-v7 replay carries 'default').
+        prd_id = task.prd_id
+        # Denormalization invariant: a task lives in its owning feature's PRD
+        # partition. Assert Task.prd_id == owning Feature.prd_id at write time so
+        # a cross-partition mismatch fails fast here rather than silently
+        # producing an orphaned partition. The owning feature row exists by the
+        # time a task is written (feature.created precedes task.created in both
+        # the live path and replay ordering); if it is somehow absent we skip the
+        # check rather than invent a constraint.
+        feat_row = conn.execute(
+            "SELECT prd_id FROM features WHERE id = ?", (task.feature_id,)
+        ).fetchone()
+        if feat_row is not None and feat_row[0] != prd_id:
+            raise TransactionAborted(
+                f"task {task.id!r} prd_id={prd_id!r} does not match owning "
+                f"feature {task.feature_id!r} prd_id={feat_row[0]!r}"
+            )
         conn.execute(
             """
             INSERT INTO tasks
-                (id, feature_id, title, description, status, priority,
+                (id, prd_id, feature_id, title, description, status, priority,
                  task_type, dependencies, conflict_groups, scores,
                  acceptance_criteria, implementation_notes, verification,
                  likely_files, parent_task_id, created_at, updated_at)
             VALUES
-                (:id, :feature_id, :title, :description, :status, :priority,
+                (:id, :prd_id, :feature_id, :title, :description, :status, :priority,
                  :task_type, :dependencies, :conflict_groups, :scores,
                  :acceptance_criteria, :implementation_notes, :verification,
                  :likely_files, :parent_task_id, :created_at, :updated_at)
             ON CONFLICT(id) DO UPDATE SET
+                prd_id               = excluded.prd_id,
                 feature_id           = excluded.feature_id,
                 title                = excluded.title,
                 description          = excluded.description,
@@ -4346,6 +4476,7 @@ class SqliteBackend:
             """,
             {
                 "id": data["id"],
+                "prd_id": prd_id,
                 "feature_id": data["feature_id"],
                 "title": data["title"],
                 "description": data["description"],
@@ -4571,9 +4702,19 @@ class SqliteBackend:
         )
 
     def _row_to_prd(self, row: Any) -> PRD:
-        """Deserialise a prds row into a PRD model instance."""
+        """Deserialise a prds row into a PRD model instance.
+
+        Maps the v7 identity/release columns (id / title / target_version /
+        target_tag / is_default / created_at / updated_at) into the PRD model.
+        Those model fields carry ``Field(exclude=True)`` — they round-trip as
+        in-memory attributes but stay out of ``model_dump()`` (and therefore out
+        of ``serialize_state``), so reading them here is purely additive and the
+        replay-equivalence golden is unaffected.
+        """
         d = dict(row)
-        # Remove the synthetic project_id PK column — PRD model doesn't have it.
+        # project_id is the migration's stored owner column. The PRD model has no
+        # such field, so drop it from the validation dict (it is NOT exclude=True —
+        # it simply does not exist on the model).
         d.pop("project_id", None)
         for col in (
             "goals",
@@ -4585,7 +4726,39 @@ class SqliteBackend:
         ):
             if isinstance(d.get(col), str):
                 d[col] = json.loads(d[col])
+        # is_default is stored as INTEGER (0/1); coerce to bool for the model.
+        if "is_default" in d and d["is_default"] is not None:
+            d["is_default"] = bool(d["is_default"])
+        # Review #13: created_at / updated_at are backfilled by the v6->v7
+        # migration via COALESCE(last_reviewed_at, project.created_at), both of
+        # which are stored as tz-aware UTC ISO strings — so the PRD field
+        # validators (which reject naive datetimes) normally pass. Defensively
+        # normalize any value that parses naive to UTC here, so get_prd() on a
+        # migrated DB can never raise on a legacy row that predates tz
+        # enforcement.
+        for col in ("created_at", "updated_at", "last_reviewed_at"):
+            d[col] = self._coerce_utc_iso(d.get(col))
         return PRD.model_validate(d)
+
+    @staticmethod
+    def _coerce_utc_iso(value: Any) -> Any:
+        """Return an ISO timestamp string normalized to tz-aware UTC.
+
+        A naive ISO string (no offset) is reinterpreted as UTC by appending the
+        ``+00:00`` offset, so the PRD model's UTC field-validators accept it.
+        Non-string / None / already-offset-aware values pass through unchanged.
+        """
+        if not isinstance(value, str) or not value:
+            return value
+        import datetime as _dt
+
+        try:
+            parsed = _dt.datetime.fromisoformat(value)
+        except ValueError:
+            return value
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=_dt.UTC).isoformat()
+        return value
 
     def _row_to_project(self, row: Any) -> Project:
         """Deserialise a projects row into a Project model instance."""

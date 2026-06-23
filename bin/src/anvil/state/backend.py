@@ -103,8 +103,13 @@ class Backend(Protocol):
         status: str | None = None,
         feature_id: str | None = None,
         task_type: str | None = None,
+        prd_id: str | None = None,
     ) -> list[Task]:
-        """Return tasks, optionally filtered by status, feature, task_type."""
+        """Return tasks, optionally filtered by status, feature, task_type, prd_id.
+
+        ``prd_id`` (T009) is the multi-PRD partition filter: ``None`` means all
+        PRDs (unchanged), an explicit id scopes to ``prd_id = ?``.
+        """
         ...
 
     def get_claim(self, claim_id: str) -> Claim | None:
@@ -115,10 +120,13 @@ class Backend(Protocol):
         """Return the Feature with the given ID, or None if not found."""
         ...
 
-    def list_features(self) -> list[Feature]:
-        """Return all Feature rows. Used by `plan` for orphan detection
+    def list_features(self, *, prd_id: str | None = None) -> list[Feature]:
+        """Return Feature rows. Used by `plan` for orphan detection
         on re-parse (v1.15.0): the new parse's feature set is diffed
-        against this to compute which features to delete."""
+        against this to compute which features to delete.
+
+        ``prd_id`` (T009): ``None`` means all PRDs (unchanged), an explicit id
+        scopes to ``prd_id = ?``."""
         ...
 
     def list_conflict_groups(self) -> list[ConflictGroup]:
@@ -169,12 +177,17 @@ class Backend(Protocol):
         """
         ...
 
-    def list_requirements(self) -> list[Requirement]:
-        """Return all Requirement rows sorted by id ASC.
+    def list_requirements(
+        self, *, prd_id: str | None = None
+    ) -> list[Requirement]:
+        """Return Requirement rows sorted by id ASC.
 
         Used by serialize_state to capture the full requirement set written
         by prd.parsed.  The id-based ordering is deterministic because
         requirement IDs are assigned at parse time and never mutate.
+
+        ``prd_id`` (T009): ``None`` means all PRDs (unchanged), an explicit id
+        scopes to ``WHERE prd_id = ?``.
         """
         ...
 
@@ -195,8 +208,32 @@ class Backend(Protocol):
         event-log range it covers (B48 part 2)."""
         ...
 
-    def get_prd(self) -> PRD | None:
-        """Return the current PRD, or None if not yet parsed."""
+    def get_prd(self, prd_id: str | None = None) -> PRD | None:
+        """Return a PRD, or None if not found.
+
+        ``prd_id is None`` resolves the ``is_default = 1`` row — the single PRD
+        on a single-PRD DB (the legacy no-arg call shape). An explicit ``prd_id``
+        resolves ``WHERE id = ?`` (the T008 multi-PRD partition lookup).
+        """
+        ...
+
+    def list_prds(self) -> list[PRD]:
+        """Return every PRD ordered by ``id`` ASC (T008)."""
+        ...
+
+    def default_prd_id(self) -> str | None:
+        """Return the ``is_default = 1`` PRD's id, or None if no PRD exists (T008)."""
+        ...
+
+    def get_prd_for_task(self, task: Task) -> PRD | None:
+        """Return the PRD that OWNS ``task``, resolved via ``task.prd_id`` (T011).
+
+        Reads ``task.prd_id`` directly — no ``Feature`` join — then ``get_prd``
+        on that id. Falls back to the default PRD (``get_prd()`` /
+        ``is_default = 1``) when the task carries no ``prd_id``. The per-PRD
+        claim gate keys on this, so a task in an approved PRD is claimable while
+        a sibling in a draft PRD is refused at ``prd_status_gate``.
+        """
         ...
 
     def get_project(self) -> Project | None:

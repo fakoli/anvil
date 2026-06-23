@@ -190,7 +190,7 @@ Bundling all future columns now (revision lineage, sync columns) avoids a second
 **Verification:**
 
 - `cd bin && uv run python -c "from anvil.state.schema import SCHEMA_VERSION, DDL; assert SCHEMA_VERSION==7; assert 'is_default' in DDL and 'idx_tasks_prd_status' in DDL and 'entity_kind' in DDL and 'revision_superseded' in DDL; print('ok')"`
-- `cd bin && uv run pytest -q ../tests/test_schema_version.py tests/test_version_sync.py`
+- `cd bin && uv run pytest -q ../tests/test_schema_version.py ../tests/test_version_sync.py`
 
 ### T003: Thread prd_id + release fields through payloads with DEFAULT_PRD_ID replay defaults
 
@@ -372,7 +372,7 @@ If task.prd_id is somehow absent (mis-migrated), get_prd_for_task must fall back
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_claims.py tests/test_transitions.py`
+- `cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_transitions.py`
 - `cd bin && uv run pytest -q -k 'per_prd_gate or owning_prd'`
 
 ### T012: Collapse the duplicated MCP claim gate onto ClaimManager
@@ -414,7 +414,7 @@ This is the moat. The danger is a future --prd filter implemented as list_tasks(
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_inference.py tests/test_claims.py tests/test_stale.py`
+- `cd bin && uv run pytest -q ../tests/test_inference.py ../tests/test_claims.py ../tests/test_stale.py`
 - `cd bin && uv run pytest -q -k cross_prd`
 
 ### T014: v6->v7 gate-equivalence test: migrated single-PRD DB keeps identical claimability
@@ -538,7 +538,7 @@ The --prd filter on next MUST build exclusion sets from ALL PRDs then narrow; im
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'next and prd'; cd bin && uv run pytest -q ../tests/test_claims.py tests/test_mcp_server.py`
+- `cd bin && uv run pytest -q -k 'next and prd'; cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_mcp_server.py`
 - `cd bin && uv run anvil next --help | grep -- --prd`
 
 ### T020: Per-PRD rollup for anvil status and get_project_status/get_project_summary
@@ -801,5 +801,5 @@ The SCHEMA_VERSION bump shipped in Phase 0 is publishable; the version lockstep 
 **Verification:**
 
 - `grep -rn '.anvil/prds/' docs/how-to/; grep -rn 'prds/default.md' docs/how-to/`
-- `cd bin && uv run pytest -q ../tests/test_version_sync.py tests/test_install_manifests.py`
+- `cd bin && uv run pytest -q ../tests/test_version_sync.py ../tests/test_install_manifests.py`
 
