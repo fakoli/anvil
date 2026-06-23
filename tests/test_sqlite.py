@@ -48,6 +48,12 @@ from anvil.state.sqlite import (
 
 _UTC = UTC
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=_UTC)
+# A DISTINCT, LATER timestamp (T0 + 1h). Used to make the v6->v7 created_at /
+# updated_at assertions load-bearing: the migration's source timestamp (T0) and
+# a subsequent re-parse event's "now" (T1) must differ, otherwise an UPSERT that
+# wrongly overwrote created_at would still leave it == T0 and the test would
+# pass vacuously.
+_T1 = _T0 + timedelta(hours=1)
 
 
 # ---------------------------------------------------------------------------
@@ -6668,10 +6674,14 @@ class TestV6ToV7Migration:
             "VALUES (?, ?, ?, ?, ?)",
             ("proj-1", "Proj", "desc", iso, iso),
         )
+        # last_reviewed_at is DISTINCT from project.created_at (_T1 vs _T0) so
+        # the v7 COALESCE(last_reviewed_at, project.created_at) backfill is
+        # load-bearing: a test asserting created_at == _T1 proves the migration
+        # sourced last_reviewed_at, not the project fallback.
         conn.execute(
             "INSERT INTO prds (project_id, status, summary, last_reviewed_at) "
             "VALUES (?, ?, ?, ?)",
-            ("proj-1", "reviewed", "the summary", iso),
+            ("proj-1", "reviewed", "the summary", _T1.isoformat()),
         )
         conn.execute(
             "INSERT INTO requirements (id, prd_section, text) VALUES (?, ?, ?)",
@@ -6740,8 +6750,12 @@ class TestV6ToV7Migration:
                 assert prds[0][1] == 1
                 assert prds[0][2] == "the summary"
                 assert prds[0][3] == "proj-1"
-                # created_at backfilled from COALESCE(last_reviewed_at, ...).
-                assert prds[0][4] == _T0.isoformat()
+                # created_at backfilled from COALESCE(last_reviewed_at,
+                # project.created_at). last_reviewed_at (_T1) is DISTINCT from
+                # project.created_at (_T0), so this asserts the COALESCE picked
+                # the FIRST non-null source (last_reviewed_at == _T1), not the
+                # fallback — the assertion is load-bearing, not vacuous.
+                assert prds[0][4] == _T1.isoformat()
                 # The PK is the single ``id`` column (NOT composite / project_id).
                 pk_cols = [
                     r[1]
@@ -7073,26 +7087,34 @@ class TestV6ToV7Migration:
             finally:
                 conn.close()
             assert before[0] == 1
-            assert before[1] is not None  # created_at backfilled by the migration
+            # created_at backfilled by the migration from last_reviewed_at (_T1).
+            assert before[1] == _T1.isoformat()
 
-            # Apply a prd.parsed event (the first re-parse after migration).
+            # Apply a prd.parsed event (the first re-parse after migration). Its
+            # "now" (_T0) is DISTINCT from — and earlier than — the migrated
+            # created_at (_T1). This makes the created_at/updated_at assertions
+            # below LOAD-BEARING: if the UPSERT wrongly overwrote created_at with
+            # the event timestamp, created_at would become _T0 != before[1] and
+            # the assertion would fail. updated_at must advance to the event "now".
             payload = _make_prd_parsed_payload(
                 project_id="proj-1", summary="re-parsed summary"
             )
-            b.append(_make_event("prd.parsed", payload))
+            b.append(_make_event("prd.parsed", payload, now=_T0))
 
             conn = sqlite3.connect(db_path)
             try:
                 rows = conn.execute(
-                    "SELECT id, is_default, created_at, summary FROM prds"
+                    "SELECT id, is_default, created_at, summary, updated_at FROM prds"
                 ).fetchall()
                 # Exactly one prds row, still the default identity preserved.
                 assert len(rows) == 1
                 row = rows[0]
                 assert row[0] == "default"
                 assert row[1] == 1  # is_default preserved (NOT reset to 0)
-                assert row[2] == before[1]  # created_at preserved
+                assert row[2] == before[1]  # created_at preserved (_T1, NOT _T0)
+                assert row[2] == _T1.isoformat()
                 assert row[3] == "re-parsed summary"  # v6 content updated
+                assert row[4] == _T0.isoformat()  # updated_at bumped to event now
                 # Exactly one is_default=1 row (ux_prds_default invariant holds).
                 n_default = conn.execute(
                     "SELECT COUNT(*) FROM prds WHERE is_default=1"

@@ -1226,37 +1226,50 @@ class SqliteBackend:
         statements = [s.strip() for s in DDL.split(";") if s.strip()]
         non_version = [s for s in statements if "user_version" not in s.lower()]
         conn.execute("BEGIN")
-        for stmt in non_version:
-            if not stmt:
-                continue
-            try:
-                conn.execute(stmt)
-            except sqlite3.OperationalError as e:
-                # A new index that references a column the pending migration
-                # has not added yet (e.g. v7's idx_*_prd / ux_prds_default on
-                # the prd_id / is_default columns) fails against a pre-existing
-                # older-shaped table. The DDL runs BEFORE _check_schema_version,
-                # so swallow exactly that "no such column" case for CREATE INDEX
-                # statements — the matching migration step re-creates the index
-                # (IF NOT EXISTS) right after it ALTERs the column in. A fresh
-                # DB never hits this branch (its CREATE TABLE already has the
-                # column). Any other OperationalError still propagates.
-                msg = str(e).lower()
-                # Strip leading SQL line-comments / blank lines so the keyword
-                # check sees the actual statement (DDL statements can carry a
-                # ``-- ...`` comment line before the verb).
-                body = "\n".join(
-                    line
-                    for line in stmt.splitlines()
-                    if line.strip() and not line.strip().startswith("--")
-                ).lower()
-                is_index = body.startswith("create index") or body.startswith(
-                    "create unique index"
-                )
-                if is_index and "no such column" in msg:
+        try:
+            for stmt in non_version:
+                if not stmt:
                     continue
-                raise
-        conn.execute("COMMIT")
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError as e:
+                    # A new index that references a column the pending migration
+                    # has not added yet (e.g. v7's idx_*_prd / ux_prds_default on
+                    # the prd_id / is_default columns) fails against a pre-existing
+                    # older-shaped table. The DDL runs BEFORE _check_schema_version,
+                    # so on an UPGRADING DB swallow exactly that "no such column"
+                    # case for CREATE INDEX statements — the matching migration step
+                    # re-creates the index (IF NOT EXISTS) right after it ALTERs the
+                    # column in. A fresh/current DB must NOT swallow it (its CREATE
+                    # TABLE already has the column, so a miss is a real bug).
+                    msg = str(e).lower()
+                    # Strip leading SQL line-comments / blank lines so the keyword
+                    # check sees the actual statement (DDL statements can carry a
+                    # ``-- ...`` comment line before the verb).
+                    body = "\n".join(
+                        line
+                        for line in stmt.splitlines()
+                        if line.strip() and not line.strip().startswith("--")
+                    ).lower()
+                    is_index = body.startswith("create index") or body.startswith(
+                        "create unique index"
+                    )
+                    # Swallow ONLY the legitimate pre-migration case: a CREATE INDEX
+                    # on a v7 column (prd_id / is_default) that an older-shaped table
+                    # has not been ALTERed to yet — the ladder re-creates the index
+                    # IF NOT EXISTS right after. A typo'd / unknown column name still
+                    # propagates on every DB, incl. fresh/current (review FIX 4).
+                    after = msg.partition("no such column:")[2].strip().split()
+                    missing_col = after[0] if after else ""
+                    if is_index and missing_col in ("prd_id", "is_default"):
+                        continue
+                    raise
+            conn.execute("COMMIT")
+        except BaseException:
+            # A non-swallowed DDL failure leaves the BEGIN open; roll it back so the
+            # connection isn't left mid-transaction before propagating (review FIX 5).
+            self._safe_rollback(conn)
+            raise
         # NOTE: user_version is intentionally NOT stamped here — see the
         # docstring. _check_schema_version stamps it after a successful ladder.
 
@@ -1430,8 +1443,10 @@ class SqliteBackend:
         except BaseException:
             # BaseException, not Exception: a SIGKILL surfaces as
             # KeyboardInterrupt; we still want the in-flight transaction rolled
-            # back so nothing partial lands on disk.
-            conn.execute("ROLLBACK")
+            # back so nothing partial lands on disk. Use _safe_rollback so a
+            # ROLLBACK against an already-auto-aborted transaction (SQLITE_FULL/
+            # IOERR) does not mask the original migration failure (review FIX 2).
+            self._safe_rollback(conn)
             raise
         conn.execute("COMMIT")
 
@@ -2473,10 +2488,11 @@ class SqliteBackend:
             UPDATE prds
                SET status = 'reviewed',
                    last_reviewed_at = ?,
-                   last_reviewed_by = ?
+                   last_reviewed_by = ?,
+                   updated_at = ?
              WHERE project_id = ?
             """,
-            (timestamp, reviewer, project_id),
+            (timestamp, reviewer, timestamp, project_id),
         )
 
     def _check_prd_approved(
@@ -2516,10 +2532,11 @@ class SqliteBackend:
             UPDATE prds
                SET status = 'approved',
                    last_reviewed_at = ?,
-                   last_reviewed_by = ?
+                   last_reviewed_by = ?,
+                   updated_at = ?
              WHERE project_id = ?
             """,
-            (timestamp, approver, project_id),
+            (timestamp, approver, timestamp, project_id),
         )
 
         review_id = f"RV-{event_id}"
