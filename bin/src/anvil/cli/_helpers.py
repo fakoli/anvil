@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 _STATE_DIR_NAME = ".anvil"
 _PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
 _PRD_FILENAME = "prd.md"
+_PRDS_DIR_NAME = "prds"
+
+# The PRD ids that denote the implicit/default PRD. Both ``DEFAULT_PRD_ID``
+# ('default', the stored model id) and the parse-time sentinel ('prd', what
+# every single-PRD caller passes) map to the bare ``.anvil/prd.md`` source so
+# the default PRD keeps its pre-multi-PRD on-disk location.
+_DEFAULT_PRD_IDS = ("default", "prd")
 
 _ACTOR_FALLBACK = "agent"
 
@@ -266,6 +273,28 @@ def _resolve_project_root(cwd: Path | None) -> Path:
     if env_root is not None and env_root.strip() != "":
         return Path(env_root).expanduser().resolve()
     return Path.cwd().resolve()
+
+
+def prd_source_path(state_dir: Path, prd_id: str) -> Path:
+    """Return the on-disk markdown source for a PRD partition (T016).
+
+    The default PRD keeps its pre-multi-PRD location ``<state_dir>/prd.md``;
+    every named PRD lives under a ``prds/`` collection as
+    ``<state_dir>/prds/<prd_id>.md``. Both the stored model id (``'default'``)
+    and the parse-time sentinel (``'prd'``) resolve to the bare ``prd.md`` so
+    callers can pass either without special-casing.
+
+    Args:
+        state_dir: Absolute path to the ``.anvil/`` directory.
+        prd_id: The PRD partition id. ``'default'``/``'prd'`` → ``prd.md``;
+            any other id → ``prds/<prd_id>.md``.
+
+    Returns:
+        Absolute Path to the PRD's markdown source.
+    """
+    if prd_id in _DEFAULT_PRD_IDS:
+        return state_dir / _PRD_FILENAME
+    return state_dir / _PRDS_DIR_NAME / f"{prd_id}.md"
 
 
 def _open_backend(state_dir: Path) -> SqliteBackend:
