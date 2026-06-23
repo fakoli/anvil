@@ -520,6 +520,55 @@ def test_replay_matches_migrated_db_single_default_prd(tmp_path: Path) -> None:
         backend_b.close()
 
 
+def test_replay_from_empty_on_v7_reconstructs_same_task_statuses_and_claims(
+    tmp_path: Path,
+) -> None:
+    """T014 (criterion 3) — ``replay_from_empty`` over the ORIGINAL (pre-v7)
+    events.jsonl on a v7 schema reconstructs the SAME task statuses and claims.
+
+    The committed fixture events.jsonl is a genuine pre-v7 log (no ``prd_id``
+    keys — guarded below). Replaying it onto a freshly created v7 backend must
+    reproduce the canonical task-status and claim-status set captured in the
+    golden snapshot: the v6->v7 schema change carries zero new fields into the
+    status/claim projections, so the replay verdict is invariant across the
+    schema bump. This is the replay half of the v6->v7 gate-equivalence proof
+    (the migration half lives in TestV6ToV7Migration in test_sqlite.py).
+    """
+    # Guard: the log really is pre-v7 (no prd_id keys), so this exercises the
+    # "original events.jsonl on v7" path the criterion names.
+    raw_text = _EVENTS_PATH.read_text(encoding="utf-8")
+    assert "prd_id" not in raw_text, (
+        "the replay fixture events.jsonl now carries a 'prd_id' key — it is no "
+        "longer the ORIGINAL pre-v7 log this gate-equivalence test needs."
+    )
+
+    replay = _make_backend(tmp_path)
+    try:
+        replay.replay_from_empty(str(_EVENTS_PATH))
+
+        # The replay re-created the schema at v7 (the engine's current version).
+        assert replay.get_schema_version() == 7
+
+        golden = _load_golden()
+        # Vacuity guard: the golden encodes a non-degenerate status/claim set.
+        assert len(golden["tasks"]) == 3 and len(golden["claims"]) == 2, (
+            "golden is degenerate — regenerate via "
+            "tests/fixtures/replay/regenerate.py"
+        )
+
+        # Task statuses reconstructed by the v7 replay == the golden statuses.
+        replayed_task_status = {t.id: t.status.value for t in replay.list_tasks()}
+        golden_task_status = {t["id"]: t["status"] for t in golden["tasks"]}
+        assert replayed_task_status == golden_task_status
+
+        # Claim statuses reconstructed by the v7 replay == the golden claims.
+        replayed_claim_status = {c.id: c.status.value for c in replay.list_claims()}
+        golden_claim_status = {c["id"]: c["status"] for c in golden["claims"]}
+        assert replayed_claim_status == golden_claim_status
+    finally:
+        replay.close()
+
+
 def test_default_prd_id_is_single_source_for_migration_and_payloads() -> None:
     """DEFAULT_PRD_ID is THE single source of the 'default' partition literal.
 
