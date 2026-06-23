@@ -248,15 +248,19 @@ def test_serialize_state_is_json_serialisable_and_total(tmp_path: Path) -> None:
 
         # Top-level shape is exactly the documented contract.
         assert set(snap.keys()) == {
-            "project", "prd", "features", "tasks",
+            "project", "prds", "features", "tasks",
             "claims", "reviews", "evidence", "requirements", "sync_mappings",
         }
 
-        # Singletons present.
+        # Project singleton present.
         assert snap["project"] is not None
         assert snap["project"]["id"] == "proj-1"
-        assert snap["prd"] is not None
-        assert snap["prd"]["status"] == "reviewed"
+        # T024: the default PRD is the sole 'prds' entry, carrying its identity
+        # (id / revision) stamps alongside the mutable scalars.
+        assert len(snap["prds"]) == 1
+        assert snap["prds"][0]["id"] == "default"
+        assert snap["prds"][0]["revision"] == 1
+        assert snap["prds"][0]["status"] == "reviewed"
 
         # Collections populated.
         assert [f["id"] for f in snap["features"]] == ["F001"]
@@ -320,7 +324,8 @@ def test_serialize_state_empty_backend(tmp_path: Path) -> None:
     try:
         snap = serialize_state(b)
         assert snap["project"] is None
-        assert snap["prd"] is None
+        # T024: no PRDs on an empty backend — 'prds' is the empty list, not None.
+        assert snap["prds"] == []
         assert snap["features"] == []
         assert snap["tasks"] == []
         assert snap["claims"] == []

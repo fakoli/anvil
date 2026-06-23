@@ -45,8 +45,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from anvil.clock import FrozenClock
 from anvil.state import models, payloads
 from anvil.state.models import DEFAULT_PRD_ID, EventDraft
@@ -188,7 +186,7 @@ def test_replayed_state_is_well_formed(tmp_path: Path) -> None:
         snap = _serialize(replay)
 
         assert set(snap.keys()) == {
-            "project", "prd", "features", "tasks",
+            "project", "prds", "features", "tasks",
             "claims", "reviews", "evidence", "requirements", "sync_mappings",
         }, (
             f"serialize_state returned unexpected keys {set(snap.keys())}. "
@@ -196,7 +194,8 @@ def test_replayed_state_is_well_formed(tmp_path: Path) -> None:
             "the expected key set here AND regenerate the fixture."
         )
         assert snap["project"] is not None
-        assert snap["prd"] is not None
+        # T024: a single-PRD log emits exactly one prds entry, the default PRD.
+        assert [p["id"] for p in snap["prds"]] == [DEFAULT_PRD_ID]
 
         # Three tasks were created.
         assert {t["id"] for t in snap["tasks"]} == {"T001", "T002", "T003"}
@@ -625,22 +624,212 @@ def test_default_prd_id_is_single_source_for_migration_and_payloads() -> None:
         )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "2-PRD byte-compare oracle is DEFERRED to Phase 6: serialize_state "
-        "still emits a SINGLETON 'prd' and does not enumerate multiple PRDs, so "
-        "json.dumps(serialize_state(b), sort_keys=True) cannot yet be "
-        "byte-identical between a directly-built 2-PRD backend and its "
-        "replay_from_empty. Implement once serialize_state enumerates a sorted "
-        "'prds' collection (Phase 6); do NOT change serialize_state here."
-    ),
-    strict=True,
-    run=False,
-)
-def test_two_prd_replay_byte_equivalence_phase6() -> None:  # pragma: no cover
-    """TODO(Phase 6): directly-build a 2-PRD backend, replay_from_empty over the
-    same events, and assert json.dumps(serialize_state(b), sort_keys=True) is
-    byte-identical between the two. Blocked on serialize_state multi-PRD
-    enumeration (the singleton 'prd' key must become a sorted 'prds' list).
+def _req_dict(rid: str, text: str) -> dict[str, Any]:
+    """A minimal requirement dict for a prd.parsed / prd.revised diff list."""
+    return {
+        "id": rid,
+        "prd_section": "requirements",
+        "text": text,
+        "source_paragraph": None,
+        "derived": False,
+    }
+
+
+def _prd_event(action: str, payload: dict[str, Any], *, prd_id: str) -> EventDraft:
+    """A prd.* EventDraft targeting ``prd_id`` (the target_id the CLI stamps)."""
+    return EventDraft(
+        timestamp=_T0,
+        actor="test",
+        action=action,
+        target_kind="prd",
+        target_id=prd_id,
+        payload_json=payload,
+    )
+
+
+def _build_two_prd_multi_revision(state_dir: Path) -> SqliteBackend:
+    """Build a 2-PRD, multi-revision backend via the production write path
+    (``append``), which also writes events.jsonl for the replay half.
+
+    Scenario (deterministic, FrozenClock):
+      * default PRD parsed at rev1 with R200 + R210;
+      * a SECOND PRD 'v0.2' (is_default=False) parsed at rev1 with R001 + R002;
+      * default revised to rev2 — supersedes R210 (NEVER DELETE), adds R205;
+      * v0.2 revised to rev2 — pure-additive, adds R102.
+
+    The requirement ids are deliberately chosen so an id-only sort produces a
+    DIFFERENT order than the AC#1 (prd_id, revision_introduced, id) key — the
+    test exists to lock that key in, and a fixture whose ids already sort the
+    same way under both keys would let a revert to id-only sorting pass:
+
+      * Cross-partition interleave: v0.2 owns the LOW ids (R001, R002, R102)
+        while the default PRD owns the HIGH ids (R200, R210, R205). Under
+        id-only sorting the v0.2 rows would sort first; under the partition-aware
+        key the default rows ('default' < 'v0.2') sort first. The two orders
+        diverge.
+      * Within-partition revision interleave: in the default PRD a rev2 addition
+        (R205) has an id that sorts BEFORE a rev1 row (R210). Under id-only
+        sorting R205 precedes R210; under the (..., revision_introduced, id) key
+        the rev1 R210 precedes the rev2 R205. The two orders diverge here too.
+
+    The resulting state spans two partitions, two revisions, a superseded
+    lineage row, and id orderings that distinguish the mandated sort key from a
+    naive id-only one — exactly the shape a missed serialize_state sort key would
+    let diverge under replay.
     """
-    raise NotImplementedError("Phase 6: serialize_state multi-PRD enumeration")
+    b = _make_backend(state_dir)
+    # Project + state init (FK / gate preconditions).
+    b.append(
+        EventDraft(
+            timestamp=_T0, actor="test", action="project.created",
+            target_kind="project", target_id="proj-1",
+            payload_json={
+                "id": "proj-1", "name": "Two-PRD Project", "description": "",
+                "created_at": _T0.isoformat(), "updated_at": _T0.isoformat(),
+            },
+        )
+    )
+    b.append(
+        EventDraft(
+            timestamp=_T0, actor="test", action="state.initialized",
+            target_kind="project", target_id="proj-1", payload_json={},
+        )
+    )
+    # Default PRD, revision 1 — owns the HIGH ids (sort after v0.2's under
+    # id-only ordering, before them under the partition-aware key).
+    b.append(_prd_event(
+        "prd.parsed",
+        {
+            "project_id": "proj-1", "prd_id": DEFAULT_PRD_ID, "is_default": True,
+            "status": "draft", "summary": "default v1",
+            "requirements": [_req_dict("R200", "d one"), _req_dict("R210", "d two")],
+        },
+        prd_id=DEFAULT_PRD_ID,
+    ))
+    # Second, named PRD (is_default=False — the ux_prds_default invariant allows
+    # exactly one default), revision 1 — owns the LOW ids.
+    b.append(_prd_event(
+        "prd.parsed",
+        {
+            "project_id": "proj-1", "prd_id": "v0.2", "is_default": False,
+            "status": "draft", "summary": "v0.2 v1",
+            "requirements": [_req_dict("R001", "v one"), _req_dict("R002", "v two")],
+        },
+        prd_id="v0.2",
+    ))
+    # Revise the default PRD to revision 2: supersede R210, add R205. R205's id
+    # sorts BEFORE the rev1 R210 — so the rev-introduced key is exercised within
+    # this partition, not just across partitions.
+    b.append(_prd_event(
+        "prd.revised",
+        {
+            "project_id": "proj-1", "prd_id": DEFAULT_PRD_ID, "revision": 2,
+            "is_default": True, "status": "draft", "summary": "default v2",
+            "requirements_added": [_req_dict("R205", "d three")],
+            "requirements_superseded": [_req_dict("R210", "d two")],
+            "requirements_unchanged": [_req_dict("R200", "d one")],
+        },
+        prd_id=DEFAULT_PRD_ID,
+    ))
+    # Revise v0.2 to revision 2: pure-additive, add R102.
+    b.append(_prd_event(
+        "prd.revised",
+        {
+            "project_id": "proj-1", "prd_id": "v0.2", "revision": 2,
+            "is_default": False, "status": "draft", "summary": "v0.2 v2",
+            "requirements_added": [_req_dict("R102", "v three")],
+            "requirements_superseded": [],
+            "requirements_unchanged": [_req_dict("R001", "v one"),
+                                       _req_dict("R002", "v two")],
+        },
+        prd_id="v0.2",
+    ))
+    return b
+
+
+def test_two_prd_replay_byte_equivalence(tmp_path: Path) -> None:
+    """T024 — the 2-PRD half of the Phase 1 replay oracle.
+
+    Directly-build a 2-PRD, multi-revision backend via ``append``, replay the
+    same events.jsonl into a fresh backend, and assert
+    ``json.dumps(serialize_state(b), sort_keys=True)`` is byte-identical between
+    the two. This closes the byte-compare half that was deferred while
+    serialize_state still emitted a singleton ``prd`` — it now enumerates a
+    sorted ``prds`` list and partitions ``requirements`` by
+    ``(prd_id, revision_introduced, id)``.
+    """
+    normal_dir = tmp_path / "normal"
+    replay_dir = tmp_path / "replay"
+    normal_dir.mkdir()
+    replay_dir.mkdir()
+
+    normal = _build_two_prd_multi_revision(normal_dir)
+    replay = _make_backend(replay_dir)
+    try:
+        # Replay over the events the direct build appended.
+        replay.replay_from_empty(str(normal_dir / "events.jsonl"))
+
+        normal_snap = serialize_state(normal)
+        replay_snap = serialize_state(replay)
+
+        # Vacuity guard: the scenario really is multi-PRD / multi-revision.
+        assert [p["id"] for p in normal_snap["prds"]] == [DEFAULT_PRD_ID, "v0.2"]
+        assert [(p["id"], p["revision"]) for p in normal_snap["prds"]] == [
+            (DEFAULT_PRD_ID, 2), ("v0.2", 2),
+        ]
+        # The emitted requirement order, as a tuple lineage key. The fixture's
+        # ids are chosen so this order CANNOT be produced by an id-only sort
+        # (see _build_two_prd_multi_revision): v0.2 owns the low ids yet sorts
+        # AFTER the default partition, and within the default partition the rev2
+        # R205 sorts before the rev1 R210. This is the AC#1 order
+        # (prd_id, revision_introduced, id) — see _expected_order below.
+        def _req_keys(snap: dict[str, Any]) -> list[tuple[Any, ...]]:
+            return [
+                (r["prd_id"], r["revision_introduced"],
+                 r["revision_superseded"], r["id"])
+                for r in snap["requirements"]
+            ]
+
+        _expected_order = [
+            (DEFAULT_PRD_ID, 1, None, "R200"),
+            (DEFAULT_PRD_ID, 1, 2, "R210"),       # superseded, lineage retained
+            (DEFAULT_PRD_ID, 2, None, "R205"),    # rev2, but id < R210 (rev1)
+            ("v0.2", 1, None, "R001"),            # low id, yet sorts after default
+            ("v0.2", 1, None, "R002"),
+            ("v0.2", 2, None, "R102"),
+        ]
+        # Pin the order on BOTH halves — not just normal_snap — so the replayed
+        # backend's ordering is independently asserted (the byte-compare below
+        # alone cannot catch a sort-key bug shared by both serialize_state
+        # calls).
+        assert _req_keys(normal_snap) == _expected_order
+        assert _req_keys(replay_snap) == _expected_order
+
+        # Discrimination guard: the AC#1 order is NOT what an id-only sort would
+        # produce. If serialize_state ever reverts its requirements sort to
+        # key=rq.id, the emitted order would equal _id_only_order and this assert
+        # would fail FIRST — making the sort key a real, tested guarantee rather
+        # than one the byte-compare silently waves through.
+        _id_only_order = sorted(_expected_order, key=lambda k: k[3])
+        assert _expected_order != _id_only_order, (
+            "fixture regression: requirement ids no longer interleave across "
+            "partitions/revisions, so an id-only sort would be indistinguishable "
+            "from the AC#1 (prd_id, revision_introduced, id) key."
+        )
+        assert _req_keys(normal_snap) != _id_only_order, (
+            "serialize_state emitted requirements in id-only order — the AC#1 "
+            "(prd_id, revision_introduced, id) sort key has been reverted; "
+            "replay would silently fork on a multi-PRD / multi-revision DB."
+        )
+
+        assert json.dumps(normal_snap, sort_keys=True) == json.dumps(
+            replay_snap, sort_keys=True
+        ), (
+            "directly-built and replayed 2-PRD snapshots diverge — a missed "
+            "serialize_state sort key (prds by id, requirements by "
+            "(prd_id, revision_introduced, id)) lets replay silently fork on a "
+            "multi-PRD / multi-revision DB."
+        )
+    finally:
+        normal.close()
+        replay.close()

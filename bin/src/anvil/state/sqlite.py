@@ -43,6 +43,7 @@ from anvil.state.backend import (
 )
 from anvil.state.hashing import hash_event_id
 from anvil.state.models import (
+    DEFAULT_PRD_ID,
     PRD,
     Claim,
     ClaimStatus,
@@ -977,7 +978,7 @@ class SqliteBackend:
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         rows = conn.execute(
             "SELECT id, prd_section, text, source_paragraph, derived, "
-            "revision_introduced, revision_superseded "
+            "revision_introduced, revision_superseded, prd_id "
             f"FROM requirements {where}ORDER BY id ASC",
             tuple(params),
         ).fetchall()
@@ -5117,7 +5118,7 @@ class SqliteBackend:
 
         Row column order must match the SELECT used in list_requirements:
           0:id  1:prd_section  2:text  3:source_paragraph  4:derived
-          5:revision_introduced  6:revision_superseded
+          5:revision_introduced  6:revision_superseded  7:prd_id
 
         The ``derived`` column is stored as an integer (0/1) — bool() is
         applied so the Requirement model receives a proper Python bool.
@@ -5128,10 +5129,18 @@ class SqliteBackend:
         NULL means "introduced at revision 1", so it falls back to the model
         default of 1 (the field is ``ge=1`` and would reject ``None``).
         ``revision_superseded`` stays nullable (None = still live).
+
+        T024 — the ``prd_id`` partition column is surfaced so a multi-PRD DB's
+        requirements carry their owning PRD in memory (the model field is
+        ``exclude=True`` so model_dump() still drops it, but serialize_state
+        reads ``rq.prd_id`` directly to partition the snapshot). A pre-v7 /
+        single-PRD row carries ``DEFAULT_PRD_ID`` via the column DEFAULT, so this
+        falls back to the model default of ``DEFAULT_PRD_ID`` when NULL.
         """
         revision_introduced = row[5] if row[5] is not None else 1
         return Requirement(
             id=row[0],
+            prd_id=row[7] if row[7] is not None else DEFAULT_PRD_ID,
             prd_section=row[1],
             text=row[2],
             source_paragraph=row[3],
