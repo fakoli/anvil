@@ -321,6 +321,46 @@ items here does not block parsing or approval — they are informational.
 
 ---
 
+### `## Release` (or `**Release:**`)
+
+Optional release marker. Parses into the `PRD.target_version` and
+`PRD.target_tag` model fields. Absent → both `None`. Two equivalent spellings:
+
+> **Not yet persisted.** As of T015 these fields round-trip at the parsed-model
+> level only — the `prd.parsed` event and `state.db` do not yet carry them, so
+> they will not appear in `anvil show` output. Wiring the values through the
+> parse-to-persist boundary (and `--prd` selection) is deferred to T016.
+
+**Inline field line** (conventionally placed in `## Summary`):
+
+```markdown
+## Summary
+
+A short paragraph describing the project.
+**Release:** v0.2.0 (tag: v0.2)
+```
+
+The leading token is the **version** (`target_version`); an optional
+parenthetical `(tag: <tag>)` (or just `(<tag>)`) sets the **tag**
+(`target_tag`). The `**Release:**` line is pulled out of the summary prose, so
+`PRD.summary` stays clean.
+
+**Dedicated section** with explicit sub-fields:
+
+```markdown
+## Release
+
+**Version:** v0.2.0
+**Tag:** v0.2
+```
+
+`target_tag` is the git milestone/release tag (intended to be unique per
+project, 1:1 PRD ↔ release); `target_version` is the human-facing version
+string. For the default PRD you usually omit the Release marker entirely;
+named release PRDs use it to bind the tranche to a milestone.
+
+---
+
 ### `## Features`
 
 Defines logical groupings of tasks. Each feature is an H3 heading followed by a
@@ -446,6 +486,14 @@ IDs are stable across edits.
 **Cross-references use bare IDs without backticks.** In `**Requirements:**` and
 `**Feature:**` fields, write `R001, R002` — not `` `R001` `` or `[R001]`. The parser
 looks for the bare ID pattern.
+
+**Named-PRD ids are prefixed.** The default PRD keeps bare ids (`T001`). A named
+release PRD (parsed with a `prd_id`, e.g. `v0.2`) gets every id prefixed with
+`<prd_id>:` (`v0.2:T001`, `v0.2:F001`, `v0.2:R001`). Author your headings and
+cross-refs either bare (`### F001:`, `**Feature:** F001`) — they are prefixed
+for you — or already prefixed (`### v0.2:F001:`); both resolve to the same id
+within that PRD. Keeping the default PRD's ids bare limits the blast radius of
+prefixed ids to newly-named PRDs.
 
 **Subtask IDs are generated, not authored.** The `## Tasks` section should only contain
 root task IDs (`T001`, `T002`, ...). Run `anvil expand T001` to break a task

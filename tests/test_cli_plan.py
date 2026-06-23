@@ -402,7 +402,9 @@ class TestExpandFormatPrd:
 
         from anvil.planning.template import parse_prd
 
-        parsed = parse_prd(wrapped_prd, prd_id="prd-roundtrip")
+        # Use the default prd_id so ids stay BARE (T001, T001.1) — prd_id is
+        # now load-bearing and a named PRD would prefix them (T015).
+        parsed = parse_prd(wrapped_prd)
         # No fatal errors from the parser.
         fatal = [e for e in parsed.errors if "fatal" in e.message.lower()]
         assert not fatal, f"parse_prd raised fatal errors: {fatal}"

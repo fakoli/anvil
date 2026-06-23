@@ -13,6 +13,7 @@ from pathlib import Path
 
 from anvil.clock import FrozenClock
 from anvil.planning.template import ParseResult, parse_prd
+from anvil.state.models import DEFAULT_PRD_ID
 
 # ---------------------------------------------------------------------------
 # Fixture path
@@ -1446,3 +1447,251 @@ A task body.
         task = result.tasks[0]
         # The default SystemClock stamps within the test's wall-clock window.
         assert before <= task.created_at <= after
+
+
+# ---------------------------------------------------------------------------
+# T015: prd_id is load-bearing — default PRD keeps BARE ids, named PRDs get a
+# '<prd_id>:' prefix; bare cross-refs resolve within the same PRD; the Release
+# marker round-trips into PRD.target_version / target_tag.
+# ---------------------------------------------------------------------------
+
+
+_FULL_PRD = """\
+# Project: Multi-PRD Demo
+
+## Summary
+
+A project spanning features and tasks.
+
+## Goals
+
+- Ship the thing.
+
+## Requirements
+
+- R001: First requirement.
+
+## Features
+
+### F001: Feature One
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: First Task
+
+**Feature:** F001
+**Dependencies:** T002
+
+### T002: Second Task
+
+**Feature:** F001
+"""
+
+
+class TestPrdIdLoadBearing:
+    """parse_prd(prd_id=...) controls id shape and cross-ref resolution."""
+
+    def test_default_prd_id_yields_bare_ids(self) -> None:
+        """Default prd_id keeps ids BARE — byte-identical to the legacy parser."""
+        result = parse_prd(_FULL_PRD)
+        assert not result.errors, result.errors
+        assert result.requirements[0].id == "R001"
+        assert result.features[0].id == "F001"
+        assert {t.id for t in result.tasks} == {"T001", "T002"}
+        # Default PRD stamps the model prd_id as DEFAULT_PRD_ID, never the
+        # parse-time "prd" sentinel.
+        assert result.requirements[0].prd_id == DEFAULT_PRD_ID
+        assert result.features[0].prd_id == DEFAULT_PRD_ID
+        assert result.tasks[0].prd_id == DEFAULT_PRD_ID
+        assert result.prd.id == DEFAULT_PRD_ID
+
+    def test_named_prd_id_prefixes_every_minted_id(self) -> None:
+        """A named prd_id prefixes requirement/feature/task ids with '<id>:'."""
+        result = parse_prd(_FULL_PRD, prd_id="v0.2")
+        assert not result.errors, result.errors
+        assert result.requirements[0].id == "v0.2:R001"
+        assert result.features[0].id == "v0.2:F001"
+        assert {t.id for t in result.tasks} == {"v0.2:T001", "v0.2:T002"}
+        assert result.requirements[0].prd_id == "v0.2"
+        assert result.features[0].prd_id == "v0.2"
+        assert result.tasks[0].prd_id == "v0.2"
+        assert result.prd.id == "v0.2"
+
+    def test_named_prd_resolves_bare_cross_refs_without_warnings(self) -> None:
+        """Bare **Feature:**/**Requirements:**/**Dependencies:** refs resolve
+        against this PRD's prefixed ids — no unknown-ref warnings."""
+        result = parse_prd(_FULL_PRD, prd_id="v0.2")
+        assert not result.errors, result.errors
+        # Feature's requirement cross-ref is prefixed and resolves.
+        assert result.features[0].requirements == ["v0.2:R001"]
+        # Task's feature cross-ref resolves.
+        t1 = next(t for t in result.tasks if t.id == "v0.2:T001")
+        assert t1.feature_id == "v0.2:F001"
+        # Task dependency cross-ref resolves to the sibling task's prefixed id.
+        assert t1.dependencies == ["v0.2:T002"]
+        # Feature.tasks back-link carries the prefixed task ids.
+        assert result.features[0].tasks == ["v0.2:T001", "v0.2:T002"]
+
+    def test_author_written_prefixed_ids_parse_without_warnings(self) -> None:
+        """Author may write ids already prefixed (v0.2:T001); no double-prefix,
+        no warnings, cross-refs still resolve."""
+        prd = """\
+# Project: Prefixed Authoring
+
+## Summary
+
+Author wrote prefixed ids by hand.
+
+## Goals
+
+- g
+
+## Requirements
+
+- v0.2:R001: First requirement.
+
+## Features
+
+### v0.2:F001: Feature One
+
+**Requirements:** v0.2:R001
+
+## Tasks
+
+### v0.2:T001: First Task
+
+**Feature:** v0.2:F001
+"""
+        result = parse_prd(prd, prd_id="v0.2")
+        assert not result.errors, result.errors
+        assert result.requirements[0].id == "v0.2:R001"
+        assert result.features[0].id == "v0.2:F001"
+        assert result.tasks[0].id == "v0.2:T001"
+        # No double-prefixing.
+        assert "v0.2:v0.2:" not in result.tasks[0].id
+        assert result.features[0].requirements == ["v0.2:R001"]
+        assert result.tasks[0].feature_id == "v0.2:F001"
+
+    def test_default_prd_mixed_bare_authoring_unchanged(self) -> None:
+        """Sanity: default-PRD parse output is byte-identical regardless of the
+        new prd_id plumbing (no prefixes ever appear)."""
+        result = parse_prd(_FULL_PRD, prd_id="prd")
+        assert not result.errors, result.errors
+        assert result.features[0].requirements == ["R001"]
+        t1 = next(t for t in result.tasks if t.id == "T001")
+        assert t1.feature_id == "F001"
+        assert t1.dependencies == ["T002"]
+
+
+class TestReleaseRoundTrip:
+    """A Release marker round-trips into PRD.target_version / target_tag."""
+
+    def test_release_field_line_in_summary(self) -> None:
+        """**Release:** v0.2.0 (tag: v0.2) sets both fields; line is kept out
+        of the summary prose."""
+        prd = """\
+# Project: Release Test
+
+## Summary
+
+A release-tagged project.
+**Release:** v0.2.0 (tag: v0.2)
+
+## Goals
+
+- g
+
+## Requirements
+
+- R001: req.
+"""
+        result = parse_prd(prd)
+        assert not result.errors, result.errors
+        assert result.prd.target_version == "v0.2.0"
+        assert result.prd.target_tag == "v0.2"
+        # The release marker is not folded into the summary prose.
+        assert "Release" not in result.prd.summary
+        assert result.prd.summary == "A release-tagged project."
+
+    def test_release_field_version_only(self) -> None:
+        """A bare **Release:** value sets target_version; tag stays None."""
+        prd = """\
+# Project: Release Test
+
+## Summary
+
+Summary.
+**Release:** v1.0.0
+
+## Goals
+
+- g
+
+## Requirements
+
+- R001: req.
+"""
+        result = parse_prd(prd)
+        assert not result.errors, result.errors
+        assert result.prd.target_version == "v1.0.0"
+        assert result.prd.target_tag is None
+
+    def test_release_field_bare_paren_tag(self) -> None:
+        """A bare parenthetical (no 'tag:' keyword) sets target_tag too:
+        **Release:** v0.2.0 (v0.2) → version=v0.2.0, tag=v0.2."""
+        prd = """\
+# Project: Release Test
+
+## Summary
+
+Summary.
+**Release:** v0.2.0 (v0.2)
+
+## Goals
+
+- g
+
+## Requirements
+
+- R001: req.
+"""
+        result = parse_prd(prd)
+        assert not result.errors, result.errors
+        assert result.prd.target_version == "v0.2.0"
+        assert result.prd.target_tag == "v0.2"
+
+    def test_release_section(self) -> None:
+        """A dedicated ## Release section with **Version:**/**Tag:** fields."""
+        prd = """\
+# Project: Release Section Test
+
+## Summary
+
+Summary.
+
+## Goals
+
+- g
+
+## Requirements
+
+- R001: req.
+
+## Release
+
+**Version:** v0.3.0
+**Tag:** v0.3
+"""
+        result = parse_prd(prd)
+        assert not result.errors, result.errors
+        assert result.prd.target_version == "v0.3.0"
+        assert result.prd.target_tag == "v0.3"
+
+    def test_release_absent_yields_none(self) -> None:
+        """No Release marker => target_version/target_tag both None."""
+        result = parse_prd(_MINIMAL_PRD)
+        assert not result.errors, result.errors
+        assert result.prd.target_version is None
+        assert result.prd.target_tag is None
