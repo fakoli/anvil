@@ -71,6 +71,61 @@ class PrdParsedPayload(BaseModel):
     open_questions: list[Any] = []
 
 
+class PrdRevisedPayload(BaseModel):
+    """Payload for 'prd.revised' (v0.3 multi-PRD, Phase 6).
+
+    Emitted when an existing ``prd_id`` is re-parsed. Carries the new
+    ``revision`` number, the scalar PRD fields (mirroring
+    :class:`PrdParsedPayload` so the revised PRD row is fully described), and a
+    self-describing requirement diff:
+
+    - ``requirements_added`` — requirements new in this revision.
+    - ``requirements_superseded`` — requirements removed/replaced by this
+      revision (the handler marks ``revision_superseded`` on the prior rows).
+    - ``requirements_unchanged`` — requirements carried forward verbatim.
+
+    The diff is the source of truth for the status-demotion rule: a revision
+    that supersedes/removes any requirement demotes an approved PRD back to
+    ``draft``; a pure-additive revision (empty ``requirements_superseded``)
+    keeps the current status.
+
+    ``extra='forbid'`` rejects unknown keys at dispatch. The ``list[Any]``
+    requirement-diff fields hold raw requirement dicts that the handler
+    validates via ``Requirement.model_validate`` (mirroring
+    :class:`PrdParsedPayload.requirements`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    prd_id: str = DEFAULT_PRD_ID
+    revision: int = Field(ge=1)
+    # Scalar PRD fields (mirror PrdParsedPayload) — describe the revised PRD row.
+    title: str = ""
+    target_version: str | None = None
+    target_tag: str | None = None
+    # Unlike PrdParsedPayload (where 'first parse of the default PRD' justifies
+    # is_default=True), a 'revise' event always targets an EXISTING prd_id. For
+    # any non-default named PRD that is is_default=False, so the safe default
+    # here is False: a Phase 6 prd.revised handler that trusts this value must
+    # not flip a named PRD's is_default 0→1 (that would create two is_default=1
+    # rows, violating the ux_prds_default single-default invariant and the v7
+    # identity preservation _write_prd_parsed protects). The default PRD's
+    # revision carries is_default=True explicitly.
+    is_default: bool = False
+    status: str = "draft"
+    summary: str = ""
+    goals: list[Any] = []
+    non_goals: list[Any] = []
+    acceptance_criteria: list[Any] = []
+    risks: list[Any] = []
+    open_questions: list[Any] = []
+    # Self-describing requirement diff (raw dicts; handler validates each).
+    requirements_added: list[Any] = []
+    requirements_superseded: list[Any] = []
+    requirements_unchanged: list[Any] = []
+
+
 class PrdReviewedPayload(BaseModel):
     """Payload for 'prd.reviewed'.
 
@@ -870,6 +925,7 @@ __all__ = [
     "PrdDecisionResolvedPayload",
     "PrdParsedPayload",
     "PrdReviewedPayload",
+    "PrdRevisedPayload",
     "ProgressNotedPayload",
     "ProjectCreatedPayload",
     "StateInitializedPayload",
