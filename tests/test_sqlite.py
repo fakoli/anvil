@@ -48,6 +48,12 @@ from anvil.state.sqlite import (
 
 _UTC = UTC
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=_UTC)
+# A DISTINCT, LATER timestamp (T0 + 1h). Used to make the v6->v7 created_at /
+# updated_at assertions load-bearing: the migration's source timestamp (T0) and
+# a subsequent re-parse event's "now" (T1) must differ, otherwise an UPSERT that
+# wrongly overwrote created_at would still leave it == T0 and the test would
+# pass vacuously.
+_T1 = _T0 + timedelta(hours=1)
 
 
 # ---------------------------------------------------------------------------
@@ -5095,8 +5101,8 @@ class TestSchemaVersionPhase8:
     """
 
     def test_schema_version_is_six(self) -> None:
-        """The SL-3 / B48 typed-proofs ship floor is SCHEMA_VERSION == 6."""
-        assert SCHEMA_VERSION == 6
+        """The v0.3 multi-PRD foundation ship floor is SCHEMA_VERSION == 7."""
+        assert SCHEMA_VERSION == 7
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -5118,7 +5124,7 @@ class TestSchemaVersionPhase8:
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b.close()
 
@@ -5384,7 +5390,7 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b.close()
 
@@ -5411,7 +5417,7 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(db_path)
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b2.close()
 
@@ -5439,7 +5445,7 @@ class TestSchemaAutoUpgrade:
             conn = sqlite3.connect(db_path)
             v = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
             proj = b2.get_project()
             assert proj is not None
             assert proj.id == "proj-1"
@@ -5485,7 +5491,7 @@ class TestSchemaAutoUpgrade:
                 r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()
             }
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
             assert row is not None
             assert row[0] is None, "pre-v4 event rows must keep seq NULL"
             assert "task_type" in cols, "v5 must add tasks.task_type"
@@ -5538,7 +5544,7 @@ class TestSchemaAutoUpgrade:
                 "SELECT task_type FROM tasks WHERE id = 'T001'"
             ).fetchone()
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
             assert tt is not None
             assert tt[0] == "feature", "pre-v5 rows backfill to 'feature'"
         finally:
@@ -5579,7 +5585,7 @@ class TestSchemaAutoUpgrade:
                 r[1] for r in conn.execute("PRAGMA table_info(evidence)").fetchall()
             }
             conn.close()
-            assert v == 6
+            assert v == SCHEMA_VERSION
             assert "proofs" in cols, "v6 must add evidence.proofs"
         finally:
             b2.close()
@@ -5614,7 +5620,7 @@ class TestSchemaAutoUpgrade:
             b._conn.execute("PRAGMA user_version = 1")  # noqa: SLF001
             b.initialize()  # takes early-return; _check_schema_version sees v1
             v = b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b.close()
 
@@ -6483,7 +6489,7 @@ class TestV2ToV3MigrationAppliesColumnAdditions:
             assert row[1] is None
             # user_version is now the current SCHEMA_VERSION (6).
             v = b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
-            assert v == 6
+            assert v == SCHEMA_VERSION
         finally:
             b.close()
 
@@ -6552,6 +6558,570 @@ class TestV2ToV3MigrationAppliesColumnAdditions:
             # New optional fields default cleanly.
             assert stored.external_url is None
             assert stored.provider_metadata == {}
+        finally:
+            b.close()
+
+
+class TestV6ToV7Migration:
+    """T004 — the v6 -> v7 multi-PRD persistence-foundation migration.
+
+    A real v6 db has a SINGLE-row ``prds`` table keyed on ``project_id`` and
+    ``requirements`` / ``features`` / ``tasks`` / ``sync_mappings`` with no
+    ``prd_id`` partition column. The migration must:
+      * rebuild ``prds`` with the single-column ``id`` PK + identity/release
+        columns, adopting the existing row as ``id='default'`` is_default=1;
+      * ALTER-backfill ``prd_id='default'`` onto every existing requirement /
+        feature / task / sync_mapping row in one statement each (zero data loss
+        — the row counts are invariant);
+      * stamp ``user_version = 7``;
+      * be idempotent (re-running it after a simulated crash does not error).
+    """
+
+    def _stand_up_v6_db(self, db_path: str, events_path: str) -> None:
+        """Create a real v6-shaped db (singleton prds keyed on project_id, no
+        prd_id columns) with a project, prd, 2 requirements, a feature, 2 tasks
+        and a sync_mapping, then stamp user_version=6.
+        """
+        Path(events_path).touch()
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE prds (
+                project_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'draft',
+                summary TEXT NOT NULL DEFAULT '',
+                goals TEXT NOT NULL DEFAULT '[]',
+                non_goals TEXT NOT NULL DEFAULT '[]',
+                requirements TEXT NOT NULL DEFAULT '[]',
+                acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                risks TEXT NOT NULL DEFAULT '[]',
+                open_questions TEXT NOT NULL DEFAULT '[]',
+                last_reviewed_at TEXT, last_reviewed_by TEXT
+            );
+            CREATE TABLE requirements (
+                id TEXT PRIMARY KEY, prd_section TEXT NOT NULL, text TEXT NOT NULL,
+                source_paragraph TEXT, derived INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE features (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                requirements TEXT NOT NULL DEFAULT '[]', tasks TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                feature_id TEXT NOT NULL REFERENCES features(id) ON DELETE RESTRICT,
+                title TEXT NOT NULL, description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                priority TEXT NOT NULL DEFAULT 'medium',
+                task_type TEXT NOT NULL DEFAULT 'feature',
+                dependencies TEXT NOT NULL DEFAULT '[]',
+                conflict_groups TEXT NOT NULL DEFAULT '[]',
+                scores TEXT NOT NULL DEFAULT '{}',
+                acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                implementation_notes TEXT NOT NULL DEFAULT '[]',
+                verification TEXT NOT NULL DEFAULT '{}',
+                likely_files TEXT NOT NULL DEFAULT '[]',
+                parent_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE evidence (
+                id TEXT PRIMARY KEY, task_id TEXT NOT NULL, claim_id TEXT NOT NULL,
+                commands_run TEXT NOT NULL DEFAULT '[]', output_excerpt TEXT,
+                files_changed TEXT NOT NULL DEFAULT '[]', pr_url TEXT, commit_sha TEXT,
+                screenshots TEXT NOT NULL DEFAULT '[]', known_limitations TEXT,
+                proofs TEXT NOT NULL DEFAULT '[]',
+                submitted_at TEXT NOT NULL, submitted_by TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
+                action TEXT NOT NULL, target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}', seq INTEGER
+            );
+            CREATE TABLE sync_mappings (
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                external_system TEXT NOT NULL, external_id TEXT NOT NULL,
+                external_url TEXT, last_synced_at TEXT NOT NULL,
+                sync_state TEXT NOT NULL DEFAULT 'in_sync',
+                conflict_resolution_strategy TEXT NOT NULL DEFAULT 'prompt',
+                provider_metadata_json TEXT,
+                PRIMARY KEY (task_id, external_system),
+                UNIQUE (external_system, external_id)
+            );
+            CREATE TABLE claims (id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                claimed_by TEXT NOT NULL, claim_type TEXT NOT NULL DEFAULT 'task',
+                status TEXT NOT NULL DEFAULT 'active', branch TEXT, worktree_path TEXT,
+                expected_files TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL, last_heartbeat_at TEXT NOT NULL,
+                released_at TEXT, release_reason TEXT);
+            CREATE TABLE decisions (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                context TEXT NOT NULL, decision TEXT NOT NULL, consequences TEXT NOT NULL,
+                created_at TEXT NOT NULL, related_tasks TEXT NOT NULL DEFAULT '[]',
+                related_features TEXT NOT NULL DEFAULT '[]');
+            CREATE TABLE reviews (id TEXT PRIMARY KEY, target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL, reviewed_by TEXT NOT NULL, decision TEXT NOT NULL,
+                notes TEXT, created_at TEXT NOT NULL);
+            CREATE TABLE conflict_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                task_ids TEXT NOT NULL DEFAULT '[]', reason TEXT NOT NULL);
+            """
+        )
+        iso = _T0.isoformat()
+        conn.execute(
+            "INSERT INTO projects (id, name, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("proj-1", "Proj", "desc", iso, iso),
+        )
+        # last_reviewed_at is DISTINCT from project.created_at (_T1 vs _T0) so
+        # the v7 COALESCE(last_reviewed_at, project.created_at) backfill is
+        # load-bearing: a test asserting created_at == _T1 proves the migration
+        # sourced last_reviewed_at, not the project fallback.
+        conn.execute(
+            "INSERT INTO prds (project_id, status, summary, last_reviewed_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("proj-1", "reviewed", "the summary", _T1.isoformat()),
+        )
+        conn.execute(
+            "INSERT INTO requirements (id, prd_section, text) VALUES (?, ?, ?)",
+            ("R001", "Goals", "req one"),
+        )
+        conn.execute(
+            "INSERT INTO requirements (id, prd_section, text) VALUES (?, ?, ?)",
+            ("R002", "Goals", "req two"),
+        )
+        conn.execute(
+            "INSERT INTO features (id, title, description) VALUES (?, ?, ?)",
+            ("F001", "Feat", "fdesc"),
+        )
+        for tid in ("T001", "T002"):
+            conn.execute(
+                "INSERT INTO tasks (id, feature_id, title, description, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (tid, "F001", tid, "tdesc", iso, iso),
+            )
+        conn.execute(
+            "INSERT INTO sync_mappings (task_id, external_system, external_id, "
+            "last_synced_at) VALUES (?, ?, ?, ?)",
+            ("T001", "github_issues", "gh-1", iso),
+        )
+        conn.execute("PRAGMA user_version = 6")
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _counts(db_path: str) -> dict[str, int]:
+        conn = sqlite3.connect(db_path)
+        try:
+            return {
+                t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in ("requirements", "features", "tasks", "sync_mappings")
+            }
+        finally:
+            conn.close()
+
+    def test_v6_to_v7_backfills_default_prd_and_preserves_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """Upgrading a v6 db mints the default PRD and backfills prd_id with no
+        row loss; user_version becomes 7 and the prds PK is the single-col id.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+        before = self._counts(db_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                # user_version stamped to 7.
+                assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+                # prds: exactly one default row, keyed on single-col id.
+                prds = conn.execute(
+                    "SELECT id, is_default, summary, project_id, created_at "
+                    "FROM prds"
+                ).fetchall()
+                assert len(prds) == 1
+                assert prds[0][0] == "default"
+                assert prds[0][1] == 1
+                assert prds[0][2] == "the summary"
+                assert prds[0][3] == "proj-1"
+                # created_at backfilled from COALESCE(last_reviewed_at,
+                # project.created_at). last_reviewed_at (_T1) is DISTINCT from
+                # project.created_at (_T0), so this asserts the COALESCE picked
+                # the FIRST non-null source (last_reviewed_at == _T1), not the
+                # fallback — the assertion is load-bearing, not vacuous.
+                assert prds[0][4] == _T1.isoformat()
+                # The PK is the single ``id`` column (NOT composite / project_id).
+                pk_cols = [
+                    r[1]
+                    for r in conn.execute("PRAGMA table_info(prds)").fetchall()
+                    if r[5]  # pk flag
+                ]
+                assert pk_cols == ["id"]
+                # Every entity row backfilled to the default partition.
+                for table in ("requirements", "features", "tasks"):
+                    rows = conn.execute(
+                        f"SELECT DISTINCT prd_id FROM {table}"
+                    ).fetchall()
+                    assert rows == [("default",)], (table, rows)
+                # sync_mapping prd_id backfilled via the task join; entity_kind.
+                sm = conn.execute(
+                    "SELECT prd_id, entity_kind FROM sync_mappings"
+                ).fetchall()
+                assert sm == [("default", "task")]
+                # requirements lineage columns exist and default to NULL.
+                lineage = conn.execute(
+                    "SELECT revision_introduced, revision_superseded "
+                    "FROM requirements"
+                ).fetchall()
+                assert all(r == (None, None) for r in lineage)
+            finally:
+                conn.close()
+        finally:
+            b.close()
+
+        # Row-count invariant: nothing was lost.
+        assert self._counts(db_path) == before
+
+    def test_v6_to_v7_is_idempotent(self, tmp_path: Path) -> None:
+        """Re-running the v6->v7 step on an already-migrated db is a no-op.
+
+        Simulates a crash that left the db migrated but the user_version not yet
+        observed: we force user_version back to 6 and re-run _check_schema_version
+        directly. The rebuild guard (is_default already present) and the
+        duplicate-column-tolerant ALTERs must make this a clean no-op.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates to v7
+        try:
+            assert b._conn is not None  # noqa: SLF001
+            before = self._counts(db_path)
+            # Force the on-disk marker back to 6 and re-run the migration on the
+            # already-v7-shaped tables — must not raise.
+            b._conn.execute("PRAGMA user_version = 6")  # noqa: SLF001
+            b._check_schema_version(pre_ddl_version=6)  # noqa: SLF001
+            assert (
+                b._conn.execute("PRAGMA user_version").fetchone()[0] == 7  # noqa: SLF001
+            )
+            # Still exactly one default prd, still no row loss.
+            prds = b._conn.execute(  # noqa: SLF001
+                "SELECT id, is_default FROM prds"
+            ).fetchall()
+            assert len(prds) == 1
+            assert prds[0][0] == "default"
+            assert prds[0][1] == 1
+            assert self._counts(db_path) == before
+        finally:
+            b.close()
+
+    def test_v6_to_v7_torn_rebuild_with_stray_prds_new_heals(
+        self, tmp_path: Path
+    ) -> None:
+        """T007 — a crash MID-REBUILD that left a stray ``prds_new`` table behind
+        must heal cleanly on the next migrate, not raise.
+
+        The rebuild guard keys on ``is_default`` being absent from ``prds``; a
+        crash AFTER ``CREATE TABLE prds_new`` but BEFORE the ``DROP prds`` /
+        ``RENAME`` leaves ``prds`` still un-rebuilt (no ``is_default``) AND a
+        stray ``prds_new`` present. Re-opening must DROP the stale ``prds_new``
+        and complete: user_version=7, a single default PRD row, every entity row
+        prd_id='default', and no row loss.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+        before = self._counts(db_path)
+
+        # Simulate the torn rebuild: a stray prds_new table left behind by a
+        # crash, while prds is still the un-migrated v6 shape (no is_default).
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("CREATE TABLE prds_new (id TEXT PRIMARY KEY)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # must heal the torn rebuild, not raise
+        try:
+            assert b.get_schema_version() == 7
+            conn = sqlite3.connect(db_path)
+            try:
+                # The stray table is gone (renamed/dropped during the heal).
+                names = {
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                assert "prds_new" not in names
+                # Single default PRD row.
+                prds = conn.execute("SELECT id, is_default FROM prds").fetchall()
+                assert prds == [("default", 1)]
+                # Every entity row in the default partition.
+                for table in ("requirements", "features", "tasks"):
+                    rows = conn.execute(
+                        f"SELECT DISTINCT prd_id FROM {table}"
+                    ).fetchall()
+                    assert rows == [("default",)], (table, rows)
+                sm = conn.execute("SELECT DISTINCT prd_id FROM sync_mappings").fetchall()
+                assert sm == [("default",)]
+            finally:
+                conn.close()
+        finally:
+            b.close()
+
+        # Row-count invariant preserved across the (torn → healed) migrate.
+        assert self._counts(db_path) == before
+
+    def test_v6_to_v7_rerun_on_already_v7_db_is_noop(
+        self, tmp_path: Path
+    ) -> None:
+        """T007 — re-running the migration on an ALREADY-v7 db is a clean no-op.
+
+        After the first migrate stamps v7, forcing the on-disk marker back to 6
+        and re-running ``_check_schema_version`` must re-stamp v7 with zero
+        changes: same single default PRD, identical row counts, no error from
+        the rebuild guard or the duplicate-column-tolerant ALTERs.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates v6 -> v7
+        try:
+            assert b._conn is not None  # noqa: SLF001
+            counts_after_first = self._counts(db_path)
+            prds_after_first = b._conn.execute(  # noqa: SLF001
+                "SELECT id, is_default FROM prds ORDER BY id"
+            ).fetchall()
+
+            # Re-run the migration on the already-v7-shaped tables.
+            b._conn.execute("PRAGMA user_version = 6")  # noqa: SLF001
+            b._check_schema_version(pre_ddl_version=6)  # noqa: SLF001
+
+            assert b.get_schema_version() == 7
+            # Nothing changed: same prds, same row counts.
+            assert (
+                b._conn.execute(  # noqa: SLF001
+                    "SELECT id, is_default FROM prds ORDER BY id"
+                ).fetchall()
+                == prds_after_first
+            )
+            assert self._counts(db_path) == counts_after_first
+        finally:
+            b.close()
+
+    def test_v6_to_v7_torn_migration_rolls_back_and_retries_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """BUG 002 — a torn v6->v7 migration must roll back atomically (leaving
+        user_version at 6, NOT 7) and then COMPLETE on a clean retry.
+
+        The connection is autocommit (isolation_level=None), so without the
+        explicit BEGIN IMMEDIATE/COMMIT wrap each statement would commit on its
+        own: a failure AFTER the prds rebuild + some ALTERs would leave a
+        partial-v7 schema while user_version was already stamped 7 (by the
+        pre-fix _apply_ddl), and the ladder would never re-run — tasks.prd_id /
+        sync_mappings.prd_id missing forever.
+
+        We force a failure PART-WAY through (during the sync_mappings prd_id
+        ALTER, after the prds rebuild and the entity-table ALTERs have run)
+        WITHOUT manually resetting user_version, and assert:
+          1. the exception leaves user_version at 6 (rolled back, not 7), and
+             the partial work (prds rebuild, tasks.prd_id) is gone;
+          2. removing the injected failure and re-opening COMPLETES the
+             migration: every prd_id column present, user_version=7, rows intact.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+        before = self._counts(db_path)
+
+        # --- 1. First open: inject a mid-migration failure. -----------------
+        # Run the REAL _m_to_v7 (whatever its internals), but feed it a thin
+        # connection proxy whose execute() raises on a chosen statement that
+        # only runs AFTER meaningful partial work (the prds rebuild + the
+        # requirements/features/tasks prd_id ALTERs) has already executed.
+        # Targeting _m_to_v7 (present in every version) keeps the test agnostic
+        # to the fix's internal structure: it asserts the OBSERVABLE end-state.
+        real_m_to_v7 = SqliteBackend._m_to_v7
+        sentinel = "ALTER TABLE sync_mappings ADD COLUMN prd_id"
+
+        class _FailingConn:
+            """Proxy that forwards to the real connection but raises on the
+            sentinel statement (sqlite3.Connection.execute is read-only and
+            cannot be monkeypatched directly)."""
+
+            def __init__(self, real: sqlite3.Connection) -> None:
+                self._real = real
+
+            def execute(self, sql: str, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+                if sentinel in sql:
+                    raise sqlite3.OperationalError("injected mid-migration failure")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._real, name)
+
+        def torn_m_to_v7(self: SqliteBackend, conn: sqlite3.Connection) -> None:
+            real_m_to_v7(self, _FailingConn(conn))  # type: ignore[arg-type]
+
+        # The migration ladder dispatches via the _MIGRATIONS table, which holds
+        # the function object captured at class-definition time — so patch the
+        # table entry (not just the class attribute) to actually intercept the
+        # v6->v7 step. This works identically on the fixed and unfixed source.
+        orig_migrations = list(SqliteBackend._MIGRATIONS)
+        SqliteBackend._MIGRATIONS = [
+            (frm, torn_m_to_v7 if frm == 6 else fn)
+            for frm, fn in orig_migrations
+        ]
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="injected"):
+                b.initialize()
+        finally:
+            SqliteBackend._MIGRATIONS = orig_migrations
+            # The failed initialize may have left a half-open backend; close it.
+            try:
+                b.close()
+            except Exception:
+                pass
+
+        # The torn migration rolled back: user_version is still 6, and NONE of
+        # the v7 changes survived (atomic rollback of the whole body).
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+            prds_cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(prds)").fetchall()
+            }
+            assert "is_default" not in prds_cols  # prds rebuild rolled back
+            tasks_cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            assert "prd_id" not in tasks_cols  # entity ALTER rolled back
+            # No stray prds_new left behind.
+            names = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "prds_new" not in names
+        finally:
+            conn.close()
+
+        # --- 2. Clean retry (no injected failure) completes the migration. --
+        b2 = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b2.initialize()
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+                # Both prd_id columns the torn run failed to add now exist.
+                for table in ("tasks", "sync_mappings"):
+                    cols = {
+                        r[1]
+                        for r in conn.execute(
+                            f"PRAGMA table_info({table})"
+                        ).fetchall()
+                    }
+                    assert "prd_id" in cols, table
+                prds = conn.execute("SELECT id, is_default FROM prds").fetchall()
+                assert prds == [("default", 1)]
+                for table in ("requirements", "features", "tasks"):
+                    rows = conn.execute(
+                        f"SELECT DISTINCT prd_id FROM {table}"
+                    ).fetchall()
+                    assert rows == [("default",)], (table, rows)
+            finally:
+                conn.close()
+        finally:
+            b2.close()
+
+        # Row counts intact across torn → rolled-back → cleanly-migrated.
+        assert self._counts(db_path) == before
+
+    def test_prd_parsed_after_v7_migration_preserves_default_identity(
+        self, tmp_path: Path
+    ) -> None:
+        """BUG 001 — the first prd.parsed re-parse after a v6->v7 migration must
+        NOT wipe the v7 identity columns of the migrated default PRD row.
+
+        The migrated 'default' row has is_default=1 and a non-null created_at.
+        A naive ``INSERT OR REPLACE`` (omitting id/is_default/created_at) would
+        collide on id='default', reset is_default 1->0 and null created_at,
+        destroying the ux_prds_default invariant. The UPSERT fix must keep
+        is_default=1 and created_at, updating only the v6 content + updated_at.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates v6 -> v7
+        try:
+            # Capture the migrated default row's identity columns.
+            conn = sqlite3.connect(db_path)
+            try:
+                before = conn.execute(
+                    "SELECT is_default, created_at FROM prds WHERE id='default'"
+                ).fetchone()
+            finally:
+                conn.close()
+            assert before[0] == 1
+            # created_at backfilled by the migration from last_reviewed_at (_T1).
+            assert before[1] == _T1.isoformat()
+
+            # Apply a prd.parsed event (the first re-parse after migration). Its
+            # "now" (_T0) is DISTINCT from — and earlier than — the migrated
+            # created_at (_T1). This makes the created_at/updated_at assertions
+            # below LOAD-BEARING: if the UPSERT wrongly overwrote created_at with
+            # the event timestamp, created_at would become _T0 != before[1] and
+            # the assertion would fail. updated_at must advance to the event "now".
+            payload = _make_prd_parsed_payload(
+                project_id="proj-1", summary="re-parsed summary"
+            )
+            b.append(_make_event("prd.parsed", payload, now=_T0))
+
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT id, is_default, created_at, summary, updated_at FROM prds"
+                ).fetchall()
+                # Exactly one prds row, still the default identity preserved.
+                assert len(rows) == 1
+                row = rows[0]
+                assert row[0] == "default"
+                assert row[1] == 1  # is_default preserved (NOT reset to 0)
+                assert row[2] == before[1]  # created_at preserved (_T1, NOT _T0)
+                assert row[2] == _T1.isoformat()
+                assert row[3] == "re-parsed summary"  # v6 content updated
+                assert row[4] == _T0.isoformat()  # updated_at bumped to event now
+                # Exactly one is_default=1 row (ux_prds_default invariant holds).
+                n_default = conn.execute(
+                    "SELECT COUNT(*) FROM prds WHERE is_default=1"
+                ).fetchone()[0]
+                assert n_default == 1
+            finally:
+                conn.close()
         finally:
             b.close()
 

@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from anvil.state.models import ProofArtifact
+from anvil.state.models import DEFAULT_PRD_ID, ProofArtifact
 
 
 class ProjectCreatedPayload(BaseModel):
@@ -44,11 +44,23 @@ class StateInitializedPayload(BaseModel):
 
 
 class PrdParsedPayload(BaseModel):
-    """Payload for 'prd.parsed'."""
+    """Payload for 'prd.parsed'.
+
+    ``prd_id`` defaults to ``DEFAULT_PRD_ID`` ('default') so a PRE-v7
+    ``prd.parsed`` event (which never carried a ``prd_id`` key) deserialises
+    into the default PRD partition — preserving replay equivalence. The
+    identity/release fields (title/target_version/target_tag/is_default) also
+    default so old payloads validate unchanged.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
+    prd_id: str = DEFAULT_PRD_ID
+    title: str = ""
+    target_version: str | None = None
+    target_tag: str | None = None
+    is_default: bool = True
     status: str = "draft"
     summary: str = ""
     goals: list[Any] = []
@@ -60,21 +72,32 @@ class PrdParsedPayload(BaseModel):
 
 
 class PrdReviewedPayload(BaseModel):
-    """Payload for 'prd.reviewed'."""
+    """Payload for 'prd.reviewed'.
+
+    ``prd_id`` defaults to ``DEFAULT_PRD_ID`` so pre-v7 events (which scoped the
+    status change to the singleton via ``project_id`` only) replay into the
+    default PRD partition.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
+    prd_id: str = DEFAULT_PRD_ID
     reviewer: str
     notes: str | None = None
 
 
 class PrdApprovedPayload(BaseModel):
-    """Payload for 'prd.approved'."""
+    """Payload for 'prd.approved'.
+
+    ``prd_id`` defaults to ``DEFAULT_PRD_ID`` for pre-v7 replay equivalence
+    (see :class:`PrdReviewedPayload`).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
+    prd_id: str = DEFAULT_PRD_ID
     approver: str
 
 
@@ -107,6 +130,7 @@ class FeatureCreatedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    prd_id: str = DEFAULT_PRD_ID
     title: str
     description: str = ""
     status: str = "proposed"
@@ -125,6 +149,7 @@ class TaskCreatedPayload(BaseModel):
 
     id: str
     feature_id: str
+    prd_id: str = DEFAULT_PRD_ID
     title: str
     description: str = ""
     status: str = "proposed"

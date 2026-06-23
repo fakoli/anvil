@@ -326,12 +326,12 @@ class SqliteBackend:
            apply implementation.
 
         Ordering note (P1-3): the pre-DDL ``user_version`` is captured
-        BEFORE ``_apply_ddl`` runs because ``_apply_ddl`` unconditionally
-        stamps ``PRAGMA user_version = SCHEMA_VERSION`` at the end. If we
-        deferred reading until afterward, the v2→v3 migration branch
-        would never fire — every reopened db would look "already v3" to
-        ``_check_schema_version`` and the missing ALTERs would silently
-        not happen.
+        BEFORE ``_apply_ddl`` runs. ``_apply_ddl`` no longer stamps the
+        version (BUG 002 — the stamp is deferred to a successful
+        ``_check_schema_version``), but the capture still happens up front so
+        the migration ladder sees the true on-disk version. A torn migration
+        therefore leaves ``user_version`` at the pre-migrate value for a clean
+        retry on the next open, instead of looking "already current".
         """
         if self._conn is not None:
             # Already initialised — verify version and return.
@@ -364,9 +364,10 @@ class SqliteBackend:
         else:
             conn.execute("PRAGMA synchronous = NORMAL")
 
-        # Capture the on-disk version BEFORE _apply_ddl re-stamps it. The
-        # v2→v3 migration relies on knowing the original version (the DDL
-        # always sets user_version to SCHEMA_VERSION at the end).
+        # Capture the on-disk version before the migration ladder runs. The
+        # migration ladder relies on knowing the original version. (_apply_ddl
+        # no longer stamps user_version — BUG 002 — but capturing here is still
+        # correct and keeps the read away from any DDL side effects.)
         pre_ddl_row = conn.execute("PRAGMA user_version").fetchone()
         pre_ddl_version = pre_ddl_row[0] if pre_ddl_row else 0
 
@@ -1209,20 +1210,68 @@ class SqliteBackend:
     # ------------------------------------------------------------------
 
     def _apply_ddl(self) -> None:
-        """Execute the DDL script statement-by-statement."""
+        """Execute the DDL script statement-by-statement.
+
+        Crucially this does NOT stamp ``PRAGMA user_version`` (BUG 002): the
+        stamp is deferred to ``_check_schema_version``, which sets it ONLY
+        after the migration ladder has actually run to completion. Stamping
+        here — before the ladder — is what let a torn v6→v7 migration leave the
+        DB permanently at user_version=7 while the schema was still partial:
+        the next open would early-return on ``on_disk == SCHEMA_VERSION`` and
+        never retry the ladder.
+        """
         conn = self._require_conn()
-        # Split on semicolons; filter blanks and PRAGMA user_version (set last).
+        # Split on semicolons; filter blanks and PRAGMA user_version (stamped by
+        # _check_schema_version, never here).
         statements = [s.strip() for s in DDL.split(";") if s.strip()]
-        # Separate the user_version pragma — it must be set outside a transaction
-        # on some SQLite versions, so we handle it explicitly at the end.
-        version_pragma = f"PRAGMA user_version = {SCHEMA_VERSION}"
         non_version = [s for s in statements if "user_version" not in s.lower()]
         conn.execute("BEGIN")
-        for stmt in non_version:
-            if stmt:
-                conn.execute(stmt)
-        conn.execute("COMMIT")
-        conn.execute(version_pragma)
+        try:
+            for stmt in non_version:
+                if not stmt:
+                    continue
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError as e:
+                    # A new index that references a column the pending migration
+                    # has not added yet (e.g. v7's idx_*_prd / ux_prds_default on
+                    # the prd_id / is_default columns) fails against a pre-existing
+                    # older-shaped table. The DDL runs BEFORE _check_schema_version,
+                    # so on an UPGRADING DB swallow exactly that "no such column"
+                    # case for CREATE INDEX statements — the matching migration step
+                    # re-creates the index (IF NOT EXISTS) right after it ALTERs the
+                    # column in. A fresh/current DB must NOT swallow it (its CREATE
+                    # TABLE already has the column, so a miss is a real bug).
+                    msg = str(e).lower()
+                    # Strip leading SQL line-comments / blank lines so the keyword
+                    # check sees the actual statement (DDL statements can carry a
+                    # ``-- ...`` comment line before the verb).
+                    body = "\n".join(
+                        line
+                        for line in stmt.splitlines()
+                        if line.strip() and not line.strip().startswith("--")
+                    ).lower()
+                    is_index = body.startswith("create index") or body.startswith(
+                        "create unique index"
+                    )
+                    # Swallow ONLY the legitimate pre-migration case: a CREATE INDEX
+                    # on a v7 column (prd_id / is_default) that an older-shaped table
+                    # has not been ALTERed to yet — the ladder re-creates the index
+                    # IF NOT EXISTS right after. A typo'd / unknown column name still
+                    # propagates on every DB, incl. fresh/current (review FIX 4).
+                    after = msg.partition("no such column:")[2].strip().split()
+                    missing_col = after[0] if after else ""
+                    if is_index and missing_col in ("prd_id", "is_default"):
+                        continue
+                    raise
+            conn.execute("COMMIT")
+        except BaseException:
+            # A non-swallowed DDL failure leaves the BEGIN open; roll it back so the
+            # connection isn't left mid-transaction before propagating (review FIX 5).
+            self._safe_rollback(conn)
+            raise
+        # NOTE: user_version is intentionally NOT stamped here — see the
+        # docstring. _check_schema_version stamps it after a successful ladder.
 
     def _check_schema_version(self, *, pre_ddl_version: int | None = None) -> None:
         """Raise SchemaMismatch if on-disk version is incompatible with SCHEMA_VERSION.
@@ -1274,80 +1323,271 @@ class SqliteBackend:
             on_disk = row[0] if row else 0
         if on_disk == SCHEMA_VERSION:
             return
-        if on_disk in (0, 1) and SCHEMA_VERSION == 6:
-            # v0/v1 → v6: no sync_mappings existed pre-v2, so the DDL above
-            # created the current-shaped table directly. Retrofit events.seq
-            # (v4), tasks.task_type (v5), and evidence.proofs (v6), then bump.
-            self._ensure_events_seq_column(conn)
-            self._ensure_task_type_column(conn)
-            self._ensure_evidence_proofs_column(conn)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            return
-        if on_disk == 2 and SCHEMA_VERSION == 6:
-            # v2 → v6: add the three v3 sync_mappings additions that the
-            # IF NOT EXISTS DDL cannot retroactively apply to the v2 table.
-            # Each ALTER is wrapped because re-running the migration (e.g.
-            # crash-recovery) must remain idempotent — a "duplicate column"
-            # error means the ALTER already happened on a previous run.
-            try:
-                conn.execute(
-                    "ALTER TABLE sync_mappings ADD COLUMN external_url TEXT"
-                )
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    raise
-            try:
-                conn.execute(
-                    "ALTER TABLE sync_mappings ADD COLUMN "
-                    "provider_metadata_json TEXT"
-                )
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    raise
-            # SQLite does not support adding a table-level UNIQUE constraint
-            # via ALTER TABLE, but a UNIQUE INDEX has the same enforcement
-            # semantics for query planning AND constraint violation. The
-            # IF NOT EXISTS makes the migration replay-safe.
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "idx_sync_mappings_external_unique "
-                "ON sync_mappings (external_system, external_id)"
+        # De-literalized migration ladder (was a chain of literal per-version
+        # branches gated on the SCHEMA_VERSION constant). ``_MIGRATIONS`` is
+        # an ordered list of ``(from_version, migrate_fn)`` steps; each ``fn``
+        # applies exactly the additive delta that takes the DB from
+        # ``from_version`` to ``from_version + 1`` and is idempotent
+        # (duplicate-column tolerant) so a crash mid-migrate re-runs cleanly.
+        # We apply every step whose ``from_version >= on_disk`` in order, then
+        # stamp ``user_version``. Adding a future v8 step is ONE new tuple —
+        # no literal version comparison to update.
+        #
+        # An older DB that is already past a given step (e.g. a v3 DB whose DDL
+        # already grew current-shaped tables) still runs that step's helpers:
+        # they no-op via duplicate-column tolerance / IF NOT EXISTS, so running
+        # the full ordered ladder from ``on_disk`` is always safe.
+        if on_disk > SCHEMA_VERSION or on_disk < 0:
+            raise SchemaMismatch(
+                f"Database schema version {on_disk} does not match "
+                f"expected version {SCHEMA_VERSION}. "
+                "Run a migration or delete state.db to start fresh."
             )
-            self._ensure_events_seq_column(conn)
-            self._ensure_task_type_column(conn)
-            self._ensure_evidence_proofs_column(conn)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            return
-        if on_disk == 3 and SCHEMA_VERSION == 6:
-            # v3 → v6: retrofit the nullable events.seq column (v4), the
-            # tasks.task_type column (v5), and evidence.proofs (v6), then bump.
-            # See the docstring for why the legacy strict events id CHECK stays.
-            self._ensure_events_seq_column(conn)
-            self._ensure_task_type_column(conn)
-            self._ensure_evidence_proofs_column(conn)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            return
-        if on_disk == 4 and SCHEMA_VERSION == 6:
-            # v4 → v6: retrofit task_type (v5) and evidence.proofs (v6). Both
-            # are purely additive — the column DEFAULTs backfill every existing
-            # row to its pre-upgrade meaning, so no data migration is needed.
-            self._ensure_task_type_column(conn)
-            self._ensure_evidence_proofs_column(conn)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            return
-        if on_disk == 5 and SCHEMA_VERSION == 6:
-            # v5 → v6 (SL-3 / B48 typed proofs): purely additive — evidence
-            # gains proofs TEXT NOT NULL DEFAULT '[]'. The DEFAULT backfills
-            # every existing evidence row to "no typed proofs," which is the
-            # correct pre-SL-3 meaning, so no data migration is required.
-            self._ensure_evidence_proofs_column(conn)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            return
-        raise SchemaMismatch(
-            f"Database schema version {on_disk} does not match "
-            f"expected version {SCHEMA_VERSION}. "
-            "Run a migration or delete state.db to start fresh."
+        applied = False
+        for from_version, migrate_fn in self._MIGRATIONS:
+            if on_disk <= from_version < SCHEMA_VERSION:
+                migrate_fn(self, conn)
+                applied = True
+        if not applied:
+            # No ladder step covers this on_disk version (e.g. a gap between a
+            # known floor and SCHEMA_VERSION) — fail loudly rather than stamp a
+            # version we did not actually migrate to.
+            raise SchemaMismatch(
+                f"Database schema version {on_disk} does not match "
+                f"expected version {SCHEMA_VERSION}. "
+                "Run a migration or delete state.db to start fresh."
+            )
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    # ------------------------------------------------------------------
+    # Migration ladder steps. Each ``_m_to_vN`` applies the additive delta
+    # from vN-1 to vN. All are idempotent (duplicate-column tolerant /
+    # IF NOT EXISTS) so re-running after a crash is a no-op.
+    # ------------------------------------------------------------------
+
+    def _m_to_v3(self, conn: sqlite3.Connection) -> None:
+        """v2 → v3: the three sync_mappings additions the IF NOT EXISTS DDL
+        cannot retroactively apply to a real (pre-existing) v2 table.
+
+        On a v0/v1 DB (no pre-existing sync_mappings — DDL created the current
+        shape) these ALTERs hit duplicate-column tolerance and no-op.
+        """
+        try:
+            conn.execute("ALTER TABLE sync_mappings ADD COLUMN external_url TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+        try:
+            conn.execute(
+                "ALTER TABLE sync_mappings ADD COLUMN provider_metadata_json TEXT"
+            )
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+        # SQLite cannot add a table-level UNIQUE via ALTER; a UNIQUE INDEX has
+        # the same enforcement. IF NOT EXISTS makes it replay-safe.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_sync_mappings_external_unique "
+            "ON sync_mappings (external_system, external_id)"
         )
+
+    def _m_to_v4(self, conn: sqlite3.Connection) -> None:
+        """v3 → v4: retrofit the nullable ``events.seq`` column."""
+        self._ensure_events_seq_column(conn)
+
+    def _m_to_v5(self, conn: sqlite3.Connection) -> None:
+        """v4 → v5: retrofit ``tasks.task_type`` (DEFAULT 'feature')."""
+        self._ensure_task_type_column(conn)
+
+    def _m_to_v6(self, conn: sqlite3.Connection) -> None:
+        """v5 → v6: retrofit ``evidence.proofs`` (DEFAULT '[]')."""
+        self._ensure_evidence_proofs_column(conn)
+
+    def _m_to_v7(self, conn: sqlite3.Connection) -> None:
+        """v6 → v7: v0.3 multi-PRD persistence foundation.
+
+        Steps, all idempotent / crash-safe:
+        1. Rebuild ``prds`` (SQLite cannot ALTER a PRIMARY KEY; atomicity comes
+           from the outer transaction — see "Atomicity (BUG 002)" below):
+           CREATE ``prds_new`` with the single-column ``id`` PK + the new
+           identity/release columns, INSERT-SELECT the existing single row as
+           ``id='default'`` / ``is_default=1`` / ``created_at`` =
+           COALESCE(last_reviewed_at, project.created_at), DROP old, RENAME.
+           Guarded so a re-run after a torn rebuild (prds already migrated)
+           is a no-op.
+        2. ALTER requirements/features/tasks ADD COLUMN ``prd_id`` TEXT NOT NULL
+           DEFAULT 'default' — the DEFAULT backfills every existing row in one
+           statement. requirements also gains nullable revision lineage columns.
+        3. ALTER sync_mappings ADD ``prd_id`` + ``entity_kind``; backfill
+           ``prd_id`` by joining mapping.task_id -> task.prd_id (== 'default').
+        4. CREATE the new indexes + ux_prds_default IF NOT EXISTS.
+
+        The 'default' literal MUST equal ``DEFAULT_PRD_ID`` (models.py) or
+        replay forks: a pre-v7 log replays into the same partition this
+        migration mints.
+
+        Atomicity (BUG 002): the connection runs in autocommit
+        (``isolation_level=None``), so every statement would otherwise commit
+        individually — a crash part-way (disk full, lock, SIGKILL) would leave
+        a partial-v7 schema on disk. We wrap the ENTIRE body in one explicit
+        ``BEGIN IMMEDIATE … COMMIT`` (ROLLBACK on any exception). SQLite DDL is
+        transactional, so a torn migration rolls back every change atomically
+        and ``user_version`` stays at the pre-migrate value (6) for a clean
+        retry on the next open. The body remains idempotent (duplicate-column
+        tolerant / IF NOT EXISTS) so a completed-then-rerun ladder no-ops.
+        """
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._m_to_v7_body(conn)
+        except BaseException:
+            # BaseException, not Exception: a SIGKILL surfaces as
+            # KeyboardInterrupt; we still want the in-flight transaction rolled
+            # back so nothing partial lands on disk. Use _safe_rollback so a
+            # ROLLBACK against an already-auto-aborted transaction (SQLITE_FULL/
+            # IOERR) does not mask the original migration failure (review FIX 2).
+            self._safe_rollback(conn)
+            raise
+        conn.execute("COMMIT")
+
+    def _m_to_v7_body(self, conn: sqlite3.Connection) -> None:
+        """The v6→v7 migration statements, run inside the explicit transaction
+        opened by ``_m_to_v7``. Kept idempotent / crash-safe."""
+        # ---- 1. Rebuild prds (PK change requires table rebuild) ----
+        # Detect whether the rebuild already ran (idempotency after a crash).
+        prds_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(prds)").fetchall()
+        }
+        if "is_default" not in prds_cols:
+            # project.created_at is the fallback timestamp for the default PRD.
+            proj_row = conn.execute(
+                "SELECT created_at FROM projects"
+            ).fetchone()
+            project_created_at = proj_row[0] if proj_row else None
+            # Crash-safety: a previous migration that died AFTER
+            # ``CREATE TABLE prds_new`` but BEFORE the ``DROP TABLE prds`` /
+            # ``RENAME`` leaves a stray ``prds_new`` behind while ``prds``
+            # still lacks ``is_default`` — so the guard above does not catch
+            # it and the CREATE below would raise "table prds_new already
+            # exists". Drop any stale ``prds_new`` first so a re-run after a
+            # torn rebuild heals cleanly instead of crashing. (With the
+            # outer transaction a torn run rolls back fully, but the guard is
+            # retained as defence in depth.)
+            conn.execute("DROP TABLE IF EXISTS prds_new")
+            conn.execute(
+                """
+                CREATE TABLE prds_new (
+                    id                  TEXT PRIMARY KEY DEFAULT 'default',
+                    project_id          TEXT NOT NULL DEFAULT '',
+                    title               TEXT NOT NULL DEFAULT '',
+                    status              TEXT NOT NULL DEFAULT 'draft',
+                    summary             TEXT NOT NULL DEFAULT '',
+                    goals               TEXT NOT NULL DEFAULT '[]',
+                    non_goals           TEXT NOT NULL DEFAULT '[]',
+                    requirements        TEXT NOT NULL DEFAULT '[]',
+                    acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                    risks               TEXT NOT NULL DEFAULT '[]',
+                    open_questions      TEXT NOT NULL DEFAULT '[]',
+                    last_reviewed_at    TEXT,
+                    last_reviewed_by    TEXT,
+                    target_version      TEXT,
+                    target_tag          TEXT,
+                    is_default          INTEGER NOT NULL DEFAULT 0,
+                    created_at          TEXT,
+                    updated_at          TEXT
+                )
+                """
+            )
+            # Carry the single existing PRD row forward as the default PRD.
+            conn.execute(
+                """
+                INSERT INTO prds_new (
+                    id, project_id, title, status, summary, goals, non_goals,
+                    requirements, acceptance_criteria, risks, open_questions,
+                    last_reviewed_at, last_reviewed_by, target_version,
+                    target_tag, is_default, created_at, updated_at
+                )
+                SELECT
+                    'default', project_id, '', status, summary, goals,
+                    non_goals, requirements, acceptance_criteria, risks,
+                    open_questions, last_reviewed_at, last_reviewed_by,
+                    NULL, NULL, 1,
+                    COALESCE(last_reviewed_at, ?),
+                    COALESCE(last_reviewed_at, ?)
+                FROM prds
+                """,
+                (project_created_at, project_created_at),
+            )
+            conn.execute("DROP TABLE prds")
+            conn.execute("ALTER TABLE prds_new RENAME TO prds")
+
+        # ---- 2. Additive prd_id + revision lineage on entity tables ----
+        for table in ("requirements", "features", "tasks"):
+            try:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN "
+                    "prd_id TEXT NOT NULL DEFAULT 'default'"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+        for col in ("revision_introduced", "revision_superseded"):
+            try:
+                conn.execute(
+                    f"ALTER TABLE requirements ADD COLUMN {col} INTEGER"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+        # ---- 3. sync_mappings partition columns ----
+        try:
+            conn.execute("ALTER TABLE sync_mappings ADD COLUMN prd_id TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+        try:
+            conn.execute(
+                "ALTER TABLE sync_mappings ADD COLUMN "
+                "entity_kind TEXT NOT NULL DEFAULT 'task'"
+            )
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+        # Backfill prd_id from the owning task (every task is 'default' now).
+        conn.execute(
+            "UPDATE sync_mappings SET prd_id = ("
+            "  SELECT t.prd_id FROM tasks t WHERE t.id = sync_mappings.task_id"
+            ") WHERE prd_id IS NULL"
+        )
+
+        # ---- 4. New indexes + partial unique default index ----
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_requirements_prd "
+            "ON requirements (prd_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_features_prd ON features (prd_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_prd_status "
+            "ON tasks (prd_id, status)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_prds_default "
+            "ON prds (project_id) WHERE is_default = 1"
+        )
+
+    # Ordered migration ladder: (from_version, bound-method). Applied while
+    # ``on_disk <= from_version < SCHEMA_VERSION``. Append one tuple per future
+    # schema bump; never edit a literal version comparison again.
+    _MIGRATIONS: list[tuple[int, Any]] = [
+        (2, _m_to_v3),
+        (3, _m_to_v4),
+        (4, _m_to_v5),
+        (5, _m_to_v6),
+        (6, _m_to_v7),
+    ]
 
     @staticmethod
     def _ensure_events_seq_column(conn: sqlite3.Connection) -> None:
@@ -2129,15 +2369,41 @@ class SqliteBackend:
         ]
         requirement_ids = [r.id for r in requirement_objects]
 
-        # Upsert the PRD row.
+        # Upsert the default PRD row (BUG 001). Under the v7 single-column PK
+        # (``id TEXT PRIMARY KEY DEFAULT 'default'``) a bare INSERT OR REPLACE
+        # that omitted id/is_default/created_at/updated_at would collide on the
+        # migrated ``id='default'`` row and, being a DELETE+INSERT, reset
+        # is_default 1→0 and wipe created_at/updated_at — destroying the v7
+        # migration's COALESCE backfill and the ux_prds_default invariant on
+        # the first re-parse. Use an explicit UPSERT that writes ONLY the v6
+        # content columns on conflict, preserving is_default and created_at.
+        #
+        # ``now`` comes from the event timestamp (the backend's injected clock
+        # source — see the many ``event.timestamp.isoformat()`` write handlers)
+        # so replay is deterministic; we never call datetime.now() directly.
+        now = event.timestamp.isoformat()
         conn.execute(
             """
-            INSERT OR REPLACE INTO prds
-                (project_id, status, summary, goals, non_goals, requirements,
-                 acceptance_criteria, risks, open_questions,
-                 last_reviewed_at, last_reviewed_by)
+            INSERT INTO prds
+                (id, project_id, status, summary, goals, non_goals,
+                 requirements, acceptance_criteria, risks, open_questions,
+                 last_reviewed_at, last_reviewed_by,
+                 is_default, created_at, updated_at)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                project_id = excluded.project_id,
+                status = excluded.status,
+                summary = excluded.summary,
+                goals = excluded.goals,
+                non_goals = excluded.non_goals,
+                requirements = excluded.requirements,
+                acceptance_criteria = excluded.acceptance_criteria,
+                risks = excluded.risks,
+                open_questions = excluded.open_questions,
+                last_reviewed_at = excluded.last_reviewed_at,
+                last_reviewed_by = excluded.last_reviewed_by,
+                updated_at = excluded.updated_at
             """,
             (
                 project_id,
@@ -2149,6 +2415,8 @@ class SqliteBackend:
                 json.dumps(acceptance_criteria),
                 json.dumps(risks),
                 json.dumps(open_questions),
+                now,
+                now,
             ),
         )
 
@@ -2220,10 +2488,11 @@ class SqliteBackend:
             UPDATE prds
                SET status = 'reviewed',
                    last_reviewed_at = ?,
-                   last_reviewed_by = ?
+                   last_reviewed_by = ?,
+                   updated_at = ?
              WHERE project_id = ?
             """,
-            (timestamp, reviewer, project_id),
+            (timestamp, reviewer, timestamp, project_id),
         )
 
     def _check_prd_approved(
@@ -2263,10 +2532,11 @@ class SqliteBackend:
             UPDATE prds
                SET status = 'approved',
                    last_reviewed_at = ?,
-                   last_reviewed_by = ?
+                   last_reviewed_by = ?,
+                   updated_at = ?
              WHERE project_id = ?
             """,
-            (timestamp, approver, project_id),
+            (timestamp, approver, timestamp, project_id),
         )
 
         review_id = f"RV-{event_id}"

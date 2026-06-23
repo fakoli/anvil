@@ -32,11 +32,29 @@ Version history
   bugfix / refactor / modify work alongside greenfield feature tasks.
   Auto-upgrade is purely additive (ALTER ADD task_type with a DEFAULT, which
   backfills every existing row to 'feature' — exactly the pre-v5 meaning).
+- v6: SL-3 / B48 typed proofs — evidence gains a ``proofs`` column
+  (TEXT NOT NULL DEFAULT '[]'). Purely additive; the DEFAULT backfills every
+  existing evidence row to "no typed proofs," the correct pre-SL-3 meaning.
+- v7: v0.3 multi-PRD persistence foundation (T002). The singleton ``prds``
+  table becomes a multi-row table keyed on a single-column ``id`` PRIMARY KEY
+  (NOT composite) and gains title/target_version/target_tag/is_default/
+  created_at/updated_at; a partial unique index ``ux_prds_default`` enforces
+  at most one default PRD. ``requirements``/``features``/``tasks`` each gain a
+  ``prd_id`` partition column (TEXT NOT NULL DEFAULT 'default'); ``requirements``
+  also gains nullable ``revision_introduced``/``revision_superseded`` lineage
+  columns. ``sync_mappings`` gains ``prd_id``/``entity_kind`` partition columns.
+  New indexes: idx_requirements_prd, idx_features_prd, idx_tasks_prd_status
+  (prd_id, status). The v6->v7 in-place migration rebuilds ``prds`` (SQLite
+  cannot ALTER a PRIMARY KEY) and ALTER-backfills every other column with a
+  DEFAULT so existing rows adopt the default PRD with zero data loss. Every new
+  column has a DEFAULT so the existing INSERT statements (which never mention
+  the new columns) keep working unchanged — Phase 0 is purely additive at the
+  write layer.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 6
+SCHEMA_VERSION: int = 7
 
 
 def get_schema_version() -> int:
@@ -77,7 +95,9 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 CREATE TABLE IF NOT EXISTS prds (
-    project_id                  TEXT PRIMARY KEY,
+    id                          TEXT PRIMARY KEY DEFAULT 'default',
+    project_id                  TEXT NOT NULL DEFAULT '',
+    title                       TEXT NOT NULL DEFAULT '',
     status                      TEXT NOT NULL DEFAULT 'draft',
     summary                     TEXT NOT NULL DEFAULT '',
     goals                       TEXT NOT NULL DEFAULT '[]',
@@ -87,19 +107,34 @@ CREATE TABLE IF NOT EXISTS prds (
     risks                       TEXT NOT NULL DEFAULT '[]',
     open_questions              TEXT NOT NULL DEFAULT '[]',
     last_reviewed_at            TEXT,
-    last_reviewed_by            TEXT
+    last_reviewed_by            TEXT,
+    target_version              TEXT,
+    target_tag                  TEXT,
+    is_default                  INTEGER NOT NULL DEFAULT 0,
+    created_at                  TEXT,
+    updated_at                  TEXT
 );
 
+-- At most one default PRD per project (single-row today, partition-ready).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_prds_default ON prds (project_id)
+    WHERE is_default = 1;
+
 CREATE TABLE IF NOT EXISTS requirements (
-    id                TEXT PRIMARY KEY,
-    prd_section       TEXT NOT NULL,
-    text              TEXT NOT NULL,
-    source_paragraph  TEXT,
-    derived           INTEGER NOT NULL DEFAULT 0
+    id                   TEXT PRIMARY KEY,
+    prd_id               TEXT NOT NULL DEFAULT 'default',
+    prd_section          TEXT NOT NULL,
+    text                 TEXT NOT NULL,
+    source_paragraph     TEXT,
+    derived              INTEGER NOT NULL DEFAULT 0,
+    revision_introduced  INTEGER,
+    revision_superseded  INTEGER
 );
+
+CREATE INDEX IF NOT EXISTS idx_requirements_prd ON requirements (prd_id);
 
 CREATE TABLE IF NOT EXISTS features (
     id           TEXT PRIMARY KEY,
+    prd_id       TEXT NOT NULL DEFAULT 'default',
     title        TEXT NOT NULL,
     description  TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'proposed',
@@ -107,9 +142,12 @@ CREATE TABLE IF NOT EXISTS features (
     tasks        TEXT NOT NULL DEFAULT '[]'
 );
 
+CREATE INDEX IF NOT EXISTS idx_features_prd ON features (prd_id);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id                   TEXT PRIMARY KEY,
     feature_id           TEXT NOT NULL REFERENCES features(id) ON DELETE RESTRICT,
+    prd_id               TEXT NOT NULL DEFAULT 'default',
     title                TEXT NOT NULL,
     description          TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'proposed',
@@ -130,6 +168,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_feature_status ON tasks (feature_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_prd_status ON tasks (prd_id, status);
 
 CREATE TABLE IF NOT EXISTS claims (
     id                 TEXT PRIMARY KEY,
@@ -210,6 +250,8 @@ CREATE TABLE IF NOT EXISTS sync_mappings (
     sync_state                   TEXT NOT NULL DEFAULT 'in_sync',
     conflict_resolution_strategy TEXT NOT NULL DEFAULT 'prompt',
     provider_metadata_json       TEXT,
+    prd_id                       TEXT,
+    entity_kind                  TEXT NOT NULL DEFAULT 'task',
     PRIMARY KEY (task_id, external_system),
     UNIQUE (external_system, external_id)
 );
@@ -227,7 +269,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;
 """
 
 
