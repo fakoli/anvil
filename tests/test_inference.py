@@ -31,10 +31,12 @@ def _make_task(
     *,
     dependencies: list[str] | None = None,
     conflict_groups: list[str] | None = None,
+    prd_id: str = "default",
 ) -> Task:
     return Task(
         id=task_id,
         feature_id="F001",
+        prd_id=prd_id,
         title=f"Task {task_id}",
         description="A task for inference testing.",
         status=TaskStatus.proposed,
@@ -218,6 +220,39 @@ class TestInferConflictGroups:
         result_tasks, groups = infer_conflict_groups([])
         assert result_tasks == []
         assert groups == []
+
+    def test_cross_prd_overlap_emits_single_unfiltered_group(self) -> None:
+        """T013: inference spans PRDs — a PRD-A task and a PRD-B task that share
+        one likely_file form a single CG-... group containing both ids, and the
+        ConflictGroup carries no prd_id (inference never filters by prd_id)."""
+        tasks = [
+            _make_task(
+                "T001",
+                ["src/shared.py", "src/a_only.py"],
+                prd_id="default",
+            ),
+            _make_task(
+                "T900",
+                ["src/shared.py", "src/b_only.py"],
+                prd_id="v0.2",
+            ),
+        ]
+        result_tasks, groups = infer_conflict_groups(tasks)
+
+        # Exactly one group spanning both PRDs' tasks.
+        assert len(groups) == 1
+        cg = groups[0]
+        assert cg.id == "CG-T001-T900"
+        assert sorted(cg.task_ids) == ["T001", "T900"]
+
+        # ConflictGroup has no prd_id field at all — coordination is global.
+        assert not hasattr(cg, "prd_id")
+
+        # Both tasks (regardless of owning PRD) record membership.
+        t001 = next(t for t in result_tasks if t.id == "T001")
+        t900 = next(t for t in result_tasks if t.id == "T900")
+        assert cg.id in t001.conflict_groups
+        assert cg.id in t900.conflict_groups
 
 
 # ---------------------------------------------------------------------------
