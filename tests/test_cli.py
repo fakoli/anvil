@@ -459,6 +459,292 @@ class TestStatusInitialized:
 
 
 # ---------------------------------------------------------------------------
+# status — per-PRD rollup (T020)
+# ---------------------------------------------------------------------------
+
+
+def _insert_prd_row(
+    db: Path, *, prd_id: str, status: str = "draft", is_default: int = 0
+) -> None:
+    """Raw-insert a PRD row (mirrors tests/test_claims.py::_insert_prd_raw)."""
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO prds (id, project_id, status, is_default) "
+            "VALUES (?, 'proj-1', ?, ?)",
+            (prd_id, status, is_default),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_task_row(
+    db: Path, *, task_id: str, status: str = "ready", prd_id: str = "default"
+) -> None:
+    """Raw-insert a task row partitioned to ``prd_id`` (mirrors _insert_task_raw)."""
+    conn = sqlite3.connect(str(db))
+    iso = "2026-05-24T18:00:00+00:00"
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO features "
+            "(id, title, description, status, requirements, tasks) "
+            "VALUES ('F001', 'F', 'desc', 'proposed', '[]', '[]')",
+        )
+        conn.execute(
+            """INSERT INTO tasks
+            (id, feature_id, title, description, status, priority,
+             dependencies, conflict_groups, scores, acceptance_criteria,
+             implementation_notes, verification, likely_files,
+             prd_id, created_at, updated_at)
+            VALUES (?, 'F001', ?, 'desc', ?, 'medium', '[]', '[]', '{}', '[]',
+                    '[]', '{}', '[]', ?, ?, ?)""",
+            (task_id, f"Task {task_id}", status, prd_id, iso, iso),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_active_claim_row(
+    db: Path, *, claim_id: str, task_id: str, actor: str = "agent"
+) -> None:
+    """Raw-insert an active claim (mirrors _insert_active_claim_raw)."""
+    conn = sqlite3.connect(str(db))
+    iso = "2026-05-24T18:00:00+00:00"
+    try:
+        conn.execute(
+            """INSERT INTO claims
+            (id, task_id, claimed_by, claim_type, status, expected_files,
+             created_at, lease_expires_at, last_heartbeat_at)
+            VALUES (?, ?, ?, 'task', 'active', '[]', ?, '2099-01-01T00:00:00+00:00', ?)""",
+            (claim_id, task_id, actor, iso, iso),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class TestStatusRollup:
+    """T020: ``anvil status`` prints one block per PRD plus a PROJECT TOTAL, and
+    ``--json`` carries ``data['prds']`` alongside the flat project totals."""
+
+    def _init(self, tmp_path: Path) -> Path:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            res = runner.invoke(
+                app, ["init", "--name", "Rollup"], catch_exceptions=False
+            )
+            assert res.exit_code == 0, res.output
+        finally:
+            os.chdir(original_cwd)
+        return tmp_path / ".anvil" / "state.db"
+
+    def _status(self, tmp_path: Path, args: list[str]) -> Result:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            return runner.invoke(app, ["status", *args], catch_exceptions=False)
+        finally:
+            os.chdir(original_cwd)
+
+    def _setup_two_prds(self, tmp_path: Path) -> Path:
+        """Default PRD (approved) owning 2 tasks (1 ready, 1 claimed) + a second
+        'v0.2' PRD (draft) owning 1 ready task."""
+        db = self._init(tmp_path)
+        _insert_prd_row(db, prd_id="default", status="approved", is_default=1)
+        _insert_prd_row(db, prd_id="v0.2", status="draft", is_default=0)
+        _insert_task_row(db, task_id="T001", status="ready", prd_id="default")
+        _insert_task_row(db, task_id="T002", status="claimed", prd_id="default")
+        _insert_task_row(db, task_id="T900", status="ready", prd_id="v0.2")
+        _insert_active_claim_row(db, claim_id="C001", task_id="T002")
+        return db
+
+    def test_status_rollup_single_prd_block_equals_totals(
+        self, tmp_path: Path
+    ) -> None:
+        """A single-PRD DB shows ONE block whose numbers equal the project total."""
+        db = self._init(tmp_path)
+        _insert_prd_row(db, prd_id="default", status="approved", is_default=1)
+        _insert_task_row(db, task_id="T001", status="ready", prd_id="default")
+        _insert_task_row(db, task_id="T002", status="blocked", prd_id="default")
+        _insert_active_claim_row(db, claim_id="C001", task_id="T002")
+
+        res = self._status(tmp_path, ["--json"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)["data"]
+        assert len(data["prds"]) == 1
+        entry = data["prds"][0]
+        assert entry["prd_id"] == "default"
+        assert entry["status"] == "approved"
+        # The one block's numbers equal the flat project totals.
+        assert entry["total_tasks"] == data["tasks"]["total"] == 2
+        assert entry["ready_task_count"] == data["tasks"]["ready"] == 1
+        assert entry["active_claim_count"] == data["active_claims"] == 1
+
+    def test_status_rollup_json_has_prds_and_keeps_flat_fields(
+        self, tmp_path: Path
+    ) -> None:
+        """--json adds data['prds'] while retaining the flat project-total fields."""
+        self._setup_two_prds(tmp_path)
+        res = self._status(tmp_path, ["--json"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)["data"]
+        # Flat project-total fields retained.
+        assert data["tasks"]["total"] == 3
+        assert data["tasks"]["ready"] == 2
+        assert data["active_claims"] == 1
+        # Per-PRD rollup present, one entry per PRD (ordered by id).
+        by_id = {e["prd_id"]: e for e in data["prds"]}
+        assert set(by_id) == {"default", "v0.2"}
+        assert by_id["default"]["total_tasks"] == 2
+        assert by_id["default"]["ready_task_count"] == 1
+        assert by_id["default"]["active_claim_count"] == 1
+        assert by_id["default"]["status"] == "approved"
+        assert by_id["v0.2"]["total_tasks"] == 1
+        assert by_id["v0.2"]["ready_task_count"] == 1
+        assert by_id["v0.2"]["active_claim_count"] == 0
+        assert by_id["v0.2"]["status"] == "draft"
+
+    def test_status_rollup_human_prints_block_per_prd_and_total(
+        self, tmp_path: Path
+    ) -> None:
+        """Human output has one block per PRD plus a PROJECT TOTAL section.
+
+        Pins the EXACT per-PRD block bodies (header + Tasks line with the
+        ready/in_progress/blocked field order + the Active claims line), not just
+        header substrings: a swap of the count fields or a dropped per-PRD
+        ``Active claims:`` line in init_status.py must fail here, since that
+        format string is the only place those numbers are rendered.
+        """
+        self._setup_two_prds(tmp_path)
+        res = self._status(tmp_path, [])
+        assert res.exit_code == 0, res.output
+        out = res.output
+        # default PRD: 2 tasks (1 ready, 0 in_progress, 0 blocked), 1 active claim.
+        assert "PRD default (approved)" in out
+        assert (
+            "  Tasks:         2 total (1 ready, 0 in_progress, 0 blocked)\n"
+            "  Active claims: 1\n"
+        ) in out
+        # v0.2 PRD: 1 ready task, 0 active claims.
+        assert "PRD v0.2 (draft)" in out
+        assert (
+            "  Tasks:         1 total (1 ready, 0 in_progress, 0 blocked)\n"
+            "  Active claims: 0\n"
+        ) in out
+        # PROJECT TOTAL reflects the sum across PRDs (3 tasks, 2 ready, 1 claim).
+        assert "PROJECT TOTAL" in out
+        assert (
+            "Tasks:         3 total (2 ready, 0 in_progress, 0 blocked)" in out
+        )
+
+    def test_status_rollup_hook_format_unchanged(self, tmp_path: Path) -> None:
+        """--hook-format line shape is unchanged; prd-status is the default PRD."""
+        self._setup_two_prds(tmp_path)
+        res = self._status(tmp_path, ["--hook-format"])
+        assert res.exit_code == 0, res.output
+        out = res.output.strip()
+        # Single compact line with the exact four key:value tokens, no per-PRD
+        # blocks. prd-status pins to the default (most-mature) PRD: approved.
+        assert out == (
+            "active-claims:1 ready-tasks:2 blockers:0 prd-status:approved"
+        )
+
+    def test_status_rollup_task_with_unknown_prd_surfaces_as_orphan(
+        self, tmp_path: Path
+    ) -> None:
+        """A task whose ``prd_id`` names a PRD with no row never silently
+        vanishes: it surfaces as its own synthetic entry (status ``none``) and is
+        still counted in the project total.
+
+        Mutation guard for the orphan path: dropping the orphan task instead of
+        bucketing it (a bare ``continue``) would make the per-entry totals stop
+        summing to the project total AND erase the synthetic block — both
+        assertions below catch that.
+        """
+        db = self._init(tmp_path)
+        _insert_prd_row(db, prd_id="default", status="approved", is_default=1)
+        _insert_task_row(db, task_id="T001", status="ready", prd_id="default")
+        # T900 points at a named PRD that has NO prds row (mis-migrated / stale).
+        _insert_task_row(db, task_id="T900", status="ready", prd_id="ghost")
+
+        res = self._status(tmp_path, ["--json"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)["data"]
+        # Flat project total counts BOTH tasks.
+        assert data["tasks"]["total"] == 2
+        by_id = {e["prd_id"]: e for e in data["prds"]}
+        # The unknown PRD surfaces as a synthetic orphan entry, status "none".
+        assert set(by_id) == {"default", "ghost"}
+        assert by_id["ghost"]["status"] == "none"
+        assert by_id["ghost"]["total_tasks"] == 1
+        assert by_id["ghost"]["ready_task_count"] == 1
+        # Exhaustive: per-entry task totals sum to the flat project total, so no
+        # task is dropped from the per-PRD view.
+        assert (
+            sum(e["total_tasks"] for e in data["prds"]) == data["tasks"]["total"]
+        )
+
+    def test_status_rollup_claim_on_unknown_prd_surfaces_as_orphan(
+        self, tmp_path: Path
+    ) -> None:
+        """An active claim whose owning task points at an unknown PRD is bucketed
+        into the synthetic orphan entry, not dropped — per-entry claim counts
+        still sum to the flat ``active_claims`` total."""
+        db = self._init(tmp_path)
+        _insert_prd_row(db, prd_id="default", status="approved", is_default=1)
+        _insert_task_row(db, task_id="T900", status="claimed", prd_id="ghost")
+        _insert_active_claim_row(db, claim_id="C900", task_id="T900")
+
+        res = self._status(tmp_path, ["--json"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)["data"]
+        assert data["active_claims"] == 1
+        by_id = {e["prd_id"]: e for e in data["prds"]}
+        assert by_id["ghost"]["active_claim_count"] == 1
+        assert (
+            sum(e["active_claim_count"] for e in data["prds"])
+            == data["active_claims"]
+        )
+
+    def test_status_rollup_migrated_default_tasks_without_prd_row(
+        self, tmp_path: Path
+    ) -> None:
+        """Migrated-no-PRD-row case: a v6 project that had tasks but never a
+        parsed PRD migrates to v7 with ``tasks.prd_id='default'`` yet no prds row.
+
+        The canonical default tasks must surface as a real ``default`` block (one
+        block, id ``default``) — NOT vanish and NOT be split across an unrelated
+        orphan id — keeping the documented single-PRD rollup shape even though
+        ``status`` is ``none`` (there is no PRD row to read it from, matching the
+        ``none`` PROJECT TOTAL prd-status on such a DB).
+        """
+        db = self._init(tmp_path)
+        # No _insert_prd_row: simulate the migrated DB with tasks but no PRD row.
+        _insert_task_row(db, task_id="T001", status="ready", prd_id="default")
+        _insert_task_row(db, task_id="T002", status="blocked", prd_id="default")
+
+        res = self._status(tmp_path, ["--json"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)["data"]
+        assert data["tasks"]["total"] == 2
+        # Exactly one rollup block, carrying the canonical default id.
+        assert len(data["prds"]) == 1
+        entry = data["prds"][0]
+        assert entry["prd_id"] == "default"
+        assert entry["status"] == "none"
+        assert entry["total_tasks"] == 2
+        assert entry["ready_task_count"] == 1
+        assert entry["task_counts"]["blocked"] == 1
+        # Human output renders it as a real PRD block, not a vanished/stray one.
+        human = self._status(tmp_path, [])
+        assert human.exit_code == 0, human.output
+        assert "PRD default (none)" in human.output
+
+
+# ---------------------------------------------------------------------------
 # --version
 # ---------------------------------------------------------------------------
 

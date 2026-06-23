@@ -537,6 +537,41 @@ class TestGetProjectSummary:
         assert counts["done"] == 1
         assert counts["proposed"] == 1
 
+    def test_prds_rollup_additive_with_flat_totals(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T020: get_project_summary grows a per-PRD ``prds`` list while keeping
+        the flat fields as the project total. Default PRD (approved) owns 2 tasks
+        + 1 claim; a second 'v0.2' PRD (draft) owns 1 ready task."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="approved", prd_id="default", is_default=1)
+        _add_prd(state_dir, status="draft", prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready", prd_id="default")
+        _add_task(state_dir, task_id="T002", status="claimed", prd_id="default")
+        _add_task(state_dir, task_id="T900", status="ready", prd_id="v0.2")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T002")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("get_project_summary", {}))
+
+        data = _run(run())
+        # Flat project totals retained.
+        assert data["ready_task_count"] == 2
+        assert data["active_claim_count"] == 1
+        # Additive per-PRD rollup.
+        by_id = {e["prd_id"]: e for e in data["prds"]}
+        assert set(by_id) == {"default", "v0.2"}
+        assert by_id["default"]["total_tasks"] == 2
+        assert by_id["default"]["ready_task_count"] == 1
+        assert by_id["default"]["active_claim_count"] == 1
+        assert by_id["default"]["status"] == "approved"
+        assert by_id["v0.2"]["total_tasks"] == 1
+        assert by_id["v0.2"]["active_claim_count"] == 0
+        assert by_id["v0.2"]["status"] == "draft"
+
 
 # ===========================================================================
 # Tool 2: list_tasks
@@ -2175,6 +2210,43 @@ class TestGetProjectStatus:
         assert data["project_id"] is None
         assert data["total_tasks"] == 0
         assert data["active_claim_count"] == 0
+        # T020: uninitialized DB has no PRDs to roll up.
+        assert data["prds"] == []
+
+    def test_prds_rollup_additive_with_flat_totals(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T020: get_project_status grows a per-PRD ``prds`` list while keeping
+        the flat fields as the project total."""
+        state_dir = _init_state_dir(tmp_path, "Status Project")
+        _add_prd(state_dir, status="approved", prd_id="default", is_default=1)
+        _add_prd(state_dir, status="draft", prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready", prd_id="default")
+        _add_task(state_dir, task_id="T002", status="blocked", prd_id="default")
+        _add_task(state_dir, task_id="T900", status="ready", prd_id="v0.2")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("get_project_status", {}))
+
+        data = _run(run())
+        # Flat project totals retained.
+        assert data["total_tasks"] == 3
+        assert data["ready_queue_depth"] == 2
+        assert data["active_claim_count"] == 1
+        # Additive per-PRD rollup.
+        by_id = {e["prd_id"]: e for e in data["prds"]}
+        assert set(by_id) == {"default", "v0.2"}
+        assert by_id["default"]["total_tasks"] == 2
+        assert by_id["default"]["ready_task_count"] == 1
+        assert by_id["default"]["active_claim_count"] == 1
+        assert by_id["default"]["task_counts"]["blocked"] == 1
+        assert by_id["v0.2"]["total_tasks"] == 1
+        assert by_id["v0.2"]["ready_task_count"] == 1
+        assert by_id["v0.2"]["active_claim_count"] == 0
 
 
 # ===========================================================================

@@ -19,6 +19,7 @@ from anvil.cli._helpers import (
     _slug,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
+from anvil.state.rollup import compute_prd_rollup
 
 if TYPE_CHECKING:
     from anvil.state.sqlite import SqliteBackend
@@ -429,6 +430,7 @@ def status(
     try:
         project = backend.get_project()
         prd = backend.get_prd()
+        prds = backend.list_prds()
         all_tasks = backend.list_tasks()
         active_claims = backend.list_active_claims()
     finally:
@@ -441,6 +443,11 @@ def status(
 
     prd_status_str = str(prd.status) if prd is not None else "none"
     active_claim_count = len(active_claims)
+
+    # T020: per-PRD rollup. The flat fields above stay the PROJECT TOTAL; the
+    # rollup adds one slice per PRD. On a single-PRD DB the one entry's numbers
+    # equal those totals (see compute_prd_rollup).
+    rollup = compute_prd_rollup(prds, all_tasks, active_claims)
 
     if json_output:
         emit_success(
@@ -455,6 +462,8 @@ def status(
                     "blocked": blocked_count,
                 },
                 "active_claims": active_claim_count,
+                # T020: additive per-PRD rollup alongside the flat project totals.
+                "prds": [dump_model(entry) for entry in rollup],
                 # T007/B11: code-targeted schema version (== SCHEMA_VERSION),
                 # plus the version stamped on this DB for drift detection.
                 "schema_version": schema_version,
@@ -506,7 +515,23 @@ def status(
     typer.echo(f'anvil for "{project_name}" (id: {project_id_str})')
     typer.echo(f"Path: {state_dir}")
     typer.echo(f"Initialized: {initialized_at}")
+
+    # T020: one block per PRD (id, status, counts, ready, active claims). On a
+    # single-PRD DB this is exactly one block whose numbers equal the PROJECT
+    # TOTAL printed below.
+    for entry in rollup:
+        typer.echo("")
+        typer.echo(f"PRD {entry.prd_id} ({entry.status})")
+        typer.echo(
+            f"  Tasks:         {entry.total_tasks} total "
+            f"({entry.ready_task_count} ready, "
+            f"{entry.task_counts.get('in_progress', 0)} in_progress, "
+            f"{entry.task_counts.get('blocked', 0)} blocked)"
+        )
+        typer.echo(f"  Active claims: {entry.active_claim_count}")
+
     typer.echo("")
+    typer.echo("PROJECT TOTAL")
     typer.echo(f"PRD:           {prd_status_str}")
     typer.echo(
         f"Tasks:         {len(all_tasks)} total "
