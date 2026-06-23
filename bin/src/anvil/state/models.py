@@ -465,6 +465,13 @@ class PRD(BaseModel):
     target_version: str | None = Field(default=None, exclude=True)
     target_tag: str | None = Field(default=None, exclude=True)
     is_default: bool = Field(default=False, exclude=True)
+    # Event-sourced revision counter (v0.3 multi-PRD, Phase 6 wiring). First
+    # parse is revision 1; each re-parse bumps it via a ``prd.revised`` event.
+    # Defaults to 1 so a PRD constructed without it (and any v6 prds row that
+    # predates the column) reads as the first revision. ``exclude=True`` keeps
+    # Phase 0 additive — omitted from ``model_dump()`` so existing event
+    # payloads / snapshot blobs stay byte-identical until Phase 6 wires it in.
+    revision: int = Field(default=1, ge=1, exclude=True)
     status: PRDStatus = PRDStatus.draft
     summary: str = ""
     goals: list[str] = Field(default_factory=list)
@@ -508,6 +515,15 @@ class Requirement(BaseModel):
     text: str
     source_paragraph: str | None = None
     derived: bool = False
+    # Revision lineage (v0.3 multi-PRD, Phase 6 wiring). ``revision_introduced``
+    # is the PRD revision a requirement first appeared in; ``revision_superseded``
+    # is the revision that removed/replaced it (None = still live). Defaults make
+    # a Requirement constructed without them read as "introduced at revision 1,
+    # never superseded" — matching the nullable INTEGER columns the v7 migration
+    # adds. ``exclude=True`` keeps Phase 0 additive: omitted from ``model_dump()``
+    # so existing event payloads / snapshot blobs stay byte-identical.
+    revision_introduced: int = Field(default=1, ge=1, exclude=True)
+    revision_superseded: int | None = Field(default=None, exclude=True)
 
 
 class Feature(BaseModel):

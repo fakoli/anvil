@@ -283,6 +283,65 @@ class TestTaskDefaults:
 
 
 # ---------------------------------------------------------------------------
+# T022 — PRD.revision + Requirement lineage fields (v0.3 multi-PRD foundation)
+# ---------------------------------------------------------------------------
+
+
+class TestRevisionLineageFields:
+    def test_prd_default_revision_is_one(self) -> None:
+        """PRD constructed with no new fields defaults revision to 1."""
+        prd = PRD()
+        assert prd.revision == 1
+
+    def test_requirement_default_lineage(self) -> None:
+        """Requirement lineage fields default to revision_introduced=1,
+        revision_superseded=None (back-compat)."""
+        req = Requirement(id="R001", prd_section="s", text="t")
+        assert req.revision_introduced == 1
+        assert req.revision_superseded is None
+
+    def test_prd_no_new_fields_still_validates(self) -> None:
+        """Constructing PRD() with no new fields still validates."""
+        assert PRD() is not None
+
+    def test_requirement_no_new_fields_still_validates(self) -> None:
+        """Constructing Requirement() with no new fields still validates."""
+        assert Requirement(id="R001", prd_section="s", text="t") is not None
+
+    def test_prd_revision_must_be_ge_one(self) -> None:
+        """revision below 1 is a ValidationError (ge=1)."""
+        with pytest.raises(ValidationError):
+            PRD(revision=0)
+
+    def test_requirement_revision_introduced_must_be_ge_one(self) -> None:
+        """revision_introduced below 1 is a ValidationError (ge=1)."""
+        with pytest.raises(ValidationError):
+            Requirement(
+                id="R001", prd_section="s", text="t", revision_introduced=0
+            )
+
+    def test_revision_fields_excluded_from_dump(self) -> None:
+        """Phase 0 is additive: the new fields are excluded from model_dump
+        so existing event payloads / snapshot blobs stay byte-identical."""
+        prd_dump = PRD().model_dump()
+        assert "revision" not in prd_dump
+        req_dump = Requirement(id="R001", prd_section="s", text="t").model_dump()
+        assert "revision_introduced" not in req_dump
+        assert "revision_superseded" not in req_dump
+
+    def test_requirement_supersedes_explicit_value(self) -> None:
+        """revision_superseded accepts an explicit revision number."""
+        req = Requirement(
+            id="R001",
+            prd_section="s",
+            text="t",
+            revision_introduced=1,
+            revision_superseded=3,
+        )
+        assert req.revision_superseded == 3
+
+
+# ---------------------------------------------------------------------------
 # TaskType enum (T015 — non-feature task types)
 # ---------------------------------------------------------------------------
 

@@ -5742,6 +5742,67 @@ class TestPayloadValidation:
         })
         assert obj.reviewer == "alice"
 
+    def test_prd_revised_payload_validates_good(self) -> None:
+        p = self._import_payload_models()
+        obj = p.PrdRevisedPayload.model_validate({
+            "project_id": "proj-1",
+            "prd_id": "default",
+            "revision": 2,
+            "summary": "revised summary",
+            "requirements_added": [{"id": "R002"}],
+            "requirements_superseded": [{"id": "R001"}],
+            "requirements_unchanged": [],
+        })
+        assert obj.project_id == "proj-1"
+        assert obj.revision == 2
+        assert obj.requirements_added == [{"id": "R002"}]
+        assert obj.requirements_superseded == [{"id": "R001"}]
+
+    def test_prd_revised_payload_defaults(self) -> None:
+        """prd_id defaults to 'default' and the diff lists default to empty."""
+        p = self._import_payload_models()
+        obj = p.PrdRevisedPayload.model_validate({
+            "project_id": "proj-1",
+            "revision": 3,
+        })
+        assert obj.prd_id == "default"
+        # A 'revise' event targets an existing prd_id; the safe default is
+        # is_default=False so a named-PRD revision never flips is_default 0→1
+        # and breaks the ux_prds_default single-default invariant.
+        assert obj.is_default is False
+        assert obj.requirements_added == []
+        assert obj.requirements_superseded == []
+        assert obj.requirements_unchanged == []
+
+    def test_prd_revised_payload_missing_revision_rejects(self) -> None:
+        """revision is required (no default); omitting it raises ValidationError.
+
+        Guards the T023 revision-counter contract: a regression that gave
+        revision a default (e.g. ``= 1``) would silently accept payloads with
+        no explicit revision and change prd.revised dispatch semantics.
+        """
+        from pydantic import ValidationError as PydanticValidationError
+        p = self._import_payload_models()
+        with pytest.raises(PydanticValidationError, match="revision"):
+            p.PrdRevisedPayload.model_validate({
+                "project_id": "proj-1",
+            })
+
+    def test_prd_revised_payload_revision_must_be_ge_one(self) -> None:
+        """revision below 1 raises ValidationError (Field(ge=1)).
+
+        Mirrors test_models.py::test_prd_revision_must_be_ge_one for the
+        payload's identical guard: revision is a positive monotonic counter, so
+        a revision=0 (or negative) payload must be rejected at dispatch.
+        """
+        from pydantic import ValidationError as PydanticValidationError
+        p = self._import_payload_models()
+        with pytest.raises(PydanticValidationError, match="revision"):
+            p.PrdRevisedPayload.model_validate({
+                "project_id": "proj-1",
+                "revision": 0,
+            })
+
     def test_prd_approved_payload_validates_good(self) -> None:
         p = self._import_payload_models()
         obj = p.PrdApprovedPayload.model_validate({
@@ -5910,6 +5971,16 @@ class TestPayloadValidation:
                 "project_id": "proj-1",
                 "reviewer": "alice",
                 "bad": "field",
+            })
+
+    def test_prd_revised_rejects_unknown_key(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+        p = self._import_payload_models()
+        with pytest.raises(PydanticValidationError, match="extra"):
+            p.PrdRevisedPayload.model_validate({
+                "project_id": "proj-1",
+                "revision": 2,
+                "unknown_key": "oops",
             })
 
     def test_prd_approved_rejects_unknown_key(self) -> None:
