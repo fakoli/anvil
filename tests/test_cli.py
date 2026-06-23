@@ -822,6 +822,274 @@ A project without goals.
 
 
 # ---------------------------------------------------------------------------
+# prd parse --prd (T016) — per-PRD source files and partitioned parsing
+# ---------------------------------------------------------------------------
+
+
+_NAMED_PRD_CONTENT = """\
+# Project: CLI Named PRD
+
+## Summary
+
+A named PRD for multi-PRD CLI testing.
+
+## Goals
+
+- Ship v0.2.
+
+## Requirements
+
+- Named requirement one.
+- Named requirement two.
+"""
+
+
+def _write_named_prd(tmp_path: Path, prd_id: str, content: str) -> None:
+    """Write content to .anvil/prds/<prd_id>.md, creating prds/ if needed."""
+    prds_dir = tmp_path / ".anvil" / "prds"
+    prds_dir.mkdir(parents=True, exist_ok=True)
+    (prds_dir / f"{prd_id}.md").write_text(content, encoding="utf-8")
+
+
+def _prd_parsed_payload(tmp_path: Path) -> dict:  # type: ignore[type-arg]
+    """Return the payload of the LAST prd.parsed event in events.jsonl."""
+    payload: dict = {}  # type: ignore[type-arg]
+    for line in _events_text(tmp_path).splitlines():
+        event = json.loads(line)
+        if event.get("action") == "prd.parsed":
+            payload = event.get("payload_json") or event.get("payload") or {}
+    return payload
+
+
+class TestPrdSourcePath:
+    def test_default_prd_id_maps_to_bare_prd_md(self) -> None:
+        """prd_source_path returns <state_dir>/prd.md for the default PRD."""
+        from anvil.cli._helpers import prd_source_path
+
+        state_dir = Path("/proj/.anvil")
+        assert prd_source_path(state_dir, "default") == state_dir / "prd.md"
+
+    def test_parse_sentinel_id_maps_to_bare_prd_md(self) -> None:
+        """The parse-time sentinel ('prd') also resolves to prd.md."""
+        from anvil.cli._helpers import prd_source_path
+
+        state_dir = Path("/proj/.anvil")
+        assert prd_source_path(state_dir, "prd") == state_dir / "prd.md"
+
+    def test_named_prd_id_maps_to_prds_subdir(self) -> None:
+        """A named PRD resolves to <state_dir>/prds/<id>.md."""
+        from anvil.cli._helpers import prd_source_path
+
+        state_dir = Path("/proj/.anvil")
+        assert (
+            prd_source_path(state_dir, "v0.2")
+            == state_dir / "prds" / "v0.2.md"
+        )
+
+
+class TestPrdParseNamed:
+    def test_named_prd_reads_prds_subdir_and_prd_parsed_carries_prd_id(
+        self, tmp_path: Path
+    ) -> None:
+        """`prd parse --prd v0.2` reads .anvil/prds/v0.2.md and emits a
+        prd.parsed event carrying prd_id='v0.2'."""
+        _do_init(tmp_path)
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+
+        result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+        assert result.exit_code == 0, f"named parse failed: {result.output}"
+        # Source line points at the prds/ subdir, not the bare prd.md.
+        assert "prds/v0.2.md" in result.output
+
+        payload = _prd_parsed_payload(tmp_path)
+        assert payload.get("prd_id") == "v0.2"
+        assert payload.get("is_default") is False
+        # Named PRD ids are prefixed (T015).
+        assert [r["id"] for r in payload["requirements"]] == [
+            "v0.2:R001",
+            "v0.2:R002",
+        ]
+
+        # ux_prds_default invariant at the DB level (not just the event
+        # payload): a named-only parse with NO prior default parse must NOT
+        # mint an is_default=1 row, and the named row must be is_default=0.
+        # An event-payload-only assertion would miss a handler regression that
+        # ignored payload.is_default.
+        from anvil.cli._helpers import _open_backend
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prds = {p.id: p.is_default for p in backend.list_prds()}
+            assert prds == {"v0.2": False}
+            assert backend.default_prd_id() is None
+        finally:
+            backend.close()
+
+    def test_no_flag_reads_default_prd_md_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """Without --prd the command reads .anvil/prd.md and the prd.parsed
+        payload stays byte-identical (no prd_id/is_default keys → default
+        partition with bare ids)."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert result.exit_code == 0, f"prd parse failed: {result.output}"
+        # The default source is the bare prd.md (no prds/ subdir).
+        assert "prd.md" in result.output
+        assert "prds/" not in result.output
+
+        payload = _prd_parsed_payload(tmp_path)
+        # Omitted entirely so the event matches the pre-multi-PRD golden.
+        assert "prd_id" not in payload
+        assert "is_default" not in payload
+        # Default PRD keeps bare requirement ids.
+        assert [r["id"] for r in payload["requirements"]] == ["R001", "R002"]
+
+    def test_parsing_named_prd_leaves_default_requirements_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """Parsing one PRD writes only its own partition: the default PRD's
+        requirement rows survive a subsequent named parse, and vice-versa."""
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            default_reqs = [
+                r.id for r in backend.list_requirements(prd_id="default")
+            ]
+            named_reqs = [
+                r.id for r in backend.list_requirements(prd_id="v0.2")
+            ]
+        finally:
+            backend.close()
+
+        # The default partition is intact after the named parse...
+        assert default_reqs == ["R001", "R002"]
+        # ...and the named partition holds only its own (prefixed) rows.
+        assert named_reqs == ["v0.2:R001", "v0.2:R002"]
+
+    def test_missing_named_prd_source_exits_1_with_path(
+        self, tmp_path: Path
+    ) -> None:
+        """A missing .anvil/prds/<id>.md exits 1 with an actionable message
+        naming the exact path the author must create."""
+        _do_init(tmp_path)
+        # Do NOT create prds/nope.md.
+        result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "nope"])
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "prds/nope.md" in combined
+        assert "not found" in combined.lower()
+
+    @pytest.mark.parametrize("sentinel", ["default", "prd"])
+    def test_reserved_sentinel_prd_flag_creates_visible_default(
+        self, tmp_path: Path, sentinel: str
+    ) -> None:
+        """`prd parse --prd default` / `--prd prd` are spellings of the DEFAULT
+        PRD, not named PRDs: they read the bare prd.md and create a proper
+        is_default=1 row, leaving the default PRD visible to is_default=1
+        consumers (get_prd() no-arg, default_prd_id()).
+
+        Regression guard for the `if prd:` truthiness bug: stamping
+        is_default=False for these sentinels INSERTed an ('default', is_default=0)
+        row, breaking ux_prds_default and making the PRD silently disappear.
+        """
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+
+        result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", sentinel])
+        assert result.exit_code == 0, f"sentinel parse failed: {result.output}"
+        # Resolves to the bare prd.md, not a prds/ subdir.
+        assert "prds/" not in result.output
+
+        # The sentinel must take the no-stamp (default) branch, so the event
+        # omits prd_id/is_default exactly like a no-flag parse.
+        payload = _prd_parsed_payload(tmp_path)
+        assert "prd_id" not in payload
+        assert "is_default" not in payload
+        # Default PRD keeps bare requirement ids.
+        assert [r["id"] for r in payload["requirements"]] == ["R001", "R002"]
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prds = {p.id: p.is_default for p in backend.list_prds()}
+            assert prds == {"default": True}
+            assert backend.default_prd_id() == "default"
+            assert backend.get_prd() is not None
+        finally:
+            backend.close()
+
+    def test_file_with_prd_flag_writes_into_named_partition(
+        self, tmp_path: Path
+    ) -> None:
+        """--file controls WHICH path is read; --prd still controls the
+        partition the event writes into. A `--file X --prd v0.2` parse must
+        land in the v0.2 partition (stamped is_default=False) without touching
+        the default PRD.
+
+        This is the one branch where prd_path and parse_prd_id are decoupled
+        (file is not None skips prd_source_path), so the partition stamp must
+        ride parse_prd_id, not the file path.
+        """
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        # An existing default PRD that must stay untouched.
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+
+        # The --file source lives OUTSIDE the prds/ convention.
+        custom = tmp_path / "external_prd.md"
+        custom.write_text(_NAMED_PRD_CONTENT, encoding="utf-8")
+
+        result = _invoke_cmd(
+            tmp_path, ["prd", "parse", "--file", str(custom), "--prd", "v0.2"]
+        )
+        assert result.exit_code == 0, f"--file --prd failed: {result.output}"
+        # The source line points at the --file path, not prds/v0.2.md.
+        assert "external_prd.md" in result.output
+
+        # Event is stamped into the v0.2 partition despite the --file source.
+        payload = _prd_parsed_payload(tmp_path)
+        assert payload.get("prd_id") == "v0.2"
+        assert payload.get("is_default") is False
+        assert [r["id"] for r in payload["requirements"]] == [
+            "v0.2:R001",
+            "v0.2:R002",
+        ]
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            # Default partition survived the --file --prd parse...
+            default_reqs = [
+                r.id for r in backend.list_requirements(prd_id="default")
+            ]
+            named_reqs = [
+                r.id for r in backend.list_requirements(prd_id="v0.2")
+            ]
+            prds = {p.id: p.is_default for p in backend.list_prds()}
+        finally:
+            backend.close()
+
+        assert default_reqs == ["R001", "R002"]
+        assert named_reqs == ["v0.2:R001", "v0.2:R002"]
+        # Exactly one default row; the named row is is_default=0.
+        assert prds == {"default": True, "v0.2": False}
+
+
+# ---------------------------------------------------------------------------
 # prd review command
 # ---------------------------------------------------------------------------
 

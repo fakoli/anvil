@@ -7,11 +7,13 @@ from pathlib import Path
 import typer
 
 from anvil.cli._helpers import (
+    _DEFAULT_PRD_IDS,
     _PRD_FILENAME,
     _get_project_id,
     _open_backend,
     _require_state_dir,
     _resolve_state_dir,
+    prd_source_path,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.state.models import EventDraft
@@ -33,6 +35,15 @@ def prd_parse(
             "Defaults to .anvil/prd.md in the current directory."
         ),
     ),
+    prd: str | None = typer.Option(  # noqa: B008
+        None,
+        "--prd",
+        help=(
+            "Named PRD to parse (multi-PRD). Reads .anvil/prds/<id>.md and "
+            "scopes the parse to that PRD partition. Omit for the default "
+            "PRD (.anvil/prd.md). Ignored when --file is given."
+        ),
+    ),
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
         "--cwd",
@@ -40,10 +51,12 @@ def prd_parse(
         hidden=True,
     ),
 ) -> None:
-    """Parse prd.md and store the result as a prd.parsed event.
+    """Parse a PRD and store the result as a prd.parsed event.
 
-    Reads .anvil/prd.md (or --file PATH), calls the template parser,
-    emits a prd.parsed event with the full PRD + requirements payload.
+    Reads .anvil/prd.md (or --file PATH, or .anvil/prds/<id>.md via --prd),
+    calls the template parser, emits a prd.parsed event with the full PRD +
+    requirements payload. With --prd the event carries that prd_id so the
+    backend writes only that PRD's partition, leaving other PRDs untouched.
 
     Exits 1 if there are parse errors or the file cannot be read.
     On success, prints a summary of what was parsed.
@@ -54,7 +67,17 @@ def prd_parse(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir)
 
-    prd_path = file if file is not None else state_dir / _PRD_FILENAME
+    # The parse-time prd_id controls id shape and the partition the event
+    # writes into. ``--prd v0.2`` scopes to a named PRD; the default ('prd'
+    # sentinel) keeps bare ids and the default partition, byte-identical to
+    # the pre-multi-PRD behaviour. ``--file`` always reads the given path but
+    # still honours ``--prd`` for the partition.
+    parse_prd_id = prd if prd else "prd"
+
+    if file is not None:
+        prd_path = file
+    else:
+        prd_path = prd_source_path(state_dir, parse_prd_id)
     if not prd_path.exists():
         typer.echo(
             f"Error: PRD file not found at {prd_path}. "
@@ -69,7 +92,7 @@ def prd_parse(
         typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    result = parse_prd(markdown, prd_id="prd")
+    result = parse_prd(markdown, prd_id=parse_prd_id)
 
     if result.errors:
         for err in result.errors:
@@ -110,6 +133,28 @@ def prd_parse(
             "risks": result.prd.risks,
             "open_questions": result.prd.open_questions,
         }
+
+        # Named PRD: stamp the partition so the backend writes ONLY this PRD's
+        # rows (the prd.parsed handler scopes its DELETE/UPSERT by prd_id),
+        # leaving other PRDs' requirements untouched. The default PRD omits
+        # these keys entirely so the payload stays byte-identical to the
+        # pre-multi-PRD event (PrdParsedPayload defaults prd_id='default',
+        # is_default=True), preserving replay equivalence.
+        #
+        # Gate on the RESOLVED parse_prd_id, not the raw ``--prd`` flag: the
+        # reserved sentinels ``--prd default`` / ``--prd prd`` are legitimate
+        # spellings of the DEFAULT PRD (per ``_DEFAULT_PRD_IDS`` / ``prd_source_path``
+        # / ``parse_prd``), so they must take the default (no-stamp) branch.
+        # Stamping is_default=False for them would INSERT an ``id='default'``
+        # row with is_default=0, breaking the ux_prds_default invariant and
+        # making the default PRD invisible to every is_default=1 consumer
+        # (get_prd() no-arg, default_prd_id(), planning, claim gating).
+        if parse_prd_id not in _DEFAULT_PRD_IDS:
+            payload["prd_id"] = result.prd.id
+            payload["is_default"] = False
+            payload["title"] = result.prd.title
+            payload["target_version"] = result.prd.target_version
+            payload["target_tag"] = result.prd.target_tag
 
         draft = EventDraft(
             timestamp=now,
