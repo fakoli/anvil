@@ -990,13 +990,18 @@ class TestRowDeserialization:
             # Insert project first (PRD FK)
             b.append(_make_project_event(event_id="E000001"))
 
-            # Insert PRD directly
+            # Insert the default PRD row directly. Under v7, get_prd() no-arg
+            # resolves the is_default=1 row, so the row must carry is_default=1
+            # (the single-PRD default), id='default', and tz-aware timestamps.
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             conn.execute(
                 """INSERT INTO prds
-                (project_id, status, summary, goals, non_goals, requirements,
-                 acceptance_criteria, risks, open_questions)
-                VALUES ('proj-1', 'draft', 'test prd', '[]', '[]', '[]', '[]', '[]', '[]')"""
+                (id, project_id, status, summary, goals, non_goals, requirements,
+                 acceptance_criteria, risks, open_questions,
+                 is_default, created_at, updated_at)
+                VALUES ('default', 'proj-1', 'draft', 'test prd', '[]', '[]', '[]',
+                        '[]', '[]', '[]', 1, ?, ?)""",
+                (_T0.isoformat(), _T0.isoformat()),
             )
             conn.commit()
             conn.close()
@@ -1005,6 +1010,8 @@ class TestRowDeserialization:
             assert prd is not None
             assert prd.status.value == "draft"
             assert prd.summary == "test prd"
+            assert prd.id == "default"
+            assert prd.is_default is True
         finally:
             b.close()
 
@@ -6787,6 +6794,47 @@ class TestV6ToV7Migration:
 
         # Row-count invariant: nothing was lost.
         assert self._counts(db_path) == before
+
+    def test_get_prd_on_migrated_v6_db_returns_tz_aware_default(
+        self, tmp_path: Path
+    ) -> None:
+        """T008 (review #13) — get_prd() on a freshly migrated v6 DB returns the
+        default PRD without raising on the tz-aware timestamp validators.
+
+        The v6->v7 migration backfills created_at/updated_at via
+        COALESCE(last_reviewed_at, project.created_at), both stored as tz-aware
+        UTC ISO strings. _row_to_prd must surface them through PRD's UTC
+        field-validators (which reject naive datetimes) without error, and the
+        no-arg get_prd() must resolve the is_default=1 row.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates v6 -> v7
+        try:
+            prd = b.get_prd()  # no-arg → is_default=1 row
+            assert prd is not None
+            assert prd.id == "default"
+            assert prd.is_default is True
+            assert prd.summary == "the summary"
+            # Timestamps parsed and tz-AWARE (no naive datetime escaped).
+            assert prd.created_at is not None
+            assert prd.created_at.tzinfo is not None
+            assert prd.updated_at is not None
+            assert prd.updated_at.tzinfo is not None
+            # created_at sourced from COALESCE(last_reviewed_at=_T1, ...).
+            assert prd.created_at == _T1
+            # default_prd_id() and list_prds() agree with the single default.
+            assert b.default_prd_id() == "default"
+            assert [p.id for p in b.list_prds()] == ["default"]
+            # Explicit-id lookup resolves the same row; unknown id → None.
+            assert b.get_prd("default") is not None
+            assert b.get_prd("nonexistent") is None
+        finally:
+            b.close()
 
     def test_v6_to_v7_is_idempotent(self, tmp_path: Path) -> None:
         """Re-running the v6->v7 step on an already-migrated db is a no-op.

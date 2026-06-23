@@ -125,18 +125,25 @@ def _init_state_dir(tmp_path: Path, project_name: str = "Test Project") -> Path:
 
 
 def _add_prd(state_dir: Path, status: str = "reviewed") -> None:
-    """Insert a PRD row directly via SQLite.
+    """Insert the default PRD row directly via SQLite.
 
     status options: 'draft', 'reviewed', 'approved'
+
+    Under schema v7 the no-arg ``get_prd()`` resolves the ``is_default = 1`` row,
+    so the inserted row must be a v7-correct default PRD: ``id='default'``,
+    ``is_default=1``, with tz-aware UTC timestamps.
     """
     db_path = str(state_dir / "state.db")
+    iso = "2026-05-24T18:00:00+00:00"
     conn = sqlite3.connect(db_path)
     conn.execute("""
         INSERT OR REPLACE INTO prds
-        (project_id, status, summary, goals, non_goals, requirements,
-         acceptance_criteria, risks, open_questions)
-        VALUES ('proj-test', ?, 'Test summary.', '[]', '[]', '[]', '[]', '[]', '[]')
-    """, (status,))
+        (id, project_id, status, summary, goals, non_goals, requirements,
+         acceptance_criteria, risks, open_questions,
+         is_default, created_at, updated_at)
+        VALUES ('default', 'proj-test', ?, 'Test summary.', '[]', '[]', '[]',
+                '[]', '[]', '[]', 1, ?, ?)
+    """, (status, iso, iso))
     conn.commit()
     conn.close()
 
