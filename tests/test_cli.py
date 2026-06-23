@@ -1413,6 +1413,306 @@ class TestPrdReview:
 
 
 # ---------------------------------------------------------------------------
+# T021 — backward-compat surface tests + PRD ambiguity / ANVIL_PRD on the CLI
+#
+# AC1: a v7 single-PRD ('default') DB yields identical output for
+#      status / prd review / plan / next with no --prd vs the pre-change
+#      baseline (modulo the additive prds[]).
+# AC2: the ambiguity error fires ONLY when >1 PRD and no --prd/$ANVIL_PRD; the
+#      message lists the available ids and the --prd/$ANVIL_PRD knobs.
+# AC3: $ANVIL_PRD is honoured by the CLI (and, in test_mcp.py, equally by MCP).
+# ---------------------------------------------------------------------------
+
+
+def _seed_default_prd(tmp_path: Path, *, approve: bool = False) -> None:
+    """Parse the bare prd.md into a real DEFAULT PRD row (correct project_id, so
+    the prd.reviewed/approved write path actually transitions it). Optionally
+    drive it to approved so raw-inserted ready tasks are claimable by `next`."""
+    _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+    res = _invoke_cmd(tmp_path, ["prd", "parse"])
+    assert res.exit_code == 0, res.output
+    if approve:
+        assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
+
+
+def _seed_two_named_prds(tmp_path: Path) -> None:
+    """Two NON-default PRDs (v0.1, v0.2), no default — the ambiguous shape the
+    mutating resolver refuses to pick from. Uses the real parse flow so the rows
+    carry the project's actual project_id."""
+    _write_named_prd(tmp_path, "v0.1", _NAMED_PRD_CONTENT)
+    assert _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.1"]).exit_code == 0
+    _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+    assert _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code == 0
+
+
+class TestSinglePrdBackcompat:
+    """AC1: on a single-PRD ('default') DB, the read/review surfaces behave
+    identically with no --prd as with an explicit `--prd default`, and the
+    additive per-PRD rollup carries exactly one entry equal to the totals."""
+
+    def test_single_prd_backcompat_status_one_block_equals_totals(
+        self, tmp_path: Path
+    ) -> None:
+        """status: the additive prds[] has ONE entry whose numbers equal the flat
+        project totals, and prd_status mirrors the single PRD — unchanged shape."""
+        _do_init(tmp_path)
+        _seed_default_prd(tmp_path)
+        _insert_task_row(
+            tmp_path / ".anvil" / "state.db", task_id="T001",
+            status="ready", prd_id="default",
+        )
+
+        res = _invoke_cmd(tmp_path, ["status", "--json"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)["data"]
+        assert data["prd_status"] == "draft"
+        assert data["tasks"]["total"] == 1
+        # Modulo additive prds[]: exactly one block, numbers == project totals.
+        assert len(data["prds"]) == 1
+        entry = data["prds"][0]
+        assert entry["prd_id"] == "default"
+        assert entry["total_tasks"] == data["tasks"]["total"] == 1
+        assert entry["ready_task_count"] == data["tasks"]["ready"] == 1
+
+    def test_single_prd_backcompat_list_and_next_match_explicit_default(
+        self, tmp_path: Path
+    ) -> None:
+        """list/next with NO --prd return the SAME tasks as an explicit
+        `--prd default` on a single-PRD DB — the pre-change baseline. (The two
+        query paths can order the list differently, so compare by task set /
+        count, which is the observable contract.)"""
+        _do_init(tmp_path)
+        _seed_default_prd(tmp_path, approve=True)
+        db = tmp_path / ".anvil" / "state.db"
+        _insert_task_row(db, task_id="T001", status="ready", prd_id="default")
+        _insert_task_row(db, task_id="T002", status="blocked", prd_id="default")
+
+        list_bare = json.loads(_invoke_cmd(tmp_path, ["list", "--json"]).output)["data"]
+        list_def = json.loads(
+            _invoke_cmd(tmp_path, ["list", "--json", "--prd", "default"]).output
+        )["data"]
+        assert list_bare["count"] == list_def["count"] == 2
+        assert (
+            {t["id"] for t in list_bare["tasks"]}
+            == {t["id"] for t in list_def["tasks"]}
+            == {"T001", "T002"}
+        )
+
+        # `next` is a single-pick, so its output IS byte-identical across the two
+        # paths: the highest-priority claimable task is the same either way.
+        next_bare = json.loads(_invoke_cmd(tmp_path, ["next", "--json"]).output)
+        next_def = json.loads(
+            _invoke_cmd(tmp_path, ["next", "--json", "--prd", "default"]).output
+        )
+        assert next_bare == next_def
+        assert next_bare["data"]["task"]["id"] == "T001"
+
+    def test_single_prd_backcompat_prd_review_no_flag_transitions(
+        self, tmp_path: Path
+    ) -> None:
+        """prd review with NO --prd resolves the single default PRD and walks it
+        draft → reviewed → approved — unchanged from the pre-multi-PRD flow."""
+        _do_init(tmp_path)
+        _seed_default_prd(tmp_path)
+
+        rev = _invoke_cmd(tmp_path, ["prd", "review"])
+        assert rev.exit_code == 0, rev.output
+        assert "reviewed" in rev.output.lower()
+        app_ = _invoke_cmd(tmp_path, ["prd", "review", "--approve"])
+        assert app_.exit_code == 0, app_.output
+        assert "approved" in app_.output.lower()
+
+        status = json.loads(_invoke_cmd(tmp_path, ["status", "--json"]).output)
+        assert status["data"]["prd_status"] == "approved"
+
+    def test_single_prd_backcompat_plan_no_flag_equals_explicit_default(
+        self, tmp_path: Path
+    ) -> None:
+        """plan: AC1 names `plan` as a guarded backward-compat surface. On a
+        single-PRD ('default') DB, `plan --no-llm` with NO --prd must yield the
+        SAME result envelope as an explicit `--prd default` — identical feature/
+        task/conflict-group counts and nothing pruned. Two independent projects
+        (plan mutates state, so they cannot share a DB) seeded from the same
+        prd.md isolate the two resolution paths.
+
+        Guards the per-PRD scoping in plan.py: a regression that double-counted
+        or dropped the default partition on the no-flag path (e.g. scoping to
+        the wrong prd_id) would diverge the two envelopes and turn this red.
+        """
+        bare_dir = tmp_path / "bare"
+        flag_dir = tmp_path / "flag"
+        bare_dir.mkdir()
+        flag_dir.mkdir()
+
+        def _plan(project: Path, extra: list[str]) -> dict[str, object]:
+            _do_init(project)
+            _write_prd(project, _FULL_PRD_CONTENT)
+            assert _invoke_cmd(project, ["prd", "parse"]).exit_code == 0
+            res = _invoke_cmd(project, ["plan", "--no-llm", "--json", *extra])
+            assert res.exit_code == 0, res.output
+            return json.loads(res.output)["data"]
+
+        bare = _plan(bare_dir, [])
+        flag = _plan(flag_dir, ["--prd", "default"])
+
+        # The additive-only contract: every observable plan count is identical
+        # across the no-flag and explicit-default paths on a single-PRD DB.
+        assert bare["features"] == flag["features"] == 2
+        assert bare["tasks"] == flag["tasks"] == 2
+        assert bare["conflict_groups"] == flag["conflict_groups"]
+        # The default partition is fully covered by its own prd.md, so nothing
+        # is orphan-pruned on either path.
+        assert bare["pruned_task_ids"] == flag["pruned_task_ids"] == []
+        assert bare["pruned_feature_ids"] == flag["pruned_feature_ids"] == []
+
+
+class TestPrdAmbiguityCli:
+    """AC2: the ambiguity error fires ONLY when >1 PRD and no --prd/$ANVIL_PRD,
+    and only on the surfaces that must resolve a SINGLE PRD (prd review). The
+    cross-PRD read surfaces (status/list/next) stay clean on the same DB."""
+
+    def test_prd_ambiguity_review_errors_listing_ids_and_knobs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No --prd, no $ANVIL_PRD, two non-default PRDs → exit 1 whose message
+        lists the available ids and names BOTH override knobs (--prd, ANVIL_PRD)."""
+        monkeypatch.delenv("ANVIL_PRD", raising=False)
+        _do_init(tmp_path)
+        _seed_two_named_prds(tmp_path)
+
+        res = _invoke_cmd(tmp_path, ["prd", "review"])
+        assert res.exit_code == 1
+        # Click renders the ClickException to stderr/stdout; CliRunner mixes them.
+        out = res.output + (getattr(res, "stderr", "") or "")
+        assert "v0.1" in out and "v0.2" in out
+        assert "--prd" in out
+        assert "ANVIL_PRD" in out
+
+    def test_prd_ambiguity_cross_prd_reads_stay_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ambiguity error must NOT fire on status/list/next with no --prd:
+        those surfaces span ALL PRDs and never resolve a single one.
+
+        Each assertion verifies the ACTUAL cross-PRD aggregation, not just a
+        zero exit: status/list count BOTH PRDs' tasks and `next` returns a real
+        task drawn from EITHER partition. A bare ``exit_code == 0`` on `next`
+        would be non-discriminating — an empty/withheld queue also exits 0, so
+        it would stay green even if the queue silently emptied. Driving both
+        PRDs to `approved` makes the tasks genuinely claimable, so a regression
+        that emptied the cross-PRD pool turns this red.
+        """
+        monkeypatch.delenv("ANVIL_PRD", raising=False)
+        _do_init(tmp_path)
+        _seed_two_named_prds(tmp_path)
+        # Drive both PRDs through the real review flow to `approved` so their
+        # ready tasks pass the claim-gate (next_claimable gate 3 requires the
+        # owning PRD reviewed/approved). Without this the queue is empty and a
+        # `next` assertion proves nothing.
+        for prd_id in ("v0.1", "v0.2"):
+            assert (
+                _invoke_cmd(tmp_path, ["prd", "review", "--prd", prd_id]).exit_code == 0
+            )
+            assert (
+                _invoke_cmd(
+                    tmp_path, ["prd", "review", "--prd", prd_id, "--approve"]
+                ).exit_code
+                == 0
+            )
+        db = tmp_path / ".anvil" / "state.db"
+        _insert_task_row(db, task_id="T100", status="ready", prd_id="v0.1")
+        _insert_task_row(db, task_id="T900", status="ready", prd_id="v0.2")
+
+        assert _invoke_cmd(tmp_path, ["status", "--json"]).exit_code == 0
+        list_res = _invoke_cmd(tmp_path, ["list", "--json"])
+        assert list_res.exit_code == 0
+        # Both PRDs' tasks are listed (all-PRDs, no single-PRD resolution).
+        assert json.loads(list_res.output)["data"]["count"] == 2
+        # `next` aggregates across BOTH PRDs and picks a real claimable task
+        # without raising ambiguity — assert the actual pick, not just exit 0.
+        next_res = _invoke_cmd(tmp_path, ["next", "--json"])
+        assert next_res.exit_code == 0
+        next_data = json.loads(next_res.output)["data"]
+        assert next_data["task"] is not None
+        assert next_data["task"]["id"] in {"T100", "T900"}
+
+    def test_prd_ambiguity_defused_by_explicit_prd_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit --prd defuses the ambiguity: `prd review --prd v0.1`
+        transitions ONLY v0.1, leaving v0.2 untouched."""
+        monkeypatch.delenv("ANVIL_PRD", raising=False)
+        _do_init(tmp_path)
+        _seed_two_named_prds(tmp_path)
+
+        res = _invoke_cmd(tmp_path, ["prd", "review", "--prd", "v0.1"])
+        assert res.exit_code == 0, res.output
+        assert "reviewed" in res.output.lower()
+
+        from anvil.cli._helpers import _open_backend
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            statuses = {p.id: p.status.value for p in backend.list_prds()}
+        finally:
+            backend.close()
+        assert statuses["v0.1"] == "reviewed"
+        assert statuses["v0.2"] == "draft"
+
+
+class TestAnvilPrdEnvCli:
+    """AC3: $ANVIL_PRD is honoured by the CLI exactly like an explicit --prd —
+    it defuses ambiguity and scopes the surfaces that read it via PRD_OPTION."""
+
+    def test_anvil_prd_env_resolves_review_on_ambiguous_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$ANVIL_PRD=v0.1 lets `prd review` (no flag) resolve the otherwise
+        ambiguous DB to v0.1 and transition only that PRD."""
+        _do_init(tmp_path)
+        _seed_two_named_prds(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+
+        res = _invoke_cmd(tmp_path, ["prd", "review"])
+        assert res.exit_code == 0, res.output
+
+        from anvil.cli._helpers import _open_backend
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            statuses = {p.id: p.status.value for p in backend.list_prds()}
+        finally:
+            backend.close()
+        assert statuses["v0.1"] == "reviewed"
+        assert statuses["v0.2"] == "draft"
+
+    def test_anvil_prd_env_scopes_list_like_explicit_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$ANVIL_PRD narrows `list` to that partition (PRD_OPTION wires the
+        envvar), matching an explicit `--prd v0.2`."""
+        _do_init(tmp_path)
+        _seed_two_named_prds(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        _insert_task_row(db, task_id="T100", status="ready", prd_id="v0.1")
+        _insert_task_row(db, task_id="T900", status="ready", prd_id="v0.2")
+
+        explicit = json.loads(
+            _invoke_cmd(tmp_path, ["list", "--json", "--prd", "v0.2"]).output
+        )
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+        via_env = json.loads(_invoke_cmd(tmp_path, ["list", "--json"]).output)
+        assert via_env["data"]["count"] == 1
+        assert {t["id"] for t in via_env["data"]["tasks"]} == {"T900"}
+        # The env path scopes to the SAME tasks as the explicit flag.
+        assert (
+            {t["id"] for t in via_env["data"]["tasks"]}
+            == {t["id"] for t in explicit["data"]["tasks"]}
+        )
+
+
+# ---------------------------------------------------------------------------
 # prd find-decisions command (v1.14.0)
 # ---------------------------------------------------------------------------
 

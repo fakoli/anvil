@@ -168,13 +168,20 @@ def _should_seed(state_dir: Path, prd_path: Path, *, force: bool) -> str | None:
     if force:
         return "force"
 
-    # If a PRD already exists in state, do not re-seed (idempotent re-scan).
+    # If ANY PRD already exists in state, do not re-seed (idempotent re-scan).
+    #
+    # This is an existence probe for the brownfield first-run seed — "has this
+    # project been given a PRD yet?". Use list_prds(), NOT bare get_prd(): a
+    # project that holds only NON-default PRDs (e.g. v0.1/v0.2, no is_default
+    # row) is already populated, and bare get_prd() would return None and
+    # re-seed a fresh default draft graph on top of the existing multi-PRD
+    # state. Any PRD's presence must suppress re-seeding.
     backend = _open_backend(state_dir)
     try:
-        prd = backend.get_prd()
+        has_prd = bool(backend.list_prds())
     finally:
         backend.close()
-    if prd is not None:
+    if has_prd:
         return None
     if prd_path.exists():
         # A prd.md exists but was never parsed into state — leave it for the

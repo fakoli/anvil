@@ -629,6 +629,11 @@ def prd_resolve_decision(
         clock = SystemClock()
         now = clock.now()
         project_id = _get_project_id(backend)
+        # T021 audit (get_prd no-arg): default-only-correct. `resolve-decision`
+        # (like `find-decisions`) operates on the default PRD's markdown source
+        # (.anvil/prd.md, or --file) and is NOT --prd scoped, so the transition
+        # is validated against the default PRD. ``or result.prd`` covers the
+        # pre-parse case where no PRD row exists yet.
         prd_model = backend.get_prd() or result.prd
 
         try:

@@ -2450,6 +2450,149 @@ class TestReviewPrd:
 
 
 # ===========================================================================
+# T021 — PRD ambiguity + $ANVIL_PRD parity on the MCP surface
+#
+# The MCP server must enforce the SAME resolution contract as the CLI: an
+# ambiguous DB (>1 PRD, no default, no prd_id/$ANVIL_PRD) makes the
+# single-PRD-resolving tool (review_prd) raise — translated to a ToolError —
+# while the cross-PRD reads (get_project_status / get_next_task) stay clean.
+# $ANVIL_PRD is honoured equally by the MCP server (AC2/AC3).
+# ===========================================================================
+
+
+class TestMcpPrdAmbiguityAndEnv:
+    def _two_named_prds(self, tmp_path: Path) -> Path:
+        """Two NON-default PRDs (v0.1, v0.2), no default — the ambiguous shape."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="draft", prd_id="v0.1", is_default=0)
+        _add_prd(state_dir, status="draft", prd_id="v0.2", is_default=0)
+        return state_dir
+
+    def test_review_prd_ambiguity_errors_listing_ids_and_knobs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """review_prd with no prd_id and no $ANVIL_PRD on an ambiguous DB raises
+        a ToolError whose message lists the available ids and both knobs — the
+        CLI ClickException message, translated by _resolve_prd_id."""
+        monkeypatch.delenv("ANVIL_PRD", raising=False)
+        self._two_named_prds(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("review_prd", {"reviewer": "alice"})
+
+        with pytest.raises(ToolError) as exc:
+            _run(run())
+        msg = str(exc.value)
+        assert "v0.1" in msg and "v0.2" in msg
+        assert "--prd" in msg
+        assert "ANVIL_PRD" in msg
+
+    def test_prd_ambiguity_cross_prd_reads_stay_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """get_project_status / get_next_task aggregate across ALL PRDs and never
+        resolve a single one, so they succeed on the same ambiguous DB.
+
+        The asserts verify the ACTUAL cross-PRD aggregation (total_tasks == 2,
+        ready_queue_depth == 2, and next picks a real task from EITHER PRD), not
+        merely that the calls did not raise. That content is what proves these
+        surfaces span all PRDs rather than routing through the single-PRD
+        resolver; a bare "did not raise" would be non-discriminating since these
+        tools structurally never reach the resolver on the no-prd_id path.
+        """
+        monkeypatch.delenv("ANVIL_PRD", raising=False)
+        state_dir = self._two_named_prds(tmp_path)
+        # Both PRDs need an approved status for a task to be claimable by next.
+        _add_prd(state_dir, status="approved", prd_id="v0.1", is_default=0)
+        _add_prd(state_dir, status="approved", prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T100", status="ready", prd_id="v0.1")
+        _add_task(state_dir, task_id="T900", status="ready", prd_id="v0.2")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[Any, Any]:
+            async with Client(mcp) as c:
+                status = _data(await c.call_tool("get_project_status", {}))
+                nxt = _data(await c.call_tool("get_next_task", {}))
+                return status, nxt
+
+        status, nxt = _run(run())
+        assert status["initialized"] is True
+        assert status["total_tasks"] == 2
+        assert status["ready_queue_depth"] == 2
+        # next picks SOME claimable task across both PRDs (no ambiguity raised).
+        assert nxt is not None
+        assert nxt["id"] in {"T100", "T900"}
+
+    def test_prd_ambiguity_defused_by_explicit_prd_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit prd_id defuses the ambiguity: review_prd(prd_id='v0.1')
+        transitions ONLY v0.1, leaving v0.2 untouched."""
+        monkeypatch.delenv("ANVIL_PRD", raising=False)
+        state_dir = self._two_named_prds(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool(
+                        "review_prd", {"prd_id": "v0.1", "reviewer": "alice"}
+                    )
+                )
+
+        resp = _run(run())
+        assert resp["to_status"] == "reviewed"
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            assert b.get_prd("v0.1").status.value == "reviewed"
+            assert b.get_prd("v0.2").status.value == "draft"
+        finally:
+            b.close()
+
+    def test_anvil_prd_env_resolves_review_like_explicit_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$ANVIL_PRD is honoured by the MCP server exactly like an explicit
+        prd_id: with $ANVIL_PRD=v0.2 and no prd_id, review_prd transitions ONLY
+        v0.2 on the otherwise-ambiguous DB — matching the CLI's env behaviour."""
+        state_dir = self._two_named_prds(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("review_prd", {"reviewer": "bob"}))
+
+        resp = _run(run())
+        assert resp["to_status"] == "reviewed"
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            assert b.get_prd("v0.2").status.value == "reviewed"
+            assert b.get_prd("v0.1").status.value == "draft"
+        finally:
+            b.close()
+
+
+# ===========================================================================
 # Tool 18: plan_tasks
 # ===========================================================================
 
@@ -2557,6 +2700,55 @@ class TestPlanTasks:
             # Default-PRD tasks are unchanged and stay in the default partition.
             default_tasks = b.list_tasks(prd_id="default")
             assert {t.id for t in default_tasks} == {"T001", "T002"}
+        finally:
+            b.close()
+
+    def test_plan_named_prd_with_no_default_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """plan_tasks(prd_id='v0.2') must succeed when ONLY a named PRD was ever
+        parsed and NO default PRD row exists.
+
+        Regression for the existence-guard: the guard probes the TARGET
+        partition (result.prd.id), not the bare is_default=1 row. A bare
+        get_prd() returns None here (no default), so the old default-only guard
+        wrongly raised 'No PRD found' even though v0.2 is a real parsed
+        partition. This forces the no-default-but-named-PRD path the default-only
+        probe never reached.
+        """
+        state_dir = _init_state_dir(tmp_path)
+        # ONLY a named PRD source — the default prd.md is deliberately absent,
+        # and parse_prd is never called for the default, so no is_default row
+        # exists in state.
+        prds_dir = state_dir / "prds"
+        prds_dir.mkdir(exist_ok=True)
+        (prds_dir / "v0.2.md").write_text(_MINIMAL_PRD, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {"prd_id": "v0.2"})
+                return _data(await c.call_tool("plan_tasks", {"prd_id": "v0.2"}))
+
+        plan = _run(run())
+        assert plan["feature_count"] == 1
+        assert plan["task_count"] == 2
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            # No default partition was ever created.
+            assert b.get_prd("default") is None
+            assert b.default_prd_id() is None
+            # The named tasks landed in the v0.2 partition.
+            v02_tasks = b.list_tasks(prd_id="v0.2")
+            assert {t.id for t in v02_tasks} == {"v0.2:T001", "v0.2:T002"}
         finally:
             b.close()
 

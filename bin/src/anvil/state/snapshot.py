@@ -81,6 +81,12 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
         byte-identical across repeated calls on an unchanged backend.
     """
     project = backend.get_project()
+    # T021 audit (get_prd no-arg): default-only-correct. The snapshot's ``prd``
+    # singleton mirrors the on-disk shape the replay-equivalence oracle compares,
+    # which resolves the ``is_default = 1`` PRD — exactly what no-arg get_prd()
+    # returns. Per-PRD partitions surface through ``tasks``/``features``/
+    # ``requirements`` (each carries its prd_id), so multi-PRD state is not lost
+    # here; only the legacy singleton field stays pinned to the default PRD.
     prd = backend.get_prd()
 
     return {

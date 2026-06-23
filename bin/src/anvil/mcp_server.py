@@ -628,6 +628,11 @@ def get_project_summary() -> ProjectSummary:
                 "Project not found — run `anvil init` to initialize.",
             )
 
+        # T021 audit (get_prd no-arg): default-only-correct. The flat
+        # ``prd_status`` field is the legacy single-PRD summary — it reads the
+        # default PRD's status. Multi-PRD callers read the additive per-PRD
+        # ``prds`` rollup below (built from list_prds()), which scopes each
+        # entry's status to its own partition; the flat field stays the default.
         prd = backend.get_prd()
         prds = backend.list_prds()
         all_tasks = backend.list_tasks()
@@ -1688,6 +1693,9 @@ def get_project_status(cwd: str | None = None) -> ProjectStatusResponse:
     backend = _open_backend(state_dir)
     try:
         project = backend.get_project()
+        # T021 audit (get_prd no-arg): default-only-correct. ``prd_status`` is the
+        # flat legacy field (the default PRD's status); per-PRD status lives in the
+        # additive ``prds`` rollup below. Mirrors get_project_summary.
         prd = backend.get_prd()
         prds = backend.list_prds()
         all_tasks = backend.list_tasks()
@@ -2230,25 +2238,31 @@ def plan_tasks(
 
     backend = _open_backend(state_dir)
     try:
-        # Guard: `parse_prd` must have run first so the backend has a PRD row.
-        # Without this check, an out-of-order call would emit feature/task
-        # events into a backend with no PRD row, leaving downstream tools
-        # (review_prd, apply_review_decision) to fail with "No PRD found"
-        # after the state was already mutated. Fail loudly here instead.
-        if backend.get_prd() is None:
-            raise ToolError(
-                "No PRD found in state. Call parse_prd before plan_tasks so "
-                "the PRD row exists before feature and task events are emitted."
-            )
-
-        clock = SystemClock()
-
         # T019: the partition this plan run owns. ``result.prd.id`` is the MODEL
         # prd_id ('default' for the default PRD, else the named id) already
         # collapsed from the 'prd' parse sentinel. Orphan-prune scopes to this
         # partition so tasks in OTHER PRDs are never pruned just because they
         # are absent from this PRD's prd.md. Mirrors cli/plan.py.
         scope_prd_id = result.prd.id
+
+        # Guard: `parse_prd` must have run first so the backend has the PRD row
+        # THIS run targets. Without this check, an out-of-order call would emit
+        # feature/task events into a backend with no matching PRD row, leaving
+        # downstream tools (review_prd, apply_review_decision) to fail with
+        # "No PRD found" after the state was already mutated. Fail loudly here.
+        #
+        # Probe the target partition (``scope_prd_id``), NOT the bare default:
+        # a multi-PRD project with only named PRDs (no is_default row) can call
+        # plan_tasks(prd_id='v0.2') legitimately, and bare get_prd() would wrongly
+        # raise even though v0.2 is a real parsed partition.
+        if backend.get_prd(scope_prd_id) is None:
+            raise ToolError(
+                f"No PRD found in state for '{scope_prd_id}'. Call parse_prd "
+                "before plan_tasks so the PRD row exists before feature and "
+                "task events are emitted."
+            )
+
+        clock = SystemClock()
 
         def _with_prd_id(payload: dict[str, Any], model_prd_id: str) -> dict[str, Any]:
             # prd_id is Field(exclude=True) on Feature/Task, so model_dump drops

@@ -1405,6 +1405,11 @@ def review_tasks(
         # GAP-09: capture the PRD status while the backend is open so we can
         # nudge the user to approve a still-draft PRD after promotion (a hint,
         # not a gate — tasks are still promoted regardless).
+        #
+        # T021 audit (get_prd no-arg): default-only-correct. `review tasks`
+        # promotes drafted/reviewed tasks across ALL PRDs (it is not --prd
+        # scoped); the PRD status here only feeds a post-promotion approval
+        # hint, so reading the default PRD's status is the right summary signal.
         prd = backend.get_prd()
         prd_status = prd.status.value if prd is not None else None
 
