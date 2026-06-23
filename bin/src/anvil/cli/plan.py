@@ -12,17 +12,17 @@ LLM enrichment is layered on top and may fail open with a stderr warning.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 import yaml
 
 from anvil.cli._helpers import (
-    _PRD_FILENAME,
     _open_backend,
     _require_state_dir,
     _resolve_state_dir,
     _scores_complete,
+    prd_source_path,
 )
 from anvil.cli._json import (
     JSON_OPTION,
@@ -199,6 +199,17 @@ def plan(
         help="Project directory. Defaults to the current working directory.",
         hidden=True,
     ),
+    prd: str | None = typer.Option(  # noqa: B008
+        None,
+        "--prd",
+        help=(
+            "Named PRD to plan (multi-PRD). Reads .anvil/prds/<id>.md and "
+            "scopes feature/task creation, orphan-prune, dependency "
+            "inference, and proposed->drafted promotion to that PRD's "
+            "partition; conflict-group inference still spans ALL PRDs. Omit "
+            "for the default PRD (.anvil/prd.md), unchanged pre-v7 behaviour."
+        ),
+    ),
     use_llm: bool = typer.Option(  # noqa: B008
         False,
         "--use-llm",
@@ -270,7 +281,7 @@ def plan(
     ``prd.md`` it is never re-appended.
     """
     from anvil.clock import SystemClock
-    from anvil.planning.inference import infer_all
+    from anvil.planning.inference import InferenceResult
     from anvil.planning.llm import LLMProviderError
     from anvil.planning.llm_planner import (
         PlannerProviderUnavailable,
@@ -287,7 +298,13 @@ def plan(
     # otherwise go to stderr in human mode).
     plan_warnings: list[str] = []
 
-    prd_path = state_dir / _PRD_FILENAME
+    # T017: the parse-time prd_id controls id shape AND the partition that
+    # plan scopes to. ``--prd v0.2`` reads .anvil/prds/v0.2.md and prunes /
+    # promotes only that PRD's rows; the default ('prd' sentinel) keeps bare
+    # ids and the default partition, byte-identical to pre-multi-PRD plan.
+    parse_prd_id = prd if prd else "prd"
+
+    prd_path = prd_source_path(state_dir, parse_prd_id)
     if not prd_path.exists():
         if json_output:
             fail(
@@ -318,7 +335,7 @@ def plan(
     config = _load_config_optional(state_dir)
 
     provider = _resolve_llm_provider(use_llm, config, model=model)
-    parsed = parse_prd(markdown, prd_id="prd", provider=provider)
+    parsed = parse_prd(markdown, prd_id=parse_prd_id, provider=provider)
 
     # Non-fatal parse errors are surfaced as warnings during plan.
     if parsed.errors:
@@ -427,7 +444,7 @@ def plan(
             typer.echo(f"Error: cannot re-read {prd_path}: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
-        parsed = parse_prd(markdown, prd_id="prd", provider=provider)
+        parsed = parse_prd(markdown, prd_id=parse_prd_id, provider=provider)
         llm_generated_count = len(parsed.tasks)
         llm_tier_used = gen_result.provider_used
 
@@ -453,10 +470,22 @@ def plan(
             emit_prune_events,
         )
 
+        # T017: the partition this plan run owns. ``parsed.prd.id`` is the
+        # MODEL prd_id ('default' for the default PRD, e.g. 'v0.2' for a named
+        # one), already collapsed from the 'prd' parse sentinel by the parser.
+        # Orphan-prune, dependency inference, and proposed->drafted promotion
+        # all scope to this partition; conflict-group inference (below) does
+        # NOT — it spans every PRD so cross-PRD file overlaps are detected.
+        scope_prd_id = parsed.prd.id
+
+        # Scope orphan classification to THIS PRD: tasks/features in OTHER
+        # PRDs must never be pruned just because they are absent from this
+        # PRD's prd.md. Passing the prd_id-filtered lists means the diff only
+        # ever flags entities that belong to the partition being re-parsed.
         classification = classify_orphans(
-            backend.list_tasks(),
+            backend.list_tasks(prd_id=scope_prd_id),
             {t.id for t in parsed.tasks},
-            backend.list_features(),
+            backend.list_features(prd_id=scope_prd_id),
             {f.id for f in parsed.features},
         )
 
@@ -525,10 +554,20 @@ def plan(
         deleted_task_ids = prune_result.pruned_task_ids
         deleted_feature_ids = prune_result.pruned_feature_ids
 
+        # prd_id is Field(exclude=True) on Feature/Task, so model_dump() drops
+        # it. Stamp it back into every feature/task payload so the SQL handler
+        # writes the row into THIS PRD's partition instead of silently
+        # defaulting to 'default' — the whole point of --prd scoping. (T017)
+        def _with_prd_id(payload: dict[str, Any], model_prd_id: str) -> dict[str, Any]:
+            payload["prd_id"] = model_prd_id
+            return payload
+
         # Emit feature.created for each feature.
         for feature in parsed.features:
             now = clock.now()
-            feature_data = feature.model_dump(mode="json")
+            feature_data = _with_prd_id(
+                feature.model_dump(mode="json"), feature.prd_id
+            )
             draft = EventDraft(
                 timestamp=now,
                 actor="anvil-cli",
@@ -542,7 +581,7 @@ def plan(
         # Emit task.created for each task (status proposed at creation time).
         for task in parsed.tasks:
             now = clock.now()
-            task_data = task.model_dump(mode="json")
+            task_data = _with_prd_id(task.model_dump(mode="json"), task.prd_id)
             draft = EventDraft(
                 timestamp=now,
                 actor="anvil-cli",
@@ -553,16 +592,47 @@ def plan(
             )
             backend.append(draft)
 
-        # Run inference on the parsed tasks (before they are stored with updated
-        # deps/conflict groups — we upsert them via task.created events again).
-        inference_result = infer_all(parsed.tasks)
+        # ------------------------------------------------------------------
+        # Inference (T017): dependency inference + proposed->drafted promotion
+        # run over THIS PRD's subset; conflict-group inference spans ALL PRDs.
+        #
+        # Dependencies are intra-PRD by construction — the subset's strict
+        # likely_files subset edges. Conflict groups are coordination
+        # signals: a task in PRD-A and a task in PRD-B that touch the same
+        # file collide regardless of which PRD owns them, so the conflict
+        # scan reads backend.list_tasks() (all partitions). We feed it the
+        # in-memory subset (already carrying inferred deps) UNION the
+        # already-persisted OTHER-PRD tasks, so a cross-PRD overlap lands in
+        # a single CG-* group that both tasks reference.
+        # ------------------------------------------------------------------
+        from anvil.planning.inference import (
+            infer_conflict_groups,
+            infer_dependencies,
+        )
 
-        # Re-upsert tasks with inferred dependencies and conflict groups,
-        # then promote proposed → drafted.
-        for inferred_task in inference_result.tasks:
+        subset_with_deps = infer_dependencies(parsed.tasks)
+        subset_ids = {t.id for t in subset_with_deps}
+
+        # OTHER-PRD persisted tasks: everything NOT in this partition. The
+        # just-emitted subset task.created rows are excluded by id so the
+        # in-memory (deps-annotated) copies are the ones fed to the scan.
+        other_prd_tasks = [
+            t for t in backend.list_tasks() if t.id not in subset_ids
+        ]
+
+        all_with_cgs, conflict_groups = infer_conflict_groups(
+            subset_with_deps + other_prd_tasks
+        )
+        cgs_by_id = {t.id: t for t in all_with_cgs}
+
+        # Re-upsert THIS PRD's tasks with inferred dependencies + conflict
+        # groups, then promote proposed -> drafted (subset only).
+        for base_task in subset_with_deps:
+            inferred_task = cgs_by_id[base_task.id]
             now = clock.now()
-            # Upsert with full updated fields.
-            task_data = inferred_task.model_dump(mode="json")
+            task_data = _with_prd_id(
+                inferred_task.model_dump(mode="json"), inferred_task.prd_id
+            )
             upsert_draft = EventDraft(
                 timestamp=now,
                 actor="anvil-cli",
@@ -597,6 +667,36 @@ def plan(
                     },
                 )
                 backend.append(status_draft)
+
+        # Re-upsert OTHER-PRD tasks whose conflict_groups changed because a
+        # cross-PRD overlap with this PRD pulled them into a new CG-* group.
+        # The task.created upsert preserves status (it omits status from its
+        # ON CONFLICT update set), so a claimed/in_progress sibling in another
+        # PRD is not regressed — only its conflict_groups field is refreshed.
+        # prd_id is stamped from the task's own partition, never this run's.
+        for base_task in other_prd_tasks:
+            inferred_task = cgs_by_id[base_task.id]
+            if inferred_task.conflict_groups == base_task.conflict_groups:
+                continue
+            now = clock.now()
+            task_data = _with_prd_id(
+                inferred_task.model_dump(mode="json"), inferred_task.prd_id
+            )
+            backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor="anvil-cli",
+                    action="task.created",
+                    target_kind="task",
+                    target_id=inferred_task.id,
+                    payload_json=task_data,
+                )
+            )
+
+        inference_result = InferenceResult(
+            tasks=[cgs_by_id[t.id] for t in subset_with_deps],
+            conflict_groups=conflict_groups,
+        )
 
         # CL-4 — persist the inferred ConflictGroups so the conflict_groups
         # table round-trips them (surfaced later by `anvil conflicts`). The
