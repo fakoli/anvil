@@ -399,7 +399,7 @@ Removing the early inline gate changes the error surface ordering; tests asserti
 
 **Feature:** F004
 **Priority:** critical
-**Likely files:** tests/test_inference.py, tests/test_claims.py, tests/test_stale.py, bin/src/anvil/planning/inference.py
+**Likely files:** tests/test_inference.py, tests/test_claims.py, bin/src/anvil/planning/inference.py
 **Dependencies:** T011
 
 This is the moat. The danger is a future --prd filter implemented as list_tasks(prd_id=) for the exclusion sets, hiding cross-PRD conflicts. These tests are the guardrail; they must land BEFORE the --prd filter.
@@ -414,7 +414,7 @@ This is the moat. The danger is a future --prd filter implemented as list_tasks(
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_inference.py ../tests/test_claims.py ../tests/test_stale.py`
+- `cd bin && uv run pytest -q ../tests/test_inference.py ../tests/test_claims.py`
 - `cd bin && uv run pytest -q -k cross_prd`
 
 ### T014: v6->v7 gate-equivalence test: migrated single-PRD DB keeps identical claimability

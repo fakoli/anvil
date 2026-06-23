@@ -331,6 +331,41 @@ class TestNextClaimable:
         finally:
             b.close()
 
+    def test_next_skips_cross_prd_conflict_group_collision(self, tmp_path: Path) -> None:
+        """T013: next_claimable() (no --prd) must not return a PRD-B task whose
+        conflict_group already has an active claim on a PRD-A task, yet must
+        still return a *non-colliding* PRD-B task. Coordination spans PRDs —
+        the claimable scan never filters by prd_id, so the collision (not PRD
+        scoping) is the only reason the colliding task is skipped."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_prd_raw(conn, prd_id="v0.2", status="approved", is_default=0)
+            _insert_feature_raw(conn)
+            # PRD-A task is claimed, in the shared conflict_group.
+            _insert_task_raw(conn, task_id="T001", status="claimed",
+                             conflict_groups=["CG-T001-T900"], prd_id="default")
+            # PRD-B task in the same group → must be skipped (collision).
+            _insert_task_raw(conn, task_id="T900", status="ready",
+                             conflict_groups=["CG-T001-T900"], prd_id="v0.2")
+            # PRD-B task with no collision → must be returned, proving the scan
+            # crosses PRDs and only the collision excludes T900 (not prd_id
+            # scoping, which would wrongly drop T901 too).
+            _insert_task_raw(conn, task_id="T901", status="ready",
+                             conflict_groups=["CG-T901"], prd_id="v0.2")
+            _insert_active_claim_raw(conn, claim_id="C001", task_id="T001")
+            conn.close()
+
+            m = _make_manager(b)
+            task = m.next_claimable()
+            assert task is not None
+            assert task.id == "T901"
+        finally:
+            b.close()
+
 
 # ---------------------------------------------------------------------------
 # TestNextReadyExcludingActiveFiles (T014)
@@ -1297,6 +1332,50 @@ class TestStaleDetection:
         finally:
             b.close()
 
+    def test_stale_detector_reaps_cross_prd_claims(self, tmp_path: Path) -> None:
+        """T013: detect_and_release_stale reaps an expired claim regardless of
+        which PRD owns its task. The reaper scans list_active_claims() globally,
+        so a claim on a non-default-PRD task is reaped and its task returns to
+        ready just like a default-PRD one."""
+        clock = _make_clock(_T0)
+        b = _make_backend(tmp_path, clock)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_prd_raw(conn, prd_id="v0.2", status="approved", is_default=0)
+            _insert_feature_raw(conn)
+            # Expired claims on tasks owned by two different PRDs.
+            _insert_task_raw(conn, task_id="T001", status="claimed", prd_id="default")
+            _insert_task_raw(conn, task_id="T900", status="claimed", prd_id="v0.2")
+            _insert_active_claim_raw(
+                conn, claim_id="C001", task_id="T001",
+                lease_expires_at=_T0 - timedelta(hours=1),
+            )
+            _insert_active_claim_raw(
+                conn, claim_id="C900", task_id="T900",
+                lease_expires_at=_T0 - timedelta(hours=1),
+            )
+            conn.close()
+
+            reaped = detect_and_release_stale(b, clock)
+
+            # Both claims reaped regardless of owning PRD.
+            assert "C001" in reaped
+            assert "C900" in reaped
+
+            for claim_id in ("C001", "C900"):
+                claim = b.get_claim(claim_id)
+                assert claim is not None
+                assert claim.status == ClaimStatus.stale
+
+            # The non-default-PRD task is released back to ready too.
+            t900 = b.get_task("T900")
+            assert t900 is not None
+            assert t900.status == TaskStatus.ready
+        finally:
+            b.close()
+
 
 # ---------------------------------------------------------------------------
 # CL-3 regression: _reap_stale_claims must NOT swallow SchemaMismatch
@@ -1495,6 +1574,37 @@ class TestCheckConflicts:
             m = _make_manager(b, actor="agent-alpha")
             conflicts = m.check_conflicts("T001", [])
             assert conflicts == []  # empty files → no file-overlap conflict
+        finally:
+            b.close()
+
+    def test_check_conflicts_flags_cross_prd_file_overlap(self, tmp_path: Path) -> None:
+        """T013: check_conflicts flags a PRD-B claim whose expected_files overlap
+        an active PRD-A claim. list_active_claims() spans all PRDs, so the
+        overlap check is global — never scoped to the candidate task's PRD."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_prd_raw(conn, prd_id="v0.2", status="approved", is_default=0)
+            _insert_feature_raw(conn)
+            # Active claim lives on a PRD-A task; candidate is a PRD-B task.
+            _insert_task_raw(conn, task_id="T001", status="claimed",
+                             likely_files=["src/shared.py"], prd_id="default")
+            _insert_task_raw(conn, task_id="T900", status="ready",
+                             likely_files=["src/shared.py"], prd_id="v0.2")
+            _insert_active_claim_raw(
+                conn, claim_id="C001", task_id="T001",
+                actor="other-agent", expected_files=["src/shared.py"],
+            )
+            conn.close()
+
+            m = _make_manager(b, actor="agent-alpha")
+            conflicts = m.check_conflicts("T900", ["src/shared.py"])
+            assert len(conflicts) == 1
+            assert isinstance(conflicts[0], ConflictWarning)
+            assert conflicts[0].other_claim_id == "C001"
+            assert "src/shared.py" in conflicts[0].overlapping_files
         finally:
             b.close()
 
