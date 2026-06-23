@@ -50,6 +50,7 @@ import pytest
 from anvil.clock import FrozenClock
 from anvil.state import models, payloads
 from anvil.state.models import DEFAULT_PRD_ID, EventDraft
+from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
 
@@ -426,8 +427,8 @@ def test_pre_v7_log_replays_every_row_into_default_prd(tmp_path: Path) -> None:
     try:
         replay.replay_from_empty(str(_EVENTS_PATH))
 
-        # The v7 schema is stamped (replay re-creates the schema on open).
-        assert replay.get_schema_version() == 7
+        # The current schema is stamped (replay re-creates the schema on open).
+        assert replay.get_schema_version() == SCHEMA_VERSION
 
         # The scenario produced real rows in every partitioned table (vacuity
         # guard — an all-empty DB would pass the 'every row is default' check
@@ -546,8 +547,8 @@ def test_replay_from_empty_on_v7_reconstructs_same_task_statuses_and_claims(
     try:
         replay.replay_from_empty(str(_EVENTS_PATH))
 
-        # The replay re-created the schema at v7 (the engine's current version).
-        assert replay.get_schema_version() == 7
+        # The replay re-created the schema at the engine's current version.
+        assert replay.get_schema_version() == SCHEMA_VERSION
 
         golden = _load_golden()
         # Vacuity guard: the golden encodes a non-degenerate status/claim set.

@@ -42,11 +42,15 @@ Output shape (the contract downstream fixtures/tests depend on)
       "claims":        [<object>, ...],      # ALL claims, sorted by id
       "reviews":       [<object>, ...],      # sorted by id
       "evidence":      [<object>, ...],      # sorted by id
-      "requirements":  [<object>, ...],      # sorted by id
+      "requirements":  [<object>, ...],      # FULL lineage, sorted by id
       "sync_mappings": [<object>, ...],      # sorted by (task_id, external_system)
     }
 
 Each ``<object>`` is the corresponding model's ``model_dump(mode="json")``.
+The ``requirements`` objects additionally carry the lineage stamps
+(``revision_introduced`` / ``revision_superseded``), which are ``exclude=True``
+on the model — the oracle compares them explicitly so superseded-row lineage is
+part of the replay-equivalence check.
 ``project`` and ``prd`` are singletons (the backend exposes ``get_project`` /
 ``get_prd`` returning one-or-None), so they are emitted as a single object or
 ``None`` rather than a list.
@@ -121,11 +125,26 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
             e.model_dump(mode="json")
             for e in sorted(backend.list_evidence(), key=lambda e: e.id)
         ],
-        # requirements are written by prd.parsed (destructive replace).
-        # Sorted by id for determinism — id is the stable natural key.
+        # requirements: the FULL lineage (live + superseded), not just the live
+        # set. prd.parsed writes the live rows; prd.revised supersedes rows in
+        # place (NEVER DELETE) and adds new ones. The lineage stamps
+        # (revision_introduced / revision_superseded) are surfaced explicitly —
+        # they are exclude=True on the model so model_dump() drops them, but the
+        # replay-equivalence oracle MUST compare them or a mis-stamped /
+        # dropped superseded row would diverge invisibly between the live and
+        # replayed DBs. Sorted by id for determinism (id is the stable natural
+        # key; at most one row per id under the single-column PK, so id is a
+        # total sort even across the superseded rows).
         "requirements": [
-            rq.model_dump(mode="json")
-            for rq in sorted(backend.list_requirements(), key=lambda rq: rq.id)
+            {
+                **rq.model_dump(mode="json"),
+                "revision_introduced": rq.revision_introduced,
+                "revision_superseded": rq.revision_superseded,
+            }
+            for rq in sorted(
+                backend.list_requirements(include_superseded=True),
+                key=lambda rq: rq.id,
+            )
         ],
         # SyncMapping has no single-column id; its natural key is the
         # (task_id, external_system) pair (matching the backend's own ORDER BY).

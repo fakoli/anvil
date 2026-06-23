@@ -92,6 +92,8 @@
       "derived": false,
       "id": "R001",
       "prd_section": "requirements",
+      "revision_introduced": 1,
+      "revision_superseded": null,
       "source_paragraph": null,
       "text": "Replay must reproduce canonical state."
     }

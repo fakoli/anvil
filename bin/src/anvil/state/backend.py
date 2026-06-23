@@ -178,16 +178,25 @@ class Backend(Protocol):
         ...
 
     def list_requirements(
-        self, *, prd_id: str | None = None
+        self, *, prd_id: str | None = None, include_superseded: bool = False
     ) -> list[Requirement]:
         """Return Requirement rows sorted by id ASC.
 
-        Used by serialize_state to capture the full requirement set written
-        by prd.parsed.  The id-based ordering is deterministic because
-        requirement IDs are assigned at parse time and never mutate.
+        The id-based ordering is deterministic because requirement IDs are
+        assigned at parse time and never mutate.
+
+        T023 — by default returns only the LIVE set (``revision_superseded IS
+        NULL``): ``prd.revised`` is non-destructive (a superseded requirement
+        keeps its row for lineage), so superseded rows are filtered out. A
+        single-parse PRD has every row live, so this is unchanged for the
+        pre-revision shape.
+
+        ``include_superseded=True`` returns the full lineage (live + superseded)
+        — used by serialize_state so the replay-equivalence oracle compares
+        superseded-row lineage, not just the live set.
 
         ``prd_id`` (T009): ``None`` means all PRDs (unchanged), an explicit id
-        scopes to ``WHERE prd_id = ?``.
+        scopes to ``AND prd_id = ?``.
         """
         ...
 
