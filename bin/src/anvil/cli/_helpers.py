@@ -37,6 +37,18 @@ _DEFAULT_PRD_IDS = ("default", "prd")
 
 _ACTOR_FALLBACK = "agent"
 
+# T018: env override naming the PRD partition a mutating command targets, the
+# PRD analogue of ``ANVIL_ACTOR``. Resolution precedence (applied identically
+# by the CLI ``resolve_prd_id`` and the MCP ``_resolve_prd_id``):
+#
+#     explicit arg/flag (--prd)  >  ANVIL_PRD  >  single PRD | default | error
+#
+# When neither an explicit id nor the env supplies one, a project with exactly
+# one PRD resolves to it, a project with a marked default PRD resolves to that,
+# and a project with several non-default PRDs is AMBIGUOUS — we error rather
+# than silently picking one, the whole point of a shared resolver.
+_PRD_ENV = "ANVIL_PRD"
+
 
 # ---------------------------------------------------------------------------
 # Actor identity (B47) — ONE resolver for claim / heartbeat / gate / guard / MCP
@@ -81,6 +93,106 @@ def resolve_actor(explicit: str | None = None) -> str:
     except Exception:  # noqa: BLE001 — actor resolution must never crash a claim/gate
         pass
     return _ACTOR_FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# PRD partition resolution (T018) — ONE resolver shared by CLI + MCP
+# ---------------------------------------------------------------------------
+
+# Shared ``--prd`` Typer option. Defined here so every mutating command imports
+# the SAME flag/envvar wiring (``--prd`` / ``ANVIL_PRD``) instead of each
+# re-declaring it, and so the CLI flag and the MCP ``prd_id`` argument resolve
+# through the identical precedence (:func:`resolve_prd_id`).
+PRD_OPTION = typer.Option(  # noqa: B008
+    None,
+    "--prd",
+    envvar=_PRD_ENV,
+    help=(
+        "PRD partition to target (multi-PRD). Precedence: this flag > "
+        "$ANVIL_PRD > the single PRD / the default PRD. With several "
+        "non-default PRDs and none chosen, the command errors rather than "
+        "guessing. Omit on a single-PRD project for unchanged behaviour."
+    ),
+)
+
+
+class PrdAmbiguityError(click.ClickException):
+    """No PRD could be resolved unambiguously (T018).
+
+    Raised when neither an explicit ``--prd``/arg nor ``$ANVIL_PRD`` names a
+    PRD and the project has several PRDs with no single default to fall back
+    on. A ``click.ClickException`` so Typer/Click print a clean ``Error: ...``
+    line and exit non-zero instead of a traceback.
+    """
+
+    exit_code = 1
+
+
+def resolve_prd_id(backend: SqliteBackend, explicit: str | None = None) -> str:
+    """Resolve which PRD partition a command targets.
+
+    The ONE resolver shared by the CLI (every mutating command's ``--prd``
+    flag) and the MCP server (:func:`mcp_server._resolve_prd_id`), so both
+    surfaces pick the identical PRD for identical DB + env inputs.
+
+    Precedence::
+
+        explicit arg/flag (--prd)  >  $ANVIL_PRD  >
+            single PRD | default PRD | ambiguity-error
+
+    1. ``explicit`` — a non-empty, stripped ``--prd`` value (or positional arg)
+       always wins. Returned verbatim; existence is the caller's concern.
+    2. ``$ANVIL_PRD`` — the env override, consulted only when no explicit id was
+       passed. (``PRD_OPTION`` wires ``envvar=ANVIL_PRD`` so the CLI flag already
+       reads it; the env tier here is for callers that pass ``explicit=None``
+       directly, e.g. the MCP server.)
+    3. Otherwise inspect the DB: exactly one PRD → that PRD's id; several PRDs
+       with one marked default → the default id; several PRDs with no default →
+       :class:`PrdAmbiguityError` (we never silently pick one).
+
+    Args:
+        backend: An initialized backend for the project being targeted.
+        explicit: The ``--prd`` value (or positional override). ``None``/blank
+            defers to ``$ANVIL_PRD`` then the DB tiers.
+
+    Returns:
+        The resolved PRD id (always a non-empty, stripped string).
+
+    Raises:
+        PrdAmbiguityError: Several PRDs exist, none is the default, and neither
+            an explicit id nor ``$ANVIL_PRD`` chose one.
+    """
+    if explicit and explicit.strip():
+        return explicit.strip()
+
+    env_value = os.environ.get(_PRD_ENV)
+    if env_value and env_value.strip():
+        return env_value.strip()
+
+    prds = backend.list_prds()
+    if len(prds) == 1:
+        return prds[0].id
+
+    default_id = backend.default_prd_id()
+    if default_id is not None:
+        return default_id
+
+    # Two distinct failure shapes land here; describe each one honestly rather
+    # than claiming "multiple" for both. ZERO PRDs (a freshly-initialized
+    # project before the first parse_prd) needs "create/parse a PRD first";
+    # SEVERAL non-default PRDs need "pick one with --prd/$ANVIL_PRD".
+    if not prds:
+        raise PrdAmbiguityError(
+            "No PRD exists yet, so no partition can be resolved. "
+            "Parse a PRD first (e.g. `anvil prd parse`), or pass --prd <id> / "
+            f"set {_PRD_ENV} to name one."
+        )
+    available = ", ".join(p.id for p in prds)
+    raise PrdAmbiguityError(
+        "Multiple PRDs exist and none is the default; cannot pick one "
+        f"automatically. Available PRDs: {available}. "
+        f"Pass --prd <id> or set {_PRD_ENV}."
+    )
 
 # T005/B07: env override pointing at the PROJECT ROOT (the directory that
 # *contains* .anvil/). Resolution precedence — applied identically by
