@@ -632,6 +632,35 @@ class TestClaim:
         finally:
             b.close()
 
+    def test_per_prd_gate_claims_task_in_approved_nondefault_prd_while_default_draft(
+        self, tmp_path: Path
+    ) -> None:
+        """A task in an APPROVED non-default PRD is claimable even when the
+        DEFAULT PRD is still draft - proving the gate keys on the task's OWNING
+        PRD, not the default PRD nor 'any approved PRD' (the inverse of the
+        draft-sibling case) (T011)."""
+        clock = _make_clock()
+        b = _make_backend(tmp_path, clock)
+        try:
+            _setup_project(b)
+            # Default PRD: parse only (NO review) -> stays draft.
+            b.append(_make_event(
+                "prd.parsed", _make_prd_payload(),
+                event_id="E000003", target_kind="prd", target_id="proj-1",
+            ))
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_prd_raw(conn, prd_id="v0.2", status="approved", is_default=0)
+            _insert_feature_raw(conn)
+            _insert_task_raw(conn, task_id="T900", status="ready", prd_id="v0.2")
+            conn.close()
+
+            m = _make_manager(b, clock=clock)
+            result = m.claim("T900")  # owned by approved v0.2; default is draft
+            assert result.claim.status == ClaimStatus.active
+            assert result.claim.task_id == "T900"
+        finally:
+            b.close()
+
     def test_claim_warns_on_file_overlap_with_other_active_claim(self, tmp_path: Path) -> None:
         """Without --force, claim raises ClaimError with ConflictWarning details on file overlap."""
         clock = _make_clock()

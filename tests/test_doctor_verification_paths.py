@@ -97,3 +97,23 @@ def test_cd_prefix_bare_path_is_flagged(backend, frozen_clock, tmp_path: Path): 
     assert finding.severity == "warning"
     assert tid in finding.message
     assert finding.detail["offenders"][0]["path"] == "tests/real.py"
+
+
+def test_cd_prefix_resets_per_statement_no_false_positive(backend, frozen_clock, tmp_path: Path):  # type: ignore[no-untyped-def]
+    # A multi-statement command that re-cd's in each ';' statement
+    # (cd bin && A; cd bin && B) must resolve B's ../tests path from bin/, not
+    # accumulate to bin/bin. Regression guard for the per-statement cwd reset.
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "real.py").write_text("", encoding="utf-8")
+    create_workflow_task(
+        backend, title="t", description="d", actor="r", clock=frozen_clock,
+        verification=Verification(
+            commands=[
+                "cd bin && uv run pytest -q -k foo; "
+                "cd bin && uv run pytest -q ../tests/real.py"
+            ]
+        ),
+    )
+    finding = _check_verification_paths(backend, tmp_path)
+    assert finding.severity == "ok"
