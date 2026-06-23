@@ -184,6 +184,21 @@ class TestStatusJson:
         assert "PRD:" in res.output
         assert "Tasks:" in res.output
 
+    def test_status_json_has_prds_rollup(self, tmp_path: Path) -> None:
+        """T020: status --json carries data['prds'] alongside the flat totals."""
+        _planned_project(tmp_path)
+        res = _invoke(tmp_path, ["status", "--json"])
+        assert res.exit_code == 0
+        data = _assert_success(_parse_envelope(res), "status")
+        assert "prds" in data
+        # Single-PRD project: one entry whose numbers equal the flat totals.
+        assert len(data["prds"]) == 1
+        entry = data["prds"][0]
+        assert entry["total_tasks"] == data["tasks"]["total"]
+        assert entry["ready_task_count"] == data["tasks"]["ready"]
+        assert entry["active_claim_count"] == data["active_claims"]
+        assert entry["status"] == data["prd_status"]
+
 
 class TestListJson:
     def test_list_json_success(self, tmp_path: Path) -> None:

@@ -123,6 +123,53 @@ class TaskCountsByStatus(BaseModel):
     rejected: int = 0
 
 
+class PrdStatusEntry(BaseModel):
+    """One per-PRD slice of project state (T020).
+
+    Additive: ``get_project_status`` / ``get_project_summary`` grow a ``prds``
+    list of these alongside the existing flat project-total fields. On a single-
+    PRD DB there is exactly one entry whose numbers equal those flat totals.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prd_id: str
+    status: str
+    task_counts: TaskCountsByStatus
+    total_tasks: int
+    ready_task_count: int
+    active_claim_count: int
+
+
+def _prd_status_entries(
+    prds: Any, tasks: Any, active_claims: Any
+) -> list[PrdStatusEntry]:
+    """Adapt the pure :func:`compute_prd_rollup` output to ``PrdStatusEntry``.
+
+    Keeps the per-PRD aggregation logic in one place (anvil.state.rollup) so the
+    CLI ``anvil status`` and these MCP tools never drift.
+    """
+    from anvil.state.rollup import compute_prd_rollup
+
+    entries: list[PrdStatusEntry] = []
+    for r in compute_prd_rollup(prds, tasks, active_claims):
+        counts = TaskCountsByStatus()
+        for status_val, n in r.task_counts.items():
+            if hasattr(counts, status_val):
+                setattr(counts, status_val, n)
+        entries.append(
+            PrdStatusEntry(
+                prd_id=r.prd_id,
+                status=r.status,
+                task_counts=counts,
+                total_tasks=r.total_tasks,
+                ready_task_count=r.ready_task_count,
+                active_claim_count=r.active_claim_count,
+            )
+        )
+    return entries
+
+
 class ProjectSummary(BaseModel):
     """Summary of project state returned by get_project_summary."""
 
@@ -136,6 +183,8 @@ class ProjectSummary(BaseModel):
     active_claim_count: int
     blocked_task_count: int
     ready_task_count: int
+    # T020: additive per-PRD rollup. Flat fields above remain the PROJECT TOTAL.
+    prds: list[PrdStatusEntry] = Field(default_factory=list)
 
 
 class ClaimResponse(BaseModel):
@@ -580,6 +629,7 @@ def get_project_summary() -> ProjectSummary:
             )
 
         prd = backend.get_prd()
+        prds = backend.list_prds()
         all_tasks = backend.list_tasks()
         active_claims = backend.list_active_claims()
 
@@ -604,6 +654,8 @@ def get_project_summary() -> ProjectSummary:
             active_claim_count=len(active_claims),
             blocked_task_count=blocked_count,
             ready_task_count=ready_count,
+            # T020: per-PRD rollup; flat fields above stay the project total.
+            prds=_prd_status_entries(prds, all_tasks, active_claims),
         )
     finally:
         backend.close()
@@ -1604,6 +1656,8 @@ class ProjectStatusResponse(BaseModel):
     total_tasks: int
     ready_queue_depth: int
     active_claim_count: int
+    # T020: additive per-PRD rollup. Flat fields above remain the PROJECT TOTAL.
+    prds: list[PrdStatusEntry] = Field(default_factory=list)
 
 
 @mcp.tool
@@ -1635,6 +1689,7 @@ def get_project_status(cwd: str | None = None) -> ProjectStatusResponse:
     try:
         project = backend.get_project()
         prd = backend.get_prd()
+        prds = backend.list_prds()
         all_tasks = backend.list_tasks()
         active_claims = backend.list_active_claims()
 
@@ -1657,6 +1712,8 @@ def get_project_status(cwd: str | None = None) -> ProjectStatusResponse:
             total_tasks=len(all_tasks),
             ready_queue_depth=ready_depth,
             active_claim_count=len(active_claims),
+            # T020: per-PRD rollup; flat fields above stay the project total.
+            prds=_prd_status_entries(prds, all_tasks, active_claims),
         )
     finally:
         backend.close()
