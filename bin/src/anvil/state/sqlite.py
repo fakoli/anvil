@@ -1004,6 +1004,20 @@ class SqliteBackend:
         ).fetchone()
         return row[0] if row else None
 
+    def get_prd_for_task(self, task: Task) -> PRD | None:
+        """Return the PRD that OWNS ``task``, resolved via ``task.prd_id`` (T011).
+
+        Reads ``task.prd_id`` directly (no ``Feature`` join) and resolves it with
+        ``get_prd(prd_id)`` — a single-column partition lookup. When the task
+        carries no ``prd_id`` it falls back to the default PRD via the plain
+        ``get_prd()`` (``is_default = 1``) resolver. On a single-PRD DB every
+        task's ``prd_id`` is the default id, so this returns the same PRD the
+        legacy no-arg ``get_prd()`` did — behaviour is unchanged there.
+        """
+        if not task.prd_id:
+            return self.get_prd()
+        return self.get_prd(task.prd_id)
+
     def get_project(self) -> Project | None:
         """Return the Project record, or None if not initialised."""
         conn = self._require_conn()

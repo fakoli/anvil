@@ -433,8 +433,10 @@ class ClaimManager:
                 "expected 'ready'."
             )
 
-        # Gate 3: PRD must be reviewed or approved (delegate to transitions).
-        prd = self._backend.get_prd()
+        # Gate 3: the task's OWNING PRD must be reviewed or approved (T011).
+        # Resolve via task.prd_id so a task in an approved PRD is claimable while
+        # a sibling in a draft PRD is refused; the transition gate stays pure.
+        prd = self._backend.get_prd_for_task(task)
         if prd is None:
             raise ClaimError(
                 f"Task '{task_id}' cannot be claimed: no PRD found. "

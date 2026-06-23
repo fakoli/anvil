@@ -225,6 +225,17 @@ class Backend(Protocol):
         """Return the ``is_default = 1`` PRD's id, or None if no PRD exists (T008)."""
         ...
 
+    def get_prd_for_task(self, task: Task) -> PRD | None:
+        """Return the PRD that OWNS ``task``, resolved via ``task.prd_id`` (T011).
+
+        Reads ``task.prd_id`` directly — no ``Feature`` join — then ``get_prd``
+        on that id. Falls back to the default PRD (``get_prd()`` /
+        ``is_default = 1``) when the task carries no ``prd_id``. The per-PRD
+        claim gate keys on this, so a task in an approved PRD is claimable while
+        a sibling in a draft PRD is refused at ``prd_status_gate``.
+        """
+        ...
+
     def get_project(self) -> Project | None:
         """Return the Project record, or None if not initialised."""
         ...

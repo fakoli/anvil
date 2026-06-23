@@ -154,6 +154,7 @@ def _insert_task_raw(
     conflict_groups: list[str] | None = None,
     likely_files: list[str] | None = None,
     dependencies: list[str] | None = None,
+    prd_id: str = "default",
 ) -> None:
     import json as _json
     conn.execute(
@@ -161,8 +162,8 @@ def _insert_task_raw(
         (id, feature_id, title, description, status, priority,
          dependencies, conflict_groups, scores, acceptance_criteria,
          implementation_notes, verification, likely_files,
-         created_at, updated_at)
-        VALUES (?, 'F001', ?, 'desc', ?, 'medium', ?, ?, '{}', '[]', '[]', '{}', ?, ?, ?)""",
+         prd_id, created_at, updated_at)
+        VALUES (?, 'F001', ?, 'desc', ?, 'medium', ?, ?, '{}', '[]', '[]', '{}', ?, ?, ?, ?)""",
         (
             task_id,
             f"Task {task_id}",
@@ -170,9 +171,27 @@ def _insert_task_raw(
             _json.dumps(dependencies or []),
             _json.dumps(conflict_groups or []),
             _json.dumps(likely_files or []),
+            prd_id,
             _T0.isoformat(),
             _T0.isoformat(),
         ),
+    )
+    conn.commit()
+
+
+def _insert_prd_raw(
+    conn: sqlite3.Connection,
+    *,
+    prd_id: str,
+    status: str = "draft",
+    is_default: int = 0,
+) -> None:
+    """Raw-insert a second PRD row (the parser doesn't mint named PRDs until
+    Phase 4, so the per-PRD gate test seeds one directly — same pattern as
+    ``_insert_task_raw``). All other prds columns carry NOT NULL defaults."""
+    conn.execute(
+        "INSERT INTO prds (id, project_id, status, is_default) VALUES (?, 'proj-1', ?, ?)",
+        (prd_id, status, is_default),
     )
     conn.commit()
 
@@ -547,6 +566,69 @@ class TestClaim:
             m = _make_manager(b, clock=clock)
             result = m.claim("T001")
             assert result.claim.status == ClaimStatus.active
+        finally:
+            b.close()
+
+    def _setup_two_prds(self, tmp_path: Path, clock: FrozenClock) -> SqliteBackend:
+        """Default PRD APPROVED + a second 'v0.2' PRD still in DRAFT, each owning
+        one ready task. Exercises the per-PRD claim gate (T011): the gate must
+        key on the task's OWNING PRD, not the (approved) default one."""
+        b = _make_backend(tmp_path, clock)
+        _setup_project(b)
+        _setup_prd(b, approve=True)  # default PRD -> approved
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        _insert_prd_raw(conn, prd_id="v0.2", status="draft", is_default=0)
+        _insert_feature_raw(conn)
+        _insert_task_raw(conn, task_id="T001", status="ready", prd_id="default")
+        _insert_task_raw(conn, task_id="T900", status="ready", prd_id="v0.2")
+        conn.close()
+        return b
+
+    def test_per_prd_gate_claims_task_in_approved_prd(self, tmp_path: Path) -> None:
+        """A task whose OWNING PRD is approved is claimable (T011)."""
+        clock = _make_clock()
+        b = self._setup_two_prds(tmp_path, clock)
+        try:
+            m = _make_manager(b, clock=clock)
+            result = m.claim("T001")  # owned by the approved 'default' PRD
+            assert result.claim.status == ClaimStatus.active
+            assert result.claim.task_id == "T001"
+        finally:
+            b.close()
+
+    def test_per_prd_gate_refuses_sibling_in_draft_prd(self, tmp_path: Path) -> None:
+        """A sibling task in a DRAFT PRD is refused at prd_status_gate even though
+        the default PRD is approved — proving the gate is per-PRD, not global (T011)."""
+        clock = _make_clock()
+        b = self._setup_two_prds(tmp_path, clock)
+        try:
+            m = _make_manager(b, clock=clock)
+            with pytest.raises(ClaimError, match="draft|reviewed|approved"):
+                m.claim("T900")  # owned by the draft 'v0.2' PRD
+        finally:
+            b.close()
+
+    def test_owning_prd_falls_back_to_default_when_prd_id_absent(self, tmp_path: Path) -> None:
+        """get_prd_for_task resolves the default PRD when the task carries no
+        prd_id (acceptance criterion 1's 'absent' branch — the mis-migrated /
+        hand-constructed case). Pins the documented fallback that the per-PRD
+        gate tests don't exercise (they use a truthy prd_id)."""
+        clock = _make_clock()
+        b = _make_backend(tmp_path, clock)
+        try:
+            _setup_project(b)
+            _setup_prd(b)  # default PRD, id='default'
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(conn, task_id="T777", status="ready", prd_id="")
+            conn.close()
+
+            task = b.get_task("T777")
+            assert task is not None
+            assert task.prd_id == ""  # falsy -> exercises the fallback branch
+            prd = b.get_prd_for_task(task)
+            assert prd is not None
+            assert prd.id == "default"
         finally:
             b.close()
 
