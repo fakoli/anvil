@@ -124,14 +124,20 @@ def _init_state_dir(tmp_path: Path, project_name: str = "Test Project") -> Path:
     return state_dir
 
 
-def _add_prd(state_dir: Path, status: str = "reviewed") -> None:
-    """Insert the default PRD row directly via SQLite.
+def _add_prd(
+    state_dir: Path,
+    status: str = "reviewed",
+    *,
+    prd_id: str = "default",
+    is_default: int = 1,
+) -> None:
+    """Insert a PRD row directly via SQLite.
 
     status options: 'draft', 'reviewed', 'approved'
 
-    Under schema v7 the no-arg ``get_prd()`` resolves the ``is_default = 1`` row,
-    so the inserted row must be a v7-correct default PRD: ``id='default'``,
-    ``is_default=1``, with tz-aware UTC timestamps.
+    Defaults insert a v7-correct DEFAULT PRD (``id='default'``, ``is_default=1``)
+    that the no-arg ``get_prd()`` resolves. Pass ``prd_id`` + ``is_default=0`` to
+    seed an additional NON-default PRD (e.g. a multi-PRD per-PRD-gate test).
     """
     db_path = str(state_dir / "state.db")
     iso = "2026-05-24T18:00:00+00:00"
@@ -141,9 +147,9 @@ def _add_prd(state_dir: Path, status: str = "reviewed") -> None:
         (id, project_id, status, summary, goals, non_goals, requirements,
          acceptance_criteria, risks, open_questions,
          is_default, created_at, updated_at)
-        VALUES ('default', 'proj-test', ?, 'Test summary.', '[]', '[]', '[]',
-                '[]', '[]', '[]', 1, ?, ?)
-    """, (status, iso, iso))
+        VALUES (?, 'proj-test', ?, 'Test summary.', '[]', '[]', '[]',
+                '[]', '[]', '[]', ?, ?, ?)
+    """, (prd_id, status, is_default, iso, iso))
     conn.commit()
     conn.close()
 
@@ -167,6 +173,7 @@ def _add_task(
     *,
     task_id: str = "T001",
     feature_id: str = "F001",
+    prd_id: str = "default",
     title: str = "Test Task",
     status: str = "ready",
     priority: str = "medium",
@@ -182,16 +189,17 @@ def _add_task(
     conn = sqlite3.connect(db_path)
     conn.execute(
         """INSERT OR REPLACE INTO tasks
-        (id, feature_id, title, description, status, priority, task_type,
+        (id, feature_id, prd_id, title, description, status, priority, task_type,
          dependencies, conflict_groups, scores, acceptance_criteria,
          implementation_notes, verification, likely_files,
          parent_task_id, created_at, updated_at)
-        VALUES (?, ?, ?, 'A test task.', ?, ?, ?,
+        VALUES (?, ?, ?, ?, 'A test task.', ?, ?, ?,
          ?, ?, ?, '["Tests pass."]', '[]', '{}', ?,
          ?, ?, ?)""",
         (
             task_id,
             feature_id,
+            prd_id,
             title,
             status,
             priority,
@@ -823,7 +831,12 @@ class TestClaimTask:
         assert claim["expected_files"] == ["src/foo.py"]
 
     def test_error_when_prd_is_draft(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Gate: PRD in 'draft' status → ToolError."""
+        """Gate: owning PRD in 'draft' status → ToolError.
+
+        T012: the refusal now flows through ClaimManager's per-PRD gate (the
+        duplicated inline get_prd() pre-check was removed), so the message is the
+        transition gate's 'PRD must be in {reviewed, approved}' text, not the old
+        inline 'PRD is in draft status' string."""
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
@@ -837,7 +850,7 @@ class TestClaimTask:
                     "claimed_by": "agent-x",
                 })
 
-        with pytest.raises(ToolError, match="draft|PRD"):
+        with pytest.raises(ToolError, match="PRD must be in"):
             _run(run())
 
     def test_error_when_prd_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -854,8 +867,37 @@ class TestClaimTask:
                     "claimed_by": "agent-x",
                 })
 
-        with pytest.raises(ToolError, match="missing|draft|PRD"):
+        # Tightened from "missing|draft|PRD" (loose: only the bare 'PRD' substring
+        # matched): the missing-PRD case now flows through ClaimManager Gate 3,
+        # which raises "no PRD found" - pin that so a future reword can't pass silently.
+        with pytest.raises(ToolError, match="no PRD found"):
             _run(run())
+
+    def test_claims_task_in_approved_nondefault_prd_via_mcp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T012 / finding-A: claim_task honors the task's OWNING PRD via
+        ClaimManager now that the duplicated inline get_prd() gate is gone. The
+        default PRD is DRAFT but the task's non-default PRD 'v0.2' is APPROVED,
+        so the MCP claim SUCCEEDS - CLI and MCP agree. The pre-T012 inline gate
+        resolved the draft default PRD and wrongly refused this claim."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_prd(state_dir, status="draft")  # default PRD: draft
+        _add_prd(state_dir, status="approved", prd_id="v0.2", is_default=0)
+        _add_task(state_dir, task_id="T900", status="ready", prd_id="v0.2")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("claim_task", {
+                    "task_id": "T900",
+                    "claimed_by": "agent-x",
+                }))
+
+        claim = _run(run())
+        assert claim["task_id"] == "T900"
+        assert claim["claimed_by"] == "agent-x"
 
     def test_error_on_double_claim(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Claiming an already-claimed task raises ToolError (ClaimError bubble)."""

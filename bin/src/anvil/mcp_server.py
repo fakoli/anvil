@@ -736,7 +736,8 @@ def claim_task(
 ) -> ClaimResponse:
     """Acquire an exclusive lease on task_id for claimed_by.
 
-    Reaps stale claims first; refuses (ToolError) while the PRD is in 'draft'.
+    Reaps stale claims first; refuses (ToolError) unless the task's OWNING PRD
+    is reviewed/approved (enforced by ClaimManager's per-PRD gate, T011/T012).
     lease_duration_seconds defaults to 900 (15 min).
     """
     claimed_by = _require_actor(claimed_by)
@@ -748,15 +749,12 @@ def claim_task(
 
         _reap_stale(backend)
 
-        # PRD gate: refuse if PRD is draft.
-        prd = backend.get_prd()
-        if prd is None or prd.status.value == "draft":
-            prd_status = prd.status.value if prd is not None else "missing"
-            raise ToolError(
-                f"Cannot claim task '{task_id}': PRD is in '{prd_status}' status. "
-                "The PRD must be reviewed or approved before tasks can be claimed.",
-            )
-
+        # The PRD gate is enforced inside ClaimManager.claim() via
+        # get_prd_for_task (T011/T012): the task's OWNING PRD must be reviewed or
+        # approved. Its ClaimError is translated to ToolError below, so the MCP
+        # and CLI paths apply the IDENTICAL per-PRD gate. (A duplicated inline
+        # pre-check on the global get_prd() lived here pre-T012; it resolved the
+        # default PRD and so disagreed with the per-PRD gate under multi-PRD.)
         lease_minutes = max(1, lease_duration_seconds // 60)
         manager = ClaimManager(
             backend,
