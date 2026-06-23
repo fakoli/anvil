@@ -4045,6 +4045,280 @@ class TestPlanOrphanPrune:
         )
 
 
+# Default PRD: T001 touches the shared file, T002 is default-only. Used to
+# prove that planning a NAMED PRD never prunes default tasks and that a
+# cross-PRD file overlap (src/shared.py) is detected.
+_MULTIPRD_DEFAULT = """\
+# Project: Multi-PRD Default
+
+## Summary
+
+Default PRD for T017 scoping tests.
+
+## Goals
+
+- Scope plan to a PRD.
+
+## Requirements
+
+- R001: Default work.
+
+## Features
+
+### F001: Default feature
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Default task on shared file
+
+**Feature:** F001
+**Priority:** medium
+**Likely files:** src/shared.py, src/d.py
+
+**Acceptance criteria:**
+
+- works
+
+**Verification:**
+
+- `pytest`
+
+### T002: Default-only task
+
+**Feature:** F001
+**Priority:** medium
+**Likely files:** src/default_only.py
+
+**Acceptance criteria:**
+
+- works
+
+**Verification:**
+
+- `pytest`
+"""
+
+# Same default PRD with T002 removed — used to prove default-scoped pruning.
+_MULTIPRD_DEFAULT_NO_T002 = _MULTIPRD_DEFAULT.split("### T002:")[0].rstrip() + "\n"
+
+# Named v0.2 PRD: its single task touches the SAME src/shared.py the default
+# T001 touches, so the cross-PRD conflict scan must group them together.
+_MULTIPRD_NAMED = """\
+# Project: Multi-PRD Named
+
+## Summary
+
+Named PRD for T017 scoping tests.
+
+## Goals
+
+- Ship v0.2.
+
+## Requirements
+
+- R001: Named work.
+
+## Features
+
+### F001: Named feature
+
+**Requirements:** R001
+
+## Tasks
+
+### T900: Named task on shared file
+
+**Feature:** F001
+**Priority:** medium
+**Likely files:** src/shared.py, src/n.py
+
+**Acceptance criteria:**
+
+- works
+
+**Verification:**
+
+- `pytest`
+"""
+
+
+class TestPlanPrdScoping:
+    """T017: `anvil plan --prd <id>` scopes feature/task creation,
+    orphan-prune, dependency inference, and proposed->drafted promotion to a
+    single PRD partition — while conflict-group inference still spans ALL PRDs.
+    """
+
+    def _task_rows(self, tmp_path: Path) -> dict[str, tuple[str, str]]:
+        """Return {task_id: (prd_id, status)} straight from state.db."""
+        db = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(str(db)) as conn:
+            return {
+                r[0]: (r[1], r[2])
+                for r in conn.execute(
+                    "SELECT id, prd_id, status FROM tasks"
+                )
+            }
+
+    def _conflict_groups(self, tmp_path: Path) -> dict[str, list[str]]:
+        """Return {cg_id: task_ids} from the conflict_groups table."""
+        db = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(str(db)) as conn:
+            return {
+                r[0]: json.loads(r[1])
+                for r in conn.execute(
+                    "SELECT id, task_ids FROM conflict_groups"
+                )
+            }
+
+    def _task_conflict_groups(self, tmp_path: Path, task_id: str) -> list[str]:
+        db = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(str(db)) as conn:
+            row = conn.execute(
+                "SELECT conflict_groups FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return json.loads(row[0]) if row else []
+
+    def _setup_default_then_named(self, tmp_path: Path) -> None:
+        """Init, plan the default PRD, then parse the named v0.2 PRD."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MULTIPRD_DEFAULT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["plan", "--no-llm"]).exit_code == 0
+        _write_named_prd(tmp_path, "v0.2", _MULTIPRD_NAMED)
+        assert (
+            _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code
+            == 0
+        )
+
+    def test_plan_named_prd_creates_tasks_carrying_prd_id(
+        self, tmp_path: Path
+    ) -> None:
+        """`plan --prd v0.2` reads prds/v0.2.md and creates its task in the
+        v0.2 partition (prd_id stamped), promoted proposed->drafted, while the
+        default tasks are untouched."""
+        self._setup_default_then_named(tmp_path)
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2", "--no-llm"])
+        assert result.exit_code == 0, result.output
+
+        rows = self._task_rows(tmp_path)
+        # Named id is prefixed (T015 id convention).
+        assert "v0.2:T900" in rows, rows
+        prd_id, status = rows["v0.2:T900"]
+        assert prd_id == "v0.2", f"task should carry its prd_id; got {prd_id}"
+        # Dependency inference + promotion ran over the subset.
+        assert status == "drafted", f"named task should be promoted; got {status}"
+        # Default tasks are in their own partition, unchanged.
+        assert rows["T001"][0] == "default"
+        assert rows["T002"][0] == "default"
+
+    def test_plan_named_prd_does_not_prune_default_tasks(
+        self, tmp_path: Path
+    ) -> None:
+        """Orphan-prune is scoped: planning v0.2 (whose prd.md lists only T900)
+        must NOT delete the default PRD's T001/T002 just because they are
+        absent from v0.2's source."""
+        self._setup_default_then_named(tmp_path)
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2", "--no-llm"])
+        assert result.exit_code == 0, result.output
+        rows = self._task_rows(tmp_path)
+        assert "T001" in rows, "default T001 must survive a named-PRD plan"
+        assert "T002" in rows, "default T002 must survive a named-PRD plan"
+        assert "Pruned" not in result.output, (
+            f"named plan should not prune cross-PRD tasks; got: {result.output}"
+        )
+
+    def test_default_plan_prunes_only_default_orphans_not_named(
+        self, tmp_path: Path
+    ) -> None:
+        """Symmetric scoping: re-planning the DEFAULT PRD with T002 removed
+        prunes T002 but leaves the v0.2 task intact."""
+        self._setup_default_then_named(tmp_path)
+        assert (
+            _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2", "--no-llm"]).exit_code
+            == 0
+        )
+        # Now drop T002 from the default PRD and re-plan the default.
+        _write_prd(tmp_path, _MULTIPRD_DEFAULT_NO_T002)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        result = _invoke_cmd(tmp_path, ["plan", "--no-llm"])
+        assert result.exit_code == 0, result.output
+
+        rows = self._task_rows(tmp_path)
+        assert "T002" not in rows, "T002 should be pruned from the default PRD"
+        assert "T001" in rows
+        assert "v0.2:T900" in rows, (
+            "the v0.2 task must NOT be pruned by a default-PRD re-plan"
+        )
+
+    def test_plan_with_no_prd_targets_default(self, tmp_path: Path) -> None:
+        """Without --prd, plan reads .anvil/prd.md and writes the default
+        partition (pre-v7 behaviour): all tasks carry prd_id='default'."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MULTIPRD_DEFAULT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        result = _invoke_cmd(tmp_path, ["plan", "--no-llm"])
+        assert result.exit_code == 0, result.output
+        rows = self._task_rows(tmp_path)
+        assert set(rows) == {"T001", "T002"}, rows
+        assert all(prd_id == "default" for prd_id, _ in rows.values()), rows
+
+
+class TestPlanCrossPrdConflictGroups:
+    """T017: conflict-group inference spans ALL PRDs (reads backend.list_tasks()
+    with no prd filter), so a default-PRD task and a named-PRD task that share a
+    likely_file land in ONE CG-* group that both task rows reference.
+    """
+
+    def _setup(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MULTIPRD_DEFAULT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["plan", "--no-llm"]).exit_code == 0
+        _write_named_prd(tmp_path, "v0.2", _MULTIPRD_NAMED)
+        assert (
+            _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code
+            == 0
+        )
+
+    def test_named_plan_groups_conflict_across_prds(
+        self, tmp_path: Path
+    ) -> None:
+        """Planning v0.2 detects that v0.2:T900 and default T001 both touch
+        src/shared.py and forms a single cross-PRD conflict group; BOTH task
+        rows carry the group id."""
+        self._setup(tmp_path)
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2", "--no-llm"])
+        assert result.exit_code == 0, result.output
+        assert "conflict group" in result.output, result.output
+
+        db = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(str(db)) as conn:
+            cgs = {
+                r[0]: json.loads(r[1])
+                for r in conn.execute(
+                    "SELECT id, task_ids FROM conflict_groups"
+                )
+            }
+            t001 = json.loads(
+                conn.execute(
+                    "SELECT conflict_groups FROM tasks WHERE id = 'T001'"
+                ).fetchone()[0]
+            )
+            t900 = json.loads(
+                conn.execute(
+                    "SELECT conflict_groups FROM tasks WHERE id = 'v0.2:T900'"
+                ).fetchone()[0]
+            )
+
+        cross = [k for k, v in cgs.items() if set(v) == {"T001", "v0.2:T900"}]
+        assert cross, f"expected ONE cross-PRD CG; got {cgs}"
+        cg_id = cross[0]
+        assert cg_id in t001, f"default T001 must reference {cg_id}; got {t001}"
+        assert cg_id in t900, f"named task must reference {cg_id}; got {t900}"
+
+
 # ---------------------------------------------------------------------------
 # replay command
 # ---------------------------------------------------------------------------
