@@ -154,6 +154,7 @@ class ClaimManager:
         max_blast: int | None = None,
         max_review_risk: int | None = None,
         metrics: AcceptRateMetrics | None = None,
+        prd_id: str | None = None,
     ) -> Task | None:
         """Pick the highest-priority claimable Task.
 
@@ -179,10 +180,18 @@ class ClaimManager:
         (ineligible), so the filter fails safe rather than routing weakly-scored
         risk to a local runner. Omitting both keeps the pre-B45 behaviour.
 
+        ``prd_id`` (T019): when given, restrict the *candidate pool* (the final
+        ready tasks we might return) to that PRD partition. The EXCLUSION sets
+        — active claims, done-dependency set, and active conflict groups — are
+        ALWAYS built from ALL PRDs first, then the candidates are narrowed.
+        Coordination is cross-PRD: a ``--prd v0.1`` pick must still skip a v0.1
+        task whose conflict_group is held by an active v0.2 claim. Omitting it
+        keeps the pre-T019 behaviour (all PRDs eligible as candidates).
+
         Returns None if no task is claimable.
         """
         ready_tasks = self._backend.list_tasks(
-            status=TaskStatus.ready, task_type=task_type
+            status=TaskStatus.ready, task_type=task_type, prd_id=prd_id
         )
         if not ready_tasks:
             return None
@@ -269,7 +278,9 @@ class ClaimManager:
         candidates.sort(key=_sort_key)
         return candidates[0]
 
-    def next_ready_excluding_active_files(self) -> Task | None:
+    def next_ready_excluding_active_files(
+        self, *, prd_id: str | None = None
+    ) -> Task | None:
         """Pick the next claimable Task, also excluding file-conflict overlaps.
 
         Identical to :meth:`next_claimable` (priority desc, complexity asc,
@@ -290,15 +301,22 @@ class ClaimManager:
         ``check_conflicts`` / ``claim --force`` flow; this method is the
         stricter variant used where we surface a single safe suggestion.
 
+        ``prd_id`` (T019): scopes the CANDIDATE pool to one PRD partition while
+        the exclusion sets (active claims, locked files, done-deps, conflict
+        groups) still span ALL PRDs — same cross-PRD coordination contract as
+        :meth:`next_claimable`. Omitting it keeps the all-PRDs behaviour.
+
         Returns None if no task is claimable.
         """
-        base = self.next_claimable()
+        base = self.next_claimable(prd_id=prd_id)
         if base is None:
             return None
 
         active_claims = self._backend.list_active_claims()
         # Files locked by an active claim, keyed by owning actor so we can skip
         # our own claims (re-suggesting work we already hold is not a conflict).
+        # Spans ALL PRDs: a foreign lock in another partition still excludes a
+        # candidate in the requested one (T019 cross-PRD coordination).
         locked_by_others: set[str] = set()
         for claim in active_claims:
             if claim.claimed_by == self._actor:
@@ -311,7 +329,10 @@ class ClaimManager:
 
         # Re-run the candidate scan so we can fall through to the next-best
         # task when the top pick collides. Mirrors next_claimable's filters.
-        ready_tasks = self._backend.list_tasks(status=TaskStatus.ready)
+        # The candidate pool is prd_id-scoped; the exclusion sets below are not.
+        ready_tasks = self._backend.list_tasks(
+            status=TaskStatus.ready, prd_id=prd_id
+        )
         if not ready_tasks:
             return None
 

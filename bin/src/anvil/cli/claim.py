@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 
 from anvil.cli._helpers import (
+    PRD_OPTION,
     _lease_manager_kwargs,
     _load_config_optional,
     _open_backend,
@@ -14,7 +15,9 @@ from anvil.cli._helpers import (
     _require_state_dir,
     _resolve_base_dir,
     _resolve_state_dir,
+    canonical_prd_id,
     resolve_actor,
+    resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
 
@@ -526,6 +529,7 @@ def next(  # noqa: A001
         "is confirmed and <= M (same safe-by-construction semantics as "
         "--max-blast; likewise inert until a confirmation source ships).",
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     quiet: bool = typer.Option(  # noqa: B008
         False,
@@ -546,6 +550,11 @@ def next(  # noqa: A001
     Prints the recommended task ID and title.  Run `anvil claim TASK_ID`
     to acquire the lease after reviewing the recommendation. ``--type`` scopes
     the recommendation to a single task type.
+
+    ``--prd`` (T019) scopes the CANDIDATE pool to one PRD partition while
+    coordination still spans ALL PRDs: ``next --prd v0.1`` will skip a v0.1
+    task whose conflict_group is held by an active v0.2 claim. Omitting it
+    (single-PRD projects) keeps the all-PRDs behaviour unchanged.
 
     With ``--json`` emits ``{"ok": true, "command": "next", "data":
     {"task": {...} | null}}`` — ``task`` is null when nothing is claimable
@@ -568,6 +577,14 @@ def next(  # noqa: A001
         clock = SystemClock()
         _reap_stale_claims(backend)
 
+        # T019: only narrow the candidate pool when a PRD was explicitly named
+        # (flag or $ANVIL_PRD, both surfaced via PRD_OPTION's envvar wiring).
+        # An explicit value always wins verbatim through resolve_prd_id; with
+        # no selection we pass prd_id=None so a single-PRD project's output
+        # stays byte-identical to pre-T019. Collapse the default sentinel ('prd')
+        # so `--prd prd` narrows to the stored prd_id='default' partition.
+        scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd)) if prd else None
+
         manager = ClaimManager(backend, clock, actor=resolved_actor)
         # B49 — accept-rate governor: gate the pull seam on review-debt + the
         # runner's recent accept-rate, configured from config.yaml (defaults
@@ -587,6 +604,7 @@ def next(  # noqa: A001
             max_blast=max_blast,
             max_review_risk=max_review_risk,
             metrics=metrics,
+            prd_id=scoped_prd_id,
         )
         # B49 observability: distinguish a governed withhold (review queue
         # saturated / runner below the accept-rate floor) from a genuinely empty

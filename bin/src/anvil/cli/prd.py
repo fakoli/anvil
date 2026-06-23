@@ -9,11 +9,14 @@ import typer
 from anvil.cli._helpers import (
     _DEFAULT_PRD_IDS,
     _PRD_FILENAME,
+    PRD_OPTION,
     _get_project_id,
     _open_backend,
     _require_state_dir,
     _resolve_state_dir,
+    canonical_prd_id,
     prd_source_path,
+    resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.state.models import EventDraft
@@ -193,6 +196,7 @@ def prd_review(
         "--notes",
         help="Optional review notes.",
     ),
+    prd: str | None = PRD_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
         "--cwd",
@@ -204,6 +208,11 @@ def prd_review(
 
     Without --approve: draft → reviewed (emits prd.reviewed event).
     With --approve:    reviewed → approved (emits prd.approved event).
+
+    ``--prd`` (T019) names which PRD partition to review on a multi-PRD project:
+    the status check reads that PRD via ``get_prd`` and the emitted event carries
+    its ``prd_id`` so the handler mutates only that PRD's row. Omitting it on a
+    single-PRD project keeps the pre-T019 default-PRD behaviour unchanged.
     """
     from anvil.clock import SystemClock
 
@@ -216,19 +225,35 @@ def prd_review(
         now = clock.now()
         project_id = _get_project_id(backend)
 
-        prd = backend.get_prd()
-        if prd is None:
+        # T019: resolve which PRD this review targets. With no --prd/$ANVIL_PRD
+        # the resolver returns the single/default PRD's id, so single-PRD
+        # projects keep working unchanged; an explicit value scopes the lookup
+        # and the emitted event to that partition. Collapse the default sentinel
+        # ('prd') to the stored id ('default') so `--prd prd` finds the default
+        # PRD row instead of looking up a nonexistent id='prd'.
+        resolved_prd_id = canonical_prd_id(resolve_prd_id(backend, prd))
+
+        prd_model = backend.get_prd(resolved_prd_id)
+        if prd_model is None:
             typer.echo(
                 "Error: no PRD found in state. Run `anvil prd parse` first.",
                 err=True,
             )
             raise typer.Exit(code=1)
 
+        # Stamp prd_id into the event payload ONLY for a named (non-default)
+        # PRD. The default PRD omits the key so the payload stays byte-identical
+        # to the pre-multi-PRD event (the payload defaults prd_id='default').
+        def _scope(payload: dict[str, object]) -> dict[str, object]:
+            if prd_model.id not in _DEFAULT_PRD_IDS:
+                payload["prd_id"] = prd_model.id
+            return payload
+
         if approve:
-            if prd.status.value != "reviewed":
+            if prd_model.status.value != "reviewed":
                 typer.echo(
                     f"Error: PRD must be in 'reviewed' status to approve, "
-                    f"got '{prd.status.value}'. "
+                    f"got '{prd_model.status.value}'. "
                     "Run `anvil prd review` first.",
                     err=True,
                 )
@@ -240,15 +265,15 @@ def prd_review(
                 action="prd.approved",
                 target_kind="prd",
                 target_id=project_id,
-                payload_json={"project_id": project_id, "approver": reviewer},
+                payload_json=_scope({"project_id": project_id, "approver": reviewer}),
             )
             backend.append(draft)
             typer.echo(f"PRD approved by '{reviewer}'.")
         else:
-            if prd.status.value != "draft":
+            if prd_model.status.value != "draft":
                 typer.echo(
                     f"Error: PRD must be in 'draft' status to review, "
-                    f"got '{prd.status.value}'. "
+                    f"got '{prd_model.status.value}'. "
                     "Pass --approve to move from reviewed → approved.",
                     err=True,
                 )
@@ -260,7 +285,9 @@ def prd_review(
                 action="prd.reviewed",
                 target_kind="prd",
                 target_id=project_id,
-                payload_json={"project_id": project_id, "reviewer": reviewer, "notes": notes},
+                payload_json=_scope(
+                    {"project_id": project_id, "reviewer": reviewer, "notes": notes}
+                ),
             )
             backend.append(draft)
             typer.echo(f"PRD reviewed by '{reviewer}'.")

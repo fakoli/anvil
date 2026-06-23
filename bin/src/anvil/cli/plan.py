@@ -18,11 +18,14 @@ import typer
 import yaml
 
 from anvil.cli._helpers import (
+    PRD_OPTION,
     _open_backend,
     _require_state_dir,
     _resolve_state_dir,
     _scores_complete,
+    canonical_prd_id,
     prd_source_path,
+    resolve_prd_id,
 )
 from anvil.cli._json import (
     JSON_OPTION,
@@ -838,12 +841,17 @@ def score(
             "model-name conventions."
         ),
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
 ) -> None:
     """Score tasks across six dimensions using rule-based heuristics.
 
     Without TASK_ID: scores all tasks whose scores are incomplete.
     With TASK_ID: scores that single task.
+
+    ``--prd`` (T019) scopes the all-tasks (no TASK_ID) scoring pass to one PRD
+    partition via ``list_tasks(prd_id=...)``. Omitting it on a single-PRD
+    project keeps the pre-T019 behaviour (all PRDs scored).
 
     With ``--use-llm`` the deterministic explanation is appended with a 1-3
     sentence trade-off summary from the LLM.  Numeric scores are unaffected.
@@ -880,6 +888,12 @@ def score(
     try:
         clock = SystemClock()
 
+        # T019: only scope the all-tasks pass when a PRD is explicitly named
+        # (flag or $ANVIL_PRD). With no selection we pass prd_id=None so a
+        # single-PRD project scores every task exactly as before. Collapse the
+        # default sentinel ('prd') so `--prd prd` matches stored prd_id='default'.
+        scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd)) if prd else None
+
         if task_id is not None:
             task = backend.get_task(task_id)
             if task is None:
@@ -892,7 +906,7 @@ def score(
                 raise typer.Exit(code=1)
             tasks_to_score = [task]
         else:
-            all_tasks = backend.list_tasks()
+            all_tasks = backend.list_tasks(prd_id=scoped_prd_id)
             tasks_to_score = [
                 t for t in all_tasks if not _scores_complete(t)
             ]
@@ -1515,6 +1529,7 @@ def list_tasks(
         "--type",
         help="Filter by task type (feature, bugfix, refactor, modify).",
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1528,14 +1543,26 @@ def list_tasks(
     Prints a table: TaskID | Title | Status | Priority | Type | Score | Feature.
     With ``--json`` emits ``{"ok": true, "command": "list", "data":
     {"tasks": [...], "count": N, "filters": {...}}}``.
+
+    ``--prd`` (T019) scopes the listing to one PRD partition via
+    ``list_tasks(prd_id=...)``. Omitting it on a single-PRD project keeps the
+    pre-T019 behaviour (all PRDs listed).
     """
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="list", json_output=json_output)
 
     backend = _open_backend(state_dir)
     try:
+        # T019: only scope when a PRD is explicitly named (flag or $ANVIL_PRD).
+        # No selection -> prd_id=None -> all PRDs, byte-identical to pre-T019.
+        # Collapse the default sentinel ('prd') so `--prd prd` matches stored
+        # prd_id='default' rather than filtering on a nonexistent id='prd'.
+        scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd)) if prd else None
         tasks = backend.list_tasks(
-            status=status, feature_id=feature, task_type=task_type
+            status=status,
+            feature_id=feature,
+            task_type=task_type,
+            prd_id=scoped_prd_id,
         )
     finally:
         backend.close()
@@ -1616,6 +1643,7 @@ def list_tasks(
 
 def show(
     task_id: str = typer.Argument(..., help="Task ID to display (e.g. T001)."),  # noqa: B008
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1635,6 +1663,11 @@ def show(
     {"task": {...}, "active_claims": [...], "recent_events": [...]}}``.
     A missing task yields ``{"ok": false, ... "error": {"code": "not_found"}}``
     and exit 1.
+
+    ``--prd`` (T019) asserts the task belongs to the named PRD partition: an
+    explicit ``--prd``/``$ANVIL_PRD`` that doesn't match the task's ``prd_id``
+    is a ``not_found`` error (task IDs are globally unique, so the lookup itself
+    is unscoped). Omitting it keeps the pre-T019 behaviour unchanged.
     """
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="show", json_output=json_output)
@@ -1647,6 +1680,23 @@ def show(
                 fail("show", f"task '{task_id}' not found.", code="not_found")
             typer.echo(f"Error: task '{task_id}' not found.", err=True)
             raise typer.Exit(code=1)
+
+        # T019: when a PRD is explicitly named, assert the task lives in that
+        # partition (get_task is unscoped because IDs are unique). A mismatch
+        # is reported as not_found so callers can't silently read across PRDs.
+        # Collapse the default sentinel ('prd') so `--prd prd` matches a task
+        # stored with prd_id='default' instead of a false mismatch.
+        if prd:
+            scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd))
+            if task.prd_id and task.prd_id != scoped_prd_id:
+                msg = (
+                    f"task '{task_id}' belongs to PRD '{task.prd_id}', "
+                    f"not '{scoped_prd_id}'."
+                )
+                if json_output:
+                    fail("show", msg, code="not_found")
+                typer.echo(f"Error: {msg}", err=True)
+                raise typer.Exit(code=1)
 
         # Fetch active claims for this task.
         active_claims = backend.list_active_claims()

@@ -366,6 +366,77 @@ class TestNextClaimable:
         finally:
             b.close()
 
+    def test_prd_id_narrows_candidate_pool(self, tmp_path: Path) -> None:
+        """T019: next_claimable(prd_id='v0.2') only returns tasks in that PRD —
+        a higher-priority default-PRD task is invisible once the pool is scoped."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b, approve=True)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_prd_raw(conn, prd_id="v0.2", status="approved", is_default=0)
+            _insert_feature_raw(conn)
+            # Default-PRD task is higher priority — would win the unscoped pick.
+            _insert_task_raw(conn, task_id="T001", status="ready", prd_id="default")
+            conn.execute("UPDATE tasks SET priority = 'critical' WHERE id = 'T001'")
+            _insert_task_raw(conn, task_id="T900", status="ready", prd_id="v0.2")
+            conn.commit()
+            conn.close()
+
+            m = _make_manager(b)
+            # Unscoped picks the critical default-PRD task.
+            assert m.next_claimable().id == "T001"
+            # Scoped to v0.2 narrows the pool to T900 only.
+            scoped = m.next_claimable(prd_id="v0.2")
+            assert scoped is not None
+            assert scoped.id == "T900"
+        finally:
+            b.close()
+
+    def test_prd_id_scoped_pick_skips_cross_prd_active_claim_collision(
+        self, tmp_path: Path
+    ) -> None:
+        """T019 core: next_claimable(prd_id='v0.1') builds the conflict-group
+        exclusion from ALL PRDs first, so a v0.1 candidate colliding with an
+        ACTIVE v0.2 claim is skipped — while a non-colliding v0.1 task is still
+        returned. Proves the exclusion set spans PRDs even though the candidate
+        pool is narrowed to one."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b, approve=True)  # default PRD approved (unused here)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_prd_raw(conn, prd_id="v0.1", status="approved", is_default=0)
+            _insert_prd_raw(conn, prd_id="v0.2", status="approved", is_default=0)
+            _insert_feature_raw(conn)
+            # ACTIVE claim on a v0.2 task in the shared conflict_group.
+            _insert_task_raw(conn, task_id="T800", status="claimed",
+                             conflict_groups=["CG-shared"], prd_id="v0.2")
+            _insert_active_claim_raw(conn, claim_id="C001", task_id="T800")
+            # v0.1 candidate in the SAME group → must be skipped (cross-PRD).
+            # Give it the HIGHER priority so that, absent the cross-PRD
+            # exclusion, the unscoped sort would prefer it over T101 — the test
+            # then fails cleanly (T100 returned) under a regression instead of
+            # relying on equal sort keys + insertion order (the MCP twin uses
+            # the same high/low split).
+            _insert_task_raw(conn, task_id="T100", status="ready",
+                             conflict_groups=["CG-shared"], prd_id="v0.1")
+            conn.execute("UPDATE tasks SET priority = 'high' WHERE id = 'T100'")
+            # v0.1 candidate with no collision but LOWER priority → only
+            # returned because the collision excludes the higher-priority T100.
+            _insert_task_raw(conn, task_id="T101", status="ready",
+                             conflict_groups=["CG-T101"], prd_id="v0.1")
+            conn.execute("UPDATE tasks SET priority = 'low' WHERE id = 'T101'")
+            conn.commit()
+            conn.close()
+
+            m = _make_manager(b)
+            picked = m.next_claimable(prd_id="v0.1")
+            assert picked is not None
+            assert picked.id == "T101"
+        finally:
+            b.close()
+
 
 # ---------------------------------------------------------------------------
 # TestNextReadyExcludingActiveFiles (T014)
@@ -499,6 +570,46 @@ class TestNextReadyExcludingActiveFiles:
         try:
             m = _make_manager(b)
             assert m.next_ready_excluding_active_files() is None
+        finally:
+            b.close()
+
+    def test_prd_id_scopes_candidates_but_excludes_cross_prd_locked_files(
+        self, tmp_path: Path
+    ) -> None:
+        """T019: next_ready_excluding_active_files(prd_id='v0.1') narrows the
+        candidate pool to v0.1 yet still excludes a v0.1 task whose likely_files
+        overlap an active v0.2 claim — the file-lock exclusion spans PRDs."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b, approve=True)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_prd_raw(conn, prd_id="v0.1", status="approved", is_default=0)
+            _insert_prd_raw(conn, prd_id="v0.2", status="approved", is_default=0)
+            _insert_feature_raw(conn)
+            # A v0.2 task is claimed by another agent, locking src/shared.py.
+            _insert_task_raw(conn, task_id="T800", status="claimed",
+                             likely_files=["src/shared.py"], prd_id="v0.2")
+            _insert_active_claim_raw(conn, claim_id="C001", task_id="T800",
+                                     actor="other-agent",
+                                     expected_files=["src/shared.py"])
+            # v0.1 high-priority candidate overlaps the cross-PRD lock → excluded.
+            _insert_task_raw(conn, task_id="T100", status="ready",
+                             likely_files=["src/shared.py"], prd_id="v0.1")
+            conn.execute("UPDATE tasks SET priority = 'high' WHERE id = 'T100'")
+            # v0.1 candidate on a different file → eligible.
+            _insert_task_raw(conn, task_id="T101", status="ready",
+                             likely_files=["src/other.py"], prd_id="v0.1")
+            conn.commit()
+            conn.close()
+
+            m = _make_manager(b, actor="agent-test")
+            # The scoped base pick is the high-priority colliding task...
+            assert m.next_claimable(prd_id="v0.1").id == "T100"
+            # ...but the file-aware helper falls through to the non-colliding one.
+            picked = m.next_ready_excluding_active_files(prd_id="v0.1")
+            assert picked is not None
+            assert picked.id == "T101"
         finally:
             b.close()
 
