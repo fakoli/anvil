@@ -6584,10 +6584,16 @@ class TestV6ToV7Migration:
       * be idempotent (re-running it after a simulated crash does not error).
     """
 
-    def _stand_up_v6_db(self, db_path: str, events_path: str) -> None:
+    def _stand_up_v6_db(
+        self, db_path: str, events_path: str, *, prd_status: str = "reviewed"
+    ) -> None:
         """Create a real v6-shaped db (singleton prds keyed on project_id, no
         prd_id columns) with a project, prd, 2 requirements, a feature, 2 tasks
         and a sync_mapping, then stamp user_version=6.
+
+        ``prd_status`` controls the singleton PRD's status (default 'reviewed').
+        Pass 'draft' to stand up a v6 DB whose PRD is NOT claimable, so the
+        migration's PRD-status carry-through can be exercised at the claim gate.
         """
         Path(events_path).touch()
         conn = sqlite3.connect(db_path)
@@ -6688,7 +6694,7 @@ class TestV6ToV7Migration:
         conn.execute(
             "INSERT INTO prds (project_id, status, summary, last_reviewed_at) "
             "VALUES (?, ?, ?, ?)",
-            ("proj-1", "reviewed", "the summary", _T1.isoformat()),
+            ("proj-1", prd_status, "the summary", _T1.isoformat()),
         )
         conn.execute(
             "INSERT INTO requirements (id, prd_section, text) VALUES (?, ?, ?)",
@@ -7170,6 +7176,201 @@ class TestV6ToV7Migration:
                 assert n_default == 1
             finally:
                 conn.close()
+        finally:
+            b.close()
+
+    # -----------------------------------------------------------------------
+    # T014 — v6->v7 gate-equivalence: a migrated single-PRD DB keeps identical
+    # claimability. The migration must not change which tasks are claimable nor
+    # which PRD owns a task; the default partition the migration mints resolves
+    # exactly as the legacy single-PRD DB did.
+    # -----------------------------------------------------------------------
+
+    def test_v6_to_v7_migration_claim_gate_resolves_every_task_to_default_prd(
+        self, tmp_path: Path
+    ) -> None:
+        """T014 (criterion 1) — after migrating a v6 single-PRD DB, every
+        pre-existing task's owning PRD (``get_prd_for_task`` — the resolver the
+        claim gate uses) is the default PRD.
+
+        A real v6 DB has no ``prd_id`` column, so the migration backfills every
+        task into the default partition. ``get_prd_for_task`` must therefore
+        return the single ``id='default'`` PRD for each task — the same PRD the
+        legacy no-arg ``get_prd()`` resolved before the multi-PRD foundation, so
+        the claim gate keys on the same PRD it did pre-migration.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates v6 -> v7
+        try:
+            assert b.get_schema_version() == 7
+            default = b.get_prd()  # is_default=1 row
+            assert default is not None
+            assert default.id == "default"
+
+            # The two pre-existing v6 tasks (T001, T002) each resolve to the
+            # default PRD — and the list is non-empty so the assertion is not
+            # vacuous.
+            tasks = b.list_tasks()
+            assert {t.id for t in tasks} == {"T001", "T002"}
+            for task in tasks:
+                owning = b.get_prd_for_task(task)
+                assert owning is not None, task.id
+                assert owning.id == "default", (task.id, owning.id)
+                assert owning.id == default.id, (task.id, owning.id)
+        finally:
+            b.close()
+
+    def test_v6_to_v7_migration_preserves_claimability_gate(
+        self, tmp_path: Path
+    ) -> None:
+        """T014 (criterion 2) — a task claimable pre-migration is still
+        claimable post-migration, and a task NOT claimable pre-migration stays
+        un-claimable.
+
+        Pre-migration claimability on the v6 schema is exactly: status='ready'
+        AND the (single) PRD reviewed/approved (no per-task PRD partition
+        exists yet, so every task shares the one PRD). The v6 fixture's PRD is
+        'reviewed', so on the v6 DB T001 (set ready) is claimable while T002
+        (proposed) is not. After migrating to v7 the real ``ClaimManager``
+        gate — which now resolves the OWNING PRD via ``get_prd_for_task`` — must
+        reach the SAME verdict: T001 claims, T002 raises on the status gate.
+
+        The status-gated negative case (T002) short-circuits at Gate 2 and
+        never reaches the migrated PRD partition, so a companion test
+        (``…_blocked_by_unreviewed_prd``) exercises the OTHER direction: a
+        task that IS ready but whose PRD was un-reviewed pre-migration must
+        stay refused — there at the migration-sensitive PRD gate (Gate 3).
+        """
+        from anvil.claims.manager import ClaimError, ClaimManager
+        from anvil.state.models import ClaimStatus
+
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        # --- Pre-migration: compute claimability on the v6 schema. ----------
+        # v6 has no prd_id column; every task shares the singleton PRD keyed on
+        # project_id. Claimable iff status='ready' AND that PRD is
+        # reviewed/approved. Set T001 ready (claimable), leave T002 proposed
+        # (not claimable). Read the verdict directly off the v6 schema.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = 'T001'")
+            conn.commit()
+            prd_status = conn.execute("SELECT status FROM prds").fetchone()[0]
+            prd_claimable = prd_status in ("reviewed", "approved")
+            pre_claimable = {
+                tid: (status == "ready" and prd_claimable)
+                for tid, status in conn.execute(
+                    "SELECT id, status FROM tasks"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        # Sanity: the v6 fixture really gives one claimable and one not.
+        assert pre_claimable == {"T001": True, "T002": False}
+
+        # --- Migrate v6 -> v7, then run the REAL claim gate. ----------------
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates v6 -> v7
+        try:
+            assert b.get_schema_version() == 7
+            mgr = ClaimManager(b, clock, actor="agent-test")
+
+            # T001 was claimable pre-migration → still claimable post-migration.
+            assert pre_claimable["T001"] is True
+            result = mgr.claim("T001")
+            assert result.claim.status == ClaimStatus.active
+            assert result.claim.task_id == "T001"
+
+            # T002 was NOT claimable pre-migration → still refused (status gate).
+            assert pre_claimable["T002"] is False
+            with pytest.raises(ClaimError, match="ready"):
+                mgr.claim("T002")
+        finally:
+            b.close()
+
+    def test_v6_to_v7_migration_keeps_ready_task_blocked_by_unreviewed_prd(
+        self, tmp_path: Path
+    ) -> None:
+        """T014 (criterion 2, the migration-sensitive direction) — a task that
+        is NOT claimable pre-migration *because its PRD is un-reviewed* stays
+        un-claimable post-migration, refused at the PRD gate.
+
+        The sibling gate test's negative case (T002, status='proposed') is
+        refused at Gate 2 (the status gate) which short-circuits BEFORE Gate 3
+        ever calls ``get_prd_for_task`` — so it exercises ZERO migrated-PRD
+        resolution and cannot catch a migration that mis-carries PRD status.
+        Here both tasks are status='ready' (so the status gate passes) but the
+        v6 PRD is 'draft', so pre-migration neither task is claimable on the
+        PRD-status half of the gate. After migrating, the real ``ClaimManager``
+        must reach the SAME verdict — refused — but now via the migration's
+        actual behavioural delta: ``get_prd_for_task`` resolving the owning
+        (default) PRD whose status the migration carried forward verbatim.
+
+        This is the regression guard the status-gated case lacks: were the
+        migration to wrongly stamp the default PRD 'reviewed' when the v6 PRD
+        was 'draft', the post-migration claim would WRONGLY succeed and this
+        test — and only this test — would fail.
+        """
+        from anvil.claims.manager import ClaimError, ClaimManager
+
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        # v6 PRD is 'draft' (NOT reviewed/approved) → not claimable on the PRD
+        # half of the gate even when a task is ready.
+        self._stand_up_v6_db(db_path, events_path, prd_status="draft")
+
+        # --- Pre-migration: make both tasks 'ready' so the status gate would
+        # PASS; the only thing blocking a claim is the un-reviewed PRD. Read the
+        # verdict directly off the v6 schema.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("UPDATE tasks SET status = 'ready'")
+            conn.commit()
+            prd_status = conn.execute("SELECT status FROM prds").fetchone()[0]
+            prd_claimable = prd_status in ("reviewed", "approved")
+            pre_claimable = {
+                tid: (status == "ready" and prd_claimable)
+                for tid, status in conn.execute(
+                    "SELECT id, status FROM tasks"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        # Both tasks are ready but the PRD is draft → both un-claimable, and
+        # NOT because of the status gate.
+        assert prd_claimable is False
+        assert pre_claimable == {"T001": False, "T002": False}
+
+        # --- Migrate v6 -> v7, then run the REAL claim gate. ----------------
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates v6 -> v7
+        try:
+            assert b.get_schema_version() == 7
+            # The migration must carry the 'draft' status onto the default PRD.
+            assert b.get_prd().status.value == "draft"
+            mgr = ClaimManager(b, clock, actor="agent-test")
+
+            # Both were un-claimable pre-migration (un-reviewed PRD) → still
+            # refused post-migration, this time at the PRD gate (Gate 3) which
+            # resolves the owning PRD via get_prd_for_task. The status gate
+            # passes (both ready), so the only way to be refused is the
+            # migration-carried PRD status — the behaviour a status-gated
+            # negative case can never reach.
+            for tid in ("T001", "T002"):
+                assert pre_claimable[tid] is False
+                with pytest.raises(
+                    ClaimError, match=r"PRD must be in"
+                ):
+                    mgr.claim(tid)
         finally:
             b.close()
 
