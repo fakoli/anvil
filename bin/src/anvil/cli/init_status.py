@@ -429,6 +429,11 @@ def status(
         raise typer.Exit(code=1) from None
     try:
         project = backend.get_project()
+        # T021 audit (get_prd no-arg): default-only-correct. The flat
+        # ``prd_status`` line (and the --hook-format ``prd-status`` token) is the
+        # legacy single-PRD summary — the default PRD's status. The per-PRD
+        # rollup below (compute_prd_rollup over list_prds()) scopes status to
+        # each partition; the flat field stays pinned to the default PRD.
         prd = backend.get_prd()
         prds = backend.list_prds()
         all_tasks = backend.list_tasks()

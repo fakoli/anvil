@@ -322,6 +322,43 @@ class TestScanCommand:
         assert data["files_scanned"] == 5
         assert data["first_scan"] is True
 
+    def test_rescan_does_not_reseed_when_only_named_prds_exist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A project that holds only NON-default PRDs (no is_default row) and
+        has no prd.md on disk is already populated — scan must NOT re-seed a
+        fresh default draft graph on top of it.
+
+        Regression for the brownfield re-seed suppressor: it probes list_prds()
+        (any PRD exists), not bare get_prd() (default only). A named-only project
+        returns None from get_prd(), so the old default-only check would slip
+        through to `no_prd` and clobber the existing multi-PRD state.
+        """
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        # Seed ONLY a named PRD row directly; no default PRD, no prd.md on disk.
+        state_dir = tmp_path / ".anvil"
+        assert not (state_dir / "prd.md").exists()
+        conn = sqlite3.connect(str(state_dir / "state.db"))
+        try:
+            conn.execute(
+                "INSERT INTO prds (id, project_id, status, is_default) "
+                "VALUES ('v0.2', 'proj-1', 'approved', 0)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.chdir(tmp_path)
+
+        res = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert res.exit_code == 0, res.output
+        payload = json.loads(res.output)
+        # The existing named PRD suppresses re-seeding; no default draft written.
+        assert payload["data"]["seeded"] is None
+        assert not (state_dir / "prd.md").exists(), (
+            "scan must not write a default prd.md over an existing named-PRD project"
+        )
+
     def test_scan_force_reseeds(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
