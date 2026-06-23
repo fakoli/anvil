@@ -6810,6 +6810,299 @@ class TestV6ToV7Migration:
         finally:
             b.close()
 
+    def test_v6_to_v7_torn_rebuild_with_stray_prds_new_heals(
+        self, tmp_path: Path
+    ) -> None:
+        """T007 — a crash MID-REBUILD that left a stray ``prds_new`` table behind
+        must heal cleanly on the next migrate, not raise.
+
+        The rebuild guard keys on ``is_default`` being absent from ``prds``; a
+        crash AFTER ``CREATE TABLE prds_new`` but BEFORE the ``DROP prds`` /
+        ``RENAME`` leaves ``prds`` still un-rebuilt (no ``is_default``) AND a
+        stray ``prds_new`` present. Re-opening must DROP the stale ``prds_new``
+        and complete: user_version=7, a single default PRD row, every entity row
+        prd_id='default', and no row loss.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+        before = self._counts(db_path)
+
+        # Simulate the torn rebuild: a stray prds_new table left behind by a
+        # crash, while prds is still the un-migrated v6 shape (no is_default).
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("CREATE TABLE prds_new (id TEXT PRIMARY KEY)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # must heal the torn rebuild, not raise
+        try:
+            assert b.get_schema_version() == 7
+            conn = sqlite3.connect(db_path)
+            try:
+                # The stray table is gone (renamed/dropped during the heal).
+                names = {
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                assert "prds_new" not in names
+                # Single default PRD row.
+                prds = conn.execute("SELECT id, is_default FROM prds").fetchall()
+                assert prds == [("default", 1)]
+                # Every entity row in the default partition.
+                for table in ("requirements", "features", "tasks"):
+                    rows = conn.execute(
+                        f"SELECT DISTINCT prd_id FROM {table}"
+                    ).fetchall()
+                    assert rows == [("default",)], (table, rows)
+                sm = conn.execute("SELECT DISTINCT prd_id FROM sync_mappings").fetchall()
+                assert sm == [("default",)]
+            finally:
+                conn.close()
+        finally:
+            b.close()
+
+        # Row-count invariant preserved across the (torn → healed) migrate.
+        assert self._counts(db_path) == before
+
+    def test_v6_to_v7_rerun_on_already_v7_db_is_noop(
+        self, tmp_path: Path
+    ) -> None:
+        """T007 — re-running the migration on an ALREADY-v7 db is a clean no-op.
+
+        After the first migrate stamps v7, forcing the on-disk marker back to 6
+        and re-running ``_check_schema_version`` must re-stamp v7 with zero
+        changes: same single default PRD, identical row counts, no error from
+        the rebuild guard or the duplicate-column-tolerant ALTERs.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates v6 -> v7
+        try:
+            assert b._conn is not None  # noqa: SLF001
+            counts_after_first = self._counts(db_path)
+            prds_after_first = b._conn.execute(  # noqa: SLF001
+                "SELECT id, is_default FROM prds ORDER BY id"
+            ).fetchall()
+
+            # Re-run the migration on the already-v7-shaped tables.
+            b._conn.execute("PRAGMA user_version = 6")  # noqa: SLF001
+            b._check_schema_version(pre_ddl_version=6)  # noqa: SLF001
+
+            assert b.get_schema_version() == 7
+            # Nothing changed: same prds, same row counts.
+            assert (
+                b._conn.execute(  # noqa: SLF001
+                    "SELECT id, is_default FROM prds ORDER BY id"
+                ).fetchall()
+                == prds_after_first
+            )
+            assert self._counts(db_path) == counts_after_first
+        finally:
+            b.close()
+
+    def test_v6_to_v7_torn_migration_rolls_back_and_retries_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """BUG 002 — a torn v6->v7 migration must roll back atomically (leaving
+        user_version at 6, NOT 7) and then COMPLETE on a clean retry.
+
+        The connection is autocommit (isolation_level=None), so without the
+        explicit BEGIN IMMEDIATE/COMMIT wrap each statement would commit on its
+        own: a failure AFTER the prds rebuild + some ALTERs would leave a
+        partial-v7 schema while user_version was already stamped 7 (by the
+        pre-fix _apply_ddl), and the ladder would never re-run — tasks.prd_id /
+        sync_mappings.prd_id missing forever.
+
+        We force a failure PART-WAY through (during the sync_mappings prd_id
+        ALTER, after the prds rebuild and the entity-table ALTERs have run)
+        WITHOUT manually resetting user_version, and assert:
+          1. the exception leaves user_version at 6 (rolled back, not 7), and
+             the partial work (prds rebuild, tasks.prd_id) is gone;
+          2. removing the injected failure and re-opening COMPLETES the
+             migration: every prd_id column present, user_version=7, rows intact.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+        before = self._counts(db_path)
+
+        # --- 1. First open: inject a mid-migration failure. -----------------
+        # Run the REAL _m_to_v7 (whatever its internals), but feed it a thin
+        # connection proxy whose execute() raises on a chosen statement that
+        # only runs AFTER meaningful partial work (the prds rebuild + the
+        # requirements/features/tasks prd_id ALTERs) has already executed.
+        # Targeting _m_to_v7 (present in every version) keeps the test agnostic
+        # to the fix's internal structure: it asserts the OBSERVABLE end-state.
+        real_m_to_v7 = SqliteBackend._m_to_v7
+        sentinel = "ALTER TABLE sync_mappings ADD COLUMN prd_id"
+
+        class _FailingConn:
+            """Proxy that forwards to the real connection but raises on the
+            sentinel statement (sqlite3.Connection.execute is read-only and
+            cannot be monkeypatched directly)."""
+
+            def __init__(self, real: sqlite3.Connection) -> None:
+                self._real = real
+
+            def execute(self, sql: str, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+                if sentinel in sql:
+                    raise sqlite3.OperationalError("injected mid-migration failure")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._real, name)
+
+        def torn_m_to_v7(self: SqliteBackend, conn: sqlite3.Connection) -> None:
+            real_m_to_v7(self, _FailingConn(conn))  # type: ignore[arg-type]
+
+        # The migration ladder dispatches via the _MIGRATIONS table, which holds
+        # the function object captured at class-definition time — so patch the
+        # table entry (not just the class attribute) to actually intercept the
+        # v6->v7 step. This works identically on the fixed and unfixed source.
+        orig_migrations = list(SqliteBackend._MIGRATIONS)
+        SqliteBackend._MIGRATIONS = [
+            (frm, torn_m_to_v7 if frm == 6 else fn)
+            for frm, fn in orig_migrations
+        ]
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="injected"):
+                b.initialize()
+        finally:
+            SqliteBackend._MIGRATIONS = orig_migrations
+            # The failed initialize may have left a half-open backend; close it.
+            try:
+                b.close()
+            except Exception:
+                pass
+
+        # The torn migration rolled back: user_version is still 6, and NONE of
+        # the v7 changes survived (atomic rollback of the whole body).
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+            prds_cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(prds)").fetchall()
+            }
+            assert "is_default" not in prds_cols  # prds rebuild rolled back
+            tasks_cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            assert "prd_id" not in tasks_cols  # entity ALTER rolled back
+            # No stray prds_new left behind.
+            names = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "prds_new" not in names
+        finally:
+            conn.close()
+
+        # --- 2. Clean retry (no injected failure) completes the migration. --
+        b2 = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b2.initialize()
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+                # Both prd_id columns the torn run failed to add now exist.
+                for table in ("tasks", "sync_mappings"):
+                    cols = {
+                        r[1]
+                        for r in conn.execute(
+                            f"PRAGMA table_info({table})"
+                        ).fetchall()
+                    }
+                    assert "prd_id" in cols, table
+                prds = conn.execute("SELECT id, is_default FROM prds").fetchall()
+                assert prds == [("default", 1)]
+                for table in ("requirements", "features", "tasks"):
+                    rows = conn.execute(
+                        f"SELECT DISTINCT prd_id FROM {table}"
+                    ).fetchall()
+                    assert rows == [("default",)], (table, rows)
+            finally:
+                conn.close()
+        finally:
+            b2.close()
+
+        # Row counts intact across torn → rolled-back → cleanly-migrated.
+        assert self._counts(db_path) == before
+
+    def test_prd_parsed_after_v7_migration_preserves_default_identity(
+        self, tmp_path: Path
+    ) -> None:
+        """BUG 001 — the first prd.parsed re-parse after a v6->v7 migration must
+        NOT wipe the v7 identity columns of the migrated default PRD row.
+
+        The migrated 'default' row has is_default=1 and a non-null created_at.
+        A naive ``INSERT OR REPLACE`` (omitting id/is_default/created_at) would
+        collide on id='default', reset is_default 1->0 and null created_at,
+        destroying the ux_prds_default invariant. The UPSERT fix must keep
+        is_default=1 and created_at, updating only the v6 content + updated_at.
+        """
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v6_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # migrates v6 -> v7
+        try:
+            # Capture the migrated default row's identity columns.
+            conn = sqlite3.connect(db_path)
+            try:
+                before = conn.execute(
+                    "SELECT is_default, created_at FROM prds WHERE id='default'"
+                ).fetchone()
+            finally:
+                conn.close()
+            assert before[0] == 1
+            assert before[1] is not None  # created_at backfilled by the migration
+
+            # Apply a prd.parsed event (the first re-parse after migration).
+            payload = _make_prd_parsed_payload(
+                project_id="proj-1", summary="re-parsed summary"
+            )
+            b.append(_make_event("prd.parsed", payload))
+
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT id, is_default, created_at, summary FROM prds"
+                ).fetchall()
+                # Exactly one prds row, still the default identity preserved.
+                assert len(rows) == 1
+                row = rows[0]
+                assert row[0] == "default"
+                assert row[1] == 1  # is_default preserved (NOT reset to 0)
+                assert row[2] == before[1]  # created_at preserved
+                assert row[3] == "re-parsed summary"  # v6 content updated
+                # Exactly one is_default=1 row (ux_prds_default invariant holds).
+                n_default = conn.execute(
+                    "SELECT COUNT(*) FROM prds WHERE is_default=1"
+                ).fetchone()[0]
+                assert n_default == 1
+            finally:
+                conn.close()
+        finally:
+            b.close()
+
 
 # ---------------------------------------------------------------------------
 # PR #49 P2-2 regression — multi-provider missing_sync_mapping scan
