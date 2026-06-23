@@ -362,6 +362,27 @@ def _resolve_state_dir(cwd: str | None = None) -> Path:
         raise ToolError(exc.message) from exc
 
 
+def _resolve_prd_id(backend: Any, prd_id: str | None = None) -> str:
+    """Resolve which PRD partition an MCP tool targets (T018).
+
+    Delegates to the shared CLI resolver (:func:`cli._helpers.resolve_prd_id`)
+    so the MCP ``prd_id`` argument and the CLI ``--prd`` flag pick the IDENTICAL
+    PRD for identical DB + env inputs. Precedence is therefore the same:
+
+        explicit ``prd_id``  >  $ANVIL_PRD  >  single PRD | default | error
+
+    Translates the CLI ambiguity ``ClickException`` into a ``ToolError`` so MCP
+    clients receive a structured error instead of a CLI-shaped one (mirrors how
+    :func:`_resolve_state_dir` translates ``StateRootError``).
+    """
+    from anvil.cli._helpers import PrdAmbiguityError, resolve_prd_id
+
+    try:
+        return resolve_prd_id(backend, prd_id)
+    except PrdAmbiguityError as exc:
+        raise ToolError(exc.message) from exc
+
+
 def _open_backend(state_dir: Path):  # type: ignore[return]
     """Open a fresh SqliteBackend for the given state_dir.
 
