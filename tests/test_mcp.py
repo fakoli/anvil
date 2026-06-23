@@ -2073,6 +2073,60 @@ def _write_prd_file(state_dir: Path, content: str = _MINIMAL_PRD) -> Path:
     return prd_path
 
 
+# A re-parse of ``_MINIMAL_PRD``: R001 dropped (→ superseded), R002 carried
+# forward (→ unchanged), R003 added — a material change that exercises the
+# prd.revised diff and the approved→draft status demotion.
+_MINIMAL_PRD_V2 = """\
+# Project: MCP Test Project
+
+## Summary
+
+A project for MCP workflow testing, revised.
+
+## Goals
+
+- Verify the workflow MCP tools end-to-end.
+
+## Requirements
+
+- R002: The system produces output.
+- R003: The system logs activity.
+"""
+
+# A re-parse that re-lists R001 — an id retired in a prior revision. Because
+# requirement ids are permanent lineage (single ``id`` PK), this cannot be
+# revived and must be rejected rather than silently dropped.
+_MINIMAL_PRD_READD = """\
+# Project: MCP Test Project
+
+## Summary
+
+A project for MCP workflow testing, re-adding a retired id.
+
+## Goals
+
+- Verify the workflow MCP tools end-to-end.
+
+## Requirements
+
+- R001: The system accepts input, restored.
+- R002: The system produces output.
+"""
+
+
+def _events_with_action(state_dir: Path, action: str) -> list[dict[str, Any]]:
+    """Return the payloads of every events.jsonl line with the given action."""
+    out: list[dict[str, Any]] = []
+    text = (state_dir / "events.jsonl").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("action") == action:
+            out.append(event.get("payload_json") or event.get("payload") or {})
+    return out
+
+
 # ===========================================================================
 # Tool 14: init_project
 # ===========================================================================
@@ -2351,6 +2405,138 @@ class TestParsePrd:
             assert len(v02_reqs) == 2
         finally:
             b.close()
+
+    def test_reparse_emits_revised_with_diff_and_supersedes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MCP re-parse branch mirrors the CLI: the FIRST parse emits
+        prd.parsed; a re-parse of the same PRD emits prd.revised carrying a diff
+        (R001 superseded, R002 unchanged, R003 added) and the prior row is
+        SUPERSEDED, not deleted."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def first() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        _run(first())
+        assert len(_events_with_action(state_dir, "prd.parsed")) == 1
+        assert _events_with_action(state_dir, "prd.revised") == []
+
+        _write_prd_file(state_dir, _MINIMAL_PRD_V2)
+
+        async def second() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        _run(second())
+
+        revised = _events_with_action(state_dir, "prd.revised")
+        assert len(revised) == 1
+        # Re-parse must NOT re-create / wipe the PRD.
+        assert len(_events_with_action(state_dir, "prd.parsed")) == 1
+        payload = revised[0]
+        assert payload["prd_id"] == "default"
+        assert payload["revision"] == 2
+        assert {r["id"] for r in payload["requirements_added"]} == {"R003"}
+        assert {r["id"] for r in payload["requirements_superseded"]} == {"R001"}
+        assert {r["id"] for r in payload["requirements_unchanged"]} == {"R002"}
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            live = {r.id for r in b.list_requirements(prd_id="default")}
+            full = {
+                r.id: r.revision_superseded
+                for r in b.list_requirements(
+                    prd_id="default", include_superseded=True
+                )
+            }
+        finally:
+            b.close()
+        assert live == {"R002", "R003"}
+        assert full == {"R001": 2, "R002": None, "R003": None}, full
+
+    def test_reparse_readding_retired_id_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-listing an id retired in a PRIOR revision must raise rather than
+        silently drop the requirement. R001 is superseded in rev2, then a third
+        parse re-adds it — that id is permanent lineage and cannot be revived."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        _run(parse())          # rev1: R001, R002
+        _write_prd_file(state_dir, _MINIMAL_PRD_V2)
+        _run(parse())          # rev2: R001 superseded, R002 kept, R003 added
+
+        # Third parse re-adds the retired R001 → must be rejected, not dropped.
+        _write_prd_file(state_dir, _MINIMAL_PRD_READD)
+
+        async def readd() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        with pytest.raises(ToolError, match="R001.*superseded|superseded.*R001"):
+            _run(readd())
+
+        # No third revision was written — the rejected parse left the log alone.
+        assert len(_events_with_action(state_dir, "prd.revised")) == 1
+
+    def test_reparse_supersede_demotes_approved_prd_status_in_response(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-parse that supersedes a requirement demotes an APPROVED PRD back
+        to draft; the ParsePrdResponse.prd_status must report the STORED status,
+        not the parsed-markdown status (which would lie about the demotion)."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def setup_approved() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+                await c.call_tool("review_prd", {})            # draft → reviewed
+                await c.call_tool("review_prd", {"approve": True})  # → approved
+
+        _run(setup_approved())
+
+        # A material re-parse (R001 superseded) must demote approved → draft.
+        _write_prd_file(state_dir, _MINIMAL_PRD_V2)
+
+        async def reparse() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        resp = _run(reparse())
+        assert resp["prd_status"] == "draft", resp
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            prd = b.get_prd("default")
+        finally:
+            b.close()
+        assert prd is not None and prd.status.value == "draft"
 
 
 # ===========================================================================

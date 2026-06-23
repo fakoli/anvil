@@ -264,6 +264,26 @@ class Backend(Protocol):
         """
         ...
 
+    def replay_to_event_id(self, events_path: str, stop_after_event_id: str) -> None:
+        """Reconstruct state.db AS OF a bounded prefix of the log (read-only).
+
+        Like :meth:`replay_from_empty`, but stops after applying the event whose
+        id equals ``stop_after_event_id`` — every event ordered after it is left
+        unapplied, rebuilding the projection exactly as it stood when that event
+        committed. Reuses the same apply path and per-mode (local/git) ordering
+        and torn-trailing-line tolerance as ``replay_from_empty``, so the rebuilt
+        prefix is byte-identical to the prefix a full replay would produce.
+
+        Read-only: writes only the projection, never appends to ``events.jsonl``.
+        Raises ``ValueError`` if ``stop_after_event_id`` is absent from the log.
+
+        Args:
+            events_path: Absolute path to the JSONL event log to replay.
+            stop_after_event_id: The last event id to apply; events after it in
+                canonical order are skipped.
+        """
+        ...
+
     def close(self) -> None:
         """Release any held resources (connections, file handles)."""
         ...

@@ -804,6 +804,219 @@ class SqliteBackend:
         finally:
             self._replaying = False
 
+    def replay_to_event_id(self, events_path: str, stop_after_event_id: str) -> None:
+        """Reconstruct state.db AS OF a bounded prefix of the log (read-only).
+
+        Like :meth:`replay_from_empty`, but stops after applying the event whose
+        id equals ``stop_after_event_id`` — every event ordered after it is left
+        unapplied. This rebuilds the projection exactly as it stood the instant
+        that event committed, which is how a caller inspects a PRD at an earlier
+        revision: replaying ``[prd.parsed(rev1), prd.revised(rev2)]`` and
+        stopping after the ``prd.parsed`` id yields the rev1 live set; stopping
+        after the ``prd.revised`` id yields the rev2 set.
+
+        Bounded replay reuses the SAME ``_apply_write_only`` path and the SAME
+        per-mode ordering / torn-trailing-line tolerance as
+        :meth:`replay_from_empty`, so the rebuilt prefix is byte-identical to the
+        prefix a full replay would produce — there is no second apply
+        implementation and no divergence between the bounded and unbounded
+        variants.
+
+        - **Local mode**: events apply in file order (the canonical local order),
+          stopping after the line whose id matches.
+        - **Git mode**: events apply in hybrid-logical-clock order
+          ``(lamport, ts, id)`` after deduping by id — identical to
+          ``_replay_from_empty_git`` — stopping after the matching id in that
+          order.
+
+        Read-only: applying via ``_apply_write_only`` writes ONLY the projection
+        (state.db); no new line is appended to events.jsonl. The counter
+        (``_next_seq`` / ``_max_lamport``) is re-seeded from the events that were
+        actually applied, so a subsequent append would continue from the bounded
+        prefix — callers using this for inspection should treat the backend as
+        a throwaway snapshot.
+
+        Raises ``ValueError`` if ``stop_after_event_id`` is not found in the log
+        (an unbounded replay would have applied a different set, so silently
+        replaying everything would be a lie about the bound).
+        """
+        if self._events_storage == "git":
+            self._replay_to_event_id_git(events_path, stop_after_event_id)
+            return
+
+        # Close existing connection.
+        self.close()
+
+        # Delete the database file (and any WAL/SHM sidecars).
+        for suffix in ("", "-wal", "-shm"):
+            path = self._db_path + suffix
+            if os.path.exists(path):
+                os.remove(path)
+
+        self._replaying = True
+        try:
+            self.initialize()
+
+            if not os.path.exists(events_path):
+                raise ValueError(
+                    f"replay_to_event_id: events.jsonl does not exist but "
+                    f"stop_after_event_id {stop_after_event_id!r} was requested."
+                )
+
+            conn = self._require_conn()
+            last_event_id = 0
+            found = False
+
+            with open(events_path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+
+            for i, raw_line in enumerate(lines):
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+
+                is_last = i == len(lines) - 1
+
+                try:
+                    raw: dict[str, Any] = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    if is_last:
+                        logger.debug(
+                            "replay_to_event_id: skipping torn trailing line "
+                            "(line %d): %s",
+                            i + 1,
+                            exc,
+                        )
+                        break
+                    raise ValueError(
+                        f"replay_to_event_id: malformed JSON on interior line "
+                        f"{i + 1}: {exc}"
+                    ) from exc
+
+                try:
+                    event = Event.model_validate(raw)
+                except Exception as exc:
+                    if is_last:
+                        logger.debug(
+                            "replay_to_event_id: skipping invalid trailing event "
+                            "(line %d): %s",
+                            i + 1,
+                            exc,
+                        )
+                        break
+                    raise ValueError(
+                        f"replay_to_event_id: cannot parse Event on interior line "
+                        f"{i + 1}: {exc}"
+                    ) from exc
+
+                self._apply_write_only(conn, event)
+
+                try:
+                    seq = int(event.id[1:])
+                    if seq > last_event_id:
+                        last_event_id = seq
+                except (ValueError, IndexError):
+                    pass
+
+                if event.id == stop_after_event_id:
+                    found = True
+                    break
+
+            if not found:
+                raise ValueError(
+                    f"replay_to_event_id: stop_after_event_id "
+                    f"{stop_after_event_id!r} not found in {events_path}."
+                )
+
+            if last_event_id > 0:
+                self._next_seq = last_event_id
+        finally:
+            self._replaying = False
+
+    def _replay_to_event_id_git(
+        self, events_path: str, stop_after_event_id: str
+    ) -> None:
+        """Bounded rebuild for ``events_storage: git`` — the git-mode half of
+        :meth:`replay_to_event_id`.
+
+        Mirrors :meth:`_replay_from_empty_git` exactly (dedupe by id,
+        hybrid-logical-clock ordering, torn-trailing-line tolerance, seq
+        assignment) but stops after the event whose id equals
+        ``stop_after_event_id`` in HLC order. Raises ``ValueError`` if that id
+        is absent from the log.
+        """
+        self.close()
+        for suffix in ("", "-wal", "-shm"):
+            path = self._db_path + suffix
+            if os.path.exists(path):
+                os.remove(path)
+
+        self._replaying = True
+        try:
+            self.initialize()
+
+            if not os.path.exists(events_path):
+                raise ValueError(
+                    f"replay_to_event_id: events.jsonl does not exist but "
+                    f"stop_after_event_id {stop_after_event_id!r} was requested."
+                )
+
+            conn = self._require_conn()
+
+            with open(events_path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+
+            events_by_id: dict[str, Event] = {}
+            for i, raw_line in enumerate(lines):
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                is_last = i == len(lines) - 1
+                try:
+                    raw: dict[str, Any] = json.loads(stripped)
+                    event = Event.model_validate(raw)
+                except Exception as exc:
+                    if is_last:
+                        logger.debug(
+                            "git bounded replay: skipping torn trailing line "
+                            "(line %d): %s",
+                            i + 1,
+                            exc,
+                        )
+                        break
+                    raise ValueError(
+                        f"git bounded replay: malformed event on interior line "
+                        f"{i + 1}: {exc}"
+                    ) from exc
+                if event.id in events_by_id:
+                    logger.debug(
+                        "git bounded replay: duplicate event %s skipped", event.id
+                    )
+                    continue
+                events_by_id[event.id] = event
+
+            if stop_after_event_id not in events_by_id:
+                raise ValueError(
+                    f"replay_to_event_id: stop_after_event_id "
+                    f"{stop_after_event_id!r} not found in {events_path}."
+                )
+
+            ordered = sorted(
+                events_by_id.values(),
+                key=lambda e: (e.lamport or 0, e.timestamp, e.id),
+            )
+
+            max_lamport = 0
+            for seq, event in enumerate(ordered, start=1):
+                self._apply_write_only(conn, event, seq=seq)
+                if event.lamport is not None and event.lamport > max_lamport:
+                    max_lamport = event.lamport
+                if event.id == stop_after_event_id:
+                    break
+            self._max_lamport = max_lamport
+        finally:
+            self._replaying = False
+
     # ------------------------------------------------------------------
     # Query methods
     # ------------------------------------------------------------------

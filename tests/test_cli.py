@@ -1376,6 +1376,406 @@ class TestPrdParseNamed:
 
 
 # ---------------------------------------------------------------------------
+# prd parse RE-parse (T025 AC#2/AC#3) — first parse emits prd.parsed, a
+# subsequent re-parse of the same prd_id emits prd.revised (non-destructive
+# supersede), never a wipe.
+# ---------------------------------------------------------------------------
+
+
+# A revised default PRD: R001 dropped (→ superseded), R002 kept (→ unchanged),
+# R003 introduced (→ added). The diff exercises all three diff buckets.
+_MINIMAL_PRD_CONTENT_V2 = """\
+# Project: CLI Test Project
+
+## Summary
+
+A project for CLI testing, revised.
+
+## Goals
+
+- Do something useful.
+
+## Requirements
+
+- R002: The system produces output.
+- R003: The system logs activity.
+"""
+
+# A re-parse that re-lists R001 — an id retired in a prior revision. Requirement
+# ids are permanent lineage (single ``id`` PK), so this cannot be revived; the
+# re-parse must fail loudly rather than silently drop the requirement.
+_MINIMAL_PRD_CONTENT_READD = """\
+# Project: CLI Test Project
+
+## Summary
+
+A project for CLI testing, re-adding a retired id.
+
+## Goals
+
+- Do something useful.
+
+## Requirements
+
+- R001: The system accepts input, restored.
+- R002: The system produces output.
+"""
+
+
+def _events_of_action(tmp_path: Path, action: str) -> list[dict]:  # type: ignore[type-arg]
+    """Return the payloads of every event with the given action, in log order."""
+    out: list[dict] = []  # type: ignore[type-arg]
+    for line in _events_text(tmp_path).splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("action") == action:
+            out.append(event.get("payload_json") or event.get("payload") or {})
+    return out
+
+
+class TestPrdReparse:
+    def test_first_parse_emits_parsed_reparse_emits_revised_with_diff(
+        self, tmp_path: Path
+    ) -> None:
+        """T025 AC#2 — the FIRST `prd parse` of a prd_id emits prd.parsed; a
+        re-parse of that same prd_id emits prd.revised carrying a diff against
+        the current live rows (R001 superseded, R002 unchanged, R003 added)."""
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+
+        first = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert first.exit_code == 0, f"first parse failed: {first.output}"
+        # First parse is a create.
+        assert len(_events_of_action(tmp_path, "prd.parsed")) == 1
+        assert _events_of_action(tmp_path, "prd.revised") == []
+
+        # Re-parse the SAME (default) prd_id with an edited PRD.
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_V2)
+        second = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert second.exit_code == 0, f"re-parse failed: {second.output}"
+        assert "Revised" in second.output
+
+        # Exactly one new prd.revised, and NO second prd.parsed (re-parse must
+        # NOT re-create / wipe the PRD).
+        revised = _events_of_action(tmp_path, "prd.revised")
+        assert len(revised) == 1, _events_text(tmp_path)
+        assert len(_events_of_action(tmp_path, "prd.parsed")) == 1
+
+        payload = revised[0]
+        assert payload["prd_id"] == "default"
+        assert payload["revision"] == 2
+        added = {r["id"] for r in payload["requirements_added"]}
+        superseded = {r["id"] for r in payload["requirements_superseded"]}
+        unchanged = {r["id"] for r in payload["requirements_unchanged"]}
+        assert added == {"R003"}
+        assert superseded == {"R001"}
+        assert unchanged == {"R002"}
+
+        # DB-level proof: R001 is SUPERSEDED (row retained, dropped from the live
+        # set), not DELETED. The live set is {R002, R003}; the full lineage still
+        # contains R001 stamped with the revision that retired it.
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            live = {r.id for r in backend.list_requirements(prd_id="default")}
+            full = {
+                r.id: r.revision_superseded
+                for r in backend.list_requirements(
+                    prd_id="default", include_superseded=True
+                )
+            }
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+
+        assert live == {"R002", "R003"}
+        assert full == {"R001": 2, "R002": None, "R003": None}, full
+        assert prd is not None and prd.revision == 2
+
+    def test_reparse_named_prd_emits_revised_for_that_partition_only(
+        self, tmp_path: Path
+    ) -> None:
+        """T025 AC#2 — re-parse semantics apply per partition: re-parsing a named
+        PRD emits a prd.revised stamped with that prd_id, leaving the default
+        PRD's first-parse lineage untouched."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        _invoke_cmd(tmp_path, ["prd", "parse"])  # default: prd.parsed
+
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        first_named = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+        assert first_named.exit_code == 0, first_named.output
+        # First named parse is a create, not a revision.
+        named_parsed = [
+            p
+            for p in _events_of_action(tmp_path, "prd.parsed")
+            if p.get("prd_id") == "v0.2"
+        ]
+        assert len(named_parsed) == 1
+        assert _events_of_action(tmp_path, "prd.revised") == []
+
+        # Re-parse the named PRD → prd.revised for v0.2 only.
+        second_named = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+        assert second_named.exit_code == 0, second_named.output
+        revised = _events_of_action(tmp_path, "prd.revised")
+        assert len(revised) == 1
+        assert revised[0]["prd_id"] == "v0.2"
+        assert revised[0]["is_default"] is False
+        assert revised[0]["revision"] == 2
+
+    def test_reparse_migrated_v6_default_prd_supersedes_not_wipes(
+        self, tmp_path: Path
+    ) -> None:
+        """T025 AC#3 — a v6 DB upgraded in place, then re-parsed, produces a
+        revision-2 default PRD whose prior requirements are SUPERSEDED, not
+        deleted: the audit log shows prd.revised (a non-destructive amend), and
+        the migrated rows survive as lineage."""
+        from anvil.cli._helpers import _open_backend
+
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        _stand_up_v6_state_dir(state_dir)
+
+        # The on-disk PRD that the re-parse diffs against the migrated rows:
+        # drop the migrated R001 (→ superseded), keep R002 (→ unchanged), add
+        # R003 (→ added).
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_V2)
+
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert result.exit_code == 0, f"re-parse of migrated v6 failed: {result.output}"
+        assert "Revised" in result.output
+
+        # The migration itself emits NO prd.parsed (it backfills the row in
+        # place); the only PRD lifecycle event the re-parse adds is prd.revised —
+        # i.e. the log records an amend, not a wipe-and-recreate.
+        assert _events_of_action(tmp_path, "prd.parsed") == []
+        revised = _events_of_action(tmp_path, "prd.revised")
+        assert len(revised) == 1
+        assert revised[0]["prd_id"] == "default"
+        assert revised[0]["revision"] == 2
+
+        backend = _open_backend(state_dir)
+        try:
+            live = {r.id for r in backend.list_requirements(prd_id="default")}
+            full = {
+                r.id: r.revision_superseded
+                for r in backend.list_requirements(
+                    prd_id="default", include_superseded=True
+                )
+            }
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+
+        # The migrated R001 was superseded (lineage retained), NOT deleted; R002
+        # carried forward, R003 added. Default PRD is now at revision 2.
+        assert live == {"R002", "R003"}
+        assert full == {"R001": 2, "R002": None, "R003": None}, full
+        assert prd is not None and prd.revision == 2
+        assert prd.is_default is True
+
+    def test_reparse_readding_retired_id_fails_not_silent_drop(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-listing an id retired in a PRIOR revision must fail loudly (exit 1)
+        rather than be silently dropped. R001 is superseded in rev2; a third
+        parse re-adds it — an id is permanent lineage (single ``id`` PK) and
+        cannot be revived, so the parse is rejected and no rev3 is written."""
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0  # rev1
+
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_V2)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0  # rev2
+        assert len(_events_of_action(tmp_path, "prd.revised")) == 1
+
+        # Third parse re-adds the retired R001 → exit 1, actionable message.
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_READD)
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert result.exit_code == 1, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "R001" in combined
+
+        # No rev3 was written and the live set is unchanged (R001 not revived).
+        assert len(_events_of_action(tmp_path, "prd.revised")) == 1
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            live = {r.id for r in backend.list_requirements(prd_id="default")}
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert live == {"R002", "R003"}
+        assert prd is not None and prd.revision == 2
+
+    def test_reparse_eventrejected_is_clean_exit_not_traceback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A prd.revised gate rejection on the re-parse append must surface as a
+        clean error + exit 1, not an uncaught EventRejected traceback. The gate
+        (_check_prd_revised) can reject on PRD state — e.g. a concurrent re-parse
+        off the same base computing revision != current+1 — which the old
+        prd.parsed path never did. We force that rejection by making the backend
+        reject the prd.revised draft, then assert the CLI exits cleanly."""
+        from anvil.state.backend import EventRejected
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0  # rev1
+
+        real_append = SqliteBackend.append
+
+        def rejecting_append(self, draft):  # type: ignore[no-untyped-def]
+            if draft.action == "prd.revised":
+                raise EventRejected(
+                    "prd.revised: revision 2 is not current+1 "
+                    "(current revision is 2, expected 3)"
+                )
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", rejecting_append)
+
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_V2)
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert result.exit_code == 1, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        # Clean error message, not a Python traceback.
+        assert "rejected" in combined.lower()
+        assert "Traceback" not in combined
+        assert "is not current+1" in combined
+
+
+def _stand_up_v6_state_dir(state_dir: Path) -> None:
+    """Create a real v6-shaped state.db (singleton prds keyed on project_id, no
+    prd_id partition columns) with a project + default PRD + R001/R002, then
+    stamp user_version=6 so the next `_open_backend` migrates it in place.
+
+    This mirrors the v6 DDL the engine shipped before the multi-PRD foundation
+    (kept in lockstep with tests/test_sqlite.py::_stand_up_v6_db) so the CLI
+    exercises the real in-place v6→current migration ladder, not a shortcut.
+    """
+    db_path = str(state_dir / "state.db")
+    (state_dir / "events.jsonl").touch()
+    iso = "2026-05-24T18:00:00+00:00"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE prds (
+                project_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'draft',
+                summary TEXT NOT NULL DEFAULT '',
+                goals TEXT NOT NULL DEFAULT '[]',
+                non_goals TEXT NOT NULL DEFAULT '[]',
+                requirements TEXT NOT NULL DEFAULT '[]',
+                acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                risks TEXT NOT NULL DEFAULT '[]',
+                open_questions TEXT NOT NULL DEFAULT '[]',
+                last_reviewed_at TEXT, last_reviewed_by TEXT
+            );
+            CREATE TABLE requirements (
+                id TEXT PRIMARY KEY, prd_section TEXT NOT NULL, text TEXT NOT NULL,
+                source_paragraph TEXT, derived INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE features (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                requirements TEXT NOT NULL DEFAULT '[]', tasks TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                feature_id TEXT NOT NULL REFERENCES features(id) ON DELETE RESTRICT,
+                title TEXT NOT NULL, description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                priority TEXT NOT NULL DEFAULT 'medium',
+                task_type TEXT NOT NULL DEFAULT 'feature',
+                dependencies TEXT NOT NULL DEFAULT '[]',
+                conflict_groups TEXT NOT NULL DEFAULT '[]',
+                scores TEXT NOT NULL DEFAULT '{}',
+                acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                implementation_notes TEXT NOT NULL DEFAULT '[]',
+                verification TEXT NOT NULL DEFAULT '{}',
+                likely_files TEXT NOT NULL DEFAULT '[]',
+                parent_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE evidence (
+                id TEXT PRIMARY KEY, task_id TEXT NOT NULL, claim_id TEXT NOT NULL,
+                commands_run TEXT NOT NULL DEFAULT '[]', output_excerpt TEXT,
+                files_changed TEXT NOT NULL DEFAULT '[]', pr_url TEXT, commit_sha TEXT,
+                screenshots TEXT NOT NULL DEFAULT '[]', known_limitations TEXT,
+                proofs TEXT NOT NULL DEFAULT '[]',
+                submitted_at TEXT NOT NULL, submitted_by TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
+                action TEXT NOT NULL, target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}', seq INTEGER
+            );
+            CREATE TABLE sync_mappings (
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                external_system TEXT NOT NULL, external_id TEXT NOT NULL,
+                external_url TEXT, last_synced_at TEXT NOT NULL,
+                sync_state TEXT NOT NULL DEFAULT 'in_sync',
+                conflict_resolution_strategy TEXT NOT NULL DEFAULT 'prompt',
+                provider_metadata_json TEXT,
+                PRIMARY KEY (task_id, external_system),
+                UNIQUE (external_system, external_id)
+            );
+            CREATE TABLE claims (id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                claimed_by TEXT NOT NULL, claim_type TEXT NOT NULL DEFAULT 'task',
+                status TEXT NOT NULL DEFAULT 'active', branch TEXT, worktree_path TEXT,
+                expected_files TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL, last_heartbeat_at TEXT NOT NULL,
+                released_at TEXT, release_reason TEXT);
+            CREATE TABLE decisions (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                context TEXT NOT NULL, decision TEXT NOT NULL, consequences TEXT NOT NULL,
+                created_at TEXT NOT NULL, related_tasks TEXT NOT NULL DEFAULT '[]',
+                related_features TEXT NOT NULL DEFAULT '[]');
+            CREATE TABLE reviews (id TEXT PRIMARY KEY, target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL, reviewed_by TEXT NOT NULL, decision TEXT NOT NULL,
+                notes TEXT, created_at TEXT NOT NULL);
+            CREATE TABLE conflict_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                task_ids TEXT NOT NULL DEFAULT '[]', reason TEXT NOT NULL);
+            """
+        )
+        conn.execute(
+            "INSERT INTO projects (id, name, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("proj-1", "Proj", "desc", iso, iso),
+        )
+        conn.execute(
+            "INSERT INTO prds (project_id, status, summary, last_reviewed_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("proj-1", "reviewed", "the summary", iso),
+        )
+        conn.execute(
+            "INSERT INTO requirements (id, prd_section, text) VALUES (?, ?, ?)",
+            ("R001", "Goals", "req one"),
+        )
+        conn.execute(
+            "INSERT INTO requirements (id, prd_section, text) VALUES (?, ?, ?)",
+            ("R002", "Goals", "req two"),
+        )
+        conn.execute("PRAGMA user_version = 6")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # prd review command
 # ---------------------------------------------------------------------------
 
