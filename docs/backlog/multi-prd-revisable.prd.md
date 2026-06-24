@@ -738,7 +738,7 @@ Documentation-only; ensures the deferred scope is tracked rather than lost.
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_sync.py`
+- `cd bin && uv run pytest -q ../tests/test_cli_sync.py ../tests/test_reconciliation.py ../tests/test_sync_provider.py ../tests/test_cli_drift.py` (the live sync/reconciliation suites; `test_sync.py` does not exist — this guards the SyncMapping prd_id/entity_kind plumbing and the prd-kind drift special-case that T029's deferral doc relies on)
 
 ### T030: Reframe PRD mental model in architecture.md, _positioning.md, roadmap.md, prd-template.md
 
