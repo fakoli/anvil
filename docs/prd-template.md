@@ -1,11 +1,19 @@
 # PRD Template
 
-The `.anvil/prd.md` file is the authoritative source of truth for every project
-that uses anvil. It describes what the project must do, why, and how to verify it.
-The parser reads it deterministically — no LLM required — and writes the results into
-`state.db` as `Requirement`, `Feature`, and `Task` rows.
+A PRD file is the authoritative source of truth for the plan it describes. It
+spells out what that plan must do, why, and how to verify it. The parser reads it
+deterministically — no LLM required — and writes the results into `state.db` as
+`Requirement`, `Feature`, and `Task` rows owned by that PRD.
 
-**Location**: `.anvil/prd.md` inside your project (`anvil init` creates the `.anvil/` directory; you author `prd.md` by hand).
+A project can hold **several release-scoped PRDs** in one `state.db` /
+`events.jsonl` (see [Multi-PRD storage](#multi-prd-storage-and-the-default-prd)
+below). The common single-PRD project is just the degenerate case: one `default`
+PRD whose source lives at the bare `.anvil/prd.md`.
+
+**Location**: the default PRD is `.anvil/prd.md` inside your project (`anvil init`
+creates the `.anvil/` directory; you author `prd.md` by hand). Each **named**
+release PRD is a separate file at `.anvil/prds/<prd_id>.md` and is parsed with
+`anvil prd parse --prd <prd_id>`.
 
 **Hard rule**: structure matters. The parser rejects the file with a `ParseError` if any
 required section is missing or malformed. Edit `prd.md`, then run `anvil prd parse`
@@ -324,12 +332,9 @@ items here does not block parsing or approval — they are informational.
 ### `## Release` (or `**Release:**`)
 
 Optional release marker. Parses into the `PRD.target_version` and
-`PRD.target_tag` model fields. Absent → both `None`. Two equivalent spellings:
-
-> **Not yet persisted.** As of T015 these fields round-trip at the parsed-model
-> level only — the `prd.parsed` event and `state.db` do not yet carry them, so
-> they will not appear in `anvil show` output. Wiring the values through the
-> parse-to-persist boundary (and `--prd` selection) is deferred to T016.
+`PRD.target_tag` model fields, **persisted** to `state.db` and carried on the
+`prd.parsed` event, so they survive a re-parse and show up in PRD rollups. Absent
+→ both `None`. Two equivalent spellings:
 
 **Inline field line** (conventionally placed in `## Summary`):
 
@@ -502,16 +507,52 @@ appear in `prd.md`.
 
 ---
 
+## Multi-PRD storage and the default PRD
+
+A project holds one or more release-scoped PRDs, all persisted in the same
+`.anvil/state.db` and `.anvil/events.jsonl`, partitioned by an owning `prd_id`.
+Each PRD has its own markdown source file:
+
+| PRD | Source file | Parse command |
+|---|---|---|
+| Default | `.anvil/prd.md` | `anvil prd parse` |
+| Named release (`<prd_id>`) | `.anvil/prds/<prd_id>.md` | `anvil prd parse --prd <prd_id>` |
+
+The `.anvil/prds/` collection holds every named PRD; a fresh single-PRD project
+has just the default PRD at `.anvil/prd.md`. The source path is resolved by the
+CLI (`prd_source_path()`), never hardcoded — the default PRD keeps the bare
+`.anvil/prd.md`; named PRDs live under the `.anvil/prds/` collection.
+
+**Named-PRD ids are prefixed** (see [ID Conventions](#id-conventions)): the
+`default` PRD keeps bare ids (`T001`), a PRD parsed with `--prd v0.2` gets every
+id prefixed (`v0.2:T001`). The `**Release:**` marker binds a named PRD to its
+milestone/version; the default PRD usually omits it.
+
+**Single-PRD → default migration note.** Projects created before multi-PRD
+support carry exactly one implicit PRD. The in-place schema migration backfills a
+`default` PRD that **owns every existing requirement, feature, and task row** —
+zero data loss, nothing to re-author. Conceptually the lone pre-multi-PRD PRD
+becomes `.anvil/prds/default.md`; on disk its source stays at the bare
+`.anvil/prd.md` (the `default` id resolves to that path), so existing
+single-PRD workflows and `anvil prd parse` keep working with no edits. After the
+migration the project still has one `default` PRD, and you can add named release
+PRDs alongside it under `.anvil/prds/`.
+
+---
+
 ## Parser Behavior at a Glance
 
 **Preprocessing**: HTML comments (`<!-- ... -->`) are stripped before any section
 matching. Trailing whitespace and extra blank lines are ignored.
 
-**Re-parse replaces, not merges**: running `anvil prd parse` a second time
-replaces all `Requirement`, `Feature`, and `Task` entities in `state.db` completely.
-There is no merge. Edit `prd.md` and re-run the command to refresh state. Tasks in
-`in_progress` or `claimed` status are also replaced — coordinate with active agents
-before re-parsing a live project.
+**Re-parse replaces per PRD, not merges**: running `anvil prd parse` a second
+time replaces all `Requirement`, `Feature`, and `Task` entities **owned by the
+PRD being parsed** in `state.db` completely. There is no merge. The replace is
+scoped to one PRD: re-parsing the `default` PRD (`anvil prd parse`) leaves a named
+PRD's rows untouched, and `anvil prd parse --prd v0.2` replaces only `v0.2`'s
+rows. Edit the PRD's source file and re-run the command to refresh that PRD's
+state. Tasks in `in_progress` or `claimed` status are also replaced — coordinate
+with active agents before re-parsing a live PRD.
 
 **Missing required sections**: the parse fails immediately with a `ParseError` that names
 the missing section. The existing `state.db` content is preserved untouched.

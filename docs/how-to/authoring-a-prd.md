@@ -239,8 +239,9 @@ PRDs are not write-once. The expected loop:
 3. Re-run the gates: `prd review`, then `prd review --approve`.
 
 **Re-parse replaces, not merges.** Every `prd parse` invocation completely replaces the
-`Requirement`, `Feature`, and `Task` entities in `state.db`. There is no diff, no merge,
-no preservation of hand-edits on individual rows. This is documented at
+`Requirement`, `Feature`, and `Task` entities **owned by the PRD being parsed** in
+`state.db` — re-parsing the default PRD leaves a named PRD's rows untouched. There is no
+diff, no merge, no preservation of hand-edits on individual rows. This is documented at
 [`prd-template.md` → Parser Behavior at a Glance](../prd-template.md#parser-behavior-at-a-glance).
 
 The replacement extends to tasks already in `claimed` or `in_progress` status. **Coordinate
@@ -319,7 +320,7 @@ sub-task proposals on a complex task. Most PRDs ship without ever invoking the L
 | `Task 'T001' has no **Feature:** field` | Task block lacks a `**Feature:**` line | Add the field. Empty `feature_id` is allowed but creates an unowned task. |
 | Scope creep in inferred features | `## Non-Goals` absent or vague | Add explicit out-of-scope items. The planner agent reads this section to bound feature inference. |
 | `--use-llm` exits with `ANTHROPIC_API_KEY` error | Env var not exported in the current shell | Run `export ANTHROPIC_API_KEY=sk-ant-...` and retry, or drop the flag. |
-| Re-parse silently drops a hand-edited task description | Re-parse replaces all task rows from `prd.md`; in-DB edits are not preserved | Make the change in `prd.md` itself, then re-parse. The PRD file is the source of truth. |
+| Re-parse silently drops a hand-edited task description | Re-parse replaces the parsed PRD's task rows from its source file; in-DB edits are not preserved | Make the change in the PRD's source file itself, then re-parse. The PRD file is the source of truth. |
 
 ---
 
