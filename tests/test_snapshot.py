@@ -415,6 +415,9 @@ def test_serialize_state_sorts_prd_kind_sync_mappings_with_null_task_id() -> Non
         def get_prd(self) -> None:
             return None
 
+        def list_prds(self) -> list[Any]:
+            return []
+
         def list_features(self) -> list[Any]:
             return []
 
@@ -430,7 +433,7 @@ def test_serialize_state_sorts_prd_kind_sync_mappings_with_null_task_id() -> Non
         def list_evidence(self) -> list[Any]:
             return []
 
-        def list_requirements(self) -> list[Any]:
+        def list_requirements(self, **_kwargs: Any) -> list[Any]:
             return []
 
         def list_sync_mappings(self) -> list[SyncMapping]:
