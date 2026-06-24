@@ -6,8 +6,34 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-23
+
+Multi-PRD, revisable, partitioned state: a project holds several release-scoped
+PRDs in one `state.db`, gated per-PRD and coordinated globally, with
+event-sourced (revisable) PRDs and schema migration v6 -> v7 -> v8.
+
 ### Added
 
+- **Multi-PRD projects (schema v7).** A project can now hold several
+  release-scoped PRDs in one `state.db`, each a separately-gated revisable plan
+  carrying a target version/tag, partitioned by `prd_id`. The v6 -> v7 migration
+  backfills a single `default` PRD that owns every existing row, so single-PRD
+  projects upgrade with zero data loss and unchanged behavior.
+- **`anvil prd list`.** Lists every PRD (id, status, revision, target; the
+  default marked `*`; `--json`) so you can pick which one to work on.
+- **`--prd <id>` / `$ANVIL_PRD` scoping** across `prd parse`, `prd review`,
+  `plan`, `sync provider|github`, and the MCP tools, resolved through a shared
+  `resolve_prd_id` (the `prd` sentinel collapses to the `default` partition).
+  Omitting it preserves single-PRD behavior.
+- **Per-PRD claim gate.** A ready task is claimable only when its OWNING PRD
+  (`task.prd_id`) is reviewed/approved; a sibling draft PRD's tasks are refused.
+  File-overlap and conflict-group checks still span ALL PRDs (the cross-PRD moat).
+- **Per-PRD status rollup** (`anvil status` shows one block per PRD) and per-PRD
+  sync push scoping with `prd_id`-stamped mappings + reconciliation discrepancies
+  attributed to the owning PRD.
+- **Revisable PRDs.** Re-running `anvil prd parse` on an existing PRD emits a
+  non-destructive `prd.revised` (supersedes changed requirements, never deletes
+  lineage) instead of overwriting; the audit log stays fully replayable.
 - **Schema v8 — per-PRD `revision` counter (v0.3 T023).** `prds` gains a
   `revision INTEGER NOT NULL DEFAULT 1` column, bumped by `prd.revised`. This is
   a separate schema version from v7 (the multi-PRD foundation) so a DB already

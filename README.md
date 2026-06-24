@@ -9,13 +9,13 @@
 > Durable, evidence-gated, lease-coordinated state for multi-agent software work.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Plugin Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](.claude-plugin/plugin.json)
+[![Plugin Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](.claude-plugin/plugin.json)
 [![Marketplace](https://img.shields.io/badge/marketplace-fakoli-purple.svg)](https://github.com/fakoli/anvil)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests)
 
 </div>
 
-> **Beta — v0.1.2.** The core loop works today; command surfaces and APIs may change before 1.0.
+> **Beta — v0.3.0.** The core loop works today; command surfaces and APIs may change before 1.0.
 
 ---
 
@@ -42,9 +42,10 @@ When an AI agent claims a task, that claim is an enforced database row with a le
 
 Highlights:
 
+- **Multi-PRD projects (v0.3).** One project can hold several release-scoped PRDs in a single partitioned `state.db`, each separately gated (a task is claimable only when its owning PRD is approved) yet coordinated globally for cross-PRD file conflicts. `anvil prd list` and `--prd <id>` scope the workflow; PRDs are revisable, with re-parse appending a non-destructive `prd.revised`. Single-PRD projects are unaffected.
 - **Multi-provider LLM access.** `BedrockProvider` (boto3 chain) and `CustomEndpointProvider` (vLLM / OpenRouter / LiteLLM-proxy / Together / Groq / Azure-OpenAI / self-hosted) ship alongside the existing `AnthropicProvider`. Precedence: explicit config > env auto-detect > fail loudly. Optional extras keep the default install lean.
 - **Tier-aware model defaults.** New `MODEL_TIERS` vocabulary (`opus` / `sonnet` / `haiku`) with per-agent tier mapping that drops typical session cost ~60% versus the prior "everything routes to Opus" pattern. Override always wins.
-- CI covers the full pytest suite and benchmark smoke test; SQLite schema remains at version 5.
+- CI covers the full pytest suite and benchmark smoke test; the on-disk SQLite schema is at version 8, auto-upgraded from older DBs via the additive v6 -> v7 -> v8 migration ladder.
 
 Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
@@ -225,7 +226,7 @@ The Iron Rule (review agents never `Edit`/`Write`) is enforced at the `tools:` f
 
 ## Status
 
-Anvil is in beta (v0.1.2). The full PRD → plan → claim → execute → verify → finish loop works today, plus GitHub Issues sync and multi-provider LLM support. Known gaps and hardening are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md); the near-term focus is correctness for claim races, evidence gates, and replay before adding more surface. Linear and Monday providers, webhook sync, and immediate-apply conflict resolution are tracked in [`docs/roadmap.md`](docs/roadmap.md).
+Anvil is in beta (v0.3.0). The full PRD → plan → claim → execute → verify → finish loop works today, plus GitHub Issues sync and multi-provider LLM support. Known gaps and hardening are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md); the near-term focus is correctness for claim races, evidence gates, and replay before adding more surface. Linear and Monday providers, webhook sync, and immediate-apply conflict resolution are tracked in [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
