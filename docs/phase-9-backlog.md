@@ -101,6 +101,22 @@ Phase 9 T5 (`agent-welder-honesty-status.md` § 2 — "Immediate-apply variants 
 - Updated `docs/github-sync.md` § "Audit honesty" — the `*_applied` tokens join the controlled vocabulary alongside the `*_deferred` ones.
 - `tests/test_cli_sync.py` — 4+ new tests covering both immediate-apply paths plus the race-edit fallback.
 
+### MPRD-RG1 · PRD→release-group sync (`ensure_release_group` Protocol + GitHub milestone client)
+
+**Status**: OPEN. **Target**: v2.0.
+
+Deferred out of the multi-PRD release (Phase 7 of `docs/specs/2026-06-22-multi-prd-revisable.md`; tracked as **T029** in `docs/backlog/multi-prd-revisable.prd.md`). That release shipped the release/sync **data plumbing only** — `SyncMapping.prd_id` + `entity_kind: Literal['task','prd']`, per-PRD `--prd` push scoping, and `prd_id` on reconciliation discrepancies. The network-touching milestone wiring was explicitly **not** built so no existing provider had to change.
+
+**Acceptance** (none of this lands in the multi-PRD release; existing providers unchanged):
+
+- A **provider-neutral** `ensure_release_group(release_tag, target_version, prd_summary, mapping) -> ExternalRef` Protocol method (covers GitHub Milestone / Linear Cycle / Jira FixVersion), **optional and capability-gated** via a `supports_milestones` / `supports_release_groups` flag so existing providers stay unchanged.
+- GitHub client `create_milestone` / `list_milestones` calls plus issue→milestone assignment for the issues a PRD owns.
+- A `sync.milestone.ensured` (release-group) audit event and **prd-kind** `SyncMapping` row persistence (`entity_kind='prd'`, carrying `prd_id`, null `task_id`) recording the 1:1 PRD↔release/milestone mapping.
+- A `missing_milestone_mapping` reconciliation discrepancy kind for a PRD that has a `target_tag` but no persisted milestone mapping (sibling to `missing_sync_mapping`; `drift_sync_state` already special-cases prd-kind rows so a milestone produces no task-shaped drift).
+- The milestone-ensure step is wired into `anvil sync … --prd <id> --push` only for providers that advertise the capability.
+
+Re-homed in the live roadmap as `[MPRD-RG1]` (`docs/roadmap.md` § v2.0 → Theme: Sync infrastructure).
+
 ---
 
 ## v2.x — Carry-forward from `tech-debt-backlog.md`
