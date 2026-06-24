@@ -27,7 +27,13 @@ from typing import (  # noqa: UP035 — TypeAlias required for 3.11 compat
     TypeAlias,
 )
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 __all__ = [
     # Type aliases
@@ -830,7 +836,23 @@ class SyncMapping(BaseModel):
     Fields
     ------
     task_id:
-        FK into ``tasks``.
+        FK into ``tasks`` for a ``entity_kind='task'`` mapping. ``None`` for a
+        ``entity_kind='prd'`` mapping — a milestone/release-level mapping is
+        owned by a PRD, not a single task, so it carries ``prd_id`` and a null
+        ``task_id`` instead (enforced by the model_validator).
+    prd_id:
+        Owning PRD partition (v0.3 multi-PRD). For a task-kind mapping this is
+        the task's owning PRD (stamped by the sync push path, T027); for a
+        prd-kind (milestone) mapping it is the PRD the milestone tracks and is
+        REQUIRED. ``exclude=True`` keeps this additive: the field round-trips as
+        an in-memory attribute but stays out of ``model_dump()`` so existing
+        event payloads / snapshot blobs stay byte-identical (it is persisted via
+        the explicit :class:`anvil.state.payloads.SyncMappingUpsertedPayload`
+        field + the sync_mappings ``prd_id`` column, not via the model dump).
+    entity_kind:
+        ``'task'`` (the default — a per-task issue mapping) or ``'prd'`` (a
+        milestone/release-level mapping owned by a PRD). ``exclude=True`` for the
+        same byte-identity reason as ``prd_id``.
     external_system:
         Provider id string (snake_case: ``github_issues``,
         ``"monday"``, ``"linear"``, etc.). Matches the key under which
@@ -862,7 +884,17 @@ class SyncMapping(BaseModel):
 
     model_config = _MODEL_CONFIG
 
-    task_id: TaskID
+    # task_id is nullable: a prd-kind (milestone) mapping carries prd_id and a
+    # NULL task_id instead (see the model_validator below).
+    task_id: TaskID | None = None
+    # Multi-PRD partition (v0.3). Both fields default + exclude=True so a pre-
+    # change ``sync_mapping.upserted`` event (which never carried them) and any
+    # legacy sync_mappings row reconstruct cleanly, and the snapshot / event
+    # payload byte-shape is unchanged. Persistence flows through the explicit
+    # ``SyncMappingUpsertedPayload`` fields + the dedicated DB columns, not the
+    # model dump — exactly the pattern the v7 PRD identity columns use.
+    prd_id: PRDID | None = Field(default=None, exclude=True)
+    entity_kind: Literal["task", "prd"] = Field(default="task", exclude=True)
     # ``external_system`` is ``str`` (not the ``ExternalSystem`` enum) so
     # that contributor-registered providers (e.g. ``"monday"``,
     # ``"linear"``, ``"my_custom_tracker"``) can persist mappings without
@@ -884,6 +916,34 @@ class SyncMapping(BaseModel):
     @classmethod
     def _validate_utc(cls, v: datetime.datetime) -> datetime.datetime:
         return _require_utc(v, "last_synced_at")
+
+    @model_validator(mode="after")
+    def _validate_entity_kind_invariants(self) -> SyncMapping:
+        """Keep the (entity_kind, task_id, prd_id) trio internally consistent.
+
+        Overloading ``task_id`` on prd-kind rows is what we are guarding against:
+        a milestone (``entity_kind='prd'``) mapping is owned by a PRD, so it must
+        carry a ``prd_id`` and a NULL ``task_id`` — otherwise
+        ``get_sync_mapping`` / ``list_sync_mappings`` would surface it as if it
+        were a task mapping. A task-kind row is the mirror image: it must carry a
+        ``task_id`` (the FK into ``tasks``).
+        """
+        if self.entity_kind == "prd":
+            if self.prd_id is None:
+                raise ValueError(
+                    "entity_kind='prd' SyncMapping requires a prd_id"
+                )
+            if self.task_id is not None:
+                raise ValueError(
+                    "entity_kind='prd' SyncMapping must have a null task_id "
+                    "(a milestone mapping is owned by a PRD, not a task)"
+                )
+        else:  # entity_kind == 'task'
+            if self.task_id is None:
+                raise ValueError(
+                    "entity_kind='task' SyncMapping requires a task_id"
+                )
+        return self
 
 
 class ConflictGroup(BaseModel):

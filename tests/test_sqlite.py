@@ -5063,6 +5063,111 @@ class TestSyncMappingHandler:
         replayed_dump = _sqlite_dump(db_path)
         assert original_dump == replayed_dump
 
+    def test_upsert_pre_change_payload_persists_default_partition(
+        self, tmp_path: Path
+    ) -> None:
+        """T026: a sync_mapping.upserted event WITHOUT prd_id/entity_kind keys
+        (a pre-change event) lands prd_id='default' / entity_kind='task' in the
+        sync_mappings columns — the same partition the v6->v7 migration
+        backfills, so replay reconstructs the migrated table."""
+        b = _make_backend(tmp_path)
+        db_path = str(tmp_path / "state.db")
+        try:
+            _setup_project(b)
+            _setup_task_for_sync(b)
+            # _make_sync_mapping_payload deliberately omits prd_id / entity_kind.
+            b.append(_make_event(
+                "sync_mapping.upserted", _make_sync_mapping_payload(),
+                event_id="E000005", target_kind="task", target_id="T001",
+            ))
+        finally:
+            b.close()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT prd_id, entity_kind FROM sync_mappings WHERE task_id = ?",
+                ("T001",),
+            ).fetchone()
+            assert row == ("default", "task")
+        finally:
+            conn.close()
+
+    def test_upsert_explicit_prd_id_persists_and_reads_back(
+        self, tmp_path: Path
+    ) -> None:
+        """T026: an explicit NON-default prd_id on the payload is written to the
+        column AND surfaced back on the SyncMapping read model (T027/T028 consume
+        it).
+
+        ``prd_id='v0.2'`` is deliberately NOT the DEFAULT_PRD_ID fallback, so this
+        test fails if the handler ever drops ``payload.prd_id`` and backfills
+        'default' (which would silently land every mapping in the default
+        partition, cross-contaminating PRDs). ``sync_mappings.prd_id`` has no FK,
+        so no PRD row is needed.
+        """
+        b = _make_backend(tmp_path)
+        db_path = str(tmp_path / "state.db")
+        try:
+            _setup_project(b)
+            _setup_task_for_sync(b)
+            payload = {**_make_sync_mapping_payload(), "prd_id": "v0.2"}
+            b.append(_make_event(
+                "sync_mapping.upserted", payload,
+                event_id="E000005", target_kind="task", target_id="T001",
+            ))
+
+            mapping = b.get_sync_mapping("T001")
+            assert mapping is not None
+            assert mapping.prd_id == "v0.2"
+            assert mapping.entity_kind == "task"
+        finally:
+            b.close()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT prd_id, entity_kind FROM sync_mappings WHERE task_id = ?",
+                ("T001",),
+            ).fetchone()
+            assert row == ("v0.2", "task")
+        finally:
+            conn.close()
+
+    def test_upsert_rejects_prd_kind_milestone_mapping(
+        self, tmp_path: Path
+    ) -> None:
+        """T026 boundary: a prd-kind (milestone) mapping — entity_kind='prd',
+        task_id=None, prd_id set — is a VALID SyncMapping model shape, but the
+        sync_mappings DDL still declares task_id NOT NULL (relaxed only in the
+        milestone phase). The check gate must reject it UP FRONT with
+        EventRejected, not let it green-light through to an opaque NOT NULL
+        IntegrityError (TransactionAborted) inside the write lock.
+
+        This also pins the handler's ``payload.entity_kind`` wiring: if the writer
+        hard-coded entity_kind='task' (ignoring the payload), the gate would never
+        see a 'prd' value and this reject would not fire.
+        """
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_task_for_sync(b)
+            prd_kind = {
+                **_make_sync_mapping_payload(),
+                "task_id": None,
+                "entity_kind": "prd",
+                "prd_id": "v0.2",
+            }
+            with pytest.raises(EventRejected):
+                b.append(_make_event(
+                    "sync_mapping.upserted", prd_kind,
+                    event_id="E000005", target_kind="prd", target_id="v0.2",
+                ))
+            # The rejected event leaves no sync_mappings row behind.
+            assert b.list_sync_mappings() == []
+        finally:
+            b.close()
+
     def test_upsert_rejects_invalid_sync_state(self, tmp_path: Path) -> None:
         """sync_state must be a valid SyncState enum value; otherwise TransactionAborted."""
         b = _make_backend(tmp_path)
@@ -6188,6 +6293,40 @@ class TestPayloadValidation:
         })
         assert obj.sync_state == "in_sync"
         assert obj.conflict_resolution_strategy == "prompt"
+
+    def test_sync_mapping_upserted_payload_pre_change_event_defaults_prd(
+        self,
+    ) -> None:
+        """T026: an OLD sync_mapping.upserted event (no prd_id / entity_kind
+        keys) deserialises with entity_kind='task' and prd_id='default' — the
+        same partition the v6->v7 migration backfills, so replay matches."""
+        from anvil.state.models import DEFAULT_PRD_ID
+
+        p = self._import_payload_models()
+        obj = p.SyncMappingUpsertedPayload.model_validate({
+            "task_id": "T001",
+            "external_system": "github_issues",
+            "external_id": "gh-42",
+            "last_synced_at": _T0.isoformat(),
+        })
+        assert obj.entity_kind == "task"
+        assert obj.prd_id == DEFAULT_PRD_ID
+
+    def test_sync_mapping_upserted_payload_accepts_explicit_prd_partition(
+        self,
+    ) -> None:
+        """T026: a new event may carry explicit prd_id / entity_kind."""
+        p = self._import_payload_models()
+        obj = p.SyncMappingUpsertedPayload.model_validate({
+            "task_id": "T001",
+            "external_system": "github_issues",
+            "external_id": "gh-42",
+            "last_synced_at": _T0.isoformat(),
+            "prd_id": "v0.2",
+            "entity_kind": "task",
+        })
+        assert obj.prd_id == "v0.2"
+        assert obj.entity_kind == "task"
 
     def test_sync_mapping_upserted_rejects_unknown_key(self) -> None:
         from pydantic import ValidationError as PydanticValidationError
