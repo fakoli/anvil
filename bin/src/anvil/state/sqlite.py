@@ -43,6 +43,7 @@ from anvil.state.backend import (
 )
 from anvil.state.hashing import hash_event_id
 from anvil.state.models import (
+    DEFAULT_PRD_ID,
     PRD,
     Claim,
     ClaimStatus,
@@ -1187,7 +1188,8 @@ class SqliteBackend:
         base = (
             "SELECT task_id, external_system, external_id, external_url, "
             "last_synced_at, sync_state, conflict_resolution_strategy, "
-            "provider_metadata_json FROM sync_mappings WHERE task_id = ?"
+            "provider_metadata_json, prd_id, entity_kind FROM sync_mappings "
+            "WHERE task_id = ?"
         )
         if external_system is None:
             row = conn.execute(
@@ -1217,7 +1219,7 @@ class SqliteBackend:
         base = (
             "SELECT task_id, external_system, external_id, external_url, "
             "last_synced_at, sync_state, conflict_resolution_strategy, "
-            "provider_metadata_json FROM sync_mappings"
+            "provider_metadata_json, prd_id, entity_kind FROM sync_mappings"
         )
         if external_system is None:
             rows = conn.execute(
@@ -1250,6 +1252,11 @@ class SqliteBackend:
         fast at THIS call site with a ``ValidationError`` rather than
         surfacing as ``TransactionAborted`` inside the lock. (Wave 1 critic fix MF-2.)
         """
+        # prd_id / entity_kind are exclude=True on SyncMapping, so they are NOT
+        # in mapping.model_dump() — pass them explicitly. A task-kind mapping
+        # whose prd_id was never stamped (None) writes the default partition, so
+        # replay matches the v6->v7 migration backfill (every legacy mapping is
+        # owned by the default PRD).
         payload = SyncMappingUpsertedPayload(
             task_id=mapping.task_id,
             external_system=str(mapping.external_system),
@@ -1259,6 +1266,8 @@ class SqliteBackend:
             sync_state=str(mapping.sync_state),
             conflict_resolution_strategy=str(mapping.conflict_resolution_strategy),
             provider_metadata=dict(mapping.provider_metadata),
+            prd_id=mapping.prd_id if mapping.prd_id is not None else DEFAULT_PRD_ID,
+            entity_kind=mapping.entity_kind,
         )
         draft = EventDraft(
             timestamp=self._clock.now(),
@@ -4299,6 +4308,15 @@ class SqliteBackend:
 
         Was a validation guard inside the old handler (``raise
         TransactionAborted`` on an invalid SyncMapping); now rejects up front.
+
+        Note on ``entity_kind='prd'`` (milestone) mappings: the model + validator
+        accept a prd-kind shape (``task_id=None``), but the ``sync_mappings`` DDL
+        still declares ``task_id TEXT NOT NULL`` (T026 is the data-only phase; the
+        column is relaxed in the milestone phase). Persisting a prd-kind row would
+        therefore abort the write transaction with an opaque NOT NULL
+        ``IntegrityError`` inside the lock — exactly the deferred-failure mode this
+        gate exists to prevent. So reject prd-kind events here, at the call site,
+        rather than mid-write/mid-replay.
         """
         _ = (conn, event)
         try:
@@ -4307,6 +4325,12 @@ class SqliteBackend:
             raise EventRejected(
                 f"sync_mapping.upserted: invalid SyncMapping payload: {exc}"
             ) from exc
+        if payload.entity_kind == "prd":
+            raise EventRejected(
+                "sync_mapping.upserted: entity_kind='prd' (milestone) mappings "
+                "are not yet persistable — sync_mappings.task_id is still "
+                "NOT NULL (deferred to the milestone phase)"
+            )
 
     def _write_sync_mapping_upserted(
         self,
@@ -4336,23 +4360,29 @@ class SqliteBackend:
         # provider_metadata is opaque dict — serialise to JSON for the
         # provider_metadata_json TEXT column.
         provider_metadata_json = json.dumps(data.get("provider_metadata") or {})
+        # prd_id / entity_kind are exclude=True on SyncMapping, so they are NOT
+        # in ``data`` — read the persisted partition straight off the payload
+        # (which defaults to prd_id='default' / entity_kind='task' for a
+        # pre-change event, matching the v6->v7 migration backfill).
         conn.execute(
             """
             INSERT INTO sync_mappings
                 (task_id, external_system, external_id, external_url,
                  last_synced_at, sync_state, conflict_resolution_strategy,
-                 provider_metadata_json)
+                 provider_metadata_json, prd_id, entity_kind)
             VALUES
                 (:task_id, :external_system, :external_id, :external_url,
                  :last_synced_at, :sync_state, :conflict_resolution_strategy,
-                 :provider_metadata_json)
+                 :provider_metadata_json, :prd_id, :entity_kind)
             ON CONFLICT(task_id, external_system) DO UPDATE SET
                 external_id                  = excluded.external_id,
                 external_url                 = excluded.external_url,
                 last_synced_at               = excluded.last_synced_at,
                 sync_state                   = excluded.sync_state,
                 conflict_resolution_strategy = excluded.conflict_resolution_strategy,
-                provider_metadata_json       = excluded.provider_metadata_json
+                provider_metadata_json       = excluded.provider_metadata_json,
+                prd_id                       = excluded.prd_id,
+                entity_kind                  = excluded.entity_kind
             """,
             {
                 "task_id": data["task_id"],
@@ -4363,6 +4393,8 @@ class SqliteBackend:
                 "sync_state": data["sync_state"],
                 "conflict_resolution_strategy": data["conflict_resolution_strategy"],
                 "provider_metadata_json": provider_metadata_json,
+                "prd_id": payload.prd_id,
+                "entity_kind": payload.entity_kind,
             },
         )
 
@@ -4788,8 +4820,11 @@ class SqliteBackend:
 
         The DB column ``provider_metadata_json`` is renamed to the model
         field ``provider_metadata`` after a JSON parse; ``external_url``
-        passes through directly. Missing columns (older rows) default
-        cleanly via the model's own defaults.
+        passes through directly. The v7 partition columns ``prd_id`` /
+        ``entity_kind`` map straight onto the (exclude=True) model fields, so a
+        task-kind row surfaces its owning PRD without changing the serialized
+        (``model_dump``) shape. Missing columns (older rows) default cleanly via
+        the model's own defaults.
         """
         d = dict(row)
         raw_meta = d.pop("provider_metadata_json", None)
@@ -4797,4 +4832,9 @@ class SqliteBackend:
             d["provider_metadata"] = json.loads(raw_meta)
         else:
             d["provider_metadata"] = {}
+        # entity_kind is NOT NULL DEFAULT 'task' in the DDL, but guard a legacy
+        # row that somehow stored NULL so model_validate falls back to the model
+        # default instead of raising on a None Literal.
+        if d.get("entity_kind") is None:
+            d.pop("entity_kind", None)
         return SyncMapping.model_validate(d)

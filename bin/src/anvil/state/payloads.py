@@ -476,7 +476,7 @@ class SyncMappingUpsertedPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    task_id: str
+    task_id: str | None = None
     external_system: str
     external_id: str
     external_url: str | None = None
@@ -484,6 +484,13 @@ class SyncMappingUpsertedPayload(BaseModel):
     sync_state: str = "in_sync"
     conflict_resolution_strategy: str = "prompt"
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    # v0.3 multi-PRD partition (T026). Both default so a PRE-change
+    # ``sync_mapping.upserted`` event (which never carried these keys)
+    # deserialises with ``entity_kind='task'`` and ``prd_id='default'`` — the
+    # same shape the in-place v6->v7 migration backfills (every legacy mapping
+    # is owned by the default PRD), so replay reconstructs the migrated table.
+    prd_id: str = DEFAULT_PRD_ID
+    entity_kind: Literal["task", "prd"] = "task"
 
 
 class SyncMappingDeletedPayload(BaseModel):

@@ -17,6 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from anvil.state.models import (
+    DEFAULT_PRD_ID,
     PRD,
     Claim,
     ClaimStatus,
@@ -705,6 +706,93 @@ class TestRoundTrips:
         dumped = original.model_dump(mode="json")
         restored = SyncMapping.model_validate(dumped)
         assert restored == original
+
+
+# ---------------------------------------------------------------------------
+# T026 — SyncMapping prd_id / entity_kind partition (v0.3 multi-PRD sync)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncMappingPartition:
+    def _task_kind(self, **overrides: Any) -> SyncMapping:
+        defaults: dict[str, Any] = {
+            "task_id": "T001",
+            "external_system": "github_issues",
+            "external_id": "gh-42",
+            "last_synced_at": _NOW,
+        }
+        defaults.update(overrides)
+        return SyncMapping(**defaults)
+
+    def test_default_entity_kind_is_task(self) -> None:
+        """A SyncMapping built the existing way defaults entity_kind='task'."""
+        assert self._task_kind().entity_kind == "task"
+
+    def test_default_prd_id_is_none(self) -> None:
+        """prd_id is None until the sync push path stamps the owning PRD."""
+        assert self._task_kind().prd_id is None
+
+    def test_partition_fields_excluded_from_dump(self) -> None:
+        """prd_id / entity_kind are exclude=True — additive, so the serialized
+        (snapshot / event-payload) shape stays byte-identical."""
+        dump = self._task_kind(prd_id="v0.2").model_dump()
+        assert "prd_id" not in dump
+        assert "entity_kind" not in dump
+
+    def test_prd_kind_requires_prd_id(self) -> None:
+        """entity_kind='prd' with no prd_id is a ValidationError."""
+        with pytest.raises(ValidationError):
+            SyncMapping(
+                task_id=None,
+                external_system="github_issues",
+                external_id="ms-1",
+                last_synced_at=_NOW,
+                entity_kind="prd",
+            )
+
+    def test_prd_kind_requires_null_task_id(self) -> None:
+        """entity_kind='prd' carrying a task_id is a ValidationError — a
+        milestone mapping is owned by a PRD, never overloaded onto a task."""
+        with pytest.raises(ValidationError):
+            SyncMapping(
+                task_id="T001",
+                external_system="github_issues",
+                external_id="ms-1",
+                last_synced_at=_NOW,
+                entity_kind="prd",
+                prd_id="v0.2",
+            )
+
+    def test_prd_kind_with_prd_id_and_null_task_id_is_valid(self) -> None:
+        """A well-formed prd-kind (milestone) mapping validates."""
+        m = SyncMapping(
+            task_id=None,
+            external_system="github_issues",
+            external_id="ms-1",
+            last_synced_at=_NOW,
+            entity_kind="prd",
+            prd_id="v0.2",
+        )
+        assert m.entity_kind == "prd"
+        assert m.prd_id == "v0.2"
+        assert m.task_id is None
+
+    def test_task_kind_requires_task_id(self) -> None:
+        """entity_kind='task' with a null task_id is a ValidationError."""
+        with pytest.raises(ValidationError):
+            SyncMapping(
+                task_id=None,
+                external_system="github_issues",
+                external_id="gh-42",
+                last_synced_at=_NOW,
+            )
+
+    def test_task_kind_carries_owning_prd_id(self) -> None:
+        """A task-kind mapping may carry its owning prd_id (stamped at push)."""
+        m = self._task_kind(prd_id=DEFAULT_PRD_ID)
+        assert m.entity_kind == "task"
+        assert m.prd_id == DEFAULT_PRD_ID
+        assert m.task_id == "T001"
 
 
 # ---------------------------------------------------------------------------

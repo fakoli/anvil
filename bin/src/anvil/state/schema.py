@@ -241,6 +241,11 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
 
+-- ``task_id`` is still NOT NULL: T026 is the data-only phase, so only task-kind
+-- mappings persist. The SyncMapping model accepts an entity_kind='prd'
+-- (milestone) shape with a NULL task_id, but that is rejected up front by
+-- ``_check_sync_mapping_upserted`` until this column is relaxed in the milestone
+-- phase — see that gate for the fail-fast rationale.
 CREATE TABLE IF NOT EXISTS sync_mappings (
     task_id                      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     external_system              TEXT NOT NULL,

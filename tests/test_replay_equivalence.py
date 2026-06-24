@@ -357,11 +357,12 @@ def test_no_tracked_db_artifacts_under_fixture_dir() -> None:
 _DEFAULT_BACKED_TABLES = ("tasks", "features", "requirements")
 
 # All v7 prd-partitioned tables, including ``sync_mappings``. NOTE: under v7,
-# ``sync_mappings.prd_id`` is NULLABLE with NO column DEFAULT — the v6->v7
-# MIGRATION backfills it via a task-join UPDATE, but a REPLAY of a pre-v7 log
-# leaves it NULL until the sync_mapping write-handler threads prd_id (Phase 2,
-# T010 — explicitly out of scope here). The single-PRD oracle therefore asserts
-# 'default' on the DEFAULT-backed tables and NULL-on-replay for sync_mappings.
+# ``sync_mappings.prd_id`` is NULLABLE with NO column DEFAULT. The v6->v7
+# MIGRATION backfills it via a task-join UPDATE; since T026 the sync_mapping
+# write-handler ALSO threads prd_id (the ``SyncMappingUpsertedPayload``
+# defaults prd_id='default' for a pre-change event), so a REPLAY of a pre-v7
+# log now lands every mapping under 'default' — matching the migration. The
+# single-PRD oracle therefore asserts 'default' on every partitioned table.
 _PRD_PARTITIONED_TABLES = (*_DEFAULT_BACKED_TABLES, "sync_mappings")
 
 
@@ -446,17 +447,19 @@ def test_pre_v7_log_replays_every_row_into_default_prd(tmp_path: Path) -> None:
                 f"replaying a pre-v7 log: {_distinct_prd_ids(db_path, table)!r}"
             )
 
-        # sync_mappings.prd_id is NULL on a pre-v7 REPLAY: its v7 column is
-        # nullable with no DEFAULT, and the write-handler does not thread prd_id
-        # until Phase 2 (T010). The v6->v7 MIGRATION backfills it to 'default'
-        # via a task-join UPDATE — covered by TestV6ToV7Migration in
-        # test_sqlite.py — but replay does not run that UPDATE. Asserting NULL
-        # here pins the genuine Phase 1 state instead of papering over it.
-        assert _prd_id_or_none(db_path, "sync_mappings") == [None], (
-            "sync_mappings.prd_id changed on a pre-v7 replay — Phase 1 leaves it "
-            "NULL (no column DEFAULT; write-handler prd_id is Phase 2/T010). If "
-            "the write-handler now threads prd_id, move this to assert 'default' "
-            "and update the Phase 1 scope note."
+        # sync_mappings.prd_id is 'default' on a pre-v7 REPLAY since T026: the
+        # column is nullable with no DEFAULT, but the sync_mapping write-handler
+        # now threads prd_id off the payload (which defaults to 'default' for a
+        # pre-change event lacking the key). That makes a pre-v7 replay land
+        # every mapping under 'default' — byte-for-byte the same partition the
+        # v6->v7 MIGRATION backfills via its task-join UPDATE (covered by
+        # TestV6ToV7Migration in test_sqlite.py). This is the replay-equivalence
+        # T026 acceptance #3 demands.
+        assert _prd_id_or_none(db_path, "sync_mappings") == [DEFAULT_PRD_ID], (
+            "sync_mappings.prd_id on a pre-v7 replay should be 'default' (T026 "
+            "threads prd_id through the write-handler so replay matches the "
+            "v6->v7 migration backfill); got "
+            f"{_prd_id_or_none(db_path, 'sync_mappings')!r}."
         )
     finally:
         replay.close()
@@ -493,13 +496,13 @@ def test_replay_matches_migrated_db_single_default_prd(tmp_path: Path) -> None:
             assert _distinct_prd_ids(db_a, table) == [DEFAULT_PRD_ID], table
             assert _distinct_prd_ids(db_b, table) == [DEFAULT_PRD_ID], table
 
-        # sync_mappings.prd_id is NULL on replay in Phase 1 (see the single-PRD
-        # oracle above) — assert it stays consistent across both replays rather
-        # than asserting 'default' the replay write-path does not yet produce.
+        # sync_mappings.prd_id is 'default' on replay since T026 (see the
+        # single-PRD oracle above) — the write-handler threads prd_id off the
+        # payload default, so both replays converge on the migration's backfill.
         assert (
             _prd_id_or_none(db_a, "sync_mappings")
             == _prd_id_or_none(db_b, "sync_mappings")
-            == [None]
+            == [DEFAULT_PRD_ID]
         )
 
         # The prds table holds exactly one row, the default PRD (id='default').
