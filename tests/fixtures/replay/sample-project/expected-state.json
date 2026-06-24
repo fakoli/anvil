@@ -71,6 +71,7 @@
         "Ship SL-1."
       ],
       "id": "default",
+      "is_default": true,
       "last_reviewed_at": "2026-05-24T18:00:00Z",
       "last_reviewed_by": "alice",
       "non_goals": [],
@@ -81,7 +82,10 @@
       "revision": 1,
       "risks": [],
       "status": "reviewed",
-      "summary": "Build the thing."
+      "summary": "Build the thing.",
+      "target_tag": null,
+      "target_version": null,
+      "title": ""
     }
   ],
   "project": {

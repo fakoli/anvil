@@ -1494,6 +1494,43 @@ class TestPrdReparse:
         assert full == {"R001": 2, "R002": None, "R003": None}, full
         assert prd is not None and prd.revision == 2
 
+    def test_reparse_pure_additive_keeps_approved_status(self, tmp_path: Path) -> None:
+        """A PURE-ADDITIVE re-parse (nothing superseded) must KEEP the PRD's
+        reviewed/approved status. Regression for the silent-demotion bug: the
+        prd.revised payload carried result.prd.status (a fresh parse is always
+        'draft'), so EVERY re-parse demoted an approved PRD to draft and dropped
+        the claim gate. The handler demotes only when a requirement is superseded;
+        the payload must therefore carry the CURRENT stored status."""
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review", "--approve"]).exit_code == 0
+
+        # Pure-additive edit: keep R001 + R002, add R003 — nothing superseded.
+        _write_prd(
+            tmp_path, _MINIMAL_PRD_CONTENT + "- R003: The system logs activity.\n"
+        )
+        second = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert second.exit_code == 0, second.output
+
+        revised = _events_of_action(tmp_path, "prd.revised")
+        assert len(revised) == 1
+        assert {r["id"] for r in revised[0]["requirements_superseded"]} == set()
+        assert {r["id"] for r in revised[0]["requirements_added"]} == {"R003"}
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None and prd.revision == 2
+        assert prd.status.value == "approved", (
+            "pure-additive re-parse must NOT demote an approved PRD to draft"
+        )
+
     def test_reparse_named_prd_emits_revised_for_that_partition_only(
         self, tmp_path: Path
     ) -> None:

@@ -1954,7 +1954,11 @@ def parse_prd(
                 "title": existing_prd.title,
                 "target_version": existing_prd.target_version,
                 "target_tag": existing_prd.target_tag,
-                "status": result.prd.status.value,
+                # Carry the CURRENT stored status (mirrors the CLI): result.prd is a
+                # fresh parse and is always 'draft', so using it would silently demote
+                # a reviewed/approved PRD on every re-parse. Pure-additive keeps this;
+                # the handler demotes only when a requirement is superseded.
+                "status": existing_prd.status.value,
                 "summary": result.prd.summary,
                 "goals": result.prd.goals,
                 "non_goals": result.prd.non_goals,

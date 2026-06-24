@@ -252,7 +252,12 @@ def prd_parse(
                 "title": existing_prd.title,
                 "target_version": existing_prd.target_version,
                 "target_tag": existing_prd.target_tag,
-                "status": result.prd.status.value,
+                # Carry the CURRENT stored status, NOT result.prd.status: a freshly
+                # parsed PRD is always 'draft' (template.parse_prd never reads a
+                # status), so using it would silently demote a reviewed/approved PRD
+                # on every re-parse. A pure-additive revision keeps this status; the
+                # handler demotes to 'draft' only when a requirement is superseded.
+                "status": existing_prd.status.value,
                 "summary": result.prd.summary,
                 "goals": result.prd.goals,
                 "non_goals": result.prd.non_goals,

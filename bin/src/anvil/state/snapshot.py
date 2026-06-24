@@ -114,8 +114,18 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
         "prds": [
             {
                 **p.model_dump(mode="json"),
+                # id/revision AND the identity/config fields are all Field(exclude=True)
+                # on the PRD model, so model_dump() drops them. Re-surface ALL of them
+                # so the replay-equivalence oracle + doctor compare them: is_default is
+                # the ux_prds_default invariant carrier; title/target_* are written
+                # straight from the event payload — a replay that corrupted any of them
+                # would otherwise diverge invisibly between the live and replayed DBs.
                 "id": p.id,
                 "revision": p.revision,
+                "is_default": p.is_default,
+                "title": p.title,
+                "target_version": p.target_version,
+                "target_tag": p.target_tag,
             }
             for p in sorted(backend.list_prds(), key=lambda p: p.id)
         ],
