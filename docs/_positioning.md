@@ -37,6 +37,19 @@ commit point that records evidence and transitions a task to `done`. Drift
 (stale claims, orphan branches, sync conflicts) is detected and reconciled,
 not papered over.
 
+**(Q)** Stretching the analogy one notch: each PRD is a **scoped stack /
+workspace** within the **one canonical state**. A project holds several PRDs the
+way a Terraform installation holds several workspaces — separate plans, separate
+gates, separate `apply` rhythms — all backed by a single state store
+(`.anvil/state.db` + `events.jsonl`), not one database per PRD. A PRD is
+a release/milestone-scoped, separately-gated, revisable plan carrying a target
+version/tag: it gates the claimability of the tasks *it* owns (a task is
+claimable once its owning PRD is reviewed/approved, independent of sibling PRDs),
+yet conflict detection deliberately spans every workspace so two tasks in
+different PRDs that touch the same file are still single-winner-coordinated. The
+single-PRD project is the one-workspace default — a lone `default` PRD owning
+every row.
+
 ## MCP vs plugin
 
 **(Q)** MCP exposes capabilities; plugins encode operating discipline. The

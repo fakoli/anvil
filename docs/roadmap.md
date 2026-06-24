@@ -232,6 +232,48 @@ steps cannot double-claim or fake "done").
 
 ---
 
+## Theme: Multi-PRD (release-scoped plans)
+
+The v0.3 reframe: a single project holds **several release-scoped PRDs** in one
+`state.db` / `events.jsonl` instead of exactly one. Each PRD is a
+release/milestone-scoped, separately-gated, revisable plan carrying a target
+version/tag; its requirements, features, and tasks are partitioned by an owning
+`prd_id`. Full design in
+[`docs/specs/2026-06-22-multi-prd-revisable.md`](specs/2026-06-22-multi-prd-revisable.md);
+task-by-task backlog in
+[`docs/backlog/multi-prd-revisable.prd.md`](backlog/multi-prd-revisable.prd.md).
+
+The three load-bearing properties this theme must hold:
+
+- **The v6→v7 migration is zero-data-loss.** The in-place v6→v7 migration (the
+  v0.3 multi-PRD persistence foundation) rebuilds the partitioned `prds` /
+  requirements / features / tasks layout so that a pre-multi-PRD database becomes
+  a project whose lone **`default` PRD owns every existing row**. Nothing is
+  dropped and nothing has to be re-authored; the single-PRD project is just the
+  one-PRD degenerate case after the migration. (The follow-on v7→v8 step is a
+  purely additive per-PRD `revision` counter — see
+  [`state/sqlite.py`](../bin/src/anvil/state/sqlite.py) `_m_to_v7` / `_m_to_v8`.)
+- **Gating is per-PRD; conflict detection is cross-PRD.** The `prd_status_gate`
+  keys on the **task's owning PRD** (`task.prd_id`): a task is claimable as soon
+  as *its* PRD is reviewed/approved, even while a sibling PRD is still `draft`.
+  Conflict groups and `anvil next` exclusion sets, by contrast, are computed over
+  **all** PRDs, so two tasks in different PRDs that touch the same file are still
+  single-winner-coordinated — the moat holds across the whole project, not
+  per-PRD.
+- **Replay stays equivalent.** Every multi-PRD mutation carries `prd_id` through
+  the event payloads, so replaying `events.jsonl` from empty reconstructs the
+  partitioned canonical state exactly. Replay-equivalence is checked as
+  *logical* equivalence (canonical row-ordered dump / per-table content hash),
+  never byte-identical SQLite, and the migration backfill is written to match
+  what replay would produce.
+
+Release/milestone **sync** wiring (PRD→GitHub-milestone) is intentionally **not**
+in this theme — only the `SyncMapping.prd_id` + prd-kind data plumbing shipped;
+the network-touching milestone client is deferred to **[MPRD-RG1]** under
+[v2.0 → Sync infrastructure](#theme-sync-infrastructure-push-based--conflict-completion).
+
+---
+
 ## Version: next (v1.11 / v2.0 candidate)
 
 These are the Phase 10 plugin-audit deferrals — 56 live items the five critics raised at SHOULD FIX, CONSIDER, or NIT severity. None are breaking. The bulk close as mechanical batches; see [Cross-cutting themes](#cross-cutting-themes-high-leverage-batches) for the recommended welder fan-out.

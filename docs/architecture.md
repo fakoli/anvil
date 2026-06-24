@@ -24,6 +24,18 @@ records evidence and transitions a task to `done`. Drift (stale claims,
 orphan branches, sync conflicts) is detected and reconciled, not papered
 over.
 
+A single project holds **several release-scoped PRDs** in one `state.db` and one
+`events.jsonl`. Each PRD is a separately-gated, revisable plan that carries a
+target version/tag (a release or milestone); its requirements, features, and
+tasks are partitioned by an owning `prd_id`. The single-PRD project is just the
+degenerate case — one `default` PRD owning every row. Because each PRD gates
+independently, the `prd_status_gate` keys on the **task's owning PRD**: a task is
+claimable as soon as *its* PRD is reviewed/approved, even while a sibling PRD is
+still `draft`. Conflict detection, by contrast, spans **all** PRDs — two tasks in
+different PRDs that touch the same file land in one conflict group, so the
+single-winner guarantee holds across the whole project, not per-PRD. See
+[`_positioning.md`](_positioning.md) for the per-PRD-as-scoped-stack framing.
+
 The full positioning (the five differentiators and the Terraform analogy) is maintained
 in [`_positioning.md`](_positioning.md); this document does not duplicate
 that material.
@@ -168,11 +180,11 @@ validated at every transition (`extra="forbid"`,
 
 | Entity | Purpose |
 |---|---|
-| `Project` | Root entity that owns all other entities in the database |
-| `PRD` | Product Requirements Document — the gate that controls task claimability |
-| `Requirement` | A single atomic requirement derived from a section of the PRD |
-| `Feature` | A logical grouping of tasks that delivers a user-observable capability |
-| `Task` | The primary unit of work — claimable, scoreable, evidence-backed |
+| `Project` | Root entity that owns all other entities in the database — including **several PRDs** |
+| `PRD` | A release/milestone-scoped, separately-gated, revisable plan carrying a target version/tag; gates claimability of the tasks it owns. A project holds one or more PRDs (a `default` PRD plus any named release PRDs), all in the same `state.db`/`events.jsonl` |
+| `Requirement` | A single atomic requirement derived from a section of a PRD; partitioned by its owning `prd_id` |
+| `Feature` | A logical grouping of tasks that delivers a user-observable capability; partitioned by `prd_id` |
+| `Task` | The primary unit of work — claimable, scoreable, evidence-backed; carries the owning `prd_id` that its claim gate keys on |
 | `Claim` | An exclusive lease that an agent holds on a Task while working on it |
 | `Evidence` | Completion evidence submitted by an agent after finishing a Task |
 | `Decision` | An architectural or design decision recorded for audit and context |
@@ -252,7 +264,7 @@ Three named gates appear in the transition module; each raises
 | Gate | Where it fires | What it checks |
 |---|---|---|
 | `readiness_gate` | drafted → reviewed | `task.acceptance_criteria` and `task.verification.commands` must both be non-empty |
-| `prd_status_gate` | ready → claimed | Project PRD must be in `reviewed` or `approved` (refuses while `draft`) |
+| `prd_status_gate` | ready → claimed | The task's **owning** PRD (resolved via `task.prd_id`) must be in `reviewed` or `approved` (refuses while `draft`). A task in an approved PRD is claimable while a sibling in a draft PRD is refused |
 | `evidence_gate` | needs_review → accepted | Every item in `task.verification.required_evidence` must appear as a substring of at least one Evidence field |
 
 ### Who drives each transition
@@ -326,11 +338,21 @@ assignment to the backend's `apply_event` method.
 ```text
 <user-project>/.anvil/
 ├── config.yaml         # project-level config (sync providers, lease defaults, ...)
-├── state.db            # SQLite — the canonical state (WAL mode)
-├── events.jsonl        # append-only audit / event log (replay source)
-├── prd.md              # the PRD source (edited by hand; re-parsed via `prd parse`)
+├── state.db            # SQLite — the canonical state for ALL PRDs (WAL mode)
+├── events.jsonl        # append-only audit / event log for ALL PRDs (replay source)
+├── prd.md              # the default PRD source (edited by hand; `prd parse`)
+├── prds/               # named release-scoped PRD sources
+│   ├── v0.2.md         #   .anvil/prds/<prd_id>.md — one file per named PRD
+│   └── v0.3.md
 └── packets/            # generated work packets (per-task markdown / json)
 ```
+
+One state.db and one events.jsonl hold **every** PRD's rows, partitioned by
+`prd_id`; there is no per-PRD database. The default PRD keeps its source at the
+bare `.anvil/prd.md`; each named release PRD has a markdown source at
+`.anvil/prds/<prd_id>.md` (resolved by `prd_source_path()` —
+[`cli/_helpers.py`](../bin/src/anvil/cli/_helpers.py)). Re-parsing one PRD
+replaces only that PRD's rows and leaves the others untouched.
 
 A `snapshots/` subdirectory was originally planned (and is shown in the v0
 spec) but the `anvil snapshot` subcommand has not yet shipped — see
