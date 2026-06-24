@@ -42,9 +42,10 @@ When an AI agent claims a task, that claim is an enforced database row with a le
 
 Highlights:
 
+- **Multi-PRD projects (v0.3).** One project can hold several release-scoped PRDs in a single partitioned `state.db`, each separately gated (a task is claimable only when its owning PRD is approved) yet coordinated globally for cross-PRD file conflicts. `anvil prd list` and `--prd <id>` scope the workflow; PRDs are revisable, with re-parse appending a non-destructive `prd.revised`. Single-PRD projects are unaffected.
 - **Multi-provider LLM access.** `BedrockProvider` (boto3 chain) and `CustomEndpointProvider` (vLLM / OpenRouter / LiteLLM-proxy / Together / Groq / Azure-OpenAI / self-hosted) ship alongside the existing `AnthropicProvider`. Precedence: explicit config > env auto-detect > fail loudly. Optional extras keep the default install lean.
 - **Tier-aware model defaults.** New `MODEL_TIERS` vocabulary (`opus` / `sonnet` / `haiku`) with per-agent tier mapping that drops typical session cost ~60% versus the prior "everything routes to Opus" pattern. Override always wins.
-- CI covers the full pytest suite and benchmark smoke test; SQLite schema remains at version 5.
+- CI covers the full pytest suite and benchmark smoke test; the on-disk SQLite schema is at version 8, auto-upgraded from older DBs via the additive v6 -> v7 -> v8 migration ladder.
 
 Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
