@@ -201,10 +201,16 @@ def _seed_task(
     title: str = "Test task",
     description: str = "desc",
     now: _datetime = _NOW,
+    prd_id: str = "default",
 ) -> None:
     """Apply project + feature + task events directly to the backend.
 
     ``project_root`` is the directory containing ``.anvil/``.
+
+    ``prd_id`` (T027) stamps the owning PRD on BOTH the feature and the task
+    payloads — the backend asserts a task's prd_id matches its owning
+    feature's, so they must agree. Defaults to ``'default'`` (single-PRD
+    repos), unchanged from before.
     """
     from anvil.cli._helpers import _open_backend
     from anvil.state.models import EventDraft as _EventDraft
@@ -221,6 +227,7 @@ def _seed_task(
             target_id=feature_id,
             payload_json={
                 "id": feature_id,
+                "prd_id": prd_id,
                 "title": "F",
                 "description": "",
                 "status": "proposed",
@@ -238,6 +245,7 @@ def _seed_task(
             payload_json={
                 "id": task_id,
                 "feature_id": feature_id,
+                "prd_id": prd_id,
                 "title": title,
                 "description": description,
                 "status": status,
@@ -258,6 +266,23 @@ def _seed_task(
                 "updated_at": now.isoformat(),
             },
         ))
+    finally:
+        b.close()
+
+
+def _read_sync_mapping(
+    project_root: Path,
+    *,
+    task_id: str,
+    external_system: str = _TEST_PROVIDER_ID,
+) -> SyncMapping | None:
+    """Read back a SyncMapping for ``task_id`` (used to assert prd_id, T027)."""
+    from anvil.cli._helpers import _open_backend
+
+    state_dir = project_root / ".anvil"
+    b = _open_backend(state_dir)
+    try:
+        return b.get_sync_mapping(task_id, external_system=external_system)
     finally:
         b.close()
 
@@ -566,6 +591,311 @@ class TestSyncPushPull:
         assert r.exit_code == 0, r.output  # batch keeps going
         actions = _actions_in_events(initialized_project)
         assert "sync.push.failed" in actions
+
+
+# ---------------------------------------------------------------------------
+# Per-PRD push scoping + prd_id stamping (T027)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncPerPRDPushScoping:
+    """T027 — ``--prd`` scopes push to one PRD; mappings carry the owning prd_id."""
+
+    def test_push_stamps_owning_prd_id_on_mapping(
+        self,
+        initialized_project: Path,
+        patched_registry: dict[str, Any],
+    ) -> None:
+        """A pushed task's SyncMapping carries the task's owning prd_id (T027)."""
+        cls = _make_scripted_provider_cls()
+        patched_registry[_TEST_PROVIDER_ID] = cls
+        _seed_task(
+            initialized_project,
+            task_id="T100",
+            feature_id="F100",
+            prd_id="v0.2",
+        )
+
+        r = runner.invoke(
+            app,
+            ["sync", "github", "--push", "--cwd", str(initialized_project)],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+
+        mapping = _read_sync_mapping(initialized_project, task_id="T100")
+        assert mapping is not None
+        assert mapping.prd_id == "v0.2"
+        assert mapping.entity_kind == "task"
+
+    def test_default_prd_task_mapping_stamps_default(
+        self,
+        initialized_project: Path,
+        patched_registry: dict[str, Any],
+    ) -> None:
+        """A default-PRD task writes prd_id='default'; a non-default sibling
+        keeps its own id.
+
+        Pushing BOTH a default and a non-default task makes this discriminating:
+        ``apply_sync_mapping`` coerces a ``None`` prd_id to ``'default'``, so a
+        default-only assertion stays green even if the production stamp
+        (``prd_id=task.prd_id``) is dropped to ``None`` or a constant. The
+        non-default task is the canary — if the stamp regresses to ``None``/
+        ``'default'``, T900's mapping wrongly reads ``'default'`` and this fails.
+        """
+        cls = _make_scripted_provider_cls()
+        patched_registry[_TEST_PROVIDER_ID] = cls
+        _seed_task(initialized_project, task_id="T001")  # prd_id defaults to 'default'
+        _seed_task(
+            initialized_project,
+            task_id="T900",
+            feature_id="F900",
+            prd_id="v0.2",
+        )
+
+        r = runner.invoke(
+            app,
+            ["sync", "github", "--push", "--cwd", str(initialized_project)],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+
+        m_default = _read_sync_mapping(initialized_project, task_id="T001")
+        assert m_default is not None
+        assert m_default.prd_id == "default"
+        # Canary: a dropped/constant stamp would coerce this to 'default' too.
+        m_v02 = _read_sync_mapping(initialized_project, task_id="T900")
+        assert m_v02 is not None
+        assert m_v02.prd_id == "v0.2"
+
+    def test_prd_flag_scopes_push_to_one_prd(
+        self,
+        initialized_project: Path,
+        patched_registry: dict[str, Any],
+    ) -> None:
+        """``--prd v0.2`` pushes only tasks owned by that PRD."""
+        cls = _make_scripted_provider_cls()
+        patched_registry[_TEST_PROVIDER_ID] = cls
+        # Two PRDs, one task each.
+        _seed_task(
+            initialized_project,
+            task_id="T001",
+            feature_id="F001",
+            prd_id="default",
+        )
+        _seed_task(
+            initialized_project,
+            task_id="T900",
+            feature_id="F900",
+            prd_id="v0.2",
+        )
+
+        r = runner.invoke(
+            app,
+            [
+                "sync", "provider", _TEST_PROVIDER_ID,
+                "--push",
+                "--prd", "v0.2",
+                "--cwd", str(initialized_project),
+            ],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+
+        push_completed_targets = sorted(
+            e["target_id"]
+            for e in _read_events_jsonl(initialized_project)
+            if e["action"] == "sync.push.completed"
+        )
+        assert push_completed_targets == ["T900"]
+        # The default-PRD task was NOT pushed, so it has no mapping.
+        assert _read_sync_mapping(initialized_project, task_id="T001") is None
+
+    def test_default_iterates_all_prds_with_correct_prd_id(
+        self,
+        initialized_project: Path,
+        patched_registry: dict[str, Any],
+    ) -> None:
+        """No --prd → every PRD's tasks push; each mapping carries its owning
+        prd_id with no cross-contamination (T027 core)."""
+        cls = _make_scripted_provider_cls()
+        patched_registry[_TEST_PROVIDER_ID] = cls
+        _seed_task(
+            initialized_project,
+            task_id="T001",
+            feature_id="F001",
+            prd_id="default",
+        )
+        _seed_task(
+            initialized_project,
+            task_id="T900",
+            feature_id="F900",
+            prd_id="v0.2",
+        )
+
+        r = runner.invoke(
+            app,
+            [
+                "sync", "provider", _TEST_PROVIDER_ID,
+                "--push",
+                "--cwd", str(initialized_project),
+            ],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+
+        push_completed_targets = sorted(
+            e["target_id"]
+            for e in _read_events_jsonl(initialized_project)
+            if e["action"] == "sync.push.completed"
+        )
+        assert push_completed_targets == ["T001", "T900"]
+
+        m_default = _read_sync_mapping(initialized_project, task_id="T001")
+        m_v02 = _read_sync_mapping(initialized_project, task_id="T900")
+        assert m_default is not None and m_default.prd_id == "default"
+        assert m_v02 is not None and m_v02.prd_id == "v0.2"
+
+    def test_anvil_prd_env_scopes_push(
+        self,
+        initialized_project: Path,
+        patched_registry: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """$ANVIL_PRD is the env twin of --prd: with it set and no flag, push
+        scopes to that PRD (proves PRD_OPTION's envvar wiring on sync, the same
+        contract every other PRD-scoped command honours)."""
+        cls = _make_scripted_provider_cls()
+        patched_registry[_TEST_PROVIDER_ID] = cls
+        _seed_task(
+            initialized_project,
+            task_id="T001",
+            feature_id="F001",
+            prd_id="default",
+        )
+        _seed_task(
+            initialized_project,
+            task_id="T900",
+            feature_id="F900",
+            prd_id="v0.2",
+        )
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        r = runner.invoke(
+            app,
+            [
+                "sync", "provider", _TEST_PROVIDER_ID,
+                "--push",
+                "--cwd", str(initialized_project),
+            ],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+
+        push_completed_targets = sorted(
+            e["target_id"]
+            for e in _read_events_jsonl(initialized_project)
+            if e["action"] == "sync.push.completed"
+        )
+        assert push_completed_targets == ["T900"]
+        assert _read_sync_mapping(initialized_project, task_id="T001") is None
+
+    def test_prd_sentinel_prd_matches_default_partition(
+        self,
+        initialized_project: Path,
+        patched_registry: dict[str, Any],
+    ) -> None:
+        """``--prd prd`` (the parse-time spelling of the default PRD) collapses
+        to the stored id 'default', so it pushes the default-partition task
+        instead of matching zero rows against a nonexistent id='prd'."""
+        cls = _make_scripted_provider_cls()
+        patched_registry[_TEST_PROVIDER_ID] = cls
+        _seed_task(
+            initialized_project,
+            task_id="T001",
+            feature_id="F001",
+            prd_id="default",
+        )
+        _seed_task(
+            initialized_project,
+            task_id="T900",
+            feature_id="F900",
+            prd_id="v0.2",
+        )
+
+        r = runner.invoke(
+            app,
+            [
+                "sync", "provider", _TEST_PROVIDER_ID,
+                "--push",
+                "--prd", "prd",
+                "--cwd", str(initialized_project),
+            ],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+
+        push_completed_targets = sorted(
+            e["target_id"]
+            for e in _read_events_jsonl(initialized_project)
+            if e["action"] == "sync.push.completed"
+        )
+        assert push_completed_targets == ["T001"]
+        assert _read_sync_mapping(initialized_project, task_id="T900") is None
+
+    def test_task_filter_wins_over_prd_filter(
+        self,
+        initialized_project: Path,
+        patched_registry: dict[str, Any],
+    ) -> None:
+        """``--task`` is the narrowest scope: when both are passed, the task
+        filter wins and --prd is ignored.
+
+        Discriminating against an AND-ing regression: T001 lives in 'default'
+        but the run names ``--prd v0.2``. The documented precedence pushes T001
+        anyway; an implementation that AND-ed the filters would push nothing.
+        """
+        cls = _make_scripted_provider_cls()
+        patched_registry[_TEST_PROVIDER_ID] = cls
+        _seed_task(
+            initialized_project,
+            task_id="T001",
+            feature_id="F001",
+            prd_id="default",
+        )
+        _seed_task(
+            initialized_project,
+            task_id="T900",
+            feature_id="F900",
+            prd_id="v0.2",
+        )
+
+        r = runner.invoke(
+            app,
+            [
+                "sync", "provider", _TEST_PROVIDER_ID,
+                "--push",
+                "--task", "T001",
+                "--prd", "v0.2",
+                "--cwd", str(initialized_project),
+            ],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+
+        push_completed_targets = sorted(
+            e["target_id"]
+            for e in _read_events_jsonl(initialized_project)
+            if e["action"] == "sync.push.completed"
+        )
+        assert push_completed_targets == ["T001"]
+        assert _read_sync_mapping(initialized_project, task_id="T900") is None
+
+    def test_prd_help_lists_flag(self) -> None:
+        """`sync provider --help` advertises the --prd option."""
+        r = runner.invoke(app, ["sync", "provider", "--help"], catch_exceptions=False)
+        assert r.exit_code == 0, r.output
+        assert "--prd" in r.output
 
 
 # ---------------------------------------------------------------------------

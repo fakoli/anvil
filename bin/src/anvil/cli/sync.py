@@ -8,7 +8,7 @@ Layout
 ``anvil sync --fix --yes``    same, then applies suggested fixes
 ``anvil sync github``         alias for ``sync provider github_issues``
 ``anvil sync provider <id>``  generic provider invocation
-                                     (``--push`` / ``--pull`` / ``--task``)
+                                     (``--push`` / ``--pull`` / ``--task`` / ``--prd``)
 ``anvil sync github --health``probe provider reachability + auth
 ``anvil sync github --watch`` long-running poll loop
 
@@ -41,10 +41,12 @@ import typer
 import yaml
 
 from anvil.cli._helpers import (
+    PRD_OPTION,
     _open_backend,
     _require_state_dir,
     _resolve_project_root,
     _resolve_state_dir,
+    canonical_prd_id,
 )
 
 if TYPE_CHECKING:
@@ -196,6 +198,7 @@ def sync_github(
     task: str | None = typer.Option(  # noqa: B008
         None, "--task", help="Scope sync to a single task id (e.g. T001)."
     ),
+    prd: str | None = PRD_OPTION,
     yes: bool = typer.Option(  # noqa: B008
         False,
         "--yes",
@@ -230,6 +233,7 @@ def sync_github(
         health=health,
         interval=interval,
         cwd=cwd,
+        prd=prd,
     )
 
 
@@ -260,6 +264,7 @@ def sync_provider(
     task: str | None = typer.Option(  # noqa: B008
         None, "--task", help="Scope sync to a single task id."
     ),
+    prd: str | None = PRD_OPTION,
     yes: bool = typer.Option(  # noqa: B008
         False, "--yes", help="Auto-confirm conflict prompts."
     ),
@@ -288,6 +293,7 @@ def sync_provider(
         health=health,
         interval=interval,
         cwd=cwd,
+        prd=prd,
     )
 
 
@@ -308,6 +314,7 @@ def _sync_provider_dispatch(
     health: bool,
     interval: int,
     cwd: Path | None,
+    prd: str | None = None,
 ) -> None:
     """Single entrypoint for both ``sync github`` and ``sync provider <id>``.
 
@@ -351,6 +358,7 @@ def _sync_provider_dispatch(
                 task=task,
                 yes=yes,
                 interval=interval,
+                prd=prd,
             )
         else:
             _run_sync_once(
@@ -362,6 +370,7 @@ def _sync_provider_dispatch(
                 fix=fix,
                 task=task,
                 yes=yes,
+                prd=prd,
             )
     finally:
         # Providers may hold an ``httpx.Client`` (or other transport pool);
@@ -438,6 +447,7 @@ def _run_sync_once(
     fix: bool,
     task: str | None,
     yes: bool,
+    prd: str | None = None,
 ) -> None:
     """Execute one push+pull cycle through ``provider``.
 
@@ -445,13 +455,15 @@ def _run_sync_once(
     only in that ``--push`` skips pull and vice versa.
 
     ``--task T001`` scopes to a single task; otherwise every task gets a
-    sync attempt. ``--fix`` swaps the conflict path to a forced pull
+    sync attempt. ``--prd <id>`` (T027) scopes the batch to one PRD's tasks
+    (default: every PRD). ``--fix`` swaps the conflict path to a forced pull
     (remote_wins on every conflict).
     """
     # Default: do both. If only --push or --pull is set, do that side only.
     do_push = push or not pull
     do_pull = pull or not push
 
+    _scope_note = f"task={task}" if task else (f"prd={prd}" if prd else None)
     _emit_audit(
         backend,
         action="sync.batch.started",
@@ -460,13 +472,13 @@ def _run_sync_once(
             "direction": "push" if (do_push and not do_pull) else (
                 "pull" if (do_pull and not do_push) else "both"
             ),
-            "audit_note": f"task={task}" if task else None,
+            "audit_note": _scope_note,
         },
         target_kind="provider",
         target_id=provider.provider_id,
     )
 
-    tasks = _select_tasks_for_sync(backend, task)
+    tasks = _select_tasks_for_sync(backend, task, prd)
     if not tasks:
         typer.echo("Nothing to sync (no matching tasks).")
         _emit_audit(
@@ -537,16 +549,31 @@ def _run_sync_once(
 def _select_tasks_for_sync(
     backend: SqliteBackend,
     task_filter: str | None,
+    prd_filter: str | None = None,
 ) -> list[Task]:
     """Return the list of tasks to sync this iteration.
 
     ``task_filter`` (e.g. ``"T001"``) narrows to one task; missing → empty
     list with a friendly print upstream.
+
+    ``prd_filter`` (T027) scopes the batch to the tasks OWNED by one PRD —
+    ``anvil sync provider <id> --prd <prd_id>`` pushes only that PRD's tasks.
+    Its value comes from the shared ``--prd`` / ``$ANVIL_PRD`` wiring
+    (``PRD_OPTION``), so the env override is honoured identically to every
+    other PRD-scoped command. ``None`` (the default, no ``--prd`` and no
+    ``$ANVIL_PRD``) iterates every PRD's tasks. The default-PRD sentinel
+    ``'prd'`` is collapsed to the stored id ``'default'`` via
+    :func:`canonical_prd_id` so ``--prd prd`` matches the default partition's
+    rows (which store ``prd_id='default'``) instead of silently matching none.
+    A ``--task`` id wins over ``--prd``: an explicit single-task scope is the
+    narrowest selection, so the PRD filter is ignored when ``task_filter`` is
+    set.
     """
     if task_filter is not None:
         one = backend.get_task(task_filter)
         return [one] if one is not None else []
-    return backend.list_tasks()
+    resolved_prd = canonical_prd_id(prd_filter) if prd_filter is not None else None
+    return backend.list_tasks(prd_id=resolved_prd)
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +695,12 @@ def _persist_mapping_from_push(
         if existing is not None
         else ConflictResolutionStrategy.prompt
     )
+    # Stamp the task's OWNING prd_id (T027): a task-kind mapping is owned by the
+    # PRD that owns the task, so the persisted SyncMapping carries task.prd_id.
+    # A task whose prd_id was never set falls back to the default partition via
+    # apply_sync_mapping's None→DEFAULT_PRD_ID coercion. entity_kind stays
+    # 'task' (the model default) for every CLI push — milestone/prd-kind
+    # mappings are a deferred capability (T029).
     mapping = SyncMapping(
         task_id=task.id,
         external_system=provider.provider_id,
@@ -677,6 +710,7 @@ def _persist_mapping_from_push(
         sync_state=SyncState.in_sync,
         conflict_resolution_strategy=strategy,
         provider_metadata=dict(existing.provider_metadata) if existing else {},
+        prd_id=task.prd_id,
     )
     backend.apply_sync_mapping(mapping, actor="sync-cli")
 
@@ -1325,6 +1359,7 @@ def _run_watch_loop(
     task: str | None,
     yes: bool,
     interval: int,
+    prd: str | None = None,
 ) -> None:
     """Poll forever until Ctrl-C. ``--interval 0`` runs ONE iteration.
 
@@ -1355,6 +1390,7 @@ def _run_watch_loop(
                     fix=fix,
                     task=task,
                     yes=yes,
+                    prd=prd,
                 )
             except typer.Exit:
                 # manual_merge etc. — surface but keep polling. The next
