@@ -102,11 +102,13 @@ def _make_task_payload(
     feature_id: str = "F001",
     title: str = "Test Task",
     status: str = "ready",
+    prd_id: str = "default",
     now: datetime = _T0,
 ) -> dict[str, Any]:
     return {
         "id": task_id,
         "feature_id": feature_id,
+        "prd_id": prd_id,
         "title": title,
         "description": "",
         "status": status,
@@ -157,13 +159,19 @@ def _setup_task(
     task_id: str = "T001",
     feature_id: str = "F001",
     status: str = "ready",
+    prd_id: str = "default",
     base_event_id: int = 3,
 ) -> None:
-    """Create a feature + a task in the given status."""
+    """Create a feature + a task in the given status.
+
+    ``prd_id`` (v0.3 multi-PRD) stamps BOTH the feature and the task with the
+    owning PRD: a task's ``prd_id`` must match its feature's, so they are seeded
+    together. Defaults to ``'default'`` for the single-PRD case.
+    """
     b.append(_make_event(
         "feature.created",
         {
-            "id": feature_id, "title": "F", "description": "",
+            "id": feature_id, "prd_id": prd_id, "title": "F", "description": "",
             "status": "proposed", "requirements": [], "tasks": [],
         },
         event_id=f"E{base_event_id:06d}",
@@ -171,7 +179,9 @@ def _setup_task(
     ))
     b.append(_make_event(
         "task.created",
-        _make_task_payload(task_id=task_id, feature_id=feature_id, status=status),
+        _make_task_payload(
+            task_id=task_id, feature_id=feature_id, status=status, prd_id=prd_id,
+        ),
         event_id=f"E{base_event_id + 1:06d}",
         target_kind="task", target_id=task_id,
     ))
@@ -1013,15 +1023,19 @@ class TestMissingExpectedFile:
 class TestMissingSyncMapping:
     """Done tasks without a SyncMapping when at least one provider configured."""
 
-    def _make_done_task(self, b: SqliteBackend, task_id: str = "T001") -> None:
+    def _make_done_task(
+        self, b: SqliteBackend, task_id: str = "T001", prd_id: str = "default",
+    ) -> None:
         """Walk the full status chain proposed → ... → done for ``task_id``.
 
         The only realistic shortcut: emit task.status_changed events. We
         bypass the claim flow because that requires a 'ready' precursor;
-        what reconciliation cares about is just the final status.
+        what reconciliation cares about is just the final status. ``prd_id``
+        stamps the owning PRD (feature + task) so multi-PRD attribution can be
+        asserted.
         """
         _setup_project(b)
-        _setup_task(b, task_id=task_id, status="proposed")
+        _setup_task(b, task_id=task_id, status="proposed", prd_id=prd_id)
         # Walk through the legal transitions to land on 'done'.
         chain = [
             ("proposed", "drafted"),
@@ -1116,6 +1130,46 @@ class TestMissingSyncMapping:
             report = engine.scan()
             assert [d for d in report.discrepancies
                     if d.kind == DiscrepancyKind.missing_sync_mapping] == []
+        finally:
+            b.close()
+
+    def test_missing_sync_mapping_payload_carries_default_prd_id(
+        self, tmp_path: Path,
+    ) -> None:
+        """T028: the discrepancy payload attributes the gap to the task's
+        owning PRD — the default partition for a single-PRD project."""
+        b = _make_backend(tmp_path)
+        try:
+            self._make_done_task(b, task_id="T001")
+            engine = ReconciliationEngine(
+                b, state_dir=tmp_path, clock=_make_clock(),
+                configured_providers=["github_issues"],
+            )
+            report = engine.scan()
+            missing = [d for d in report.discrepancies
+                       if d.kind == DiscrepancyKind.missing_sync_mapping]
+            assert len(missing) == 1
+            assert missing[0].payload["prd_id"] == "default"
+        finally:
+            b.close()
+
+    def test_missing_sync_mapping_payload_carries_owning_prd_id(
+        self, tmp_path: Path,
+    ) -> None:
+        """T028: a done task owned by a non-default PRD attributes the missing
+        mapping to THAT PRD, so an operator can scope the gap to one release."""
+        b = _make_backend(tmp_path)
+        try:
+            self._make_done_task(b, task_id="T001", prd_id="v0.2")
+            engine = ReconciliationEngine(
+                b, state_dir=tmp_path, clock=_make_clock(),
+                configured_providers=["github_issues"],
+            )
+            report = engine.scan()
+            missing = [d for d in report.discrepancies
+                       if d.kind == DiscrepancyKind.missing_sync_mapping]
+            assert len(missing) == 1
+            assert missing[0].payload["prd_id"] == "v0.2"
         finally:
             b.close()
 
@@ -1233,6 +1287,72 @@ class TestDriftSyncState:
             assert "cannot auto-fix" in err
             assert "drift_sync_state" in err
             assert "suggested command" in err
+        finally:
+            b.close()
+
+    def test_drift_payload_carries_owning_prd_id(self, tmp_path: Path) -> None:
+        """T028: the drift payload attributes the mapping to its owning PRD.
+
+        The task/feature/mapping are seeded into a non-default PRD; the conflict
+        drift must surface ``payload['prd_id']`` so an operator can scope it.
+        """
+        clock = _make_clock()
+        b = _make_backend(tmp_path, clock)
+        try:
+            _setup_project(b)
+            _setup_task(b, task_id="T001", prd_id="v0.2")
+            mapping = SyncMapping(
+                task_id="T001",
+                prd_id="v0.2",
+                external_system="github_issues",
+                external_id="gh-1",
+                last_synced_at=_T0,
+                sync_state="conflict",
+            )
+            b.apply_sync_mapping(mapping)
+            engine = ReconciliationEngine(b, state_dir=tmp_path, clock=clock)
+            report = engine.scan()
+            drifts = [d for d in report.discrepancies
+                      if d.kind == DiscrepancyKind.drift_sync_state]
+            assert len(drifts) == 1
+            assert drifts[0].payload["prd_id"] == "v0.2"
+        finally:
+            b.close()
+
+    def test_drift_skips_prd_kind_milestone_mapping(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """T028: an ``entity_kind='prd'`` (milestone) mapping is NOT reported as
+        task-shaped drift, even when it is in conflict.
+
+        A milestone mapping carries a null ``task_id`` and is owned by a PRD, not
+        a task — there is no task-scoped remediation for it (milestone drift is a
+        deferred, separate reconciliation kind, T029). Such rows cannot yet be
+        persisted (``sync_mappings.task_id`` is still NOT NULL), so the mapping is
+        injected via ``list_sync_mappings`` to exercise the scan's skip branch
+        the way a future milestone phase would surface it.
+        """
+        clock = _make_clock()
+        b = _make_backend(tmp_path, clock)
+        try:
+            _setup_project(b)
+            _setup_task(b, task_id="T001", prd_id="v0.2")
+            milestone = SyncMapping(
+                entity_kind="prd",
+                prd_id="v0.2",
+                task_id=None,
+                external_system="github_issues",
+                external_id="ms-1",
+                last_synced_at=_T0,
+                sync_state="conflict",  # would drift if it were task-shaped
+            )
+            monkeypatch.setattr(
+                b, "list_sync_mappings", lambda *a, **k: [milestone],
+            )
+            engine = ReconciliationEngine(b, state_dir=tmp_path, clock=clock)
+            report = engine.scan()
+            assert [d for d in report.discrepancies
+                    if d.kind == DiscrepancyKind.drift_sync_state] == []
         finally:
             b.close()
 

@@ -131,11 +131,17 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
         # (task_id, external_system) pair (matching the backend's own ORDER BY).
         # The sort key (task_id, external_system) is total because that pair is
         # unique per the table's UNIQUE constraint.
+        #
+        # T028: a prd-kind (milestone) mapping carries ``task_id=None`` (it is
+        # owned by a PRD, not a task). Comparing ``None`` against a ``str``
+        # task_id raises TypeError, so coerce a null task_id to ``""`` for
+        # ordering only — empty string sorts ahead of any real task_id and the
+        # dumped row is unchanged (the sort key never reaches the snapshot).
         "sync_mappings": [
             m.model_dump(mode="json")
             for m in sorted(
                 backend.list_sync_mappings(),
-                key=lambda m: (m.task_id, m.external_system),
+                key=lambda m: (m.task_id or "", m.external_system),
             )
         ],
     }
