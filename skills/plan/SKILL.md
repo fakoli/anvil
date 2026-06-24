@@ -79,15 +79,15 @@ The soft-gate design is deliberate: `find-decisions` non-empty does NOT block pl
 Invoke `anvil plan` yourself — via Bash, the MCP `plan_tasks` tool when available, or whichever execution primitive the runtime exposes:
 
 ```bash
-anvil plan
+anvil plan           # add --prd <prd_id> to scope to one named release PRD
 ```
 
-Reads the parsed PRD from `state.db` and emits `feature.created` and `task.created` events. Dependency inference and conflict-group detection run automatically — tasks that share `likely_files` entries are grouped into the same conflict group.
+Reads the parsed PRD from `state.db` and emits `feature.created` and `task.created` events. **Multi-PRD scoping:** `plan` (and its orphan-prune below) operates on the **selected PRD only** — pass `--prd <prd_id>` to plan a named release PRD; omit it for the default. Dependency inference and conflict-group detection run automatically — tasks that share `likely_files` entries are grouped into the same conflict group. **Read-only note:** conflict groups span **ALL PRDs**, not just the one you planned — `anvil next` will not route two file-overlapping tasks across PRDs into parallel claims, so a `v0.2` task colliding on a file with an active `default` claim stays blocked until that claim clears.
 
 **The CLI now GUARANTEES tasks AND orphan-free state (v1.15.0).** Two integrity guarantees were added together in v1.15.0:
 
 1. If the PRD has features+requirements but no `## Tasks` section, `plan` calls the LLM itself to generate them (instead of silently returning `0 tasks` and forcing the agent to dispatch a separate planner subagent).
-2. If tasks were removed from the PRD between parses, `plan` emits `task.deleted` events automatically so state.db stays in sync (instead of leaving orphans behind). Same for features. Safe statuses (proposed / drafted / ready) prune silently; unsafe statuses (claimed / in_progress / needs_review / …) fail loudly with a clear list and the `--prune-force` escape hatch. Tasks with claims/evidence rows can NEVER be deleted at the SQL layer (the audit history is FK-protected by schema).
+2. If tasks were removed from the selected PRD between parses, `plan` emits `task.deleted` events automatically so state.db stays in sync (instead of leaving orphans behind). Same for features. The prune is scoped to the planned PRD's partition — other PRDs' tasks are never touched. Safe statuses (proposed / drafted / ready) prune silently; unsafe statuses (claimed / in_progress / needs_review / …) fail loudly with a clear list and the `--prune-force` escape hatch. Tasks with claims/evidence rows can NEVER be deleted at the SQL layer (the audit history is FK-protected by schema).
 
 The output line tells you what happened. A plain run prints `Planned N features, M tasks.`; when the LLM backstop fired, the line names the count and the exact PRD file it appended to:
 
