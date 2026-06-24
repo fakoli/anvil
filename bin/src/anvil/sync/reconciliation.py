@@ -741,6 +741,10 @@ class ReconciliationEngine:
                     ),
                     payload={
                         "task_id": task.id,
+                        # Owning PRD partition (v0.3 multi-PRD, T028): attribute
+                        # the discrepancy to the task's PRD so operators can scope
+                        # a sync gap to a single release/milestone plan.
+                        "prd_id": task.prd_id,
                         "missing_provider": provider_id,
                         "configured_providers": list(self._configured_providers),
                     },
@@ -761,10 +765,24 @@ class ReconciliationEngine:
         and the drift scan was blind to the fact that the remote was
         gone — operators had to grep stderr to discover dangling
         references.
+
+        T028 (v0.3 multi-PRD): ``list_sync_mappings`` now also yields
+        ``entity_kind='prd'`` (milestone/release-level) rows. Those carry a
+        null ``task_id`` and represent a PRD's milestone, not a task — so the
+        task-shaped drift discrepancy (``target_id=task_id``, task-scoped
+        suggested fix) does not apply. Skip them here; milestone drift is a
+        separate, deferred reconciliation kind (see backlog T029). Each
+        surviving task-kind discrepancy gains ``payload['prd_id']`` (the
+        mapping's owning PRD) so a drift can be attributed to one release.
         """
         now = self._clock.now()
         out: list[Discrepancy] = []
         for mapping in self._backend.list_sync_mappings():
+            # Milestone (prd-kind) mappings are owned by a PRD, not a task, and
+            # carry a null task_id — there is no task-shaped drift to report for
+            # them. Skip; milestone drift is tracked separately (T029, deferred).
+            if mapping.entity_kind == "prd":
+                continue
             state_str = str(mapping.sync_state)
             in_conflict = state_str == "conflict"
             externally_deleted = state_str == "external_deleted"
@@ -821,6 +839,10 @@ class ReconciliationEngine:
                 suggested_fix=fix,
                 payload={
                     "task_id": mapping.task_id,
+                    # Owning PRD partition (v0.3 multi-PRD, T028): attribute the
+                    # drift to the mapping's PRD so a stale/conflicted sync can be
+                    # scoped to a single release plan.
+                    "prd_id": mapping.prd_id,
                     "external_system": str(mapping.external_system),
                     "sync_state": str(mapping.sync_state),
                     "last_synced_at": mapping.last_synced_at.isoformat(),

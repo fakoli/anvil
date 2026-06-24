@@ -374,6 +374,74 @@ def test_serialize_state_requirements_reflect_parsed_prd(tmp_path: Path) -> None
         b.close()
 
 
+def test_serialize_state_sorts_prd_kind_sync_mappings_with_null_task_id() -> None:
+    """The sync_mappings sort tolerates a prd-kind mapping's null task_id.
+
+    T028: a prd-kind (milestone) mapping carries ``task_id=None``. The snapshot
+    sorts mappings by ``(task_id, external_system)``; comparing ``None`` against
+    a ``str`` task_id raises ``TypeError`` and would abort every snapshot. This
+    drives serialize_state with a stub backend whose ``list_sync_mappings``
+    yields a prd-kind row alongside a task-kind one, asserting the sort does not
+    raise and the null-task_id mapping orders ahead of the task-kind one.
+    """
+    from anvil.state.models import SyncMapping
+
+    prd_mapping = SyncMapping(
+        task_id=None,
+        prd_id="default",
+        entity_kind="prd",
+        external_system="github_issues",
+        external_id="milestone-1",
+        last_synced_at=_T0,
+    )
+    task_mapping = SyncMapping(
+        task_id="T001",
+        external_system="github_issues",
+        external_id="42",
+        last_synced_at=_T0,
+    )
+
+    class _StubBackend:
+        """Minimal read-only backend exercising the sync_mappings sort path."""
+
+        def get_project(self) -> None:
+            return None
+
+        def get_prd(self) -> None:
+            return None
+
+        def list_features(self) -> list[Any]:
+            return []
+
+        def list_tasks(self) -> list[Any]:
+            return []
+
+        def list_claims(self) -> list[Any]:
+            return []
+
+        def list_reviews(self) -> list[Any]:
+            return []
+
+        def list_evidence(self) -> list[Any]:
+            return []
+
+        def list_requirements(self) -> list[Any]:
+            return []
+
+        def list_sync_mappings(self) -> list[SyncMapping]:
+            # Return the task-kind row first to prove the sort (not input order)
+            # is what places the null-task_id prd-kind row ahead of it.
+            return [task_mapping, prd_mapping]
+
+    snap = serialize_state(_StubBackend())  # type: ignore[arg-type]
+
+    # The sort completed without TypeError, and the null-task_id (prd-kind)
+    # mapping sorts ahead of the task-kind one ("" < "T001").
+    assert [m["task_id"] for m in snap["sync_mappings"]] == [None, "T001"]
+    # Still fully JSON-serialisable.
+    json.dumps(snap, sort_keys=True)
+
+
 # ===========================================================================
 # T009/F006: `anvil migrate state` — promote the in-init schema
 # migration to an explicit, backed-up, dry-run-by-default command.
