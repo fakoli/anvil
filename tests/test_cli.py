@@ -1434,6 +1434,33 @@ def _events_of_action(tmp_path: Path, action: str) -> list[dict]:  # type: ignor
     return out
 
 
+class TestPrdList:
+    def test_prd_list_text_and_json(self, tmp_path: Path) -> None:
+        """`anvil prd list` lists the PRDs (text + --json); the default is marked.
+
+        T031: Step 0 of the prd skill ("select or create the PRD") cites
+        `anvil prd list`; this command exists and the skill/CLI contract guard
+        (test_skill_cli_contract) requires every cited command to resolve.
+        """
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+
+        text = _invoke_cmd(tmp_path, ["prd", "list"])
+        assert text.exit_code == 0, text.output
+        assert "default" in text.output
+        assert "*" in text.output  # default-PRD marker
+
+        rj = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
+        assert rj.exit_code == 0, rj.output
+        env = json.loads(rj.output)
+        assert env["ok"] and env["command"] == "prd list"
+        prds = env["data"]["prds"]
+        assert {p["id"] for p in prds} == {"default"}
+        assert prds[0]["is_default"] is True
+        assert prds[0]["status"] == "draft"
+
+
 class TestPrdReparse:
     def test_first_parse_emits_parsed_reparse_emits_revised_with_diff(
         self, tmp_path: Path

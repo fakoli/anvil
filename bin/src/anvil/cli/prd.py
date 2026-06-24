@@ -433,6 +433,64 @@ def _truncate(text: str, limit: int = _CONTEXT_TRUNCATE) -> str:
     return flat[: limit - 1].rstrip() + "…"
 
 
+@prd_app.command("list")
+def prd_list(
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the current working directory.",
+        hidden=True,
+    ),
+) -> None:
+    """List every PRD in the project — the multi-PRD entry point.
+
+    Shows each release-scoped PRD (id, status, revision, target version/tag) so you
+    can pick which one to work on; the default PRD is marked ``*``. A single-PRD
+    project lists just the default PRD. Read-only.
+    """
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command="prd list", json_output=json_output)
+
+    backend = _open_backend(state_dir)
+    try:
+        # Default PRD first, then by id, so the canonical partition leads.
+        prds = sorted(backend.list_prds(), key=lambda p: (not p.is_default, p.id))
+    finally:
+        backend.close()
+
+    if json_output:
+        emit_success(
+            "prd list",
+            {
+                "prds": [
+                    {
+                        "id": p.id,
+                        "status": p.status.value,
+                        "revision": p.revision,
+                        "is_default": p.is_default,
+                        "title": p.title,
+                        "target_version": p.target_version,
+                        "target_tag": p.target_tag,
+                    }
+                    for p in prds
+                ]
+            },
+        )
+        return
+
+    if not prds:
+        typer.echo("No PRDs yet. Run `anvil prd parse` to create one.")
+        return
+
+    for p in prds:
+        marker = "*" if p.is_default else " "
+        target = p.target_version or p.target_tag
+        suffix = f" -> {target}" if target else ""
+        title = f"  {p.title}" if p.title else ""
+        typer.echo(f"{marker} {p.id}  [{p.status.value} r{p.revision}]{suffix}{title}")
+
+
 @prd_app.command("find-decisions")
 def prd_find_decisions(
     file: Path | None = typer.Option(  # noqa: B008

@@ -21,14 +21,14 @@ Turn a `ready` task into an active claim: a persisted claim record with a 60-min
 
 ## Prerequisites
 
-anvil must be initialized and the PRD must be in `reviewed` or `approved` status. Confirm before proceeding:
+anvil must be initialized, and a ready task is claimable **iff its OWNING PRD is in `reviewed` or `approved` status**. A project can hold several release-scoped PRDs, each gated separately — the task id names its PRD (e.g. `v0.2:T001` is owned by the `v0.2` PRD; a bare `T001` by the default PRD), and the gate keys on that PRD, not on any single project-wide status. Confirm before proceeding:
 
 ```bash
 anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
 anvil status
 ```
 
-Plain `anvil status` prints a `PRD:` line; look for `PRD:           reviewed` or `PRD:           approved`. The claim gate enforces this: `anvil claim` raises `ClaimError` when the PRD is in `draft`, `rejected`, or absent. `reviewed` and `approved` both pass. If the PRD is still `draft`, run `anvil prd review` (or `--approve`) first, or proceed to `/anvil:prd`.
+`anvil status` prints one block per PRD with its status. The claim gate enforces per-PRD: `anvil claim` raises `ClaimError` when the task's owning PRD is `draft`, `rejected`, or absent; `reviewed` and `approved` both pass. So a `default` task can be claimable while a `v0.2` task is gated, and vice versa. If the owning PRD is still `draft`, run `anvil prd review --prd <prd_id>` (or `--approve`) first, or proceed to `/anvil:prd`. (`claim`/`release`/`renew` take no `--prd` flag — the task id already names its PRD.)
 
 Commands used in this skill (all ship today; confirm any with `anvil <cmd> --help`):
 
@@ -59,7 +59,7 @@ Returns the single highest-priority `ready` task with no unmet dependencies and 
 
 If the user wants to see the full ready queue rather than the top pick, run `anvil list --status ready` yourself and present it.
 
-If `next` returns nothing, the queue is empty, fully claimed, or PRD-gated. Run `anvil status` yourself and diagnose inline: read the `PRD:` line, the `Tasks:` line (`N total (M ready, ...)`), and the `Active claims:` count, then tell the user what's blocking and what to do about it. A non-zero ready count alongside a `PRD:` that is neither `reviewed` nor `approved` means the PRD gate is blocking all claims; the ready count is accurate, but the gate is closed.
+If `next` returns nothing, the queue is empty, fully claimed, or PRD-gated. Run `anvil status` yourself and diagnose inline. The claim gate is **per-PRD**: each task is gated by its OWNING PRD's status, not by the project-total `PRD:` line under `PROJECT TOTAL`. So read the per-PRD blocks (`PRD <id> (<status>)`, each with its own `Tasks:` and `Active claims:` lines) — find the block whose status is neither `reviewed` nor `approved` yet still shows a non-zero ready count: that PRD's gate is closed and is hiding its ready tasks from `next`. On a multi-PRD project the project-total `PRD:` line can read `approved` while a specific PRD owning the ready task is still `draft`, so do **not** conclude "the gate is open" from that line alone. Tell the user which PRD is blocking and to run `anvil prd review --prd <id>` (or `--approve`) on it.
 
 ---
 
@@ -96,10 +96,10 @@ Invoke `anvil claim TASK_ID` yourself once the user confirms. The command perfor
 anvil claim T012
 ```
 
-The manager checks two conflict conditions before issuing the lease:
+The manager checks two conflict conditions before issuing the lease. **Both span ALL active claims regardless of PRD** — a `default`-PRD task and a `v0.2`-PRD task that touch the same file still collide, so the gate protects the whole working tree, not just one release's slice:
 
-1. **File overlap**: another active claim by a different actor has at least one file in common with the `likely_files` of T012.
-2. **Conflict group**: T012 belongs to a `conflict_group` that already has an active claim on a sibling task.
+1. **File overlap**: any other active claim by a different actor (in any PRD) has at least one file in common with the `likely_files` of T012.
+2. **Conflict group**: T012 belongs to a `conflict_group` that already has an active claim on a sibling task. Conflict groups are computed across all PRDs, so a sibling in a different release PRD counts.
 
 If either condition is true and `--force` is not passed, `claim` refuses (exit 1) and prints the overlapping claim ID, the other actor's identity, and the overlapping files. Example:
 
