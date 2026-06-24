@@ -6,6 +6,12 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-23
+
+Multi-PRD, revisable, partitioned state: a project holds several release-scoped
+PRDs in one `state.db`, gated per-PRD and coordinated globally, with
+event-sourced (revisable) PRDs and schema migration v6 -> v7 -> v8.
+
 ### Added
 
 - **Schema v8 — per-PRD `revision` counter (v0.3 T023).** `prds` gains a

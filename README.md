@@ -9,13 +9,13 @@
 > Durable, evidence-gated, lease-coordinated state for multi-agent software work.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Plugin Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](.claude-plugin/plugin.json)
+[![Plugin Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](.claude-plugin/plugin.json)
 [![Marketplace](https://img.shields.io/badge/marketplace-fakoli-purple.svg)](https://github.com/fakoli/anvil)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests)
 
 </div>
 
-> **Beta — v0.1.2.** The core loop works today; command surfaces and APIs may change before 1.0.
+> **Beta — v0.3.0.** The core loop works today; command surfaces and APIs may change before 1.0.
 
 ---
 
@@ -225,7 +225,7 @@ The Iron Rule (review agents never `Edit`/`Write`) is enforced at the `tools:` f
 
 ## Status
 
-Anvil is in beta (v0.1.2). The full PRD → plan → claim → execute → verify → finish loop works today, plus GitHub Issues sync and multi-provider LLM support. Known gaps and hardening are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md); the near-term focus is correctness for claim races, evidence gates, and replay before adding more surface. Linear and Monday providers, webhook sync, and immediate-apply conflict resolution are tracked in [`docs/roadmap.md`](docs/roadmap.md).
+Anvil is in beta (v0.3.0). The full PRD → plan → claim → execute → verify → finish loop works today, plus GitHub Issues sync and multi-provider LLM support. Known gaps and hardening are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md); the near-term focus is correctness for claim races, evidence gates, and replay before adding more surface. Linear and Monday providers, webhook sync, and immediate-apply conflict resolution are tracked in [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
