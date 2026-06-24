@@ -62,24 +62,32 @@
       "title": "Feature F001"
     }
   ],
-  "prd": {
-    "acceptance_criteria": [
-      "Golden snapshot matches."
-    ],
-    "goals": [
-      "Ship SL-1."
-    ],
-    "last_reviewed_at": "2026-05-24T18:00:00Z",
-    "last_reviewed_by": "alice",
-    "non_goals": [],
-    "open_questions": [],
-    "requirements": [
-      "R001"
-    ],
-    "risks": [],
-    "status": "reviewed",
-    "summary": "Build the thing."
-  },
+  "prds": [
+    {
+      "acceptance_criteria": [
+        "Golden snapshot matches."
+      ],
+      "goals": [
+        "Ship SL-1."
+      ],
+      "id": "default",
+      "is_default": true,
+      "last_reviewed_at": "2026-05-24T18:00:00Z",
+      "last_reviewed_by": "alice",
+      "non_goals": [],
+      "open_questions": [],
+      "requirements": [
+        "R001"
+      ],
+      "revision": 1,
+      "risks": [],
+      "status": "reviewed",
+      "summary": "Build the thing.",
+      "target_tag": null,
+      "target_version": null,
+      "title": ""
+    }
+  ],
   "project": {
     "created_at": "2026-05-24T18:00:00Z",
     "description": "A realistic replay-equivalence fixture.",
@@ -91,7 +99,10 @@
     {
       "derived": false,
       "id": "R001",
+      "prd_id": "default",
       "prd_section": "requirements",
+      "revision_introduced": 1,
+      "revision_superseded": null,
       "source_paragraph": null,
       "text": "Replay must reproduce canonical state."
     }

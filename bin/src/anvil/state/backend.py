@@ -178,16 +178,25 @@ class Backend(Protocol):
         ...
 
     def list_requirements(
-        self, *, prd_id: str | None = None
+        self, *, prd_id: str | None = None, include_superseded: bool = False
     ) -> list[Requirement]:
         """Return Requirement rows sorted by id ASC.
 
-        Used by serialize_state to capture the full requirement set written
-        by prd.parsed.  The id-based ordering is deterministic because
-        requirement IDs are assigned at parse time and never mutate.
+        The id-based ordering is deterministic because requirement IDs are
+        assigned at parse time and never mutate.
+
+        T023 — by default returns only the LIVE set (``revision_superseded IS
+        NULL``): ``prd.revised`` is non-destructive (a superseded requirement
+        keeps its row for lineage), so superseded rows are filtered out. A
+        single-parse PRD has every row live, so this is unchanged for the
+        pre-revision shape.
+
+        ``include_superseded=True`` returns the full lineage (live + superseded)
+        — used by serialize_state so the replay-equivalence oracle compares
+        superseded-row lineage, not just the live set.
 
         ``prd_id`` (T009): ``None`` means all PRDs (unchanged), an explicit id
-        scopes to ``WHERE prd_id = ?``.
+        scopes to ``AND prd_id = ?``.
         """
         ...
 
@@ -252,6 +261,26 @@ class Backend(Protocol):
 
         Args:
             events_path: Absolute path to the JSONL event log to replay.
+        """
+        ...
+
+    def replay_to_event_id(self, events_path: str, stop_after_event_id: str) -> None:
+        """Reconstruct state.db AS OF a bounded prefix of the log (read-only).
+
+        Like :meth:`replay_from_empty`, but stops after applying the event whose
+        id equals ``stop_after_event_id`` — every event ordered after it is left
+        unapplied, rebuilding the projection exactly as it stood when that event
+        committed. Reuses the same apply path and per-mode (local/git) ordering
+        and torn-trailing-line tolerance as ``replay_from_empty``, so the rebuilt
+        prefix is byte-identical to the prefix a full replay would produce.
+
+        Read-only: writes only the projection, never appends to ``events.jsonl``.
+        Raises ``ValueError`` if ``stop_after_event_id`` is absent from the log.
+
+        Args:
+            events_path: Absolute path to the JSONL event log to replay.
+            stop_after_event_id: The last event id to apply; events after it in
+                canonical order are skipped.
         """
         ...
 

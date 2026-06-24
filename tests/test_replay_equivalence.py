@@ -50,6 +50,7 @@ import pytest
 from anvil.clock import FrozenClock
 from anvil.state import models, payloads
 from anvil.state.models import DEFAULT_PRD_ID, EventDraft
+from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
 
@@ -79,16 +80,24 @@ def _load_golden() -> dict[str, Any]:
         return json.load(fh)
 
 
-def _make_backend(state_dir: Path, *, db_name: str = "state.db") -> SqliteBackend:
+def _make_backend(
+    state_dir: Path, *, db_name: str = "state.db", storage: str = "local"
+) -> SqliteBackend:
     """A fresh, initialized SqliteBackend rooted under ``state_dir``.
 
     Uses a FrozenClock so any clock read during append/replay is deterministic.
-    Both paths are fully deterministic.
+    Both paths are fully deterministic. ``storage`` selects the events backend
+    ('local' default; 'git' exercises the HLC-ordered git replay paths).
     """
     db_path = str(state_dir / db_name)
     events_path = str(state_dir / "events.jsonl")
     Path(events_path).touch()
-    b = SqliteBackend(db_path=db_path, events_path=events_path, clock=FrozenClock(_T0))
+    b = SqliteBackend(
+        db_path=db_path,
+        events_path=events_path,
+        clock=FrozenClock(_T0),
+        events_storage=storage,
+    )
     b.initialize()
     return b
 
@@ -187,7 +196,7 @@ def test_replayed_state_is_well_formed(tmp_path: Path) -> None:
         snap = _serialize(replay)
 
         assert set(snap.keys()) == {
-            "project", "prd", "features", "tasks",
+            "project", "prds", "features", "tasks",
             "claims", "reviews", "evidence", "requirements", "sync_mappings",
         }, (
             f"serialize_state returned unexpected keys {set(snap.keys())}. "
@@ -195,7 +204,8 @@ def test_replayed_state_is_well_formed(tmp_path: Path) -> None:
             "the expected key set here AND regenerate the fixture."
         )
         assert snap["project"] is not None
-        assert snap["prd"] is not None
+        # T024: a single-PRD log emits exactly one prds entry, the default PRD.
+        assert [p["id"] for p in snap["prds"]] == [DEFAULT_PRD_ID]
 
         # Three tasks were created.
         assert {t["id"] for t in snap["tasks"]} == {"T001", "T002", "T003"}
@@ -427,8 +437,8 @@ def test_pre_v7_log_replays_every_row_into_default_prd(tmp_path: Path) -> None:
     try:
         replay.replay_from_empty(str(_EVENTS_PATH))
 
-        # The v7 schema is stamped (replay re-creates the schema on open).
-        assert replay.get_schema_version() == 7
+        # The current schema is stamped (replay re-creates the schema on open).
+        assert replay.get_schema_version() == SCHEMA_VERSION
 
         # The scenario produced real rows in every partitioned table (vacuity
         # guard — an all-empty DB would pass the 'every row is default' check
@@ -549,8 +559,8 @@ def test_replay_from_empty_on_v7_reconstructs_same_task_statuses_and_claims(
     try:
         replay.replay_from_empty(str(_EVENTS_PATH))
 
-        # The replay re-created the schema at v7 (the engine's current version).
-        assert replay.get_schema_version() == 7
+        # The replay re-created the schema at the engine's current version.
+        assert replay.get_schema_version() == SCHEMA_VERSION
 
         golden = _load_golden()
         # Vacuity guard: the golden encodes a non-degenerate status/claim set.
@@ -627,22 +637,611 @@ def test_default_prd_id_is_single_source_for_migration_and_payloads() -> None:
         )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "2-PRD byte-compare oracle is DEFERRED to Phase 6: serialize_state "
-        "still emits a SINGLETON 'prd' and does not enumerate multiple PRDs, so "
-        "json.dumps(serialize_state(b), sort_keys=True) cannot yet be "
-        "byte-identical between a directly-built 2-PRD backend and its "
-        "replay_from_empty. Implement once serialize_state enumerates a sorted "
-        "'prds' collection (Phase 6); do NOT change serialize_state here."
-    ),
-    strict=True,
-    run=False,
-)
-def test_two_prd_replay_byte_equivalence_phase6() -> None:  # pragma: no cover
-    """TODO(Phase 6): directly-build a 2-PRD backend, replay_from_empty over the
-    same events, and assert json.dumps(serialize_state(b), sort_keys=True) is
-    byte-identical between the two. Blocked on serialize_state multi-PRD
-    enumeration (the singleton 'prd' key must become a sorted 'prds' list).
+def _req_dict(rid: str, text: str) -> dict[str, Any]:
+    """A minimal requirement dict for a prd.parsed / prd.revised diff list."""
+    return {
+        "id": rid,
+        "prd_section": "requirements",
+        "text": text,
+        "source_paragraph": None,
+        "derived": False,
+    }
+
+
+def _prd_event(action: str, payload: dict[str, Any], *, prd_id: str) -> EventDraft:
+    """A prd.* EventDraft targeting ``prd_id`` (the target_id the CLI stamps)."""
+    return EventDraft(
+        timestamp=_T0,
+        actor="test",
+        action=action,
+        target_kind="prd",
+        target_id=prd_id,
+        payload_json=payload,
+    )
+
+
+def _build_two_prd_multi_revision(
+    state_dir: Path, *, storage: str = "local"
+) -> SqliteBackend:
+    """Build a 2-PRD, multi-revision backend via the production write path
+    (``append``), which also writes events.jsonl for the replay half.
+
+    Scenario (deterministic, FrozenClock):
+      * default PRD parsed at rev1 with R200 + R210;
+      * a SECOND PRD 'v0.2' (is_default=False) parsed at rev1 with R001 + R002;
+      * default revised to rev2 — supersedes R210 (NEVER DELETE), adds R205;
+      * v0.2 revised to rev2 — pure-additive, adds R102.
+
+    The requirement ids are deliberately chosen so an id-only sort produces a
+    DIFFERENT order than the AC#1 (prd_id, revision_introduced, id) key — the
+    test exists to lock that key in, and a fixture whose ids already sort the
+    same way under both keys would let a revert to id-only sorting pass:
+
+      * Cross-partition interleave: v0.2 owns the LOW ids (R001, R002, R102)
+        while the default PRD owns the HIGH ids (R200, R210, R205). Under
+        id-only sorting the v0.2 rows would sort first; under the partition-aware
+        key the default rows ('default' < 'v0.2') sort first. The two orders
+        diverge.
+      * Within-partition revision interleave: in the default PRD a rev2 addition
+        (R205) has an id that sorts BEFORE a rev1 row (R210). Under id-only
+        sorting R205 precedes R210; under the (..., revision_introduced, id) key
+        the rev1 R210 precedes the rev2 R205. The two orders diverge here too.
+
+    The resulting state spans two partitions, two revisions, a superseded
+    lineage row, and id orderings that distinguish the mandated sort key from a
+    naive id-only one — exactly the shape a missed serialize_state sort key would
+    let diverge under replay.
     """
-    raise NotImplementedError("Phase 6: serialize_state multi-PRD enumeration")
+    b = _make_backend(state_dir, storage=storage)
+    # Project + state init (FK / gate preconditions).
+    b.append(
+        EventDraft(
+            timestamp=_T0, actor="test", action="project.created",
+            target_kind="project", target_id="proj-1",
+            payload_json={
+                "id": "proj-1", "name": "Two-PRD Project", "description": "",
+                "created_at": _T0.isoformat(), "updated_at": _T0.isoformat(),
+            },
+        )
+    )
+    b.append(
+        EventDraft(
+            timestamp=_T0, actor="test", action="state.initialized",
+            target_kind="project", target_id="proj-1", payload_json={},
+        )
+    )
+    # Default PRD, revision 1 — owns the HIGH ids (sort after v0.2's under
+    # id-only ordering, before them under the partition-aware key).
+    b.append(_prd_event(
+        "prd.parsed",
+        {
+            "project_id": "proj-1", "prd_id": DEFAULT_PRD_ID, "is_default": True,
+            "status": "draft", "summary": "default v1",
+            "requirements": [_req_dict("R200", "d one"), _req_dict("R210", "d two")],
+        },
+        prd_id=DEFAULT_PRD_ID,
+    ))
+    # Second, named PRD (is_default=False — the ux_prds_default invariant allows
+    # exactly one default), revision 1 — owns the LOW ids.
+    b.append(_prd_event(
+        "prd.parsed",
+        {
+            "project_id": "proj-1", "prd_id": "v0.2", "is_default": False,
+            "status": "draft", "summary": "v0.2 v1",
+            "requirements": [_req_dict("R001", "v one"), _req_dict("R002", "v two")],
+        },
+        prd_id="v0.2",
+    ))
+    # Revise the default PRD to revision 2: supersede R210, add R205. R205's id
+    # sorts BEFORE the rev1 R210 — so the rev-introduced key is exercised within
+    # this partition, not just across partitions.
+    b.append(_prd_event(
+        "prd.revised",
+        {
+            "project_id": "proj-1", "prd_id": DEFAULT_PRD_ID, "revision": 2,
+            "is_default": True, "status": "draft", "summary": "default v2",
+            "requirements_added": [_req_dict("R205", "d three")],
+            "requirements_superseded": [_req_dict("R210", "d two")],
+            "requirements_unchanged": [_req_dict("R200", "d one")],
+        },
+        prd_id=DEFAULT_PRD_ID,
+    ))
+    # Revise v0.2 to revision 2: pure-additive, add R102.
+    b.append(_prd_event(
+        "prd.revised",
+        {
+            "project_id": "proj-1", "prd_id": "v0.2", "revision": 2,
+            "is_default": False, "status": "draft", "summary": "v0.2 v2",
+            "requirements_added": [_req_dict("R102", "v three")],
+            "requirements_superseded": [],
+            "requirements_unchanged": [_req_dict("R001", "v one"),
+                                       _req_dict("R002", "v two")],
+        },
+        prd_id="v0.2",
+    ))
+    return b
+
+
+def test_two_prd_replay_byte_equivalence(tmp_path: Path) -> None:
+    """T024 — the 2-PRD half of the Phase 1 replay oracle.
+
+    Directly-build a 2-PRD, multi-revision backend via ``append``, replay the
+    same events.jsonl into a fresh backend, and assert
+    ``json.dumps(serialize_state(b), sort_keys=True)`` is byte-identical between
+    the two. This closes the byte-compare half that was deferred while
+    serialize_state still emitted a singleton ``prd`` — it now enumerates a
+    sorted ``prds`` list and partitions ``requirements`` by
+    ``(prd_id, revision_introduced, id)``.
+    """
+    normal_dir = tmp_path / "normal"
+    replay_dir = tmp_path / "replay"
+    normal_dir.mkdir()
+    replay_dir.mkdir()
+
+    normal = _build_two_prd_multi_revision(normal_dir)
+    replay = _make_backend(replay_dir)
+    try:
+        # Replay over the events the direct build appended.
+        replay.replay_from_empty(str(normal_dir / "events.jsonl"))
+
+        normal_snap = serialize_state(normal)
+        replay_snap = serialize_state(replay)
+
+        # Vacuity guard: the scenario really is multi-PRD / multi-revision.
+        assert [p["id"] for p in normal_snap["prds"]] == [DEFAULT_PRD_ID, "v0.2"]
+        assert [(p["id"], p["revision"]) for p in normal_snap["prds"]] == [
+            (DEFAULT_PRD_ID, 2), ("v0.2", 2),
+        ]
+        # The emitted requirement order, as a tuple lineage key. The fixture's
+        # ids are chosen so this order CANNOT be produced by an id-only sort
+        # (see _build_two_prd_multi_revision): v0.2 owns the low ids yet sorts
+        # AFTER the default partition, and within the default partition the rev2
+        # R205 sorts before the rev1 R210. This is the AC#1 order
+        # (prd_id, revision_introduced, id) — see _expected_order below.
+        def _req_keys(snap: dict[str, Any]) -> list[tuple[Any, ...]]:
+            return [
+                (r["prd_id"], r["revision_introduced"],
+                 r["revision_superseded"], r["id"])
+                for r in snap["requirements"]
+            ]
+
+        _expected_order = [
+            (DEFAULT_PRD_ID, 1, None, "R200"),
+            (DEFAULT_PRD_ID, 1, 2, "R210"),       # superseded, lineage retained
+            (DEFAULT_PRD_ID, 2, None, "R205"),    # rev2, but id < R210 (rev1)
+            ("v0.2", 1, None, "R001"),            # low id, yet sorts after default
+            ("v0.2", 1, None, "R002"),
+            ("v0.2", 2, None, "R102"),
+        ]
+        # Pin the order on BOTH halves — not just normal_snap — so the replayed
+        # backend's ordering is independently asserted (the byte-compare below
+        # alone cannot catch a sort-key bug shared by both serialize_state
+        # calls).
+        assert _req_keys(normal_snap) == _expected_order
+        assert _req_keys(replay_snap) == _expected_order
+
+        # Discrimination guard: the AC#1 order is NOT what an id-only sort would
+        # produce. If serialize_state ever reverts its requirements sort to
+        # key=rq.id, the emitted order would equal _id_only_order and this assert
+        # would fail FIRST — making the sort key a real, tested guarantee rather
+        # than one the byte-compare silently waves through.
+        _id_only_order = sorted(_expected_order, key=lambda k: k[3])
+        assert _expected_order != _id_only_order, (
+            "fixture regression: requirement ids no longer interleave across "
+            "partitions/revisions, so an id-only sort would be indistinguishable "
+            "from the AC#1 (prd_id, revision_introduced, id) key."
+        )
+        assert _req_keys(normal_snap) != _id_only_order, (
+            "serialize_state emitted requirements in id-only order — the AC#1 "
+            "(prd_id, revision_introduced, id) sort key has been reverted; "
+            "replay would silently fork on a multi-PRD / multi-revision DB."
+        )
+
+        assert json.dumps(normal_snap, sort_keys=True) == json.dumps(
+            replay_snap, sort_keys=True
+        ), (
+            "directly-built and replayed 2-PRD snapshots diverge — a missed "
+            "serialize_state sort key (prds by id, requirements by "
+            "(prd_id, revision_introduced, id)) lets replay silently fork on a "
+            "multi-PRD / multi-revision DB."
+        )
+    finally:
+        normal.close()
+        replay.close()
+
+
+# ---------------------------------------------------------------------------
+# T025 — bounded replay (replay_to_event_id)
+# ---------------------------------------------------------------------------
+
+
+def _event_id_for(events_path: Path, action: str, prd_id: str) -> str:
+    """Return the id of the (single) ``action`` event whose payload targets
+    ``prd_id`` in the committed log — used to bound replay_to_event_id."""
+    found: list[str] = []
+    with events_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            raw = json.loads(stripped)
+            if raw.get("action") != action:
+                continue
+            payload = raw.get("payload_json") or raw.get("payload") or {}
+            # The default PRD's prd.parsed omits prd_id (defaults to 'default');
+            # treat the missing key as the default partition.
+            ev_prd_id = payload.get("prd_id", DEFAULT_PRD_ID)
+            if ev_prd_id == prd_id:
+                found.append(raw["id"])
+    assert len(found) == 1, (
+        f"expected exactly one {action!r} event for prd_id {prd_id!r}, "
+        f"found {found!r}"
+    )
+    return found[0]
+
+
+def test_replay_to_event_id_bounds_default_prd_revision(tmp_path: Path) -> None:
+    """T025 AC#1 — bounded replay reconstructs the DB AS OF a chosen event.
+
+    Build the 2-PRD, multi-revision log; the default PRD is the
+    ``[prd.parsed(rev1), prd.revised(rev2)]`` lineage the AC names. Replaying and
+    stopping AFTER the rev1 ``prd.parsed`` must yield the rev1 live set
+    ({R200, R210}); stopping AFTER the rev2 ``prd.revised`` must yield the rev2
+    live set ({R200, R205}, with R210 superseded). Bounded replay is read-only:
+    it appends no new line to events.jsonl.
+    """
+    normal_dir = tmp_path / "normal"
+    normal_dir.mkdir()
+    normal = _build_two_prd_multi_revision(normal_dir)
+    normal.close()
+
+    events_path = normal_dir / "events.jsonl"
+    parsed_id = _event_id_for(events_path, "prd.parsed", DEFAULT_PRD_ID)
+    revised_id = _event_id_for(events_path, "prd.revised", DEFAULT_PRD_ID)
+    log_bytes_before = events_path.read_bytes()
+
+    # Stop AFTER the rev1 prd.parsed — the default PRD stands at revision 1 with
+    # its original two requirements, and the rev2 supersede has NOT applied.
+    at_rev1_dir = tmp_path / "at_rev1"
+    at_rev1_dir.mkdir()
+    at_rev1 = _make_backend(at_rev1_dir)
+    try:
+        at_rev1.replay_to_event_id(str(events_path), parsed_id)
+        prd = at_rev1.get_prd(DEFAULT_PRD_ID)
+        assert prd is not None
+        assert prd.revision == 1
+        live = [r.id for r in at_rev1.list_requirements(prd_id=DEFAULT_PRD_ID)]
+        assert live == ["R200", "R210"], live
+        # Bounded replay is read-only — the source log is untouched.
+        assert events_path.read_bytes() == log_bytes_before
+    finally:
+        at_rev1.close()
+
+    # Stop AFTER the rev2 prd.revised — R210 is superseded (lineage retained),
+    # R205 is the rev2 addition, and the PRD stands at revision 2.
+    at_rev2_dir = tmp_path / "at_rev2"
+    at_rev2_dir.mkdir()
+    at_rev2 = _make_backend(at_rev2_dir)
+    try:
+        at_rev2.replay_to_event_id(str(events_path), revised_id)
+        prd = at_rev2.get_prd(DEFAULT_PRD_ID)
+        assert prd is not None
+        assert prd.revision == 2
+        live = [r.id for r in at_rev2.list_requirements(prd_id=DEFAULT_PRD_ID)]
+        assert live == ["R200", "R205"], live
+        # The superseded R210 row survives (NEVER DELETE) — visible only with
+        # include_superseded=True, stamped with the revision that retired it.
+        full = {
+            r.id: r.revision_superseded
+            for r in at_rev2.list_requirements(
+                prd_id=DEFAULT_PRD_ID, include_superseded=True
+            )
+        }
+        assert full == {"R200": None, "R210": 2, "R205": None}, full
+    finally:
+        at_rev2.close()
+
+
+def test_replay_to_event_id_matches_full_replay_prefix(tmp_path: Path) -> None:
+    """T025 AC#1 — the bounded variant does not diverge from replay_from_empty.
+
+    Stopping AFTER the LAST event must reconstruct exactly what an unbounded
+    replay_from_empty produces (byte-identical serialize_state), proving the
+    bounded path reuses the same apply/ordering and tolerance and adds no skew.
+    A nonexistent stop id raises rather than silently replaying everything.
+    """
+    normal_dir = tmp_path / "normal"
+    normal_dir.mkdir()
+    normal = _build_two_prd_multi_revision(normal_dir)
+    normal.close()
+    events_path = normal_dir / "events.jsonl"
+
+    # The id of the last appended event (the v0.2 rev2 prd.revised).
+    last_id = _event_id_for(events_path, "prd.revised", "v0.2")
+
+    full_dir = tmp_path / "full"
+    bounded_dir = tmp_path / "bounded"
+    full_dir.mkdir()
+    bounded_dir.mkdir()
+    full = _make_backend(full_dir)
+    bounded = _make_backend(bounded_dir)
+    try:
+        full.replay_from_empty(str(events_path))
+        bounded.replay_to_event_id(str(events_path), last_id)
+        assert json.dumps(serialize_state(full), sort_keys=True) == json.dumps(
+            serialize_state(bounded), sort_keys=True
+        ), (
+            "bounded replay stopping after the last event diverged from "
+            "replay_from_empty — the bounded variant is not a faithful prefix."
+        )
+    finally:
+        full.close()
+        bounded.close()
+
+    # A stop id absent from the log is an error, not a silent full replay.
+    absent_dir = tmp_path / "absent"
+    absent_dir.mkdir()
+    absent = _make_backend(absent_dir)
+    try:
+        with pytest.raises(ValueError, match="not found"):
+            absent.replay_to_event_id(str(events_path), "E999999")
+    finally:
+        absent.close()
+
+
+def test_replay_to_event_id_interior_bound_is_genuine_prefix(
+    tmp_path: Path,
+) -> None:
+    """T025 AC#1 — bounding on an INTERIOR event reconstructs exactly the prefix
+    an independently-built log would produce.
+
+    The sibling ``..._matches_full_replay_prefix`` bounds on the LAST event, so
+    it only proves apply-all == apply-all and exercises no trimming. This test
+    closes that gap: it stops AFTER the default PRD's rev2 ``prd.revised`` (the
+    5th of 6 appended events — the v0.2 rev2 revision is excluded) and compares,
+    byte-for-byte, against a backend built by ``replay_from_empty`` over a log
+    TRUNCATED to exactly those first events. A bug that mis-orders or
+    double-applies interior events but still converges on the same FINAL state
+    would pass the last-event test yet diverge here.
+    """
+    normal_dir = tmp_path / "normal"
+    normal_dir.mkdir()
+    normal = _build_two_prd_multi_revision(normal_dir)
+    normal.close()
+    events_path = normal_dir / "events.jsonl"
+
+    # The interior stop: the default PRD's rev2 revision (excludes v0.2 rev2).
+    stop_id = _event_id_for(events_path, "prd.revised", DEFAULT_PRD_ID)
+
+    # Build the independent prefix log: every line up to AND INCLUDING the stop
+    # event, in file order. (Local mode applies in file order, so the truncated
+    # log's replay_from_empty IS the canonical prefix.)
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    cut = None
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if json.loads(line)["id"] == stop_id:
+            cut = i
+            break
+    assert cut is not None, "stop event not found in the log"
+    prefix_lines = lines[: cut + 1]
+    # Sanity: the bound really is interior — there are events AFTER it.
+    assert cut + 1 < len([line for line in lines if line.strip()]) or cut + 1 < len(
+        lines
+    ), "bound is not interior — there must be trailing events to trim"
+
+    prefix_dir = tmp_path / "prefix"
+    prefix_dir.mkdir()
+    prefix_events = prefix_dir / "events.jsonl"
+    prefix_events.write_text("\n".join(prefix_lines) + "\n", encoding="utf-8")
+
+    prefix = _make_backend(prefix_dir)
+    bounded_dir = tmp_path / "bounded"
+    bounded_dir.mkdir()
+    bounded = _make_backend(bounded_dir)
+    try:
+        prefix.replay_from_empty(str(prefix_events))
+        bounded.replay_to_event_id(str(events_path), stop_id)
+
+        prefix_snap = serialize_state(prefix)
+        bounded_snap = serialize_state(bounded)
+
+        # Vacuity guard: the prefix genuinely EXCLUDES the v0.2 rev2 revision —
+        # v0.2 stands at revision 1, not 2.
+        v02 = {p["id"]: p["revision"] for p in bounded_snap["prds"]}
+        assert v02["v0.2"] == 1, v02
+        assert v02[DEFAULT_PRD_ID] == 2, v02
+
+        assert json.dumps(bounded_snap, sort_keys=True) == json.dumps(
+            prefix_snap, sort_keys=True
+        ), (
+            "bounded replay to an INTERIOR event diverged from an independently "
+            "built prefix — the bounded variant is not a faithful prefix "
+            "(interior ordering / double-apply / off-by-one in the stop)."
+        )
+    finally:
+        prefix.close()
+        bounded.close()
+
+
+def test_replay_to_event_id_git_bounds_and_matches_full(tmp_path: Path) -> None:
+    """T025 — the git-mode half of bounded replay (``_replay_to_event_id_git``).
+
+    The local-mode tests use ``_make_backend`` (events_storage='local'), so the
+    ~80-line git branch — dedupe, HLC ``(lamport, ts, id)`` ordering, break after
+    the stop id, ``_max_lamport`` reseed — had ZERO coverage despite git events
+    being a real production mode. The T025 risk note names this branch as THE
+    divergence risk ('local/git mode behavior must match replay_from_empty
+    exactly'). This builds a git-mode 2-PRD multi-revision log and asserts:
+
+    * stopping after the default PRD's rev1 ``prd.parsed`` yields the rev1 live
+      set ({R200, R210}), with the rev2 supersede NOT applied;
+    * stopping after the LAST event is byte-identical to a full git
+      ``replay_from_empty`` (the bounded git path adds no skew);
+    * an absent stop id raises rather than silently replaying everything.
+    """
+    normal_dir = tmp_path / "normal"
+    normal_dir.mkdir()
+    normal = _build_two_prd_multi_revision(normal_dir, storage="git")
+    normal.close()
+    events_path = normal_dir / "events.jsonl"
+
+    parsed_id = _event_id_for(events_path, "prd.parsed", DEFAULT_PRD_ID)
+    last_id = _event_id_for(events_path, "prd.revised", "v0.2")
+    log_bytes_before = events_path.read_bytes()
+
+    # Bounded git replay stopping AFTER the default rev1 prd.parsed.
+    at_rev1_dir = tmp_path / "git_at_rev1"
+    at_rev1_dir.mkdir()
+    at_rev1 = _make_backend(at_rev1_dir, storage="git")
+    try:
+        at_rev1.replay_to_event_id(str(events_path), parsed_id)
+        prd = at_rev1.get_prd(DEFAULT_PRD_ID)
+        assert prd is not None and prd.revision == 1
+        live = [r.id for r in at_rev1.list_requirements(prd_id=DEFAULT_PRD_ID)]
+        assert live == ["R200", "R210"], live
+        # Read-only: the source log is untouched.
+        assert events_path.read_bytes() == log_bytes_before
+    finally:
+        at_rev1.close()
+
+    # Bounded-to-last git replay == full git replay_from_empty (no skew).
+    full_dir = tmp_path / "git_full"
+    bounded_dir = tmp_path / "git_bounded"
+    full_dir.mkdir()
+    bounded_dir.mkdir()
+    full = _make_backend(full_dir, storage="git")
+    bounded = _make_backend(bounded_dir, storage="git")
+    try:
+        full.replay_from_empty(str(events_path))
+        bounded.replay_to_event_id(str(events_path), last_id)
+        assert json.dumps(serialize_state(full), sort_keys=True) == json.dumps(
+            serialize_state(bounded), sort_keys=True
+        ), (
+            "git bounded replay stopping after the last event diverged from "
+            "_replay_from_empty_git — the git bounded variant forked (HLC "
+            "ordering, break placement, or _max_lamport reseed)."
+        )
+    finally:
+        full.close()
+        bounded.close()
+
+    # An absent stop id is an error, not a silent full git replay.
+    absent_dir = tmp_path / "git_absent"
+    absent_dir.mkdir()
+    absent = _make_backend(absent_dir, storage="git")
+    try:
+        with pytest.raises(ValueError, match="not found"):
+            absent.replay_to_event_id(str(events_path), "E999999")
+    finally:
+        absent.close()
+
+    # A torn TRAILING line must be tolerated by the git bounded path too:
+    # bounding on the last good event reconstructs the same state as the clean
+    # full git replay despite an interrupted final append.
+    torn_events = tmp_path / "git-torn-events.jsonl"
+    good_lines = [
+        line
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    torn_events.write_text(
+        "\n".join(good_lines) + "\n" + '{"id": "Etorn", "action": "prd.rev',
+        encoding="utf-8",
+    )
+    torn_dir = tmp_path / "git_torn"
+    torn_dir.mkdir()
+    torn = _make_backend(torn_dir, storage="git")
+    full2_dir = tmp_path / "git_full2"
+    full2_dir.mkdir()
+    full2 = _make_backend(full2_dir, storage="git")
+    try:
+        full2.replay_from_empty(str(events_path))
+        torn.replay_to_event_id(str(torn_events), last_id)
+        assert json.dumps(serialize_state(torn), sort_keys=True) == json.dumps(
+            serialize_state(full2), sort_keys=True
+        ), (
+            "git bounded replay did not tolerate a torn trailing line — it must "
+            "skip the interrupted final append and reconstruct the prefix."
+        )
+    finally:
+        torn.close()
+        full2.close()
+
+
+def test_replay_to_event_id_tolerates_torn_trailing_line(tmp_path: Path) -> None:
+    """T025 — torn-trailing-line tolerance is a named AC ('must match
+    replay_from_empty exactly'), and the bounded local path has dedicated
+    handling (is_last → break on JSONDecodeError / Event.model_validate
+    failure), yet no test fed a torn trailing line to ``replay_to_event_id``.
+
+    A torn (truncated) LAST line must be tolerated — the bound stops at the last
+    GOOD interior event and reconstructs its prefix — while a malformed INTERIOR
+    line must RAISE (corruption mid-log is not recoverable). Both branches were
+    uncovered.
+    """
+    normal_dir = tmp_path / "normal"
+    normal_dir.mkdir()
+    normal = _build_two_prd_multi_revision(normal_dir)
+    normal.close()
+    events_path = normal_dir / "events.jsonl"
+
+    lines = [
+        line
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    # Bound on the last GOOD event (the v0.2 rev2 prd.revised), which is the
+    # final line; we then append a torn trailing line AFTER it.
+    last_good_id = _event_id_for(events_path, "prd.revised", "v0.2")
+
+    # --- Torn TRAILING line is tolerated -----------------------------------
+    torn_dir = tmp_path / "torn"
+    torn_dir.mkdir()
+    torn_events = torn_dir / "events.jsonl"
+    # A half-written JSON object as the final line (no trailing newline — a
+    # classic interrupted append).
+    torn_events.write_text(
+        "\n".join(lines) + "\n" + '{"id": "E000007", "action": "prd.rev',
+        encoding="utf-8",
+    )
+
+    clean_dir = tmp_path / "clean"
+    clean_dir.mkdir()
+    clean = _make_backend(clean_dir)
+    torn = _make_backend(torn_dir)
+    try:
+        clean.replay_from_empty(str(events_path))
+        # Bounding on the last good event must succeed despite the torn tail and
+        # reconstruct exactly the clean full state.
+        torn.replay_to_event_id(str(torn_events), last_good_id)
+        assert json.dumps(serialize_state(torn), sort_keys=True) == json.dumps(
+            serialize_state(clean), sort_keys=True
+        ), (
+            "bounded replay did not tolerate a torn trailing line — it must "
+            "skip the interrupted final append and reconstruct the prefix."
+        )
+    finally:
+        clean.close()
+        torn.close()
+
+    # --- Malformed INTERIOR line RAISES ------------------------------------
+    # Corrupt an interior line (the 3rd), keep valid lines after it so the bad
+    # line is NOT the last → the bounded path must raise, not silently skip.
+    # The corrupt file is a STANDALONE artifact passed to replay_to_event_id;
+    # the backend itself is rooted in a CLEAN dir so initialize() does not read
+    # (and choke on) the corrupt log before the bounded replay runs.
+    corrupt_events = tmp_path / "corrupt-events.jsonl"
+    corrupt_lines = list(lines)
+    corrupt_lines[2] = '{"id": "E000003", broken'
+    corrupt_events.write_text("\n".join(corrupt_lines) + "\n", encoding="utf-8")
+
+    corrupt_dir = tmp_path / "corrupt"
+    corrupt_dir.mkdir()
+    corrupt = _make_backend(corrupt_dir)
+    try:
+        with pytest.raises(ValueError, match="interior"):
+            corrupt.replay_to_event_id(str(corrupt_events), last_good_id)
+    finally:
+        corrupt.close()

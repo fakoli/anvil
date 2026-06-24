@@ -38,8 +38,9 @@ Version history
 - v7: v0.3 multi-PRD persistence foundation (T002). The singleton ``prds``
   table becomes a multi-row table keyed on a single-column ``id`` PRIMARY KEY
   (NOT composite) and gains title/target_version/target_tag/is_default/
-  created_at/updated_at; a partial unique index ``ux_prds_default`` enforces
-  at most one default PRD. ``requirements``/``features``/``tasks`` each gain a
+  created_at/updated_at; a partial unique index ``ux_prds_default``
+  enforces at most one default PRD. ``requirements``/``features``/``tasks``
+  each gain a
   ``prd_id`` partition column (TEXT NOT NULL DEFAULT 'default'); ``requirements``
   also gains nullable ``revision_introduced``/``revision_superseded`` lineage
   columns. ``sync_mappings`` gains ``prd_id``/``entity_kind`` partition columns.
@@ -50,11 +51,20 @@ Version history
   column has a DEFAULT so the existing INSERT statements (which never mention
   the new columns) keep working unchanged — Phase 0 is purely additive at the
   write layer.
+- v8: v0.3 multi-PRD revisions (T023). ``prds`` gains ``revision`` — the per-PRD
+  monotonic revision counter (INTEGER NOT NULL DEFAULT 1) bumped by
+  ``prd.revised``. Purely additive: the v7->v8 migration ALTER-adds the column
+  with a DEFAULT, so every pre-existing v7 PRD row backfills to revision 1.
+  This is a SEPARATE schema version (NOT folded into v7) because v7 already
+  shipped without ``revision``; a DB already stamped at v7 must re-enter the
+  migration ladder via the v8 bump to grow the column — modifying v7 in place
+  would leave those DBs missing the column (the version-equal early-return
+  skips the ladder).
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 7
+SCHEMA_VERSION: int = 8
 
 
 def get_schema_version() -> int:
@@ -111,6 +121,7 @@ CREATE TABLE IF NOT EXISTS prds (
     target_version              TEXT,
     target_tag                  TEXT,
     is_default                  INTEGER NOT NULL DEFAULT 0,
+    revision                    INTEGER NOT NULL DEFAULT 1,
     created_at                  TEXT,
     updated_at                  TEXT
 );

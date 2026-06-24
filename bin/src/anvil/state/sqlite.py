@@ -74,6 +74,7 @@ from anvil.state.payloads import (
     PrdDecisionResolvedPayload,
     PrdParsedPayload,
     PrdReviewedPayload,
+    PrdRevisedPayload,
     ProgressNotedPayload,
     ProjectCreatedPayload,
     StateInitializedPayload,
@@ -803,6 +804,219 @@ class SqliteBackend:
         finally:
             self._replaying = False
 
+    def replay_to_event_id(self, events_path: str, stop_after_event_id: str) -> None:
+        """Reconstruct state.db AS OF a bounded prefix of the log (read-only).
+
+        Like :meth:`replay_from_empty`, but stops after applying the event whose
+        id equals ``stop_after_event_id`` — every event ordered after it is left
+        unapplied. This rebuilds the projection exactly as it stood the instant
+        that event committed, which is how a caller inspects a PRD at an earlier
+        revision: replaying ``[prd.parsed(rev1), prd.revised(rev2)]`` and
+        stopping after the ``prd.parsed`` id yields the rev1 live set; stopping
+        after the ``prd.revised`` id yields the rev2 set.
+
+        Bounded replay reuses the SAME ``_apply_write_only`` path and the SAME
+        per-mode ordering / torn-trailing-line tolerance as
+        :meth:`replay_from_empty`, so the rebuilt prefix is byte-identical to the
+        prefix a full replay would produce — there is no second apply
+        implementation and no divergence between the bounded and unbounded
+        variants.
+
+        - **Local mode**: events apply in file order (the canonical local order),
+          stopping after the line whose id matches.
+        - **Git mode**: events apply in hybrid-logical-clock order
+          ``(lamport, ts, id)`` after deduping by id — identical to
+          ``_replay_from_empty_git`` — stopping after the matching id in that
+          order.
+
+        Read-only: applying via ``_apply_write_only`` writes ONLY the projection
+        (state.db); no new line is appended to events.jsonl. The counter
+        (``_next_seq`` / ``_max_lamport``) is re-seeded from the events that were
+        actually applied, so a subsequent append would continue from the bounded
+        prefix — callers using this for inspection should treat the backend as
+        a throwaway snapshot.
+
+        Raises ``ValueError`` if ``stop_after_event_id`` is not found in the log
+        (an unbounded replay would have applied a different set, so silently
+        replaying everything would be a lie about the bound).
+        """
+        if self._events_storage == "git":
+            self._replay_to_event_id_git(events_path, stop_after_event_id)
+            return
+
+        # Close existing connection.
+        self.close()
+
+        # Delete the database file (and any WAL/SHM sidecars).
+        for suffix in ("", "-wal", "-shm"):
+            path = self._db_path + suffix
+            if os.path.exists(path):
+                os.remove(path)
+
+        self._replaying = True
+        try:
+            self.initialize()
+
+            if not os.path.exists(events_path):
+                raise ValueError(
+                    f"replay_to_event_id: events.jsonl does not exist but "
+                    f"stop_after_event_id {stop_after_event_id!r} was requested."
+                )
+
+            conn = self._require_conn()
+            last_event_id = 0
+            found = False
+
+            with open(events_path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+
+            for i, raw_line in enumerate(lines):
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+
+                is_last = i == len(lines) - 1
+
+                try:
+                    raw: dict[str, Any] = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    if is_last:
+                        logger.debug(
+                            "replay_to_event_id: skipping torn trailing line "
+                            "(line %d): %s",
+                            i + 1,
+                            exc,
+                        )
+                        break
+                    raise ValueError(
+                        f"replay_to_event_id: malformed JSON on interior line "
+                        f"{i + 1}: {exc}"
+                    ) from exc
+
+                try:
+                    event = Event.model_validate(raw)
+                except Exception as exc:
+                    if is_last:
+                        logger.debug(
+                            "replay_to_event_id: skipping invalid trailing event "
+                            "(line %d): %s",
+                            i + 1,
+                            exc,
+                        )
+                        break
+                    raise ValueError(
+                        f"replay_to_event_id: cannot parse Event on interior line "
+                        f"{i + 1}: {exc}"
+                    ) from exc
+
+                self._apply_write_only(conn, event)
+
+                try:
+                    seq = int(event.id[1:])
+                    if seq > last_event_id:
+                        last_event_id = seq
+                except (ValueError, IndexError):
+                    pass
+
+                if event.id == stop_after_event_id:
+                    found = True
+                    break
+
+            if not found:
+                raise ValueError(
+                    f"replay_to_event_id: stop_after_event_id "
+                    f"{stop_after_event_id!r} not found in {events_path}."
+                )
+
+            if last_event_id > 0:
+                self._next_seq = last_event_id
+        finally:
+            self._replaying = False
+
+    def _replay_to_event_id_git(
+        self, events_path: str, stop_after_event_id: str
+    ) -> None:
+        """Bounded rebuild for ``events_storage: git`` — the git-mode half of
+        :meth:`replay_to_event_id`.
+
+        Mirrors :meth:`_replay_from_empty_git` exactly (dedupe by id,
+        hybrid-logical-clock ordering, torn-trailing-line tolerance, seq
+        assignment) but stops after the event whose id equals
+        ``stop_after_event_id`` in HLC order. Raises ``ValueError`` if that id
+        is absent from the log.
+        """
+        self.close()
+        for suffix in ("", "-wal", "-shm"):
+            path = self._db_path + suffix
+            if os.path.exists(path):
+                os.remove(path)
+
+        self._replaying = True
+        try:
+            self.initialize()
+
+            if not os.path.exists(events_path):
+                raise ValueError(
+                    f"replay_to_event_id: events.jsonl does not exist but "
+                    f"stop_after_event_id {stop_after_event_id!r} was requested."
+                )
+
+            conn = self._require_conn()
+
+            with open(events_path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+
+            events_by_id: dict[str, Event] = {}
+            for i, raw_line in enumerate(lines):
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                is_last = i == len(lines) - 1
+                try:
+                    raw: dict[str, Any] = json.loads(stripped)
+                    event = Event.model_validate(raw)
+                except Exception as exc:
+                    if is_last:
+                        logger.debug(
+                            "git bounded replay: skipping torn trailing line "
+                            "(line %d): %s",
+                            i + 1,
+                            exc,
+                        )
+                        break
+                    raise ValueError(
+                        f"git bounded replay: malformed event on interior line "
+                        f"{i + 1}: {exc}"
+                    ) from exc
+                if event.id in events_by_id:
+                    logger.debug(
+                        "git bounded replay: duplicate event %s skipped", event.id
+                    )
+                    continue
+                events_by_id[event.id] = event
+
+            if stop_after_event_id not in events_by_id:
+                raise ValueError(
+                    f"replay_to_event_id: stop_after_event_id "
+                    f"{stop_after_event_id!r} not found in {events_path}."
+                )
+
+            ordered = sorted(
+                events_by_id.values(),
+                key=lambda e: (e.lamport or 0, e.timestamp, e.id),
+            )
+
+            max_lamport = 0
+            for seq, event in enumerate(ordered, start=1):
+                self._apply_write_only(conn, event, seq=seq)
+                if event.lamport is not None and event.lamport > max_lamport:
+                    max_lamport = event.lamport
+                if event.id == stop_after_event_id:
+                    break
+            self._max_lamport = max_lamport
+        finally:
+            self._replaying = False
+
     # ------------------------------------------------------------------
     # Query methods
     # ------------------------------------------------------------------
@@ -942,26 +1156,44 @@ class SqliteBackend:
         return [self._row_to_evidence(row) for row in rows]
 
     def list_requirements(
-        self, *, prd_id: str | None = None
+        self, *, prd_id: str | None = None, include_superseded: bool = False
     ) -> list[Requirement]:
         """Return Requirement rows sorted by id ASC.
 
         The id-based ordering is deterministic because requirement IDs are
-        assigned at prd.parsed time and never mutate.  prd.parsed is
-        destructive — it deletes and re-inserts all rows — so the result
-        always reflects the current parse, in stable id order.
+        assigned at prd.parsed time and never mutate.
+
+        T023 — by default this returns only the LIVE set (rows still current:
+        ``revision_superseded IS NULL``). ``prd.revised`` is non-destructive — a
+        superseded requirement keeps its row (stamped with the revision that
+        retired it) so the lineage survives replay — but it is no longer part of
+        the current requirement set, so it is filtered out by default. A
+        single-parse PRD (the only shape a pre-T023 db ever had) has every row
+        at ``revision_superseded IS NULL``, so this is byte-identical for those.
+
+        ``include_superseded=True`` returns the FULL lineage (live + superseded)
+        — used by ``serialize_state`` so the replay-equivalence oracle compares
+        superseded-row lineage too. A superseded row carries a non-NULL
+        ``revision_superseded`` on the returned model, so divergence in a
+        retired row is observable in the snapshot.
 
         ``prd_id`` (T009) is the multi-PRD partition filter: ``None`` means all
-        PRDs (byte-identical to the pre-T009 call), an explicit id adds
-        ``WHERE prd_id = ?``.
+        PRDs, an explicit id adds ``AND prd_id = ?``.
         """
         conn = self._require_conn()
-        where = "WHERE prd_id = ? " if prd_id is not None else ""
-        params: tuple[str, ...] = (prd_id,) if prd_id is not None else ()
+        clauses: list[str] = []
+        params: list[str] = []
+        if not include_superseded:
+            clauses.append("revision_superseded IS NULL")
+        if prd_id is not None:
+            clauses.append("prd_id = ?")
+            params.append(prd_id)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         rows = conn.execute(
-            "SELECT id, prd_section, text, source_paragraph, derived "
+            "SELECT id, prd_section, text, source_paragraph, derived, "
+            "revision_introduced, revision_superseded, prd_id "
             f"FROM requirements {where}ORDER BY id ASC",
-            params,
+            tuple(params),
         ).fetchall()
         return [self._row_to_requirement(row) for row in rows]
 
@@ -1601,6 +1833,11 @@ class SqliteBackend:
             conn.execute("DROP TABLE prds")
             conn.execute("ALTER TABLE prds_new RENAME TO prds")
 
+        # NOTE: the per-PRD ``revision`` column is NOT added here — it is a v8
+        # change (``_m_to_v8``). v7 already shipped without it, so a DB stamped
+        # at v7 must grow it via the v8 ladder step, not a retroactive edit to
+        # the v7 shape.
+
         # ---- 2. Additive prd_id + revision lineage on entity tables ----
         for table in ("requirements", "features", "tasks"):
             try:
@@ -1658,6 +1895,29 @@ class SqliteBackend:
             "ON prds (project_id) WHERE is_default = 1"
         )
 
+    def _m_to_v8(self, conn: sqlite3.Connection) -> None:
+        """v7 → v8: per-PRD ``revision`` counter on ``prds`` (T023).
+
+        Purely additive: ALTER ADD COLUMN ``revision INTEGER NOT NULL
+        DEFAULT 1`` backfills every existing PRD row to revision 1 (the correct
+        pre-revision meaning). Duplicate-column tolerant so a re-run after a
+        crash (or a fresh v6→v8 DB whose v7 rebuild already grew the column from
+        the current DDL) no-ops.
+
+        This is a SEPARATE step from ``_m_to_v7`` on purpose: v7 shipped without
+        ``revision`` (PR #80), so a DB already stamped at v7 early-returns on
+        ``on_disk == SCHEMA_VERSION`` and never re-enters the v7 body. Bumping
+        SCHEMA_VERSION to 8 and adding this step is what re-arms the ladder for
+        those DBs.
+        """
+        try:
+            conn.execute(
+                "ALTER TABLE prds ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
+            )
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+
     # Ordered migration ladder: (from_version, bound-method). Applied while
     # ``on_disk <= from_version < SCHEMA_VERSION``. Append one tuple per future
     # schema bump; never edit a literal version comparison again.
@@ -1667,6 +1927,7 @@ class SqliteBackend:
         (4, _m_to_v5),
         (5, _m_to_v6),
         (6, _m_to_v7),
+        (7, _m_to_v8),
     ]
 
     @staticmethod
@@ -2187,6 +2448,14 @@ class SqliteBackend:
             "prd.parsed": ActionSpec(
                 PrdParsedPayload, self._check_prd_parsed, self._write_prd_parsed
             ),
+            # T023 — amend-aware, non-destructive PRD revision. Supersedes the
+            # diff's retired requirements in place (NEVER DELETE), inserts the
+            # added ones at the new revision, and bumps the per-PRD revision
+            # counter. Registered alongside prd.parsed (the destructive
+            # first-parse path).
+            "prd.revised": ActionSpec(
+                PrdRevisedPayload, self._check_prd_revised, self._write_prd_revised
+            ),
             "prd.reviewed": ActionSpec(
                 PrdReviewedPayload, self._check_prd_reviewed, self._write_prd_reviewed
             ),
@@ -2553,6 +2822,297 @@ class SqliteBackend:
             conn.execute("RELEASE prd_requirements_replace")
             raise
         conn.execute("RELEASE prd_requirements_replace")
+
+    def _check_prd_revised(
+        self,
+        conn: sqlite3.Connection,
+        payload: PrdRevisedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate a prd.revised before any write.
+
+        Gates, all up front (no partial state):
+
+        1. ``revision`` must be exactly ``current + 1`` — the per-PRD revision
+           counter is a strict monotonic +1 sequence, so a stale or skipped
+           revision (e.g. two agents revising the same PRD off the same base)
+           is rejected rather than silently mis-stamping lineage. The target
+           PRD must exist; revising an unknown ``prd_id`` is rejected.
+        2. Every requirement dict in the added / superseded / unchanged diff
+           lists must be a valid Requirement (mirrors ``_check_prd_parsed``).
+        3. The diff must match the on-disk live set so the write applies
+           cleanly and the status-demotion rule keys off a REAL change:
+           - every ``requirements_superseded`` / ``requirements_unchanged`` id
+             must currently be live (``revision_superseded IS NULL``) in this
+             PRD's partition — superseding/carrying an id that is missing or
+             already retired is rejected (it would otherwise UPDATE 0 rows yet
+             still demote status / claim to carry an edit forward);
+           - every ``requirements_added`` id must NOT already exist in this
+             partition (live OR superseded). The requirements PK is the single
+             ``id`` column, so a re-added id would otherwise collide — destroying
+             the existing lineage row (INSERT OR REPLACE) or raising mid-write
+             (plain INSERT). Rejecting up front keeps lineage append-only.
+        """
+        _ = event
+        row = conn.execute(
+            "SELECT revision FROM prds WHERE id = ?", (payload.prd_id,)
+        ).fetchone()
+        if row is None:
+            raise EventRejected(
+                f"prd.revised: unknown prd_id {payload.prd_id!r} — cannot revise "
+                "a PRD that does not exist"
+            )
+        current = int(row[0])
+        if payload.revision != current + 1:
+            raise EventRejected(
+                f"prd.revised: revision {payload.revision} is not current+1 "
+                f"(current revision is {current}, expected {current + 1})"
+            )
+        for req_data in (
+            *payload.requirements_added,
+            *payload.requirements_superseded,
+            *payload.requirements_unchanged,
+        ):
+            try:
+                Requirement.model_validate(req_data)
+            except Exception as exc:
+                raise EventRejected(
+                    f"prd.revised: invalid Requirement in payload: {exc}"
+                ) from exc
+
+        # Snapshot this PRD's partition: which ids exist at all, and which are
+        # currently live. The diff is validated against these so the write path
+        # is a pure, total application (no 0-row UPDATEs, no PK collisions).
+        all_ids = {
+            r[0]
+            for r in conn.execute(
+                "SELECT id FROM requirements WHERE prd_id = ?", (payload.prd_id,)
+            ).fetchall()
+        }
+        live_ids = {
+            r[0]
+            for r in conn.execute(
+                "SELECT id FROM requirements "
+                "WHERE prd_id = ? AND revision_superseded IS NULL",
+                (payload.prd_id,),
+            ).fetchall()
+        }
+        for req_data in payload.requirements_superseded:
+            rid = Requirement.model_validate(req_data).id
+            if rid not in live_ids:
+                raise EventRejected(
+                    f"prd.revised: cannot supersede requirement {rid!r} — it is "
+                    "not currently live in this PRD (missing or already "
+                    "superseded)"
+                )
+        for req_data in payload.requirements_unchanged:
+            rid = Requirement.model_validate(req_data).id
+            if rid not in live_ids:
+                raise EventRejected(
+                    f"prd.revised: requirements_unchanged names {rid!r}, which is "
+                    "not currently live in this PRD — cannot carry it forward"
+                )
+        for req_data in payload.requirements_added:
+            rid = Requirement.model_validate(req_data).id
+            if rid in all_ids:
+                raise EventRejected(
+                    f"prd.revised: cannot add requirement {rid!r} — that id "
+                    "already exists in this PRD (re-adding a retired id would "
+                    "destroy its lineage row); use a fresh id"
+                )
+
+    def _write_prd_revised(
+        self,
+        conn: sqlite3.Connection,
+        payload: PrdRevisedPayload,
+        event: Event,
+    ) -> None:
+        """Apply a non-destructive, amend-aware PRD revision.
+
+        Unlike ``prd.parsed`` (which DELETEs and re-inserts every requirement),
+        ``prd.revised`` NEVER deletes a requirement row — the requirements table
+        is the append-only lineage of the PRD:
+
+        - UPDATE the prds scalar columns from the payload and bump ``revision``
+          to the new revision number.
+        - For each requirement in ``requirements_superseded``: stamp
+          ``revision_superseded = <new revision>`` on the existing row. The row
+          stays in the table (it drops out of the live set — see
+          ``list_requirements`` — but its lineage survives replay).
+        - For each requirement in ``requirements_added``: INSERT a new row with
+          ``revision_introduced = <new revision>`` and ``revision_superseded``
+          NULL (live). ``_check_prd_revised`` has already rejected any added id
+          that collides with an existing row, so a plain INSERT is safe and
+          NEVER overwrites a lineage row (a re-added id would destroy the
+          retired row's history — see the handler's append-only contract).
+        - For each requirement in ``requirements_unchanged``: UPDATE the live
+          carried-forward row's editable fields in place (text / prd_section /
+          source_paragraph / derived). The id, prd_id and lineage stamps are
+          untouched. This lets a revision edit a requirement it is carrying
+          forward; without it the field is dead and the edit is silently lost.
+        - Status-demotion rule: a revision that supersedes/removes any
+          requirement demotes an approved PRD back to ``draft``. The superseded
+          list is validated up front to contain only currently-live ids, so a
+          non-empty list always corresponds to a REAL row change — the demotion
+          can never fire on a no-op diff. A pure-additive revision (empty
+          ``requirements_superseded``) keeps the payload's status.
+
+        The whole body runs inside a SAVEPOINT so a failure mid-revision leaves
+        no partial state within the outer transaction.
+        """
+        prd_id: str = payload.prd_id
+        new_revision: int = payload.revision
+
+        superseded_objects = [
+            Requirement.model_validate(r) for r in payload.requirements_superseded
+        ]
+        added_objects = [
+            Requirement.model_validate(r) for r in payload.requirements_added
+        ]
+        unchanged_objects = [
+            Requirement.model_validate(r) for r in payload.requirements_unchanged
+        ]
+
+        # Status-demotion rule: superseding/removing any requirement is a
+        # material change, so an approved PRD drops back to draft. The superseded
+        # list is validated to contain only currently-live ids (see
+        # _check_prd_revised), so a non-empty list is always a real change — the
+        # demotion never fires on a no-op diff. A pure additive revision keeps
+        # the payload's declared status.
+        status = payload.status
+        if superseded_objects:
+            status = "draft"
+
+        now = event.timestamp.isoformat()
+
+        conn.execute("SAVEPOINT prd_revised")
+        try:
+            # UPDATE the scalar PRD columns and bump the revision counter. We do
+            # NOT touch id / is_default / created_at — a revision targets an
+            # EXISTING row and must preserve its identity and the
+            # ux_prds_default invariant (see PrdRevisedPayload.is_default).
+            conn.execute(
+                """
+                UPDATE prds
+                   SET project_id = ?,
+                       title = ?,
+                       status = ?,
+                       summary = ?,
+                       goals = ?,
+                       non_goals = ?,
+                       acceptance_criteria = ?,
+                       risks = ?,
+                       open_questions = ?,
+                       target_version = ?,
+                       target_tag = ?,
+                       revision = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (
+                    payload.project_id,
+                    payload.title,
+                    status,
+                    payload.summary,
+                    json.dumps(payload.goals),
+                    json.dumps(payload.non_goals),
+                    json.dumps(payload.acceptance_criteria),
+                    json.dumps(payload.risks),
+                    json.dumps(payload.open_questions),
+                    payload.target_version,
+                    payload.target_tag,
+                    new_revision,
+                    now,
+                    prd_id,
+                ),
+            )
+
+            # Supersede retired requirements in place — NEVER DELETE. Stamp the
+            # revision that retired them; scoped to this PRD's partition and to
+            # rows still live so a re-stamp is idempotent.
+            for req in superseded_objects:
+                conn.execute(
+                    """
+                    UPDATE requirements
+                       SET revision_superseded = ?
+                     WHERE id = ? AND prd_id = ?
+                       AND revision_superseded IS NULL
+                    """,
+                    (new_revision, req.id, prd_id),
+                )
+
+            # Apply any edits carried in requirements_unchanged onto the live
+            # rows in place. _check_prd_revised guarantees each id is currently
+            # live, so this UPDATE always targets exactly one row; the lineage
+            # stamps and id/prd_id are untouched. Without this the field is dead
+            # and an edit on a carried-forward requirement is silently dropped.
+            for req in unchanged_objects:
+                conn.execute(
+                    """
+                    UPDATE requirements
+                       SET prd_section = ?,
+                           text = ?,
+                           source_paragraph = ?,
+                           derived = ?
+                     WHERE id = ? AND prd_id = ?
+                       AND revision_superseded IS NULL
+                    """,
+                    (
+                        req.prd_section,
+                        req.text,
+                        req.source_paragraph,
+                        1 if req.derived else 0,
+                        req.id,
+                        prd_id,
+                    ),
+                )
+
+            # Insert the requirements new in this revision, stamped with the
+            # revision they were introduced at and live (revision_superseded
+            # NULL). Plain INSERT — _check_prd_revised has rejected any added id
+            # that collides with an existing (live or superseded) row, so this
+            # never overwrites a lineage row.
+            for req in added_objects:
+                conn.execute(
+                    """
+                    INSERT INTO requirements
+                        (id, prd_id, prd_section, text, source_paragraph,
+                         derived, revision_introduced, revision_superseded)
+                    VALUES
+                        (?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        req.id,
+                        prd_id,
+                        req.prd_section,
+                        req.text,
+                        req.source_paragraph,
+                        1 if req.derived else 0,
+                        new_revision,
+                    ),
+                )
+
+            # Refresh the prds.requirements FK list to the live set in stable id
+            # order so it mirrors the requirements actually current after this
+            # revision (added + carried-forward, minus superseded).
+            live_ids = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT id FROM requirements "
+                    "WHERE prd_id = ? AND revision_superseded IS NULL "
+                    "ORDER BY id ASC",
+                    (prd_id,),
+                ).fetchall()
+            ]
+            conn.execute(
+                "UPDATE prds SET requirements = ? WHERE id = ?",
+                (json.dumps(live_ids), prd_id),
+            )
+        except Exception:
+            conn.execute("ROLLBACK TO prd_revised")
+            conn.execute("RELEASE prd_revised")
+            raise
+        conn.execute("RELEASE prd_revised")
 
     def _check_prd_reviewed(
         self,
@@ -4802,16 +5362,35 @@ class SqliteBackend:
 
         Row column order must match the SELECT used in list_requirements:
           0:id  1:prd_section  2:text  3:source_paragraph  4:derived
+          5:revision_introduced  6:revision_superseded  7:prd_id
 
         The ``derived`` column is stored as an integer (0/1) — bool() is
         applied so the Requirement model receives a proper Python bool.
+
+        T023 — the lineage columns are surfaced so a revised PRD's requirements
+        carry their correct introduction/supersession revisions in memory.
+        ``revision_introduced`` is nullable for pre-lineage (v6-migrated) rows;
+        NULL means "introduced at revision 1", so it falls back to the model
+        default of 1 (the field is ``ge=1`` and would reject ``None``).
+        ``revision_superseded`` stays nullable (None = still live).
+
+        T024 — the ``prd_id`` partition column is surfaced so a multi-PRD DB's
+        requirements carry their owning PRD in memory (the model field is
+        ``exclude=True`` so model_dump() still drops it, but serialize_state
+        reads ``rq.prd_id`` directly to partition the snapshot). A pre-v7 /
+        single-PRD row carries ``DEFAULT_PRD_ID`` via the column DEFAULT, so this
+        falls back to the model default of ``DEFAULT_PRD_ID`` when NULL.
         """
+        revision_introduced = row[5] if row[5] is not None else 1
         return Requirement(
             id=row[0],
+            prd_id=row[7] if row[7] is not None else DEFAULT_PRD_ID,
             prd_section=row[1],
             text=row[2],
             source_paragraph=row[3],
             derived=bool(row[4]),
+            revision_introduced=revision_introduced,
+            revision_superseded=row[6],
         )
 
     @staticmethod

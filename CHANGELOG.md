@@ -6,6 +6,32 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **Schema v8 — per-PRD `revision` counter (v0.3 T023).** `prds` gains a
+  `revision INTEGER NOT NULL DEFAULT 1` column, bumped by `prd.revised`. This is
+  a separate schema version from v7 (the multi-PRD foundation) so a DB already
+  stamped at v7 re-enters the migration ladder and grows the column; the v7->v8
+  ALTER backfills every existing PRD to revision 1. Auto-upgrade is purely
+  additive.
+
+### Fixed
+
+- **`prd.revised` is now fully non-destructive and amend-aware (v0.3 T023).**
+  - Re-adding a previously-superseded (or live) requirement id is rejected up
+    front instead of silently destroying the existing lineage row — the added
+    requirements now use a plain `INSERT` rather than `INSERT OR REPLACE`
+    against the single-column requirements PK.
+  - Status demotion (approved -> draft) now keys off a validated, real change:
+    superseding an id that does not exist / is already retired is rejected, so a
+    malformed diff can no longer demote a PRD on a 0-row update.
+  - `requirements_unchanged` edits are now applied to the carried-forward rows
+    instead of being silently dropped.
+  - `serialize_state` (the replay-equivalence oracle / `doctor` snapshot) now
+    captures the full requirement lineage (live + superseded) with the
+    `revision_introduced` / `revision_superseded` stamps, so superseded-row
+    divergence between a live and a replayed DB is caught.
+
 ## [0.1.2] — 2026-06-22
 
 ### Added

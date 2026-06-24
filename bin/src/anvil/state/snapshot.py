@@ -11,7 +11,7 @@ Design contract
   writes, never reads the clock, and never touches the filesystem beyond the
   backend's own queries. It reaches through the Backend protocol, never into
   SQLite directly.
-- **Total.** Every canonical collection is covered: project, prd, features,
+- **Total.** Every canonical collection is covered: project, prds, features,
   tasks, claims (ALL of them — active, released, stale, force_released),
   reviews, evidence, requirements, and sync mappings.
 
@@ -36,20 +36,36 @@ Output shape (the contract downstream fixtures/tests depend on)
 
     {
       "project":       <object> | None,     # single Project, or None
-      "prd":           <object> | None,     # single PRD, or None
+      "prds":          [<object>, ...],      # ALL PRDs, sorted by id
       "features":      [<object>, ...],      # sorted by id
       "tasks":         [<object>, ...],      # sorted by id
       "claims":        [<object>, ...],      # ALL claims, sorted by id
       "reviews":       [<object>, ...],      # sorted by id
       "evidence":      [<object>, ...],      # sorted by id
-      "requirements":  [<object>, ...],      # sorted by id
+      "requirements":  [<object>, ...],      # FULL lineage; sorted by (prd_id, rev_introduced, id)
       "sync_mappings": [<object>, ...],      # sorted by (task_id, external_system)
     }
 
 Each ``<object>`` is the corresponding model's ``model_dump(mode="json")``.
-``project`` and ``prd`` are singletons (the backend exposes ``get_project`` /
-``get_prd`` returning one-or-None), so they are emitted as a single object or
-``None`` rather than a list.
+
+The ``prds`` collection (T024) replaces the legacy singleton ``prd`` key: a
+multi-PRD DB carries one entry per PRD, sorted by ``id``. A single-PRD DB (every
+pre-v7 / default-only shape) emits exactly one entry — the default PRD. Each
+entry additionally carries its identity/revision stamps (``id`` / ``revision``),
+which are ``exclude=True`` on the model — surfaced explicitly so the oracle
+compares per-PRD partition identity and the revision counter, not just the
+mutable scalar fields.
+
+The ``requirements`` objects additionally carry the partition id (``prd_id``) and
+the lineage stamps (``revision_introduced`` / ``revision_superseded``), all
+``exclude=True`` on the model — the oracle compares them explicitly so the
+per-PRD partition and superseded-row lineage are part of the replay-equivalence
+check. They are sorted by ``(prd_id, revision_introduced, id)`` so a multi-PRD /
+multi-revision DB has a total, deterministic order: a missed sort key would let
+replay silently diverge on a DB whose ids interleave across PRDs/revisions.
+
+``project`` is the sole remaining singleton (the backend exposes ``get_project``
+returning one-or-None), emitted as a single object or ``None``.
 """
 
 from __future__ import annotations
@@ -70,7 +86,7 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
     ----------
     backend:
         Any object satisfying the read side of the Backend protocol. Only
-        the ``get_project``, ``get_prd``, ``list_features``, ``list_tasks``,
+        the ``get_project``, ``list_prds``, ``list_features``, ``list_tasks``,
         ``list_claims``, ``list_reviews``, ``list_evidence``,
         ``list_requirements``, and ``list_sync_mappings`` methods are used.
 
@@ -81,18 +97,38 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
         byte-identical across repeated calls on an unchanged backend.
     """
     project = backend.get_project()
-    # T021 audit (get_prd no-arg): default-only-correct. The snapshot's ``prd``
-    # singleton mirrors the on-disk shape the replay-equivalence oracle compares,
-    # which resolves the ``is_default = 1`` PRD — exactly what no-arg get_prd()
-    # returns. Per-PRD partitions surface through ``tasks``/``features``/
-    # ``requirements`` (each carries its prd_id), so multi-PRD state is not lost
-    # here; only the legacy singleton field stays pinned to the default PRD.
-    prd = backend.get_prd()
 
     return {
-        # Singletons: one-or-None, emitted directly (no list wrapper).
+        # Singleton: one-or-None, emitted directly (no list wrapper).
         "project": project.model_dump(mode="json") if project is not None else None,
-        "prd": prd.model_dump(mode="json") if prd is not None else None,
+        # T024: ALL PRDs, sorted by id, replacing the legacy singleton ``prd``.
+        # ``id`` and ``revision`` are exclude=True on the PRD model (so a v6 prds
+        # row that predates the columns still constructs and existing event
+        # payloads stay byte-identical), but they are the per-PRD partition
+        # identity and the revision counter — the oracle MUST compare them or a
+        # mis-partitioned PRD or a mis-bumped revision would diverge invisibly
+        # between the live and replayed DBs. So they are surfaced explicitly here,
+        # exactly as the requirements lineage stamps are below. A single-PRD DB
+        # emits exactly one entry (the default PRD); the legacy no-arg get_prd()
+        # singleton is subsumed by this sorted list.
+        "prds": [
+            {
+                **p.model_dump(mode="json"),
+                # id/revision AND the identity/config fields are all Field(exclude=True)
+                # on the PRD model, so model_dump() drops them. Re-surface ALL of them
+                # so the replay-equivalence oracle + doctor compare them: is_default is
+                # the ux_prds_default invariant carrier; title/target_* are written
+                # straight from the event payload — a replay that corrupted any of them
+                # would otherwise diverge invisibly between the live and replayed DBs.
+                "id": p.id,
+                "revision": p.revision,
+                "is_default": p.is_default,
+                "title": p.title,
+                "target_version": p.target_version,
+                "target_tag": p.target_tag,
+            }
+            for p in sorted(backend.list_prds(), key=lambda p: p.id)
+        ],
         # Collections: each sorted by a stable key so element order is
         # deterministic regardless of the order the backend returned rows.
         # The backend already sorts by id ASC, but we re-sort here so the
@@ -121,11 +157,33 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
             e.model_dump(mode="json")
             for e in sorted(backend.list_evidence(), key=lambda e: e.id)
         ],
-        # requirements are written by prd.parsed (destructive replace).
-        # Sorted by id for determinism — id is the stable natural key.
+        # requirements: the FULL lineage (live + superseded), not just the live
+        # set. prd.parsed writes the live rows; prd.revised supersedes rows in
+        # place (NEVER DELETE) and adds new ones. The partition id (prd_id) and
+        # the lineage stamps (revision_introduced / revision_superseded) are
+        # surfaced explicitly — all three are exclude=True on the model so
+        # model_dump() drops them, but the replay-equivalence oracle MUST compare
+        # them or a mis-partitioned / mis-stamped / dropped superseded row would
+        # diverge invisibly between the live and replayed DBs.
+        #
+        # T024: sorted by (prd_id, revision_introduced, id). The id alone is NOT
+        # a safe total order on a multi-PRD / multi-revision DB — requirement ids
+        # can interleave across PRDs and across revisions, so a id-only sort lets
+        # replay silently diverge if two backends assign overlapping ids to
+        # different partitions. The (prd_id, revision_introduced, id) tuple is
+        # total because id is unique under the single-column PK, so the trailing
+        # id breaks any tie deterministically.
         "requirements": [
-            rq.model_dump(mode="json")
-            for rq in sorted(backend.list_requirements(), key=lambda rq: rq.id)
+            {
+                **rq.model_dump(mode="json"),
+                "prd_id": rq.prd_id,
+                "revision_introduced": rq.revision_introduced,
+                "revision_superseded": rq.revision_superseded,
+            }
+            for rq in sorted(
+                backend.list_requirements(include_superseded=True),
+                key=lambda rq: (rq.prd_id, rq.revision_introduced, rq.id),
+            )
         ],
         # SyncMapping has no single-column id; its natural key is the
         # (task_id, external_system) pair (matching the backend's own ORDER BY).

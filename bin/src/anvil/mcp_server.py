@@ -1841,13 +1841,100 @@ def parse_prd(
         project = backend.get_project()
         project_id = project.id if project is not None else "project"
 
-        payload: dict[str, Any] = {
-            "project_id": project_id,
-            "status": result.prd.status.value,
-            "summary": result.prd.summary,
-            "goals": result.prd.goals,
-            "non_goals": result.prd.non_goals,
-            "requirements": [
+        # ``result.prd.id`` is the STORED model id (default sentinels collapse to
+        # 'default'); use it for the existence check and the diff partition.
+        stored_prd_id = result.prd.id
+        existing_prd = backend.get_prd(stored_prd_id)
+        is_default_prd = parse_prd_id in _DEFAULT_PRD_IDS
+
+        # The status the response reports. A first parse stores the parsed
+        # status verbatim; a re-parse that supersedes a requirement DEMOTES an
+        # approved PRD to ``draft`` in the handler, so reporting the parsed
+        # status would lie. Re-read the stored status after the revised append.
+        effective_status = result.prd.status.value
+
+        new_requirements = [
+            {
+                "id": r.id,
+                "prd_section": r.prd_section,
+                "text": r.text,
+                "source_paragraph": r.source_paragraph,
+                "derived": r.derived,
+            }
+            for r in result.requirements
+        ]
+
+        if existing_prd is None:
+            # FIRST parse → prd.parsed (destructive create). Mirrors cli/prd.py.
+            payload: dict[str, Any] = {
+                "project_id": project_id,
+                "status": result.prd.status.value,
+                "summary": result.prd.summary,
+                "goals": result.prd.goals,
+                "non_goals": result.prd.non_goals,
+                "requirements": new_requirements,
+                "acceptance_criteria": result.prd.acceptance_criteria,
+                "risks": result.prd.risks,
+                "open_questions": result.prd.open_questions,
+            }
+
+            # Named PRD: stamp the partition so the handler writes ONLY this PRD's
+            # rows. The default PRD omits these keys so the payload stays
+            # byte-identical to the pre-multi-PRD event. Gate on the RESOLVED
+            # parse_prd_id so the reserved 'default'/'prd' sentinels take the
+            # default (no-stamp) branch (see cli/prd.py for the invariant).
+            if not is_default_prd:
+                payload["prd_id"] = stored_prd_id
+                payload["is_default"] = False
+                payload["title"] = result.prd.title
+                payload["target_version"] = result.prd.target_version
+                payload["target_tag"] = result.prd.target_tag
+
+            backend.append(EventDraft(
+                timestamp=now,
+                actor="anvil-mcp",
+                action="prd.parsed",
+                target_kind="prd",
+                target_id=project_id,
+                payload_json=payload,
+            ))
+        else:
+            # RE-parse of an existing prd_id → prd.revised (non-destructive
+            # supersede). Diff the freshly parsed requirements against the PRD's
+            # current LIVE rows so prior requirements are SUPERSEDED (lineage
+            # retained), not DELETED. Mirrors cli/prd.py exactly.
+            live_reqs = backend.list_requirements(prd_id=stored_prd_id)
+            live_by_id = {r.id: r for r in live_reqs}
+            all_reqs = backend.list_requirements(
+                prd_id=stored_prd_id, include_superseded=True
+            )
+            all_ids = {r.id for r in all_reqs}
+            new_by_id = {r["id"]: r for r in new_requirements}
+
+            # An id retired in a PRIOR revision (in all_ids but NOT live) that
+            # reappears in the new parse falls into NO diff bucket and would be
+            # silently dropped (mirrors cli/prd.py). The single ``id`` PK means
+            # lineage cannot be revived, so reject loudly instead of losing it.
+            readded_retired = sorted(
+                rid
+                for rid in new_by_id
+                if rid in all_ids and rid not in live_by_id
+            )
+            if readded_retired:
+                ids = ", ".join(readded_retired)
+                raise ToolError(
+                    f"Requirement id(s) {ids} were superseded in an earlier "
+                    "revision and cannot be re-added (ids are permanent "
+                    "lineage). Use a fresh id for the restored requirement."
+                )
+
+            requirements_added = [
+                r for r in new_requirements if r["id"] not in all_ids
+            ]
+            requirements_unchanged = [
+                new_by_id[rid] for rid in live_by_id if rid in new_by_id
+            ]
+            requirements_superseded = [
                 {
                     "id": r.id,
                     "prd_section": r.prd_section,
@@ -1855,38 +1942,62 @@ def parse_prd(
                     "source_paragraph": r.source_paragraph,
                     "derived": r.derived,
                 }
-                for r in result.requirements
-            ],
-            "acceptance_criteria": result.prd.acceptance_criteria,
-            "risks": result.prd.risks,
-            "open_questions": result.prd.open_questions,
-        }
+                for r in live_reqs
+                if r.id not in new_by_id
+            ]
 
-        # Named PRD: stamp the partition so the handler writes ONLY this PRD's
-        # rows (mirrors cli/prd.py). The default PRD omits these keys so the
-        # payload stays byte-identical to the pre-multi-PRD event. Gate on the
-        # RESOLVED parse_prd_id so the reserved 'default'/'prd' sentinels take
-        # the default (no-stamp) branch (see cli/prd.py for the invariant).
-        if parse_prd_id not in _DEFAULT_PRD_IDS:
-            payload["prd_id"] = result.prd.id
-            payload["is_default"] = False
-            payload["title"] = result.prd.title
-            payload["target_version"] = result.prd.target_version
-            payload["target_tag"] = result.prd.target_tag
+            revised_payload: dict[str, Any] = {
+                "project_id": project_id,
+                "prd_id": stored_prd_id,
+                "revision": existing_prd.revision + 1,
+                "is_default": existing_prd.is_default,
+                "title": existing_prd.title,
+                "target_version": existing_prd.target_version,
+                "target_tag": existing_prd.target_tag,
+                # Carry the CURRENT stored status (mirrors the CLI): result.prd is a
+                # fresh parse and is always 'draft', so using it would silently demote
+                # a reviewed/approved PRD on every re-parse. Pure-additive keeps this;
+                # the handler demotes only when a requirement is superseded.
+                "status": existing_prd.status.value,
+                "summary": result.prd.summary,
+                "goals": result.prd.goals,
+                "non_goals": result.prd.non_goals,
+                "acceptance_criteria": result.prd.acceptance_criteria,
+                "risks": result.prd.risks,
+                "open_questions": result.prd.open_questions,
+                "requirements_added": requirements_added,
+                "requirements_superseded": requirements_superseded,
+                "requirements_unchanged": requirements_unchanged,
+            }
 
-        backend.append(EventDraft(
-            timestamp=now,
-            actor="anvil-mcp",
-            action="prd.parsed",
-            target_kind="prd",
-            target_id=project_id,
-            payload_json=payload,
-        ))
+            from anvil.state.backend import EventRejected
+
+            try:
+                backend.append(EventDraft(
+                    timestamp=now,
+                    actor="anvil-mcp",
+                    action="prd.revised",
+                    target_kind="prd",
+                    target_id=stored_prd_id,
+                    payload_json=revised_payload,
+                ))
+            except EventRejected as exc:
+                # The prd.revised gate can reject on PRD state (e.g. a concurrent
+                # re-parse off the same base computes revision != current+1). The
+                # old prd.parsed path never rejected on state, so without this
+                # guard the rejection would surface as an unhandled traceback.
+                raise ToolError(f"PRD parse rejected: {exc}") from exc
+
+            # Report the status as actually stored: a supersede demotes an
+            # approved PRD to draft, so the parsed status may be stale.
+            revised_prd = backend.get_prd(stored_prd_id)
+            if revised_prd is not None:
+                effective_status = revised_prd.status.value
     finally:
         backend.close()
 
     return ParsePrdResponse(
-        prd_status=result.prd.status.value,
+        prd_status=effective_status,
         requirement_count=len(result.requirements),
         feature_count=len(result.features),
         task_count=len(result.tasks),

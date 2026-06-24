@@ -1596,6 +1596,308 @@ class TestHandlePrdParsed:
 
 
 # ---------------------------------------------------------------------------
+# Phase 6 (T023) — prd.revised handler (non-destructive, amend-aware)
+# ---------------------------------------------------------------------------
+
+
+def _req(rid: str, text: str, *, section: str = "requirements") -> dict[str, Any]:
+    """A minimal requirement dict for prd diff lists."""
+    return {
+        "id": rid,
+        "prd_section": section,
+        "text": text,
+        "source_paragraph": None,
+        "derived": False,
+    }
+
+
+def _make_prd_revised_payload(
+    *,
+    revision: int,
+    status: str = "draft",
+    prd_id: str = "default",
+    added: list[dict[str, Any]] | None = None,
+    superseded: list[dict[str, Any]] | None = None,
+    unchanged: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "project_id": "proj-1",
+        "prd_id": prd_id,
+        "revision": revision,
+        "status": status,
+        "summary": f"Revision {revision} summary.",
+        "goals": [],
+        "non_goals": [],
+        "acceptance_criteria": [],
+        "risks": [],
+        "open_questions": [],
+        "requirements_added": added or [],
+        "requirements_superseded": superseded or [],
+        "requirements_unchanged": unchanged or [],
+    }
+
+
+def _requirements_lineage(db_path: str) -> dict[str, tuple[int | None, int | None]]:
+    """Map requirement id -> (revision_introduced, revision_superseded) for ALL
+    rows (live + superseded), so a destroyed lineage row is observable.
+
+    Reads the raw columns: ``prd.parsed`` rows store ``revision_introduced`` as
+    NULL (the v7/v8 schema interprets NULL as "introduced at revision 1"; the
+    model coerces it). ``prd.revised``-added rows stamp the literal revision.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        return {
+            r[0]: (r[1], r[2])
+            for r in conn.execute(
+                "SELECT id, revision_introduced, revision_superseded "
+                "FROM requirements"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+
+class TestHandlePrdRevised:
+    """T023 review fixes — the prd.revised write path is non-destructive,
+    consumes every diff bucket, and gates status demotion on a real change.
+    """
+
+    def _parse_two_reqs(self, b: SqliteBackend) -> None:
+        """prd.parsed at revision 1 with R001 ('v1 one') + R002 ('v1 two')."""
+        _setup_project(b)
+        _apply(
+            b,
+            "prd.parsed",
+            _make_prd_parsed_payload(
+                requirements=[_req("R001", "v1 one"), _req("R002", "v1 two")]
+            ),
+        )
+
+    def test_supersede_keeps_lineage_row_and_filters_live_set(
+        self, tmp_path: Path
+    ) -> None:
+        """Superseding R002 stamps revision_superseded on its row (NEVER DELETE);
+        the row survives, but list_requirements() drops it from the live set."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2, superseded=[_req("R002", "v1 two")]
+                ),
+            )
+            # Live set is just R001.
+            live = {r.id for r in b.list_requirements()}
+            assert live == {"R001"}
+            # R002's row survives, stamped superseded=2 (lineage preserved).
+            # introduced is NULL on a prd.parsed row (== "revision 1").
+            lineage = _requirements_lineage(str(tmp_path / "state.db"))
+            assert lineage["R002"] == (None, 2)
+            assert lineage["R001"] == (None, None)
+        finally:
+            b.close()
+
+    def test_readding_retired_id_is_rejected_and_lineage_survives(
+        self, tmp_path: Path
+    ) -> None:
+        """Adversarial (finding #1/#6): rev2 supersedes R002; rev3 tries to add a
+        NEW R002. The single-column PK cannot hold both rows, so re-adding a
+        retired id is rejected up front — the superseded lineage row is NOT
+        destroyed (the old INSERT OR REPLACE silently erased it)."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2, superseded=[_req("R002", "v1 two")]
+                ),
+            )
+            with pytest.raises((EventRejected, TransactionAborted)):
+                _apply(
+                    b,
+                    "prd.revised",
+                    _make_prd_revised_payload(
+                        revision=3, added=[_req("R002", "re-added")]
+                    ),
+                )
+            # The rev2 supersession row is intact (introduced=NULL/"rev1",
+            # superseded=2), NOT replaced by an introduced-at-3 live row.
+            lineage = _requirements_lineage(str(tmp_path / "state.db"))
+            assert lineage["R002"] == (None, 2)
+        finally:
+            b.close()
+
+    def test_superseding_nonexistent_id_is_rejected_no_demotion(
+        self, tmp_path: Path
+    ) -> None:
+        """Adversarial (finding #2): an approved PRD revised with a superseded id
+        that doesn't exist must be REJECTED — not silently demoted to draft on a
+        0-row UPDATE. The live set and status are unchanged."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(b, "prd.reviewed", {"project_id": "proj-1", "reviewer": "alice"})
+            _apply(b, "prd.approved", {"project_id": "proj-1", "approver": "bob"})
+            assert b.get_prd().status == "approved"
+            with pytest.raises((EventRejected, TransactionAborted)):
+                _apply(
+                    b,
+                    "prd.revised",
+                    _make_prd_revised_payload(
+                        revision=2,
+                        status="approved",
+                        superseded=[_req("R999", "ghost")],
+                    ),
+                )
+            # No change: still approved, both reqs live, revision still 1.
+            prd = b.get_prd()
+            assert prd.status == "approved"
+            assert prd.revision == 1
+            assert {r.id for r in b.list_requirements()} == {"R001", "R002"}
+        finally:
+            b.close()
+
+    def test_supersede_demotes_approved_to_draft(self, tmp_path: Path) -> None:
+        """A revision that supersedes a real live requirement demotes an approved
+        PRD back to draft (the diff is the source of truth)."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(b, "prd.reviewed", {"project_id": "proj-1", "reviewer": "alice"})
+            _apply(b, "prd.approved", {"project_id": "proj-1", "approver": "bob"})
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2,
+                    status="approved",  # payload claims approved …
+                    superseded=[_req("R002", "v1 two")],
+                ),
+            )
+            # … but the supersede forces a demotion to draft.
+            assert b.get_prd().status == "draft"
+        finally:
+            b.close()
+
+    def test_pure_additive_revision_keeps_status(self, tmp_path: Path) -> None:
+        """A pure-additive revision (no superseded) keeps the payload's status."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2, status="reviewed", added=[_req("R003", "v2 new")]
+                ),
+            )
+            prd = b.get_prd()
+            assert prd.status == "reviewed"
+            assert prd.revision == 2
+            assert {r.id for r in b.list_requirements()} == {"R001", "R002", "R003"}
+            lineage = _requirements_lineage(str(tmp_path / "state.db"))
+            assert lineage["R003"] == (2, None)  # introduced at revision 2
+        finally:
+            b.close()
+
+    def test_unchanged_requirement_edit_is_applied(self, tmp_path: Path) -> None:
+        """Adversarial (finding #3): an edited requirement carried in
+        requirements_unchanged is APPLIED, not silently dropped."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2,
+                    unchanged=[_req("R001", "EDITED TEXT"), _req("R002", "v1 two")],
+                ),
+            )
+            reqs = {r.id: r for r in b.list_requirements()}
+            assert reqs["R001"].text == "EDITED TEXT"
+            # Lineage stamps untouched by the carry-forward edit (NULL == "rev1").
+            lineage = _requirements_lineage(str(tmp_path / "state.db"))
+            assert lineage["R001"] == (None, None)
+        finally:
+            b.close()
+
+    def test_stale_revision_is_rejected(self, tmp_path: Path) -> None:
+        """revision must be exactly current+1 — a stale/skipped revision rejects."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            with pytest.raises((EventRejected, TransactionAborted)):
+                _apply(
+                    b,
+                    "prd.revised",
+                    _make_prd_revised_payload(
+                        revision=3, added=[_req("R003", "skip")]
+                    ),
+                )
+        finally:
+            b.close()
+
+    def test_snapshot_captures_superseded_lineage(self, tmp_path: Path) -> None:
+        """serialize_state surfaces superseded rows WITH their lineage stamps, so
+        the replay-equivalence oracle compares retired-row lineage (finding #4/#7
+        — previously only the live set was serialized)."""
+        from anvil.state.snapshot import serialize_state
+
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2, superseded=[_req("R002", "v1 two")]
+                ),
+            )
+            snap = serialize_state(b)
+            by_id = {r["id"]: r for r in snap["requirements"]}
+            # Both rows present — the superseded R002 is NOT filtered out.
+            assert set(by_id) == {"R001", "R002"}
+            assert by_id["R002"]["revision_superseded"] == 2
+            assert by_id["R001"]["revision_superseded"] is None
+        finally:
+            b.close()
+
+    def test_revised_event_replays_with_lineage_intact(
+        self, tmp_path: Path
+    ) -> None:
+        """A prd.revised event replayed from empty reconstructs identical lineage
+        (live + superseded) — guards the non-destructive write path under replay.
+        """
+        b = _make_backend(tmp_path)
+        events_path = str(tmp_path / "events.jsonl")
+        try:
+            self._parse_two_reqs(b)
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2,
+                    superseded=[_req("R002", "v1 two")],
+                    added=[_req("R003", "v2 new")],
+                ),
+            )
+            before = _requirements_lineage(str(tmp_path / "state.db"))
+            b.replay_from_empty(events_path)
+            after = _requirements_lineage(str(tmp_path / "state.db"))
+            assert after == before
+            assert before["R002"] == (None, 2)  # prd.parsed row, then superseded
+            assert before["R003"] == (2, None)  # prd.revised-added at revision 2
+        finally:
+            b.close()
+
+
+# ---------------------------------------------------------------------------
 # Phase 3 — prd.reviewed handler
 # ---------------------------------------------------------------------------
 
@@ -5213,8 +5515,9 @@ class TestSchemaVersionPhase8:
     """
 
     def test_schema_version_is_six(self) -> None:
-        """The v0.3 multi-PRD foundation ship floor is SCHEMA_VERSION == 7."""
-        assert SCHEMA_VERSION == 7
+        """The v0.3 multi-PRD revisions ship floor is SCHEMA_VERSION == 8
+        (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023)."""
+        assert SCHEMA_VERSION == 8
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -6961,18 +7264,24 @@ class TestV6ToV7Migration:
         try:
             conn = sqlite3.connect(db_path)
             try:
-                # user_version stamped to 7.
-                assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
-                # prds: exactly one default row, keyed on single-col id.
+                # user_version stamped to the current SCHEMA_VERSION (v6 climbs
+                # the full ladder: v7 multi-PRD foundation + v8 revision column).
+                assert (
+                    conn.execute("PRAGMA user_version").fetchone()[0]
+                    == SCHEMA_VERSION
+                )
+                # prds: exactly one default row, keyed on single-col id; the v8
+                # revision counter backfilled to 1.
                 prds = conn.execute(
-                    "SELECT id, is_default, summary, project_id, created_at "
-                    "FROM prds"
+                    "SELECT id, is_default, summary, project_id, created_at, "
+                    "revision FROM prds"
                 ).fetchall()
                 assert len(prds) == 1
                 assert prds[0][0] == "default"
                 assert prds[0][1] == 1
                 assert prds[0][2] == "the summary"
                 assert prds[0][3] == "proj-1"
+                assert prds[0][5] == 1, "v8 revision backfills to 1"
                 # created_at backfilled from COALESCE(last_reviewed_at,
                 # project.created_at). last_reviewed_at (_T1) is DISTINCT from
                 # project.created_at (_T0), so this asserts the COALESCE picked
@@ -7075,7 +7384,8 @@ class TestV6ToV7Migration:
             b._conn.execute("PRAGMA user_version = 6")  # noqa: SLF001
             b._check_schema_version(pre_ddl_version=6)  # noqa: SLF001
             assert (
-                b._conn.execute("PRAGMA user_version").fetchone()[0] == 7  # noqa: SLF001
+                b._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
+                == SCHEMA_VERSION
             )
             # Still exactly one default prd, still no row loss.
             prds = b._conn.execute(  # noqa: SLF001
@@ -7119,7 +7429,7 @@ class TestV6ToV7Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must heal the torn rebuild, not raise
         try:
-            assert b.get_schema_version() == 7
+            assert b.get_schema_version() == SCHEMA_VERSION
             conn = sqlite3.connect(db_path)
             try:
                 # The stray table is gone (renamed/dropped during the heal).
@@ -7177,7 +7487,7 @@ class TestV6ToV7Migration:
             b._conn.execute("PRAGMA user_version = 6")  # noqa: SLF001
             b._check_schema_version(pre_ddl_version=6)  # noqa: SLF001
 
-            assert b.get_schema_version() == 7
+            assert b.get_schema_version() == SCHEMA_VERSION
             # Nothing changed: same prds, same row counts.
             assert (
                 b._conn.execute(  # noqa: SLF001
@@ -7297,7 +7607,10 @@ class TestV6ToV7Migration:
         try:
             conn = sqlite3.connect(db_path)
             try:
-                assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+                assert (
+                    conn.execute("PRAGMA user_version").fetchone()[0]
+                    == SCHEMA_VERSION
+                )
                 # Both prd_id columns the torn run failed to add now exist.
                 for table in ("tasks", "sync_mappings"):
                     cols = {
@@ -7417,7 +7730,7 @@ class TestV6ToV7Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # migrates v6 -> v7
         try:
-            assert b.get_schema_version() == 7
+            assert b.get_schema_version() == SCHEMA_VERSION
             default = b.get_prd()  # is_default=1 row
             assert default is not None
             assert default.id == "default"
@@ -7490,7 +7803,7 @@ class TestV6ToV7Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # migrates v6 -> v7
         try:
-            assert b.get_schema_version() == 7
+            assert b.get_schema_version() == SCHEMA_VERSION
             mgr = ClaimManager(b, clock, actor="agent-test")
 
             # T001 was claimable pre-migration → still claimable post-migration.
@@ -7564,7 +7877,7 @@ class TestV6ToV7Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # migrates v6 -> v7
         try:
-            assert b.get_schema_version() == 7
+            assert b.get_schema_version() == SCHEMA_VERSION
             # The migration must carry the 'draft' status onto the default PRD.
             assert b.get_prd().status.value == "draft"
             mgr = ClaimManager(b, clock, actor="agent-test")
@@ -7581,6 +7894,132 @@ class TestV6ToV7Migration:
                     ClaimError, match=r"PRD must be in"
                 ):
                     mgr.claim(tid)
+        finally:
+            b.close()
+
+
+class TestV7ToV8Migration:
+    """T023 — the v7 -> v8 migration adds the per-PRD ``revision`` counter.
+
+    v7 (PR #80) shipped a multi-row ``prds`` table WITHOUT a ``revision``
+    column. T023 introduced ``revision`` as a SEPARATE schema version (v8): a DB
+    already stamped at v7 must re-enter the migration ladder via the v8 bump and
+    grow the column. Folding ``revision`` into v7 in place would leave such DBs
+    missing the column forever (the version-equal early-return skips the ladder)
+    — the bug this test guards against.
+    """
+
+    def _stand_up_v7_db(self, db_path: str, events_path: str) -> None:
+        """Create a real v7-shaped db: a multi-row ``prds`` table keyed on the
+        single-column ``id`` PK, with ``is_default`` but NO ``revision`` column;
+        the entity tables carry ``prd_id`` + the requirements lineage columns.
+        Stamp ``user_version = 7`` so the engine sees a genuine pre-v8 DB."""
+        Path(events_path).touch()
+        conn = sqlite3.connect(db_path)
+        iso = _T0.isoformat()
+        conn.executescript(
+            """
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE prds (
+                id TEXT PRIMARY KEY DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                summary TEXT NOT NULL DEFAULT '',
+                goals TEXT NOT NULL DEFAULT '[]',
+                non_goals TEXT NOT NULL DEFAULT '[]',
+                requirements TEXT NOT NULL DEFAULT '[]',
+                acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                risks TEXT NOT NULL DEFAULT '[]',
+                open_questions TEXT NOT NULL DEFAULT '[]',
+                last_reviewed_at TEXT, last_reviewed_by TEXT,
+                target_version TEXT, target_tag TEXT,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT, updated_at TEXT
+            );
+            CREATE UNIQUE INDEX ux_prds_default ON prds (project_id)
+                WHERE is_default = 1;
+            CREATE TABLE requirements (
+                id TEXT PRIMARY KEY, prd_id TEXT NOT NULL DEFAULT 'default',
+                prd_section TEXT NOT NULL, text TEXT NOT NULL,
+                source_paragraph TEXT, derived INTEGER NOT NULL DEFAULT 0,
+                revision_introduced INTEGER, revision_superseded INTEGER
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO projects (id, name, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("proj-1", "Proj", "desc", iso, iso),
+        )
+        conn.execute(
+            "INSERT INTO prds (id, project_id, status, summary, is_default, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("default", "proj-1", "approved", "the summary", 1, iso, iso),
+        )
+        conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+        conn.close()
+
+    def test_v7_db_gains_revision_column_and_stamps_v8(
+        self, tmp_path: Path
+    ) -> None:
+        """Opening a pre-v8 (v7-stamped) DB runs the v8 step: the ``revision``
+        column appears (backfilled to 1) and user_version becomes 8. Without the
+        SCHEMA_VERSION bump the version-equal early-return would skip the ladder
+        and `SELECT revision FROM prds` would raise no-such-column."""
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v7_db(db_path, events_path)
+
+        # Sanity: the v7 fixture genuinely lacks the column.
+        conn = sqlite3.connect(db_path)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(prds)")}
+            assert "revision" not in cols
+        finally:
+            conn.close()
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # must migrate v7 -> v8
+        try:
+            assert b.get_schema_version() == SCHEMA_VERSION == 8
+            conn = sqlite3.connect(db_path)
+            try:
+                # The column now exists and backfilled to 1 for the existing row.
+                rev = conn.execute("SELECT revision FROM prds").fetchone()[0]
+                assert rev == 1
+            finally:
+                conn.close()
+            # And the revision feature works end-to-end on this upgraded DB:
+            # get_prd().revision reads the real column, and a prd.revised bumps.
+            assert b.get_prd().revision == 1
+        finally:
+            b.close()
+
+    def test_v7_to_v8_is_idempotent(self, tmp_path: Path) -> None:
+        """Re-running the v8 step on an already-v8 DB is a clean no-op (the ALTER
+        is duplicate-column tolerant)."""
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v7_db(db_path, events_path)
+
+        clock = _make_clock()
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
+        b.initialize()  # v7 -> v8
+        try:
+            assert b._conn is not None  # noqa: SLF001
+            # Force the marker back to 7 and re-run — must not raise.
+            b._conn.execute("PRAGMA user_version = 7")  # noqa: SLF001
+            b._check_schema_version(pre_ddl_version=7)  # noqa: SLF001
+            assert b.get_schema_version() == SCHEMA_VERSION
+            assert b._conn.execute(  # noqa: SLF001
+                "SELECT revision FROM prds"
+            ).fetchone()[0] == 1
         finally:
             b.close()
 
