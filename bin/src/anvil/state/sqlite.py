@@ -17,7 +17,14 @@ Phase 5 extends routing with: evidence.submitted, task.applied.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl  # POSIX whole-file advisory locking (flock)
+except ImportError:  # Windows: fcntl is POSIX-only.
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt  # Windows byte-range file locking (locking)
+except ImportError:  # POSIX: msvcrt is Windows-only.
+    msvcrt = None  # type: ignore[assignment]
 import json
 import logging
 import os
@@ -195,6 +202,41 @@ def _flock_backoff_delays(
     while True:
         yield base * (1.0 + _FLOCK_BACKOFF_JITTER * (2.0 * rand() - 1.0))
         base = min(base * 2.0, _FLOCK_BACKOFF_CAP_S)
+
+
+# Byte offset for the Windows lock. msvcrt.locking takes a *mandatory* byte-range
+# lock, so we lock a single sentinel byte far beyond any real events.jsonl content
+# rather than byte 0 — that way the lock never blocks concurrent *readers* of the
+# file's actual bytes, only other *appenders* taking the same sentinel lock.
+_WIN_LOCK_OFFSET = 0x7FFF_0000
+
+
+def _append_lock_acquire_nb(lock_fh: Any) -> None:
+    """Take an exclusive, non-blocking, cross-process advisory lock on ``lock_fh``.
+
+    Raises ``OSError`` when another process already holds the lock; callers treat
+    that as contention and retry with backoff. POSIX uses ``fcntl.flock`` over the
+    whole open file description; Windows uses ``msvcrt.locking`` over a single
+    sentinel byte (see ``_WIN_LOCK_OFFSET``). When neither API exists this is a
+    no-op and callers fall back to the in-process lock alone.
+    """
+    if fcntl is not None:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    elif msvcrt is not None:
+        os.lseek(lock_fh.fileno(), _WIN_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+
+def _append_lock_release(lock_fh: Any) -> None:
+    """Release the lock taken by :func:`_append_lock_acquire_nb` (best effort)."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            os.lseek(lock_fh.fileno(), _WIN_LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(lock_fh.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
 
 
 def read_db_schema_version(db_path: str | os.PathLike[str]) -> int:
@@ -2013,17 +2055,22 @@ class SqliteBackend:
             log_path = self._events_path
             if not os.path.exists(log_path):
                 open(log_path, "a", encoding="utf-8").close()  # noqa: WPS515
-            with open(log_path, "a", encoding="utf-8") as _lock_fh:
-                # Try a non-blocking LOCK_EX first; if contended, retry with
-                # jittered exponential backoff until the 5 s budget is spent.
-                # The deadline is measured on the monotonic clock, NOT
+            # Binary handle: the Windows lock path os.lseek()s this fd to a
+            # sentinel offset, which a text handle would refuse. The handle is a
+            # pure lock token — only its fileno() is used, never read/written.
+            with open(log_path, "ab") as _lock_fh:
+                # Try a non-blocking exclusive lock first; if contended, retry
+                # with jittered exponential backoff until the 5 s budget is
+                # spent. The deadline is measured on the monotonic clock, NOT
                 # self._clock: a wall-clock NTP step mid-contention would
                 # silently stretch or shorten the timeout.
                 delays = _flock_backoff_delays()
                 deadline = self._monotonic_fn() + _FLOCK_TIMEOUT_S
                 while True:
                     try:
-                        fcntl.flock(_lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        # No-op when neither fcntl nor msvcrt exists, so the loop
+                        # breaks immediately and we rely on self._proc_lock alone.
+                        _append_lock_acquire_nb(_lock_fh)
                         break
                     except OSError as lock_exc:
                         remaining = deadline - self._monotonic_fn()
@@ -2037,10 +2084,7 @@ class SqliteBackend:
                 try:
                     yield
                 finally:
-                    try:
-                        fcntl.flock(_lock_fh.fileno(), fcntl.LOCK_UN)
-                    except OSError:
-                        pass
+                    _append_lock_release(_lock_fh)
 
     def _read_tail_window(self) -> list[bytes]:
         """Return candidate raw lines from the end of events.jsonl, oldest first.
