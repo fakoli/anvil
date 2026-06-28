@@ -13,7 +13,6 @@ Coverage targets:
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import sqlite3
@@ -39,6 +38,8 @@ from anvil.state.sqlite import (
     _FLOCK_BACKOFF_INITIAL_S,
     _FLOCK_TIMEOUT_S,
     SqliteBackend,
+    _append_lock_acquire_nb,
+    _append_lock_release,
     _flock_backoff_delays,
 )
 
@@ -11187,16 +11188,17 @@ class TestAppendLockBackoff:
             sleep_fn=fake_sleep,
             monotonic_fn=lambda: fake_now[0],
         )
-        # Hold LOCK_EX on an independent fd: flock locks belong to the open
-        # file description, so a second open() of the same path contends even
-        # within a single process.
-        holder = open(events_path, "a", encoding="utf-8")
+        # Hold the append lock on an independent fd via the same cross-platform
+        # helper the backend uses: locks belong to the open file handle, so a
+        # second open() of the same path contends even within a single process
+        # (true for both POSIX flock and Windows msvcrt byte-range locks).
+        holder = open(events_path, "ab")
         try:
-            fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+            _append_lock_acquire_nb(holder)
             with pytest.raises(StateLocked), b._append_lock():
                 pass  # unreachable — the lock is never acquired
         finally:
-            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            _append_lock_release(holder)
             holder.close()
 
         # Every sleep is clamped to the time remaining, so the recorded
