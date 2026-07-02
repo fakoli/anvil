@@ -66,7 +66,7 @@ class TestLoadConfig:
         assert isinstance(cfg.project_id, str)
         # The project_id should be a UUID4
         uuid.UUID(cfg.project_id)  # raises ValueError if not valid UUID
-        assert cfg.default_lease_minutes == 60
+        assert cfg.default_lease_minutes == 240
         assert cfg.default_heartbeat_minutes == 5
         assert cfg.git_ops_mode == "auto"
         assert cfg.durability == "relaxed"
@@ -822,9 +822,10 @@ class TestLoadMergedGlobalConfig:
         monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
 
         cfg = load_merged_config(self._project(tmp_path))
-        # branch_prefix supplied by global; lease falls through to default 60.
+        # branch_prefix supplied by global; lease falls through to the built-in
+        # default (240 — raised from 60 after real sessions hit silent expiry).
         assert cfg.branch_prefix == "feature"
-        assert cfg.default_lease_minutes == 60
+        assert cfg.default_lease_minutes == 240
 
     def test_global_config_missing_file_uses_project_only(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -926,7 +927,7 @@ class TestLoadMergedGlobalConfig:
         global_path.write_text("", encoding="utf-8")
         monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
         cfg = load_merged_config(self._project(tmp_path))
-        assert cfg.default_lease_minutes == 60  # dataclass default
+        assert cfg.default_lease_minutes == 240  # dataclass default
 
 
 class TestGlobalConfigLeasePrecedence:
@@ -1014,7 +1015,7 @@ class TestGlobalConfigLeasePrecedence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No config and no flag → empty kwargs (ClaimManager keeps its own
-        60-min default — preserves pre-T016 behaviour)."""
+        240-min default)."""
         from anvil.cli._helpers import _lease_manager_kwargs
 
         assert _lease_manager_kwargs(None, lease_override=None) == {}

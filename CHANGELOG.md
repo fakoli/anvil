@@ -6,16 +6,37 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
-### Added
+## [0.3.1] - 2026-07-02
 
-- **`docs/backlog/strategic-backlog.md`** — moat-execution overlay (S1–S13)
-  from a full product/PMF/moat review: sequences the closed verification loop
-  (re-execution + countersigned proofs, strict-gate default, gaming/critic
-  measurement) ahead of breadth work, and cross-references the existing
-  roadmap/E-B backlogs.
+Onboarding truth + silent-failure fixes, driven by six real-session
+retrospectives (post-session findings) and a five-path hands-on reproduction
+of the published 0.3.0 onboarding; plus the strategic backlog and a
+production-readiness plan.
 
 ### Fixed
 
+- **`anvil claim` now creates the promised `agent/<task>-<slug>` branch in
+  the default HOME-workspace layout.** Git branch/worktree ops resolved their
+  working dir through the state base dir (`~/.anvil/workspaces/<key>`, never
+  a git repo), so every workspace-layout claim warned "git branch not
+  created". New `_resolve_project_dir` (explicit `--cwd` > `ANVIL_ROOT` >
+  cwd) drives git ops; regression test pins it.
+- **`anvil install` dry-runs no longer claim "(wrote)".** The default
+  dry-run printed the same verbs as `--write`, so new users believed the
+  install had completed. Dry-runs now print "would write"/"would merge" and
+  end with "# dry-run — nothing was written. Re-run with --write to apply."
+- **Windows cp1252 crash (#106).** `submit`/`apply` crashed with
+  `UnicodeEncodeError` printing `→`/`↳` on cp1252 consoles. The CLI now
+  reconfigures stdout/stderr to UTF-8 (lossless `backslashreplace`
+  fallback); no more `PYTHONUTF8=1` workaround.
+- **`anvil status` no longer hides claimed/needs_review/done tasks.** Task
+  rollups (human + JSON, per-PRD and total) now report all six lifecycle
+  buckets; previously a claimed task appeared in no bucket and a finished
+  project read "0 of N".
+- **Shipped `AGENTS.md` pointed harnesses at `bin/anvil` / `bin/anvil-mcp`**
+  — repo-relative paths that don't exist for installed users. Now bare
+  `anvil` / `anvil-mcp`, with the 14-default/24-gated MCP surface noted
+  (all three shipped copies synced).
 - **Docs corrected against shipped code (~25 stale claims).** A verification
   pass found docs describing shipped features as unbuilt and vice versa; now
   corrected: B46 max-claim-age, B47 unified `ANVIL_ACTOR` resolver, B48 typed
@@ -27,6 +48,37 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   (replay-equivalence in CI) marked SHIPPED. README comparison table gains a
   measured always-on context-cost row (~2.4k tokens, from
   `benchmarks/CONTEXT_AUDIT.md`).
+
+### Changed
+
+- **Default claim lease raised 60 → 240 minutes.** Real >15-minute agent
+  workflows silently lost their lease mid-task and reverted to `ready`; the
+  standing field workaround was `--lease 240`. Max-claim-age (4×) still caps
+  a wedged agent at 16 h.
+- **Onboarding docs rewritten around the real default state layout**
+  (`~/.anvil/workspaces/<key>/.anvil`, not `./.anvil`): README Quick Start,
+  `docs/how-to/getting-started.md` (example outputs regenerated from real
+  runs), `docs/prd-template.md` (plus a strict `R0NN` requirement-ID
+  pre-flight callout), `docs/mcp.md` (tool-surface gating section),
+  `docs/live-tests.md`, `benchmarks/README.md` (committed-results status).
+
+### Added
+
+- **`docs/plans/2026-07-02-production-readiness.md`** — strengths/weaknesses
+  triangulated from real-session retrospectives + onboarding reproduction +
+  in-repo evidence, with a sequenced plan (silent-failure elimination,
+  CLI-satisfiable evidence gate, review-cost tiering from the six-dimension
+  scores, production-ops guide).
+- **README "Proven in real sessions" summary** — measured field numbers
+  (32 tasks/21 PRs/23.7 h autonomous run; 18/18-task PRD by two concurrent
+  loops; cross-session claim deconfliction).
+
+- **`docs/backlog/strategic-backlog.md`** — moat-execution overlay (S1–S13)
+  from a full product/PMF/moat review: sequences the closed verification loop
+  (re-execution + countersigned proofs, strict-gate default, gaming/critic
+  measurement) ahead of breadth work, and cross-references the existing
+  roadmap/E-B backlogs.
+
 
 ## [0.3.0] - 2026-06-23
 

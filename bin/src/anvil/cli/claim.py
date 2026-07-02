@@ -13,7 +13,7 @@ from anvil.cli._helpers import (
     _open_backend,
     _reap_stale_claims,
     _require_state_dir,
-    _resolve_base_dir,
+    _resolve_project_dir,
     _resolve_state_dir,
     canonical_prd_id,
     resolve_actor,
@@ -94,10 +94,13 @@ def claim(
     from anvil.git_ops.worktree import create_worktree_for_task
 
     resolved_actor = resolve_actor(actor)
-    # SHOULD-FIX (consistency): resolve the working dir for git branch/worktree
-    # ops through the SAME env-aware resolver that picks state_dir, so a claim
-    # under ANVIL_ROOT operates on the env project root, not cwd.
-    resolved_cwd = _resolve_base_dir(cwd)
+    # Git ops run in the user's PROJECT dir, not the state base dir: in the
+    # default workspace layout the base dir is ~/.anvil/workspaces/<key>,
+    # which is never a git repo, so branch/worktree creation silently
+    # no-oped for every workspace-layout claim (found reproducing the
+    # README flow on 0.3.0; same resolver-mismatch class as the 2026-06-22
+    # postmortem).
+    resolved_cwd = _resolve_project_dir(cwd)
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="claim", json_output=json_output)
 
