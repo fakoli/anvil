@@ -2,7 +2,9 @@ site_name: Anvil
 site_description: >-
   The system of record for agent teams — durable, evidence-gated,
   lease-coordinated state for multi-agent software work.
-site_url: https://anvil-state.readthedocs.io/
+# Canonical site: GitHub Pages (auto-deployed by .github/workflows/docs-pages.yml
+# on every docs push to main). Read the Docs also builds via .readthedocs.yaml.
+site_url: https://fakoli.github.io/anvil/
 repo_url: https://github.com/fakoli/anvil
 repo_name: fakoli/anvil
 edit_uri: edit/main/docs/

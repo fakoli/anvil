@@ -1,0 +1,64 @@
+# Deploy the MkDocs site to GitHub Pages: https://fakoli.github.io/anvil/
+#
+# One-time setup: Settings → Pages → Source: "GitHub Actions"
+# (configure-pages below attempts to enable it automatically; if the deploy
+# step complains Pages is disabled, flip the setting once and re-run).
+#
+# Read the Docs remains available in parallel via .readthedocs.yaml — both
+# hosts build from the same mkdocs.yml.
+name: Docs → GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs-pages.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let a queued newer run supersede an older one.
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Build site (strict)
+        run: uvx --with-requirements docs/requirements.txt mkdocs build --strict
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

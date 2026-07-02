@@ -193,7 +193,7 @@ not projections:
 
 ## Documentation
 
-Browsable docs site: **[anvil-state.readthedocs.io](https://anvil-state.readthedocs.io/)** — built from `docs/` via MkDocs ([`mkdocs.yml`](mkdocs.yml)); `uvx --with-requirements docs/requirements.txt mkdocs serve` previews it locally.
+Browsable docs site: **[fakoli.github.io/anvil](https://fakoli.github.io/anvil/)** — auto-deployed to GitHub Pages from `docs/` on every push to `main` ([`mkdocs.yml`](mkdocs.yml); Read the Docs also supported via [`.readthedocs.yaml`](.readthedocs.yaml)). Preview locally with `uvx --with-requirements docs/requirements.txt mkdocs serve`.
 
 - [`docs/architecture.md`](docs/architecture.md) — layered architecture, lifecycles, audit guarantee
 - [`docs/design.md`](docs/design.md) — design rationale and trade-offs

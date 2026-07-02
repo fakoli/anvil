@@ -81,7 +81,9 @@ production-readiness plan.
   ~160 site link warnings were cleaned: links into the source tree became
   absolute GitHub URLs (valid on GitHub and on the site), broken anchors
   were re-slugged, `attr_list` was enabled for `{ #id }` heading anchors,
-  and three genuinely dead links were unlinked. Local preview:
+  and three genuinely dead links were unlinked. The site auto-deploys to
+  GitHub Pages (https://fakoli.github.io/anvil/) on every docs push to
+  `main` via `.github/workflows/docs-pages.yml`. Local preview:
   `uvx --with-requirements docs/requirements.txt mkdocs serve`.
 - **`docs/plans/2026-07-02-production-readiness.md`** — strengths/weaknesses
   triangulated from real-session retrospectives + onboarding reproduction +
