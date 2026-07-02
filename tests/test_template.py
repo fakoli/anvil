@@ -1695,3 +1695,57 @@ Summary.
         assert not result.errors, result.errors
         assert result.prd.target_version is None
         assert result.prd.target_tag is None
+
+
+# ---------------------------------------------------------------------------
+# Duplicate / suffixed id validation (2026-07-02 bricked-workspace regression)
+#
+# A duplicate id that reached the state engine aborted the write on the
+# UNIQUE constraint AFTER the prd.parsed line hit events.jsonl, poisoning
+# replay: every later command failed until `anvil init --force`. The parser
+# must refuse these PRDs with clean ParseErrors so nothing is ever written.
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateAndSuffixedIds:
+    def test_duplicate_requirement_id_is_a_parse_error(self) -> None:
+        prd = _MINIMAL_PRD + "- R002: A duplicated id.\n"
+        result = parse_prd(prd)
+        assert any(
+            "Duplicate requirement id 'R002'" in e.message for e in result.errors
+        ), result.errors
+
+    def test_suffixed_requirement_id_is_a_parse_error_not_truncated(self) -> None:
+        prd = _MINIMAL_PRD.replace("- R002: The system does Y.",
+                                   "- R002a: The system does Y.")
+        result = parse_prd(prd)
+        assert any(
+            "'R002a' is not canonical" in e.message for e in result.errors
+        ), result.errors
+        # And the truncated form must NOT have been silently accepted.
+        assert all(r.id != "R002" for r in result.requirements)
+
+    def test_duplicate_task_id_is_a_parse_error(self) -> None:
+        prd = _MINIMAL_PRD + """\
+
+## Features
+
+### F001: Feature one
+**Requirements:** R001
+
+## Tasks
+
+### T001: Task one
+**Feature:** F001
+
+### T001: Task one again
+**Feature:** F001
+"""
+        result = parse_prd(prd)
+        assert any(
+            "Duplicate task id 'T001'" in e.message for e in result.errors
+        ), result.errors
+
+    def test_unique_ids_still_parse_clean(self) -> None:
+        result = parse_prd(_MINIMAL_PRD)
+        assert not result.errors, result.errors

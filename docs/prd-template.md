@@ -8,16 +8,29 @@ deterministically — no LLM required — and writes the results into `state.db`
 A project can hold **several release-scoped PRDs** in one `state.db` /
 `events.jsonl` (see [Multi-PRD storage](#multi-prd-storage-and-the-default-prd)
 below). The common single-PRD project is just the degenerate case: one `default`
-PRD whose source lives at the bare `.anvil/prd.md`.
+PRD whose source lives at the bare `prd.md` in the state directory.
 
-**Location**: the default PRD is `.anvil/prd.md` inside your project (`anvil init`
-creates the `.anvil/` directory; you author `prd.md` by hand). Each **named**
-release PRD is a separate file at `.anvil/prds/<prd_id>.md` and is parsed with
-`anvil prd parse --prd <prd_id>`.
+**Location**: the default PRD is `prd.md` inside the anvil state directory. By
+default that directory is a per-project HOME workspace —
+`~/.anvil/workspaces/<dirname>-<hash8>/.anvil` — **not** `./.anvil` inside your
+project. `anvil init` prints the exact absolute PRD path in its next-step hint,
+and `anvil status` shows the state directory on its `Path:` line. To author the
+PRD elsewhere, pass `anvil prd parse --file <path>`; to keep state in the
+project tree at `./.anvil`, set `ANVIL_STATE_LAYOUT=local` before `anvil init`
+(`ANVIL_ROOT=<dir>` pins state to `<dir>/.anvil` literally). Each **named**
+release PRD is a separate file at `<state dir>/prds/<prd_id>.md` and is parsed
+with `anvil prd parse --prd <prd_id>`.
 
 **Hard rule**: structure matters. The parser rejects the file with a `ParseError` if any
 required section is missing or malformed. Edit `prd.md`, then run `anvil prd parse`
 to refresh state.
+
+**Hard rule — requirement IDs are strict `RNNN`** (`R001`, `R002`, … `R100` —
+`R` + digits, no suffixes): canonical IDs are what feature `**Requirements:**`
+references resolve against deterministically. A suffixed ID like `R003a` is
+**not** a new ID; the parser refuses it (and any duplicate ID) with a clear
+`ParseError` before anything is written to state. To split a requirement,
+renumber (`R003`, `R004`) instead.
 
 **Reference**: the canonical data model and CLI command set are defined in
 [`docs/specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
@@ -26,7 +39,8 @@ to refresh state.
 
 ## Quick-Start Example
 
-Copy this block into `.anvil/prd.md` and edit it for your project. Every required
+Copy this block into your `prd.md` (the absolute path `anvil init` prints) and edit it
+for your project. Every required
 and optional section is shown with realistic content. Delete optional sections you do not
 need; do not delete required ones.
 
@@ -259,12 +273,15 @@ omit it — the parser assigns IDs in document order when they are absent.
 - The system does Y when Z.
 ```
 
-IDs must be zero-padded to three digits: `R001`, `R002`, ..., `R099`, `R100`.
+IDs must be zero-padded to three digits with no suffixes: `R001`, `R002`, ..., `R099`,
+`R100`. `R003a` is not a valid ID — the parser reads it as `R003` (see the hard rule at
+the top of this document).
 
 **Parser behavior**: if the section is absent, parse fails. Each item becomes a
 `Requirement` entity with `prd_section = "Requirements"`. If explicit IDs conflict
-(duplicate `RNNN` in the same file), parse fails with a `ParseError` naming the
-conflicting ID.
+(duplicate `RNNN` in the same file, including suffixed IDs that truncate to the same
+`RNNN`), the parse is refused with a duplicate-ID error
+(`UNIQUE constraint failed: requirements.id`).
 
 ---
 
@@ -594,7 +611,8 @@ Once `anvil prd parse` succeeds, the PRD status is `draft`. From there:
 3. **Claim and work**: only tasks in `ready` status can be claimed. Run
    `anvil next` to find the highest-priority claimable task, then
    `anvil claim T001` to acquire an exclusive lease. The claim auto-creates an
-   `agent/t001-<slug>` branch. Evidence submitted via `anvil submit` releases the
+   `agent/t001-<slug>` branch in your project's git repo (even in the default
+   HOME-workspace layout). Evidence submitted via `anvil submit` releases the
    claim automatically.
 
 The full workflow is described in the spec at

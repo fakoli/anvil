@@ -15,6 +15,14 @@ production-readiness plan.
 
 ### Fixed
 
+- **Duplicate or suffixed PRD ids can no longer brick a workspace.** A PRD
+  with a duplicated requirement/feature/task id passed validation, appended
+  the `prd.parsed` line to `events.jsonl`, then aborted the DB write on the
+  UNIQUE constraint — leaving a poisoned event log that failed every
+  subsequent command until `anvil init --force` (data loss). The parser now
+  refuses duplicate ids and non-canonical suffixed ids (`R003a`) with clear
+  `ParseError`s before anything is written; regression tests pin both the
+  refusal and the clean recovery.
 - **`anvil claim` now creates the promised `agent/<task>-<slug>` branch in
   the default HOME-workspace layout.** Git branch/worktree ops resolved their
   working dir through the state base dir (`~/.anvil/workspaces/<key>`, never
@@ -58,7 +66,7 @@ production-readiness plan.
 - **Onboarding docs rewritten around the real default state layout**
   (`~/.anvil/workspaces/<key>/.anvil`, not `./.anvil`): README Quick Start,
   `docs/how-to/getting-started.md` (example outputs regenerated from real
-  runs), `docs/prd-template.md` (plus a strict `R0NN` requirement-ID
+  runs), `docs/prd-template.md` (plus a strict `RNNN` requirement-ID
   pre-flight callout), `docs/mcp.md` (tool-surface gating section),
   `docs/live-tests.md`, `benchmarks/README.md` (committed-results status).
 
