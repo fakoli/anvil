@@ -1,0 +1,151 @@
+site_name: Anvil
+site_description: >-
+  The system of record for agent teams — durable, evidence-gated,
+  lease-coordinated state for multi-agent software work.
+site_url: https://anvil-state.readthedocs.io/
+repo_url: https://github.com/fakoli/anvil
+repo_name: fakoli/anvil
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - tables
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.details
+
+plugins:
+  - search
+
+# Many docs deliberately link into the source tree (../bin/src/...) and to
+# repo-root files (CHANGELOG.md, AGENTS.md) — valid on GitHub, outside the
+# site. Warn, don't fail, on those; a strict pass is tracked in
+# docs/plans/2026-07-02-production-readiness.md (D5).
+validation:
+  links:
+    not_found: warn
+    absolute_links: ignore
+    unrecognized_links: ignore
+
+# In the repo but intentionally NOT in the site nav:
+#   _positioning.md    — internal source-of-truth, marked "not part of
+#                        user-facing docs nav" in its own header
+#   backlog/*.prd.md   — machine-ingested PRD data files, not prose
+not_in_nav: |
+  _positioning.md
+  backlog/anvil-backlog.prd.md
+  backlog/multi-prd-revisable.prd.md
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - First project: how-to/getting-started.md
+      - Where state lives: how-to/state-location.md
+      - Authoring a PRD: how-to/authoring-a-prd.md
+      - PRD template & schema: prd-template.md
+      - FAQ: faq.md
+  - How-to guides:
+      - Claiming & shipping a task: how-to/claiming-and-shipping-a-task.md
+      - Driving the anvil loop: how-to/drive-the-anvil-loop.md
+      - Using anvil on any harness: how-to/using-anvil-on-any-harness.md
+      - Packet quality: how-to/packet-quality.md
+      - Syncing with GitHub: how-to/syncing-with-github.md
+      - Running the bake-off: how-to/bake-off.md
+  - Reference:
+      - CLI: cli-reference.md
+      - MCP server (24 tools): mcp.md
+      - Agents: agents-reference.md
+      - Skills: skills-reference.md
+      - Hooks: hooks-reference.md
+      - LLM integration: llm.md
+      - LLM providers: llm-providers.md
+      - Model strategy: model-strategy.md
+      - Evidence buffer: evidence-buffer.md
+      - Context budget: context-budget.md
+      - GitHub sync: github-sync.md
+      - Sync providers (contributing): sync-providers.md
+      - Migrations: migrations.md
+      - Codex harness: reference/codex.md
+  - Architecture & design:
+      - Architecture: architecture.md
+      - Design rationale: design.md
+      - Specs:
+          - v0 canonical spec: specs/2026-05-24-anvil-v0.md
+          - Plugin audit & critics: specs/2026-05-26-plugin-audit-and-critics.md
+          - Event-sourcing write path (SL-1): specs/2026-06-01-sl1-rr-1-event-sourcing-write-path.md
+          - Git-backed events: specs/2026-06-10-git-backed-events.md
+          - Workflow substrate (WF-3): specs/2026-06-19-anvil-workflow-substrate.md
+          - P11 audit batch: specs/2026-06-19-p11-audit-batch.md
+          - Scoring agent: specs/2026-06-19-scoring-agent.md
+          - ProofArtifact (SL-3): specs/2026-06-19-sl3-proofartifact.md
+          - Output contract (SL-5): specs/2026-06-19-sl5-output-contract.md
+          - Workflow adapter (SL-7): specs/2026-06-19-sl7-workflow-adapter.md
+          - Multi-PRD revisable: specs/2026-06-22-multi-prd-revisable.md
+      - Decisions:
+          - WF-3 workflow format: decisions/wf3-format.md
+  - Quality & evidence:
+      - Live sync tests: live-tests.md
+      - Critic false-pass baseline: critic-false-pass-baseline.md
+      - Postmortems:
+          - 2026-06-22 skill init loop: postmortems/2026-06-22-skill-init-loop.md
+      - Audits:
+          - 2026-05-26 plugin audit: audits/2026-05-26-plugin-audit.md
+  - Project:
+      - Roadmap: roadmap.md
+      - Backlog: backlog/anvil-backlog.md
+      - Strategic backlog: backlog/strategic-backlog.md
+      - Tech-debt backlog: tech-debt-backlog.md
+      - Phase 9 backlog: phase-9-backlog.md
+      - Phase 11 backlog: phase-11-backlog.md
+      - Plans:
+          - Production readiness (2026-07): plans/2026-07-02-production-readiness.md
+          - Phase 8 sync: plans/2026-05-25-phase-8-sync.md
+          - Phase 9: plans/2026-05-25-phase-9.md
+          - Phase 10 plugin audit: plans/2026-05-26-phase-10-plugin-audit.md
+          - SL-1 event-sourcing write path: plans/2026-06-01-sl1-rr-1-event-sourcing-write-path.md
+      - Research:
+          - Competitive analysis — agent state tools: research/2026-06-20-competitive-analysis-agent-state-tools.md
+          - Agent-fleet pull market landscape: research/2026-06-20-agent-fleet-pull-market-landscape.md
+          - Competitor issue analysis: research/competitor-issue-analysis.md
+          - Backlog management research: research/2026-06-19-backlog-management-research.md
+          - Maximize anvil on Codex: research/2026-06-19-maximize-anvil-codex.md
+          - Maximize anvil on OpenClaw: research/2026-06-19-maximize-anvil-openclaw.md
+          - Bake-off results: research/2026-06-21-bake-off-results.md
+          - Agent workflow formats: research/agent-workflow-formats.md
+          - Intent-driven development landscape: research/intent-driven-development-landscape.md
+          - Spec-driven development synthesis: research/spec-driven-development-synthesis.md
+      - Build report: BUILD-REPORT.md

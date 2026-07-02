@@ -72,6 +72,13 @@ production-readiness plan.
 
 ### Added
 
+- **Documentation site (MkDocs Material + Read the Docs).** `mkdocs.yml`
+  with a comprehensive curated nav over the whole `docs/` tree (60+ pages:
+  how-tos, references, specs, plans, research; `_positioning.md` and PRD
+  data files stay out of the nav by design), a docs homepage
+  (`docs/index.md`), `.readthedocs.yaml` for readthedocs.io hosting,
+  pinned `docs/requirements.txt`, and a `docs build` CI job. Local preview:
+  `uvx --with-requirements docs/requirements.txt mkdocs serve`.
 - **`docs/plans/2026-07-02-production-readiness.md`** — strengths/weaknesses
   triangulated from real-session retrospectives + onboarding reproduction +
   in-repo evidence, with a sequenced plan (silent-failure elimination,

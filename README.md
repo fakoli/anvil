@@ -193,6 +193,8 @@ not projections:
 
 ## Documentation
 
+Browsable docs site: **[anvil-state.readthedocs.io](https://anvil-state.readthedocs.io/)** — built from `docs/` via MkDocs ([`mkdocs.yml`](mkdocs.yml)); `uvx --with-requirements docs/requirements.txt mkdocs serve` previews it locally.
+
 - [`docs/architecture.md`](docs/architecture.md) — layered architecture, lifecycles, audit guarantee
 - [`docs/design.md`](docs/design.md) — design rationale and trade-offs
 - [`docs/how-to/getting-started.md`](docs/how-to/getting-started.md) — end-to-end first-project walkthrough

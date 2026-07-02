@@ -23,3 +23,6 @@ packets/
 # Agent build scratch space — never commit
 .anvil-build/
 docs/plans/agent-*-status.md
+
+# MkDocs build output (docs site)
+site/
