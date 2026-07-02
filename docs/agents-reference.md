@@ -37,7 +37,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **Output shape:** Markdown block with `## Features`, `## Tasks`, and `## Concerns` sections. The `anvil:plan` skill parses this output to drive the `anvil plan` CLI invocation.
 
-**Source:** [`agents/planner.md`](../agents/planner.md)
+**Source:** [`agents/planner.md`](https://github.com/fakoli/anvil/blob/main/agents/planner.md)
 
 **See also:** [authoring-a-prd.md](how-to/authoring-a-prd.md) · [cli-reference.md#plan](cli-reference.md#plan)
 
@@ -61,7 +61,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 - **SHOULD FIX** — all criteria satisfied; SHOULD FIX findings remain.
 - **PASS** — no findings at SHOULD FIX or above.
 
-**Source:** [`agents/critic.md`](../agents/critic.md)
+**Source:** [`agents/critic.md`](https://github.com/fakoli/anvil/blob/main/agents/critic.md)
 
 **See also:** [cli-reference.md#submit](cli-reference.md#submit)
 
@@ -85,7 +85,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 - **Does NOT count:** "should work" reasoning; evidence from a stale buffer entry; a claimed fix without a re-run; partial output.
 - **On conflict:** if a command that should PASS exits non-zero, do not retry — mark FAIL with verbatim error output.
 
-**Source:** [`agents/sentinel.md`](../agents/sentinel.md)
+**Source:** [`agents/sentinel.md`](https://github.com/fakoli/anvil/blob/main/agents/sentinel.md)
 
 **See also:** [cli-reference.md#submit](cli-reference.md#submit)
 
@@ -116,7 +116,7 @@ Edit and Write are scoped strictly to producing sync-report files under `.anvil/
 
 **Output shape:** Markdown report with Summary counts, one section per check kind (each with a table of discrepancies + suggested fixes), and a Verdict of `CLEAN` or `DRIFT`.
 
-**Source:** [`agents/state-keeper.md`](../agents/state-keeper.md)
+**Source:** [`agents/state-keeper.md`](https://github.com/fakoli/anvil/blob/main/agents/state-keeper.md)
 
 **See also:** [cli-reference.md#sync](cli-reference.md#sync) · [architecture.md → Per-layer responsibilities (Sync engine row)](architecture.md#per-layer-responsibilities)
 
@@ -156,7 +156,7 @@ Edit and Write are scoped strictly to producing sync-report files under `.anvil/
 
 **Output shape:** Markdown sweep report with Source of Truth Read section, Cross-Reference Audit table, Doc-vs-Source Drift section (one subsection per drifted doc), CHANGELOG entry summary, plugin.json description before/after, and a Verdict of `IN SYNC`, `APPLIED`, or `OPEN QUESTIONS`.
 
-**Source:** [`agents/docs-scribe.md`](../agents/docs-scribe.md)
+**Source:** [`agents/docs-scribe.md`](https://github.com/fakoli/anvil/blob/main/agents/docs-scribe.md)
 
 ---
 

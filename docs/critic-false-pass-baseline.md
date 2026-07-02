@@ -26,7 +26,7 @@ diffs (which would make a low false-pass rate meaningless).
 
 ## The corpus
 
-Lives at [`benchmarks/critic_corpus/`](../benchmarks/critic_corpus/). Each case
+Lives at [`benchmarks/critic_corpus/`](https://github.com/fakoli/anvil/tree/main/benchmarks/critic_corpus). Each case
 is a tiny, self-evident `<id>.diff` plus a `<id>.json` carrying `id`, `label`,
 `defect_class`, and `description`. The four bad classes are exactly the ones the
 roadmap names; two good controls guard against over-rejection.
@@ -42,7 +42,7 @@ roadmap names; two good controls guard against over-rejection.
 
 ## How to run
 
-The harness lives at [`benchmarks/critic_falsepass.py`](../benchmarks/critic_falsepass.py).
+The harness lives at [`benchmarks/critic_falsepass.py`](https://github.com/fakoli/anvil/blob/main/benchmarks/critic_falsepass.py).
 Run it from `bin/` so it uses the synced `anvil` venv (uv only):
 
 ```bash
@@ -58,7 +58,7 @@ It is backend-agnostic. A *backend* is just a callable `Case -> Verdict`:
   catches the classes a simple textual rule can see and is blind, *by design*,
   to ones needing semantic reasoning. Makes **no** API call. Its number is the
   committed self-test reference below.
-* **`api`** — the real critic agent ([`agents/critic.md`](../agents/critic.md)),
+* **`api`** — the real critic agent ([`agents/critic.md`](https://github.com/fakoli/anvil/blob/main/agents/critic.md)),
   an LLM that needs `ANTHROPIC_API_KEY` and is non-deterministic. It therefore
   **cannot** run in deterministic pytest CI. It is a documented stub that raises
   `NotImplementedError` until the Agent-SDK call is wired in — it never silently
@@ -67,7 +67,7 @@ It is backend-agnostic. A *backend* is just a callable `Case -> Verdict`:
 ## Mock backend — committed self-test reference
 
 The mock backend's rules are fixed, so its result is stable across runs and is
-asserted by [`tests/test_critic_falsepass.py`](../tests/test_critic_falsepass.py)
+asserted by [`tests/test_critic_falsepass.py`](https://github.com/fakoli/anvil/blob/main/tests/test_critic_falsepass.py)
 (no network, no LLM). The mock catches `deleted-assertion`, `dropped-null-check`,
 and `assertion-free-test`, but has **no arithmetic rule**, so it waves the
 `off_by_one` diff through — one false pass out of four bad cases:
@@ -98,7 +98,7 @@ the real critic's verdicts.
 > model id, and the corpus revision in the table below. Because the critic is
 > non-deterministic, capture the number over several runs and note the spread —
 > mirror the "reproducible-aggregate, not bit-identical" caveat from the
-> coordination benchmark ([`benchmarks/README.md`](../benchmarks/README.md)).
+> coordination benchmark ([`benchmarks/README.md`](https://github.com/fakoli/anvil/blob/main/benchmarks/README.md)).
 
 | date | model | corpus rev | false_pass_rate | false_fail_rate | notes |
 |---|---|---|---|---|---|

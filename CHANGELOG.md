@@ -77,7 +77,11 @@ production-readiness plan.
   how-tos, references, specs, plans, research; `_positioning.md` and PRD
   data files stay out of the nav by design), a docs homepage
   (`docs/index.md`), `.readthedocs.yaml` for readthedocs.io hosting,
-  pinned `docs/requirements.txt`, and a `docs build` CI job. Local preview:
+  pinned `docs/requirements.txt`, and a `docs build --strict` CI job. All
+  ~160 site link warnings were cleaned: links into the source tree became
+  absolute GitHub URLs (valid on GitHub and on the site), broken anchors
+  were re-slugged, `attr_list` was enabled for `{ #id }` heading anchors,
+  and three genuinely dead links were unlinked. Local preview:
   `uvx --with-requirements docs/requirements.txt mkdocs serve`.
 - **`docs/plans/2026-07-02-production-readiness.md`** — strengths/weaknesses
   triangulated from real-session retrospectives + onboarding reproduction +

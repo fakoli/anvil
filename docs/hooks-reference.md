@@ -3,9 +3,9 @@
 > anvil ships 4 hooks that detect project state, enforce claim
 > discipline, record file changes, and buffer verification-command output as
 > evidence. All hooks are **non-blocking** by design — warnings only, never
-> errors. Hooks are wired via [`hooks/hooks.json`](../hooks/hooks.json) and
+> errors. Hooks are wired via [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) and
 > shell out to `anvil hook ...` subcommands implemented in
-> [`bin/src/anvil/cli/hooks.py`](../bin/src/anvil/cli/hooks.py).
+> [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py).
 
 ---
 
@@ -58,14 +58,14 @@ the session is never broken because a backing service is unavailable.
 
 ## `hooks.json` mapping
 
-The four entries are declared in [`hooks/hooks.json`](../hooks/hooks.json):
+The four entries are declared in [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json):
 
 | Event | Matcher | Script | Timeout |
 |---|---|---|---|
-| `SessionStart` | (all) | [`detect-state.sh`](../hooks/detect-state.sh) | 5s |
-| `PreToolUse` | `Edit\|Write\|NotebookEdit` | [`check-claim.sh`](../hooks/check-claim.sh) | 5s |
-| `PostToolUse` | `Edit\|Write\|NotebookEdit` | [`record-file-change.sh`](../hooks/record-file-change.sh) | 5s |
-| `PostToolUse` | `Bash` | [`capture-evidence.sh`](../hooks/capture-evidence.sh) | 5s |
+| `SessionStart` | (all) | [`detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh) | 5s |
+| `PreToolUse` | `Edit\|Write\|NotebookEdit` | [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | 5s |
+| `PostToolUse` | `Edit\|Write\|NotebookEdit` | [`record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh) | 5s |
+| `PostToolUse` | `Bash` | [`capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) | 5s |
 
 Each script receives the Claude Code hook payload as JSON on stdin and
 addresses the project state at `${CLAUDE_PROJECT_DIR:-$PWD}/.anvil/`.
@@ -98,7 +98,7 @@ event fires once per session, so this is the loosest of the four budgets.
 **CLI call.** `anvil status --hook-format` — emits a single line in
 the form `active-claims:N ready-tasks:N blockers:N prd-status:STATUS`.
 
-**Source.** [`hooks/detect-state.sh`](../hooks/detect-state.sh).
+**Source.** [`hooks/detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh).
 
 ---
 
@@ -135,9 +135,9 @@ consolidating these per-call sqlite spawns.
 
 **CLI call.** `anvil hook check-claim --file PATH --actor ACTOR`
 (defined in
-[`bin/src/anvil/cli/hooks.py`](../bin/src/anvil/cli/hooks.py)).
+[`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)).
 
-**Source.** [`hooks/check-claim.sh`](../hooks/check-claim.sh).
+**Source.** [`hooks/check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh).
 
 ---
 
@@ -172,7 +172,7 @@ conflict-detection and audit layers with real per-file write data.
 **Performance.** Header targets <200ms. Phase 11 backlog item P11-HK-S2
 tracks adding `flock` to harden concurrent appends.
 
-**Source.** [`hooks/record-file-change.sh`](../hooks/record-file-change.sh).
+**Source.** [`hooks/record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh).
 
 ---
 
@@ -227,7 +227,7 @@ or `.anvil/.evidence-buffer/orphan.json`.
 
 **Performance.** Header targets <200ms.
 
-**Source.** [`hooks/capture-evidence.sh`](../hooks/capture-evidence.sh).
+**Source.** [`hooks/capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh).
 
 ---
 
@@ -316,11 +316,11 @@ existing levers above are the supported workflow today.
 
 ## See also
 
-- [`architecture.md` → Hooks](architecture.md#hooks-4) — architectural placement of the hook layer.
+- [`architecture.md` → Hooks](architecture.md#hooks-5) — architectural placement of the hook layer.
 - [`evidence-buffer.md`](evidence-buffer.md) — the record schema, the
   consume-and-rotate lifecycle, and the `submit --output-file` recovery
   path used by `capture-evidence.sh`.
-- [`hooks/hooks.json`](../hooks/hooks.json) — the source of truth for
+- [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) — the source of truth for
   event-to-script wiring.
-- [`bin/src/anvil/cli/hooks.py`](../bin/src/anvil/cli/hooks.py) —
+- [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py) —
   the three `anvil hook ...` subcommands the scripts shell into.

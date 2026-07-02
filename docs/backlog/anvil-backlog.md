@@ -102,7 +102,7 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
   - **Opt 1 — actionable message (S):** glob for a sibling `*/pyproject.toml`, suggest `cd <dir> && anvil init` + the `ANVIL_ROOT=<dir>` hint. Still refuses; purely additive. Trade-off: heuristic suggestion could point at a wrong subdir in unusual layouts.
   - **Opt 2 — `--allow-plugin-root` escape hatch (S–M):** opt-in bypass. Trade-off: lets users seed `.anvil/` into the plugin repo — the exact thing the guard prevents; needs gitignore hygiene.
   - **Opt 3 — add `--cwd` to `init` (M):** parity with `status`; `_resolve_base_dir` already supports it. Trade-off: more surface; redundant with `ANVIL_ROOT` but more discoverable.
-  - **Recommendation:** Opt 1 now (no downside); defer 2/3 unless requested. See [E9](#e9--wf-3-substrate--dogfooding-friction-follow-ups) for the sibling WF-3 friction items.
+  - **Recommendation:** Opt 1 now (no downside); defer 2/3 unless requested. See [E9](#e9-wf-3-substrate-dogfooding-friction-follow-ups) for the sibling WF-3 friction items.
 
 ---
 
@@ -302,7 +302,7 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 
 ## E9 — WF-3 Substrate & Dogfooding Friction Follow-ups
 
-Surfaced 2026-06-19 while building the WF-3 declarative workflow runner (PR #28) by dogfooding anvil on its own repo. Each item below carries a researched **Implementation trade-offs** block (options with cost + a recommendation). See also [B29](#b29--anvil-init-at-the-plugin-root-guidance-instead-of-a-bare-refusal-dogfooding-friction) (init guidance), the first item from the same dogfooding pass.
+Surfaced 2026-06-19 while building the WF-3 declarative workflow runner (PR #28) by dogfooding anvil on its own repo. Each item below carries a researched **Implementation trade-offs** block (options with cost + a recommendation). See also [B29](#b29-anvil-init-at-the-plugin-root-guidance-instead-of-a-bare-refusal-dogfooding-friction) (init guidance), the first item from the same dogfooding pass.
 
 ### B30 — `anvil doctor` check: verification commands whose paths don't resolve from the project root
 

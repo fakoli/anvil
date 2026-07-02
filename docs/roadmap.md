@@ -13,7 +13,7 @@
   - `v2.x` = anytime in the v2 line; doc/composition cleanups and hygiene that don't need a fixed release.
   - `unscheduled` = wanted but not committed; revisit when an adjacent item forces a touch.
 - **Theme** = capability group (sync providers, conflict resolution, snapshot/replay, MCP surface, doc agents, hooks, etc.). Themes are durable across versions; an item may shift versions, its theme rarely does.
-- **Item IDs** preserved verbatim from origin (`P9B-N` from phase-9-backlog, `P11-XX-XN` from phase-11-backlog) so commit messages, audit cross-references, and the [Phase 10 audit](audits/2026-05-26-plugin-audit.md) stay stable. Every ID in the archived backlogs appears here exactly once (except P11-SK-S5, see [Closed / shipped](#closed--shipped-cross-reference)).
+- **Item IDs** preserved verbatim from origin (`P9B-N` from phase-9-backlog, `P11-XX-XN` from phase-11-backlog) so commit messages, audit cross-references, and the [Phase 10 audit](audits/2026-05-26-plugin-audit.md) stay stable. Every ID in the archived backlogs appears here exactly once (except P11-SK-S5, see [Closed / shipped](#closed-shipped-cross-reference)).
 
 **Status legend** (carried over from origin files):
 `OPEN` = unscheduled within target; `TARGETED-VN.M` = scheduled for that release; `SPEC-FIRST` = needs a design doc before implementation; `Phase 11` = Phase 10 audit defer, picks up in the next planning pass.
@@ -29,7 +29,7 @@ the backlog; this track is what actually gets built first.
 
 > Operating-model principle: sequencing this track by credibility risk embodies
 > fakoli-style **P5** (sequence by credibility risk, not demonstrability). See
-> [`plugins/fakoli-style/docs/fakoli-style.md`](../../fakoli-style/docs/fakoli-style.md).
+> `plugins/fakoli-style/docs/fakoli-style.md`.
 
 ### The reframe this track serves
 
@@ -89,11 +89,11 @@ backed by a passing CI job.
   `review.gates.evidence_complete`; a parametrized agreement test locks the
   enforcing gate to the preview gate. Prerequisite for SL-3.
 - **[SL-1]** Prove replay in CI. **SHIPPED in 1.19.0.** The `anvil replay`
-  CLI ([`cli/replay.py`](../bin/src/anvil/cli/replay.py)) rebuilds state from
+  CLI ([`cli/replay.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/replay.py)) rebuilds state from
   `events.jsonl` into a scratch database (the long-planned v2.1 replay item,
   pulled forward because the audit positioning depends on it; the sibling
   `anvil snapshot` command, P9B-7, remains open), and
-  [`tests/test_replay_equivalence.py`](../tests/test_replay_equivalence.py)
+  [`tests/test_replay_equivalence.py`](https://github.com/fakoli/anvil/blob/main/tests/test_replay_equivalence.py)
   asserts the replayed canonical state is equivalent to the original on every
   PR — satisfied inside the main pytest `test` CI job rather than a
   separately-named `replay-equivalence` status check. This converts the
@@ -111,16 +111,16 @@ Theme: typed proof. The substrate stops trusting strings.
 
 - **[SL-3]** Ship `ProofArtifact` (typed evidence). **SPEC-FIRST.** Implement the
   typed artifact model; migrate `Verification.required_evidence`
-  ([`state/models.py:233`](../bin/src/anvil/state/models.py)); rewrite the
-  unified gate ([`review/gates.py`](../bin/src/anvil/review/gates.py)) to
+  ([`state/models.py:233`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)); rewrite the
+  unified gate ([`review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py)) to
   evaluate typed predicates; make
-  [`hooks/capture-evidence.sh`](../hooks/capture-evidence.sh) emit `CommandProof`
+  [`hooks/capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) emit `CommandProof`
   with real exit codes and output hashes. Acceptance: the substring path is
   deleted (not deprecated) and a migration converts existing string
   requirements. Depends on SL-0.
 - **[SL-6]** Score spec assumptions, not just tasks. **TARGETED.** Extend the
   six-dimension `Score`
-  ([`state/models.py`](../bin/src/anvil/state/models.py), `Score` value
+  ([`state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py), `Score` value
   object) to PRD requirements and surface the highest-blast-radius,
   lowest-confidence assumptions before planning. Acceptance: `anvil plan`
   reports the top assumptions ranked by `blast_radius * uncertainty`, and the
@@ -134,14 +134,14 @@ Theme: "underneath," for real. Only now, on a proven substrate.
 - **[SL-4]** Promote status-file coordination to canonical state. **TARGETED.**
   Today fakoli-flow / fakoli-crew coordinate by writing and grep-parsing markdown
   at `docs/plans/agent-<name>-status.md` (see
-  [`fakoli-flow/references/status-protocol.md`](../../fakoli-flow/references/status-protocol.md)).
+  `fakoli-flow/references/status-protocol.md`).
   Replace that with state `Event`s; the wave engine reads `anvil` instead
   of parsing prose. Acceptance: the wave engine has zero markdown-parsing code
   paths for status. This is the concrete delivery of "fakoli-flow sits on top of
   anvil."
 - **[SL-5]** Contract-level conflict with after-the-fact reconciliation.
   **SPEC-FIRST.** Add `OutputContract` to `Task`; key `ConflictGroup`
-  ([`state/models.py:539`](../bin/src/anvil/state/models.py)) on contract
+  ([`state/models.py:539`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)) on contract
   overlap rather than `expected_files` overlap; add a post-`apply` drift check
   comparing declared contract to actual `DiffProof`. The reconciliation step is
   what lifts conflict detection out of the advisory-only class (the same
@@ -193,7 +193,7 @@ not hand-author a workflow file, because anvil already turns the PRD into a read
 queue. The job is to transfer/drive that ready queue into whatever loop or
 automation a runtime offers, so each step runs anvil's governed transitions.
 
-The seam is **`anvil next`** ([`cli/claim.py:500`](../bin/src/anvil/cli/claim.py)),
+The seam is **`anvil next`** ([`cli/claim.py:500`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py)),
 which already returns the next ready task or, with `--json`, `{data: {task: null}}`
 on an empty queue (exit 0). The loop body already exists —
 `claim → packet (the contract that teaches the steps) → do the work →
@@ -212,7 +212,7 @@ events — SL-4); and keeps loops correct-not-just-fast (leased + evidence-gated
 steps cannot double-claim or fake "done").
 
 - **[WF-1]** `anvil next -q` exit-code seam. **SHIPPED in this PR.** Add a
-  `-q`/`--quiet` flag to `anvil next` ([`cli/claim.py:500`](../bin/src/anvil/cli/claim.py))
+  `-q`/`--quiet` flag to `anvil next` ([`cli/claim.py:500`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py))
   that gives jq-less shells and automations a branchable exit code: exit 0 if a
   task is ready, exit 3 if the queue is empty. This is the single missing bit that
   turns the existing `anvil next` into a loop seam — `while anvil next -q; do …;
@@ -255,7 +255,7 @@ The three load-bearing properties this theme must hold:
   dropped and nothing has to be re-authored; the single-PRD project is just the
   one-PRD degenerate case after the migration. (The follow-on v7→v8 step is a
   purely additive per-PRD `revision` counter — see
-  [`state/sqlite.py`](../bin/src/anvil/state/sqlite.py) `_m_to_v7` / `_m_to_v8`.)
+  [`state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py) `_m_to_v7` / `_m_to_v8`.)
 - **Gating is per-PRD; conflict detection is cross-PRD.** The `prd_status_gate`
   keys on the **task's owning PRD** (`task.prd_id`): a task is claimable as soon
   as *its* PRD is reviewed/approved, even while a sibling PRD is still `draft`.
@@ -273,7 +273,7 @@ The three load-bearing properties this theme must hold:
 Release/milestone **sync** wiring (PRD→GitHub-milestone) is intentionally **not**
 in this theme — only the `SyncMapping.prd_id` + prd-kind data plumbing shipped;
 the network-touching milestone client is deferred to **[MPRD-RG1]** under
-[v2.0 → Sync infrastructure](#theme-sync-infrastructure-push-based--conflict-completion).
+[v2.0 → Sync infrastructure](#theme-sync-infrastructure-push-based-conflict-completion).
 
 ---
 
@@ -298,7 +298,7 @@ These are the Phase 10 plugin-audit deferrals — 56 live items the five critics
 
 ### Theme: Skill hygiene (no-fuzzy-detection rule)
 
-See [Theme 1](#theme-1--no-fuzzy-detection-rule-across-skills) for batch-fix leverage notes.
+See [Theme 1](#theme-1-no-fuzzy-detection-rule-across-skills) for batch-fix leverage notes.
 
 - **[P11-SK-S1]** `skills/execute/SKILL.md:8,15,256` — fuzzy detection for `fakoli-flow:execute`. Add Step 0 `claude plugin list 2>/dev/null | grep -q "fakoli-flow"`; branch on exit code. Mirror `start-prd/SKILL.md:48`. **Note:** the grep pattern must NOT use `^` — `claude plugin list` indents each row with `  ❯ ` so a leading anchor never matches.
 - **[P11-SK-S2]** `skills/finish/SKILL.md:8,245-246` — fuzzy detection for `fakoli-flow:finish`. Add explicit `claude plugin list 2>/dev/null | grep -q "fakoli-flow"` check at top of Step 1.
@@ -308,7 +308,7 @@ See [Theme 1](#theme-1--no-fuzzy-detection-rule-across-skills) for batch-fix lev
 
 ### Theme: Skill hygiene (phase-status drift)
 
-See [Theme 5](#theme-5--phase-status-table-drift-across-skills).
+See [Theme 5](#theme-5-phase-status-table-drift-across-skills).
 
 - **[P11-SK-S7]** `skills/state-ops/SKILL.md:119-132` — phase-availability tables contradict `execute/SKILL.md` (`anvil conflicts` "pending" vs "available"). Reconcile via single `references/phase-status.md`.
 - **[P11-SK-S8]** `skills/state-ops/SKILL.md:67-96` — Steps 2 and 3 labeled "Phase 3 — pending" but every other skill uses `list`/`show` as available. Update to "available" matching rest of plugin.
@@ -331,7 +331,7 @@ See [Theme 5](#theme-5--phase-status-table-drift-across-skills).
 
 ### Theme: Hooks (hot-path perf)
 
-See [Theme 3](#theme-3--hot-path-perf-budget-on-hook-scripts).
+See [Theme 3](#theme-3-hot-path-perf-budget-on-hook-scripts).
 
 - **[P11-HK-S1]** `hooks/check-claim.sh:36-59` — hot-path perf budget violation; spawns `python3` twice (100-300ms) on every Edit/Write/NotebookEdit; exceeds declared 200ms. Consolidate into single `python3 -c` printing both fields; mirror `record-file-change.sh:35-58` pattern.
 - **[P11-HK-S2]** `hooks/record-file-change.sh:95-106` — hot-path perf budget violation; `_escape_json()` spawns 4 `python3` instances on fallback path; 5-6 total spawns. Move JSON escaping into original extraction `python3` block; emit pre-escaped values.
@@ -340,7 +340,7 @@ See [Theme 3](#theme-3--hot-path-perf-budget-on-hook-scripts).
 
 ### Theme: Hooks (contract documentation)
 
-See [Theme 4](#theme-4--hook-contract-undocumented-at-plugin-level).
+See [Theme 4](#theme-4-hook-contract-undocumented-at-plugin-level).
 
 - **[P11-HK-S3]** `README.md` / new `hooks/README.md` — non-blocking contract undocumented at plugin/doc level; future maintainer will reintroduce `set -e`. Add hook-contract section. _Single-paragraph fix; high-leverage._
 
@@ -363,7 +363,7 @@ See [Theme 4](#theme-4--hook-contract-undocumented-at-plugin-level).
 
 ### Theme: Documentation (install messaging, surface counts)
 
-See [Theme 7](#theme-7--install-messaging-drift-in-readme--changelog).
+See [Theme 7](#theme-7-install-messaging-drift-in-readme-changelog).
 
 - **[P11-ST-S1]** `README.md:37-48` — install section says "not yet in marketplace" but root `.claude-plugin/marketplace.json` contains v1.9.0 entry. Replace manual-clone paragraph with `/plugin marketplace add fakoli/fakoli-plugins && /plugin install anvil@fakoli-plugins` flow.
 - **[P11-ST-S2]** `CHANGELOG.md:7-14` — `[Unreleased]` opens with past-tense summary of v1.9.0; content already lives under dated section. Trim leading sentence; keep forward-looking v2.x notes.
@@ -427,7 +427,7 @@ Hygiene and structural cleanups that don't need a fixed release. Pick up opportu
 
 ### Theme: Agents (composition deduplication)
 
-See [Theme 6](#theme-6--composition-duplication-across-three-docstate-agents).
+See [Theme 6](#theme-6-composition-duplication-across-three-docstate-agents).
 
 - **[P11-AG-C1]** `agents/docs-scribe.md:1-366` — 366 lines (near 400 ceiling); ~60 lines duplicate `marketplace-scribe.md` and `state-keeper.md` composition prose. Extract shared "three doc/state specialists" composition into `docs/specs/internal-agents.md`; link from all three agents.
 - **[P11-AG-C2]** `agents/marketplace-scribe.md:1-308` — same composition duplication (lines 144-161, 292-308). Same fix as C1.
@@ -459,7 +459,7 @@ Items spanning multiple critics/areas that benefit from cohesive treatment. Thes
 
 ### Theme 1 — No-fuzzy-detection rule across skills
 
-**Closes:** P11-SK-S1, P11-SK-S2, P11-SK-S3, P11-SK-S4, ~~P11-SK-S5~~, P11-SK-S6 (originally 6 SHOULD FIX items; **5 live** — P11-SK-S5 closed in Phase 10 Fix #6, see [Closed / shipped](#closed--shipped-cross-reference)).
+**Closes:** P11-SK-S1, P11-SK-S2, P11-SK-S3, P11-SK-S4, ~~P11-SK-S5~~, P11-SK-S6 (originally 6 SHOULD FIX items; **5 live** — P11-SK-S5 closed in Phase 10 Fix #6, see [Closed / shipped](#closed-shipped-cross-reference)).
 **Pattern:** every skill that conditionally bridges to fakoli-flow, fakoli-crew, a sync provider, or LLM augmentation uses prose-only "when X is installed" framing without a `claude plugin list 2>/dev/null | grep -q "X"` shell check (no `^` anchor — `claude plugin list` indents each row, so the anchored form never matches). `start-prd/SKILL.md:48` and `finish/SKILL.md:249-254` are the reference implementations every other skill should mirror.
 **Welder effort:** ~3 lines per site, 5 sites — single welder pass, ~50 minutes.
 
@@ -512,7 +512,7 @@ Items that originated in the archived backlogs but have already shipped, kept he
 
 | ID | Title | Closed in |
 |---|---|---|
-| **P11-SK-S5** | `skills/finish/SKILL.md:247-252` — fuzzy detection for `fakoli-crew:sentinel`; no shell check | **Phase 10 Fix #6** — welder closed this as a bonus while fixing the dangling `/anvil:sentinel` slash-command reference at the same lines. Removed the broken snippet AND added the `claude plugin list 2>/dev/null \| grep -q "fakoli-crew"` shell gate (mirroring `start-prd/SKILL.md:48`), with explicit branches for exit-0 (dispatch fakoli-crew:sentinel) vs non-zero (fall through to plugin-local sentinel agent). The PR-B fix-cycle subsequently dropped the `^` anchor from these patterns once it was discovered that `claude plugin list` indents each row (so `^fakoli-...` never matched). See [`docs/plans/agent-welder-t11-status.md`](plans/agent-welder-t11-status.md) § "Fix 6 approach" for the welder's full decision rationale. |
+| **P11-SK-S5** | `skills/finish/SKILL.md:247-252` — fuzzy detection for `fakoli-crew:sentinel`; no shell check | **Phase 10 Fix #6** — welder closed this as a bonus while fixing the dangling `/anvil:sentinel` slash-command reference at the same lines. Removed the broken snippet AND added the `claude plugin list 2>/dev/null \| grep -q "fakoli-crew"` shell gate (mirroring `start-prd/SKILL.md:48`), with explicit branches for exit-0 (dispatch fakoli-crew:sentinel) vs non-zero (fall through to plugin-local sentinel agent). The PR-B fix-cycle subsequently dropped the `^` anchor from these patterns once it was discovered that `claude plugin list` indents each row (so `^fakoli-...` never matched). See `docs/plans/agent-welder-t11-status.md` § "Fix 6 approach" for the welder's full decision rationale. |
 | P9-1 | Audit-event honesty — `sync.pull.completed` emitted on deferred branches | Phase 9 T5 |
 | P9-2 | `local_moved`-only path set `sync_state="in_sync"` instead of `local_ahead` | Phase 9 T5 |
 | P9-3 | `SyncAuditPayload` single all-optional model accepted nonsense | Phase 9 T3 |

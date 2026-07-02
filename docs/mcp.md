@@ -385,7 +385,7 @@ raises a `ToolError` and no claim is created.
 `lease_duration_seconds` is converted to minutes (floor, minimum 1) before being passed
 to `ClaimManager`. The default 900 seconds gives a 15-minute MCP-side override — note that
 the CLI's `ClaimManager` ships with a 60-minute default (see
-[`bin/src/anvil/claims/manager.py`](../bin/src/anvil/claims/manager.py)
+[`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py)
 line 118), and the project-level override is read from `.anvil/config.yaml`.
 
 **Output**

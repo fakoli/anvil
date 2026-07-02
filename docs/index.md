@@ -1,5 +1,7 @@
 # Anvil
 
+![Anvil — system of record for agent teams](https://raw.githubusercontent.com/fakoli/anvil/main/assets/banner.png)
+
 **The system of record for agent teams** — a local-first, backend-neutral
 project-state layer for humans and AI coding agents. Anvil records
 requirements, tasks, claims, evidence, and reviews in SQLite plus an

@@ -50,7 +50,7 @@ it has crossed the line and should be code, not YAML.
 ## Decision: concurrency acceptance bar — mirror the existing suite
 
 T006 proves `fan_out` stresses the wedge with the same rigor as
-[`tests/test_claims_concurrency.py`](../../bin/tests/test_claims_concurrency.py):
+[`tests/test_claims_concurrency.py`](https://github.com/fakoli/anvil/blob/main/tests/test_claims_concurrency.py):
 N parallel `fan_out` claims over overlapping `expected_files` must yield exactly
 one winner per task and zero lost evidence, across ≥200 iterations, ≥8 threads, and
 multiple contention shapes. A single-pass smoke test is insufficient — the rare

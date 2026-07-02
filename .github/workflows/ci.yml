@@ -71,8 +71,8 @@ jobs:
           enable-cache: true
 
       # Same command Read the Docs effectively runs (.readthedocs.yaml).
-      # Not --strict yet: docs deliberately link into the source tree,
-      # which mkdocs flags — see the validation note in mkdocs.yml and
-      # plan item D5 (docs/plans/2026-07-02-production-readiness.md).
+      # --strict: any broken relative link or anchor fails the build
+      # (source-tree references use absolute GitHub URLs — see the
+      # validation note in mkdocs.yml; plan item D5).
       - name: Build docs site
-        run: uvx --with-requirements docs/requirements.txt mkdocs build
+        run: uvx --with-requirements docs/requirements.txt mkdocs build --strict

@@ -11,6 +11,8 @@ docs_dir: docs
 
 theme:
   name: material
+  icon:
+    logo: material/anvil
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -37,6 +39,7 @@ theme:
 
 markdown_extensions:
   - admonition
+  - attr_list
   - toc:
       permalink: true
   - tables
@@ -51,15 +54,14 @@ markdown_extensions:
 plugins:
   - search
 
-# Many docs deliberately link into the source tree (../bin/src/...) and to
-# repo-root files (CHANGELOG.md, AGENTS.md) — valid on GitHub, outside the
-# site. Warn, don't fail, on those; a strict pass is tracked in
-# docs/plans/2026-07-02-production-readiness.md (D5).
+# Links into the source tree use absolute GitHub URLs (valid on GitHub AND
+# on the site); links between docs stay relative. CI builds with --strict,
+# so a broken relative link or anchor fails the build (plan item D5, done).
 validation:
   links:
     not_found: warn
     absolute_links: ignore
-    unrecognized_links: ignore
+    unrecognized_links: warn
 
 # In the repo but intentionally NOT in the site nav:
 #   _positioning.md    — internal source-of-truth, marked "not part of
@@ -109,6 +111,7 @@ nav:
           - Event-sourcing write path (SL-1): specs/2026-06-01-sl1-rr-1-event-sourcing-write-path.md
           - Git-backed events: specs/2026-06-10-git-backed-events.md
           - Workflow substrate (WF-3): specs/2026-06-19-anvil-workflow-substrate.md
+          - Unattended ergonomics: specs/2026-06-19-ergonomics-unattended.md
           - P11 audit batch: specs/2026-06-19-p11-audit-batch.md
           - Scoring agent: specs/2026-06-19-scoring-agent.md
           - ProofArtifact (SL-3): specs/2026-06-19-sl3-proofartifact.md

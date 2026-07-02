@@ -2,7 +2,7 @@
 
 Practical answers for evaluating, installing, and operating anvil. For
 positioning ("why is this different from X"), see the comparison table in the
-[README](../README.md#comparison-vs-alternatives) and
+[README](https://github.com/fakoli/anvil/blob/main/README.md#comparison-vs-alternatives) and
 [`_positioning.md`](_positioning.md). For architectural depth, see
 [`architecture.md`](architecture.md); for design rationale, see
 [`design.md`](design.md).
@@ -175,7 +175,7 @@ See [`how-to/getting-started.md`](how-to/getting-started.md) and
 ### How do I temporarily disable a hook?
 
 The five hooks are wired in
-[`hooks/hooks.json`](../hooks/hooks.json) at the `SessionStart`,
+[`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) at the `SessionStart`,
 `PreToolUse`, and `PostToolUse` events — including `heartbeat.sh`, which
 fires at `PostToolUse` on Edit/Write/NotebookEdit and Bash and renews the
 active lease. To disable one without
@@ -240,9 +240,9 @@ sqlite3 .anvil/state.db "SELECT id, status, title FROM tasks;"
 The schema is version 8; older databases are auto-upgraded via the
 additive v6 → v7 → v8 migration ladder (`anvil migrate state` — dry-run by
 default, `--yes` to apply — or automatically on open). Pydantic models in
-[`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py)
+[`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)
 define every entity; the SQLite implementation lives in
-[`bin/src/anvil/state/sqlite.py`](../bin/src/anvil/state/sqlite.py).
+[`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py).
 
 Read-only inspection is safe and concurrent — WAL mode lets readers
 proceed without blocking the CLI's writers. Do not edit rows directly:
@@ -332,11 +332,11 @@ question.
 ### How do I write my own sync provider?
 
 Implement the `SyncProvider` Protocol from
-[`bin/src/anvil/sync/provider.py`](../bin/src/anvil/sync/provider.py)
+[`bin/src/anvil/sync/provider.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/provider.py)
 and register it in
-[`registry.py`](../bin/src/anvil/sync/registry.py). The
+[`registry.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/registry.py). The
 `GitHubIssuesProvider` at
-[`sync/providers/github_issues.py`](../bin/src/anvil/sync/providers/github_issues.py)
+[`sync/providers/github_issues.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/providers/github_issues.py)
 is the reference implementation — read it alongside the contributor
 guide at [`sync-providers.md`](sync-providers.md), which walks through
 the Linear case step by step.
