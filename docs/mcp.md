@@ -3,8 +3,10 @@
 ## What it does
 
 Agents need to read and write canonical project state without each one shelling out to the
-CLI per operation and without fighting over the same SQLite rows. The MCP server exposes 24
-tools over stdio so that any MCP-compatible runtime — Claude Code, Codex, Cursor, OpenHands,
+CLI per operation and without fighting over the same SQLite rows. The MCP server has 24
+registered tools (14 on the wire by default — see
+[Tool surface gating](#tool-surface-gating)) over stdio so that any MCP-compatible
+runtime — Claude Code, Codex, Cursor, OpenHands,
 Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
 apply workflow as first-class tool calls. Read-only tools return structured Pydantic
 objects; mutating tools run stale-claim reaping before writing, so the state the agent sees
@@ -29,6 +31,30 @@ The eight workflow tools added in v1.13.0 — `init_project`, `get_project_statu
 `apply_review_decision` — deliberately omit git operations (branch / worktree creation),
 matching `claim_task`'s long-standing behavior: remote agents may have no git access, so
 the MCP surface stays git-free. Git side-effects remain CLI-only.
+
+---
+
+## Tool surface gating
+
+All 24 tools are registered, but the live stdio server exposes only the **14 execution
+tools** on the wire by default — the turn-to-turn loop an agent runs while doing work:
+
+`get_next_task`, `claim_task`, `release_task`, `renew_claim`, `submit_progress`,
+`submit_completion_evidence`, `update_task_status`, `get_task`, `get_project_status`,
+`get_project_summary`, `list_tasks`, `check_conflicts`, `generate_work_packet`,
+`get_dependency_graph`
+
+The other **10 planning tools** are hidden by default so steady-state execution clients
+never pay their schema cost on every turn:
+
+`init_project`, `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
+`apply_review_decision`, `edit_dependencies`, `find_decisions`, `describe_surface`
+
+Set `ANVIL_MCP_PLANNING=1` (any of `1`/`true`/`yes`/`on`) in the server's environment to
+keep all 24 tools on the wire — use it for the planning phase, or run a second server
+entry with the flag set. No tool is removed by the gate: introspection surfaces
+(`anvil describe`, the `--help` tool list, the Docker catalog smoke test) always report
+all 24.
 
 ---
 
@@ -359,7 +385,7 @@ raises a `ToolError` and no claim is created.
 `lease_duration_seconds` is converted to minutes (floor, minimum 1) before being passed
 to `ClaimManager`. The default 900 seconds gives a 15-minute MCP-side override — note that
 the CLI's `ClaimManager` ships with a 60-minute default (see
-[`bin/src/anvil/claims/manager.py`](../bin/src/anvil/claims/manager.py)
+[`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py)
 line 118), and the project-level override is read from `.anvil/config.yaml`.
 
 **Output**
@@ -634,7 +660,9 @@ operations.
 - `ToolError` — `.anvil/` already exists (use CLI `init --force` to reinit).
 - `ToolError` — scaffold I/O failure.
 
-**When to call**: the very first MCP call against a fresh project root.
+**When to call**: the very first MCP call against a fresh project root. `init_project` is
+planning-gated — it is not on the wire unless the server runs with
+`ANVIL_MCP_PLANNING=1` (see [Tool surface gating](#tool-surface-gating)).
 
 ---
 
@@ -1079,9 +1107,12 @@ docker run --rm -i \
   anvil-mcp
 ```
 
-`-i` keeps stdin open for the stdio transport. The mounted `/project` must already contain
-(or will receive) a `.anvil/` directory — run `anvil init` there first, or
-call the `init_project` tool over MCP.
+`-i` keeps stdin open for the stdio transport. `ANVIL_ROOT=/project` makes the
+server look for `/project/.anvil` **literally**, so the mounted project must
+carry its state in-tree: initialise it with `ANVIL_STATE_LAYOUT=local anvil
+init` (a bare `anvil init` puts state in the host's `~/.anvil/workspaces/`,
+which the container never sees), or call the `init_project` tool over MCP
+(requires `ANVIL_MCP_PLANNING=1`, since `init_project` is planning-gated).
 
 Equivalent `mcpServers` entry for an MCP client that launches Docker directly:
 

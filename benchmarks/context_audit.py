@@ -14,8 +14,10 @@ installed, BEFORE any skill is invoked or any tool is called:
                              agent registry / system prompt always-on)
     - Skill descriptions     8 skills' frontmatter `description:` ONLY
                              (skill BODIES load on demand — counted separately)
-    - MCP tool schemas       22 MCP tools (name + description + JSON input
-                             schema) as serialized over the wire by FastMCP
+    - MCP tool schemas       24 MCP tools (14 execution-surface by default;
+                             10 planning tools gated behind ANVIL_MCP_PLANNING)
+                             (name + description + JSON input schema) as
+                             serialized over the wire by FastMCP
     - Hook injections        SessionStart hook stdout injected into context
     - Commands               slash-command frontmatter (none ship today)
 

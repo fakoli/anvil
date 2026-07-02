@@ -3,7 +3,11 @@
 Anvil's engine does not depend on Claude Code. Any harness can drive the full
 loop through one of two surfaces:
 
-1. **MCP** — register the `anvil` stdio server, get all 24 tools.
+1. **MCP** — register the `anvil` stdio server. It serves the 14 execution
+   tools by default; set `ANVIL_MCP_PLANNING=1` in the server's env to expose
+   all 24 (adds the planning tools — `init_project`, `parse_prd`, `plan_tasks`,
+   `score_tasks`, `review_prd`, `review_tasks`, `apply_review_decision`,
+   `find_decisions`, `edit_dependencies`, `describe_surface`).
 2. **CLI** — `anvil <command>` with `--json` for machine-readable output.
 
 `anvil install <harness>` wires this up for you, in two tiers:
@@ -27,8 +31,24 @@ toolset with zero file-format risk.
 ## One command
 
 ```bash
-anvil install <harness>          # dry-run: prints exactly what it would write
+anvil install <harness>          # dry-run (default): prints what it would write, writes nothing
 anvil install <harness> --write  # do it (idempotent MCP merge; +AGENTS.md on codex)
+```
+
+The dry-run marks every target with `would write` and ends with an explicit
+trailer so it can't be mistaken for a write:
+
+```
+# MCP config (would write) → ~/.cursor/mcp.json
+{
+  "mcpServers": {
+    "anvil": {
+      "command": "anvil-mcp",
+      "args": []
+    }
+  }
+}
+# dry-run — nothing was written. Re-run with --write to apply.
 ```
 
 Flags: `--root <dir>` pins `ANVIL_ROOT` in the written config; `--uv-run` emits
@@ -116,9 +136,14 @@ hand-edits `~/.codex/config.toml` (Codex owns that file). `anvil install codex
 --write` runs, on your behalf:
 
 ```
-codex plugin marketplace add fakoli/anvil       # skills + commands + Plugins-panel entry
-codex mcp add anvil -- bash <…>/bin/anvil-mcp   # the MCP server
+codex plugin marketplace add fakoli/anvil   # skills + commands + Plugins-panel entry
+codex mcp add anvil -- anvil-mcp            # the MCP server
 ```
+
+(That is the installed-package form — `anvil-mcp` is the console script on your
+PATH. From a source checkout the server command points at the checkout's
+`bash <checkout>/bin/anvil-mcp` wrapper instead; the dry-run shows whichever
+applies.)
 
 It also splices anvil's usage doc into the project `AGENTS.md` as a marked,
 removable block. Undo everything with `anvil install codex --rollback` (it runs
@@ -146,9 +171,12 @@ OpenClaw is its own agent platform with a full CLI — not a Claude `.mcp.json`
 bundle. Anvil installs **natively** and touches **none** of your files:
 
 ```
-openclaw mcp add anvil --no-probe --command bash --arg <…>/bin/anvil-mcp   # register the server
-openclaw plugins install anvil --marketplace fakoli/anvil --force          # skills + commands
+openclaw mcp add anvil --no-probe --command anvil-mcp              # register the server
+openclaw plugins install anvil --marketplace fakoli/anvil --force  # skills + commands
 ```
+
+(As with codex, that is the installed-package form; from a source checkout the
+`--command`/`--arg` pair points at the checkout's `bin/anvil-mcp` bash wrapper.)
 
 We pass `--no-probe` so a cold-start `uv sync` (which can exceed OpenClaw's 30s
 connect probe) can't leave the server unsaved while the plugin installs — OpenClaw
@@ -158,7 +186,7 @@ re-install refresh the plugin rather than silently keep a stale copy. Undo with
 uninstall`). If the `openclaw` CLI isn't on PATH, the commands are printed to run.
 
 **Sandbox prerequisite.** If you enable OpenClaw sandboxing, add anvil's MCP tools to
-`sandbox.tools.allow` — otherwise the 24 anvil tools silently vanish in sandboxed
+`sandbox.tools.allow` — otherwise anvil's MCP tools silently vanish in sandboxed
 turns. `anvil install openclaw` prints this reminder.
 
 ### Gateway cron recipes (opt-in)

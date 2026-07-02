@@ -2,7 +2,7 @@
 
 Practical answers for evaluating, installing, and operating anvil. For
 positioning ("why is this different from X"), see the comparison table in the
-[README](../README.md#comparison-vs-alternatives) and
+[README](https://github.com/fakoli/anvil/blob/main/README.md#comparison-vs-alternatives) and
 [`_positioning.md`](_positioning.md). For architectural depth, see
 [`architecture.md`](architecture.md); for design rationale, see
 [`design.md`](design.md).
@@ -35,16 +35,20 @@ No, not for the core flow. The PRD parser, six-dimension scorer, and
 dependency inferencer are deterministic and rule-based — they ship as Python
 in `bin/src/anvil/planning/` and run with no network.
 
-An `ANTHROPIC_API_KEY` unlocks three optional `--use-llm` augmentations:
-`plan --use-llm` extends short task descriptions, `score --use-llm` adds a
-trade-off paragraph to the explanation, and `expand --use-llm` proposes
-sub-tasks for tasks with `complexity >= 4`. The numeric scores, task IDs,
-dependencies, and status transitions are never touched by the model — the
-LLM layer is strictly additive.
+The three optional `--use-llm` augmentations do not require an API key
+either: by default they run through the Claude Agent SDK subscription
+path (no API key — it uses your existing `claude` CLI login), with
+`ANTHROPIC_API_KEY`, Bedrock, and OpenAI-compatible custom endpoints as
+configurable alternatives. `plan --use-llm` extends short task
+descriptions, `score --use-llm` adds a trade-off paragraph to the
+explanation, and `expand --use-llm` proposes sub-tasks for tasks with
+`complexity >= 4`. The numeric scores, task IDs, dependencies, and status
+transitions are never touched by the model — the LLM layer is strictly
+additive.
 
 `expand` is the only command that *requires* `--use-llm`; everything else
-has a deterministic baseline. The default model is `claude-sonnet-4-6` with
-ephemeral prompt caching on by default.
+has a deterministic baseline. For the API-key providers, the default model
+is `claude-sonnet-4-6` with ephemeral prompt caching on by default.
 
 See [`llm.md`](llm.md) for the full augmentation contract.
 
@@ -59,9 +63,10 @@ Two surfaces are always available:
 
 - **CLI** (`anvil <cmd>`) — runtime-agnostic; any shell-capable agent
   can call it via Bash, and humans use it directly.
-- **MCP server** — 24 tools exposed over FastMCP stdio. Any MCP client
-  connects; tool responses are structured JSON with explicit error
-  envelopes.
+- **MCP server** — 24 registered tools over FastMCP stdio; the lean
+  execution default serves 14 on the wire (set `ANVIL_MCP_PLANNING=1` to
+  add the 10 planning tools). Any MCP client connects; tool responses are
+  structured JSON with explicit error envelopes.
 
 When a runtime cannot speak MCP (Cursor has no shell, some Copilot modes
 have no stdio), the CLI surface is the fallback. Hooks are Claude
@@ -169,13 +174,15 @@ See [`how-to/getting-started.md`](how-to/getting-started.md) and
 
 ### How do I temporarily disable a hook?
 
-The four hooks are wired in
-[`hooks/hooks.json`](../hooks/hooks.json) at the `SessionStart`,
-`PreToolUse`, and `PostToolUse` events. To disable one without
+The five hooks are wired in
+[`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) at the `SessionStart`,
+`PreToolUse`, and `PostToolUse` events — including `heartbeat.sh`, which
+fires at `PostToolUse` on Edit/Write/NotebookEdit and Bash and renews the
+active lease. To disable one without
 uninstalling the plugin, comment out or delete the relevant block in
 `hooks.json` and restart your Claude Code session.
 
-All four hooks are non-blocking by design — they `exit 0` regardless of
+All five hooks are non-blocking by design — they `exit 0` regardless of
 internal failure, never use `set -e` / `set -u` / `set -o pipefail`, and
 wrap CLI calls with `|| true`. A hook that errors out internally already
 behaves like a disabled hook: it warns once to stderr and gets out of the
@@ -230,11 +237,12 @@ sqlite3 .anvil/state.db .schema
 sqlite3 .anvil/state.db "SELECT id, status, title FROM tasks;"
 ```
 
-The schema is version 5 (unchanged since v1.8.0 — no
-migration required). Pydantic models in
-[`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py)
+The schema is version 8; older databases are auto-upgraded via the
+additive v6 → v7 → v8 migration ladder (`anvil migrate state` — dry-run by
+default, `--yes` to apply — or automatically on open). Pydantic models in
+[`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)
 define every entity; the SQLite implementation lives in
-[`bin/src/anvil/state/sqlite.py`](../bin/src/anvil/state/sqlite.py).
+[`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py).
 
 Read-only inspection is safe and concurrent — WAL mode lets readers
 proceed without blocking the CLI's writers. Do not edit rows directly:
@@ -266,8 +274,10 @@ clones.
 
 A native `anvil snapshot` subcommand (`sqlite3 .backup` wrapper
 with retention) is planned for v2.1 — see
-[`roadmap.md` § v2.1 → Snapshot / replay](roadmap.md). Until then,
-`cp -R` is the supported flow.
+[`roadmap.md` § v2.1 → Snapshot / replay](roadmap.md). Shipping today:
+`anvil backup` pushes `events.jsonl` (and optionally `state.db`) to a
+configured `durable_store: s3`, and `anvil restore` pulls it back and
+rebuilds state via replay. `cp -R` remains the fully-local flow.
 
 ### What if `state.db` gets corrupted?
 
@@ -322,11 +332,11 @@ question.
 ### How do I write my own sync provider?
 
 Implement the `SyncProvider` Protocol from
-[`bin/src/anvil/sync/provider.py`](../bin/src/anvil/sync/provider.py)
+[`bin/src/anvil/sync/provider.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/provider.py)
 and register it in
-[`registry.py`](../bin/src/anvil/sync/registry.py). The
+[`registry.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/registry.py). The
 `GitHubIssuesProvider` at
-[`sync/providers/github_issues.py`](../bin/src/anvil/sync/providers/github_issues.py)
+[`sync/providers/github_issues.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/providers/github_issues.py)
 is the reference implementation — read it alongside the contributor
 guide at [`sync-providers.md`](sync-providers.md), which walks through
 the Linear case step by step.

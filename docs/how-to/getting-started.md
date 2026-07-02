@@ -1,6 +1,6 @@
 # Getting started with anvil
 
-> anvil is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite under `.anvil/` and exposed through a CLI and an MCP server. This walkthrough takes you from an empty directory to a shipped task in about five minutes.
+> anvil is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite in a per-project workspace under `~/.anvil/` and exposed through a CLI and an MCP server. This walkthrough takes you from an empty directory to a shipped task in about five minutes.
 
 ## What you'll do
 
@@ -13,6 +13,10 @@ In ~5 minutes, you will:
 - Claim the first task, get a work packet, submit evidence, and apply it.
 
 By the end you will have one task in `done`, one claim recorded in `events.jsonl`, and an `agent/t001-<slug>` git branch holding the work.
+
+## Where your state lives
+
+By default anvil keeps state **outside** your project, in a per-project HOME workspace: `~/.anvil/workspaces/<dirname>-<hash8>/.anvil/` (e.g. `~/.anvil/workspaces/my-project-183a2542/.anvil`). Your repo stays clean — no `.anvil/` directory appears inside it. `anvil status` prints the exact location on its `Path:` line, and `anvil init` prints the absolute PRD path in its next-step hint. Two environment variables override the default: `ANVIL_STATE_LAYOUT=local` restores the in-repo `./.anvil/` layout, and `ANVIL_ROOT=<dir>` pins state to `<dir>/.anvil` literally. Wherever this guide writes `.anvil/…`, it means the state directory `anvil status` reports.
 
 ## Prerequisites
 
@@ -33,7 +37,7 @@ The install registers four hooks, wires the MCP server, and makes the six plugin
 
 ```bash
 anvil --version
-# → anvil 0.3.0 (schema 8)
+# → anvil 0.3.x (schema 8)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
@@ -53,19 +57,31 @@ Output:
 ```
 Initialized anvil for 'My Project' (id: my-project)
 
-  .anvil/config.yaml
-  .anvil/state.db
-  .anvil/events.jsonl
-  .anvil/packets/
+  ~/.anvil/workspaces/my-project-183a2542/.anvil/config.yaml
+  ~/.anvil/workspaces/my-project-183a2542/.anvil/state.db
+  ~/.anvil/workspaces/my-project-183a2542/.anvil/events.jsonl
+  ~/.anvil/workspaces/my-project-183a2542/.anvil/packets/
 
-Next step: author your PRD at .anvil/prd.md, then run `anvil prd parse`.
+Next step: author your PRD at ~/.anvil/workspaces/my-project-183a2542/.anvil/prd.md, then run `anvil prd parse`.
+
+Your prd.md must contain these required sections:
+  # Project: <Name>
+  ## Summary
+  ## Goals
+  ## Requirements
+Optional ## Features / ## Tasks use bold-inline fields, e.g.
+  **Feature:** F001   (under a ### Txxx task heading)
+  **Requirements:** R001, R002   (under a ### Fxxx feature heading)
+See docs/prd-template.md for the full template.
 ```
 
-`prd.md` is intentionally NOT auto-created — you author it next against the template.
+Note the paths: state landed in the HOME workspace, not in your repo. `prd.md` is intentionally NOT auto-created — you author it next, at the absolute path `init` just printed, against the template.
 
 ## Step 3 — Author your PRD
 
-Open `.anvil/prd.md` in your editor and paste a minimal valid PRD. The required sections are `# Project:`, `## Summary`, `## Goals`, `## Requirements`, plus at least one task in `## Tasks` to actually have something to claim. Any task that declares a `**Feature:** F00N` line must have a matching `### F00N:` block in `## Features`. Full schema in [`../prd-template.md`](../prd-template.md).
+Open the `prd.md` path that `init` printed (under `~/.anvil/workspaces/…`) in your editor and paste a minimal valid PRD. The required sections are `# Project:`, `## Summary`, `## Goals`, `## Requirements`, plus at least one task in `## Tasks` to actually have something to claim. Any task that declares a `**Feature:** F00N` line must have a matching `### F00N:` block in `## Features`. Full schema in [`../prd-template.md`](../prd-template.md).
+
+> **Requirement IDs are strict.** Every requirement must use the canonical `R0NN` form — `R001`, `R002`, `R003`. Suffixed or ad-hoc IDs like `R003a` are refused by the parser, so number requirements canonically *before* you run `anvil prd parse` — splitting a requirement means renumbering, not suffixing.
 
 > **Multi-PRD note.** A project can hold several release-scoped PRDs in one `state.db`, each separately gated; run `anvil prd list` to see them. The default PRD's source is the bare `.anvil/prd.md` used throughout this guide (conceptually `.anvil/prds/default.md`); a named release PRD lives at `.anvil/prds/<prd_id>.md` and is parsed with `anvil prd parse --prd <prd_id>`. Re-parsing a PRD replaces the `Requirement` rows in **that PRD's partition only**, leaving sibling PRDs untouched (Features and Tasks are (re)generated by `anvil plan`, which prunes orphans). Single-PRD projects can ignore all of this and keep using `.anvil/prd.md`.
 
@@ -121,7 +137,7 @@ Parse the positional file argument, read as UTF-8, write back uppercased.
 ```bash
 anvil prd parse
 # → Parsed 3 requirements, 1 features, 1 tasks.
-# → PRD source: .anvil/prd.md
+# → PRD source: ~/.anvil/workspaces/my-project-183a2542/.anvil/prd.md
 
 anvil prd review            # draft → reviewed
 # → PRD reviewed by 'human'.
@@ -141,8 +157,8 @@ anvil plan
 
 anvil score
 # TaskID       Complexity Parallel CtxLoad Blast Review Agent
-# ---------------------------------------------------------------
-# T001                  2        4       2     2      2     4
+# -----------------------------------------------------------
+# T001                  2        4       2     4      3     2
 #
 # Scored 1 task(s).
 
@@ -152,29 +168,71 @@ anvil review tasks
 # → 2 total promotion(s). No tasks blocked.
 
 anvil list --status ready
-# TaskID  Title                    Status  Priority  Score  Feature
-# ----------------------------------------------------------------------
-# T001    Implement uppercase CLI  ready   high      2/4    F001
+# TaskID  Title                    Status  Priority  Type             Score  Feature
+# ----------------------------------------------------------------------------------
+# T001    Implement uppercase CLI  ready   high      feature            2/2  F001
 #
 # 1 task(s) listed.
 ```
 
-Six dimensions: complexity, parallelizability, context load, blast radius, review risk, agent suitability — each 1–5. Scores drive `anvil next` routing and `expand` recommendations.
+Six dimensions: complexity, parallelizability, context load, blast radius, review risk, agent suitability — each 1–5. Scores drive `anvil next` routing and `expand` recommendations. In the list table, **Type** is the kind of change the task represents (`feature`, `bugfix`, `refactor`, or `modify`) and **Score** is shorthand for `complexity/agent-suitability`.
 
 ## Step 6 — Claim and ship the first task
 
 ```bash
 anvil next
-# → T001 — Implement uppercase CLI (ready, priority=high)
+# → Next recommended task: T001
+#     Title:    Implement uppercase CLI
+#     Priority: high
+#     Complexity: 2
 
 anvil claim T001
-# → Claim C001 active; branch agent/t001-implement-uppercase-cli created
-
-anvil packet T001
-# → Wrote .anvil/packets/T001.md
+# → Claimed task 'T001' as 'cc80db5f1e33f5f6'.
+#     Claim ID:    CBA2432F4
+#     Lease until: 2026-07-02T06:33:13.691911+00:00
+#     Branch:      agent/t001-implement-uppercase-cli
 ```
 
-Open `.anvil/packets/T001.md` — it contains the exact intent, acceptance criteria, verification commands, and non-goals the agent (or you) need to execute the work. No issue thread to summarize.
+Claim IDs are random — yours will not be `CBA2432F4` — and the lease defaults to 240 minutes; run `anvil renew <claim-id>` to extend it on long-running work. The claim also created the `agent/t001-implement-uppercase-cli` branch in **your project's** git repo (state lives in the workspace, branches live where the code is).
+
+```bash
+anvil packet T001
+```
+
+```
+Wrote packet to ~/.anvil/workspaces/my-project-183a2542/.anvil/packets/T001.md
+
+# T001 — Implement uppercase CLI
+
+**Feature:** F001 — Uppercase CLI
+**Status:** claimed
+**Priority:** high
+**Type:** feature
+**Agent suitability:** 2/5
+**Complexity:** 2/5
+
+## Goal
+
+Parse the positional file argument, read as UTF-8, write back uppercased.
+
+## Acceptance criteria
+
+- `upper sample.txt` rewrites `sample.txt` with uppercase contents.
+- `upper missing.txt` exits 1 and prints a message naming the file.
+
+...
+
+## Verification
+
+Commands:
+- `pytest tests/test_cli.py -v`
+
+Required proofs (typed — captured by the run hooks):
+- `pytest tests/test_cli.py -v` exits 0
+...
+```
+
+The packet — printed to stdout and written under `packets/` in the workspace — contains the exact intent, acceptance criteria, verification commands, and non-goals the agent (or you) need to execute the work. No issue thread to summarize.
 
 Do the work on the `agent/t001-*` branch, then submit evidence and apply:
 
@@ -182,15 +240,52 @@ Do the work on the `agent/t001-*` branch, then submit evidence and apply:
 anvil submit T001 \
     --commands "pytest tests/test_cli.py" \
     --files-changed src/upper/cli.py
-# → Evidence submitted; task T001 → needs_review.
+```
 
+```
+Evidence submitted for task 'T001'.
+  Evidence ID:  EV893EFA1D
+  Claim ID:     CBA2432F4 (auto-released)
+  Submitted by: cc80db5f1e33f5f6
+  Commands:     ['pytest tests/test_cli.py']
+  Files:        ['src/upper/cli.py']
+
+Task 'T001' status → needs_review.
+Run `anvil apply T001` when ready for human review.
+Evidence gate: INCOMPLETE — missing items for required_evidence:
+  - `pytest tests/test_cli.py -v` exits 0
+```
+
+The `Evidence gate: INCOMPLETE` line is **advisory, not an error** — the submit succeeded and the task moved to `needs_review`. A plain-CLI submit records your commands as strings; the typed exit-code proofs the gate checks for are captured by the run hooks (e.g. when a harness executes the verification commands), so a bare CLI walkthrough is expected to show this line.
+
+```bash
 anvil apply T001 --approve
-# → Task T001 applied; event task.applied recorded in events.jsonl.
+# → Task 'T001' approved by 'human' → done.
+# → Signed proof: ~/.anvil/workspaces/my-project-183a2542/.anvil/proofs/T001-E000015.json
 ```
 
 ## What just happened?
 
-`state.db` now records `T001=done` and `C001` released. `events.jsonl` has the full audit trail: `project.created`, `prd.parsed`, `prd.reviewed`, `prd.approved`, `task.created`, `task.scored`, `task.status_changed` × N, `claim.created`, `evidence.submitted`, `task.applied`. Replaying that log from an empty database reconstructs `state.db` byte-for-byte — the audit guarantee that makes `.anvil/` safe to back up by copy.
+`state.db` now records `T001=done` and the claim released. `events.jsonl` has the full audit trail: `project.created`, `state.initialized`, `prd.parsed`, `prd.reviewed`, `prd.approved`, `feature.created`, `task.created`, `task.scored`, `task.status_changed` × N, `claim.created`, `evidence.submitted`, `task.applied`. Replaying that log from an empty database reconstructs `state.db` byte-for-byte — the audit guarantee that makes `.anvil/` safe to back up by copy.
+
+`anvil status` sums it up, including the `Path:` line pointing at the workspace and a per-bucket task breakdown:
+
+```
+anvil for "My Project" (id: my-project)
+Path: ~/.anvil/workspaces/my-project-183a2542/.anvil
+Initialized: 2026-07-02T02:32:37.623329Z
+
+PRD default (approved)
+  Tasks:         1 total (0 ready, 0 claimed, 0 in_progress, 0 needs_review, 0 blocked, 1 done)
+  Active claims: 0
+
+PROJECT TOTAL
+PRD:           approved
+Tasks:         1 total (0 ready, 0 claimed, 0 in_progress, 0 needs_review, 0 blocked, 1 done)
+Active claims: 0
+Sync:          off
+Schema:        8
+```
 
 The work packet under `.anvil/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).
 
@@ -198,10 +293,10 @@ The work packet under `.anvil/packets/T001.md` is the contract that drove the wo
 
 - **"PRD must be in 'reviewed' status to approve"** — you ran `prd review --approve` without first running `prd review`. The two-step pattern is intentional. Run `anvil prd review` first, then `anvil prd review --approve`.
 - **"No ready tasks"** — your PRD's `## Tasks` section is empty, or `review tasks` blocked promotion because `**Acceptance criteria:**` or `**Verification:**` is missing on a task. Both fields are required by the `drafted → reviewed` gate. Re-check [`../prd-template.md`](../prd-template.md).
-- **"PRD file not found"** — `init` does not create `prd.md`. Author it at `.anvil/prd.md` before running `prd parse`.
-- **Claim won't work / git error** — you are not in a git repo, or your working tree is dirty. Run `git init` (if needed), commit or stash pending changes, then retry `anvil claim T001`.
+- **"PRD file not found"** — `init` does not create `prd.md`. Author it at the absolute path `init` printed (under `~/.anvil/workspaces/…`) before running `prd parse`.
+- **`Warning: git branch not created — not a git repository` on claim** — the claim itself still succeeded, but there is no repo to hold the `agent/<task>-<slug>` branch. Run `git init` (plus a first commit) in your project, then `anvil release <claim-id>` and re-claim.
 - **`uv` not found** — install it: `pip install uv` or follow [docs.astral.sh/uv](https://docs.astral.sh/uv/).
-- **Want to start over?** — `rm -rf .anvil/` and re-run `anvil init`. Or use `anvil init --force` to wipe and re-scaffold in place.
+- **Want to start over?** — run `anvil init --force` to wipe and re-scaffold. Don't reach for `rm -rf .anvil/` in your project: in the default layout there is no `.anvil/` there, so it's a no-op — state lives in the HOME workspace.
 
 ## Where to next
 

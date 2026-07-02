@@ -133,7 +133,10 @@ class Config:
     # ``timedelta(minutes=float)``, so a fractional value yields a fractional
     # lease. Whole-number configs still load as ``60.0`` / ``5.0`` and behave
     # identically to the pre-float ints.
-    default_lease_minutes: float = 60.0
+    # 240 (was 60): real sessions showed >15-min workflows silently losing
+    # their lease mid-task under the old default (post-session findings);
+    # the author's standing workaround was `--lease 240` — now the default.
+    default_lease_minutes: float = 240.0
     default_heartbeat_minutes: float = 5.0
     # B46 — hard max-claim-age as a multiple of the base lease. After
     # ``default_lease_minutes * max_claim_age_multiplier`` since a claim was
@@ -646,7 +649,7 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         # float(...) — not int(...) — so a fractional ``default_lease_minutes``
         # like 0.5 (= 30 s) is preserved instead of rejected/truncated. A
         # malformed value still raises ValueError at load time.
-        default_lease_minutes=float(str(data.get("default_lease_minutes", 60))),
+        default_lease_minutes=float(str(data.get("default_lease_minutes", 240))),
         default_heartbeat_minutes=float(
             str(data.get("default_heartbeat_minutes", 5))
         ),
@@ -1002,7 +1005,9 @@ custom_api_key_env:                 # e.g. "OPENROUTER_API_KEY"
 # ---------------------------------------------------------------------------
 # Claim / lease settings
 # ---------------------------------------------------------------------------
-default_lease_minutes: 60
+# 240 min: real agent workflows routinely exceed 15 min per task; a shorter
+# lease silently expires mid-work and the task reverts to ready.
+default_lease_minutes: 240
 default_heartbeat_minutes: 5
 # Hard cap on a single claim's age = default_lease_minutes x this multiplier
 # (B46). After it, renew() refuses even if heartbeating, so a wedged agent

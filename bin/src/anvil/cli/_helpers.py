@@ -344,6 +344,33 @@ def _resolve_base_dir(cwd: Path | None) -> Path:
     return Path.cwd().resolve() if local else _home_workspace_base(Path.cwd())
 
 
+def _resolve_project_dir(cwd: Path | None) -> Path:
+    """Return the absolute path to the user's PROJECT directory — the place
+    git operations (branch/worktree creation) must run.
+
+    This is deliberately NOT :func:`_resolve_base_dir`: in the default
+    workspace layout the base dir maps to ``~/.anvil/workspaces/<key>``,
+    which is never a git repository, so any git op resolved through it
+    silently no-ops ("git branch not created — not a git repository").
+    State lives in the workspace; the *work* lives in the project.
+
+    Precedence mirrors the state resolvers minus the workspace mapping:
+
+    1. ``cwd`` — an explicit path arg/flag always wins.
+    2. ``ANVIL_ROOT`` env var — the declared project root.
+    3. ``Path.cwd()`` — where the user invoked anvil.
+
+    In ``ANVIL_STATE_LAYOUT=local`` this returns the same directory as
+    :func:`_resolve_base_dir`, so legacy-layout behaviour is unchanged.
+    """
+    if cwd is not None:
+        return cwd.resolve()
+    env_root = os.environ.get(_STATE_ROOT_ENV)
+    if env_root is not None and env_root.strip() != "":
+        return Path(env_root).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
 def _resolve_state_dir(cwd: Path | None) -> Path:
     """Return the absolute path to the .anvil/ directory.
 

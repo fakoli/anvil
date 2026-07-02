@@ -302,3 +302,52 @@ class TestCreateWorktreeForTask:
         assert result.created is False
         assert result.branch if hasattr(result, "branch") else True  # no branch attr
         assert result.reason is not None
+
+
+# ---------------------------------------------------------------------------
+# Workspace-layout regression: git ops must target the project, not the
+# HOME workspace (found 2026-07-02 reproducing the README flow on 0.3.0 —
+# every workspace-layout claim printed "git branch not created" because
+# claim resolved its git cwd through the state base dir).
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceLayoutGitOps:
+    """`anvil claim` in the default HOME-workspace layout: state lands in
+    ~/.anvil/workspaces/<key>/, but the agent/<task>-<slug> branch must be
+    created in the user's actual project repository."""
+
+    def test_claim_creates_branch_in_project_repo_under_workspace_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        project = _init_git_repo(tmp_path / "proj")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["init", "--with-sample"])
+        assert result.exit_code == 0, result.output
+        # Sanity: workspace layout is active — state in HOME, not ./.anvil.
+        assert not (project / ".anvil").exists()
+        assert (home / ".anvil" / "workspaces").exists()
+
+        result = runner.invoke(app, ["claim", "T001"])
+        assert result.exit_code == 0, result.output
+        assert "git branch not created" not in result.output
+
+        branches = subprocess.run(
+            ["git", "branch", "--list"],
+            cwd=str(project),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "agent/t001" in branches, branches

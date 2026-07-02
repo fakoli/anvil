@@ -1,6 +1,7 @@
 # Live GitHub integration tests
 
-The anvil plugin ships a small nightly-CI suite that exercises the
+The anvil plugin ships a small suite of live tests — intended to run
+nightly in CI — that exercises the
 real GitHub Issues REST API. It catches upstream contract drift -- label
 format changes, deprecated endpoints, header renames, REST PATCH semantics
 shifts -- before users hit them. These tests are marker-gated and excluded
@@ -11,7 +12,14 @@ the same tests locally, and what residue they leave behind in the test repo.
 
 ## Workflow
 
-The job lives at `.github/workflows/anvil-live-github.yml`. It:
+> **Status: designed, not yet committed.** The repo has no
+> `.github/workflows/anvil-live-github.yml` yet — the tests themselves are
+> committed and marker-gated, but the nightly job below describes the intended
+> workflow. Until it lands, the "Running locally" runbook is the only way to
+> exercise these tests, and the "Enabling on a fork / repo" steps have no
+> effect.
+
+The job is designed to live at `.github/workflows/anvil-live-github.yml`. It:
 
 - Runs on `cron: 0 6 * * *` (06:00 UTC = 22:00 PST / 02:00 EST).
 - Can be triggered manually via the GitHub Actions "workflow_dispatch" UI.

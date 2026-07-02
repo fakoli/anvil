@@ -37,7 +37,7 @@ stateDiagram-v2
 ```
 
 The `prd_status_gate` in
-[`state/transitions.py`](../../bin/src/anvil/state/transitions.py) enforces the
+[`state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py) enforces the
 final hop: `ready → claimed` refuses while the PRD is still `draft`. The
 gate accepts both `reviewed` and `approved` — see
 [architecture.md → Gates on the lifecycle](../architecture.md#gates-on-the-lifecycle).)
@@ -48,7 +48,7 @@ gate accepts both `reviewed` and `approved` — see
 
 The full schema lives in [`../prd-template.md`](../prd-template.md). The deterministic
 parser at
-[`planning/template.py`](../../bin/src/anvil/planning/template.py) extracts these
+[`planning/template.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/planning/template.py) extracts these
 sections in this order:
 
 | Section                | Required | Stored as                  |

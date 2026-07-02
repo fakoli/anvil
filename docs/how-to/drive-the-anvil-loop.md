@@ -95,7 +95,7 @@ done
 # queue drained
 ```
 
-The committed [`packaging/loops/ci-drain.sh`](../../packaging/loops/ci-drain.sh)
+The committed [`packaging/loops/ci-drain.sh`](https://github.com/fakoli/anvil/blob/main/packaging/loops/ci-drain.sh)
 is the full version (also skips a lost lease so concurrent drainers don't abort).
 
 Durable, leased state makes **both** resumable and safe to run concurrently:

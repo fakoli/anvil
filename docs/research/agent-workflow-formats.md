@@ -152,7 +152,7 @@ legal. The globals below are injected — you do not import them.
 
 ### Real example in this repo
 
-[`.claude/skills/resolve-loop/resolve-item.workflow.js`](../../.claude/skills/resolve-loop/resolve-item.workflow.js)
+[`.claude/skills/resolve-loop/resolve-item.workflow.js`](https://github.com/fakoli/anvil/blob/main/.claude/skills/resolve-loop/resolve-item.workflow.js)
 — research (parallel, diverse angles) → judge (a ponytail gate) →
 implement-in-worktree → adversarial review loop. It exercises `meta` + `phase` +
 `parallel` + `agent(schema)` + a bounded loop.
@@ -276,7 +276,7 @@ offers, so each step runs Anvil's governed transitions.
 ### The seam — `anvil next`
 
 The seam is the `next` command
-([`bin/src/anvil/cli/claim.py:500`](../../bin/src/anvil/cli/claim.py)). It already
+([`bin/src/anvil/cli/claim.py:500`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py)). It already
 returns the next ready task, or — with `--json` — `{"data": {"task": null}}` on an
 empty queue (exit 0). The only missing bit is a **branchable exit code** for
 jq-less shells and automations: add a `-q` / `--quiet` flag → **exit 0 if a task
@@ -333,7 +333,7 @@ Backlog items:
 globals (`agent`/`pipeline`/`parallel`/`phase`/`args`/`budget`/`workflow`),
 resume/iterate mechanics, and constraints, as observed in-harness and in the
 in-repo example
-[`.claude/skills/resolve-loop/resolve-item.workflow.js`](../../.claude/skills/resolve-loop/resolve-item.workflow.js).
+[`.claude/skills/resolve-loop/resolve-item.workflow.js`](https://github.com/fakoli/anvil/blob/main/.claude/skills/resolve-loop/resolve-item.workflow.js).
 
 **OpenAI / Codex:**
 

@@ -1,7 +1,7 @@
 # Context budget
 
 > A self-imposed token budget on anvil's plugin surface, enforced in CI
-> by [`tests/test_token_budget.py`](../tests/test_token_budget.py).
+> by [`tests/test_token_budget.py`](https://github.com/fakoli/anvil/blob/main/tests/test_token_budget.py).
 
 anvil ships as a Claude Code plugin. Its skills are part of the model's
 context, and that context has a cost:
@@ -63,7 +63,7 @@ every offending skill.
 ## Changing a budget
 
 If growth is intentional (a new skill, a deliberate expansion), raise the
-constant in [`tests/test_token_budget.py`](../tests/test_token_budget.py)
+constant in [`tests/test_token_budget.py`](https://github.com/fakoli/anvil/blob/main/tests/test_token_budget.py)
 **and** update the table above in the same change. The test asserts this doc
 exists and references each budget knob by name, so the doc and the gate cannot
 silently drift.

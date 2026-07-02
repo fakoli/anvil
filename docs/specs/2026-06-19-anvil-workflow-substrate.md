@@ -77,7 +77,7 @@ runtime-neutral by construction — the runtime drives, Anvil governs.
 ### 2.3 The loop body already exists
 
 The per-task body is not new. It is the lifecycle the `execute` skill
-([`skills/execute/SKILL.md`](../../skills/execute/SKILL.md)) already wraps:
+([`skills/execute/SKILL.md`](https://github.com/fakoli/anvil/blob/main/skills/execute/SKILL.md)) already wraps:
 
 ```
 claim   → single-winner lease + file-conflict check   (cli/claim.py:25)
@@ -97,7 +97,7 @@ answer **without parsing JSON**. That is WF-1.
 
 ### 3.1 What was already there
 
-`anvil next` ([`bin/src/anvil/cli/claim.py:500`](../../bin/src/anvil/cli/claim.py))
+`anvil next` ([`bin/src/anvil/cli/claim.py:500`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py))
 recommends the highest-priority claimable task without claiming it. It already
 behaves correctly on an empty queue: with `--json` it emits
 `{"ok": true, "command": "next", "data": {"task": null}}` and **exits 0** — an
@@ -110,7 +110,7 @@ payload.
 ### 3.2 The change (WF-1 — built in this PR)
 
 Add a `-q` / `--quiet` flag to `anvil next`
-([`bin/src/anvil/cli/claim.py:513-562`](../../bin/src/anvil/cli/claim.py)) that
+([`bin/src/anvil/cli/claim.py:513-562`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py)) that
 prints nothing and uses the exit code as the signal:
 
 | exit | meaning | loop action |
@@ -138,7 +138,7 @@ if quiet:
 Exit `3` is chosen as a non-`1` sentinel so "empty queue" is distinguishable from
 "real failure" (`1`) — a `while anvil next -q; do …; done` loop stops cleanly on
 `3` under `set -e` without masking a genuine error. Tests assert both arms
-([`tests/test_cli.py:2275-2285`](../../tests/test_cli.py)): `-q` exits 3 and
+([`tests/test_cli.py:2275-2285`](https://github.com/fakoli/anvil/blob/main/tests/test_cli.py)): `-q` exits 3 and
 prints nothing on an empty queue; exits 0 and prints nothing when a task is ready.
 
 This is the whole of WF-1. It is the single missing bit that turns the existing
@@ -151,27 +151,27 @@ recommended. Each line is an existing call site — the body composes seams that
 already ship; it adds no new engine method.
 
 1. **`anvil next -q`** — ready? (exit 0) continue; empty? (exit 3) **stop**.
-   ([`cli/claim.py:500`](../../bin/src/anvil/cli/claim.py))
+   ([`cli/claim.py:500`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py))
 2. **`anvil claim <task>`** — acquire the single-winner lease + file-conflict
    check. If another runner won it, the claim fails loudly; the next pass/fire
-   retries. ([`cli/claim.py:25`](../../bin/src/anvil/cli/claim.py))
+   retries. ([`cli/claim.py:25`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py))
 3. **`anvil packet <task>`** — fetch the work packet: the contract that teaches
    the steps (acceptance criteria, files in scope, verification commands, prior
    decisions, output contract). Read it before editing.
-   ([`cli/packet_apply.py:74`](../../bin/src/anvil/cli/packet_apply.py))
+   ([`cli/packet_apply.py:74`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/packet_apply.py))
 4. **Do the work** on the claim's branch; run the packet's verification commands.
    The `capture-evidence.sh` PostToolUse hook records exit codes and output into
    the claim's pending-evidence buffer automatically.
 5. **`anvil submit <task> --commands "<cmds>" --files-changed "<paths>"`** — the
    evidence is the typed proof; this writes the `Evidence` row, auto-releases the
    claim, and moves the task to `needs_review`.
-   ([`cli/packet_apply.py:216`](../../bin/src/anvil/cli/packet_apply.py))
+   ([`cli/packet_apply.py:216`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/packet_apply.py))
 6. **`anvil apply <task> --approve [--strict]`** — the gate. `--strict` refuses
    `--approve` when required evidence is missing (exit 1), so a step cannot ship
-   unverified. ([`cli/packet_apply.py:475`](../../bin/src/anvil/cli/packet_apply.py))
+   unverified. ([`cli/packet_apply.py:475`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/packet_apply.py))
    Then loop back to step 1.
 
-The `execute` skill ([`skills/execute/SKILL.md`](../../skills/execute/SKILL.md))
+The `execute` skill ([`skills/execute/SKILL.md`](https://github.com/fakoli/anvil/blob/main/skills/execute/SKILL.md))
 already wraps steps 3–5 for a Claude session; the adapters in §6 drive the same
 body from other runtimes.
 
@@ -218,7 +218,7 @@ state between invocations.
 
 Because governance lives in Anvil, each adapter is thin: it drives the WF-1 seam
 and the existing body. The adapters are committed under
-[`packaging/loops/`](../../packaging/loops/) so they are reviewable, copyable
+[`packaging/loops/`](https://github.com/fakoli/anvil/tree/main/packaging/loops) so they are reviewable, copyable
 skeletons, not prose.
 
 ### 6.1 CI / cron drain — `packaging/loops/ci-drain.sh`
@@ -269,7 +269,7 @@ This is not feature width — it is making the central claim more true.
 
 1. **Exercises the wedge under real load.** Single-winner leases, file-conflict
    detection, and the evidence gate are proven today only by the concurrency suite
-   ([`tests/test_claims_concurrency.py`](../../tests/test_claims_concurrency.py))
+   ([`tests/test_claims_concurrency.py`](https://github.com/fakoli/anvil/blob/main/tests/test_claims_concurrency.py))
    and the benchmark. Driving them from real parallel loops proves them *in situ*:
    a regression becomes visible the instant a loop double-claims or ships
    unverified.
@@ -313,14 +313,14 @@ This is not feature width — it is making the central claim more true.
 The single missing bit (§3). Add `-q`/`--quiet` to `anvil next`: exit 0 if a task
 is ready, exit 3 if the queue is empty, print nothing. Turns the existing command
 into a loop seam usable from any plain shell. Already implemented at
-[`bin/src/anvil/cli/claim.py:513-562`](../../bin/src/anvil/cli/claim.py) with tests
-at [`tests/test_cli.py:2275-2285`](../../tests/test_cli.py).
+[`bin/src/anvil/cli/claim.py:513-562`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py) with tests
+at [`tests/test_cli.py:2275-2285`](https://github.com/fakoli/anvil/blob/main/tests/test_cli.py).
 
 ### WF-2 — committed loop adapters + how-to — **BUILDING NOW (this PR)**
 
 Worked, committed adapters driving the WF-1 seam from each runtime (§6), plus the
 how-to. Adapters live under
-[`packaging/loops/`](../../packaging/loops/): `ci-drain.sh`, `claude-loop.md`,
+[`packaging/loops/`](https://github.com/fakoli/anvil/tree/main/packaging/loops): `ci-drain.sh`, `claude-loop.md`,
 `codex-automation.md`, plus the how-to (`docs/how-to/drive-the-anvil-loop.md`) —
 all shipped in this PR. No engine change — these document and skeletonize the
 existing body over the WF-1 seam.

@@ -9,13 +9,13 @@
 > Durable, evidence-gated, lease-coordinated state for multi-agent software work.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Plugin Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](.claude-plugin/plugin.json)
+[![Plugin Version](https://img.shields.io/badge/version-0.3.1-blue.svg)](.claude-plugin/plugin.json)
 [![Marketplace](https://img.shields.io/badge/marketplace-fakoli-purple.svg)](https://github.com/fakoli/anvil)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests)
 
 </div>
 
-> **Beta — v0.3.0.** The core loop works today; command surfaces and APIs may change before 1.0.
+> **Beta — v0.3.1.** The core loop works today; command surfaces and APIs may change before 1.0.
 
 ---
 
@@ -25,7 +25,7 @@ Anvil is a local-first, backend-neutral project-state layer for humans and AI co
 
 It is for developers running Claude Code, Codex, Cursor, OpenHands, or Copilot who need multiple agents, and multiple humans, to coordinate against the same plan without overwriting each other. Solo builders can use it to keep PRDs and task state across sessions; project leads can use it to audit what work was claimed, reviewed, and completed.
 
-When an AI agent claims a task, that claim is an enforced database row with a lease and heartbeat. Completion is evidence-gated: Anvil does not record completed work without attached proof.
+When an AI agent claims a task, that claim is an enforced database row with a lease and heartbeat. Completion is evidence-gated: agents submit structured evidence before review, and with `strict_evidence: true` Anvil refuses to approve work whose required evidence is missing (advisory by default).
 
 ---
 
@@ -33,12 +33,12 @@ When an AI agent claims a task, that claim is an enforced database row with a le
 
 | Surface | Count | Notes |
 |---|---|---|
-| CLI command entries | **35** | Top-level commands plus `prd`, `review`, `hook`, `sync`, and `migrate` sub-app entries. `--use-llm` augmentation picks Anthropic API / Bedrock / OpenAI-compatible endpoints via the same multi-provider resolver as the LLM-planner backstop. |
+| CLI command entries | **39** | 33 top-level commands plus `prd`, `review`, `hook`, `sync`, `migrate`, and `proof` sub-app entries. `--use-llm` augmentation picks Anthropic API / Bedrock / OpenAI-compatible endpoints via the same multi-provider resolver as the LLM-planner backstop. |
 | MCP tools | **24** | FastMCP stdio; works in any MCP-compatible client. `plan_tasks` honors the project's `llm_provider` / `llm_tier` / Bedrock+custom knobs. |
 | Skills | **8 skills** | start-prd, prd, plan, claim, execute, finish, state-ops, resolve-decisions |
 | Agents | **5 agents** | planner (opus), critic (opus), docs-scribe (sonnet), sentinel (haiku), state-keeper (haiku) — tier-mapped per [docs/model-strategy.md](docs/model-strategy.md) |
-| Hooks | **4 hooks** | detect-state, check-claim, record-file-change, capture-evidence |
-| LLM providers | **3** | Anthropic API (default) · Amazon Bedrock (`[bedrock]` extra) · OpenAI-compatible custom endpoints (`[custom]` extra). See [docs/llm-providers.md](docs/llm-providers.md). |
+| Hooks | **5 hooks** | detect-state, check-claim, record-file-change, capture-evidence, heartbeat |
+| LLM providers | **4** | Claude Agent SDK (default — subscription auth, no API key) · Anthropic API · Amazon Bedrock (`[bedrock]` extra) · OpenAI-compatible custom endpoints (`[custom]` extra). See [docs/llm-providers.md](docs/llm-providers.md). |
 
 Highlights:
 
@@ -59,30 +59,37 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ```bash
 anvil init --with-sample
-# → scaffolds .anvil/, writes a valid sample prd.md, and runs
+# → scaffolds the state workspace, writes a valid sample prd.md, and runs
 #   parse → review → approve → plan → score → review tasks offline (no API key)
 anvil next
 # → returns a ready task immediately — nothing else to author or run
 ```
 
 `--with-sample` is purely additive: plain `anvil init` is unchanged and
-seeds nothing. Use the sample to learn the flow, then delete `.anvil/`
-and run `init` for real on your own PRD as shown below.
+seeds nothing. Use the sample to learn the flow, then run
+`anvil init --force` to start over for real on your own PRD as shown below
+(state lives outside the repo, so deleting a local `.anvil/` is a no-op —
+`--force` is the reset).
 
 ### The full loop on your own PRD
 
 ```bash
-# 1. Scaffold per-project state
+# 1. Scaffold per-project state — it lands in a HOME workspace keyed to this directory,
+#    ~/.anvil/workspaces/<dirname>-<hash8>/.anvil, not in the repo itself
 anvil init --name "My Project"
-# → creates .anvil/{config.yaml,state.db,events.jsonl,packets/}
-# → next step: author your PRD at .anvil/prd.md
+# → Initialized anvil for 'My Project' (id: my-project)
+# → Next step: author your PRD at
+#   ~/.anvil/workspaces/my-project-f4ffc446/.anvil/prd.md, then run `anvil prd parse`.
 
-# 2. Author the PRD against the template (see docs/prd-template.md)
-$EDITOR .anvil/prd.md
+# 2. Author the PRD at the path init printed, against the template (see docs/prd-template.md)
+$EDITOR ~/.anvil/workspaces/my-project-f4ffc446/.anvil/prd.md
+#   Requirement IDs must be R0NN (R001, R002, …) — the strict parser refuses
+#   suffixed IDs like R003a. Already have a PRD file? `anvil prd parse --file <path>`
+#   parses it in place instead.
 
 # 3. Parse, review, approve — the state machine requires draft → reviewed → approved
 anvil prd parse
-# → Parsed PRD: 4 requirements, 12 tasks staged for review
+# → Parsed 6 requirements, 2 features, 2 tasks.
 anvil prd review             # draft → reviewed
 anvil prd review --approve   # reviewed → approved
 
@@ -94,24 +101,31 @@ anvil review tasks
 
 # 5. Pick the next ready task and claim it
 anvil next
-# → T001 — "Wire orchestrator retry to DLQ" (ready, no conflicts)
+# → Next recommended task: T001 — "Implement Markdown link extraction"
 anvil claim T001
-# → Claim C001 active; branch agent/t001-<slug> created
+# → Claim C7FDBA6B9 active; branch agent/t001-implement-markdown-link-extraction
+#   created in your project's git repo
 
 # 6. Get the work packet, do the work, submit evidence
 anvil packet T001
 anvil submit T001 \
-    --commands "pytest tests/test_retry.py" \
-    --files-changed src/orchestrator/retry.py
+    --commands "pytest tests/test_links.py" \
+    --files-changed src/mdlinks/extract.py
+# → Task 'T001' status → needs_review. A trailing `Evidence gate: INCOMPLETE`
+#   line is expected here: --commands records commands as strings, while the
+#   typed exit-code proofs the gate checks for come from the run hooks. The
+#   gate is advisory by default, so this does not block the review.
 
 # 7. Apply the review verdict — promotes needs_review → accepted → done
 anvil apply T001 --approve
-# → Task T001 applied; event task.applied recorded in events.jsonl
+# → Task 'T001' approved by 'human' → done.
 ```
 
 > To break a complex task into subtasks, use `anvil expand T001 --use-llm` (uses your Claude subscription via the Agent SDK by default — no API key) or author `T001.1` / `T001.2` rows directly in `prd.md`. See [`docs/cli-reference.md`](docs/cli-reference.md) for command details.
 
-Every mutation appends to `.anvil/events.jsonl`. Replaying the log from scratch against an empty database reconstructs `state.db`; this is the audit guarantee the state engine is built around.
+**Where state lives:** the workspace layout above is the default; if you want state inside the repo instead, set `ANVIL_STATE_LAYOUT=local` (restores `./.anvil`) or `ANVIL_ROOT=<dir>` (pins state to `<dir>/.anvil`) — `anvil status` always prints the real path on its `Path:` line.
+
+Every mutation appends to `events.jsonl` in that state directory. Replaying the log from scratch against an empty database reconstructs `state.db`; this is the audit guarantee the state engine is built around.
 
 ---
 
@@ -147,12 +161,39 @@ Full architecture and lifecycle diagrams: [`docs/architecture.md`](docs/architec
 | **Agent work packets** | `anvil packet T012` renders exact intent + acceptance criteria + non-goals | Agent must summarize the whole issue thread or plan |
 | **Task scoring** | Six dimensions: complexity, parallelizability, context load, blast radius, review risk, agent suitability | Single-axis story points (if any) |
 | **Runtime coupling** | Runtime-neutral: CLI + FastMCP stdio; any MCP client | Coupled to GitHub or to the CCPM markdown convention |
+| **Always-on context cost** | Measured ~2.4k tokens (14 execution-tool schemas + skill/agent descriptions; 10 planning tools stay off the wire until `ANVIL_MCP_PLANNING=1`) — audit: [`benchmarks/CONTEXT_AUDIT.md`](benchmarks/CONTEXT_AUDIT.md) | Unmeasured — whole issue threads or plan markdown enter context on demand |
 
 Source for this comparison: [`docs/_positioning.md`](docs/_positioning.md).
 
 ---
 
+## Proven in real sessions
+
+Numbers from recorded working sessions
+([fakoli/post-session-findings](https://github.com/fakoli/post-session-findings)),
+not projections:
+
+- **32 tasks, 21 PRs, and a release from one 23.7-hour autonomous session** —
+  the anvil loop (claim → packet → execute → evidence → review → apply) ran
+  20 end-to-end task cycles under ~2 dozen human messages, and stayed
+  coherent across 28M generated tokens by keeping the orchestrator at ~10%.
+- **Two concurrent agent loops completed an 18/18-task PRD in 16.7 hours.**
+  In a separate run, "anvil's exclusive claim deconflicted two sessions with
+  zero explicit negotiation" — the lease model working in the field, not
+  just in the [benchmark](benchmarks/RESULTS.md) (where it measured file
+  collisions 3.0 → 0.0 vs a shared-markdown control).
+- **The gates catch real defects every time they run.** Across sessions:
+  a fail-open deny gate, log-injection bugs, a semantically broken "clean"
+  merge, and a malformed requirement ID the strict PRD parser refused
+  before it could ship a broken plan.
+- **The loop is portable:** the same claim/evidence discipline ran on
+  Codex, driven entirely through the CLI.
+
+---
+
 ## Documentation
+
+Browsable docs site: **[fakoli.github.io/anvil](https://fakoli.github.io/anvil/)** — auto-deployed to GitHub Pages from `docs/` on every push to `main` ([`mkdocs.yml`](mkdocs.yml); Read the Docs also supported via [`.readthedocs.yaml`](.readthedocs.yaml)). Preview locally with `uvx --with-requirements docs/requirements.txt mkdocs serve`.
 
 - [`docs/architecture.md`](docs/architecture.md) — layered architecture, lifecycles, audit guarantee
 - [`docs/design.md`](docs/design.md) — design rationale and trade-offs
@@ -178,7 +219,7 @@ Source for this comparison: [`docs/_positioning.md`](docs/_positioning.md).
 /plugin install anvil@anvil
 ```
 
-Installs the plugin, registers the four hooks, wires the MCP server, and makes the five agents discoverable to Claude Code at next session start.
+Installs the plugin, registers the five hooks, wires the MCP server, and makes the five agents discoverable to Claude Code at next session start.
 
 ### Standalone via `uv tool` (any harness)
 
@@ -226,7 +267,7 @@ The Iron Rule (review agents never `Edit`/`Write`) is enforced at the `tools:` f
 
 ## Status
 
-Anvil is in beta (v0.3.0). The full PRD → plan → claim → execute → verify → finish loop works today, plus GitHub Issues sync and multi-provider LLM support. Known gaps and hardening are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md); the near-term focus is correctness for claim races, evidence gates, and replay before adding more surface. Linear and Monday providers, webhook sync, and immediate-apply conflict resolution are tracked in [`docs/roadmap.md`](docs/roadmap.md).
+Anvil is in beta (v0.3.1). The full PRD → plan → claim → execute → verify → finish loop works today, plus GitHub Issues sync and multi-provider LLM support. Known gaps and hardening are tracked in [`docs/phase-11-backlog.md`](docs/phase-11-backlog.md); the near-term focus is correctness for claim races, evidence gates, and replay before adding more surface. Linear and Monday providers, webhook sync, and immediate-apply conflict resolution are tracked in [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
