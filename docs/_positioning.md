@@ -24,7 +24,7 @@ sessions. Project leads can audit what was claimed, reviewed, and completed.
 2. **Explicit claim / lock / lease model.** A `Claim` row with an expiry timestamp and heartbeat; stale leases are detected and released on every CLI or MCP call, not assignment-by-label.
 3. **LLM-optimized work packets.** `anvil packet T012` renders the exact intent, acceptance criteria, scope, and non-goals an agent needs, not an entire issue thread the agent must summarize.
 4. **Six-dimension task scoring.** Complexity, parallelizability, context load, blast radius, review risk, and agent suitability drive routing and expand recommendations, not single-axis story points.
-5. **Runtime-neutral CLI + MCP.** The state engine is not coupled to any one agent runtime; the FastMCP stdio server exposes 24 tools to any MCP-compatible client.
+5. **Runtime-neutral CLI + MCP.** The state engine is not coupled to any one agent runtime; the FastMCP stdio server exposes 24 registered tools (14 on the wire by default; 10 planning tools behind `ANVIL_MCP_PLANNING=1`) to any MCP-compatible client.
 
 ## Terraform analogy
 
@@ -133,12 +133,17 @@ safe to let weak or unsupervised local runners pull. This is a *contested* wedge
 not a won one: portable proof formats (AGEF, Proof of Insight, Pipelock) and
 enforced evidence-gates (agentic-os, EviBound, CrewAI guardrails) already exist
 *separately*, and platforms are absorbing verification (Cursor Cloud Agents
-auto-record proof onto PRs). anvil does *not* yet hold the fusion: its evidence
-gate is advisory-by-default, it emits no typed/signed/portable artifact, and it is
-single-host SQLite. So present this as a bet anvil must still execute, never as a
-moat it occupies. (Replay-in-CI, when it lands, must check *logical* equivalence
-via a canonical row-ordered dump or per-table content hash, not byte-identical
-SQLite.)
+auto-record proof onto PRs). anvil does *not* yet hold the full fusion: it now
+emits a typed, signed, portable AcceptanceProof on every acceptance (bound to
+project + task + claim + actor + observed CommandProofs + event range; verified
+off-host via `anvil proof verify` against a fail-closed trust list), but its
+evidence gate is still advisory-by-default, the proof attests hook-recorded exit
+codes rather than independently re-executed work (a buffer-writing agent can
+fabricate a passing CommandProof), the artifact is a portable export rather than a
+replayable one, and it is single-host SQLite. So present this as a bet anvil must still execute, never as a
+moat it occupies. (Replay-in-CI landed in 1.19.0 —
+`tests/test_replay_equivalence.py` checks *logical* equivalence via canonical
+serialized state, not byte-identical SQLite.)
 
 **Load-bearing, not a mode:** multi-vendor + local-first + no-account is the
 *headline*, not an option. The moment the value also works fine

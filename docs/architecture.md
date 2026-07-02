@@ -51,7 +51,7 @@ graph TD
 
     subgraph Entry["Entry surfaces"]
         CLI["CLI<br/>anvil &lt;cmd&gt;"]
-        MCP["MCP server<br/>FastMCP stdio<br/>24 tools"]
+        MCP["MCP server<br/>FastMCP stdio<br/>24 tools (14 on default surface)"]
         Hooks["Hooks<br/>SessionStart / PreToolUse / PostToolUse"]
     end
 
@@ -120,7 +120,7 @@ Source: [`assets/diagrams/component.mmd`](../assets/diagrams/component.mmd).
 |---|---|---|
 | Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json) |
 | CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py) |
-| MCP server | Runtime-neutral capability surface — 24 stdio tools any MCP client can call | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
+| MCP server | Runtime-neutral capability surface — 24 registered stdio tools; the default execution surface serves 14 on the wire, and the 10 planning-tagged tools require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
 | Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](../hooks/hooks.json), [`hooks/*.sh`](../hooks/) |
 | Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](../skills/) |
 | Plugin agents | Specialist roles owned by this plugin | [`agents/*.md`](../agents/) |
@@ -149,9 +149,13 @@ The two iron rules of the layering:
 
 The full type system lives in
 [`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py)
-— **25 Pydantic v2 classes** total (11 enums + 14 models). Every field is
+— **35 Pydantic v2 classes** total (13 enums + 22 models). Every field is
 validated at every transition (`extra="forbid"`,
-`validate_assignment=True`); all timestamps are UTC-required.
+`validate_assignment=True`); all timestamps are UTC-required. The tables
+below cover the core set; the newer `TaskType` / `ProofKind` enums and the
+proof models (`CommandProof`, `DiffProof`, `LinkProof`, `AssertionProof`,
+`ProofRequirement`), `EventRange`, `AcceptanceProof`, and `EventDraft` are
+not yet tabled.
 
 ### Enums (11)
 
@@ -250,6 +254,10 @@ stateDiagram-v2
 
 Source: [`assets/diagrams/lifecycle.mmd`](../assets/diagrams/lifecycle.mmd).
 
+> Note: the evidence gate on `needs_review → accepted` is computed and
+> reported at apply time but **enforced** only when `strict_evidence`
+> resolves true; the default path approves regardless.
+
 All 11 statuses are defined in `TaskStatus` and the allowed transitions are
 the public functions in
 [`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py).
@@ -265,7 +273,7 @@ Three named gates appear in the transition module; each raises
 |---|---|---|
 | `readiness_gate` | drafted → reviewed | `task.acceptance_criteria` and `task.verification.commands` must both be non-empty |
 | `prd_status_gate` | ready → claimed | The task's **owning** PRD (resolved via `task.prd_id`) must be in `reviewed` or `approved` (refuses while `draft`). A task in an approved PRD is claimable while a sibling in a draft PRD is refused |
-| `evidence_gate` | needs_review → accepted | Every item in `task.verification.required_evidence` must appear as a substring of at least one Evidence field |
+| `evidence_gate` | needs_review → accepted | Every item in `task.verification.required_evidence` must appear as a substring of at least one Evidence field. Computed and reported at apply time, but enforced only when `strict_evidence` resolves true — the default path approves regardless |
 
 ### Who drives each transition
 
@@ -303,12 +311,19 @@ The replay guarantee is the central audit property of the engine: **replaying
 exactly**. This is what makes the engine safe to back up by copying
 `.anvil/` and what makes a corrupted database recoverable.
 
-A native `anvil replay --from-events events.jsonl` subcommand is
-planned for v2.1 (item P9B-7 — see
-[`roadmap.md` § Snapshot / replay](roadmap.md#theme-snapshot--replay)) and
-**does not ship today**. Until it does, the supported backup and recovery
-flow is to copy `.anvil/` wholesale; the replay guarantee makes
-that safe and minimal:
+A native `anvil replay --from-events <jsonl> --into <db>` subcommand
+**ships today**
+([`bin/src/anvil/cli/replay.py`](../bin/src/anvil/cli/replay.py) — it
+refuses to target the live database) and rebuilds state from the event
+log; a CI equivalence test
+([`tests/test_replay_equivalence.py`](../tests/test_replay_equivalence.py))
+verifies the guarantee. `anvil backup` / `anvil restore` also ship —
+S3 push/pull of `events.jsonl` plus a replay-based restore. Only the
+`anvil snapshot` subcommand (item P9B-7, a local sqlite `.backup`
+wrapper — see
+[`roadmap.md` § Snapshot / replay](roadmap.md#theme-snapshot--replay))
+remains open. Copying `.anvil/` wholesale stays as the fully-local
+fallback; the replay guarantee makes that safe and minimal:
 
 ```bash
 # Back up before destructive work.
@@ -357,8 +372,9 @@ replaces only that PRD's rows and leaves the others untouched.
 A `snapshots/` subdirectory was originally planned (and is shown in the v0
 spec) but the `anvil snapshot` subcommand has not yet shipped — see
 [Roadmap → v2.1 → snapshot subcommand](roadmap.md#theme-snapshot--replay).
-Backups today are done by copying `.anvil/` wholesale; the replay
-guarantee makes that safe.
+Backups today are done with `anvil backup` / `anvil restore` (S3 push/pull
+of `events.jsonl` plus a replay-based restore) or by copying `.anvil/`
+wholesale (`cp -R`); the replay guarantee makes that safe.
 
 `hooks` and the CLI alike resolve `STATE_DIR` relative to
 `${CLAUDE_PROJECT_DIR:-$PWD}/.anvil` so every agent invocation,
@@ -410,12 +426,14 @@ in [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py):
 
 - Lifecycle setup and inspection: `init`, `status`, `describe`, `doctor`
 - PRD authoring: `prd parse`, `prd review` (sub-app)
-- Planning: `plan`, `score`, `expand`, `review tasks` (sub-app)
+- Planning: `plan`, `score`, `assumptions`, `expand`, `deps`, `review tasks` (sub-app)
 - Listing / inspecting: `list`, `show`, `scan`, `drift`, `graph`, `conflicts`
-- Claiming: `claim`, `release`, `renew`, `next`
-- Working: `packet`, `submit`, `apply`
-- Harness config: `mcp-config`
-- Migration / replay: `migrate state`, `migrate-events`, `replay`
+- Claiming: `claim`, `release`, `renew`, `next`, `claim-guard`
+- Working: `packet`, `submit`, `apply`, `gate-check`, `run-workflow`, `proof` (sub-app — `proof verify`)
+- Notifications: `notify-digest`
+- Harness config: `mcp-config`, `install`
+- Backup / restore: `backup`, `restore`
+- Migration / replay: `migrate state`, `migrate-events`, `migrate-workspace`, `replay`
 - Hooks: `hook ...` (sub-app — called by `hooks/*.sh`)
 - Sync: `sync ...` (sub-app — `sync github`, `sync github --health`, ...)
 
@@ -423,6 +441,11 @@ in [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py):
 
 Full reference is at [`docs/mcp.md`](mcp.md). Source:
 [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py).
+
+All 24 tools are registered, but the default execution surface serves 14
+on the wire; the 10 planning-tagged tools (`parse_prd`, `plan_tasks`,
+`score_tasks`, ...) require `ANVIL_MCP_PLANNING=1` (`mcp_server.py`
+tag-disables them at startup).
 
 | # | Tool | Mutates | Reaps stale |
 |---|---|---|---|
@@ -456,9 +479,9 @@ not yet on the MCP surface — agents that want sync today shell out via Bash
 to `anvil sync`. See
 [Roadmap → v2.1 → MCP sync tools](roadmap.md#theme-mcp-surface-sync-tools).
 
-### Hooks (4)
+### Hooks (5)
 
-Wired in [`hooks/hooks.json`](../hooks/hooks.json). All four are
+Wired in [`hooks/hooks.json`](../hooks/hooks.json). All five are
 **non-blocking**: they must `exit 0` regardless of internal failure, must
 not use `set -e` / `set -u` / `set -o pipefail`, must wrap CLI calls with
 `|| true`, and must complete in well under their declared timeout.
@@ -469,6 +492,7 @@ not use `set -e` / `set -u` / `set -o pipefail`, must wrap CLI calls with
 | `check-claim` | PreToolUse on `Edit / Write / NotebookEdit` | [`check-claim.sh`](../hooks/check-claim.sh) | Warn (non-blocking) if the agent has no active claim covering the file |
 | `record-file-change` | PostToolUse on `Edit / Write / NotebookEdit` | [`record-file-change.sh`](../hooks/record-file-change.sh) | Record the change against the active claim for orphan detection |
 | `capture-evidence` | PostToolUse on `Bash` | [`capture-evidence.sh`](../hooks/capture-evidence.sh) | When the command matches a verification pattern, buffer it as evidence for the active claim |
+| `heartbeat` | PostToolUse on `Edit / Write / NotebookEdit` and on `Bash` | [`heartbeat.sh`](../hooks/heartbeat.sh) | Renew the active claim's lease |
 
 ### Skills (8)
 

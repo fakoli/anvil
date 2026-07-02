@@ -1,5 +1,9 @@
 # anvil Prioritized Backlog
 
+> Sequencing overlay: [`strategic-backlog.md`](strategic-backlog.md) (2026-07)
+> orders the moat-critical subset of this backlog (S1–S13) ahead of breadth
+> work; consult it before picking the next item.
+
 ## North Star
 
 Be the durable, runtime-neutral state-of-record for AI-and-human software work: a local-first SQLite store where every requirement, task, claim, and piece of evidence is an additive, in-place transition (never a template regenerated and never an agent's unverified self-report), so multiple agents and humans can coordinate in parallel — in any MCP/ACP host — without overwriting each other, losing decisions, or trusting a fake "done." anvil wins on the one structural thing no file-based competitor can match: **edits are recorded transitions, completion is evidence-gated, and accepted work is immutable.**

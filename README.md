@@ -25,7 +25,7 @@ Anvil is a local-first, backend-neutral project-state layer for humans and AI co
 
 It is for developers running Claude Code, Codex, Cursor, OpenHands, or Copilot who need multiple agents, and multiple humans, to coordinate against the same plan without overwriting each other. Solo builders can use it to keep PRDs and task state across sessions; project leads can use it to audit what work was claimed, reviewed, and completed.
 
-When an AI agent claims a task, that claim is an enforced database row with a lease and heartbeat. Completion is evidence-gated: Anvil does not record completed work without attached proof.
+When an AI agent claims a task, that claim is an enforced database row with a lease and heartbeat. Completion is evidence-gated: agents submit structured evidence before review, and with `strict_evidence: true` Anvil refuses to approve work whose required evidence is missing (advisory by default).
 
 ---
 
@@ -33,12 +33,12 @@ When an AI agent claims a task, that claim is an enforced database row with a le
 
 | Surface | Count | Notes |
 |---|---|---|
-| CLI command entries | **35** | Top-level commands plus `prd`, `review`, `hook`, `sync`, and `migrate` sub-app entries. `--use-llm` augmentation picks Anthropic API / Bedrock / OpenAI-compatible endpoints via the same multi-provider resolver as the LLM-planner backstop. |
+| CLI command entries | **39** | 33 top-level commands plus `prd`, `review`, `hook`, `sync`, `migrate`, and `proof` sub-app entries. `--use-llm` augmentation picks Anthropic API / Bedrock / OpenAI-compatible endpoints via the same multi-provider resolver as the LLM-planner backstop. |
 | MCP tools | **24** | FastMCP stdio; works in any MCP-compatible client. `plan_tasks` honors the project's `llm_provider` / `llm_tier` / Bedrock+custom knobs. |
 | Skills | **8 skills** | start-prd, prd, plan, claim, execute, finish, state-ops, resolve-decisions |
 | Agents | **5 agents** | planner (opus), critic (opus), docs-scribe (sonnet), sentinel (haiku), state-keeper (haiku) — tier-mapped per [docs/model-strategy.md](docs/model-strategy.md) |
-| Hooks | **4 hooks** | detect-state, check-claim, record-file-change, capture-evidence |
-| LLM providers | **3** | Anthropic API (default) · Amazon Bedrock (`[bedrock]` extra) · OpenAI-compatible custom endpoints (`[custom]` extra). See [docs/llm-providers.md](docs/llm-providers.md). |
+| Hooks | **5 hooks** | detect-state, check-claim, record-file-change, capture-evidence, heartbeat |
+| LLM providers | **4** | Claude Agent SDK (default — subscription auth, no API key) · Anthropic API · Amazon Bedrock (`[bedrock]` extra) · OpenAI-compatible custom endpoints (`[custom]` extra). See [docs/llm-providers.md](docs/llm-providers.md). |
 
 Highlights:
 
@@ -147,6 +147,7 @@ Full architecture and lifecycle diagrams: [`docs/architecture.md`](docs/architec
 | **Agent work packets** | `anvil packet T012` renders exact intent + acceptance criteria + non-goals | Agent must summarize the whole issue thread or plan |
 | **Task scoring** | Six dimensions: complexity, parallelizability, context load, blast radius, review risk, agent suitability | Single-axis story points (if any) |
 | **Runtime coupling** | Runtime-neutral: CLI + FastMCP stdio; any MCP client | Coupled to GitHub or to the CCPM markdown convention |
+| **Always-on context cost** | Measured ~2.4k tokens (14 execution-tool schemas + skill/agent descriptions; 10 planning tools stay off the wire until `ANVIL_MCP_PLANNING=1`) — audit: [`benchmarks/CONTEXT_AUDIT.md`](benchmarks/CONTEXT_AUDIT.md) | Unmeasured — whole issue threads or plan markdown enter context on demand |
 
 Source for this comparison: [`docs/_positioning.md`](docs/_positioning.md).
 
@@ -178,7 +179,7 @@ Source for this comparison: [`docs/_positioning.md`](docs/_positioning.md).
 /plugin install anvil@anvil
 ```
 
-Installs the plugin, registers the four hooks, wires the MCP server, and makes the five agents discoverable to Claude Code at next session start.
+Installs the plugin, registers the five hooks, wires the MCP server, and makes the five agents discoverable to Claude Code at next session start.
 
 ### Standalone via `uv tool` (any harness)
 

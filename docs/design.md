@@ -123,7 +123,7 @@ The `Evidence` Pydantic model captures the following (the *content* fields are o
 - `pr_url` / `commit_sha`: where the work landed
 - `screenshots: list[str]`, `known_limitations: str`: optional supporting context
 
-Note: the shipped model does *not* carry per-command exit codes or a typed `Artifact` type. Adding an exit-code-bearing, portable signed proof record is exactly what backlog item B48 proposes; until it lands, the gate confirms a command was *reported* to run, not that it exited 0.
+Note: `Evidence` now carries typed proofs — `CommandProof` (command / exit_code / output_sha256), `DiffProof`, `LinkProof`, `AssertionProof` — and acceptance mints a signed, portable `AcceptanceProof` (B48, shipped). The trust-boundary caveat still holds: recorded exit codes come from a trusted hook writer and are never independently re-executed.
 
 ### Why hooks capture, not the agent
 
@@ -131,7 +131,7 @@ Note: the shipped model does *not* carry per-command exit codes or a typed `Arti
 
 ### Trade-off accepted
 
-Submitting evidence is more work than typing "done." That extra step is intentional: it requires the agent to cite commands and files that can be checked against captured hook output. "Quick fix" workflows get `anvil apply --no-strict` (or `strict_evidence: false` in config) as an explicit, logged override.
+Submitting evidence is more work than typing "done." That extra step is intentional: it requires the agent to cite commands and files that can be checked against captured hook output. Enforcement is opt-in: setting `strict_evidence: true` in config (or `--strict` / `$ANVIL_STRICT_EVIDENCE=1`) makes `apply --approve` refuse on missing evidence; `anvil apply --no-strict` overrides an enabled config for a single invocation. The shipped default is advisory.
 
 ---
 
@@ -211,7 +211,7 @@ Warn + log + audit trail. The check-claim hook prints a one-line warning to stde
 
 Non-blocking does not mean unenforced:
 
-- The `apply` gate is a hard gate. No `Evidence` → no transition to `accepted`. No `Review` → no transition to `done`. The hooks observe; the apply gate enforces.
+- The `apply` gate is a hard gate when `strict_evidence` resolves true (`--strict` / `$ANVIL_STRICT_EVIDENCE` / config): approval refuses (exit 1, JSON code `evidence_incomplete`) until required evidence is present. By default it is advisory — the gate verdict is computed and shown, but `--approve` proceeds. The hooks observe; the apply gate enforces when strict is on.
 - The `claim_task` MCP tool refuses if the PRD is still `draft` or another active claim already holds the task. That refusal is at the engine layer, not in a hook, and the engine layer *does* block.
 - Schema validation in Pydantic models refuses malformed input at every boundary.
 
@@ -250,9 +250,9 @@ A fast local model (measured 200+ tok/s on an RTX 5090) lacks the frontier world
 
 ### Prerequisites before unattended autonomy (red-team, in shipped code)
 
-- **Progress-gated heartbeat + max-claim-age:** `renew()` is unconditional, so a wedged agent heartbeats forever and never reaps.
-- **One `ANVIL_ACTOR` resolver:** claim (`$USER`), heartbeat (`$ANVIL_GATE_ACTOR`), and hooks (`session_id`) resolve the actor three ways, so heartbeat and the finish-gate fail silently *open*.
-- **`strict_evidence` on + a portable, signed proof artifact:** the gate is advisory by default and `Evidence` has no `exit_code` field. The target is a typed proof artifact that is **portable, signed, and bound to task identity plus claim/lease and pull**, not an internal-only blob. Frame this honestly: verification is a *contested* wedge, not a moat anvil holds. Portable proof formats (AGEF, Proof of Insight) and enforced evidence-gates already exist separately, and platforms are absorbing verification; the unoccupied position is the *fusion* of portable signed proof with task/claim/lease/pull, local-first. Learn from AGEF / Proof of Insight; treat it as a bet to execute, not a won position.
+- **Progress-gated heartbeat:** max-claim-age shipped (B46) — `renew()` refuses expired leases and enforces a hard max-claim-age cutoff (default 4x `default_lease_minutes`, `claims/manager.py`). Progress-gated heartbeat remains open.
+- **One `ANVIL_ACTOR` resolver:** shipped (B47, `cli/_helpers.py`). Resolution order is explicit > `$ANVIL_ACTOR` > `$ANVIL_GATE_ACTOR` > `$USER` > per-runner signing-key fingerprint > `"agent"`, used by claim, hooks/heartbeat, gate-check, claim-guard, and apply.
+- **`strict_evidence` on by default + independent re-execution:** the gate is advisory by default. The proof artifact itself shipped in v0.1.0: `CommandProof.exit_code` exists, and the signed, portable `AcceptanceProof` is **bound to project/task/claim/actor/event-range** and verified via `anvil proof verify`. What remains open is strict-by-default and independent re-execution of commands. Frame this honestly: verification is a *contested* wedge, not a moat anvil holds. Portable proof formats (AGEF, Proof of Insight) and enforced evidence-gates already exist separately, and platforms are absorbing verification; the unoccupied position is the *fusion* of portable signed proof with task/claim/lease/pull, local-first. Learn from AGEF / Proof of Insight; treat it as a bet to execute, not a won position.
 
 ### Trade-offs
 
@@ -265,7 +265,7 @@ A fast local model (measured 200+ tok/s on an RTX 5090) lacks the frontier world
 
 ## Deferred decisions
 
-Each item below was considered, has a sketch, and was explicitly *not* shipped in v0/v1. Reasoning here; tracking and target version in `roadmap.md`.
+Each item below was considered, has a sketch, and was explicitly *not* shipped in v0/v1. Items since marked **(shipped)** landed later; their original deferral reasoning is kept for the record. Reasoning here; tracking and target version in `roadmap.md`.
 
 ### Webhook-based sync (deferred to v2.0, SPEC-FIRST)
 
@@ -283,13 +283,11 @@ A `Backend` Protocol exists in `state/backend.py`, but only `SqliteBackend` ship
 
 The right time to add the second backend is when a real user has a concrete requirement. If that day comes, the Protocol gives us a refactoring target; until then, one well-tested SQLite implementation is preferable to multiple lightly tested implementations.
 
-### Multi-provider LLM beyond Anthropic (deferred indefinitely)
+### Multi-provider LLM beyond Anthropic (shipped)
 
-`LLMProvider` Protocol exists; only `AnthropicProvider` ships.
+Multi-provider LLM shipped: `ClaudeAgentSDKProvider` is the default (subscription auth, no API key), with `AnthropicProvider`, `BedrockProvider` (`[bedrock]` extra), and `CustomEndpointProvider` (`[custom]` extra). Provider resolution: an explicit `llm_provider` config wins; otherwise the Agent SDK default is used, with env auto-detect participating only when `llm_fallback: true`. Resolution never fails outright — the Agent SDK path is the guaranteed final default.
 
-**Why deferred:** the LLM is used for *augmentation* (PRD parsing, scoring, expansion), never for state mutation. A user without an API key gets the template-based deterministic fallback and loses no correctness, only convenience.
-
-Adding OpenAI or local-LLM providers is a 1-day task when a user asks; shipping all three preemptively means three test matrices and three error-handling code paths for zero current benefit. Same logic as the backend Protocol: the seam exists; the second impl waits for a forcing function.
+**Why it was deferred at first:** the LLM is used for *augmentation* (PRD parsing, scoring, expansion), never for state mutation. A user without an API key gets the template-based deterministic fallback and loses no correctness, only convenience.
 
 ### Daemon / long-running service (not planned)
 
@@ -325,7 +323,7 @@ anvil ships Python source in `bin/src/`; `uv` resolves and caches dependencies o
 
 ### Bundled monitor / sentinel daemon (deferred to v0.2 minimum)
 
-The `monitors/` directory exists in the layout but is empty.
+The v0 spec's layout listed a `monitors/` directory, but it was never created — no `monitors/` directory exists in the repo, and monitors remain unbuilt.
 
 **Why not:** monitors would be background processes that watch for stale claims, sync drift, or PRD changes and act on them. Same daemon problem as above. The on-every-op stale-claim sweep handles the most common case without a daemon.
 
@@ -343,7 +341,7 @@ The "Multi-backend abstraction beyond SQLite" note above asks for a forcing func
 
 The 2026-06-20 review resolved the open questions by *removing* most of them from the near-term build:
 
-- **Actor identity, promoted to a shipped-bug prerequisite.** No longer a design question: claim (`$USER`), heartbeat (`$ANVIL_GATE_ACTOR`), and hooks (`session_id`) resolve the actor three ways, so heartbeat and the finish-gate fail silently *open* today. One `ANVIL_ACTOR` resolver is a prerequisite (see "Why risk-axis eligibility now" § Prerequisites).
+- **Actor identity, resolved (B47).** No longer a design question: one unified resolver ships in `cli/_helpers.py` — explicit > `$ANVIL_ACTOR` > `$ANVIL_GATE_ACTOR` > `$USER` > per-runner signing-key fingerprint > `"agent"` — used by claim, hooks/heartbeat, gate-check, claim-guard, and apply (see "Why risk-axis eligibility now" § Prerequisites).
 - **Type vocabulary, deferred (cut from MVP).** `TaskType` is a 4-value advisory enum; the real work-kind taxonomy is an unbuilt prerequisite, so the `type` axis is out of the MVP entirely.
 - **Tier semantics, deferred (cut from MVP).** No `tier` field exists and "minimum-sufficient model" collides with the never-name-a-model invariant; if `tier` ever returns it is a pure function of model-neutral dimensions with the runner owning the `tier→model` map.
 - **Capacity-pools, deferred (measure first).** anvil does not model pools yet. The two-loop bake-off measures throttle frequency per flat-rate pool and whether naive spillover to the local box suffices before any pool concept is built.

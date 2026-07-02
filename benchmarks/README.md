@@ -12,12 +12,12 @@ has one, so we can put a number on it.
 ## Run it
 
 ```bash
-cd plugins/anvil/benchmarks
-python3 run_benchmark.py                       # all 4 scenarios, 3 trials -> RESULTS.md
-python3 run_benchmark.py --quick               # fast smoke (1 trial, fewer actors)
-python3 run_benchmark.py --scenarios overlapping_files,evidence_gaming
-python3 run_benchmark.py --trials 5 --seed 7   # more trials / different seed
-python3 run_benchmark.py --live                # (phase-2 stub) real subagents
+cd benchmarks
+uv run python run_benchmark.py                       # all 4 scenarios, 3 trials -> RESULTS.md
+uv run python run_benchmark.py --quick               # fast smoke (1 trial, fewer actors)
+uv run python run_benchmark.py --scenarios overlapping_files,evidence_gaming
+uv run python run_benchmark.py --trials 5 --seed 7   # more trials / different seed
+uv run python run_benchmark.py --live                # (phase-2 stub) real subagents
 ```
 
 No third-party dependencies. The first run does a one-time `uv sync` of the

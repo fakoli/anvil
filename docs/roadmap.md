@@ -70,8 +70,8 @@ Two new types make the postures real and back the items below:
 ### Why this ordering (the argument against doing it differently)
 
 The reframe rests entirely on "durable governed state" being trustworthy.
-Today the replay guarantee is unproven in CI and the evidence gate was, until
-1.17.1, gameable and self-inconsistent. You cannot position as the trust layer
+The replay guarantee was, until 1.19.0, unproven in CI (see SL-1) and the
+evidence gate was, until 1.17.1, gameable and self-inconsistent. You cannot position as the trust layer
 with an untrusted trust layer. So Wave 1 makes the existing claims true, Wave 2
 makes governance non-gameable, and Wave 3 builds the integration story on top of
 a substrate that has earned it. The temptation to ship the positioning-friendly
@@ -88,13 +88,16 @@ backed by a passing CI job.
   1.17.1 (PR #66).** `transitions._evidence_complete` delegates to
   `review.gates.evidence_complete`; a parametrized agreement test locks the
   enforcing gate to the preview gate. Prerequisite for SL-3.
-- **[SL-1]** Prove replay in CI. **TARGETED, highest leverage.** Ship
-  `anvil replay --from-events events.jsonl` into a scratch database (the
-  long-planned P9B-7 / v2.1 item, pulled forward because the audit positioning
-  depends on it). Add a CI job that, for a non-trivial fixture project, asserts
-  the replayed canonical state is equivalent to the original. Acceptance: a green
-  `replay-equivalence` check on every PR. This converts the most-repeated and
-  least-proven claim into a verified invariant.
+- **[SL-1]** Prove replay in CI. **SHIPPED in 1.19.0.** The `anvil replay`
+  CLI ([`cli/replay.py`](../bin/src/anvil/cli/replay.py)) rebuilds state from
+  `events.jsonl` into a scratch database (the long-planned v2.1 replay item,
+  pulled forward because the audit positioning depends on it; the sibling
+  `anvil snapshot` command, P9B-7, remains open), and
+  [`tests/test_replay_equivalence.py`](../tests/test_replay_equivalence.py)
+  asserts the replayed canonical state is equivalent to the original on every
+  PR — satisfied inside the main pytest `test` CI job rather than a
+  separately-named `replay-equivalence` status check. This converts the
+  most-repeated and least-proven claim into a verified invariant.
 - **[SL-2]** Measure the critic false-pass rate. **TARGETED.** Build a
   fault-injection harness: a corpus of known-bad diffs (off-by-one, dropped null
   check, assertion-free test, deleted assertion) fed to the critic agent;

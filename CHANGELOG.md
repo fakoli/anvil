@@ -6,6 +6,28 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **`docs/backlog/strategic-backlog.md`** — moat-execution overlay (S1–S13)
+  from a full product/PMF/moat review: sequences the closed verification loop
+  (re-execution + countersigned proofs, strict-gate default, gaming/critic
+  measurement) ahead of breadth work, and cross-references the existing
+  roadmap/E-B backlogs.
+
+### Fixed
+
+- **Docs corrected against shipped code (~25 stale claims).** A verification
+  pass found docs describing shipped features as unbuilt and vice versa; now
+  corrected: B46 max-claim-age, B47 unified `ANVIL_ACTOR` resolver, B48 typed
+  + signed `AcceptanceProof`s, `anvil replay`/`backup`/`restore`, four LLM
+  providers, hook count (5), CLI entry count (39), schema version (8), MCP
+  24-registered/14-on-wire split, and — most load-bearing — the evidence gate
+  documented as advisory-by-default everywhere (README's headline included)
+  instead of claiming an unconditional hard gate. Roadmap SL-1
+  (replay-equivalence in CI) marked SHIPPED. README comparison table gains a
+  measured always-on context-cost row (~2.4k tokens, from
+  `benchmarks/CONTEXT_AUDIT.md`).
+
 ## [0.3.0] - 2026-06-23
 
 Multi-PRD, revisable, partitioned state: a project holds several release-scoped
