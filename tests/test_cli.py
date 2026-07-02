@@ -5873,7 +5873,7 @@ class TestDoctorHealthy:
             == get_schema_version()
         )
         cfg_detail = by_check["config"]["detail"]
-        assert cfg_detail["effective_lease_minutes"] == 60.0
+        assert cfg_detail["effective_lease_minutes"] == 240.0
         assert cfg_detail["effective_heartbeat_minutes"] == 5.0
 
     def test_doctor_verifies_replay_integrity(self, tmp_path: Path) -> None:
