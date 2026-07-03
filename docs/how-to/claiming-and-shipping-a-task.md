@@ -60,7 +60,7 @@ The `--actor <name>` flag sets the identity recorded in the claim audit trail bu
 anvil claim T012
 ```
 
-What happens, in order, inside the CLI ([`cli/claim.py::claim`](../../bin/src/anvil/cli/claim.py)):
+What happens, in order, inside the CLI ([`cli/claim.py::claim`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/claim.py)):
 
 1. **Stale-claim reap.** `detect_and_release_stale()` releases any expired leases first so the conflict check sees current truth.
 2. **Pre-claim conflict check.** `manager.check_conflicts()` compares the task's `likely_files` against the `expected_files` of every active claim by another actor. Any overlap is printed to stderr; without `--force` the command exits non-zero before mutating state.
@@ -101,7 +101,7 @@ The `Claim` row carries `expected_files` (copied from `task.likely_files`), `cla
 anvil packet T012
 ```
 
-The packet is the complete context one agent needs to execute the task — and nothing else. It is rendered from canonical state by [`context/packets.py::render_packet`](../../bin/src/anvil/context/packets.py) and written to `.anvil/packets/T012.md`.
+The packet is the complete context one agent needs to execute the task — and nothing else. It is rendered from canonical state by [`context/packets.py::render_packet`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) and written to `.anvil/packets/T012.md`.
 
 Sections in the markdown packet:
 
@@ -138,7 +138,7 @@ The first file change auto-transitions the task `claimed → in_progress`.
 
 ## Step 5 — Renew the lease before it expires
 
-A claim's lease expires after `default_lease_minutes` (the `ClaimManager` ships with `60` as the in-code default; the project-level override lives in `.anvil/config.yaml`). Renew it before expiry:
+A claim's lease expires after `default_lease_minutes` (the `ClaimManager` ships with `240` as the in-code default; the project-level override lives in `.anvil/config.yaml`). Renew it before expiry:
 
 ```bash
 anvil renew C9F3A210
@@ -222,7 +222,7 @@ Re-run `submit` with the missing flag (`--commands` for test output, `--pr-url` 
 
 ### How the evidence gate matches
 
-[`review/gates.py::evidence_complete`](../../bin/src/anvil/review/gates.py) maps each item in `required_evidence` to a structured field using substring rules:
+[`review/gates.py::evidence_complete`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py) maps each item in `required_evidence` to a structured field using substring rules:
 
 | Required-evidence item contains | Checked against |
 |---|---|

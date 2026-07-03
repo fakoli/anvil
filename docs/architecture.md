@@ -1,6 +1,6 @@
 # anvil architecture
 
-> Condensed reference for the current **v0.3.0** standalone state. For the original v0
+> Condensed reference for the current **v0.3.1** standalone state. For the original v0
 > vision and aspirational items, see
 > [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
 > For what is planned but not yet shipped, see
@@ -51,7 +51,7 @@ graph TD
 
     subgraph Entry["Entry surfaces"]
         CLI["CLI<br/>anvil &lt;cmd&gt;"]
-        MCP["MCP server<br/>FastMCP stdio<br/>24 tools"]
+        MCP["MCP server<br/>FastMCP stdio<br/>24 tools (14 on default surface)"]
         Hooks["Hooks<br/>SessionStart / PreToolUse / PostToolUse"]
     end
 
@@ -108,30 +108,30 @@ graph TD
     GitHub --> Backend
 ```
 
-Source: [`assets/diagrams/component.mmd`](../assets/diagrams/component.mmd).
+Source: [`assets/diagrams/component.mmd`](https://github.com/fakoli/anvil/blob/main/assets/diagrams/component.mmd).
 
 <div align="center">
-<img src="../assets/how-it-works.png" alt="Isometric diagram: agents claim tasks from the anvil surface, execute, and submit evidence — claim → execute → evidence → done" width="800" />
+<img src="https://raw.githubusercontent.com/fakoli/anvil/main/assets/how-it-works.png" alt="Isometric diagram: agents claim tasks from the anvil surface, execute, and submit evidence — claim → execute → evidence → done" width="800" />
 </div>
 
 ### Per-layer responsibilities
 
 | Layer | What it owns | Key files |
 |---|---|---|
-| Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json) |
-| CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py) |
-| MCP server | Runtime-neutral capability surface — 24 stdio tools any MCP client can call | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
-| Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](../hooks/hooks.json), [`hooks/*.sh`](../hooks/) |
-| Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](../skills/) |
-| Plugin agents | Specialist roles owned by this plugin | [`agents/*.md`](../agents/) |
-| Backend protocol | The seam between state-engine logic and storage; SqliteBackend is the only impl that ships | [`bin/src/anvil/state/backend.py`](../bin/src/anvil/state/backend.py), [`bin/src/anvil/state/sqlite.py`](../bin/src/anvil/state/sqlite.py) |
-| Transitions | Pure state machine — no I/O, no DB, no side-effects beyond `model_copy()` | [`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py) |
-| Claims manager | Atomic lease + heartbeat; stale detection on every operation | [`bin/src/anvil/claims/manager.py`](../bin/src/anvil/claims/manager.py), [`bin/src/anvil/claims/stale.py`](../bin/src/anvil/claims/stale.py) |
-| Planning engine | Template-first PRD parser; optional LLM augmentation; deterministic six-dim scorer | [`bin/src/anvil/planning/`](../bin/src/anvil/planning/) |
-| Context engine | Renders work packets (markdown + JSON) from canonical state | [`bin/src/anvil/context/packets.py`](../bin/src/anvil/context/packets.py) |
-| Review engine | Pure transition-gate functions (readiness, evidence) | [`bin/src/anvil/review/gates.py`](../bin/src/anvil/review/gates.py) |
-| Git ops | Auto-create `agent/<task>-<slug>` branch on `claim`; optional worktree | [`bin/src/anvil/git_ops/`](../bin/src/anvil/git_ops/) |
-| Sync engine | Bidirectional GitHub Issues projection via the `SyncProvider` Protocol | [`bin/src/anvil/sync/`](../bin/src/anvil/sync/) |
+| Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](https://github.com/fakoli/anvil/blob/main/.claude-plugin/plugin.json) |
+| CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
+| MCP server | Runtime-neutral capability surface — 24 registered stdio tools; the default execution surface serves 14 on the wire, and the 10 planning-tagged tools require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
+| Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json), [`hooks/*.sh`](https://github.com/fakoli/anvil/tree/main/hooks) |
+| Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](https://github.com/fakoli/anvil/tree/main/skills) |
+| Plugin agents | Specialist roles owned by this plugin | [`agents/*.md`](https://github.com/fakoli/anvil/tree/main/agents) |
+| Backend protocol | The seam between state-engine logic and storage; SqliteBackend is the only impl that ships | [`bin/src/anvil/state/backend.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/backend.py), [`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py) |
+| Transitions | Pure state machine — no I/O, no DB, no side-effects beyond `model_copy()` | [`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py) |
+| Claims manager | Atomic lease + heartbeat; stale detection on every operation | [`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py), [`bin/src/anvil/claims/stale.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py) |
+| Planning engine | Template-first PRD parser; optional LLM augmentation; deterministic six-dim scorer | [`bin/src/anvil/planning/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/planning) |
+| Context engine | Renders work packets (markdown + JSON) from canonical state | [`bin/src/anvil/context/packets.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) |
+| Review engine | Pure transition-gate functions (readiness, evidence) | [`bin/src/anvil/review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py) |
+| Git ops | Auto-create `agent/<task>-<slug>` branch on `claim`; optional worktree | [`bin/src/anvil/git_ops/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/git_ops) |
+| Sync engine | Bidirectional GitHub Issues projection via the `SyncProvider` Protocol | [`bin/src/anvil/sync/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/sync) |
 
 The two iron rules of the layering:
 
@@ -148,10 +148,14 @@ The two iron rules of the layering:
 ## Data model
 
 The full type system lives in
-[`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py)
-— **25 Pydantic v2 classes** total (11 enums + 14 models). Every field is
+[`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)
+— **35 Pydantic v2 classes** total (13 enums + 22 models). Every field is
 validated at every transition (`extra="forbid"`,
-`validate_assignment=True`); all timestamps are UTC-required.
+`validate_assignment=True`); all timestamps are UTC-required. The tables
+below cover the core set; the newer `TaskType` / `ProofKind` enums and the
+proof models (`CommandProof`, `DiffProof`, `LinkProof`, `AssertionProof`,
+`ProofRequirement`), `EventRange`, `AcceptanceProof`, and `EventDraft` are
+not yet tabled.
 
 ### Enums (11)
 
@@ -248,11 +252,15 @@ stateDiagram-v2
     end note
 ```
 
-Source: [`assets/diagrams/lifecycle.mmd`](../assets/diagrams/lifecycle.mmd).
+Source: [`assets/diagrams/lifecycle.mmd`](https://github.com/fakoli/anvil/blob/main/assets/diagrams/lifecycle.mmd).
+
+> Note: the evidence gate on `needs_review → accepted` is computed and
+> reported at apply time but **enforced** only when `strict_evidence`
+> resolves true; the default path approves regardless.
 
 All 11 statuses are defined in `TaskStatus` and the allowed transitions are
 the public functions in
-[`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py).
+[`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py).
 The module is pure (no I/O); each function returns a new `Task` via
 `model_copy(update=...)`.
 
@@ -265,7 +273,7 @@ Three named gates appear in the transition module; each raises
 |---|---|---|
 | `readiness_gate` | drafted → reviewed | `task.acceptance_criteria` and `task.verification.commands` must both be non-empty |
 | `prd_status_gate` | ready → claimed | The task's **owning** PRD (resolved via `task.prd_id`) must be in `reviewed` or `approved` (refuses while `draft`). A task in an approved PRD is claimable while a sibling in a draft PRD is refused |
-| `evidence_gate` | needs_review → accepted | Every item in `task.verification.required_evidence` must appear as a substring of at least one Evidence field |
+| `evidence_gate` | needs_review → accepted | Every item in `task.verification.required_evidence` must appear as a substring of at least one Evidence field. Computed and reported at apply time, but enforced only when `strict_evidence` resolves true — the default path approves regardless |
 
 ### Who drives each transition
 
@@ -303,12 +311,19 @@ The replay guarantee is the central audit property of the engine: **replaying
 exactly**. This is what makes the engine safe to back up by copying
 `.anvil/` and what makes a corrupted database recoverable.
 
-A native `anvil replay --from-events events.jsonl` subcommand is
-planned for v2.1 (item P9B-7 — see
-[`roadmap.md` § Snapshot / replay](roadmap.md#theme-snapshot--replay)) and
-**does not ship today**. Until it does, the supported backup and recovery
-flow is to copy `.anvil/` wholesale; the replay guarantee makes
-that safe and minimal:
+A native `anvil replay --from-events <jsonl> --into <db>` subcommand
+**ships today**
+([`bin/src/anvil/cli/replay.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/replay.py) — it
+refuses to target the live database) and rebuilds state from the event
+log; a CI equivalence test
+([`tests/test_replay_equivalence.py`](https://github.com/fakoli/anvil/blob/main/tests/test_replay_equivalence.py))
+verifies the guarantee. `anvil backup` / `anvil restore` also ship —
+S3 push/pull of `events.jsonl` plus a replay-based restore. Only the
+`anvil snapshot` subcommand (item P9B-7, a local sqlite `.backup`
+wrapper — see
+[`roadmap.md` § Snapshot / replay](roadmap.md#theme-snapshot-replay))
+remains open. Copying `.anvil/` wholesale stays as the fully-local
+fallback; the replay guarantee makes that safe and minimal:
 
 ```bash
 # Back up before destructive work.
@@ -351,14 +366,15 @@ One state.db and one events.jsonl hold **every** PRD's rows, partitioned by
 `prd_id`; there is no per-PRD database. The default PRD keeps its source at the
 bare `.anvil/prd.md`; each named release PRD has a markdown source at
 `.anvil/prds/<prd_id>.md` (resolved by `prd_source_path()` —
-[`cli/_helpers.py`](../bin/src/anvil/cli/_helpers.py)). Re-parsing one PRD
+[`cli/_helpers.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/_helpers.py)). Re-parsing one PRD
 replaces only that PRD's rows and leaves the others untouched.
 
 A `snapshots/` subdirectory was originally planned (and is shown in the v0
 spec) but the `anvil snapshot` subcommand has not yet shipped — see
-[Roadmap → v2.1 → snapshot subcommand](roadmap.md#theme-snapshot--replay).
-Backups today are done by copying `.anvil/` wholesale; the replay
-guarantee makes that safe.
+[Roadmap → v2.1 → snapshot subcommand](roadmap.md#theme-snapshot-replay).
+Backups today are done with `anvil backup` / `anvil restore` (S3 push/pull
+of `events.jsonl` plus a replay-based restore) or by copying `.anvil/`
+wholesale (`cp -R`); the replay guarantee makes that safe.
 
 `hooks` and the CLI alike resolve `STATE_DIR` relative to
 `${CLAUDE_PROJECT_DIR:-$PWD}/.anvil` so every agent invocation,
@@ -377,12 +393,12 @@ mechanisms layered together:
    SQLite layer. Reads use WAL snapshots and do not block writers.
 2. **Claim leases with heartbeats.** A `Claim` row carries
    `lease_expires_at` and `last_heartbeat_at`. The CLI's `renew` command
-   (and the MCP `renew_claim` tool) extends the lease. Default lease is 60
+   (and the MCP `renew_claim` tool) extends the lease. Default lease is 240
    minutes (configurable via `.anvil/config.yaml`); the in-code
-   default lives at [`claims/manager.py`](../bin/src/anvil/claims/manager.py).
+   default lives at [`claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py).
 3. **Stale-claim reaping.** Every mutating CLI command and every mutating
    MCP tool calls
-   [`detect_and_release_stale()`](../bin/src/anvil/claims/stale.py)
+   [`detect_and_release_stale()`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py)
    at entry. Leases past their expiry are auto-released with
    `release_reason="stale"`; the audit event preserves the original
    claimant. Read-only listers skip reaping for latency.
@@ -406,23 +422,30 @@ when no claim is held.
 
 Full reference is available at
 [`docs/cli-reference.md`](cli-reference.md). The command surface assembled
-in [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py):
+in [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py):
 
 - Lifecycle setup and inspection: `init`, `status`, `describe`, `doctor`
 - PRD authoring: `prd parse`, `prd review` (sub-app)
-- Planning: `plan`, `score`, `expand`, `review tasks` (sub-app)
+- Planning: `plan`, `score`, `assumptions`, `expand`, `deps`, `review tasks` (sub-app)
 - Listing / inspecting: `list`, `show`, `scan`, `drift`, `graph`, `conflicts`
-- Claiming: `claim`, `release`, `renew`, `next`
-- Working: `packet`, `submit`, `apply`
-- Harness config: `mcp-config`
-- Migration / replay: `migrate state`, `migrate-events`, `replay`
+- Claiming: `claim`, `release`, `renew`, `next`, `claim-guard`
+- Working: `packet`, `submit`, `apply`, `gate-check`, `run-workflow`, `proof` (sub-app — `proof verify`)
+- Notifications: `notify-digest`
+- Harness config: `mcp-config`, `install`
+- Backup / restore: `backup`, `restore`
+- Migration / replay: `migrate state`, `migrate-events`, `migrate-workspace`, `replay`
 - Hooks: `hook ...` (sub-app — called by `hooks/*.sh`)
 - Sync: `sync ...` (sub-app — `sync github`, `sync github --health`, ...)
 
 ### MCP tools (24)
 
 Full reference is at [`docs/mcp.md`](mcp.md). Source:
-[`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py).
+[`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py).
+
+All 24 tools are registered, but the default execution surface serves 14
+on the wire; the 10 planning-tagged tools (`parse_prd`, `plan_tasks`,
+`score_tasks`, ...) require `ANVIL_MCP_PLANNING=1` (`mcp_server.py`
+tag-disables them at startup).
 
 | # | Tool | Mutates | Reaps stale |
 |---|---|---|---|
@@ -456,34 +479,35 @@ not yet on the MCP surface — agents that want sync today shell out via Bash
 to `anvil sync`. See
 [Roadmap → v2.1 → MCP sync tools](roadmap.md#theme-mcp-surface-sync-tools).
 
-### Hooks (4)
+### Hooks (5)
 
-Wired in [`hooks/hooks.json`](../hooks/hooks.json). All four are
+Wired in [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json). All five are
 **non-blocking**: they must `exit 0` regardless of internal failure, must
 not use `set -e` / `set -u` / `set -o pipefail`, must wrap CLI calls with
 `|| true`, and must complete in well under their declared timeout.
 
 | Hook | Trigger | Script | Purpose |
 |---|---|---|---|
-| `detect-state` | SessionStart | [`detect-state.sh`](../hooks/detect-state.sh) | Surface project state info into the session context |
-| `check-claim` | PreToolUse on `Edit / Write / NotebookEdit` | [`check-claim.sh`](../hooks/check-claim.sh) | Warn (non-blocking) if the agent has no active claim covering the file |
-| `record-file-change` | PostToolUse on `Edit / Write / NotebookEdit` | [`record-file-change.sh`](../hooks/record-file-change.sh) | Record the change against the active claim for orphan detection |
-| `capture-evidence` | PostToolUse on `Bash` | [`capture-evidence.sh`](../hooks/capture-evidence.sh) | When the command matches a verification pattern, buffer it as evidence for the active claim |
+| `detect-state` | SessionStart | [`detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh) | Surface project state info into the session context |
+| `check-claim` | PreToolUse on `Edit / Write / NotebookEdit` | [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | Warn (non-blocking) if the agent has no active claim covering the file |
+| `record-file-change` | PostToolUse on `Edit / Write / NotebookEdit` | [`record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh) | Record the change against the active claim for orphan detection |
+| `capture-evidence` | PostToolUse on `Bash` | [`capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) | When the command matches a verification pattern, buffer it as evidence for the active claim |
+| `heartbeat` | PostToolUse on `Edit / Write / NotebookEdit` and on `Bash` | [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | Renew the active claim's lease |
 
 ### Skills (8)
 
-Workflow choreography lives in [`skills/*/SKILL.md`](../skills/) —
+Workflow choreography lives in [`skills/*/SKILL.md`](https://github.com/fakoli/anvil/tree/main/skills) —
 start-prd, prd, plan, claim, execute, finish, state-ops, resolve-decisions.
 
 Skill frontmatter is always loaded into the model's context (it is the
 plugin's command surface), so the combined skill footprint is kept under an
 explicit token budget enforced in CI — see
 [`context-budget.md`](context-budget.md) and
-[`tests/test_token_budget.py`](../tests/test_token_budget.py).
+[`tests/test_token_budget.py`](https://github.com/fakoli/anvil/blob/main/tests/test_token_budget.py).
 
 ### Plugin agents (5)
 
-Defined in [`agents/*.md`](../agents/):
+Defined in [`agents/*.md`](https://github.com/fakoli/anvil/tree/main/agents):
 
 - `planner` — drafts feature / task decomposition from a parsed PRD
 - `critic` — reviews PRD or task drafts; produces an approve / reject / needs_changes verdict
@@ -502,25 +526,25 @@ points at a file you can grep.
 
 | Layer | File(s) |
 |---|---|
-| Entry: CLI assembly | [`bin/src/anvil/cli/__init__.py`](../bin/src/anvil/cli/__init__.py) |
-| Entry: MCP server (24 tools) | [`bin/src/anvil/mcp_server.py`](../bin/src/anvil/mcp_server.py) |
-| Entry: hooks manifest | [`hooks/hooks.json`](../hooks/hooks.json) |
-| Type system | [`bin/src/anvil/state/models.py`](../bin/src/anvil/state/models.py) |
-| Transitions (pure) | [`bin/src/anvil/state/transitions.py`](../bin/src/anvil/state/transitions.py) |
-| Backend Protocol | [`bin/src/anvil/state/backend.py`](../bin/src/anvil/state/backend.py) |
-| SQLite impl + schema | [`bin/src/anvil/state/sqlite.py`](../bin/src/anvil/state/sqlite.py), [`schema.py`](../bin/src/anvil/state/schema.py) |
-| Event payloads | [`bin/src/anvil/state/payloads.py`](../bin/src/anvil/state/payloads.py) |
-| Claims manager | [`bin/src/anvil/claims/manager.py`](../bin/src/anvil/claims/manager.py) |
-| Stale reaping | [`bin/src/anvil/claims/stale.py`](../bin/src/anvil/claims/stale.py) |
-| Planning (template + LLM + scoring) | [`bin/src/anvil/planning/`](../bin/src/anvil/planning/) |
-| Context (work packets) | [`bin/src/anvil/context/packets.py`](../bin/src/anvil/context/packets.py) |
-| Review gates | [`bin/src/anvil/review/gates.py`](../bin/src/anvil/review/gates.py) |
-| Git ops | [`bin/src/anvil/git_ops/`](../bin/src/anvil/git_ops/) |
-| Sync Protocol + registry | [`bin/src/anvil/sync/provider.py`](../bin/src/anvil/sync/provider.py), [`registry.py`](../bin/src/anvil/sync/registry.py) |
-| GitHub provider | [`bin/src/anvil/sync/providers/github_issues.py`](../bin/src/anvil/sync/providers/github_issues.py) |
-| Reconciliation | [`bin/src/anvil/sync/reconciliation.py`](../bin/src/anvil/sync/reconciliation.py) |
-| Plugin config | [`bin/src/anvil/config.py`](../bin/src/anvil/config.py) |
-| Clock abstraction | [`bin/src/anvil/clock.py`](../bin/src/anvil/clock.py) |
+| Entry: CLI assembly | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
+| Entry: MCP server (24 tools) | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
+| Entry: hooks manifest | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) |
+| Type system | [`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py) |
+| Transitions (pure) | [`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py) |
+| Backend Protocol | [`bin/src/anvil/state/backend.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/backend.py) |
+| SQLite impl + schema | [`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py), [`schema.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/schema.py) |
+| Event payloads | [`bin/src/anvil/state/payloads.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/payloads.py) |
+| Claims manager | [`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py) |
+| Stale reaping | [`bin/src/anvil/claims/stale.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py) |
+| Planning (template + LLM + scoring) | [`bin/src/anvil/planning/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/planning) |
+| Context (work packets) | [`bin/src/anvil/context/packets.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) |
+| Review gates | [`bin/src/anvil/review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py) |
+| Git ops | [`bin/src/anvil/git_ops/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/git_ops) |
+| Sync Protocol + registry | [`bin/src/anvil/sync/provider.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/provider.py), [`registry.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/registry.py) |
+| GitHub provider | [`bin/src/anvil/sync/providers/github_issues.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/providers/github_issues.py) |
+| Reconciliation | [`bin/src/anvil/sync/reconciliation.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/reconciliation.py) |
+| Plugin config | [`bin/src/anvil/config.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/config.py) |
+| Clock abstraction | [`bin/src/anvil/clock.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/clock.py) |
 
 ---
 

@@ -441,10 +441,16 @@ def status(
     finally:
         backend.close()
 
-    # Aggregate task counts.
+    # Aggregate task counts. claimed / needs_review / done are surfaced too —
+    # the 0.3.0 rollup hid them, so mid-loop `status` showed a claimed task in
+    # no bucket and a finished project as "0 of N" (found reproducing the
+    # README flow: counts must agree with the packet's documented lifecycle).
     ready_count = sum(1 for t in all_tasks if t.status == "ready")
+    claimed_count = sum(1 for t in all_tasks if t.status == "claimed")
     in_progress_count = sum(1 for t in all_tasks if t.status == "in_progress")
+    needs_review_count = sum(1 for t in all_tasks if t.status == "needs_review")
     blocked_count = sum(1 for t in all_tasks if t.status == "blocked")
+    done_count = sum(1 for t in all_tasks if t.status == "done")
 
     prd_status_str = str(prd.status) if prd is not None else "none"
     active_claim_count = len(active_claims)
@@ -463,8 +469,11 @@ def status(
                 "tasks": {
                     "total": len(all_tasks),
                     "ready": ready_count,
+                    "claimed": claimed_count,
                     "in_progress": in_progress_count,
+                    "needs_review": needs_review_count,
                     "blocked": blocked_count,
+                    "done": done_count,
                 },
                 "active_claims": active_claim_count,
                 # T020: additive per-PRD rollup alongside the flat project totals.
@@ -530,8 +539,11 @@ def status(
         typer.echo(
             f"  Tasks:         {entry.total_tasks} total "
             f"({entry.ready_task_count} ready, "
+            f"{entry.task_counts.get('claimed', 0)} claimed, "
             f"{entry.task_counts.get('in_progress', 0)} in_progress, "
-            f"{entry.task_counts.get('blocked', 0)} blocked)"
+            f"{entry.task_counts.get('needs_review', 0)} needs_review, "
+            f"{entry.task_counts.get('blocked', 0)} blocked, "
+            f"{entry.task_counts.get('done', 0)} done)"
         )
         typer.echo(f"  Active claims: {entry.active_claim_count}")
 
@@ -541,8 +553,11 @@ def status(
     typer.echo(
         f"Tasks:         {len(all_tasks)} total "
         f"({ready_count} ready, "
+        f"{claimed_count} claimed, "
         f"{in_progress_count} in_progress, "
-        f"{blocked_count} blocked)"
+        f"{needs_review_count} needs_review, "
+        f"{blocked_count} blocked, "
+        f"{done_count} done)"
     )
     typer.echo(f"Active claims: {active_claim_count}")
     typer.echo(f"Sync:          {sync_label}")

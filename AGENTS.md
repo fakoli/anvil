@@ -10,9 +10,11 @@ with `ANVIL_STATE_LAYOUT=local`. Either way, let the CLI resolve the path: run a
 command and read the location it echoes; never assume an in-repo `.anvil/`. Two
 equivalent surfaces:
 
-- **CLI** — `bin/anvil <command>` (single mutator, no harness dependency).
-- **MCP** — `bin/anvil-mcp` (24 FastMCP stdio tools). Run
-  `anvil mcp-config <your-client>` to print client-specific config.
+- **CLI** — `anvil <command>` (single mutator, no harness dependency; on PATH
+  after `uv tool install anvil-state`).
+- **MCP** — `anvil-mcp` (FastMCP stdio; 14 execution tools by default, all 24
+  with `ANVIL_MCP_PLANNING=1`). Run `anvil mcp-config <your-client>` to print
+  client-specific config.
 
 Both resolve the project via `ANVIL_ROOT` env var, else the current directory.
 Every read command supports `--json` for a `{"ok":…,"command":…,"data":…}`

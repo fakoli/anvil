@@ -125,7 +125,13 @@ class ClaimManager:
         clock: Clock,
         *,
         actor: str,
-        default_lease_minutes: float = 60,
+        # 240 (was 60): dogfooding sessions showed real agent workflows run
+        # >15 min per task and the 60-min default expired mid-work, SILENTLY
+        # reverting tasks to ready (post-session findings, anvil v0.3.0
+        # multi-PRD build — operators had to discover `--lease 240` by
+        # failing). Four hours covers observed task cycles; max-claim-age
+        # (4x) still caps a wedged agent at 16h.
+        default_lease_minutes: float = 240,
         default_heartbeat_minutes: float = 5,
         max_claim_age_minutes: float | None = None,
     ) -> None:

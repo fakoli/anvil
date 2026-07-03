@@ -515,6 +515,26 @@ def _parse_requirements(
         if m_id:
             raw_id = m_id.group(1).upper()
             text = m_id.group(2).strip()
+            # Refuse suffixed ids like 'R003a' instead of silently truncating
+            # to 'R003' (which collides with a sibling 'R003b' and, before the
+            # duplicate-id guard below, aborted the state write mid-append —
+            # bricking the workspace; see _flag_duplicate_ids).
+            rest = content[m_id.end(1):]
+            if rest[:1].isalpha() or rest[:1] == "_":
+                suffix = rest.split(":", 1)[0].split()[0]
+                errors.append(
+                    ParseError(
+                        section="requirements",
+                        line=start_line,
+                        message=(
+                            f"Requirement id '{m_id.group(1)}{suffix}' is not "
+                            "canonical ('R' + digits, e.g. R001). Suffixed ids "
+                            "would truncate and collide — renumber it "
+                            f"(e.g. split into its own RNNN id)."
+                        ),
+                    )
+                )
+                continue
         else:
             raw_id = _auto_id("R", auto_index)
             text = content
@@ -542,6 +562,35 @@ def _parse_requirements(
         )
 
     return reqs
+
+
+def _flag_duplicate_ids(
+    items: list, kind: str, errors: list[ParseError]
+) -> None:
+    """Refuse duplicate ids at parse time, before any state write.
+
+    A duplicate id that reached the state engine aborted the write transaction
+    on the UNIQUE constraint AFTER the ``prd.parsed`` event line was appended
+    to ``events.jsonl`` — poisoning replay so every subsequent command failed
+    with the same TransactionAborted until ``anvil init --force`` (data loss).
+    Reproduced 2026-07-02 with a duplicated ``R005`` bullet. Parse-time
+    validation is the guard: errors here fail the parse cleanly with nothing
+    written.
+    """
+    seen: set[str] = set()
+    for item in items:
+        if item.id in seen:
+            errors.append(
+                ParseError(
+                    section=f"{kind}s",
+                    line=0,
+                    message=(
+                        f"Duplicate {kind} id '{item.id}' — ids must be "
+                        "unique; renumber one of the entries."
+                    ),
+                )
+            )
+        seen.add(item.id)
 
 
 # ---------------------------------------------------------------------------
@@ -1467,6 +1516,11 @@ def parse_prd(
     # --- Optional: LLM enrichment of short task descriptions ------------
     if provider is not None:
         tasks = _augment_short_descriptions(tasks, provider)
+
+    # --- Uniqueness gate: refuse duplicate ids before ANY state write ----
+    _flag_duplicate_ids(requirements, "requirement", errors)
+    _flag_duplicate_ids(features, "feature", errors)
+    _flag_duplicate_ids(tasks, "task", errors)
 
     return ParseResult(
         prd=prd,

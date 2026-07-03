@@ -47,6 +47,35 @@ from anvil.cli.sync import sync_app
 # Root application
 # ---------------------------------------------------------------------------
 
+
+def _force_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 when the console isn't UTF-8-capable.
+
+    Windows consoles default to cp1252, and anvil's human output uses ``→`` /
+    ``↳`` glyphs — ``submit``/``apply`` crashed with ``UnicodeEncodeError``
+    (issue #106), repeatedly costing users a re-run until they discovered the
+    ``PYTHONUTF8=1`` workaround. ``backslashreplace`` keeps output lossless
+    even if reconfigure is unavailable and a raw escape slips through. No-op on
+    already-UTF-8 streams and on streams that can't be reconfigured (pipes,
+    test harnesses).
+    """
+    import sys
+
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", "") or "").lower()
+        if "utf" in encoding:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:  # noqa: BLE001 — never let console setup break the CLI
+            pass
+
+
+_force_utf8_stdio()
+
 app = typer.Typer(
     name="anvil",
     help=(

@@ -1054,8 +1054,19 @@ def install(
         for c in native_results:
             suffix = "" if c["ok"] in (None, True) else f"  ⚠ {c['detail']}"
             typer.echo(f"    {c['cmd']}{suffix}", err=True)
+    # Dry-run output must never claim "(wrote)" — reproducing the install flow
+    # on 0.3.0 showed a new user reads that as "install completed" when nothing
+    # was written. Map the verbs through the write flag.
+    def _display_action(action: str) -> str:
+        if write:
+            return action
+        return {"wrote": "would write", "merged": "would merge"}.get(action, action)
+
     if mcp["action"] in ("wrote", "merged"):
-        typer.echo(f"# MCP config ({mcp['action']}) → {mcp['path']}", err=True)
+        typer.echo(
+            f"# MCP config ({_display_action(mcp['action'])}) → {mcp['path']}",
+            err=True,
+        )
         if not write:
             typer.echo(mcp["content"], nl=False)
     elif not native_cmds:
@@ -1063,8 +1074,8 @@ def install(
 
     if instr["action"] in ("wrote", "merged"):
         typer.echo(
-            f"# Instruction file ({instr['action']}, anvil block from AGENTS.md) "
-            f"→ {instr['path']}",
+            f"# Instruction file ({_display_action(instr['action'])}, "
+            f"anvil block from AGENTS.md) → {instr['path']}",
             err=True,
         )
     if autos:
@@ -1102,5 +1113,10 @@ def install(
         typer.echo(
             f"# Backed up originals to <file>{_BAK_SUFFIX}. "
             f"Undo with: anvil install {harness} --rollback",
+            err=True,
+        )
+    else:
+        typer.echo(
+            "# dry-run — nothing was written. Re-run with --write to apply.",
             err=True,
         )

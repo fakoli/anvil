@@ -622,22 +622,27 @@ class TestStatusRollup:
         res = self._status(tmp_path, [])
         assert res.exit_code == 0, res.output
         out = res.output
-        # default PRD: 2 tasks (1 ready, 0 in_progress, 0 blocked), 1 active claim.
+        # default PRD: 2 tasks (1 ready, 1 claimed), 1 active claim. The claimed
+        # and done buckets are part of the pinned shape — 0.3.0 hid them, so a
+        # mid-loop status showed a claimed task in no bucket.
         assert "PRD default (approved)" in out
         assert (
-            "  Tasks:         2 total (1 ready, 0 in_progress, 0 blocked)\n"
+            "  Tasks:         2 total (1 ready, 1 claimed, 0 in_progress, "
+            "0 needs_review, 0 blocked, 0 done)\n"
             "  Active claims: 1\n"
         ) in out
         # v0.2 PRD: 1 ready task, 0 active claims.
         assert "PRD v0.2 (draft)" in out
         assert (
-            "  Tasks:         1 total (1 ready, 0 in_progress, 0 blocked)\n"
+            "  Tasks:         1 total (1 ready, 0 claimed, 0 in_progress, "
+            "0 needs_review, 0 blocked, 0 done)\n"
             "  Active claims: 0\n"
         ) in out
         # PROJECT TOTAL reflects the sum across PRDs (3 tasks, 2 ready, 1 claim).
         assert "PROJECT TOTAL" in out
         assert (
-            "Tasks:         3 total (2 ready, 0 in_progress, 0 blocked)" in out
+            "Tasks:         3 total (2 ready, 1 claimed, 0 in_progress, "
+            "0 needs_review, 0 blocked, 0 done)" in out
         )
 
     def test_status_rollup_hook_format_unchanged(self, tmp_path: Path) -> None:
@@ -5868,7 +5873,7 @@ class TestDoctorHealthy:
             == get_schema_version()
         )
         cfg_detail = by_check["config"]["detail"]
-        assert cfg_detail["effective_lease_minutes"] == 60.0
+        assert cfg_detail["effective_lease_minutes"] == 240.0
         assert cfg_detail["effective_heartbeat_minutes"] == 5.0
 
     def test_doctor_verifies_replay_integrity(self, tmp_path: Path) -> None:

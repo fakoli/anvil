@@ -12,17 +12,27 @@ has one, so we can put a number on it.
 ## Run it
 
 ```bash
-cd plugins/anvil/benchmarks
-python3 run_benchmark.py                       # all 4 scenarios, 3 trials -> RESULTS.md
-python3 run_benchmark.py --quick               # fast smoke (1 trial, fewer actors)
-python3 run_benchmark.py --scenarios overlapping_files,evidence_gaming
-python3 run_benchmark.py --trials 5 --seed 7   # more trials / different seed
-python3 run_benchmark.py --live                # (phase-2 stub) real subagents
+cd benchmarks
+uv run python run_benchmark.py                       # all 4 scenarios, 3 trials -> RESULTS.md
+uv run python run_benchmark.py --quick               # fast smoke (1 trial, fewer actors)
+uv run python run_benchmark.py --scenarios overlapping_files,evidence_gaming
+uv run python run_benchmark.py --trials 5 --seed 7   # more trials / different seed
+uv run python run_benchmark.py --live                # (phase-2 stub) real subagents
 ```
 
 No third-party dependencies. The first run does a one-time `uv sync` of the
 `anvil` CLI into `bin/.venv`; thereafter it calls that console script directly.
 Results are written to `RESULTS.md` (regenerated each run).
+
+### Committed results status
+
+The committed `RESULTS.md` currently holds **one scenario × one trial**:
+`overlapping_files`, seed 42, generated at anvil v0.0.8. The other three
+scenarios (`dependency_ordering`, `crash_recovery`, `evidence_gaming`) have
+**no committed numbers yet** — the default invocation above runs all
+4 scenarios × 3 trials and regenerates `RESULTS.md` in full. The `--live`
+real-agent mode is a phase-2 stub (it prints a notice and falls back to the
+deterministic simulation), so it cannot produce numbers yet.
 
 ## How it's built — and why you can trust the number
 

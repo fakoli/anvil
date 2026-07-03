@@ -79,7 +79,7 @@ Configuration is resolved from up to four layers, lowest precedence to
 highest:
 
 1. **Built-in defaults** — the dataclass defaults baked into the engine (e.g.
-   a 60-minute lease).
+   a 240-minute lease).
 2. **Global config** — `~/.config/anvil/config.yaml`. User-wide
    defaults that every project on the machine inherits, so settings need not
    be copied into each project. The location honours `$XDG_CONFIG_HOME`
@@ -106,7 +106,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.3.0`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.3.1`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -228,7 +228,7 @@ anvil scan --json | jq .data.delta
 ```
 
 **See also:** [`anvil init`](#init) (`--from-repo` runs scan for you);
-[`anvil drift`](#drift) for intent↔state↔fs divergence on an active
+`anvil drift` for intent↔state↔fs divergence on an active
 project.
 
 ---
@@ -1002,7 +1002,7 @@ anvil mcp-config --uv-run vscode     # explicit uv invocation (no bash)
 anvil mcp-config --json cursor | jq -r .data.config_text
 ```
 
-**See also:** [`AGENTS.md`](../AGENTS.md) for the MCP-tool ⇄ CLI-command table;
+**See also:** [`AGENTS.md`](https://github.com/fakoli/anvil/blob/main/AGENTS.md) for the MCP-tool ⇄ CLI-command table;
 [`docs/how-to/using-anvil-on-any-harness.md`](how-to/using-anvil-on-any-harness.md)
 for the full cross-harness walkthrough.
 

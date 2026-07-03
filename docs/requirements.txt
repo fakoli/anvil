@@ -1,0 +1,4 @@
+# Docs-site build dependencies (Read the Docs + CI + local `mkdocs serve`).
+# Kept separate from bin/pyproject.toml: the docs build never needs the engine.
+mkdocs>=1.6,<2
+mkdocs-material>=9.5,<10
