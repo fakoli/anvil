@@ -79,7 +79,7 @@ Configuration is resolved from up to four layers, lowest precedence to
 highest:
 
 1. **Built-in defaults** — the dataclass defaults baked into the engine (e.g.
-   a 60-minute lease).
+   a 240-minute lease).
 2. **Global config** — `~/.config/anvil/config.yaml`. User-wide
    defaults that every project on the machine inherits, so settings need not
    be copied into each project. The location honours `$XDG_CONFIG_HOME`

@@ -1,9 +1,9 @@
 # Hooks reference
 
-> anvil ships 4 hooks that detect project state, enforce claim
-> discipline, record file changes, and buffer verification-command output as
-> evidence. All hooks are **non-blocking** by design — warnings only, never
-> errors. Hooks are wired via [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) and
+> anvil ships 5 hooks that detect project state, enforce claim
+> discipline, record file changes, renew claim leases, and buffer
+> verification-command output as evidence. All hooks are **non-blocking** by
+> design — warnings only, never errors. Hooks are wired via [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) and
 > shell out to `anvil hook ...` subcommands implemented in
 > [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py).
 
@@ -11,7 +11,7 @@
 
 ## The non-blocking contract
 
-All 4 hooks follow these invariants. They are enforced by code review and by
+All 5 hooks follow these invariants. They are enforced by code review and by
 the hook test suite — any new hook script that violates them will be
 rejected.
 
@@ -58,17 +58,21 @@ the session is never broken because a backing service is unavailable.
 
 ## `hooks.json` mapping
 
-The four entries are declared in [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json):
+The five scripts are declared in [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) — `heartbeat.sh` runs on both `PostToolUse` matchers, so there are six wiring entries:
 
 | Event | Matcher | Script | Timeout |
 |---|---|---|---|
 | `SessionStart` | (all) | [`detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh) | 5s |
 | `PreToolUse` | `Edit\|Write\|NotebookEdit` | [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | 5s |
 | `PostToolUse` | `Edit\|Write\|NotebookEdit` | [`record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh) | 5s |
+| `PostToolUse` | `Edit\|Write\|NotebookEdit` | [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | 5s |
 | `PostToolUse` | `Bash` | [`capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) | 5s |
+| `PostToolUse` | `Bash` | [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | 5s |
 
-Each script receives the Claude Code hook payload as JSON on stdin and
-addresses the project state at `${CLAUDE_PROJECT_DIR:-$PWD}/.anvil/`.
+Each script receives the Claude Code hook payload as JSON on stdin and shells
+out to `anvil hook ...`, which resolves project state exactly as every other
+command does — the HOME workspace by default, or `ANVIL_STATE_LAYOUT=local` /
+`ANVIL_ROOT` when set. The hooks do not assume an in-repo `./.anvil`.
 
 ---
 

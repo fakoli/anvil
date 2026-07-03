@@ -22,7 +22,9 @@ permissions:
   pages: write
   id-token: write
 
-# One deploy at a time; let a queued newer run supersede an older one.
+# Serialize docs deploys. Do NOT cancel an in-progress deployment — let it
+# finish so Pages is never left half-updated; a newer run only supersedes an
+# older *queued* (not-yet-started) one.
 concurrency:
   group: docs-pages
   cancel-in-progress: false

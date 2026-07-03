@@ -94,7 +94,7 @@ actor claimed it in the meantime, the call exits non-zero with
 in the audit trail), or run `anvil next` to pick a different
 ready task.
 
-Default lease is 60 minutes (configurable in `.anvil/config.yaml`); the lease is extended
+Default lease is 240 minutes (configurable in `.anvil/config.yaml`); the lease is extended
 by `anvil renew <claim-id>` or by the MCP `renew_claim` tool. Long-running
 work should heartbeat every few minutes — see
 [`architecture.md` § Concurrency model](architecture.md) for the four

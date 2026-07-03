@@ -20,7 +20,7 @@ graph TD
     StartPRD["start-prd<br/>rough idea → prd.md draft"]
     PRD["prd<br/>parse + review + approve"]
     Plan["plan<br/>features + tasks + scoring"]
-    Claim["claim<br/>acquire 60-min lease + branch"]
+    Claim["claim<br/>acquire lease + branch"]
     Execute["execute<br/>packet → work → submit"]
     Finish["finish<br/>review evidence → apply"]
     StateOps["state-ops<br/>read-only inspection"]
@@ -150,7 +150,8 @@ tasks → scored tasks → reviewed-and-ready tasks.
 
 **Trigger:** `/anvil:claim`
 
-**Purpose:** Acquire an exclusive 60-minute lease on a `ready` task. Picks
+**Purpose:** Acquire an exclusive lease on a `ready` task (240-minute default).
+Picks
 from the queue, checks for file conflicts, claims the task, and creates the
 git branch `agent/<task_id_lower>-<slug>` to commit into.
 

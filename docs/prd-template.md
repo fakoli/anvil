@@ -274,14 +274,14 @@ omit it — the parser assigns IDs in document order when they are absent.
 ```
 
 IDs must be zero-padded to three digits with no suffixes: `R001`, `R002`, ..., `R099`,
-`R100`. `R003a` is not a valid ID — the parser reads it as `R003` (see the hard rule at
-the top of this document).
+`R100`. `R003a` is not a valid ID — the parser refuses it with a `ParseError` before any
+state is written (see the hard rule at the top of this document).
 
 **Parser behavior**: if the section is absent, parse fails. Each item becomes a
 `Requirement` entity with `prd_section = "Requirements"`. If explicit IDs conflict
-(duplicate `RNNN` in the same file, including suffixed IDs that truncate to the same
-`RNNN`), the parse is refused with a duplicate-ID error
-(`UNIQUE constraint failed: requirements.id`).
+(a duplicate `RNNN`, or a suffixed ID like `R003a`), the parser refuses the whole file
+with a `ParseError` before anything is written to state — so a bad ID can never leave a
+half-written, un-replayable workspace behind.
 
 ---
 

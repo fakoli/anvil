@@ -138,7 +138,7 @@ The first file change auto-transitions the task `claimed → in_progress`.
 
 ## Step 5 — Renew the lease before it expires
 
-A claim's lease expires after `default_lease_minutes` (the `ClaimManager` ships with `60` as the in-code default; the project-level override lives in `.anvil/config.yaml`). Renew it before expiry:
+A claim's lease expires after `default_lease_minutes` (the `ClaimManager` ships with `240` as the in-code default; the project-level override lives in `.anvil/config.yaml`). Renew it before expiry:
 
 ```bash
 anvil renew C9F3A210

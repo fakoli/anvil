@@ -393,7 +393,7 @@ mechanisms layered together:
    SQLite layer. Reads use WAL snapshots and do not block writers.
 2. **Claim leases with heartbeats.** A `Claim` row carries
    `lease_expires_at` and `last_heartbeat_at`. The CLI's `renew` command
-   (and the MCP `renew_claim` tool) extends the lease. Default lease is 60
+   (and the MCP `renew_claim` tool) extends the lease. Default lease is 240
    minutes (configurable via `.anvil/config.yaml`); the in-code
    default lives at [`claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py).
 3. **Stale-claim reaping.** Every mutating CLI command and every mutating

@@ -33,7 +33,7 @@ From the fakoli marketplace inside Claude Code:
 /plugin install anvil
 ```
 
-The install registers four hooks, wires the MCP server, and makes the six plugin agents discoverable at next session start. Verify with:
+The install registers five hooks, wires the MCP server, and makes the five plugin agents discoverable at next session start. Verify with:
 
 ```bash
 anvil --version
