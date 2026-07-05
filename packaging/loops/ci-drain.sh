@@ -14,6 +14,15 @@
 # task, and evidence gating means a step cannot fake "done".
 set -eu
 
+# Concurrency identity (#103): give THIS drainer a distinct default actor so two
+# drainers on one machine/user don't collapse to the SAME signing-key
+# fingerprint — which would let a second drainer RENEW the first's lease instead
+# of conflicting, defeating single-winner leasing. $$ is unique per process and
+# every `anvil` call below inherits it, so they all resolve one consistent
+# actor. Override by exporting ANVIL_ACTOR (a pinned name) or ANVIL_SESSION_ID
+# yourself before running.
+export ANVIL_SESSION_ID="${ANVIL_SESSION_ID:-drain-$$}"
+
 # Drain until the queue is empty (exit 3), but PROPAGATE any real error instead
 # of masking it as a clean drain. Using `if` (not a bare `while cmd`) is what
 # lets us tell exit 3 apart from exit 1/2: a bare `while` would stop on BOTH and
