@@ -216,6 +216,11 @@ class RenewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     lease_expires_at: str
+    # B46 part 2: False when the renew was a no-op (no progress since the last
+    # heartbeat), so the lease was NOT extended and ``lease_expires_at`` is the
+    # unchanged, possibly-imminent expiry — the client should not treat it as a
+    # fresh lease.
+    renewed: bool = True
 
 
 class WorkPacketResponse(BaseModel):
@@ -974,8 +979,13 @@ def renew_claim(
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
+        # B46 part 2 — a no-progress renew is a no-op (lease unchanged). Surface
+        # whether the lease actually advanced so an MCP client can tell a real
+        # renewal from a declined one instead of trusting a stale expiry.
+        renewed = updated_claim.lease_expires_at != active_claim.lease_expires_at
         return RenewResponse(
-            lease_expires_at=updated_claim.lease_expires_at.isoformat()
+            lease_expires_at=updated_claim.lease_expires_at.isoformat(),
+            renewed=renewed,
         )
     finally:
         backend.close()
