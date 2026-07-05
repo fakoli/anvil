@@ -34,6 +34,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from anvil.naming import safe_path_component
+
 if TYPE_CHECKING:
     from anvil.clock import Clock
     from anvil.state.backend import Backend
@@ -517,12 +519,18 @@ class ReconciliationEngine:
         if not packets_dir.exists():
             return []
         known_task_ids = {t.id for t in self._backend.list_tasks()}
+        # A packet for a namespaced id (``prd:T001``) is written under its
+        # path-safe name (``prd-T001.md``, #105), so match the file stem against
+        # BOTH the raw ids and their sanitized forms — otherwise every namespaced
+        # packet would be mis-flagged as an orphan with a ``rm`` fix. Raw ids are
+        # still accepted so packets written before the sanitizer are recognised.
+        known_safe_ids = {safe_path_component(tid) for tid in known_task_ids}
         out: list[Discrepancy] = []
         for entry in sorted(packets_dir.iterdir()):
             if not entry.is_file() or entry.suffix != ".md":
                 continue
             task_id = entry.stem
-            if task_id in known_task_ids:
+            if task_id in known_task_ids or task_id in known_safe_ids:
                 continue
             out.append(Discrepancy(
                 kind=DiscrepancyKind.orphan_packet,

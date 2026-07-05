@@ -19,6 +19,7 @@ from anvil.cli._helpers import (
     resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
+from anvil.naming import safe_path_component
 from anvil.state.models import CommandProof, EventDraft
 
 
@@ -108,7 +109,7 @@ def emit_acceptance_proof(
         signing.sign_proof(proof, private_key)
         proofs_dir = state_dir / "proofs"
         proofs_dir.mkdir(parents=True, exist_ok=True)
-        out = proofs_dir / f"{task_id}-{applied_event.id}.json"  # type: ignore[attr-defined]
+        out = proofs_dir / f"{safe_path_component(task_id)}-{applied_event.id}.json"  # type: ignore[attr-defined]
         out.write_text(proof.model_dump_json(indent=2) + "\n", encoding="utf-8")
         return out
     except Exception:  # noqa: BLE001 — emission is best-effort; never block accept
@@ -356,10 +357,10 @@ def packet(
     packets_dir.mkdir(exist_ok=True)
 
     if fmt == "json":
-        out_path = packets_dir / f"{task_id}.json"
+        out_path = packets_dir / f"{safe_path_component(task_id)}.json"
         content = json.dumps(work_packet.json_data, indent=2)
     else:
-        out_path = packets_dir / f"{task_id}.md"
+        out_path = packets_dir / f"{safe_path_component(task_id)}.md"
         content = work_packet.markdown
 
     out_path.write_text(content, encoding="utf-8")

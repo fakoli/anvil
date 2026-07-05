@@ -380,6 +380,27 @@ class TestOrphanPacket:
         finally:
             b.close()
 
+    def test_sanitized_namespaced_packet_not_orphan(
+        self, tmp_path: Path,
+    ) -> None:
+        """#105: a namespaced task's packet is written under its path-safe name
+        (``advise-and-defer-T005.md``), so reconciliation must map the stem back
+        to the raw id ``advise-and-defer:T005`` and NOT flag it for ``rm``."""
+        pdir = self._packet_dir(tmp_path)
+        (pdir / "advise-and-defer-T005.md").write_text("# packet\n")
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_task(
+                b, task_id="advise-and-defer:T005", prd_id="advise-and-defer",
+            )
+            engine = ReconciliationEngine(b, state_dir=tmp_path, clock=_make_clock())
+            report = engine.scan()
+            assert [d for d in report.discrepancies
+                    if d.kind == DiscrepancyKind.orphan_packet] == []
+        finally:
+            b.close()
+
     def test_non_md_files_ignored(self, tmp_path: Path) -> None:
         """README.txt and .DS_Store in packets/ are never orphans."""
         pdir = self._packet_dir(tmp_path)
