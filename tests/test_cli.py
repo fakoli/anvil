@@ -677,6 +677,31 @@ class TestStatusRollup:
             "active-claims:1 ready-tasks:2 blockers:0 prd-status:approved"
         )
 
+    def test_status_hook_format_ignores_anvil_prd_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SessionStart hook status stays project-level even with ANVIL_PRD."""
+        self._setup_two_prds(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        res = self._status(tmp_path, ["--hook-format"])
+        assert res.exit_code == 0, res.output
+        assert res.output.strip() == (
+            "active-claims:1 ready-tasks:2 blockers:0 prd-status:approved"
+        )
+
+    def test_status_hook_format_honors_explicit_prd_flag(
+        self, tmp_path: Path
+    ) -> None:
+        """An explicit hook-format --prd request scopes the compact line."""
+        self._setup_two_prds(tmp_path)
+
+        res = self._status(tmp_path, ["--hook-format", "--prd", "v0.2"])
+        assert res.exit_code == 0, res.output
+        assert res.output.strip() == (
+            "active-claims:0 ready-tasks:1 blockers:0 prd-status:draft"
+        )
+
     def test_status_rollup_task_with_unknown_prd_surfaces_as_orphan(
         self, tmp_path: Path
     ) -> None:
@@ -733,6 +758,49 @@ class TestStatusRollup:
             sum(e["active_claim_count"] for e in data["prds"])
             == data["active_claims"]
         )
+
+    def test_status_prd_json_scopes_totals_to_named_partition(
+        self, tmp_path: Path
+    ) -> None:
+        """`status --prd v0.2 --json` reports only v0.2 tasks and claims."""
+        db = self._setup_two_prds(tmp_path)
+        _insert_active_claim_row(db, claim_id="C900", task_id="T900")
+
+        res = self._status(tmp_path, ["--json", "--prd", "v0.2"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)["data"]
+        assert data["prd_status"] == "draft"
+        assert data["tasks"]["total"] == 1
+        assert data["tasks"]["ready"] == 1
+        assert data["tasks"]["claimed"] == 0
+        assert data["active_claims"] == 1
+        assert [entry["prd_id"] for entry in data["prds"]] == ["v0.2"]
+
+    def test_status_prd_human_scopes_to_named_partition(
+        self, tmp_path: Path
+    ) -> None:
+        """Human `status --prd v0.2` should not render other PRD blocks."""
+        self._setup_two_prds(tmp_path)
+
+        res = self._status(tmp_path, ["--prd", "v0.2"])
+        assert res.exit_code == 0, res.output
+        assert "PRD v0.2 (draft)" in res.output
+        assert "PRD default" not in res.output
+        assert (
+            "Tasks:         1 total (1 ready, 0 claimed, 0 in_progress, "
+            "0 needs_review, 0 blocked, 0 done)"
+        ) in res.output
+
+    def test_status_prd_sentinel_prd_matches_default(self, tmp_path: Path) -> None:
+        """`status --prd prd` scopes to the stored default PRD partition."""
+        self._setup_two_prds(tmp_path)
+
+        res = self._status(tmp_path, ["--json", "--prd", "prd"])
+        assert res.exit_code == 0, res.output
+        data = json.loads(res.output)["data"]
+        assert data["prd_status"] == "approved"
+        assert data["tasks"]["total"] == 2
+        assert [entry["prd_id"] for entry in data["prds"]] == ["default"]
 
     def test_status_rollup_migrated_default_tasks_without_prd_row(
         self, tmp_path: Path
@@ -5697,6 +5765,7 @@ class TestT019PrdScopedCliCommands:
         data = json.loads(result.output)["data"]
         ids = {t["id"] for t in data["tasks"]}
         assert ids == {"v0.2:T900"}, ids
+        assert data["filters"]["prd"] == "v0.2"
 
     def test_list_prd_default_scopes_to_default_partition(
         self, tmp_path: Path
@@ -5713,8 +5782,10 @@ class TestT019PrdScopedCliCommands:
         _seed_two_prd_project(tmp_path)
         result = _invoke_cmd(tmp_path, ["list", "--json"])
         assert result.exit_code == 0, result.output
-        ids = {t["id"] for t in json.loads(result.output)["data"]["tasks"]}
+        data = json.loads(result.output)["data"]
+        ids = {t["id"] for t in data["tasks"]}
         assert ids == {"T001", "v0.2:T900"}, ids
+        assert data["filters"]["prd"] is None
 
     # ---- next ---------------------------------------------------------------
 
@@ -5733,6 +5804,53 @@ class TestT019PrdScopedCliCommands:
         assert result.exit_code == 0, result.output
         task = json.loads(result.output)["data"]["task"]
         assert task is not None and task["id"] == "T001", task
+
+    def test_next_prd_empty_partition_exits_3_without_cross_prd_pick(
+        self, tmp_path: Path
+    ) -> None:
+        """`next --prd v0.2` must not fall through to another PRD's ready task."""
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked' WHERE id = 'v0.2:T900'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = _invoke_cmd(tmp_path, ["next", "--prd", "v0.2"])
+        assert result.exit_code == 3
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "no ready tasks in this prd" in combined.lower()
+        assert "T001" not in combined
+        assert "Next recommended task" not in combined
+
+    def test_next_prd_empty_partition_json_exits_3(
+        self, tmp_path: Path
+    ) -> None:
+        """JSON callers also get exit 3 for an explicitly scoped empty PRD."""
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked' WHERE id = 'v0.2:T900'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = _invoke_cmd(tmp_path, ["next", "--prd", "v0.2", "--json"])
+        assert result.exit_code == 3
+        payload = json.loads(result.output)
+        assert payload["ok"] is True
+        assert payload["data"]["task"] is None
+        assert payload["data"]["prd"] == "v0.2"
+        assert "no ready tasks in this prd" in payload["data"]["message"].lower()
 
     # ---- show ---------------------------------------------------------------
 
@@ -5831,6 +5949,48 @@ class TestT019PrdScopedCliCommands:
         assert result.exit_code == 0, result.output
         ids = {t["id"] for t in json.loads(result.output)["data"]["tasks"]}
         assert ids == {"v0.2:T900"}, ids
+
+    def test_anvil_prd_env_scopes_next(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$ANVIL_PRD scopes `next` exactly like an explicit --prd flag."""
+        _seed_two_prd_project(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        result = _invoke_cmd(tmp_path, ["next", "--json"])
+        assert result.exit_code == 0, result.output
+        task = json.loads(result.output)["data"]["task"]
+        assert task is not None and task["id"] == "v0.2:T900", task
+
+    def test_anvil_prd_env_scopes_status(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$ANVIL_PRD scopes `status` exactly like an explicit --prd flag."""
+        _seed_two_prd_project(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        result = _invoke_cmd(tmp_path, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["tasks"]["total"] == 1
+        assert [entry["prd_id"] for entry in data["prds"]] == ["v0.2"]
+
+    def test_anvil_prd_env_sentinel_prd_scopes_to_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$ANVIL_PRD=prd collapses to the stored default partition."""
+        _seed_two_prd_project(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "prd")
+
+        next_result = _invoke_cmd(tmp_path, ["next", "--json"])
+        assert next_result.exit_code == 0, next_result.output
+        task = json.loads(next_result.output)["data"]["task"]
+        assert task is not None and task["id"] == "T001", task
+
+        status_result = _invoke_cmd(tmp_path, ["status", "--json"])
+        assert status_result.exit_code == 0, status_result.output
+        status_data = json.loads(status_result.output)["data"]
+        assert [entry["prd_id"] for entry in status_data["prds"]] == ["default"]
 
     # ---- default sentinel collapse ('prd' -> 'default') --------------------
 

@@ -613,6 +613,14 @@ def next(  # noqa: A001
         # stays byte-identical to pre-T019. Collapse the default sentinel ('prd')
         # so `--prd prd` narrows to the stored prd_id='default' partition.
         scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd)) if prd else None
+        scoped_ready_tasks = (
+            backend.list_tasks(
+                status="ready", task_type=task_type, prd_id=scoped_prd_id
+            )
+            if scoped_prd_id is not None
+            else []
+        )
+        scoped_empty_message: str | None = None
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)
         # B49 — accept-rate governor: gate the pull seam on review-debt + the
@@ -649,6 +657,15 @@ def next(  # noqa: A001
             and (max_blast is not None or max_review_risk is not None)
         ):
             withheld_reason = "risk_ceiling"
+        if task is None and scoped_prd_id is not None:
+            if not scoped_ready_tasks:
+                scoped_empty_message = f"No ready tasks in this PRD ({scoped_prd_id})."
+                withheld_reason = "no_ready_tasks_in_prd"
+            elif withheld_reason is None:
+                scoped_empty_message = (
+                    f"No claimable tasks in this PRD ({scoped_prd_id})."
+                )
+                withheld_reason = "no_claimable_tasks_in_prd"
     finally:
         backend.close()
 
@@ -659,16 +676,22 @@ def next(  # noqa: A001
         raise typer.Exit(0 if task is not None else 3)
 
     if json_output:
-        emit_success(
-            "next",
-            {
-                "task": dump_model(task) if task is not None else None,
-                "withheld_reason": withheld_reason,
-            },
-        )
+        data = {
+            "task": dump_model(task) if task is not None else None,
+            "withheld_reason": withheld_reason,
+        }
+        if scoped_empty_message is not None:
+            data["prd"] = scoped_prd_id
+            data["message"] = scoped_empty_message
+        emit_success("next", data)
+        if scoped_empty_message is not None:
+            raise typer.Exit(code=3)
         return
 
     if task is None:
+        if scoped_empty_message is not None:
+            typer.echo(scoped_empty_message)
+            raise typer.Exit(code=3)
         if withheld_reason == "review_queue_saturated":
             typer.echo(
                 "No work offered: the human review queue is saturated "

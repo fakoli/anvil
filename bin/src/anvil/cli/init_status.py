@@ -7,16 +7,20 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import click
 import typer
 
 from anvil.cli._helpers import (
     _STATE_DIR_NAME,
+    PRD_OPTION,
     _is_local_layout,
     _is_plugin_root,
     _open_backend,
     _resolve_base_dir,
     _resolve_state_dir,
     _slug,
+    canonical_prd_id,
+    resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
 from anvil.state.rollup import compute_prd_rollup
@@ -351,6 +355,7 @@ def status(
             "(hooks must never fail the session)."
         ),
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -434,10 +439,36 @@ def status(
         # legacy single-PRD summary — the default PRD's status. The per-PRD
         # rollup below (compute_prd_rollup over list_prds()) scopes status to
         # each partition; the flat field stays pinned to the default PRD.
-        prd = backend.get_prd()
-        prds = backend.list_prds()
-        all_tasks = backend.list_tasks()
-        active_claims = backend.list_active_claims()
+        # Hook output is a project-level compatibility surface consumed by
+        # SessionStart hooks; do not let ANVIL_PRD silently change its shape.
+        # Still honor an explicit `status --hook-format --prd X` request.
+        ctx = click.get_current_context(silent=True)
+        prd_source = ctx.get_parameter_source("prd") if ctx is not None else None
+        status_prd = (
+            None
+            if hook_format and prd_source is click.core.ParameterSource.ENVIRONMENT
+            else prd
+        )
+        scoped_prd_id = (
+            canonical_prd_id(resolve_prd_id(backend, status_prd))
+            if status_prd
+            else None
+        )
+        if scoped_prd_id is None:
+            prd_model = backend.get_prd()
+            prds = backend.list_prds()
+            all_tasks = backend.list_tasks()
+            active_claims = backend.list_active_claims()
+        else:
+            prd_model = backend.get_prd(scoped_prd_id)
+            prds = [prd_model] if prd_model is not None else []
+            all_tasks = backend.list_tasks(prd_id=scoped_prd_id)
+            scoped_task_ids = {task.id for task in all_tasks}
+            active_claims = [
+                claim
+                for claim in backend.list_active_claims()
+                if claim.task_id in scoped_task_ids
+            ]
     finally:
         backend.close()
 
@@ -452,7 +483,7 @@ def status(
     blocked_count = sum(1 for t in all_tasks if t.status == "blocked")
     done_count = sum(1 for t in all_tasks if t.status == "done")
 
-    prd_status_str = str(prd.status) if prd is not None else "none"
+    prd_status_str = str(prd_model.status) if prd_model is not None else "none"
     active_claim_count = len(active_claims)
 
     # T020: per-PRD rollup. The flat fields above stay the PROJECT TOTAL; the
