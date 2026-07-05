@@ -689,6 +689,39 @@ class ClaimManager:
         # Critic-3 + Critic-2 both flagged this on PR #41.
         _ = task  # retained in signature for future audit/event payload use
 
+    def _has_progress_since(self, claim: Claim) -> bool:
+        """True if the claim shows forward progress since its last heartbeat.
+
+        B46 part 2 — "progress" is a ``file_changed`` event (recorded by the
+        record-file-change hook) on one of the claim's declared
+        ``expected_files`` with a timestamp AFTER ``last_heartbeat_at``. A
+        busy-but-useless agent — e.g. re-running a failing test — writes no
+        files, so its renews find no progress. ``file_changed`` events are keyed
+        by file path, not task id, which is why this looks them up per expected
+        file rather than by task.
+
+        A claim that declared NO ``expected_files`` cannot be assessed this way,
+        so it is treated as progressing (conservative: never no-op a claim we
+        cannot measure).
+        """
+        if not claim.expected_files:
+            return True
+        since = claim.last_heartbeat_at
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=datetime.UTC)
+        for path in claim.expected_files:
+            for action, ts_iso in self._backend.list_events(
+                target_id=path, target_kind="file", limit=3
+            ):
+                if action != "file_changed":
+                    continue
+                ts = datetime.datetime.fromisoformat(ts_iso)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=datetime.UTC)
+                if ts > since:
+                    return True
+        return False
+
     def renew(self, claim_id: str) -> Claim:
         """Heartbeat a claim — extend the lease and record last_heartbeat_at.
 
@@ -697,6 +730,11 @@ class ClaimManager:
           - Current actor must own the claim.
           - Claim must be active (not stale, released, or force_released).
           - Lease must not already be expired (raise ClaimError — caller should re-claim).
+          - Claim must be under its max age (B46 hard cap; else ClaimError).
+          - There must be forward progress since the last heartbeat (B46 part 2):
+            a renew with no ``file_changed`` on an expected file is a NO-OP that
+            leaves the lease unchanged (no raise), so a wedged-but-heartbeating
+            agent's lease still expires and the stale reaper reclaims the task.
 
         Emits claim.renewed event. Returns the updated Claim as a model
         (the Backend's handler persists the change; we return the locally-updated
@@ -764,6 +802,16 @@ class ClaimManager:
                 "renewal refused. Release and re-claim to continue. This guard "
                 "stops a stuck agent from holding a lease forever."
             )
+
+        # B46 part 2 — progress-gated heartbeat. A renew with no forward progress
+        # (no file_changed on an expected file since the last heartbeat) is a
+        # NO-OP: the lease is NOT extended, so a busy-but-useless agent that keeps
+        # heartbeating still loses the claim when the lease expires and the stale
+        # reaper reclaims it. Must not raise (the PostToolUse heartbeat stays
+        # quiet) and must not advance last_heartbeat_at, so the progress window
+        # accumulates until the next real change — return the claim unchanged.
+        if not self._has_progress_since(claim):
+            return claim
 
         new_expires = now + datetime.timedelta(minutes=self._default_lease)
 

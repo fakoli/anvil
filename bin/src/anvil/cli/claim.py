@@ -449,7 +449,9 @@ def renew(
     """Extend the lease heartbeat on CLAIM_ID.
 
     With ``--json`` emits ``{"ok": true, "command": "renew", "data":
-    {"claim": {...}}}`` carrying the updated Claim (new lease + heartbeat).
+    {"claim": {...}, "renewed": bool}}`` carrying the updated Claim and a
+    ``renewed`` flag — ``false`` when the heartbeat was a no-op (no progress
+    since the last heartbeat, B46 part 2), so the lease was NOT extended.
     A ClaimError yields a ``{"ok": false, ...}`` envelope with exit 1.
     """
 
@@ -477,6 +479,7 @@ def renew(
         manager = ClaimManager(
             backend, clock, actor=resolved_actor, **lease_kwargs
         )
+        before = backend.get_claim(claim_id)
         try:
             updated = manager.renew(claim_id)
         except ClaimError as exc:
@@ -487,13 +490,23 @@ def renew(
     finally:
         backend.close()
 
+    # B46 part 2 — renew() is a no-op (lease unchanged) when the claim shows no
+    # progress since the last heartbeat. Detect that so we report it honestly
+    # instead of announcing a fresh lease that was never granted.
+    extended = before is None or updated.lease_expires_at != before.lease_expires_at
+
     if json_output:
-        emit_success("renew", {"claim": dump_model(updated)})
+        emit_success("renew", {"claim": dump_model(updated), "renewed": extended})
         return
 
-    typer.echo(f"Renewed claim '{claim_id}'.")
-    typer.echo(f"  New lease until: {updated.lease_expires_at.isoformat()}")
-    typer.echo(f"  Last heartbeat:  {updated.last_heartbeat_at.isoformat()}")
+    if extended:
+        typer.echo(f"Renewed claim '{claim_id}'.")
+        typer.echo(f"  New lease until: {updated.lease_expires_at.isoformat()}")
+        typer.echo(f"  Last heartbeat:  {updated.last_heartbeat_at.isoformat()}")
+    else:
+        typer.echo(f"Renew declined for '{claim_id}': no progress since last heartbeat.")
+        typer.echo(f"  Lease still expires at: {updated.lease_expires_at.isoformat()}")
+        typer.echo("  Change a file among the claim's expected files, or release and re-claim.")
 
 
 # ---------------------------------------------------------------------------

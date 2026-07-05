@@ -1095,6 +1095,31 @@ class TestRenewClaim:
         assert "lease_expires_at" in resp
         new_expiry = datetime.fromisoformat(resp["lease_expires_at"])
         assert new_expiry > datetime.now(UTC)
+        # No expected_files declared → progress gate is permissive → real renewal.
+        assert resp["renewed"] is True
+
+    def test_noop_when_no_progress_reports_not_renewed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B46 part 2: a heartbeat with no file change on an expected file is a
+        no-op — the tool returns renewed=False and the (unchanged) lease."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x",
+                          expected_files=["src/foo.py"], minutes_until_expiry=30)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("renew_claim", {
+                    "task_id": "T001",
+                    "actor": "agent-x",
+                    "extend_seconds": 900,
+                }))
+
+        resp = _run(run())
+        assert resp["renewed"] is False
 
     def test_error_when_no_active_claim(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
