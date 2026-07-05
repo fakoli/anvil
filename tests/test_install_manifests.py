@@ -199,9 +199,12 @@ def test_openclaw_readme_exists() -> None:
 
 
 def test_openclaw_plugin_version_synced() -> None:
-    """The native OpenClaw plugin manifest is version-locked to anvil (T001), so
-    `openclaw plugins install/update` picks up new anvil versions like
-    codex/gemini do."""
+    """The native OpenClaw plugin manifest is version-locked to anvil (T001) —
+    kept in lockstep so its declared version never drifts (CI catches it), the
+    same enforced-consistency discipline as the codex/gemini manifests. The field
+    itself is informational (OpenClaw reloads the plugin via `--link` + gateway
+    restart, not the version string), but shipping a stale one — it was `0.0.1` —
+    is still wrong."""
     import anvil
 
     p = _packaging() / "openclaw" / "plugin" / "openclaw.plugin.json"
