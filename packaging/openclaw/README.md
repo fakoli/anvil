@@ -162,6 +162,29 @@ flag**. An explicit ambient env var wins over the config (operator override).
   an out-of-range value is rejected when the plugin loads. All three are
   additive and default-absent — omitting them preserves pre-v0.4.0 behavior.
 
+## Weak-agent guidance (v0.4.0)
+
+For OpenClaw runners weaker than frontier models (Opus / GPT-5.5), the plugin can
+inject a **more explicit, step-by-step, guardrailed** instruction variant into the
+system prompt instead of the concise default nudge:
+
+```bash
+openclaw config set plugins.entries.anvil-finish-gate.config.guidanceLevel verbose --strict-json
+```
+
+- **`standard`** (default) — the one-paragraph "use `anvil next` / `claim` /
+  `submit`, the finish-gate blocks unverified turns" nudge. Capable harnesses need
+  no more.
+- **`verbose`** — a numbered walk-through of the `next → claim → show → work →
+  verify → submit` loop plus hard rules (claim before editing; never end a turn
+  with unsubmitted evidence; one task at a time), shipped as **`AGENTS-weak.md`**
+  alongside the plugin and injected via `before_prompt_build` (cacheable — it
+  rides the provider's prompt cache, so it costs tokens once per session, not per
+  turn). Also settable via `$ANVIL_GUIDANCE_LEVEL` (env wins over config).
+
+Only the injected guidance changes — the gates (finish-gate, claim-guard) behave
+identically at both levels.
+
 ## Notes
 
 - **Anvil writes no files for OpenClaw.** No `.mcp.json`, no `AGENTS.md` splice,
