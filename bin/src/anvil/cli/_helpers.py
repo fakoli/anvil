@@ -490,6 +490,11 @@ def prd_source_path(state_dir: Path, prd_id: str) -> Path:
     return state_dir / _PRDS_DIR_NAME / f"{prd_id}.md"
 
 
+def display_path(path: Path) -> str:
+    """Render paths portably in user-facing CLI/MCP messages."""
+    return path.as_posix()
+
+
 def _open_backend(state_dir: Path) -> SqliteBackend:
     """Instantiate a SqliteBackend, call initialize(), and return it.
 

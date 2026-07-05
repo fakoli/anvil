@@ -1302,6 +1302,23 @@ class TestPrdParseNamed:
         assert "prds/nope.md" in combined
         assert "not found" in combined.lower()
 
+    def test_unreadable_named_prd_source_uses_forward_slash_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Read failures should not leak a raw Windows path from OSError text."""
+        _do_init(tmp_path)
+        blocked = tmp_path / ".anvil" / "prds" / "blocked.md"
+        blocked.mkdir(parents=True)
+
+        result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "blocked"])
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "prds/blocked.md" in combined
+        assert "prds\\blocked.md" not in combined
+        assert "cannot read" in combined.lower()
+
     @pytest.mark.parametrize("sentinel", ["default", "prd"])
     def test_reserved_sentinel_prd_flag_creates_visible_default(
         self, tmp_path: Path, sentinel: str
@@ -2647,6 +2664,37 @@ class TestPlanLlmBackstop:
         assert "T001" in list_result.output
         assert "T002" in list_result.output
 
+    def test_named_prd_happy_path_reports_forward_slash_append_path(
+        self,
+        tmp_path: Path,
+        monkeypatch,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """The LLM-generated summary should render named PRD paths portably."""
+        _do_init(tmp_path)
+        _write_named_prd(tmp_path, "v0.2", _PRD_WITHOUT_TASKS)
+        _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+
+        from anvil.planning.llm import LLMResponse
+
+        class _Provider:
+            def generate(self, **kwargs):  # type: ignore[no-untyped-def]
+                return LLMResponse(
+                    text=_CANNED_LLM_TASKS,
+                    input_tokens=100,
+                    cached_input_tokens=0,
+                    output_tokens=50,
+                    model="test-model",
+                    finish_reason="end_turn",
+                )
+
+        self._install_recorded_resolver(monkeypatch, _Provider())
+
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2"])
+        assert result.exit_code == 0, result.output
+        assert "appended to" in result.output
+        assert "prds/v0.2.md" in result.output
+        assert "prds\\v0.2.md" not in result.output
+
     def test_no_llm_opt_out_exits_1_with_clear_message(
         self,
         tmp_path: Path,
@@ -2685,6 +2733,34 @@ class TestPlanLlmBackstop:
             encoding="utf-8"
         )
         assert "## Tasks" not in prd_text
+
+    def test_named_prd_no_llm_opt_out_uses_forward_slash_path(
+        self,
+        tmp_path: Path,
+        monkeypatch,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """The --no-llm no-work error should render named PRD paths portably."""
+        _do_init(tmp_path)
+        _write_named_prd(tmp_path, "v0.2", _PRD_WITHOUT_TASKS)
+        _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+
+        from anvil.planning import llm_planner
+
+        def _explode(config=None, *, model_override=None) -> None:  # type: ignore[no-untyped-def]
+            raise AssertionError(
+                "resolve_planner_provider should not be called with --no-llm"
+            )
+
+        monkeypatch.setattr(llm_planner, "resolve_planner_provider", _explode)
+
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2", "--no-llm"])
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "--no-llm" in combined
+        assert "prds/v0.2.md" in combined
+        assert "prds\\v0.2.md" not in combined
 
     def test_provider_unavailable_exits_1_with_full_message(
         self,
@@ -2762,6 +2838,50 @@ class TestPlanLlmBackstop:
         assert "LLM call failed" in combined
         assert "claude" in combined
         assert not isinstance(result.exception, LLMProviderError)
+
+    def test_named_prd_backstop_write_error_uses_forward_slash_path(
+        self,
+        tmp_path: Path,
+        monkeypatch,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """Generated-task write failures should not leak raw Windows paths."""
+        _do_init(tmp_path)
+        _write_named_prd(tmp_path, "v0.2", _PRD_WITHOUT_TASKS)
+        _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+
+        from anvil.planning.llm import LLMResponse
+
+        class _Provider:
+            def generate(self, **kwargs):  # type: ignore[no-untyped-def]
+                return LLMResponse(
+                    text=_CANNED_LLM_TASKS,
+                    input_tokens=100,
+                    cached_input_tokens=0,
+                    output_tokens=50,
+                    model="test-model",
+                    finish_reason="end_turn",
+                )
+
+        self._install_recorded_resolver(monkeypatch, _Provider())
+
+        prd_path = tmp_path / ".anvil" / "prds" / "v0.2.md"
+        original_write_text = Path.write_text
+
+        def _fail_named_prd_write(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if self == prd_path:
+                raise OSError(13, "simulated write failure", str(self))
+            return original_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", _fail_named_prd_write)
+
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2"])
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "cannot write generated tasks" in combined.lower()
+        assert "prds/v0.2.md" in combined
+        assert "prds\\v0.2.md" not in combined
 
     def test_idempotent_second_run_does_not_re_append(
         self,
@@ -5358,6 +5478,38 @@ class TestPlanPrdScoping:
         # Default tasks are in their own partition, unchanged.
         assert rows["T001"][0] == "default"
         assert rows["T002"][0] == "default"
+
+    def test_plan_missing_named_prd_source_uses_forward_slash_path(
+        self, tmp_path: Path
+    ) -> None:
+        """`plan --prd <id>` should name .anvil/prds/<id>.md portably."""
+        _do_init(tmp_path)
+
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "nope", "--no-llm"])
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "prds/nope.md" in combined
+        assert "prds\\nope.md" not in combined
+        assert "not found" in combined.lower()
+
+    def test_plan_unreadable_named_prd_source_uses_forward_slash_path(
+        self, tmp_path: Path
+    ) -> None:
+        """`plan --prd <id>` read failures should not leak raw Windows paths."""
+        _do_init(tmp_path)
+        blocked = tmp_path / ".anvil" / "prds" / "blocked.md"
+        blocked.mkdir(parents=True)
+
+        result = _invoke_cmd(tmp_path, ["plan", "--prd", "blocked", "--no-llm"])
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "prds/blocked.md" in combined
+        assert "prds\\blocked.md" not in combined
+        assert "cannot read" in combined.lower()
 
     def test_plan_named_prd_does_not_prune_default_tasks(
         self, tmp_path: Path
