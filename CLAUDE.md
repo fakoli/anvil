@@ -16,8 +16,11 @@ can be inferred from the code, it does not belong here.
   `bin/src/anvil/__init__.py` — **and** the per-harness packaging manifests that
   `tests/test_install_manifests.py` pins to `anvil.__version__`:
   `packaging/codex/.codex-plugin/plugin.json`,
-  `packaging/codex/.agents/plugins/marketplace.json`, and
-  `packaging/gemini/gemini-extension.json`. Add a `CHANGELOG.md` entry. The root
+  `packaging/codex/.agents/plugins/marketplace.json`,
+  `packaging/gemini/gemini-extension.json`, and the OpenClaw native plugin
+  manifests `packaging/openclaw/plugin/openclaw.plugin.json` +
+  `packaging/openclaw/plugin/package.json` (version-locked as of v0.4.0). Add a
+  `CHANGELOG.md` entry. The root
   `marketplace.json` omits `version`, so it inherits from `plugin.json` — nothing
   to bump there. Also refresh the **user-facing current-version docs** (not
   enforced by a test, so easy to miss): the `README.md` version badge + "Beta —

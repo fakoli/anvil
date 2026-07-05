@@ -187,7 +187,7 @@ def test_gemini_version_synced() -> None:
     assert data["version"] == anvil.__version__
 
 
-# --- openclaw: README only (manifestless) --------------------------------
+# --- openclaw: README + version-locked native plugin (VERIFIED) ----------
 
 
 def test_openclaw_readme_exists() -> None:
@@ -196,6 +196,31 @@ def test_openclaw_readme_exists() -> None:
     text = p.read_text(encoding="utf-8")
     # Documents that hooks are detected-but-not-executed.
     assert "hooks" in text.lower()
+
+
+def test_openclaw_plugin_version_synced() -> None:
+    """The native OpenClaw plugin manifest is version-locked to anvil (T001), so
+    `openclaw plugins install/update` picks up new anvil versions like
+    codex/gemini do."""
+    import anvil
+
+    p = _packaging() / "openclaw" / "plugin" / "openclaw.plugin.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["version"] == anvil.__version__, (
+        f"openclaw.plugin.json version {data['version']!r} != "
+        f"anvil.__version__ {anvil.__version__!r} — keep them synced."
+    )
+
+
+def test_openclaw_package_version_synced() -> None:
+    import anvil
+
+    p = _packaging() / "openclaw" / "plugin" / "package.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["version"] == anvil.__version__, (
+        f"openclaw package.json version {data['version']!r} != "
+        f"anvil.__version__ {anvil.__version__!r} — keep them synced."
+    )
 
 
 # --- STUBs (NOT verified) ------------------------------------------------
