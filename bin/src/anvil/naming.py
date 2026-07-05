@@ -6,11 +6,14 @@ separator, so ``packets/advise-and-defer:T005.md`` silently writes the content
 into an ADS attached to a 0-byte file named ``advise-and-defer`` — unreadable by
 its logical name (#105). The same ``:`` is illegal in a git refname (#108.1).
 
-This module is the ONE place that maps a task id to a safe single path
-component, imported *downward* by every subsystem that turns an id into a file
-or branch name — ``cli`` (packet/proof files), ``git_ops`` (branch names), and
-``sync`` (reconciliation read-back). Keeping it a leaf module (a sibling of
-``clock`` and ``signing``) avoids an upward dependency on ``cli._helpers``.
+This is the ONE place that maps a task id to a safe single path component. It is
+a leaf module (a sibling of ``clock`` and ``signing``) so every subsystem that
+turns an id into a file or branch name can import it *downward* with no cycle —
+which is why it does not live in ``cli._helpers`` (``sync`` and ``git_ops`` must
+not depend upward on ``cli``). Adopted so far at the packet/proof filename sites
+(``cli.packet_apply``) and the reconciliation read-back (``sync``); the git
+branch and worktree name sites (``git_ops.branch`` / ``git_ops.worktree``) move
+onto it in the follow-up that closes #108.1.
 """
 
 from __future__ import annotations
