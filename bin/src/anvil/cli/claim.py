@@ -540,6 +540,7 @@ def next(  # noqa: A001
     max_blast: int | None = typer.Option(  # noqa: B008
         None,
         "--max-blast",
+        envvar="ANVIL_MAX_BLAST",
         help="[EXPERIMENTAL] Risk ceiling for a low-risk (e.g. local) runner: "
         "only recommend tasks whose blast_radius is human/LLM-CONFIRMED and <= N. "
         "Unconfirmed/unscored tasks are frontier-only (ineligible) even below "
@@ -552,6 +553,7 @@ def next(  # noqa: A001
     max_review_risk: int | None = typer.Option(  # noqa: B008
         None,
         "--max-review-risk",
+        envvar="ANVIL_MAX_REVIEW_RISK",
         help="[EXPERIMENTAL] Risk ceiling: only recommend tasks whose review_risk "
         "is confirmed and <= M (same safe-by-construction semantics as "
         "--max-blast; likewise inert until a confirmation source ships).",

@@ -130,6 +130,38 @@ openclaw config set plugins.entries.anvil-finish-gate.config.guardExec true --st
   list `before_agent_finalize` under `typedHooks` once allowConversationAccess is
   set.
 
+## Risk ceiling & PRD scope (v0.4.0)
+
+Beyond the claim-guard, the plugin exposes operator knobs that shape **which
+tasks a runner is offered** — set them the same way:
+
+```bash
+# only offer tasks whose blast-radius / review-risk is CONFIRMED and <= N (1..5):
+openclaw config set plugins.entries.anvil-finish-gate.config.maxBlast 2 --strict-json
+openclaw config set plugins.entries.anvil-finish-gate.config.maxReviewRisk 2 --strict-json
+# scope discovery to one PRD partition:
+openclaw config set plugins.entries.anvil-finish-gate.config.activePrd v0.4.0 --strict-json
+```
+
+The plugin exports these to the `anvil` the agent runs —
+`maxBlast`→`$ANVIL_MAX_BLAST`, `maxReviewRisk`→`$ANVIL_MAX_REVIEW_RISK`,
+`activePrd`→`$ANVIL_PRD` — so `anvil next` honors them with **no per-command
+flag**. An explicit ambient env var wins over the config (operator override).
+
+- **`maxBlast` / `maxReviewRisk` are safe-by-construction.** The ceiling offers a
+  task only if its risk dimension is **CONFIRMED** *and* within the ceiling —
+  unconfirmed / unscored / over-ceiling tasks are withheld, so a low-capability
+  runner is never handed high-risk work. Risk scores are confirmed when a task
+  passes the `anvil review tasks` gate; a ceiling set against a project whose
+  tasks have not been review-confirmed yields an **empty `anvil next` queue**
+  (fails safe, never open).
+- **`activePrd` takes effect immediately** — it narrows `anvil next` / `anvil
+  list` to that PRD's tasks (coordination still spans all PRDs). Omit on a
+  single-PRD project.
+- **Range-validated on load:** `maxBlast` / `maxReviewRisk` must be integers 1–5;
+  an out-of-range value is rejected when the plugin loads. All three are
+  additive and default-absent — omitting them preserves pre-v0.4.0 behavior.
+
 ## Notes
 
 - **Anvil writes no files for OpenClaw.** No `.mcp.json`, no `AGENTS.md` splice,

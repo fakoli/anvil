@@ -20,6 +20,22 @@
         "type": "boolean",
         "default": false,
         "description": "Also flag exec/bash tools run without a claim (default off). WARN-ONLY even in block mode — there is no command parser, and hard-blocking arbitrary commands would also block `anvil claim` (a deadlock)."
+      },
+      "maxBlast": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5,
+        "description": "Risk ceiling for this runner: only offer tasks whose blast_radius is CONFIRMED and <= this (1=isolated .. 5=foundational). Exported to `anvil next` as $ANVIL_MAX_BLAST. Omit for no blast ceiling. Safe-by-construction — unconfirmed/unscored/over-ceiling tasks are withheld, so a low-capability runner is never handed high-blast work."
+      },
+      "maxReviewRisk": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5,
+        "description": "Risk ceiling: only offer tasks whose review_risk is CONFIRMED and <= this (same safe-by-construction semantics as maxBlast). Exported as $ANVIL_MAX_REVIEW_RISK. Omit for no review-risk ceiling."
+      },
+      "activePrd": {
+        "type": "string",
+        "description": "Scope task discovery to a single PRD partition (multi-PRD). Exported as $ANVIL_PRD so `anvil next` / `anvil list` only surface this PRD's tasks. Omit to span all PRDs."
       }
     }
   }
