@@ -52,8 +52,17 @@
 - Every command supports `--help`. Run `anvil <command> --help` to see
   the live Typer-generated output.
 - Every command that needs a project directory accepts a hidden `--cwd PATH`
-  override. Without it, the command resolves `.anvil/` from the current
-  working directory.
+  override — it points at your **project** directory, from which anvil derives
+  the state location. Without it, the command resolves the project from the
+  current working directory.
+- **There is no `--workspace` flag.** In the default HOME-workspace layout,
+  state lives at `~/.anvil/workspaces/<key>/.anvil/` keyed by the project — you
+  select it *by project* (run inside the project, or pass `--cwd <project-dir>`),
+  never by pointing a flag at the workspace path directly. `anvil status` echoes
+  the resolved `.anvil` directory on its `Path:` line, so `anvil status --cwd
+  <project>` is how you inspect a specific project's state. (Passing a workspace
+  path where a project is expected — e.g. `anvil status --workspace …` — fails
+  with `No such option '--workspace'`.)
 - Mutating commands write to `state.db` (SQLite) **and** append a JSON line to
   `events.jsonl` in the same transaction. The event log is the source of
   truth; `state.db` is a derived projection that can be rebuilt by replaying
