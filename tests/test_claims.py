@@ -1314,6 +1314,52 @@ class TestRiskAxisNext:
         finally:
             b.close()
 
+    def test_within_risk_ceiling_shared_helper_contract(self) -> None:
+        """The ONE shared helper (#56) — called by BOTH next_claimable and the
+        MCP get_next_task, so the two seams cannot diverge. A None ceiling
+        imposes no limit; a dimension that is unscored, over-ceiling, or
+        unconfirmed is excluded; confirmed-within passes. Both axes behave
+        identically."""
+        from types import SimpleNamespace
+
+        from anvil.claims.manager import within_risk_ceiling
+
+        def _task(**kw: object) -> SimpleNamespace:
+            base = {
+                "blast_radius": None,
+                "blast_radius_confirmed": False,
+                "review_risk": None,
+                "review_risk_confirmed": False,
+            }
+            base.update(kw)
+            return SimpleNamespace(scores=SimpleNamespace(**base))
+
+        # No ceiling on either axis -> admitted even when fully unscored.
+        assert within_risk_ceiling(_task(), max_blast=None, max_review_risk=None)
+        # blast axis: confirmed-within admitted; over / unconfirmed / unscored not.
+        assert within_risk_ceiling(
+            _task(blast_radius=2, blast_radius_confirmed=True),
+            max_blast=3, max_review_risk=None,
+        )
+        assert not within_risk_ceiling(
+            _task(blast_radius=5, blast_radius_confirmed=True),
+            max_blast=3, max_review_risk=None,
+        )
+        assert not within_risk_ceiling(
+            _task(blast_radius=2, blast_radius_confirmed=False),
+            max_blast=3, max_review_risk=None,
+        )
+        assert not within_risk_ceiling(_task(), max_blast=3, max_review_risk=None)
+        # review_risk axis behaves identically.
+        assert within_risk_ceiling(
+            _task(review_risk=2, review_risk_confirmed=True),
+            max_blast=None, max_review_risk=3,
+        )
+        assert not within_risk_ceiling(
+            _task(review_risk=4, review_risk_confirmed=True),
+            max_blast=None, max_review_risk=3,
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestStaleDetection
