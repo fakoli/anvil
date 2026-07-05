@@ -9,8 +9,9 @@ and check the result of each before moving to the next. Do not improvise the ord
    - It prints ONE task id (e.g. `T003`) and its title. If it says there are no
      ready tasks, stop — there is nothing for you to do.
 2. **Claim that task BEFORE you touch any file.** Run: `anvil claim <task-id>`
-   - You now own the task. If you edit a file without claiming first, the guard
-     warns you and your work may not count.
+   - You now own the task. If you edit a file without claiming first, your work is
+     NOT tracked to the task — and you will get NO on-screen warning about it, so
+     always claim first out of habit.
 3. **Read the task.** Run: `anvil show <task-id>`
    - Read its **Acceptance criteria** (what "done" means) and its **Verification**
      commands (how you prove it). You will need both.
@@ -19,9 +20,16 @@ and check the result of each before moving to the next. Do not improvise the ord
 5. **Prove it works.** Run every command listed under **Verification** (usually
    the tests). They must all pass. If one fails, your change is wrong — fix it and
    run again. Do not continue with a failing command.
-6. **Submit your evidence.** Run: `anvil submit <task-id>`
-   - This records that you finished and captures your verification output. If you
-     skip this, anvil will BLOCK you from ending your turn.
+6. **Submit your evidence.** You MUST pass the verification command(s) you ran and
+   every file you changed — both flags are required:
+
+       anvil submit <task-id> --commands "<verification command>" --files-changed <file>
+
+   - Example: `anvil submit T003 --commands "pytest -q" --files-changed src/foo.py`
+   - Use the SAME command(s) from the task's **Verification**. Repeat `--commands`
+     once per command and `--files-changed` once per file.
+   - Bare `anvil submit <task-id>` (no flags) fails — it will not submit anything.
+   - If you skip this step, anvil will BLOCK you from ending your turn.
 7. **Done.** Go back to step 1 for the next task.
 
 ## Rules — do not break these
@@ -42,4 +50,4 @@ and check the result of each before moving to the next. Do not improvise the ord
 | take a task | `anvil claim <task-id>` |
 | read a task's requirements | `anvil show <task-id>` |
 | see my current state | `anvil status` |
-| finish a task | `anvil submit <task-id>` |
+| finish a task | `anvil submit <task-id> --commands "<cmd>" --files-changed <file>` |
