@@ -65,6 +65,12 @@ Schema:        6
 
 The `Path:` line tells you where state actually lives for this project (the HOME
 workspace by default, an in-repo `.anvil/` only under `ANVIL_STATE_LAYOUT=local`).
+To inspect a **different** project's state, pass `--cwd <project-dir>` — the flag
+points at the *project* directory anvil derives the workspace from. **There is no
+`--workspace` flag:** never point a flag at the `~/.anvil/workspaces/<key>/`
+path directly — that option does not exist (passing one prints `No such option
+'--workspace'`). Select state by project via `--cwd`, and read the resolved
+location off the `Path:` line.
 `PRD:` is one of `none`, `draft`, `reviewed`, or `approved`. The `Tasks:` line gives
 the total plus the ready / in_progress / blocked counts.
 
