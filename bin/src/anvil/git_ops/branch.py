@@ -199,6 +199,7 @@ def use_named_branch(
     *,
     cwd: Path,
     base: str | None = None,
+    checkout: bool = True,
 ) -> BranchResult:
     """Attach a claim to a caller-supplied / existing branch *name* (T027).
 
@@ -216,6 +217,12 @@ def use_named_branch(
       BranchResult(name, True, None).
     - On git error → BranchResult(None, False, str(error)).
 
+    When ``checkout=False`` (the ``claim --worktree`` flow, #104), the main
+    worktree's HEAD is NOT moved: an existing branch is referenced in place, and
+    a new one is created with ``git branch`` (not ``checkout -b``) — so the
+    subsequent ``git worktree add`` can check it out in the NEW worktree without
+    the "already used by worktree" conflict.
+
     The branch name is used verbatim (no slugging), so the caller controls the
     exact ref. Git itself rejects invalid ref names, which surfaces as a
     created=False warning.
@@ -225,6 +232,8 @@ def use_named_branch(
         cwd:  Directory in which to run git commands.
         base: Optional base ref to branch off when creating a NEW branch.
               Ignored when the branch already exists.
+        checkout: When True (default) move HEAD onto the branch; when False
+              leave HEAD in place (create the ref without checking it out).
 
     Returns:
         BranchResult describing what happened (or why it was skipped).
@@ -237,10 +246,16 @@ def use_named_branch(
 
     already_exists = _branch_exists(name, cwd)
 
+    if already_exists and not checkout:
+        # --worktree flow: the branch already exists; do NOT move main's HEAD.
+        # `git worktree add` will check it out in the new worktree.
+        return BranchResult(name, True, "existing branch")
+
     if already_exists:
         cmd = ["git", "checkout", name]
     else:
-        cmd = ["git", "checkout", "-b", name]
+        verb = ["checkout", "-b"] if checkout else ["branch"]
+        cmd = ["git", *verb, name]
         if base is not None:
             cmd.append(base)
 

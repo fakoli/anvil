@@ -18,6 +18,7 @@ from anvil.git_ops.branch import (
     create_branch_for_task,
     is_git_available,
     is_git_repo,
+    use_named_branch,
 )
 from anvil.git_ops.worktree import (
     WorktreeResult,
@@ -229,6 +230,44 @@ class TestCreateBranchForTask:
             cwd=str(git_repo), capture_output=True, text=True, check=True,
         ).stdout
         assert result.branch in listed  # but the branch was created
+
+    def test_use_named_branch_no_checkout_new_branch(self, git_repo: Path) -> None:
+        """#104: use_named_branch(checkout=False) creates a NEW named branch
+        without moving main's HEAD, so --branch + --worktree works."""
+        before = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(git_repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        result = use_named_branch("my-feature", cwd=git_repo, checkout=False)
+        assert result.created is True
+        assert result.branch == "my-feature"
+        after = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(git_repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert after == before
+        listed = subprocess.run(
+            ["git", "branch", "--list", "my-feature"],
+            cwd=str(git_repo), capture_output=True, text=True, check=True,
+        ).stdout
+        assert "my-feature" in listed
+
+    def test_use_named_branch_no_checkout_existing_branch(self, git_repo: Path) -> None:
+        """#104: for an EXISTING branch, use_named_branch(checkout=False) leaves
+        HEAD in place (so git worktree add can check it out elsewhere)."""
+        use_named_branch("existing-x", cwd=git_repo, checkout=False)  # create it
+        before = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(git_repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        result = use_named_branch("existing-x", cwd=git_repo, checkout=False)
+        assert result.created is True
+        assert result.branch == "existing-x"
+        after = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(git_repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert after == before
 
     def test_custom_branch_prefix_feature(self, git_repo: Path) -> None:
         """v1.15.0: host projects that use the `feature/` convention can
@@ -496,3 +535,47 @@ class TestWorkspaceLayoutGitOps:
             cwd=str(project), capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert after == before, "main checkout must stay on its original branch"
+
+    def test_claim_named_branch_worktree_leaves_main_and_creates_worktree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#104: --branch + --worktree combined creates the worktree and leaves
+        main's HEAD in place. (The T002 review found this combo still checked the
+        named branch out in main and failed 'already used by worktree'.)"""
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        project = _init_git_repo(tmp_path / "proj")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+
+        before = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(project), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        runner = CliRunner()
+        assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
+
+        result = runner.invoke(
+            app, ["claim", "T001", "--branch", "feat-x", "--worktree", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.stdout)["data"]
+        assert data["worktree"], data
+        assert data["warnings"] == [], data
+        assert Path(data["worktree"]).exists()
+
+        after = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(project), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert after == before, "main must not move onto the named branch"
