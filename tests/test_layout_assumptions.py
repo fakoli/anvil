@@ -50,6 +50,12 @@ def _posix_bash() -> str | None:
         Path(r"C:\Program Files\Git\bin\bash.exe"),
         Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
     ]
+    # A bash on PATH is fine too (covers scoop/choco/mingw64 layouts the two-hop
+    # above can miss) UNLESS it's the System32 WSL stub, which can't open a
+    # Windows-filesystem script path.
+    path_bash = shutil.which("bash")
+    if path_bash and "system32" not in path_bash.lower():
+        candidates.append(Path(path_bash))
     return next((str(c) for c in candidates if c.exists()), None)
 
 
