@@ -863,6 +863,41 @@ class TestGetNextTask:
         assert unscoped["id"] == "T001"  # high-priority default-PRD task wins
         assert scoped["id"] == "T900"    # candidate pool narrowed to v0.2
 
+    def test_ceiling_withholds_over_ceiling_and_unconfirmed_tasks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#56: get_next_task honors the risk-axis ceiling via the SAME
+        within_risk_ceiling helper as ClaimManager.next_claimable, so a ceilinged
+        runner is only ever offered confirmed-within-ceiling work. Mirrors
+        test_claims.py::TestRiskAxisNext to prove the two seams agree."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        # A: confirmed blast 2 -> eligible under a <=3 ceiling.
+        _add_task(state_dir, task_id="A", status="ready", priority="high",
+                  scores={"blast_radius": 2, "blast_radius_confirmed": True})
+        # B: blast 2 but UNCONFIRMED -> frontier-only under a ceiling.
+        _add_task(state_dir, task_id="B", status="ready", priority="high",
+                  scores={"blast_radius": 2, "blast_radius_confirmed": False})
+        # C: confirmed blast 5 -> over the ceiling; highest suitability so it
+        # wins the UNRESTRICTED pick, proving the ceiling changes the outcome.
+        _add_task(state_dir, task_id="C", status="ready", priority="high",
+                  scores={"blast_radius": 5, "blast_radius_confirmed": True,
+                          "agent_suitability": 5})
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[Any, Any]:
+            async with Client(mcp) as c:
+                unrestricted = _data(await c.call_tool("get_next_task", {}))
+                ceilinged = _data(
+                    await c.call_tool("get_next_task", {"max_blast": 3})
+                )
+                return unrestricted, ceilinged
+
+        unrestricted, ceilinged = _run(run())
+        assert unrestricted["id"] == "C"  # over-ceiling task wins with no ceiling
+        assert ceilinged is not None
+        assert ceilinged["id"] == "A"  # ceiling withholds C (over) and B (unconfirmed)
+
     def test_prd_id_scoped_pick_skips_cross_prd_active_claim_collision(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

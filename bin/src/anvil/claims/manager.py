@@ -46,6 +46,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def within_risk_ceiling(
+    task: Task, *, max_blast: int | None, max_review_risk: int | None
+) -> bool:
+    """True if ``task`` is claimable under the given risk-axis ceilings (B45/#56).
+
+    A ceilinged caller gets a task only if each ceilinged dimension is CONFIRMED
+    and within the ceiling; unscored / unconfirmed / over-ceiling tasks are
+    frontier-only. A ``None`` ceiling on a dimension imposes no limit there. This
+    is the ONE shared implementation, called by both
+    :meth:`ClaimManager.next_claimable` and the MCP ``get_next_task``, so the two
+    seams cannot diverge — the #56 root cause was two independent copies.
+    """
+    if max_blast is not None:
+        blast = task.scores.blast_radius
+        if blast is None or blast > max_blast or not task.scores.blast_radius_confirmed:
+            return False
+    if max_review_risk is not None:
+        risk = task.scores.review_risk
+        if (
+            risk is None
+            or risk > max_review_risk
+            or not task.scores.review_risk_confirmed
+        ):
+            return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Priority ordering for next_claimable() — higher number = higher priority.
 # ---------------------------------------------------------------------------
@@ -242,25 +270,13 @@ class ClaimManager:
             if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
                 continue
 
-            # B45 — risk-axis ceilings, safe-by-construction. A ceilinged caller
-            # gets a task only if the dimension is CONFIRMED and within the
-            # ceiling; unscored / unconfirmed / over-ceiling are frontier-only.
-            if max_blast is not None:
-                blast = task.scores.blast_radius
-                if (
-                    blast is None
-                    or blast > max_blast
-                    or not task.scores.blast_radius_confirmed
-                ):
-                    continue
-            if max_review_risk is not None:
-                risk = task.scores.review_risk
-                if (
-                    risk is None
-                    or risk > max_review_risk
-                    or not task.scores.review_risk_confirmed
-                ):
-                    continue
+            # B45/#56 — risk-axis ceilings, safe-by-construction, via the ONE
+            # shared helper so the CLI seam and the MCP get_next_task can't
+            # diverge (the #56 root cause was two independent copies).
+            if not within_risk_ceiling(
+                task, max_blast=max_blast, max_review_risk=max_review_risk
+            ):
+                continue
 
             # B49 — escalate a chronically-rejected task past a runner whose
             # accept-rate doesn't meet the (raised) bar, so it goes to a proven

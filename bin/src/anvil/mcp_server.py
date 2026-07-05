@@ -739,13 +739,23 @@ def get_task(task_id: str) -> dict[str, Any]:
 
 @mcp.tool
 def get_next_task(
-    actor: str | None = None, prd_id: str | None = None
+    actor: str | None = None,
+    prd_id: str | None = None,
+    max_blast: int | None = None,
+    max_review_risk: int | None = None,
 ) -> dict[str, Any] | None:
     """Return the single highest-priority ready task that has no overlapping
     active claim, or null if none is claimable.
 
     Ordering: critical > high > medium > low; tiebreak agent_suitability desc,
     then id asc.
+
+    ``max_blast`` / ``max_review_risk`` (B45/#56) are optional risk-axis ceilings:
+    when set, a task is only offered if that dimension is CONFIRMED and within
+    the ceiling — so a weak/local runner can declare a ceiling and never be
+    handed high-risk work. This uses the SAME
+    :func:`anvil.claims.manager.within_risk_ceiling` helper as the CLI
+    ``ClaimManager.next_claimable``, so the two seams cannot diverge.
 
     ``prd_id`` (T019) scopes the CANDIDATE pool to one PRD partition while the
     exclusion sets (active claims, done-deps, active conflict groups) still span
@@ -764,6 +774,7 @@ def get_next_task(
         # None when neither names one -> all PRDs, byte-identical to pre-T019).
         # Collapse the default sentinel ('prd') so prd_id='prd' matches tasks
         # stored with prd_id='default' rather than narrowing to an empty pool.
+        from anvil.claims.manager import within_risk_ceiling
         from anvil.cli._helpers import canonical_prd_id
 
         scoped_prd_id = (
@@ -806,6 +817,12 @@ def get_next_task(
             if any(dep_id not in done_task_ids for dep_id in task.dependencies):
                 continue
             if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
+                continue
+            # B45/#56 — risk-axis eligibility ceiling, via the SAME shared helper
+            # as ClaimManager.next_claimable so the two seams can't diverge.
+            if not within_risk_ceiling(
+                task, max_blast=max_blast, max_review_risk=max_review_risk
+            ):
                 continue
             candidates.append(task)
 
