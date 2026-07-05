@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -172,6 +173,26 @@ const ANVIL_GUIDANCE =
   "evidence (`anvil submit <task-id>`) — anvil's finish-gate will otherwise block " +
   "finalization.";
 
+// Verbose weak-agent guidance (opt-in via guidanceLevel:"verbose") — a more
+// explicit, step-by-step, guardrailed variant for OpenClaw agents weaker than
+// frontier models. Loaded ONCE from the shipped AGENTS-weak.md so that doc is the
+// single source of truth; falls back to the concise ANVIL_GUIDANCE if the file
+// can't be read (never break plugin load over a packaging surprise).
+let ANVIL_GUIDANCE_VERBOSE = ANVIL_GUIDANCE;
+try {
+  const weak = readFileSync(new URL("./AGENTS-weak.md", import.meta.url), "utf8").trim();
+  if (weak) {
+    ANVIL_GUIDANCE_VERBOSE = "[anvil] This project is tracked by anvil.\n\n" + weak;
+  }
+} catch {
+  // Keep the concise fallback.
+}
+
+// Injection verbosity: "standard" (concise) or "verbose" (weak-agent). Set from
+// the plugin config / $ANVIL_GUIDANCE_LEVEL at registration; defaults to standard
+// so capable harnesses are unaffected.
+let GUIDANCE_LEVEL: "standard" | "verbose" = "standard";
+
 // Memoize the per-workspace decision so before_prompt_build (which fires every
 // turn and is awaited) costs at most ONE `anvil status` probe per session — not a
 // shell-out on every prompt build.
@@ -187,7 +208,15 @@ async function anvilGuidanceFor(workspaceDir: string): Promise<string> {
   const probe = await runAnvil(["status", "--json", "--cwd", workspaceDir], workspaceDir, {
     ignoreOutput: true,
   });
-  const guidance = probe.code === 0 ? ANVIL_GUIDANCE : "";
+  // Non-anvil → "" (also the claim-guard's "not tracked" sentinel). A tracked
+  // project gets the concise or verbose variant per GUIDANCE_LEVEL — both are
+  // non-empty, so the guard's tracked/untracked contract is preserved.
+  const guidance =
+    probe.code === 0
+      ? GUIDANCE_LEVEL === "verbose"
+        ? ANVIL_GUIDANCE_VERBOSE
+        : ANVIL_GUIDANCE
+      : "";
   guidanceCache.set(workspaceDir, guidance);
   return guidance;
 }
@@ -288,6 +317,13 @@ export default definePluginEntry({
     exportIfUnset("ANVIL_MAX_BLAST", cfg.maxBlast);
     exportIfUnset("ANVIL_MAX_REVIEW_RISK", cfg.maxReviewRisk);
     exportIfUnset("ANVIL_PRD", cfg.activePrd);
+
+    // Weak-agent guidance verbosity (T002): env wins over config, default
+    // "standard" so capable harnesses keep the concise guidance.
+    GUIDANCE_LEVEL =
+      (process.env.ANVIL_GUIDANCE_LEVEL ?? cfg.guidanceLevel) === "verbose"
+        ? "verbose"
+        : "standard";
 
     // after_tool_call: auto-capture verification-command output as evidence. Pure
     // observer (fire-and-forget); only `exec` tools running a verification command.
