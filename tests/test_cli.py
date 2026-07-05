@@ -2999,6 +2999,42 @@ class TestReviewTasks:
         )
         assert post["data"]["task"] is not None
 
+    def test_rescore_after_review_preserves_risk_confirmation(
+        self, tmp_path: Path
+    ) -> None:
+        """T009 hardening (review finding): an ordinary `anvil score TASK_ID`
+        after `review tasks` must NOT silently clear the confirmed flags. The
+        scorer's payload omits them, and `_write_task_scored` now MERGES (per its
+        contract), preserving them — otherwise a confirmed within-ceiling task
+        would fall out of a ceilinged runner's queue with no path back, since
+        `review tasks` never revisits a ready task."""
+        from anvil.cli._helpers import _open_backend
+
+        self._setup_for_review(tmp_path)
+        _invoke_cmd(tmp_path, ["review", "tasks"])
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            ready = [t for t in backend.list_tasks() if t.status.value == "ready"]
+            assert ready, "no ready tasks after review"
+            tid = ready[0].id
+            assert ready[0].scores.blast_radius_confirmed is True
+        finally:
+            backend.close()
+
+        # Explicitly re-score that already-ready, already-confirmed task.
+        rescore = _invoke_cmd(tmp_path, ["score", tid])
+        assert rescore.exit_code == 0, rescore.output
+
+        # Confirmation SURVIVES the re-score (fresh backend read).
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            t = next(x for x in backend.list_tasks() if x.id == tid)
+            assert t.scores.blast_radius_confirmed is True, "re-score cleared blast confirmation"
+            assert t.scores.review_risk_confirmed is True, "re-score cleared review-risk confirmation"
+        finally:
+            backend.close()
+
     def test_review_tasks_blocks_incomplete(self, tmp_path: Path) -> None:
         """Task without acceptance_criteria stays blocked; surface reason."""
         _do_init(tmp_path)

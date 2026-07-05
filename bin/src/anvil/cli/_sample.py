@@ -448,34 +448,12 @@ def seed_pipeline_from_prd(
                 },
             )
         )
-        # Mirror the review-tasks gate (T009): a seeded ready task carries
-        # CONFIRMED risk scores, so the B45 ceiling is live on the sample project
-        # too — a ceilinged runner gets confirmed within-ceiling work rather than
-        # an empty queue.
-        scores = task.scores
-        if (
-            scores is not None
-            and scores.blast_radius is not None
-            and scores.review_risk is not None
-        ):
-            score_dict = scores.model_dump()
-            explanation = score_dict.pop("explanation", None)
-            score_dict["blast_radius_confirmed"] = True
-            score_dict["review_risk_confirmed"] = True
-            backend.append(
-                EventDraft(
-                    timestamp=now,
-                    actor=actor,
-                    action="task.scored",
-                    target_kind="task",
-                    target_id=task.id,
-                    payload_json={
-                        "task_id": task.id,
-                        "scores": score_dict,
-                        "explanation": explanation,
-                    },
-                )
-            )
+        # Mirror the review-tasks gate (T009) via the shared helper so the two
+        # promotion paths cannot drift: a seeded ready task carries CONFIRMED
+        # risk scores, so the B45 ceiling is live on the sample project too.
+        from anvil.cli.plan import confirm_task_risk_scores
+
+        confirm_task_risk_scores(backend, task, now, actor)
         promoted_ready.append(task.id)
 
     return {
