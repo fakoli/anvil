@@ -6,6 +6,63 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-05
+
+Bug-fix and hardening release resolving six open issues surfaced by real
+multi-agent runs, especially on Windows: task-ids that corrupted filesystem
+paths and git refs, an over-literal evidence gate, and gaps in the claim/lease
+coordination primitive. Dogfooded end-to-end through anvil's own
+PRD → plan → execute loop.
+
+### Fixed
+
+- **Namespaced task ids no longer corrupt files or git refs (#105, #108).** A
+  task id like `advise-and-defer:T005` was interpolated verbatim into packet /
+  acceptance-proof filenames (the `:` opens an NTFS alternate data stream on
+  Windows, so the file was unreadable by its logical name), branch names (an
+  illegal refname), and worktree directories. A shared
+  `anvil.naming.safe_path_component` now sanitizes the id at every path/ref
+  boundary; bare ids like `T001` are unchanged. Sync reconciliation matches the
+  sanitized names too, so it no longer mis-flags them as orphans.
+- **`anvil claim --worktree` actually creates the worktree (#104).** It created
+  the branch by checking it out in the MAIN repo, so `git worktree add` then
+  failed "already used by worktree" — the flag silently did nothing. Claim now
+  creates the branch without moving the main checkout, so the new worktree gets
+  it and main stays on its original branch; fixed for both the auto-generated
+  and `--branch` paths.
+- **The evidence gate accepts placeholder proofs (#108).** A generated
+  required-evidence line like ``captured in `docs/findings/<date>-foo.md` `` was
+  matched by exact string, so concrete evidence (`2026-07-04-foo.md`) never
+  satisfied it. `<...>` placeholders are now matched as single-token wildcards;
+  a requirement that is entirely a placeholder still needs a literal anchor (no
+  vacuous acceptance).
+- **A heartbeating agent that makes no progress loses its claim (#55).**
+  `renew()` extended the lease on every heartbeat with no proof of forward
+  progress, so a wedged-but-busy agent held its task for the whole
+  max-claim-age window. A renew with no `file_changed` on an expected file since
+  the last heartbeat is now a no-op, so the lease expires and the stale reaper
+  reclaims it. The explicit `renew` CLI and MCP tool report `renewed: false` for
+  the no-op instead of announcing a fresh lease.
+- **Concurrent agent loops no longer share one identity (#103).** Two loops on
+  the same machine/user derived the same default actor, so a second `claim`
+  renewed the first's lease instead of conflicting — lease mutual-exclusion was
+  a no-op between siblings. The derived default actor now carries a per-loop
+  session discriminator (`$ANVIL_SESSION_ID`, falling back to
+  `$CLAUDE_CODE_SESSION_ID`); explicit `--actor` / `$ANVIL_ACTOR` are unchanged.
+
+### Documented
+
+- **`--cwd` vs workspace selection (#108).** Clarified that state is selected by
+  project via `--cwd` (there is no `--workspace` flag) in the CLI reference and
+  the state-ops skill.
+
+### Internal
+
+- Regression tests pin the #104 branch-creation and #106 cp1252-arrow fixes
+  (both shipped in 0.3.1); fixed a Windows-only test-isolation bug — the
+  workspace-layout test set `$HOME`, but `Path.home()` reads `$USERPROFILE` on
+  Windows.
+
 ## [0.3.1] - 2026-07-02
 
 Onboarding truth + silent-failure fixes, driven by six real-session
