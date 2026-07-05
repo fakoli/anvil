@@ -250,8 +250,8 @@ A fast local model (measured 200+ tok/s on an RTX 5090) lacks the frontier world
 
 ### Prerequisites before unattended autonomy (red-team, in shipped code)
 
-- **Progress-gated heartbeat:** max-claim-age shipped (B46) — `renew()` refuses expired leases and enforces a hard max-claim-age cutoff (default 4x `default_lease_minutes`, `claims/manager.py`). Progress-gated heartbeat remains open.
-- **One `ANVIL_ACTOR` resolver:** shipped (B47, `cli/_helpers.py`). Resolution order is explicit > `$ANVIL_ACTOR` > `$ANVIL_GATE_ACTOR` > `$USER` > per-runner signing-key fingerprint > `"agent"`, used by claim, hooks/heartbeat, gate-check, claim-guard, and apply.
+- **Progress-gated heartbeat:** shipped (B46) — `renew()` refuses expired leases, enforces a hard max-claim-age cutoff (default 4x `default_lease_minutes`), AND is a no-op when there is no forward progress (no `file_changed` on an expected file since the last heartbeat, B46 part 2, #55), so a busy-but-useless heartbeating agent still loses its lease to the stale reaper (`claims/manager.py`).
+- **One `ANVIL_ACTOR` resolver:** shipped (B47, `cli/_helpers.py`). Resolution order is explicit > `$ANVIL_ACTOR` > `$ANVIL_GATE_ACTOR` > ((`$USER` | per-runner signing-key fingerprint | `"agent"`) + a per-loop session discriminator from `$ANVIL_SESSION_ID` / `$CLAUDE_CODE_SESSION_ID`, #103/B47), used by claim, hooks/heartbeat, gate-check, claim-guard, and apply.
 - **`strict_evidence` on by default + independent re-execution:** the gate is advisory by default. The proof artifact itself shipped in v0.1.0: `CommandProof.exit_code` exists, and the signed, portable `AcceptanceProof` is **bound to project/task/claim/actor/event-range** and verified via `anvil proof verify`. What remains open is strict-by-default and independent re-execution of commands. Frame this honestly: verification is a *contested* wedge, not a moat anvil holds. Portable proof formats (AGEF, Proof of Insight) and enforced evidence-gates already exist separately, and platforms are absorbing verification; the unoccupied position is the *fusion* of portable signed proof with task/claim/lease/pull, local-first. Learn from AGEF / Proof of Insight; treat it as a bet to execute, not a won position.
 
 ### Trade-offs
@@ -341,7 +341,7 @@ The "Multi-backend abstraction beyond SQLite" note above asks for a forcing func
 
 The 2026-06-20 review resolved the open questions by *removing* most of them from the near-term build:
 
-- **Actor identity, resolved (B47).** No longer a design question: one unified resolver ships in `cli/_helpers.py` — explicit > `$ANVIL_ACTOR` > `$ANVIL_GATE_ACTOR` > `$USER` > per-runner signing-key fingerprint > `"agent"` — used by claim, hooks/heartbeat, gate-check, claim-guard, and apply (see "Why risk-axis eligibility now" § Prerequisites).
+- **Actor identity, resolved (B47).** No longer a design question: one unified resolver ships in `cli/_helpers.py` — explicit > `$ANVIL_ACTOR` > `$ANVIL_GATE_ACTOR` > ((`$USER` | per-runner signing-key fingerprint | `"agent"`) + a per-loop session discriminator from `$ANVIL_SESSION_ID` / `$CLAUDE_CODE_SESSION_ID`, #103/B47) — used by claim, hooks/heartbeat, gate-check, claim-guard, and apply (see "Why risk-axis eligibility now" § Prerequisites).
 - **Type vocabulary, deferred (cut from MVP).** `TaskType` is a 4-value advisory enum; the real work-kind taxonomy is an unbuilt prerequisite, so the `type` axis is out of the MVP entirely.
 - **Tier semantics, deferred (cut from MVP).** No `tier` field exists and "minimum-sufficient model" collides with the never-name-a-model invariant; if `tier` ever returns it is a pure function of model-neutral dimensions with the runner owning the `tier→model` map.
 - **Capacity-pools, deferred (measure first).** anvil does not model pools yet. The two-loop bake-off measures throttle frequency per flat-rate pool and whether naive spillover to the local box suffices before any pool concept is built.
