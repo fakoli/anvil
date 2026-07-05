@@ -214,14 +214,22 @@ def _evidence_text_matches(required_lower: str, corpus_lower: str) -> bool:
     against the concrete evidence (``2026-07-04-foo.md``) would never match
     (#108.2). With no placeholder this is the plain substring test as before, so
     existing exact-match evidence is unaffected.
+
+    A placeholder only means something when literal text ANCHORS it. If stripping
+    the placeholders leaves no non-whitespace literal — e.g. the requirement is
+    entirely ``<justification>`` — a wildcard would match ANY non-empty evidence
+    (vacuous acceptance), so we fall back to the exact substring test, which such
+    a requirement won't spuriously satisfy; it stays unmet for a human to judge.
+    Each placeholder matches a single value token (``\\S+``), not arbitrary text,
+    so it can't swallow unrelated words.
     """
     if not _EVIDENCE_PLACEHOLDER_RE.search(required_lower):
         return required_lower in corpus_lower
-    # Escape the literal segments and rejoin with a non-empty lazy wildcard where
-    # each placeholder was — a placeholder that resolved to nothing is almost
-    # certainly a mistake, so require at least one character.
     segments = _EVIDENCE_PLACEHOLDER_RE.split(required_lower)
-    pattern = ".+?".join(re.escape(seg) for seg in segments)
+    if not any(seg.strip() for seg in segments):
+        # No literal anchor — refuse to wildcard-match (would accept anything).
+        return required_lower in corpus_lower
+    pattern = r"\S+".join(re.escape(seg) for seg in segments)
     return re.search(pattern, corpus_lower) is not None
 
 

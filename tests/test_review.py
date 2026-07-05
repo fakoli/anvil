@@ -135,6 +135,25 @@ class TestPlaceholderEvidence:
         evidence = _make_evidence(known_limitations="wrote 42 rows to users_v2 ok")
         assert evidence_complete(task, evidence)[0] is True
 
+    def test_whole_placeholder_requirement_is_not_vacuously_satisfied(self) -> None:
+        """A requirement that is ENTIRELY a placeholder has no literal anchor, so
+        it must NOT be satisfied by arbitrary evidence (that would be vacuous —
+        the wildcard would match any non-empty output)."""
+        task = _make_task(required_evidence=["<insert justification>"])
+        evidence = _make_evidence(output_excerpt="some unrelated but non-empty output")
+        passed, missing = evidence_complete(task, evidence)
+        assert passed is False
+        assert "<insert justification>" in missing
+
+    def test_placeholder_value_is_a_single_token_not_a_span(self) -> None:
+        """A placeholder matches one non-whitespace token, so it cannot swallow
+        across words to fake a structural match that isn't there."""
+        task = _make_task(required_evidence=["migrated <table> table"])
+        # No single token sits between 'migrated ' and ' table' here.
+        evidence = _make_evidence(output_excerpt="migrated the whole schema table")
+        passed, _ = evidence_complete(task, evidence)
+        assert passed is False
+
     def test_placeholder_matched_in_known_limitations(self) -> None:
         task = _make_task(required_evidence=[self._REQ])
         evidence = _make_evidence(
