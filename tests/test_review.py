@@ -94,6 +94,59 @@ def _make_evidence(
 # ===========================================================================
 
 
+class TestPlaceholderEvidence:
+    """#108.2 — a required-evidence string carrying an ``<...>`` placeholder is
+    matched as a wildcard against the concrete evidence, not literally, so a
+    generated ``<date>``-style requirement is satisfiable."""
+
+    _REQ = "evidence captured in `docs/findings/<date>-openclaw-keyless-failover.md`"
+
+    def test_placeholder_matches_concrete_value(self) -> None:
+        task = _make_task(required_evidence=[self._REQ])
+        evidence = _make_evidence(
+            output_excerpt=(
+                "gateway ok; evidence captured in "
+                "`docs/findings/2026-07-04-openclaw-keyless-failover.md`. done"
+            ),
+        )
+        passed, missing = evidence_complete(task, evidence)
+        assert passed is True, missing
+        assert missing == []
+
+    def test_placeholder_unsatisfied_when_surrounding_text_absent(self) -> None:
+        task = _make_task(required_evidence=[self._REQ])
+        evidence = _make_evidence(output_excerpt="totally unrelated output")
+        passed, missing = evidence_complete(task, evidence)
+        assert passed is False
+        assert self._REQ in missing
+
+    def test_no_placeholder_keeps_exact_substring_semantics(self) -> None:
+        req = "captured in docs/findings/report.md"
+        task = _make_task(required_evidence=[req])
+        hit = _make_evidence(output_excerpt="see: captured in docs/findings/report.md here")
+        assert evidence_complete(task, hit)[0] is True
+        # A different filename must NOT be wildcard-matched (no placeholder).
+        miss = _make_evidence(output_excerpt="captured in docs/findings/other.md")
+        passed, missing = evidence_complete(task, miss)
+        assert passed is False and req in missing
+
+    def test_multiple_placeholders_each_wildcard(self) -> None:
+        task = _make_task(required_evidence=["wrote <count> rows to <table>"])
+        evidence = _make_evidence(known_limitations="wrote 42 rows to users_v2 ok")
+        assert evidence_complete(task, evidence)[0] is True
+
+    def test_placeholder_matched_in_known_limitations(self) -> None:
+        task = _make_task(required_evidence=[self._REQ])
+        evidence = _make_evidence(
+            output_excerpt=None,
+            known_limitations=(
+                "evidence captured in "
+                "`docs/findings/2026-07-04-openclaw-keyless-failover.md`"
+            ),
+        )
+        assert evidence_complete(task, evidence)[0] is True
+
+
 class TestEvidenceComplete:
     def test_no_required_evidence_passes(self) -> None:
         """task.verification.required_evidence == [] → (True, [])."""

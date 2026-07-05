@@ -199,6 +199,32 @@ def deferred_findings_for_files(
     return out
 
 
+# Angle-bracket placeholder in a required-evidence string, e.g. ``<date>`` in a
+# generated ``captured in `docs/findings/<date>-foo.md` `` line — matched as a
+# wildcard against the concrete evidence (#108.2) rather than literally.
+_EVIDENCE_PLACEHOLDER_RE = re.compile(r"<[^<>]+>")
+
+
+def _evidence_text_matches(required_lower: str, corpus_lower: str) -> bool:
+    """Case-insensitive substring test of a required-evidence string against a
+    corpus, treating ``<...>`` placeholders as wildcards.
+
+    A generated packet can mint a required-evidence line before a value is known
+    (``captured in `docs/findings/<date>-foo.md` ``), so a literal substring test
+    against the concrete evidence (``2026-07-04-foo.md``) would never match
+    (#108.2). With no placeholder this is the plain substring test as before, so
+    existing exact-match evidence is unaffected.
+    """
+    if not _EVIDENCE_PLACEHOLDER_RE.search(required_lower):
+        return required_lower in corpus_lower
+    # Escape the literal segments and rejoin with a non-empty lazy wildcard where
+    # each placeholder was — a placeholder that resolved to nothing is almost
+    # certainly a mistake, so require at least one character.
+    segments = _EVIDENCE_PLACEHOLDER_RE.split(required_lower)
+    pattern = ".+?".join(re.escape(seg) for seg in segments)
+    return re.search(pattern, corpus_lower) is not None
+
+
 def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
     """Validate that Evidence satisfies the Task's declared requirements.
 
@@ -264,13 +290,16 @@ def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
             satisfied = bool(evidence.files_changed)
 
         else:
-            # Fallback: check output_excerpt or known_limitations contain the item.
+            # Fallback: check output_excerpt or known_limitations contain the
+            # item, treating any <...> placeholders as wildcards (#108.2).
             corpus_lower = []
             if evidence.output_excerpt:
                 corpus_lower.append(evidence.output_excerpt.lower())
             if evidence.known_limitations:
                 corpus_lower.append(evidence.known_limitations.lower())
-            satisfied = any(item_lower in text for text in corpus_lower)
+            satisfied = any(
+                _evidence_text_matches(item_lower, text) for text in corpus_lower
+            )
 
         if not satisfied:
             missing.append(item)
