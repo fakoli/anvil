@@ -1320,6 +1320,107 @@ class TestRiskAxisNext:
 # ---------------------------------------------------------------------------
 
 
+class TestProgressGatedRenew:
+    """B46 part 2 — renew is a no-op without forward progress (a ``file_changed``
+    on an expected file since the last heartbeat), so a busy-but-useless agent
+    that keeps heartbeating still loses its claim to the stale reaper."""
+
+    def _setup(
+        self,
+        tmp_path: Path,
+        clock: FrozenClock,
+        *,
+        files: list[str],
+        lease: int = 60,
+    ) -> tuple[SqliteBackend, str]:
+        b = _make_backend(tmp_path, clock)
+        _setup_project(b)
+        _setup_prd(b)
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        _insert_feature_raw(conn)
+        _insert_task_raw(conn, task_id="T001", status="ready")
+        conn.close()
+        m = _make_manager(b, actor="agent-alpha", clock=clock, lease_minutes=lease)
+        return b, m.claim("T001", expected_files=files).claim.id
+
+    def _record_file_change(
+        self, b: SqliteBackend, clock: FrozenClock, *, path: str,
+        actor: str = "agent-alpha",
+    ) -> None:
+        b.append(EventDraft(
+            timestamp=clock.now(),
+            actor=actor,
+            action="file_changed",
+            target_kind="file",
+            target_id=path,
+            payload_json={
+                "file": path, "tool": "Write", "actor": actor,
+                "changed_at": clock.now().isoformat(),
+            },
+        ))
+
+    def test_renew_with_progress_extends_lease(self, tmp_path: Path) -> None:
+        clock = _make_clock(_T0)
+        b, claim_id = self._setup(tmp_path, clock, files=["src/foo.py"], lease=60)
+        try:
+            clock._current = _T0 + timedelta(minutes=30)  # type: ignore[attr-defined]
+            self._record_file_change(b, clock, path="src/foo.py")
+            m = _make_manager(b, actor="agent-alpha", clock=clock, lease_minutes=60)
+            renewed = m.renew(claim_id)
+            assert renewed.lease_expires_at == _T0 + timedelta(minutes=90)
+        finally:
+            b.close()
+
+    def test_renew_without_progress_is_noop(self, tmp_path: Path) -> None:
+        clock = _make_clock(_T0)
+        b, claim_id = self._setup(tmp_path, clock, files=["src/foo.py"], lease=60)
+        try:
+            before = b.get_claim(claim_id)
+            assert before is not None
+            clock._current = _T0 + timedelta(minutes=30)  # type: ignore[attr-defined]
+            m = _make_manager(b, actor="agent-alpha", clock=clock, lease_minutes=60)
+            renewed = m.renew(claim_id)  # no file changed — must NOT raise
+            # Lease and heartbeat are untouched, so the reaper can still take it.
+            assert renewed.lease_expires_at == before.lease_expires_at
+            assert renewed.last_heartbeat_at == before.last_heartbeat_at
+            actions = [a for a, _ in b.list_events(
+                target_id=claim_id, target_kind="claim", limit=20)]
+            assert "claim.renewed" not in actions
+        finally:
+            b.close()
+
+    def test_progress_starved_claim_is_reaped(self, tmp_path: Path) -> None:
+        clock = _make_clock(_T0)
+        b, claim_id = self._setup(tmp_path, clock, files=["src/foo.py"], lease=60)
+        try:
+            # Heartbeat at T+30 with no progress -> no-op, lease stays at T0+60.
+            clock._current = _T0 + timedelta(minutes=30)  # type: ignore[attr-defined]
+            _make_manager(
+                b, actor="agent-alpha", clock=clock, lease_minutes=60
+            ).renew(claim_id)
+            # Past the un-extended lease, the reaper reclaims it.
+            clock._current = _T0 + timedelta(minutes=61)  # type: ignore[attr-defined]
+            reaped = detect_and_release_stale(b, clock)
+            assert claim_id in reaped
+            claim = b.get_claim(claim_id)
+            assert claim is not None and claim.status == ClaimStatus.stale
+        finally:
+            b.close()
+
+    def test_renew_without_expected_files_still_extends(self, tmp_path: Path) -> None:
+        """A claim that declared no files can't be progress-assessed, so renew
+        stays permissive — never no-op a claim we cannot measure."""
+        clock = _make_clock(_T0)
+        b, claim_id = self._setup(tmp_path, clock, files=[], lease=60)
+        try:
+            clock._current = _T0 + timedelta(minutes=30)  # type: ignore[attr-defined]
+            m = _make_manager(b, actor="agent-alpha", clock=clock, lease_minutes=60)
+            renewed = m.renew(claim_id)
+            assert renewed.lease_expires_at == _T0 + timedelta(minutes=90)
+        finally:
+            b.close()
+
+
 class TestStaleDetection:
     def _setup_with_expired_claim(
         self,
