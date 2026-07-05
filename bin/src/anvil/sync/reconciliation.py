@@ -693,8 +693,12 @@ class ReconciliationEngine:
                     payload={
                         "task_id": task.id,
                         "expected_file": rel,
-                        "resolved_path": str(candidate),
-                        "searched_paths": [str(path) for path in candidates],
+                        # as_posix() keeps these diagnostic paths deterministic
+                        # across platforms — str(WindowsPath) renders backslashes,
+                        # which broke forward-slash assertions and silently
+                        # weakened the "/bin/src/ not in ..." guards on Windows.
+                        "resolved_path": candidate.as_posix(),
+                        "searched_paths": [path.as_posix() for path in candidates],
                         "status": str(task.status),
                     },
                 ))

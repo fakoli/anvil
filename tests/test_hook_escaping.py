@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -38,6 +39,41 @@ from datetime import UTC, datetime
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=UTC)
 
 
+def _posix_bash() -> str | None:
+    """Resolve a POSIX bash (Git Bash on Windows), never the System32 WSL stub.
+
+    A bare-name subprocess resolves ``bash`` via ``CreateProcess`` on Windows,
+    which searches ``System32`` before ``PATH`` and finds the WSL launcher —
+    which cannot run a hook referenced by a Windows-filesystem path. Prefer Git
+    Bash (derived from ``git``'s location, then the standard install dirs);
+    return None when only the WSL stub exists so the caller can skip.
+    """
+    if os.name != "nt":
+        return shutil.which("bash")
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git:  # ...\Git\cmd\git.exe -> ...\Git\{bin,usr\bin}\bash.exe
+        root = Path(git).parent.parent
+        candidates += [root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"]
+    candidates += [
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+    ]
+    # A bash on PATH is fine too (covers scoop/choco/mingw64 layouts the two-hop
+    # above can miss) UNLESS it's the System32 WSL stub, which can't open a
+    # Windows-filesystem script path.
+    path_bash = shutil.which("bash")
+    if path_bash and "system32" not in path_bash.lower():
+        candidates.append(Path(path_bash))
+    return next((str(c) for c in candidates if c.exists()), None)
+
+
+_BASH = _posix_bash()
+pytestmark = pytest.mark.skipif(
+    _BASH is None, reason="no POSIX bash (Git Bash) available for hook tests"
+)
+
+
 def _run_hook(hook_path: Path, payload: dict, *, anvil_dir: Path) -> subprocess.CompletedProcess:
     """Run a hook script with the given JSON payload, CWD set to the tmp project root."""
     env = os.environ.copy()
@@ -45,7 +81,7 @@ def _run_hook(hook_path: Path, payload: dict, *, anvil_dir: Path) -> subprocess.
     # direct-append fallback path.
     env.pop("CLAUDE_PLUGIN_ROOT", None)
     result = subprocess.run(
-        ["bash", str(hook_path)],
+        [_BASH, str(hook_path)],
         input=json.dumps(payload).encode(),
         cwd=str(anvil_dir),
         env=env,

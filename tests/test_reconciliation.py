@@ -982,11 +982,14 @@ class TestMissingExpectedFile:
             assert d.payload["expected_file"] == rel
             # ... and the resolved path keeps the dotfile's leading dot and is
             # NOT pointed at a sibling like ``env`` / ``github``.
-            resolved = Path(d.payload["resolved_path"])
+            # resolved_path is normalized to forward slashes (as_posix), so
+            # compare the string directly — re-wrapping in Path() would render
+            # backslashes on Windows and re-break these separator-sensitive checks.
+            resolved = d.payload["resolved_path"]
             expected_leaf = rel.removeprefix("./")
-            assert str(resolved).endswith(expected_leaf), resolved
-            assert "/env" not in str(resolved)
-            assert "/github/" not in str(resolved)
+            assert resolved.endswith(expected_leaf), resolved
+            assert "/env" not in resolved
+            assert "/github/" not in resolved
         finally:
             b.close()
 

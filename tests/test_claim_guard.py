@@ -248,7 +248,8 @@ def test_cwd_flag_is_forwarded_to_resolver(tmp_path, monkeypatch) -> None:
     r = runner.invoke(app, ["claim-guard", "--json", "--cwd", "/proj/x", "--actor", "agent"],
                       catch_exceptions=False)
     assert r.exit_code == 0
-    assert str(seen["cwd"]) == "/proj/x"
+    # Compare separator-agnostically: str(WindowsPath) renders backslashes.
+    assert Path(seen["cwd"]).as_posix() == "/proj/x"
 
 
 def test_empty_expected_files_does_not_warn(tmp_path, monkeypatch) -> None:

@@ -6,6 +6,21 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows test suite passes natively — the failure half of #118.** Three
+  clusters of Windows-only test failures (green on Linux CI, so previously
+  invisible) are fixed: (1) reconciliation's `missing_expected_file` diagnostic
+  paths now render forward slashes via `Path.as_posix()` instead of OS-native
+  backslashes — a real (if low-impact) production fix that also un-masks two
+  `"/bin/src/" not in …` guard assertions that silently passed on Windows;
+  (2) the hook tests (`test_hook_escaping`, `test_layout_assumptions`) resolve
+  Git Bash explicitly instead of the System32 WSL launcher that a bare-name
+  `subprocess` picks up on Windows (via `CreateProcess` search order), which
+  couldn't run a hook referenced by a Windows-filesystem path; (3) the `--cwd`
+  forwarding tests compare paths separator-agnostically. The ~10× suite slowness
+  on Windows (git-subprocess spawn cost) remains tracked in #118.
+
 ## [0.3.2] - 2026-07-05
 
 Bug-fix and hardening release resolving six open issues surfaced by real
