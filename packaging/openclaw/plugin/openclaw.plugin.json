@@ -35,7 +35,7 @@
       },
       "activePrd": {
         "type": "string",
-        "description": "Scope task discovery to a single PRD partition (multi-PRD). Exported as $ANVIL_PRD so `anvil next` / `anvil status` only surface this PRD's tasks. Omit to span all PRDs."
+        "description": "Scope task discovery to a single PRD partition (multi-PRD). Exported as $ANVIL_PRD so `anvil next` / `anvil list` only surface this PRD's tasks. Omit to span all PRDs."
       }
     }
   }
