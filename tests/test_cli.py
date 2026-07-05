@@ -6327,3 +6327,36 @@ class TestConflictsCommand:
         env = json.loads(result.stdout.strip())
         ids = {g["id"] for g in env["data"]["conflict_groups"]}
         assert "CG-T001-T002" in ids
+
+
+def test_force_utf8_stdio_lets_arrow_encode_under_cp1252(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#106 regression: the entry-point UTF-8 reconfigure lets human output
+    containing the ``→`` glyph (which submit/apply print) be written under a
+    cp1252-backed stream instead of raising UnicodeEncodeError."""
+    import io
+    import sys
+
+    from anvil.cli import _force_utf8_stdio
+
+    # Baseline sanity: a strict cp1252 stream genuinely cannot encode the arrow.
+    probe = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    with pytest.raises(UnicodeEncodeError):
+        probe.write("→")
+        probe.flush()
+
+    # Simulate a non-UTF-8 Windows console on stdout/stderr.
+    raw_out = io.BytesIO()
+    fake_out = io.TextIOWrapper(raw_out, encoding="cp1252")
+    fake_err = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", fake_out)
+    monkeypatch.setattr(sys, "stderr", fake_err)
+
+    _force_utf8_stdio()
+
+    assert "utf" in sys.stdout.encoding.lower()
+    # The exact submit/apply line that crashed in #106 now writes cleanly.
+    sys.stdout.write("Task 'T001' status → needs_review.\n")
+    sys.stdout.flush()
+    assert "→".encode() in raw_out.getvalue()

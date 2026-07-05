@@ -328,6 +328,9 @@ class TestWorkspaceLayoutGitOps:
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
+        # Path.home() reads USERPROFILE on Windows, HOME on POSIX — set both so
+        # the HOME-workspace redirect actually isolates the test cross-platform.
+        monkeypatch.setenv("USERPROFILE", str(home))
         monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
         monkeypatch.delenv("ANVIL_ROOT", raising=False)
         monkeypatch.chdir(project)
@@ -351,3 +354,43 @@ class TestWorkspaceLayoutGitOps:
             check=True,
         ).stdout
         assert "agent/t001" in branches, branches
+
+    def test_claim_json_returns_branch_with_no_warnings_under_workspace_layout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#104 regression (--json path): ``claim --json`` in the default
+        HOME-workspace layout returns a NON-NULL ``branch`` with empty
+        ``warnings`` — git ops resolve the project repo independently of the
+        (non-repo) state/workspace dir, so branch creation is no longer a silent
+        no-op. The pre-existing test above only asserts the human-output text.
+
+        NOTE: this deliberately does NOT pass ``--worktree`` — the worktree path
+        is still broken (``claim`` checks the branch out in the MAIN repo, so
+        ``git worktree add`` then fails 'already used by worktree'), tracked as a
+        separate follow-up. This test locks the branch half that #104's fix
+        actually delivered."""
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        project = _init_git_repo(tmp_path / "proj")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        # Path.home() reads USERPROFILE on Windows, HOME on POSIX — set both so
+        # the HOME-workspace redirect actually isolates the test cross-platform.
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+
+        runner = CliRunner()
+        assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
+
+        result = runner.invoke(app, ["claim", "T001", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.stdout)["data"]
+        assert data["branch"], data
+        assert data["warnings"] == [], data
