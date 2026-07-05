@@ -385,7 +385,8 @@ def test_cwd_flag_is_forwarded_to_resolver(tmp_path, monkeypatch) -> None:
         catch_exceptions=False,
     )
     assert r.exit_code == 0
-    assert str(seen["cwd"]) == "/proj/x"
+    # Compare separator-agnostically: str(WindowsPath) renders backslashes.
+    assert Path(seen["cwd"]).as_posix() == "/proj/x"
 
 
 def test_human_block_prints_instruction(tmp_path, monkeypatch) -> None:

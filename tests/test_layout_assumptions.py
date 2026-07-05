@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -28,6 +29,34 @@ import pytest
 _REPO = Path(__file__).resolve().parents[1]
 _SKILLS = _REPO / "skills"
 _HOOKS = _REPO / "hooks"
+
+
+def _posix_bash() -> str | None:
+    """Resolve a POSIX bash (Git Bash on Windows), never the System32 WSL stub.
+
+    On Windows a bare-name subprocess resolves ``bash`` via ``CreateProcess``,
+    which searches ``System32`` before ``PATH`` and finds the WSL launcher —
+    which cannot run a hook referenced by a Windows-filesystem path. Prefer Git
+    Bash; return None when only the WSL stub exists so the caller can skip.
+    """
+    if os.name != "nt":
+        return shutil.which("bash")
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git:  # ...\Git\cmd\git.exe -> ...\Git\{bin,usr\bin}\bash.exe
+        root = Path(git).parent.parent
+        candidates += [root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"]
+    candidates += [
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+    ]
+    return next((str(c) for c in candidates if c.exists()), None)
+
+
+_BASH = _posix_bash()
+pytestmark = pytest.mark.skipif(
+    _BASH is None, reason="no POSIX bash (Git Bash) available for hook tests"
+)
 
 # A shell command operating on a RELATIVE in-repo `.anvil/` path. The negative
 # lookbehind excludes `~/.anvil`, `$HOME/.anvil`, `/abs/.anvil`, `${X}/.anvil`
@@ -104,7 +133,7 @@ def _run_hook(hook: str, payload: dict, *, home: Path, plugin_root: Path, cwd: P
         "CLAUDE_PLUGIN_ROOT": str(plugin_root),
     }
     return subprocess.run(
-        ["bash", str(_HOOKS / hook)],
+        [_BASH, str(_HOOKS / hook)],
         input=json.dumps(payload),
         text=True,
         capture_output=True,
