@@ -16,6 +16,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from anvil.naming import safe_path_component
+
 # Hard ceilings to keep git ops bounded even on misbehaving systems.
 # Critic flagged that the original code had no subprocess timeout (a hung git
 # binary would freeze the claim flow) and no collision-loop ceiling (an
@@ -93,17 +95,25 @@ def create_branch_for_task(
     cwd: Path,
     base: str | None = None,
     branch_prefix: str = "agent",
+    checkout: bool = True,
 ) -> BranchResult:
     """Create a ``<branch_prefix>/<task_id_lower>-<slug>`` branch in *cwd*.
 
     Behavior:
     - If git not available OR not a git repo → BranchResult(None, False, reason)
       (the CLI warns but does NOT fail the claim).
-    - Builds: ``<branch_prefix>/<task_id.lower()>-<slug(title)>`` truncated to
-      80 chars. When ``branch_prefix`` is empty, the leading prefix +
-      separator is omitted entirely.
+    - Builds: ``<branch_prefix>/<sanitized_task_id.lower()>-<slug(title)>``
+      truncated to 80 chars, where the task id is run through
+      :func:`anvil.naming.safe_path_component` so a namespaced id (``prd:T001``)
+      yields a valid refname instead of one with an illegal ``:`` (#108.1). When
+      ``branch_prefix`` is empty, the leading prefix + separator is omitted.
     - If that branch already exists, appends -2, -3, … until a unique name is found.
-    - Runs ``git checkout -b <branch>`` (or ``git checkout -b <branch> <base>``).
+    - When ``checkout`` (default), runs ``git checkout -b <branch>`` — moving the
+      current worktree onto the branch. When ``checkout=False``, runs
+      ``git branch <branch>`` — creating the ref WITHOUT checking it out, so a
+      caller (e.g. ``claim --worktree``) can hand the branch to ``git worktree
+      add``; a branch already checked out in the main worktree can't be added to
+      another one.
     - On success: BranchResult(branch, True, None).
     - On collision-rename: BranchResult(branch_with_suffix, True, "renamed due to collision").
     - On git error: BranchResult(None, False, str(error)).
@@ -128,10 +138,11 @@ def create_branch_for_task(
     if not is_git_repo(cwd):
         return BranchResult(None, False, "not a git repository")
 
+    safe_id = safe_path_component(task_id).lower()
     if branch_prefix:
-        base_name = f"{branch_prefix}/{task_id.lower()}-{_slug(title)}"
+        base_name = f"{branch_prefix}/{safe_id}-{_slug(title)}"
     else:
-        base_name = f"{task_id.lower()}-{_slug(title)}"
+        base_name = f"{safe_id}-{_slug(title)}"
     # Truncate to 80 chars total to stay well under git's 250-byte limit
     # while keeping branch names scannable.
     base_name = base_name[:80]
@@ -156,8 +167,10 @@ def create_branch_for_task(
         collision_suffix += 1
         renamed = True
 
-    # Build the git checkout command.
-    cmd = ["git", "checkout", "-b", branch]
+    # Build the git command: check out onto the branch (checkout -b) or just
+    # create the ref without moving the current worktree (branch).
+    verb = ["checkout", "-b"] if checkout else ["branch"]
+    cmd = ["git", *verb, branch]
     if base is not None:
         cmd.append(base)
 
@@ -170,7 +183,9 @@ def create_branch_for_task(
             timeout=_GIT_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return BranchResult(None, False, f"git checkout -b timed out after {_GIT_TIMEOUT_SECONDS}s")
+        return BranchResult(
+            None, False, f"git {' '.join(verb)} timed out after {_GIT_TIMEOUT_SECONDS}s"
+        )
     if result.returncode != 0:
         error_msg = (result.stderr or result.stdout or "unknown git error").strip()
         return BranchResult(None, False, error_msg)
@@ -184,6 +199,7 @@ def use_named_branch(
     *,
     cwd: Path,
     base: str | None = None,
+    checkout: bool = True,
 ) -> BranchResult:
     """Attach a claim to a caller-supplied / existing branch *name* (T027).
 
@@ -201,6 +217,12 @@ def use_named_branch(
       BranchResult(name, True, None).
     - On git error → BranchResult(None, False, str(error)).
 
+    When ``checkout=False`` (the ``claim --worktree`` flow, #104), the main
+    worktree's HEAD is NOT moved: an existing branch is referenced in place, and
+    a new one is created with ``git branch`` (not ``checkout -b``) — so the
+    subsequent ``git worktree add`` can check it out in the NEW worktree without
+    the "already used by worktree" conflict.
+
     The branch name is used verbatim (no slugging), so the caller controls the
     exact ref. Git itself rejects invalid ref names, which surfaces as a
     created=False warning.
@@ -210,6 +232,8 @@ def use_named_branch(
         cwd:  Directory in which to run git commands.
         base: Optional base ref to branch off when creating a NEW branch.
               Ignored when the branch already exists.
+        checkout: When True (default) move HEAD onto the branch; when False
+              leave HEAD in place (create the ref without checking it out).
 
     Returns:
         BranchResult describing what happened (or why it was skipped).
@@ -222,10 +246,16 @@ def use_named_branch(
 
     already_exists = _branch_exists(name, cwd)
 
+    if already_exists and not checkout:
+        # --worktree flow: the branch already exists; do NOT move main's HEAD.
+        # `git worktree add` will check it out in the new worktree.
+        return BranchResult(name, True, "existing branch")
+
     if already_exists:
         cmd = ["git", "checkout", name]
     else:
-        cmd = ["git", "checkout", "-b", name]
+        verb = ["checkout", "-b"] if checkout else ["branch"]
+        cmd = ["git", *verb, name]
         if base is not None:
             cmd.append(base)
 

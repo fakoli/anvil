@@ -224,7 +224,12 @@ def claim(
         # the claim row (it is reported in the JSON envelope / human output).
         recorded_branch: str | None = None
         if branch is not None:
-            branch_result = use_named_branch(branch, cwd=resolved_cwd)
+            # checkout=not worktree: with --worktree, don't move main's HEAD onto
+            # the named branch — the worktree add checks it out (#104, same fix as
+            # the auto-generated path below).
+            branch_result = use_named_branch(
+                branch, cwd=resolved_cwd, checkout=not worktree
+            )
             if branch_result.created and branch_result.branch:
                 # Record the branch on the claim so state reflects the user's
                 # own git workflow (the whole point of T027).
@@ -266,6 +271,12 @@ def claim(
                 task.title,
                 cwd=resolved_cwd,
                 branch_prefix=branch_prefix,
+                # For --worktree, create the branch WITHOUT checking it out in
+                # the main repo (#104). `git worktree add` then checks it out in
+                # the NEW worktree — a branch already checked out in the main
+                # worktree can't be added to another one ("already used by
+                # worktree"). The main checkout stays on its original branch.
+                checkout=not worktree,
             )
         if branch_result.created and branch_result.reason:
             if json_output:
