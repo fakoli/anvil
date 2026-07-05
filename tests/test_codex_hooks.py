@@ -25,6 +25,200 @@ hooks_mod = sys.modules["anvil.cli.hooks"]
 runner = CliRunner()
 
 
+def test_dispatch_check_claim_extracts_payload(tmp_path, monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: True)
+
+    def _fake_check_claim(*, file, actor, cwd):  # noqa: ANN001, ANN202,A002
+        calls.append({"file": file, "actor": actor, "cwd": cwd})
+
+    monkeypatch.setattr(hooks_mod, "hook_check_claim", _fake_check_claim)
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {"path": "src/app.py"},
+        "session_id": "sess-1",
+    }
+    r = runner.invoke(
+        app,
+        ["hook", "dispatch", "check-claim", "--cwd", str(tmp_path)],
+        input=json.dumps(payload),
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0
+    assert calls == [{"file": "src/app.py", "actor": "sess-1", "cwd": tmp_path}]
+
+
+def test_dispatch_uses_payload_cwd_when_flag_omitted(tmp_path, monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: True)
+
+    def _fake_record_file_change(*, file, tool, actor, cwd):  # noqa: ANN001, ANN202,A002
+        calls.append({"file": file, "tool": tool, "actor": actor, "cwd": cwd})
+
+    monkeypatch.setattr(hooks_mod, "hook_record_file_change", _fake_record_file_change)
+    payload = {
+        "cwd": str(tmp_path),
+        "tool_name": "Write",
+        "tool_input": {"path": "src/from-payload.py"},
+        "session_id": "sess-payload",
+    }
+    r = runner.invoke(
+        app,
+        ["hook", "dispatch", "record-file-change"],
+        input=json.dumps(payload),
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0
+    assert calls == [
+        {
+            "file": "src/from-payload.py",
+            "tool": "Write",
+            "actor": "sess-payload",
+            "cwd": tmp_path,
+        }
+    ]
+
+
+def test_dispatch_fast_paths_without_state(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: False)
+    monkeypatch.setattr(
+        hooks_mod,
+        "hook_record_file_change",
+        lambda **kwargs: calls.append("record"),
+    )
+    payload = {
+        "tool_name": "Write",
+        "tool_input": {"path": "src/app.py"},
+        "session_id": "sess-1",
+    }
+    r = runner.invoke(
+        app,
+        ["hook", "dispatch", "record-file-change", "--cwd", str(tmp_path)],
+        input=json.dumps(payload),
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0
+    assert calls == []
+
+
+def test_dispatch_capture_evidence_extracts_payload_and_temp_files(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[dict[str, object]] = []
+    temp_paths: list[Path] = []
+    monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: True)
+
+    def _fake_capture(
+        *,
+        command,
+        exit_code,
+        stdout_file,
+        stderr_file,
+        actor,
+        cwd,
+    ):  # noqa: ANN001, ANN202
+        temp_paths.extend([stdout_file, stderr_file])
+        calls.append(
+            {
+                "command": command,
+                "exit_code": exit_code,
+                "stdout": stdout_file.read_text(encoding="utf-8"),
+                "stderr": stderr_file.read_text(encoding="utf-8"),
+                "actor": actor,
+                "cwd": cwd,
+            }
+        )
+
+    monkeypatch.setattr(hooks_mod, "hook_capture_evidence", _fake_capture)
+    payload = {
+        "tool_input": {"command": "pytest -q"},
+        "tool_response": {"stdout": "ok", "stderr": "warn", "exit_code": 1},
+        "session_id": "sess-2",
+    }
+    r = runner.invoke(
+        app,
+        ["hook", "dispatch", "capture-evidence", "--cwd", str(tmp_path)],
+        input=json.dumps(payload),
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0
+    assert calls == [
+        {
+            "command": "pytest -q",
+            "exit_code": 1,
+            "stdout": "ok",
+            "stderr": "warn",
+            "actor": "sess-2",
+            "cwd": tmp_path,
+        }
+    ]
+    assert temp_paths and all(not p.exists() for p in temp_paths)
+
+
+def test_dispatch_capture_evidence_ignores_non_verification_command(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: True)
+    monkeypatch.setattr(
+        hooks_mod,
+        "hook_capture_evidence",
+        lambda **kwargs: calls.append("capture"),
+    )
+    payload = {
+        "tool_input": {"command": "echo hello"},
+        "tool_response": {"stdout": "hello", "stderr": "", "exit_code": 0},
+        "session_id": "sess-2",
+    }
+    r = runner.invoke(
+        app,
+        ["hook", "dispatch", "capture-evidence", "--cwd", str(tmp_path)],
+        input=json.dumps(payload),
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0
+    assert calls == []
+
+
+def test_dispatch_detect_state_renders_status_banner(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(hooks_mod, "_language_for_cwd", lambda cwd: "Python")
+    monkeypatch.setattr(
+        hooks_mod,
+        "_status_hook_line",
+        lambda cwd: ("active-claims:1 ready-tasks:2 blockers:0 prd-status:approved", 0),
+    )
+    r = runner.invoke(
+        app,
+        ["hook", "dispatch", "detect-state", "--cwd", str(tmp_path)],
+        input="{}",
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0
+    assert r.stdout.strip() == (
+        "[anvil] Language: Python | "
+        "active-claims:1 ready-tasks:2 blockers:0 prd-status:approved"
+    )
+
+
+def test_dispatch_heartbeat_preserves_default_actor_resolution(tmp_path, monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: True)
+
+    def _fake_heartbeat(*, actor, cwd):  # noqa: ANN001, ANN202
+        calls.append({"actor": actor, "cwd": cwd})
+
+    monkeypatch.setattr(hooks_mod, "hook_heartbeat", _fake_heartbeat)
+    r = runner.invoke(
+        app,
+        ["hook", "dispatch", "heartbeat", "--cwd", str(tmp_path)],
+        input='{"session_id":"ignored-for-heartbeat"}',
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0
+    assert calls == [{"actor": None, "cwd": tmp_path}]
+
+
 def _claim(actor: str = "agent", cid: str = "C1", task_id: str = "WT-1") -> object:
     return types.SimpleNamespace(claimed_by=actor, id=cid, task_id=task_id, expected_files=[])
 

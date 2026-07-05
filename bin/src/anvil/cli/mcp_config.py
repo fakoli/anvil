@@ -16,6 +16,7 @@ user's ``~/.cursor/mcp.json`` etc.; the user pastes the block themselves.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import typer
@@ -80,19 +81,38 @@ def _wrapper_path() -> Path:
     return Path(anvil.__file__).resolve().parent.parent.parent / "anvil-mcp"
 
 
+def _windows_host() -> bool:
+    """Return True when a bare ``bash`` command is unsafe as the default launcher."""
+    return sys.platform == "win32"
+
+
+def _uv_run_spec(bin_dir: Path) -> dict:
+    return {
+        "command": "uv",
+        "args": [
+            "run",
+            "--quiet",
+            "--project",
+            str(bin_dir),
+            "python",
+            "-m",
+            "anvil.mcp_server",
+        ],
+    }
+
+
 def _server_spec(use_uv_run: bool, root: str | None) -> dict:
     wrapper = _wrapper_path()
     spec: dict
     if wrapper.is_file():
         # Source checkout / plugin bundle: the bin/anvil-mcp bash wrapper exists
-        # and self-syncs uv deps. Default to it; --uv-run emits the explicit uv
-        # invocation for bash-less hosts.
+        # and self-syncs uv deps. Default to it on POSIX; on Windows a bare
+        # "bash" often resolves to WSL's bash.exe instead of Git Bash, which can
+        # hang or run in the wrong filesystem. In that case emit the explicit uv
+        # invocation by default; --uv-run keeps the same escape hatch everywhere.
         bin_dir = wrapper.parent
-        if use_uv_run:
-            spec = {
-                "command": "uv",
-                "args": ["run", "--project", str(bin_dir), "python", "-m", "anvil.mcp_server"],
-            }
+        if use_uv_run or _windows_host():
+            spec = _uv_run_spec(bin_dir)
         else:
             spec = {"command": "bash", "args": [str(wrapper)]}
     else:
@@ -197,6 +217,11 @@ def build_config(client: str, *, use_uv_run: bool, root: str | None) -> str:
     per-server extras, JSON vs TOML). A few clients have a different server shape
     entirely and are special-cased.
     """
+    # Codex runs on Windows, macOS, and Linux, and plugin/MCP startup happens in a
+    # sensitive long-lived process. Prefer the shell-free source-checkout launcher
+    # for Codex on every host; installed packages still emit the anvil-mcp console
+    # script because there is no checkout bin/ to sync.
+    effective_uv_run = use_uv_run or client == "codex"
     if client == "opencode":
         return _opencode_block(use_uv_run, root)
     if client == "continue":
@@ -204,7 +229,7 @@ def build_config(client: str, *, use_uv_run: bool, root: str | None) -> str:
     if client == "goose":
         return _goose_block(use_uv_run, root)
     top_key, extra, fmt = CLIENTS[client]
-    spec = {**extra, **_server_spec(use_uv_run, root)}
+    spec = {**extra, **_server_spec(effective_uv_run, root)}
     if fmt == "toml":
         return _to_toml(top_key, spec)
     return json.dumps({top_key: {_SERVER_ID: spec}}, indent=2) + "\n"
@@ -220,7 +245,7 @@ def mcp_config(
         "--uv-run",
         help=(
             "Emit the explicit `uv run` invocation instead of the bash wrapper "
-            "(use on hosts without bash, e.g. Windows)."
+            "(automatic on Windows; useful elsewhere on hosts without bash)."
         ),
     ),
     root: str | None = typer.Option(  # noqa: B008

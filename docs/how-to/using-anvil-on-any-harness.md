@@ -52,7 +52,8 @@ trailer so it can't be mistaken for a write:
 ```
 
 Flags: `--root <dir>` pins `ANVIL_ROOT` in the written config; `--uv-run` emits
-the explicit `uv run` invocation instead of the bash wrapper (Windows / no bash).
+the explicit `uv run` invocation instead of the bash wrapper (automatic for
+source checkouts on Windows; useful anywhere without bash).
 
 ### Install the CLI (no checkout)
 
@@ -141,9 +142,9 @@ codex mcp add anvil -- anvil-mcp            # the MCP server
 ```
 
 (That is the installed-package form — `anvil-mcp` is the console script on your
-PATH. From a source checkout the server command points at the checkout's
-`bash <checkout>/bin/anvil-mcp` wrapper instead; the dry-run shows whichever
-applies.)
+PATH. From a source checkout Codex always uses the shell-free form:
+`uv run --quiet --project <checkout>/bin python -m anvil.mcp_server`. The dry-run
+shows the exact command.)
 
 It also splices anvil's usage doc into the project `AGENTS.md` as a marked,
 removable block. Undo everything with `anvil install codex --rollback` (it runs
@@ -176,7 +177,10 @@ openclaw plugins install anvil --marketplace fakoli/anvil --force  # skills + co
 ```
 
 (As with codex, that is the installed-package form; from a source checkout the
-`--command`/`--arg` pair points at the checkout's `bin/anvil-mcp` bash wrapper.)
+`--command`/`--arg` pair points at the checkout's `bin/anvil-mcp` bash wrapper on
+POSIX. On Windows source checkouts, or when `--uv-run` is set, the printed
+command uses `uv run --quiet --project <checkout>/bin python -m anvil.mcp_server`;
+uv flags are emitted as `--arg=<value>` so OpenClaw treats them as server args.)
 
 We pass `--no-probe` so a cold-start `uv sync` (which can exceed OpenClaw's 30s
 connect probe) can't leave the server unsaved while the plugin installs — OpenClaw

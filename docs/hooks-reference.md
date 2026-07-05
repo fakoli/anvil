@@ -3,9 +3,11 @@
 > anvil ships 5 hooks that detect project state, enforce claim
 > discipline, record file changes, renew claim leases, and buffer
 > verification-command output as evidence. All hooks are **non-blocking** by
-> design — warnings only, never errors. Hooks are wired via [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) and
-> shell out to `anvil hook ...` subcommands implemented in
-> [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py).
+> design — warnings only, never errors. Hooks are wired via [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json).
+> The default manifest launches the shell-free `anvil hook dispatch ...` path
+> through `uv run`; the legacy `.sh` wrappers call the same subcommands in
+> [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)
+> and remain as compatibility/test wrappers.
 
 ---
 
@@ -19,11 +21,11 @@ rejected.
    command must never abort the script. A hook that aborts mid-run leaves
    partial files on disk (a half-written `orphan.json`, a missing audit
    row) and trains the agent to mistrust the hook layer.
-2. **Always `exit 0`.** Every script ends with an unconditional `exit 0`
+2. **Always `exit 0`.** Every dispatcher path and shell wrapper exits 0
    regardless of whether the work succeeded. Failures are logged to stderr
    or silently swallowed — they are never propagated as a non-zero status
    to Claude Code.
-3. **Wrap CLI calls with `|| true`.** When the script shells out to
+3. **Wrap CLI calls with `|| true`.** When a shell wrapper shells out to
    `anvil hook ...`, the call is followed by `|| true` (or the exit
    code is captured into a variable that the script then ignores). The
    Python sub-app itself follows the same discipline: every command in
@@ -48,31 +50,36 @@ audit-log entry captures the same signal without breaking flow: humans see
 the warning during review, the `events.jsonl` row supports post-hoc
 conflict detection, and the agent keeps moving.
 
-The same principle applies to the CLI degradation path. When the
-`anvil` binary is missing or its `hook` sub-app returns non-zero
-(database locked, subcommand not yet implemented during a phased
-rollout), the script falls back to a direct file write or silent skip —
-the session is never broken because a backing service is unavailable.
+The same principle applies to the CLI degradation path. When the dispatcher
+cannot resolve state, it silently skips. When a legacy wrapper cannot find the
+`anvil` binary or its `hook` sub-app returns non-zero (database locked,
+subcommand not yet implemented during a phased rollout), the wrapper falls
+back to a direct file write or silent skip — the session is never broken
+because a backing service is unavailable.
 
 ---
 
 ## `hooks.json` mapping
 
-The five scripts are declared in [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) — `heartbeat.sh` runs on both `PostToolUse` matchers, so there are six wiring entries:
+The six entries in [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json)
+call the shell-free dispatcher. `heartbeat` runs on both `PostToolUse`
+matchers. The `.sh` files listed here are the legacy wrappers for the same
+behavior:
 
-| Event | Matcher | Script | Timeout |
-|---|---|---|---|
-| `SessionStart` | (all) | [`detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh) | 5s |
-| `PreToolUse` | `Edit\|Write\|NotebookEdit` | [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | 5s |
-| `PostToolUse` | `Edit\|Write\|NotebookEdit` | [`record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh) | 5s |
-| `PostToolUse` | `Edit\|Write\|NotebookEdit` | [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | 5s |
-| `PostToolUse` | `Bash` | [`capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) | 5s |
-| `PostToolUse` | `Bash` | [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | 5s |
+| Event | Matcher | Manifest command | Legacy wrapper | Timeout |
+|---|---|---|---|---|
+| `SessionStart` | (all) | `anvil hook dispatch detect-state` | [`detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh) | 5s |
+| `PreToolUse` | `Edit\|Write\|NotebookEdit` | `anvil hook dispatch check-claim` | [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | 5s |
+| `PostToolUse` | `Edit\|Write\|NotebookEdit` | `anvil hook dispatch record-file-change` | [`record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh) | 5s |
+| `PostToolUse` | `Edit\|Write\|NotebookEdit` | `anvil hook dispatch heartbeat` | [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | 5s |
+| `PostToolUse` | `Bash` | `anvil hook dispatch capture-evidence` | [`capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) | 5s |
+| `PostToolUse` | `Bash` | `anvil hook dispatch heartbeat` | [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | 5s |
 
-Each script receives the Claude Code hook payload as JSON on stdin and shells
-out to `anvil hook ...`, which resolves project state exactly as every other
-command does — the HOME workspace by default, or `ANVIL_STATE_LAYOUT=local` /
-`ANVIL_ROOT` when set. The hooks do not assume an in-repo `./.anvil`.
+Each default manifest command receives the Claude Code/Codex hook payload as
+JSON on stdin. The dispatcher parses it and calls `anvil hook ...`, which
+resolves project state exactly as every other command does — the HOME workspace
+by default, or `ANVIL_STATE_LAYOUT=local` / `ANVIL_ROOT` when set. The hooks do
+not assume an in-repo `./.anvil`.
 
 ---
 

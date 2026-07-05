@@ -68,17 +68,26 @@ required. The plugin ships a `.mcp.json` at its root that Claude Code reads on s
   "mcpServers": {
     "anvil": {
       "type": "stdio",
-      "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/anvil-mcp"]
+      "command": "uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}/bin",
+        "python",
+        "-m",
+        "anvil.mcp_server"
+      ]
     }
   }
 }
 ```
 
-`${CLAUDE_PLUGIN_ROOT}` is the absolute path to the installed plugin directory. The wrapper
-`bin/anvil-mcp` calls `uv sync` if `uv.lock` or `pyproject.toml` is newer than the
-virtual environment (covering cold starts and `git pull` updates), then delegates to
-`python -m anvil.mcp_server`.
+`${CLAUDE_PLUGIN_ROOT}` is the absolute path to the installed plugin directory. `uv run
+--quiet --project ${CLAUDE_PLUGIN_ROOT}/bin` syncs the plugin's locked environment when
+needed (covering cold starts and `git pull` updates), then delegates to
+`python -m anvil.mcp_server` without relying on a shell or emitting uv chatter into the
+stdio MCP stream.
 
 Each tool call opens a fresh `SqliteBackend` against `.anvil/state.db` resolved from
 the agent's current working directory at call time. Agents can invoke from any project

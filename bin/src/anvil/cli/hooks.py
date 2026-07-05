@@ -5,7 +5,11 @@ Internal helpers invoked by the plugin's bash hooks.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import typer
@@ -20,6 +24,263 @@ hook_app = typer.Typer(
     help="Internal hook helpers — invoked by the plugin's bash hooks.",
     no_args_is_help=True,
 )
+
+_VERIFICATION_PATTERNS = (
+    "pytest",
+    "ruff check",
+    "mypy",
+    "npm test",
+    "cargo test",
+    "bun test",
+)
+
+
+def _read_hook_payload() -> dict[str, object]:
+    import sys
+
+    try:
+        raw = "" if sys.stdin.isatty() else sys.stdin.read()
+        if not raw.strip():
+            return {}
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:  # noqa: BLE001 - hook dispatch must never break the harness
+        return {}
+
+
+def _payload_cwd(payload: dict[str, object]) -> Path | None:
+    cwd = payload.get("cwd")
+    if isinstance(cwd, str) and cwd.strip():
+        return Path(cwd)
+    return None
+
+
+def _project_cwd(cwd: Path | None) -> Path:
+    return (cwd or Path.cwd()).resolve()
+
+
+def _has_any_anvil_state(cwd: Path | None) -> bool:
+    project = _project_cwd(cwd)
+    home_raw = os.environ.get("HOME")
+    home = Path(home_raw).expanduser() if home_raw else Path.home()
+    return (
+        (project / ".anvil").is_dir()
+        or (project / "bin" / ".anvil").is_dir()
+        or (home / ".anvil" / "workspaces").is_dir()
+    )
+
+
+def _payload_tool_input(payload: dict[str, object]) -> dict[str, object]:
+    tool_input = payload.get("tool_input")
+    return tool_input if isinstance(tool_input, dict) else {}
+
+
+def _payload_file_path(payload: dict[str, object]) -> str:
+    tool_input = _payload_tool_input(payload)
+    value = tool_input.get("path") or tool_input.get("notebook_path") or ""
+    return str(value) if value is not None else ""
+
+
+def _payload_actor(payload: dict[str, object], default: str = "unknown") -> str:
+    value = payload.get("session_id")
+    actor = str(value).strip() if value is not None else ""
+    return actor or default
+
+
+def _outside_project(file_path: str, cwd: Path | None) -> bool:
+    path = Path(file_path)
+    if not path.is_absolute():
+        return False
+    try:
+        path.resolve().relative_to(_project_cwd(cwd))
+        return False
+    except ValueError:
+        return True
+    except OSError:
+        return True
+
+
+def _run_hook_callable(fn, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
+    try:
+        fn(*args, **kwargs)
+    except typer.Exit:
+        pass
+    except SystemExit:
+        pass
+    except Exception:  # noqa: BLE001 - dispatch must preserve the hook contract
+        pass
+
+
+def _language_for_cwd(cwd: Path | None) -> str:
+    root = _project_cwd(cwd)
+    detected = "unknown"
+    if (root / "Cargo.toml").is_file():
+        detected = "Rust"
+    if (root / "pyproject.toml").is_file():
+        detected = "Python"
+    if (root / "setup.py").is_file():
+        detected = "Python"
+    if (root / "package.json").is_file():
+        detected = "TypeScript"
+    if (root / "tsconfig.json").is_file():
+        detected = "TypeScript"
+    return detected
+
+
+def _status_hook_line(cwd: Path | None) -> tuple[str, int]:
+    from anvil.cli.init_status import status
+
+    stdout = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout):
+            status(hook_format=True, json_output=False, cwd=cwd)
+    except typer.Exit as exc:
+        code = int(exc.exit_code or 0)
+    except SystemExit as exc:
+        code = int(exc.code or 0) if isinstance(exc.code, int) else 1
+    except Exception:  # noqa: BLE001
+        return "", 1
+    else:
+        code = 0
+    return stdout.getvalue().strip().splitlines()[0] if stdout.getvalue().strip() else "", code
+
+
+def _dispatch_detect_state(payload: dict[str, object], cwd: Path | None) -> None:
+    language = _language_for_cwd(cwd)
+    root = _project_cwd(cwd)
+    legacy = (root / ".anvil").is_dir() or (root / "bin" / ".anvil").is_dir()
+    status_line, status_exit = _status_hook_line(cwd)
+
+    if status_exit == 0 and status_line and status_line != "uninitialized":
+        typer.echo(f"[anvil] Language: {language} | {status_line}")
+        return
+    if status_line == "uninitialized":
+        if legacy:
+            typer.echo(
+                "[anvil] Language: "
+                f"{language} | legacy in-repo .anvil found — run "
+                "`anvil migrate-workspace` to move it into the home workspace"
+            )
+        else:
+            typer.echo("[anvil] not initialized in this project — run `anvil init` to start")
+        return
+    reason = status_line or f"status check returned exit {status_exit}"
+    typer.echo(f"[anvil] Language: {language} | status check unavailable: {reason}")
+
+
+def _dispatch_check_claim(payload: dict[str, object], cwd: Path | None) -> None:
+    if not _has_any_anvil_state(cwd):
+        return
+    file_path = _payload_file_path(payload)
+    if not file_path or _outside_project(file_path, cwd):
+        return
+    _run_hook_callable(
+        hook_check_claim,
+        file=file_path,
+        actor=_payload_actor(payload),
+        cwd=cwd,
+    )
+
+
+def _dispatch_record_file_change(payload: dict[str, object], cwd: Path | None) -> None:
+    if not _has_any_anvil_state(cwd):
+        return
+    file_path = _payload_file_path(payload)
+    if not file_path:
+        return
+    tool = str(payload.get("tool_name") or "unknown")
+    _run_hook_callable(
+        hook_record_file_change,
+        file=file_path,
+        tool=tool,
+        actor=_payload_actor(payload),
+        cwd=cwd,
+    )
+
+
+def _dispatch_capture_evidence(payload: dict[str, object], cwd: Path | None) -> None:
+    if not _has_any_anvil_state(cwd):
+        return
+    tool_input = _payload_tool_input(payload)
+    response_raw = payload.get("tool_response")
+    tool_response = response_raw if isinstance(response_raw, dict) else {}
+    command = str(tool_input.get("command") or "")
+    if not command or not any(pattern in command for pattern in _VERIFICATION_PATTERNS):
+        return
+    try:
+        exit_code = int(tool_response.get("exit_code") or 0)
+    except (TypeError, ValueError):
+        exit_code = 0
+
+    tmp_paths: list[Path] = []
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as out:
+            out.write(str(tool_response.get("stdout") or ""))
+            stdout_path = Path(out.name)
+        tmp_paths.append(stdout_path)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as err:
+            err.write(str(tool_response.get("stderr") or ""))
+            stderr_path = Path(err.name)
+        tmp_paths.append(stderr_path)
+        _run_hook_callable(
+            hook_capture_evidence,
+            command=command,
+            exit_code=exit_code,
+            stdout_file=stdout_path,
+            stderr_file=stderr_path,
+            actor=_payload_actor(payload),
+            cwd=cwd,
+        )
+    finally:
+        for path in tmp_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _dispatch_heartbeat(_payload: dict[str, object], cwd: Path | None) -> None:
+    if not _has_any_anvil_state(cwd):
+        return
+    _run_hook_callable(hook_heartbeat, actor=None, cwd=cwd)
+
+
+@hook_app.command("dispatch")
+def hook_dispatch(
+    name: str = typer.Argument(  # noqa: B008
+        ...,
+        help="Hook dispatcher name: detect-state, check-claim, record-file-change, "
+        "capture-evidence, or heartbeat.",
+    ),
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the hook payload's cwd, then current dir.",
+        hidden=True,
+    ),
+) -> None:
+    """Shell-free dispatcher for hooks/hooks.json.
+
+    This keeps the shipped hook manifest portable across Windows, Linux, and macOS:
+    the harness launches ``uv`` directly, this command parses the hook JSON payload,
+    and the existing hook subcommands perform the state work. All dispatch paths are
+    non-blocking and exit 0 by construction.
+    """
+    payload = _read_hook_payload()
+    resolved_cwd = cwd or _payload_cwd(payload)
+    try:
+        dispatch = {
+            "detect-state": _dispatch_detect_state,
+            "check-claim": _dispatch_check_claim,
+            "record-file-change": _dispatch_record_file_change,
+            "capture-evidence": _dispatch_capture_evidence,
+            "heartbeat": _dispatch_heartbeat,
+        }.get(name)
+        if dispatch is not None:
+            dispatch(payload, resolved_cwd)
+    except Exception:  # noqa: BLE001 - hook dispatch must never break the harness
+        pass
+    raise typer.Exit(code=0)
 
 
 @hook_app.command("check-claim")

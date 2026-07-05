@@ -2,8 +2,16 @@
   "mcpServers": {
     "anvil": {
       "type": "stdio",
-      "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/anvil-mcp"]
+      "command": "uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}/bin",
+        "python",
+        "-m",
+        "anvil.mcp_server"
+      ]
     }
   }
 }

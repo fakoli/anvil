@@ -16,10 +16,25 @@ runs, on your behalf:
 ```bash
 # register the MCP server (--no-probe: don't block the save on a cold-start
 # `uv sync` that can overrun OpenClaw's 30s connect probe)
-openclaw mcp add anvil --no-probe --command bash --arg <…>/bin/anvil-mcp
+openclaw mcp add anvil --no-probe --command anvil-mcp
 # pull anvil's skills + commands from its Claude-compatible marketplace
 # (--force refreshes the plugin on re-install instead of keeping a stale copy)
 openclaw plugins install anvil --marketplace fakoli/anvil --force
+```
+
+That is the installed-package form. From a source checkout, POSIX hosts use the
+wrapper:
+
+```bash
+openclaw mcp add anvil --no-probe --command bash --arg <anvil>/bin/anvil-mcp
+```
+
+Windows source checkouts, or any install run with `--uv-run`, use the shell-free
+form. Dash-leading uv flags are emitted as `--arg=<value>` so OpenClaw treats
+them as MCP server arguments:
+
+```bash
+openclaw mcp add anvil --no-probe --command uv --arg=run --arg=--quiet --arg=--project --arg=<anvil>/bin --arg=python --arg=-m --arg=anvil.mcp_server
 ```
 
 If the `openclaw` CLI isn't on PATH, the commands are printed for you to run.
