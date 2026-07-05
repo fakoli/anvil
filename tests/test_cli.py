@@ -275,6 +275,26 @@ class TestInitWithSample:
         assert task is not None, "no claimable task after init --with-sample"
         assert task["status"] == "ready"
 
+    def test_next_reads_max_blast_ceiling_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T004: `anvil next` reads the risk ceiling from $ANVIL_MAX_BLAST — the
+        env var the OpenClaw plugin exports from its `maxBlast` config — so a
+        ceilinged runner routes through the SAME B45 filter as `--max-blast`. The
+        sample task is engine-scored but unconfirmed, so any ceiling withholds it
+        (safe-by-construction) with reason 'risk_ceiling'; that the withhold flips
+        on solely from the env var proves it reached next_claimable."""
+        assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
+        # Baseline: no ceiling -> a ready task is offered.
+        baseline = json.loads(self._run(["next", "--json"], tmp_path).output)
+        assert baseline["data"]["task"] is not None
+
+        # With the env ceiling set, the same call withholds (unconfirmed scores).
+        monkeypatch.setenv("ANVIL_MAX_BLAST", "1")
+        ceilinged = json.loads(self._run(["next", "--json"], tmp_path).output)
+        assert ceilinged["data"]["task"] is None
+        assert ceilinged["data"]["withheld_reason"] == "risk_ceiling"
+
     def test_init_with_sample_reports_seed_summary(self, tmp_path: Path) -> None:
         """Human output names the sample seed and points at `next`."""
         result = self._run(["init", "--with-sample"], tmp_path)

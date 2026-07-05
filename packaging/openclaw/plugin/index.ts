@@ -270,6 +270,25 @@ export default definePluginEntry({
       asMode(process.env.ANVIL_CLAIM_GUARD_MODE) ?? asMode(cfg.claimGuardMode) ?? "warn";
     const GUARD_EXEC = cfg.guardExec === true || process.env.ANVIL_GUARD_EXEC === "true";
 
+    // Propagate the risk-ceiling / PRD-scope config to the `anvil next` the agent
+    // runs (and any anvil subprocess), via the env vars those commands read
+    // ($ANVIL_MAX_BLAST / $ANVIL_MAX_REVIEW_RISK / $ANVIL_PRD — the same envvar the
+    // `--prd` flag honors). Same precedence as the guard mode above: an explicit
+    // ambient env var always wins over the plugin config, so an operator override
+    // is never shadowed by a config default. Absent knobs export nothing (no
+    // ceiling / all-PRDs), so existing installs are unaffected.
+    const exportIfUnset = (key: string, value: unknown): void => {
+      if (
+        process.env[key] === undefined &&
+        (typeof value === "number" || (typeof value === "string" && value !== ""))
+      ) {
+        process.env[key] = String(value);
+      }
+    };
+    exportIfUnset("ANVIL_MAX_BLAST", cfg.maxBlast);
+    exportIfUnset("ANVIL_MAX_REVIEW_RISK", cfg.maxReviewRisk);
+    exportIfUnset("ANVIL_PRD", cfg.activePrd);
+
     // after_tool_call: auto-capture verification-command output as evidence. Pure
     // observer (fire-and-forget); only `exec` tools running a verification command.
     api.on("after_tool_call", (event) => {
