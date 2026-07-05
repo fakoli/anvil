@@ -439,7 +439,8 @@ def test_actor_falls_back_to_stable_runner_id_when_no_env(
     not the literal 'agent' — so headless runners don't all collide on 'agent'.
     (ANVIL_KEYS_DIR is redirected to a temp dir by the autouse conftest fixture.)
     """
-    for var in ("USER", "ANVIL_ACTOR", "ANVIL_GATE_ACTOR"):
+    for var in ("USER", "ANVIL_ACTOR", "ANVIL_GATE_ACTOR",
+                "ANVIL_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
     backend = _StubBackend(
         claims=[], task=_task("WT-1", required=("test output",)), evidence=None
@@ -457,6 +458,10 @@ def test_actor_falls_back_to_stable_runner_id_when_no_env(
 
 
 def test_actor_defaults_to_user_when_set(tmp_path, monkeypatch) -> None:
+    # No session env, so the derived identity stays the bare $USER (B47/#103
+    # appends a session discriminator only when a session id is present).
+    monkeypatch.delenv("ANVIL_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     monkeypatch.setenv("USER", "alice")
     backend = _StubBackend(
         claims=[_claim(actor="alice")],

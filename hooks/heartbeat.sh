@@ -28,8 +28,11 @@ fi
 # same actor that `anvil claim` did, or it renews zero leases (the claim is held
 # under a different actor) and the lease silently expires mid-work. Passing no
 # --actor lets the CLI's single resolver pick the same identity the claim used
-# (resolve_actor: $ANVIL_ACTOR > $ANVIL_GATE_ACTOR > $USER > per-runner
-# fingerprint > "agent"). Set $ANVIL_ACTOR in the loop env to pin it for a fleet.
+# (resolve_actor: $ANVIL_ACTOR > $ANVIL_GATE_ACTOR > (($USER | per-runner
+# fingerprint | "agent") + a per-loop session id from $ANVIL_SESSION_ID /
+# $CLAUDE_CODE_SESSION_ID, #103/B47)). This heartbeat and the claim share the
+# loop env, so they resolve the SAME session-suffixed actor. Set $ANVIL_ACTOR
+# in the loop env to pin it for a fleet.
 # Drain a PIPED stdin (the harness may send a JSON payload we no longer use) so
 # the writer never blocks — but never read from a TTY, which would hang.
 if [ ! -t 0 ]; then

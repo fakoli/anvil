@@ -55,35 +55,32 @@ _PRD_ENV = "ANVIL_PRD"
 # ---------------------------------------------------------------------------
 
 
-def resolve_actor(explicit: str | None = None) -> str:
-    """Resolve the actor identity used for claims, heartbeats, and gates.
+# Env vars that, when set, disambiguate concurrent agent loops on ONE
+# machine/user (B47/#103). Prefer the anvil-owned id; fall back to the Claude
+# Code harness session id. Every subprocess of a single loop inherits the same
+# value, so claim/heartbeat/gate/guard still resolve the SAME actor.
+_SESSION_ENV_VARS = ("ANVIL_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
 
-    B47: every surface that touches a claim must resolve the SAME identity, or a
-    claim made under one actor is heartbeated/gated under another — renewal then
-    renews zero leases and the finish-gate (seeing no matching claim) fails
-    silently OPEN. Before this, ``claim`` used ``$USER``, the bundled heartbeat
-    hook passed the Claude ``session_id``, gate-check/claim-guard used ``$USER``,
-    and the hook verbs used ``$ANVIL_GATE_ACTOR`` — four different identities.
 
-    Precedence::
-
-        explicit arg > $ANVIL_ACTOR > $ANVIL_GATE_ACTOR (legacy) > $USER >
-        per-runner signing-key fingerprint > "agent"
-
-    ``$USER`` is kept so an interactive human keeps their familiar name; the
-    signing-key fingerprint (``anvil.signing.load_or_create_signer``) is a stable
-    per-runner id so two headless runners do not both collapse to ``"agent"``.
-    The fingerprint is resolved lazily and fault-tolerantly — any failure (no
-    crypto, unwritable key dir) falls through rather than breaking a claim/gate.
-
-    Always returns a non-empty, stripped string.
-    """
-    if explicit and explicit.strip():
-        return explicit.strip()
-    for env_var in ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR", "USER"):
-        value = os.environ.get(env_var)
+def _session_discriminator() -> str | None:
+    """A per-loop session id — shared across ONE loop's subprocesses but
+    distinct between sibling loops — or None when no session env is set. Sliced
+    short so the composed actor id stays readable."""
+    for var in _SESSION_ENV_VARS:
+        value = os.environ.get(var)
         if value and value.strip():
-            return value.strip()
+            return value.strip()[:12]
+    return None
+
+
+def _base_default_actor() -> str:
+    """The derived default identity when no explicit actor is given: ``$USER``,
+    else the per-runner signing-key fingerprint, else ``"agent"``. Resolved
+    lazily and fault-tolerantly — any failure (no crypto, unwritable key dir)
+    falls through rather than breaking a claim/gate."""
+    value = os.environ.get("USER")
+    if value and value.strip():
+        return value.strip()
     try:
         from anvil import signing
 
@@ -93,6 +90,44 @@ def resolve_actor(explicit: str | None = None) -> str:
     except Exception:  # noqa: BLE001 — actor resolution must never crash a claim/gate
         pass
     return _ACTOR_FALLBACK
+
+
+def resolve_actor(explicit: str | None = None) -> str:
+    """Resolve the actor identity used for claims, heartbeats, and gates.
+
+    B47: every surface that touches a claim must resolve the SAME identity, or a
+    claim made under one actor is heartbeated/gated under another — renewal then
+    renews zero leases and the finish-gate (seeing no matching claim) fails
+    silently OPEN.
+
+    Precedence::
+
+        explicit arg > $ANVIL_ACTOR > $ANVIL_GATE_ACTOR (legacy) >
+        (($USER | signing-key fingerprint | "agent") + session discriminator)
+
+    The first three are returned verbatim — the intentional coordination knobs.
+    The DERIVED default (``$USER`` / fingerprint / ``"agent"``) instead gets a
+    per-loop **session discriminator** appended when ``$ANVIL_SESSION_ID`` or
+    ``$CLAUDE_CODE_SESSION_ID`` is set (#103/B47): without it, two concurrent
+    loops on one machine/user collapse to the SAME derived id, so a second
+    loop's ``claim`` is treated as the owner and RENEWS the lease instead of
+    conflicting — lease mutual-exclusion becomes a no-op between siblings. The
+    discriminator is stable across ONE loop's subprocesses (they inherit the
+    same env) but differs between siblings, so in-loop hooks still agree while
+    sibling loops are distinguishable by default. Set ``$ANVIL_ACTOR`` to pin an
+    explicit identity and opt a loop out.
+
+    Always returns a non-empty, stripped string.
+    """
+    if explicit and explicit.strip():
+        return explicit.strip()
+    for env_var in ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR"):
+        value = os.environ.get(env_var)
+        if value and value.strip():
+            return value.strip()
+    base = _base_default_actor()
+    session = _session_discriminator()
+    return f"{base}-{session}" if session else base
 
 
 # ---------------------------------------------------------------------------
