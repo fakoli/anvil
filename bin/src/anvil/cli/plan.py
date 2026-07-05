@@ -1640,6 +1640,7 @@ def list_tasks(
                     "status": status,
                     "feature": feature,
                     "task_type": task_type,
+                    "prd": scoped_prd_id,
                 },
             },
         )
