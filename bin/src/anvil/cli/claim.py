@@ -266,6 +266,12 @@ def claim(
                 task.title,
                 cwd=resolved_cwd,
                 branch_prefix=branch_prefix,
+                # For --worktree, create the branch WITHOUT checking it out in
+                # the main repo (#104). `git worktree add` then checks it out in
+                # the NEW worktree — a branch already checked out in the main
+                # worktree can't be added to another one ("already used by
+                # worktree"). The main checkout stays on its original branch.
+                checkout=not worktree,
             )
         if branch_result.created and branch_result.reason:
             if json_output:

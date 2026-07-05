@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from anvil.git_ops.branch import _GIT_TIMEOUT_SECONDS, is_git_available, is_git_repo
+from anvil.naming import safe_path_component
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,10 @@ def create_worktree_for_task(
             None, False, "dirty worktree — commit or stash changes before adding a worktree"
         )
 
-    wt_path = parent_dir if parent_dir is not None else cwd.parent / f"wt-{task_id.lower()}"
+    wt_path = (
+        parent_dir if parent_dir is not None
+        else cwd.parent / f"wt-{safe_path_component(task_id).lower()}"
+    )
 
     try:
         result = subprocess.run(
