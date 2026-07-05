@@ -58,12 +58,13 @@ unifying `get_next_task` onto `ClaimManager.next_claimable` (passing metrics +
 ceilings) so both pull seams share one gate.
 
 ### E13-3 · B45 risk-confirmation source (makes `--max-blast/--max-review-risk` functional)
-**Status**: OPEN. The safe-by-construction gate ships, but nothing sets
-`Score.blast_radius_confirmed` / `review_risk_confirmed`, so ceilinged `next`
-returns nothing for every engine-scored task (flag now marked EXPERIMENTAL in
-`--help`). Close by adding a trusted risk-label source — a plan-time risk
-annotation or an `anvil score --confirm`/MCP path — that sets the flags, then add
-an end-to-end test driving a confirmed task through the real scoring path.
+**Status**: RESOLVED (v0.4.0 T009). The `anvil review tasks` gate now confirms
+the engine risk scores on the drafted→ready promotion — the review IS the
+human/LLM risk assessment — re-emitting `task.scored` with
+`blast_radius_confirmed` / `review_risk_confirmed` set (the `init --with-sample`
+seeder mirrors it). A ceilinged `next` now returns confirmed within-ceiling ready
+tasks instead of an empty queue. End-to-end test:
+`test_cli.py::TestReviewTasks::test_review_tasks_confirms_risk_scores_making_the_ceiling_live`.
 
 ## B42 Phase 2 finish-gate (PR #48) — deferred review findings
 

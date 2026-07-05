@@ -542,13 +542,13 @@ def next(  # noqa: A001
         "--max-blast",
         envvar="ANVIL_MAX_BLAST",
         help="[EXPERIMENTAL] Risk ceiling for a low-risk (e.g. local) runner: "
-        "only recommend tasks whose blast_radius is human/LLM-CONFIRMED and <= N. "
+        "only recommend tasks whose blast_radius is CONFIRMED and <= N. "
         "Unconfirmed/unscored tasks are frontier-only (ineligible) even below "
         "the ceiling, so the filter fails SAFE, not open — the blast/review-risk "
-        "heuristics ride on an untrusted filename regex. NOTE: no risk-confirmation "
-        "source ships yet, so every engine-scored task is currently unconfirmed "
-        "and this returns an EMPTY queue — the safe gate is in place but inert "
-        "for routing until a confirmation source lands (tracked follow-up).",
+        "heuristics ride on an untrusted filename regex. Risk scores are confirmed "
+        "when a task passes `anvil review tasks` (v0.4.0), so a ceiling returns "
+        "confirmed within-ceiling ready tasks; a project whose tasks have not been "
+        "review-confirmed yields an empty queue.",
     ),
     max_review_risk: int | None = typer.Option(  # noqa: B008
         None,
@@ -556,7 +556,7 @@ def next(  # noqa: A001
         envvar="ANVIL_MAX_REVIEW_RISK",
         help="[EXPERIMENTAL] Risk ceiling: only recommend tasks whose review_risk "
         "is confirmed and <= M (same safe-by-construction semantics as "
-        "--max-blast; likewise inert until a confirmation source ships).",
+        "--max-blast; confirmed at the `anvil review tasks` gate).",
     ),
     prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,

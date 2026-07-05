@@ -1476,6 +1476,39 @@ def review_tasks(
                 },
             )
             backend.append(draft)
+
+            # T009 — confirm the engine risk scores at the review gate. The
+            # `review tasks` promotion IS the human/LLM risk assessment, so mark
+            # blast_radius / review_risk CONFIRMED. This is what makes the B45
+            # risk ceiling LIVE: an unconfirmed task is frontier-only (withheld
+            # from a ceilinged runner), so without this a low-ceiling runner is
+            # offered an empty queue. Re-emit task.scored (the durable, replayable
+            # score channel) with the same dimensions plus the confirmed flags —
+            # only for a task that actually carries the engine risk scores.
+            scores = task.scores
+            if (
+                scores is not None
+                and scores.blast_radius is not None
+                and scores.review_risk is not None
+            ):
+                score_dict = scores.model_dump()
+                explanation = score_dict.pop("explanation", None)
+                score_dict["blast_radius_confirmed"] = True
+                score_dict["review_risk_confirmed"] = True
+                backend.append(
+                    EventDraft(
+                        timestamp=now,
+                        actor="anvil-cli",
+                        action="task.scored",
+                        target_kind="task",
+                        target_id=task.id,
+                        payload_json={
+                            "task_id": task.id,
+                            "scores": score_dict,
+                            "explanation": explanation,
+                        },
+                    )
+                )
             promoted_to_ready.append(task.id)
     finally:
         backend.close()
