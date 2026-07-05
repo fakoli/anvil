@@ -448,6 +448,12 @@ def seed_pipeline_from_prd(
                 },
             )
         )
+        # Mirror the review-tasks gate (T009) via the shared helper so the two
+        # promotion paths cannot drift: a seeded ready task carries CONFIRMED
+        # risk scores, so the B45 ceiling is live on the sample project too.
+        from anvil.cli.plan import confirm_task_risk_scores
+
+        confirm_task_risk_scores(backend, task, now, actor)
         promoted_ready.append(task.id)
 
     return {

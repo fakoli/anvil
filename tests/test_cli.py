@@ -280,20 +280,20 @@ class TestInitWithSample:
     ) -> None:
         """T004: `anvil next` reads the risk ceiling from $ANVIL_MAX_BLAST — the
         env var the OpenClaw plugin exports from its `maxBlast` config — so a
-        ceilinged runner routes through the SAME B45 filter as `--max-blast`. The
-        sample task is engine-scored but unconfirmed, so any ceiling withholds it
-        (safe-by-construction) with reason 'risk_ceiling'; that the withhold flips
-        on solely from the env var proves it reached next_claimable."""
+        ceilinged OpenClaw runner routes through the SAME B45 filter as the
+        explicit `--max-blast` flag. Proven by the env var producing the IDENTICAL
+        decision as the flag, independent of the sample task's actual score."""
         assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
-        # Baseline: no ceiling -> a ready task is offered.
-        baseline = json.loads(self._run(["next", "--json"], tmp_path).output)
-        assert baseline["data"]["task"] is not None
+        # Reference: the explicit --max-blast=1 flag decision.
+        via_flag = json.loads(
+            self._run(["next", "--json", "--max-blast", "1"], tmp_path).output
+        )["data"]
 
-        # With the env ceiling set, the same call withholds (unconfirmed scores).
+        # The env var alone (no flag) must reach the same ceiling decision.
         monkeypatch.setenv("ANVIL_MAX_BLAST", "1")
-        ceilinged = json.loads(self._run(["next", "--json"], tmp_path).output)
-        assert ceilinged["data"]["task"] is None
-        assert ceilinged["data"]["withheld_reason"] == "risk_ceiling"
+        via_env = json.loads(self._run(["next", "--json"], tmp_path).output)["data"]
+        assert via_env["task"] == via_flag["task"]
+        assert via_env["withheld_reason"] == via_flag["withheld_reason"]
 
     def test_init_with_sample_reports_seed_summary(self, tmp_path: Path) -> None:
         """Human output names the sample seed and points at `next`."""
@@ -2965,6 +2965,77 @@ class TestReviewTasks:
         assert list_result.exit_code == 0
         # Should have some ready tasks
         assert "task" in list_result.output.lower() or "T001" in list_result.output
+
+    def test_review_tasks_confirms_risk_scores_making_the_ceiling_live(
+        self, tmp_path: Path
+    ) -> None:
+        """T009: `review tasks` marks each promoted task's blast_radius /
+        review_risk CONFIRMED — a lightweight acceptance of the engine's
+        heuristic scores at the readiness gate (not a per-dimension human risk
+        sign-off) — so the B45 risk ceiling becomes LIVE. Pre-T009 every
+        engine-scored task was unconfirmed and a ceilinged `next` returned an
+        empty queue."""
+        from anvil.cli._helpers import _open_backend
+
+        self._setup_for_review(tmp_path)
+        result = _invoke_cmd(tmp_path, ["review", "tasks"])
+        assert result.exit_code == 0, result.output
+
+        # Promoted tasks carry confirmed risk scores, read from a FRESH backend —
+        # proving the confirmation is persisted via task.scored (durable /
+        # replayable), not mutated only in memory.
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            ready = [t for t in backend.list_tasks() if t.status.value == "ready"]
+            assert ready, "no ready tasks after review"
+            for t in ready:
+                assert t.scores.blast_radius_confirmed is True, t.id
+                assert t.scores.review_risk_confirmed is True, t.id
+        finally:
+            backend.close()
+
+        # The ceiling is now LIVE: a within-ceiling ready task is offered where
+        # pre-T009 this returned an empty 'risk_ceiling' queue.
+        post = json.loads(
+            _invoke_cmd(tmp_path, ["next", "--json", "--max-blast", "5"]).output
+        )
+        assert post["data"]["task"] is not None
+
+    def test_rescore_after_review_preserves_risk_confirmation(
+        self, tmp_path: Path
+    ) -> None:
+        """T009 hardening (review finding): an ordinary `anvil score TASK_ID`
+        after `review tasks` must NOT silently clear the confirmed flags. The
+        scorer's payload omits them, and `_write_task_scored` now MERGES (per its
+        contract), preserving them — otherwise a confirmed within-ceiling task
+        would fall out of a ceilinged runner's queue with no path back, since
+        `review tasks` never revisits a ready task."""
+        from anvil.cli._helpers import _open_backend
+
+        self._setup_for_review(tmp_path)
+        _invoke_cmd(tmp_path, ["review", "tasks"])
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            ready = [t for t in backend.list_tasks() if t.status.value == "ready"]
+            assert ready, "no ready tasks after review"
+            tid = ready[0].id
+            assert ready[0].scores.blast_radius_confirmed is True
+        finally:
+            backend.close()
+
+        # Explicitly re-score that already-ready, already-confirmed task.
+        rescore = _invoke_cmd(tmp_path, ["score", tid])
+        assert rescore.exit_code == 0, rescore.output
+
+        # Confirmation SURVIVES the re-score (fresh backend read).
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            t = next(x for x in backend.list_tasks() if x.id == tid)
+            assert t.scores.blast_radius_confirmed is True, "re-score cleared blast confirmation"
+            assert t.scores.review_risk_confirmed is True, "re-score cleared review-risk confirmation"
+        finally:
+            backend.close()
 
     def test_review_tasks_blocks_incomplete(self, tmp_path: Path) -> None:
         """Task without acceptance_criteria stays blocked; surface reason."""

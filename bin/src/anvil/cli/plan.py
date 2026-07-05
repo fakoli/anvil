@@ -1363,6 +1363,44 @@ def expand(
 # ---------------------------------------------------------------------------
 
 
+def confirm_task_risk_scores(backend: Any, task: Any, now: Any, actor: str) -> None:
+    """Confirm a task's engine risk scores (T009): re-emit ``task.scored`` with
+    ``blast_radius_confirmed`` / ``review_risk_confirmed`` set, preserving the
+    other dimensions. Emits nothing for a task without engine risk scores.
+
+    Shared by the ``review tasks`` gate and the ``init --with-sample`` seeder so
+    the two promotion paths cannot drift. NOTE on semantics: promoting a task to
+    ready ACCEPTS the engine's heuristic risk scores as trustworthy for ceiling
+    routing — the readiness gate checks acceptance criteria + verification, not
+    the risk numbers, so this is a lightweight acceptance, not a per-dimension
+    human risk sign-off. A later re-score preserves these flags via the merge in
+    ``_write_task_scored``.
+    """
+    from anvil.state.models import EventDraft
+
+    scores = task.scores
+    if scores is None or scores.blast_radius is None or scores.review_risk is None:
+        return
+    score_dict = scores.model_dump()
+    explanation = score_dict.pop("explanation", None)
+    score_dict["blast_radius_confirmed"] = True
+    score_dict["review_risk_confirmed"] = True
+    backend.append(
+        EventDraft(
+            timestamp=now,
+            actor=actor,
+            action="task.scored",
+            target_kind="task",
+            target_id=task.id,
+            payload_json={
+                "task_id": task.id,
+                "scores": score_dict,
+                "explanation": explanation,
+            },
+        )
+    )
+
+
 @review_app.command("tasks")
 def review_tasks(
     json_output: bool = JSON_OPTION,
@@ -1476,6 +1514,12 @@ def review_tasks(
                 },
             )
             backend.append(draft)
+
+            # T009 — confirm the engine risk scores at the review gate so the B45
+            # ceiling is live for a ceilinged runner (an unconfirmed task is
+            # frontier-only). See confirm_task_risk_scores for the exact semantics
+            # (a lightweight acceptance, not a human per-dimension sign-off).
+            confirm_task_risk_scores(backend, task, now, "anvil-cli")
             promoted_to_ready.append(task.id)
     finally:
         backend.close()

@@ -3492,7 +3492,21 @@ class SqliteBackend:
         """
         task_id: str = payload.task_id
         timestamp: str = event.timestamp.isoformat()
-        score = self._build_task_score(payload)
+        # Merge the incoming scores OVER the existing Score, per this method's
+        # contract (the code previously overwrote wholesale, contradicting the
+        # docstring above). Fields absent from the payload are PRESERVED, not
+        # reset to model defaults — critically the risk-confirmation flags the
+        # review gate sets: an ordinary re-score carries only the six numeric
+        # dimensions, and a wholesale overwrite would silently clear
+        # blast_radius_confirmed / review_risk_confirmed and evict a confirmed
+        # within-ceiling task from a ceilinged runner's queue with no path back.
+        row = conn.execute(
+            "SELECT scores FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        existing = json.loads(row[0]) if row and row[0] else {}
+        merged = {**existing, **dict(payload.scores)}
+        merged["explanation"] = payload.explanation
+        score = Score.model_validate(merged)
         scores_json = json.dumps(score.model_dump(mode="json"))
 
         conn.execute(
