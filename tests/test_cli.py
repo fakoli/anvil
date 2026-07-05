@@ -2970,9 +2970,11 @@ class TestReviewTasks:
         self, tmp_path: Path
     ) -> None:
         """T009: `review tasks` marks each promoted task's blast_radius /
-        review_risk CONFIRMED — the review IS the risk assessment — so the B45
-        risk ceiling becomes LIVE. Pre-T009 every engine-scored task was
-        unconfirmed and a ceilinged `next` returned an empty queue."""
+        review_risk CONFIRMED — a lightweight acceptance of the engine's
+        heuristic scores at the readiness gate (not a per-dimension human risk
+        sign-off) — so the B45 risk ceiling becomes LIVE. Pre-T009 every
+        engine-scored task was unconfirmed and a ceilinged `next` returned an
+        empty queue."""
         from anvil.cli._helpers import _open_backend
 
         self._setup_for_review(tmp_path)
