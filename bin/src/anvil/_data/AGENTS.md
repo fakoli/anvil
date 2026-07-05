@@ -86,9 +86,12 @@ and the full 24-tool surface returns the moment the env flag is set. Use it for
 the planning phase; the steady-state execution loop needs none of the 10.
 
 ## Notes
-- Claude Code adds SessionStart/PreToolUse/PostToolUse **hooks**; these are
-  Claude-Code-only and have no cross-harness equivalent. Every capability is
-  still reachable via the CLI/MCP rows above without them.
+- Claude Code and Codex can run Anvil's non-blocking
+  SessionStart/PreToolUse/PostToolUse **hooks** from `hooks/hooks.json`; the
+  manifest uses a shell-free `uv run --quiet ... anvil.cli hook dispatch ...`
+  path so Windows hosts do not depend on bare `bash`. Every capability is still
+  reachable via the CLI/MCP rows above without hooks, and blocking finish gates
+  remain opt-in.
 - `uv` is the only prerequisite; the wrappers self-sync on first run.
 - Distribution: `anvil install <harness> --write` writes the MCP config and
   drops this `AGENTS.md` where the harness reads it (dry-run by default).

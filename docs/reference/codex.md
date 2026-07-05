@@ -50,9 +50,9 @@ fact-check the claims before updating here.
 | Surface | anvil status | Notes |
 | --- | --- | --- |
 | **Plugin / marketplace** | ✅ shipped | `codex plugin marketplace add fakoli/anvil` pulls the **repo root** as the plugin |
-| **MCP server** | ✅ shipped | `codex mcp add anvil -- bash …/bin/anvil-mcp` (24 tools); never via config edit |
+| **MCP server** | ✅ shipped | `codex mcp add anvil -- uv run --quiet --project …/bin python -m anvil.mcp_server` (24 tools); never via config edit |
 | **Skills** (`openai.yaml`) | ✅ this PR (B41) | 8 skills now named in the picker/Plugins panel |
-| **Hooks** | ✅ free via root plugin | root `hooks/hooks.json` (`${CLAUDE_PLUGIN_ROOT}`) ships to Codex unchanged |
+| **Hooks** | ✅ free via root plugin | root `hooks/hooks.json` uses shell-free `uv run --quiet … anvil.cli hook dispatch …` commands |
 | **Automations** | ✅ shipped, PAUSED | `anvil install codex --automations`; never auto-activated |
 | **Headless `exec`/`review` runners** | ⬜ B41 follow-on | `packaging/codex/loops/` (not built yet) |
 | **PostToolUse lease heartbeat** | ✅ shipped (B41) | `anvil hook heartbeat`, wired in `hooks.json` (non-blocking, cross-harness) |
@@ -123,9 +123,12 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
   `hooks.state` (re-prompts if the hook file changes; managed/config hooks are always on). Install +
   onboarding text MUST tell users to run `/hooks` and trust anvil's hooks. ✓
 - **anvil:** SessionStart state-inject, PreToolUse claim-check, PostToolUse file-record + Bash
-  evidence-capture all port for free via the shared root plugin — **zero packaging change** (all 3
-  events supported). **B41 (shipped):** a PostToolUse **lease heartbeat** (`anvil hook heartbeat`,
-  wired, non-blocking) keeps a lazy lease fresh on tool activity.
+  evidence-capture all port via the shared root plugin. The manifest launches
+  `uv run --quiet --project "${CLAUDE_PLUGIN_ROOT}/bin" python -m anvil.cli hook dispatch …`
+  instead of `bash …/*.sh`, so Windows Codex does not resolve the System32/WSL `bash.exe`
+  stub and hang. The legacy `.sh` hooks remain in the repo as a Claude-compatible
+  fallback/test surface. **B41 (shipped):** a PostToolUse **lease heartbeat**
+  (`anvil hook heartbeat`, wired, non-blocking) keeps a lazy lease fresh on tool activity.
 - **B41 Stop-gate (OPT-IN, blocking).** `anvil hook stop-gate` is the Codex/Claude analogue of the
   OpenClaw finish-gate: on `Stop`, if a claimed task lacks submitted evidence it emits
   `{"decision":"block","reason":…}` + exit 2 to force a continuation. It is **NOT auto-wired** —
@@ -142,7 +145,7 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
 - **What:** `codex mcp add NAME -- CMD ARGS…` (stdio) or `--url URL` (HTTP); `codex mcp list|get|remove|login|logout`.
   Stored as `[mcp_servers.<NAME>]` in `config.toml` — stdio keys `command/args/env/cwd/startup_timeout_sec`;
   HTTP keys `url/bearer_token_env_var/http_headers`. ✓
-- **anvil:** native, stable — `codex mcp add anvil -- bash …/bin/anvil-mcp` (24 tools). The MCP
+- **anvil:** native, stable — `codex mcp add anvil -- uv run --quiet --project …/bin python -m anvil.mcp_server` (24 tools). The MCP
   is wired **out-of-band** from the plugin (not via the manifest's mcpServers). ✓
 - **Source:** `codex mcp --help`; `~/.codex/config.toml` `[mcp_servers.*]`; <https://developers.openai.com/codex/mcp>.
 

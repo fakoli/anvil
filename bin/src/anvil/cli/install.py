@@ -18,7 +18,7 @@ the anvil MCP server and nothing else. Tiers:
 
 Default (no flag) is a **dry-run** that prints what it would do. ``--write``
 performs it; every modified file is backed up and logged so ``--rollback`` is
-exact. The engine is untouched; hooks stay Claude-Code-only.
+exact. The engine is untouched; hook wiring remains harness-owned.
 """
 
 from __future__ import annotations
@@ -322,7 +322,10 @@ def _codex_install_commands(*, use_uv_run: bool, root: str | None) -> list[list[
     config, so we never touch ~/.codex/config.toml. `marketplace add` registers the
     anvil plugin (skills + commands + Plugins-panel entry); `mcp add` wires the MCP
     server (`-c mcp.*` overwrite semantics make it idempotent)."""
-    spec = _server_spec(use_uv_run, root)
+    # Codex should never depend on a bare shell wrapper from a source checkout:
+    # on Windows it can resolve to System32/WSL bash and hang, and on every host
+    # MCP stdio startup is cleaner when uv launches the Python module directly.
+    spec = _server_spec(True, root)
     mcp_add = ["codex", "mcp", "add", _SERVER_ID]
     for k, v in spec.get("env", {}).items():
         mcp_add += ["--env", f"{k}={v}"]
@@ -391,7 +394,10 @@ def _openclaw_install_commands(*, use_uv_run: bool, root: str | None) -> list[li
     mcp_add = ["openclaw", "mcp", "add", _SERVER_ID, "--no-probe",
                "--command", spec["command"]]
     for a in spec["args"]:
-        mcp_add += ["--arg", a]
+        # Use the --arg=value form so uv flags like "--quiet", "--project", and
+        # "-m" stay values for OpenClaw's parser instead of being read as
+        # OpenClaw options.
+        mcp_add.append(f"--arg={a}")
     for k, v in spec.get("env", {}).items():
         mcp_add += ["--env", f"{k}={v}"]
     # `--force`: refresh the plugin on re-run. Without it OpenClaw prints "plugin
@@ -823,7 +829,8 @@ def install(
         "--uv-run",
         help=(
             "Emit the explicit `uv run` invocation instead of the bash wrapper "
-            "in the written MCP block (use on hosts without bash)."
+            "in the written MCP block (automatic on Windows; useful elsewhere "
+            "on hosts without bash)."
         ),
     ),
     root: str | None = typer.Option(  # noqa: B008
@@ -870,8 +877,9 @@ def install(
     ``CLIENTS`` table (never re-encoded); the instruction file gets anvil's
     ``AGENTS.md`` spliced into a marked, removable block (the user's own content
     is preserved). Every modified file is backed up first and logged so
-    ``--rollback`` can undo it. Hooks remain Claude-Code-only — install never
-    fakes hook shims for other harnesses.
+    ``--rollback`` can undo it. Hook wiring remains harness-owned: Codex/Claude
+    discover bundled hooks from the plugin, while install never fakes hook shims
+    for MCP-only harnesses.
     """
     if harness not in HARNESSES:
         msg = (

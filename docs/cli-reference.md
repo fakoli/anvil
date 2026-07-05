@@ -989,7 +989,7 @@ stdout (paste-clean) and a one-line `# paste into <file>` hint goes to stderr.
 
 **Flags:**
 
-- `--uv-run` *(flag)* — emit the explicit `uv run --project <bin> python -m
+- `--uv-run` *(flag)* — emit the explicit `uv run --quiet --project <bin> python -m
   anvil.mcp_server` invocation instead of the `bash <bin>/anvil-mcp` wrapper
   (use on hosts without bash, e.g. Windows).
 - `--root PATH` *(option)* — inject `"env": {"ANVIL_ROOT": "<dir>"}` to pin the

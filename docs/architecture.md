@@ -481,18 +481,20 @@ to `anvil sync`. See
 
 ### Hooks (5)
 
-Wired in [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json). All five are
-**non-blocking**: they must `exit 0` regardless of internal failure, must
-not use `set -e` / `set -u` / `set -o pipefail`, must wrap CLI calls with
-`|| true`, and must complete in well under their declared timeout.
+Wired in [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json).
+The manifest calls the shell-free `anvil hook dispatch <name>` path via `uv run
+--quiet --project ...`, so Codex on Windows never depends on a bare `bash`.
+The legacy shell scripts remain as compatibility/test wrappers. All five hooks are
+**non-blocking**: they must `exit 0` regardless of internal failure and must complete
+in well under their declared timeout.
 
 | Hook | Trigger | Script | Purpose |
 |---|---|---|---|
-| `detect-state` | SessionStart | [`detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh) | Surface project state info into the session context |
-| `check-claim` | PreToolUse on `Edit / Write / NotebookEdit` | [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | Warn (non-blocking) if the agent has no active claim covering the file |
-| `record-file-change` | PostToolUse on `Edit / Write / NotebookEdit` | [`record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh) | Record the change against the active claim for orphan detection |
-| `capture-evidence` | PostToolUse on `Bash` | [`capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) | When the command matches a verification pattern, buffer it as evidence for the active claim |
-| `heartbeat` | PostToolUse on `Edit / Write / NotebookEdit` and on `Bash` | [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | Renew the active claim's lease |
+| `detect-state` | SessionStart | `anvil hook dispatch detect-state` / [`detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh) | Surface project state info into the session context |
+| `check-claim` | PreToolUse on `Edit / Write / NotebookEdit` | `anvil hook dispatch check-claim` / [`check-claim.sh`](https://github.com/fakoli/anvil/blob/main/hooks/check-claim.sh) | Warn (non-blocking) if the agent has no active claim covering the file |
+| `record-file-change` | PostToolUse on `Edit / Write / NotebookEdit` | `anvil hook dispatch record-file-change` / [`record-file-change.sh`](https://github.com/fakoli/anvil/blob/main/hooks/record-file-change.sh) | Record the change against the active claim for orphan detection |
+| `capture-evidence` | PostToolUse on `Bash` | `anvil hook dispatch capture-evidence` / [`capture-evidence.sh`](https://github.com/fakoli/anvil/blob/main/hooks/capture-evidence.sh) | When the command matches a verification pattern, buffer it as evidence for the active claim |
+| `heartbeat` | PostToolUse on `Edit / Write / NotebookEdit` and on `Bash` | `anvil hook dispatch heartbeat` / [`heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh) | Renew the active claim's lease |
 
 ### Skills (8)
 

@@ -191,7 +191,7 @@ Six dimensions is more cognitive load than one. We mitigated by making LLM scori
 
 ## Why hooks are non-blocking
 
-**Choice:** all bundled, auto-wired hooks (`detect-state.sh`, `check-claim.sh`, `record-file-change.sh`, `capture-evidence.sh`, and the B41 `heartbeat.sh`) `exit 0` regardless of internal failure, do not use `set -e`/`set -u`/`set -o pipefail`, wrap CLI calls with `|| true`, and must complete in <200ms on hot events (PreToolUse / PostToolUse).
+**Choice:** all bundled, auto-wired hooks (`detect-state`, `check-claim`, `record-file-change`, `capture-evidence`, and the B41 `heartbeat`) run through the shell-free `anvil hook dispatch <name>` path, `exit 0` regardless of internal failure, and must complete under their declared hook timeouts. The legacy `.sh` wrappers follow the same contract, do not use `set -e`/`set -u`/`set -o pipefail`, and wrap CLI calls with `|| true`.
 
 **One opt-in exception (B41):** `anvil hook stop-gate` is a *blocking* Stop-hook evidence gate (the Codex/Claude analogue of the OpenClaw finish-gate). It is **deliberately NOT auto-wired**: it ships as a verb + a documented opt-in recipe, consistent with the blocking-gates-are-opt-in stance (the OpenClaw `--finish-gate` works the same way). Blocking is reserved for surfaces the user explicitly enables and verifies; the *default* hook posture stays non-blocking.
 

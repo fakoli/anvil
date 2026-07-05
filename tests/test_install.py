@@ -32,6 +32,38 @@ install_mod = sys.modules["anvil.cli.install"]
 runner = CliRunner()
 
 
+def _assert_checkout_launcher(spec: dict) -> None:
+    if spec["command"] == "bash":
+        assert spec["args"][-1].endswith("bin/anvil-mcp")
+        return
+
+    assert spec["command"] == "uv"
+    assert spec["args"][0] == "run"
+    assert "--project" in spec["args"]
+    assert spec["args"][-3:] == ["python", "-m", "anvil.mcp_server"]
+
+
+def _assert_uv_checkout_launcher(spec: dict) -> None:
+    assert spec["command"] == "uv"
+    assert spec["args"][0:2] == ["run", "--quiet"]
+    assert "--project" in spec["args"]
+    assert spec["args"][-3:] == ["python", "-m", "anvil.mcp_server"]
+
+
+def _assert_checkout_argv(argv: list[str]) -> None:
+    _assert_checkout_launcher({"command": argv[0], "args": argv[1:]})
+
+
+def _openclaw_arg_values(argv: list[str]) -> list[str]:
+    values: list[str] = []
+    for idx, token in enumerate(argv):
+        if token == "--arg":
+            values.append(argv[idx + 1])
+        elif token.startswith("--arg="):
+            values.append(token.removeprefix("--arg="))
+    return values
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -220,8 +252,11 @@ def test_codex_native_commands_generated(sandbox: dict[str, Path]) -> None:
     # Marketplace source is the public slug (works for any install method), not a
     # local path that wouldn't resolve from a pip wheel.
     assert "codex plugin marketplace add fakoli/anvil" in cmds
-    mcp_add = next(c for c in cmds if c.startswith("codex mcp add anvil"))
-    assert "-- bash" in mcp_add and "anvil-mcp" in mcp_add
+    mcp_add = next(
+        c for c in sandbox["native_cmds"] if c[:3] == ["codex", "mcp", "add"]
+    )
+    cmd_idx = mcp_add.index("--") + 1
+    _assert_uv_checkout_launcher({"command": mcp_add[cmd_idx], "args": mcp_add[cmd_idx + 1:]})
 
 
 def test_openclaw_native_commands_generated(sandbox: dict[str, Path]) -> None:
@@ -232,12 +267,52 @@ def test_openclaw_native_commands_generated(sandbox: dict[str, Path]) -> None:
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     cmds = [" ".join(c) for c in sandbox["native_cmds"]]
-    mcp_add = next(c for c in cmds if c.startswith("openclaw mcp add anvil"))
+    mcp_add = next(
+        c
+        for c in sandbox["native_cmds"]
+        if c[:4] == ["openclaw", "mcp", "add", "anvil"]
+    )
     # --no-probe: a cold-venv probe timeout must not block the save (half-install).
     assert "--no-probe" in mcp_add
-    assert "--command bash" in mcp_add and "anvil-mcp" in mcp_add and "--arg" in mcp_add
+    cmd_idx = mcp_add.index("--command") + 1
+    arg_values = _openclaw_arg_values(mcp_add)
+    _assert_checkout_launcher({"command": mcp_add[cmd_idx], "args": arg_values})
+    assert not any(
+        v == "--arg" and i + 1 < len(mcp_add) and mcp_add[i + 1].startswith("-")
+        for i, v in enumerate(mcp_add)
+    ), "hyphen-leading MCP args must use --arg=<value> for OpenClaw"
     # --force: re-install refreshes the plugin instead of a silent "already exists".
     assert "openclaw plugins install anvil --marketplace fakoli/anvil --force" in cmds
+
+
+def test_openclaw_uv_run_args_are_not_parsed_as_openclaw_flags(
+    sandbox: dict[str, Path],
+) -> None:
+    """The uv launcher contains dash-leading args; emit them as --arg=<value>."""
+    result = runner.invoke(
+        app, ["install", "openclaw", "--write", "--uv-run"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    mcp_add = next(
+        c
+        for c in sandbox["native_cmds"]
+        if c[:4] == ["openclaw", "mcp", "add", "anvil"]
+    )
+    assert "--command" in mcp_add
+    assert mcp_add[mcp_add.index("--command") + 1] == "uv"
+    assert "--arg=--quiet" in mcp_add
+    assert "--arg=--project" in mcp_add
+    assert "--arg=-m" in mcp_add
+    assert not any(
+        v == "--arg" and i + 1 < len(mcp_add) and mcp_add[i + 1].startswith("-")
+        for i, v in enumerate(mcp_add)
+    )
+    _assert_checkout_launcher(
+        {
+            "command": "uv",
+            "args": _openclaw_arg_values(mcp_add),
+        }
+    )
 
 
 def test_native_command_failure_is_surfaced(
@@ -651,7 +726,7 @@ def test_opencode_writes_config(sandbox: dict[str, Path]) -> None:
     spec = written["mcp"]["anvil"]
     assert spec["type"] == "local"
     assert isinstance(spec["command"], list)
-    assert spec["command"][-1].endswith("bin/anvil-mcp")
+    _assert_checkout_argv(spec["command"])
     assert spec["enabled"] is True
     # MCP-only: no AGENTS.md splice.
     assert not (sandbox["project"] / "AGENTS.md").exists()
@@ -681,7 +756,7 @@ def test_roo_writes_project_mcp_json(sandbox: dict[str, Path]) -> None:
     cfg = sandbox["project"] / ".roo" / "mcp.json"
     assert cfg.is_file(), f"expected {cfg} to exist"
     spec = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["anvil"]
-    assert spec["args"][-1].endswith("bin/anvil-mcp")
+    _assert_checkout_launcher(spec)
     assert not (sandbox["project"] / "AGENTS.md").exists()
 
 
@@ -694,7 +769,7 @@ def test_amp_writes_flat_dotted_key(sandbox: dict[str, Path]) -> None:
     data = json.loads(cfg.read_text(encoding="utf-8"))
     # The dotted key is a single flat settings key, not a nested table.
     assert "amp.mcpServers" in data
-    assert data["amp.mcpServers"]["anvil"]["args"][-1].endswith("bin/anvil-mcp")
+    _assert_checkout_launcher(data["amp.mcpServers"]["anvil"])
 
 
 def test_yaml_harnesses_skip_mcp_write(sandbox: dict[str, Path]) -> None:

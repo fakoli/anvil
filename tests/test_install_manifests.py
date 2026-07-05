@@ -12,6 +12,7 @@ repo root (matching ``test_agents_md.py`` / ``test_version_sync.py``).
 
 from __future__ import annotations
 
+from collections import Counter
 import json
 import shutil
 import subprocess
@@ -33,6 +34,19 @@ def _packaging() -> Path:
 
 def _pyproject() -> dict:
     return tomllib.loads((_repo_root() / "bin" / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def _assert_uv_mcp_spec(spec: dict, project_var: str) -> None:
+    assert spec["command"] == "uv"
+    assert spec["args"] == [
+        "run",
+        "--quiet",
+        "--project",
+        f"${{{project_var}}}/bin",
+        "python",
+        "-m",
+        "anvil.mcp_server",
+    ]
 
 
 # --- packaging as a standard installable tool (uv tool / pipx / pip) ----------
@@ -90,6 +104,15 @@ def test_built_wheel_is_self_sufficient(tmp_path: Path) -> None:
 # --- codex: plugin.json (VERIFIED) ---------------------------------------
 
 
+def test_root_mcp_json_launches_without_shell_wrapper() -> None:
+    """The root plugin MCP manifest must not depend on a bare ``bash`` command."""
+    p = _repo_root() / ".mcp.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    spec = data["mcpServers"]["anvil"]
+    assert spec["type"] == "stdio"
+    _assert_uv_mcp_spec(spec, "CLAUDE_PLUGIN_ROOT")
+
+
 def test_codex_plugin_json_parses_and_has_fields() -> None:
     p = _packaging() / "codex" / ".codex-plugin" / "plugin.json"
     data = json.loads(p.read_text(encoding="utf-8"))
@@ -117,13 +140,14 @@ def test_codex_plugin_version_matches_anvil_version() -> None:
 
 
 def test_codex_mcp_json_matches_codex_envelope() -> None:
-    """The bundled .mcp.json carries an `anvil` server pointing at bin/anvil-mcp."""
+    """The bundled .mcp.json launches the MCP server without a shell wrapper."""
     p = _packaging() / "codex" / ".mcp.json"
     data = json.loads(p.read_text(encoding="utf-8"))
     assert "mcpServers" in data
     spec = data["mcpServers"]["anvil"]
-    assert spec["command"] == "bash"
-    assert spec["args"][-1].endswith("bin/anvil-mcp")
+    _assert_uv_mcp_spec(spec, "CLAUDE_PLUGIN_ROOT")
+    assert spec["cwd"] == "${CLAUDE_PLUGIN_ROOT}"
+    assert "CODEX_PLUGIN_ROOT" not in json.dumps(spec)
 
 
 def test_codex_hooks_json_has_no_top_level_metadata() -> None:
@@ -137,6 +161,39 @@ def test_codex_hooks_json_has_no_top_level_metadata() -> None:
     data = json.loads(p.read_text(encoding="utf-8"))
     assert set(data) == {"hooks"}
     assert isinstance(data["hooks"], dict)
+
+
+def test_codex_hooks_json_uses_shell_free_dispatcher() -> None:
+    """Codex runs plugin hooks on Windows too; the manifest must not rely on bash."""
+    p = _repo_root() / "hooks" / "hooks.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert "Stop" not in data["hooks"], "blocking stop-gate must remain opt-in"
+    commands = [
+        hook["command"]
+        for event_specs in data["hooks"].values()
+        for event_spec in event_specs
+        for hook in event_spec["hooks"]
+    ]
+    assert commands, "expected hook commands"
+    expected_prefix = 'uv run --quiet --project "${CLAUDE_PLUGIN_ROOT}/bin" '
+    expected = [
+        expected_prefix + "python -m anvil.cli hook dispatch detect-state",
+        expected_prefix + "python -m anvil.cli hook dispatch check-claim",
+        expected_prefix + "python -m anvil.cli hook dispatch record-file-change",
+        expected_prefix + "python -m anvil.cli hook dispatch capture-evidence",
+        expected_prefix + "python -m anvil.cli hook dispatch heartbeat",
+        expected_prefix + "python -m anvil.cli hook dispatch heartbeat",
+    ]
+    assert Counter(commands) == Counter(expected)
+    for command in commands:
+        lowered = command.lower()
+        assert "bash" not in lowered
+        assert "python3" not in lowered
+        assert "jq" not in lowered
+        assert "powershell" not in lowered
+        assert "pwsh" not in lowered
+        assert "cmd.exe" not in lowered
+        assert "&&" not in command and ";" not in command and "|" not in command
 
 
 # --- codex: marketplace.json (VERIFIED) ----------------------------------

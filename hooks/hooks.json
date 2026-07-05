@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/detect-state.sh",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/bin\" python -m anvil.cli hook dispatch detect-state",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/check-claim.sh",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/bin\" python -m anvil.cli hook dispatch check-claim",
             "timeout": 5
           }
         ]
@@ -29,12 +29,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/record-file-change.sh",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/bin\" python -m anvil.cli hook dispatch record-file-change",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat.sh",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/bin\" python -m anvil.cli hook dispatch heartbeat",
             "timeout": 5
           }
         ]
@@ -44,12 +44,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/capture-evidence.sh",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/bin\" python -m anvil.cli hook dispatch capture-evidence",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat.sh",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/bin\" python -m anvil.cli hook dispatch heartbeat",
             "timeout": 5
           }
         ]

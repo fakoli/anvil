@@ -11,6 +11,8 @@ the JSON envelope.
 from __future__ import annotations
 
 import json
+import tomllib
+from pathlib import Path
 
 import pytest
 import yaml
@@ -25,6 +27,29 @@ from anvil.cli.mcp_config import CLIENTS, _server_spec
 # so neither `anvil.cli.mcp_config` nor monkeypatch's dotted-string form reach the
 # real module. import_module resolves it from sys.modules unambiguously.
 _mcp_mod = importlib.import_module("anvil.cli.mcp_config")
+
+
+def _assert_checkout_launcher(spec: dict) -> None:
+    if spec["command"] == "bash":
+        wrapper = spec["args"][-1]
+        assert wrapper.endswith("bin/anvil-mcp")
+        p = Path(wrapper)
+        assert p.is_absolute()
+        assert p.is_file(), f"wrapper not found on disk: {wrapper}"
+        return
+
+    assert spec["command"] == "uv"
+    args = spec["args"]
+    assert args[0] == "run"
+    proj_idx = args.index("--project")
+    proj = Path(args[proj_idx + 1])
+    assert proj.is_dir()
+    assert proj.name == "bin"
+    assert args[-3:] == ["python", "-m", "anvil.mcp_server"]
+
+
+def _assert_checkout_argv(argv: list[str]) -> None:
+    _assert_checkout_launcher({"command": argv[0], "args": argv[1:]})
 
 
 def test_server_spec_uses_console_script_when_no_checkout(monkeypatch, tmp_path) -> None:
@@ -44,13 +69,37 @@ def test_server_spec_install_mode_ignores_uv_run_and_keeps_root(monkeypatch, tmp
     assert spec["env"] == {"ANVIL_ROOT": "/proj"}
 
 
-def test_server_spec_uses_bash_wrapper_in_checkout(monkeypatch, tmp_path) -> None:
+def test_server_spec_uses_bash_wrapper_in_posix_checkout(monkeypatch, tmp_path) -> None:
     """Source checkout / plugin bundle: the bash wrapper exists, so keep using it
-    (it self-syncs uv deps) — the existing, unchanged behavior."""
+    on POSIX (it self-syncs uv deps) — the existing, unchanged behavior."""
     wrapper = tmp_path / "anvil-mcp"
     wrapper.write_text("#!/bin/sh\n")
     monkeypatch.setattr(_mcp_mod, "_wrapper_path", lambda: wrapper)
-    assert _server_spec(use_uv_run=False, root=None) == {"command": "bash", "args": [str(wrapper)]}
+    monkeypatch.setattr(_mcp_mod, "_windows_host", lambda: False)
+    assert _server_spec(use_uv_run=False, root=None) == {
+        "command": "bash",
+        "args": [str(wrapper)],
+    }
+
+
+def test_server_spec_uses_uv_run_in_windows_checkout(monkeypatch, tmp_path) -> None:
+    """On Windows a bare ``bash`` can resolve to WSL's bash.exe and hang; source
+    checkout configs should use the explicit uv invocation by default."""
+    wrapper = tmp_path / "anvil-mcp"
+    wrapper.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(_mcp_mod, "_wrapper_path", lambda: wrapper)
+    monkeypatch.setattr(_mcp_mod, "_windows_host", lambda: True)
+    spec = _server_spec(use_uv_run=False, root=None)
+    assert spec["command"] == "uv"
+    assert spec["args"] == [
+        "run",
+        "--quiet",
+        "--project",
+        str(tmp_path),
+        "python",
+        "-m",
+        "anvil.mcp_server",
+    ]
 
 # Clients whose paste-ready config is YAML, not JSON/TOML.
 _YAML_CLIENTS = {"continue", "goose"}
@@ -95,23 +144,17 @@ def test_each_client_emits_expected_top_key(client: str) -> None:
         assert "anvil" in data[top]
 
 
-def test_server_points_at_real_wrapper() -> None:
-    """The server `args` path ends with bin/anvil-mcp, is absolute, and exists.
+def test_server_points_at_launchable_checkout_entry() -> None:
+    """The server spec points at either the real wrapper or a real bin/ project.
 
     Also guarantees no ${CLAUDE_PLUGIN_ROOT} token leaks into the output.
     """
-    from pathlib import Path
-
     result = runner.invoke(app, ["mcp-config", "cursor"], catch_exceptions=False)
     assert result.exit_code == 0, result.stdout
     assert "CLAUDE_PLUGIN_ROOT" not in result.stdout
 
     spec = json.loads(result.stdout)["mcpServers"]["anvil"]
-    wrapper = spec["args"][-1]
-    assert wrapper.endswith("bin/anvil-mcp")
-    p = Path(wrapper)
-    assert p.is_absolute()
-    assert p.is_file(), f"wrapper not found on disk: {wrapper}"
+    _assert_checkout_launcher(spec)
 
 
 def test_uv_run_flag() -> None:
@@ -164,8 +207,6 @@ def test_zed_top_key() -> None:
 
 def test_opencode_shape() -> None:
     """opencode uses a unique entry: argv-array command, type local, enabled."""
-    from pathlib import Path
-
     result = runner.invoke(app, ["mcp-config", "opencode"], catch_exceptions=False)
     assert result.exit_code == 0, result.stdout
     data = json.loads(result.stdout)
@@ -176,8 +217,7 @@ def test_opencode_shape() -> None:
     # command is a single argv array, not a command/args split.
     assert isinstance(spec["command"], list)
     assert "args" not in spec
-    wrapper = spec["command"][-1]
-    assert wrapper.endswith("bin/anvil-mcp") and Path(wrapper).is_absolute()
+    _assert_checkout_argv(spec["command"])
 
 
 def test_opencode_root_uses_environment_key() -> None:
@@ -195,7 +235,7 @@ def test_amp_uses_flat_dotted_key() -> None:
     result = runner.invoke(app, ["mcp-config", "amp"], catch_exceptions=False)
     data = json.loads(result.stdout)
     assert "amp.mcpServers" in data  # literal dotted key
-    assert data["amp.mcpServers"]["anvil"]["args"][-1].endswith("bin/anvil-mcp")
+    _assert_checkout_launcher(data["amp.mcpServers"]["anvil"])
 
 
 def test_continue_is_yaml_block() -> None:
@@ -206,8 +246,7 @@ def test_continue_is_yaml_block() -> None:
     servers = doc["mcpServers"]
     assert isinstance(servers, list)
     anvil_srv = next(s for s in servers if s["name"] == "anvil")
-    assert anvil_srv["command"] == "bash"
-    assert anvil_srv["args"][-1].endswith("bin/anvil-mcp")
+    _assert_checkout_launcher(anvil_srv)
 
 
 def test_goose_is_yaml_extensions() -> None:
@@ -215,9 +254,8 @@ def test_goose_is_yaml_extensions() -> None:
     result = runner.invoke(app, ["mcp-config", "goose"], catch_exceptions=False)
     ext = yaml.safe_load(result.stdout)["extensions"]["anvil"]
     assert ext["type"] == "stdio"
-    assert ext["cmd"] == "bash"  # goose uses cmd, not command
+    _assert_checkout_launcher({"command": ext["cmd"], "args": ext["args"]})
     assert ext["enabled"] is True
-    assert ext["args"][-1].endswith("bin/anvil-mcp")
 
 
 def test_goose_root_uses_envs_key() -> None:
@@ -237,9 +275,34 @@ def test_codex_is_toml() -> None:
     assert "[mcp_servers.anvil]" in out
     assert "command = " in out
     assert "args = " in out
+    spec = tomllib.loads(out)["mcp_servers"]["anvil"]
+    assert spec["command"] == "uv"
+    assert spec["args"][0:2] == ["run", "--quiet"]
+    assert spec["args"][-3:] == ["python", "-m", "anvil.mcp_server"]
     # Not JSON.
     with pytest.raises(json.JSONDecodeError):
         json.loads(out)
+
+
+def test_codex_toml_uses_uv_launcher_on_windows(monkeypatch, tmp_path) -> None:
+    """The actual Codex TOML render must follow the Windows-safe launcher path."""
+    wrapper = tmp_path / "anvil-mcp"
+    wrapper.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(_mcp_mod, "_wrapper_path", lambda: wrapper)
+    monkeypatch.setattr(_mcp_mod, "_windows_host", lambda: True)
+    result = runner.invoke(app, ["mcp-config", "codex"], catch_exceptions=False)
+    assert result.exit_code == 0, result.stdout
+    spec = tomllib.loads(result.stdout)["mcp_servers"]["anvil"]
+    assert spec["command"] == "uv"
+    assert spec["args"] == [
+        "run",
+        "--quiet",
+        "--project",
+        str(tmp_path),
+        "python",
+        "-m",
+        "anvil.mcp_server",
+    ]
 
 
 def test_root_flag_injects_env_in_toml() -> None:
