@@ -1805,7 +1805,7 @@ def parse_prd(
             given (but still honoured for the partition).
         cwd:  Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _DEFAULT_PRD_IDS, prd_source_path
+    from anvil.cli._helpers import _DEFAULT_PRD_IDS, display_path, prd_source_path
     from anvil.clock import SystemClock
     from anvil.planning.template import parse_prd as _parse_prd_impl
     from anvil.state.models import EventDraft
@@ -1829,17 +1829,19 @@ def parse_prd(
             prd_path = (base / prd_path).resolve()
     else:
         prd_path = prd_source_path(state_dir, parse_prd_id)
+    prd_display = display_path(prd_path)
 
     if not prd_path.exists():
         raise ToolError(
-            f"PRD file not found at {prd_path}. "
+            f"PRD file not found at {prd_display}. "
             "Author your PRD there or pass file= an explicit path.",
         )
 
     try:
         markdown = prd_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ToolError(f"Cannot read {prd_path}: {exc}") from exc
+        reason = exc.strerror or exc.__class__.__name__
+        raise ToolError(f"Cannot read {prd_display}: {reason}") from exc
 
     result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
 
@@ -2216,7 +2218,7 @@ def plan_tasks(
             ``.anvil/prd.md`` source + default partition, byte-identical to the
             pre-multi-PRD behaviour.
     """
-    from anvil.cli._helpers import prd_source_path
+    from anvil.cli._helpers import display_path, prd_source_path
     from anvil.clock import SystemClock
     from anvil.planning.inference import infer_all
     from anvil.planning.llm import LLMProviderError
@@ -2242,16 +2244,18 @@ def plan_tasks(
     parse_prd_id = prd_id.strip() if (prd_id and prd_id.strip()) else "prd"
 
     prd_path = prd_source_path(state_dir, parse_prd_id)
+    prd_display = display_path(prd_path)
     if not prd_path.exists():
         raise ToolError(
-            f"PRD file not found at {prd_path}. "
+            f"PRD file not found at {prd_display}. "
             "Author your PRD and call parse_prd first.",
         )
 
     try:
         markdown = prd_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ToolError(f"Cannot read {prd_path}: {exc}") from exc
+        reason = exc.strerror or exc.__class__.__name__
+        raise ToolError(f"Cannot read {prd_display}: {reason}") from exc
 
     # v1.17.0 — load config so the LLM-planner backstop honors the
     # project's llm_provider / llm_tier / bedrock / custom-endpoint knobs.
@@ -2351,7 +2355,8 @@ def plan_tasks(
         try:
             current_markdown = prd_path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise ToolError(f"Cannot re-read {prd_path}: {exc}") from exc
+            reason = exc.strerror or exc.__class__.__name__
+            raise ToolError(f"Cannot re-read {prd_display}: {reason}") from exc
 
         from anvil.planning._plan_helpers import has_tasks_section
         if not has_tasks_section(current_markdown):
@@ -2361,15 +2366,17 @@ def plan_tasks(
             try:
                 prd_path.write_text(new_markdown, encoding="utf-8")
             except OSError as exc:
+                reason = exc.strerror or exc.__class__.__name__
                 raise ToolError(
-                    f"Cannot write generated tasks to {prd_path}: {exc}"
+                    f"Cannot write generated tasks to {prd_display}: {reason}"
                 ) from exc
 
         # Re-parse so the event emission below sees the new tasks.
         try:
             markdown = prd_path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise ToolError(f"Cannot re-read {prd_path}: {exc}") from exc
+            reason = exc.strerror or exc.__class__.__name__
+            raise ToolError(f"Cannot re-read {prd_display}: {reason}") from exc
         result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
         llm_generated = True
         llm_provider = gen_result.provider_used

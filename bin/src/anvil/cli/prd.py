@@ -15,6 +15,7 @@ from anvil.cli._helpers import (
     _require_state_dir,
     _resolve_state_dir,
     canonical_prd_id,
+    display_path,
     prd_source_path,
     resolve_prd_id,
 )
@@ -27,7 +28,6 @@ prd_app = typer.Typer(
     help="PRD lifecycle commands: parse, review, approve.",
     no_args_is_help=True,
 )
-
 
 @prd_app.command("parse")
 def prd_parse(
@@ -82,9 +82,10 @@ def prd_parse(
         prd_path = file
     else:
         prd_path = prd_source_path(state_dir, parse_prd_id)
+    prd_display = display_path(prd_path)
     if not prd_path.exists():
         typer.echo(
-            f"Error: PRD file not found at {prd_path}. "
+            f"Error: PRD file not found at {prd_display}. "
             "Author your PRD there or pass --file PATH.",
             err=True,
         )
@@ -93,7 +94,8 @@ def prd_parse(
     try:
         markdown = prd_path.read_text(encoding="utf-8")
     except OSError as exc:
-        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+        reason = exc.strerror or exc.__class__.__name__
+        typer.echo(f"Error: cannot read {prd_display}: {reason}", err=True)
         raise typer.Exit(code=1) from exc
 
     result = parse_prd(markdown, prd_id=parse_prd_id)
@@ -297,7 +299,7 @@ def prd_parse(
         f"{len(result.features)} features, "
         f"{len(result.tasks)} tasks."
     )
-    typer.echo(f"PRD source: {prd_path}")
+    typer.echo(f"PRD source: {prd_display}")
 
 
 @prd_app.command("review")

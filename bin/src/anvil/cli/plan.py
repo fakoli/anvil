@@ -24,6 +24,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
     _scores_complete,
     canonical_prd_id,
+    display_path,
     prd_source_path,
     resolve_prd_id,
 )
@@ -308,16 +309,17 @@ def plan(
     parse_prd_id = prd if prd else "prd"
 
     prd_path = prd_source_path(state_dir, parse_prd_id)
+    prd_display = display_path(prd_path)
     if not prd_path.exists():
         if json_output:
             fail(
                 "plan",
-                f"PRD file not found at {prd_path}. "
+                f"PRD file not found at {prd_display}. "
                 "Author your PRD first, then run `anvil prd parse`.",
                 code="not_found",
             )
         typer.echo(
-            f"Error: PRD file not found at {prd_path}. "
+            f"Error: PRD file not found at {prd_display}. "
             "Author your PRD first, then run `anvil prd parse`.",
             err=True,
         )
@@ -326,9 +328,10 @@ def plan(
     try:
         markdown = prd_path.read_text(encoding="utf-8")
     except OSError as exc:
+        reason = exc.strerror or exc.__class__.__name__
         if json_output:
-            fail("plan", f"cannot read {prd_path}: {exc}", code="io_error")
-        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+            fail("plan", f"cannot read {prd_display}: {reason}", code="io_error")
+        typer.echo(f"Error: cannot read {prd_display}: {reason}", err=True)
         raise typer.Exit(code=1) from exc
 
     # v1.17.0: load config once and pass it to every LLM call site so the
@@ -413,9 +416,14 @@ def plan(
         try:
             current_markdown = prd_path.read_text(encoding="utf-8")
         except OSError as exc:
+            reason = exc.strerror or exc.__class__.__name__
             if json_output:
-                fail("plan", f"cannot re-read {prd_path}: {exc}", code="io_error")
-            typer.echo(f"Error: cannot re-read {prd_path}: {exc}", err=True)
+                fail(
+                    "plan",
+                    f"cannot re-read {prd_display}: {reason}",
+                    code="io_error",
+                )
+            typer.echo(f"Error: cannot re-read {prd_display}: {reason}", err=True)
             raise typer.Exit(code=1) from exc
 
         from anvil.planning._plan_helpers import has_tasks_section
@@ -426,14 +434,15 @@ def plan(
             try:
                 prd_path.write_text(new_markdown, encoding="utf-8")
             except OSError as exc:
+                reason = exc.strerror or exc.__class__.__name__
                 if json_output:
                     fail(
                         "plan",
-                        f"cannot write generated tasks to {prd_path}: {exc}",
+                        f"cannot write generated tasks to {prd_display}: {reason}",
                         code="io_error",
                     )
                 typer.echo(
-                    f"Error: cannot write generated tasks to {prd_path}: {exc}",
+                    f"Error: cannot write generated tasks to {prd_display}: {reason}",
                     err=True,
                 )
                 raise typer.Exit(code=1) from exc
@@ -442,9 +451,14 @@ def plan(
         try:
             markdown = prd_path.read_text(encoding="utf-8")
         except OSError as exc:
+            reason = exc.strerror or exc.__class__.__name__
             if json_output:
-                fail("plan", f"cannot re-read {prd_path}: {exc}", code="io_error")
-            typer.echo(f"Error: cannot re-read {prd_path}: {exc}", err=True)
+                fail(
+                    "plan",
+                    f"cannot re-read {prd_display}: {reason}",
+                    code="io_error",
+                )
+            typer.echo(f"Error: cannot re-read {prd_display}: {reason}", err=True)
             raise typer.Exit(code=1) from exc
 
         parsed = parse_prd(markdown, prd_id=parse_prd_id, provider=provider)
@@ -732,7 +746,7 @@ def plan(
                 fail(
                     "plan",
                     "0 tasks generated; pass without --no-llm to auto-generate "
-                    f"via LLM, or author tasks manually in {prd_path}.",
+                    f"via LLM, or author tasks manually in {prd_display}.",
                     code="no_tasks",
                 )
             emit_success(
@@ -754,7 +768,7 @@ def plan(
                 f"Planned {len(parsed.features)} features, "
                 f"{len(parsed.tasks)} tasks "
                 f"({llm_generated_count} generated via LLM ({llm_tier_used}), "
-                f"appended to {prd_path})."
+                f"appended to {prd_display})."
             )
         elif (
             no_llm
@@ -770,7 +784,7 @@ def plan(
             typer.echo(
                 "Error: 0 tasks generated; pass without --no-llm to "
                 "auto-generate via LLM, or author tasks manually in "
-                f"{prd_path}.",
+                f"{prd_display}.",
                 err=True,
             )
             raise typer.Exit(code=1)

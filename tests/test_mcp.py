@@ -2415,6 +2415,41 @@ class TestParsePrd:
         with pytest.raises(ToolError, match="PRD file not found|prd.md"):
             _run(run())
 
+    def test_error_when_named_prd_file_missing_uses_forward_slash_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_state_dir(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {"prd_id": "nope"})
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        message = str(excinfo.value)
+        assert "prds/nope.md" in message
+        assert "prds\\nope.md" not in message
+
+    def test_error_when_named_prd_file_unreadable_uses_forward_slash_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        blocked = state_dir / "prds" / "blocked.md"
+        blocked.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {"prd_id": "blocked"})
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        message = str(excinfo.value)
+        assert "prds/blocked.md" in message
+        assert "prds\\blocked.md" not in message
+        assert "cannot read" in message.lower()
+
     def test_prd_id_scopes_to_named_partition(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2880,6 +2915,41 @@ class TestPlanTasks:
         with pytest.raises(ToolError, match="PRD file not found|prd.md"):
             _run(run())
 
+    def test_error_when_named_prd_file_missing_uses_forward_slash_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_state_dir(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("plan_tasks", {"prd_id": "nope"})
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        message = str(excinfo.value)
+        assert "prds/nope.md" in message
+        assert "prds\\nope.md" not in message
+
+    def test_error_when_named_prd_file_unreadable_uses_forward_slash_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        blocked = state_dir / "prds" / "blocked.md"
+        blocked.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("plan_tasks", {"prd_id": "blocked"})
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        message = str(excinfo.value)
+        assert "prds/blocked.md" in message
+        assert "prds\\blocked.md" not in message
+        assert "cannot read" in message.lower()
+
     def test_error_when_prd_file_present_but_not_parsed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3266,6 +3336,58 @@ class TestPlanTasksLlmBackstop:
 
         with pytest.raises(ToolError, match="LLM call failed|claude"):
             _run(run())
+
+    def test_named_prd_backstop_write_error_uses_forward_slash_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Generated-task write failures should not leak raw Windows paths."""
+        state_dir = _init_state_dir(tmp_path)
+        prds_dir = state_dir / "prds"
+        prds_dir.mkdir()
+        prd_path = prds_dir / "v0.2.md"
+        prd_path.write_text(_PRD_WITHOUT_TASKS_MCP, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        from anvil.planning.llm import LLMResponse
+
+        class _Provider:
+            def generate(self, **kwargs):  # type: ignore[no-untyped-def]
+                return LLMResponse(
+                    text=_CANNED_LLM_TASKS_MCP,
+                    input_tokens=100,
+                    cached_input_tokens=0,
+                    output_tokens=50,
+                    model="test-model",
+                    finish_reason="end_turn",
+                )
+
+        self._install_recorded_resolver(monkeypatch, _Provider())
+
+        async def parse() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {"prd_id": "v0.2"})
+
+        _run(parse())
+
+        original_write_text = Path.write_text
+
+        def _fail_named_prd_write(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if self == prd_path:
+                raise OSError(13, "simulated write failure", str(self))
+            return original_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", _fail_named_prd_write)
+
+        async def plan() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("plan_tasks", {"prd_id": "v0.2"})
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(plan())
+        message = str(excinfo.value)
+        assert "cannot write generated tasks" in message.lower()
+        assert "prds/v0.2.md" in message
+        assert "prds\\v0.2.md" not in message
 
 
 # ===========================================================================
