@@ -6,8 +6,47 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-06
+
+Release-scoped PRD and cross-harness hardening release. This finishes the
+v0.4.0 work packet set: OpenClaw is version-locked, Codex and Windows launch
+paths are shell-free, PRD-scoped task discovery is explicit, and risk ceilings
+are live across CLI/MCP.
+
+### Added
+
+- **OpenClaw is now release-locked with the other first-class harnesses.** The
+  native OpenClaw plugin manifest and package are pinned to `anvil.__version__`
+  and covered by `tests/test_install_manifests.py`, matching the Codex/Gemini
+  release-drift guard.
+- **OpenClaw runner controls for low-capability agents.** The native plugin
+  exposes `maxBlast`, `maxReviewRisk`, and `activePrd` config knobs, exports
+  them to Anvil's environment, and ships separate verbose guidance for weaker
+  agents without changing Claude/Codex instructions.
+
+### Changed
+
+- **Risk ceilings are live on both CLI and MCP paths.** `next_claimable` and
+  MCP `get_next_task` now share the same ceiling helper, and `anvil review
+  tasks` confirms blast-radius/review-risk scores durably so low-ceiling
+  runners receive eligible confirmed tasks instead of an inert empty queue.
+- **Task discovery is PRD-scoped.** `anvil next --prd`, `anvil list --prd`,
+  and `anvil status --prd` restrict output to the intended PRD. `anvil claim`
+  warns before cross-PRD drift by default and can refuse it via
+  `crossPrdGuard: refuse`, with `--force` as the explicit override.
+
 ### Fixed
 
+- **Codex and Windows launch paths no longer rely on shell assumptions.** Codex
+  MCP/hook manifests use shell-free `uv ... python -m ...` dispatch, the Stop
+  hook remains opt-in, Windows HOME/global-config expansion is normalized, and
+  install/run-workflow/signing/sync-provider tests avoid POSIX-only assumptions.
+- **Claim races are serialized within one Python process.** SQLite-backed claim
+  operations use a re-entrant process lock around the full logical claim flow,
+  preventing same-process contenders from sharing an otherwise exclusive task.
+- **Named PRD paths display portably on Windows.** `anvil prd parse --prd <id>`
+  and missing-source diagnostics render `prds/<id>.md` with forward slashes,
+  matching the cross-platform CLI contract.
 - **Windows test suite passes natively — the failure half of #118.** Three
   clusters of Windows-only test failures (green on Linux CI, so previously
   invisible) are fixed: (1) reconciliation's `missing_expected_file` diagnostic
@@ -20,6 +59,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   couldn't run a hook referenced by a Windows-filesystem path; (3) the `--cwd`
   forwarding tests compare paths separator-agnostically. The ~10× suite slowness
   on Windows (git-subprocess spawn cost) remains tracked in #118.
+
+### Documented
+
+- **Live OpenClaw weak-runner validation captured.** The v0.4.0 docs include
+  the Fakoli mini gateway run proving `activePrd` propagation, risk-ceiling
+  withholding, weak-agent guidance injection, and claim/evidence/submit flow.
+- User-facing version references were refreshed for `0.4.0` across the README,
+  getting-started guide, CLI reference, architecture notes, and OpenClaw README.
 
 ## [0.3.2] - 2026-07-05
 

@@ -1,20 +1,22 @@
-"""Regression test for version-string sync across anvil's three
-Python source-of-truth files. Added after structure-critic MUST FIX on
+"""Regression test for version-string sync across anvil's Python
+version-bearing files. Added after structure-critic MUST FIX on
 PR #65 caught `__init__.py` stale at 1.16.0 while every other source
 was at 1.17.0.
 
-The three sources that MUST agree (the Python world):
+The Python package/runtime version-bearing files that MUST agree:
 
   1. ``bin/pyproject.toml`` — what pip / uv reads at install
   2. ``bin/src/anvil/__init__.py`` — what ``import anvil``
      exposes as ``__version__`` at runtime
   3. ``.claude-plugin/plugin.json`` — what Claude Code's plugin loader
      reads at install/load
+  4. ``bin/uv.lock`` — committed editable-package lock metadata
 
 ``.claude-plugin/marketplace.json`` deliberately omits ``version`` so it
-inherits from ``plugin.json`` — there is no fourth version string to keep in
-sync (its schema/wiring is guarded by ``tests/test_marketplace.py``). README
-badges are documentation, not a source of truth — also not checked here.
+inherits from ``plugin.json`` — there is no extra root Claude marketplace
+version string to keep in sync (its schema/wiring is guarded by
+``tests/test_marketplace.py``). README badges are documentation, not a source of
+truth — also not checked here.
 """
 
 from __future__ import annotations
@@ -33,8 +35,8 @@ def _plugin_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def test_version_sync_across_pyproject_initpy_pluginjson() -> None:
-    """All three Python source-of-truth version strings MUST match."""
+def test_version_sync_across_pyproject_initpy_pluginjson_lockfile() -> None:
+    """All Python package/runtime version strings MUST match."""
     plugin = _plugin_root()
 
     # 1. pyproject.toml — read via tomllib (stdlib in 3.11+).
@@ -54,14 +56,27 @@ def test_version_sync_across_pyproject_initpy_pluginjson() -> None:
     with plugin_json_path.open(encoding="utf-8") as fh:
         manifest_version = json.load(fh)["version"]
 
-    # All three MUST agree. The error message names every source so a
+    # 4. uv.lock — the editable package entry must track pyproject. Other
+    #    dependency versions are unrelated and can legitimately differ.
+    uv_lock_path = plugin / "bin" / "uv.lock"
+    with uv_lock_path.open("rb") as fh:
+        lock_data = tomllib.load(fh)
+    lock_version = next(
+        package["version"]
+        for package in lock_data["package"]
+        if package["name"] == "anvil-state"
+        and package.get("source", {}).get("editable") == "."
+    )
+
+    # All four MUST agree. The error message names every source so a
     # release manager can fix the lagging file without grepping.
-    assert py_version == init_version == manifest_version, (
+    assert py_version == init_version == manifest_version == lock_version, (
         f"Version drift across anvil sources of truth:\n"
         f"  bin/pyproject.toml             → {py_version}\n"
-        f"  anvil/__init__.py       → {init_version}\n"
+        f"  anvil/__init__.py              → {init_version}\n"
         f"  .claude-plugin/plugin.json     → {manifest_version}\n"
-        f"All three MUST match. (regression test for "
+        f"  bin/uv.lock editable package   → {lock_version}\n"
+        f"All four MUST match. (regression test for "
         f"structure-critic MUST FIX, PR #65)"
     )
 
