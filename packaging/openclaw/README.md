@@ -49,7 +49,7 @@ anvil install openclaw --rollback
 runs `openclaw mcp unset anvil` + `openclaw plugins uninstall anvil --force`. The
 global registration is only removed when no other project still references it.
 
-## Native finish-gate plugin (B42 Phase 2)
+## Native finish-gate plugin (B42 Phase 2, current in v0.4.0)
 
 Anvil ships one **native OpenClaw plugin** at `packaging/openclaw/plugin/` — a
 `before_agent_finalize` hook that **blocks an agent from finalizing a turn while

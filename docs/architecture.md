@@ -1,6 +1,6 @@
 # anvil architecture
 
-> Condensed reference for the current **v0.3.2** standalone state. For the original v0
+> Condensed reference for the current **v0.4.0** standalone state. For the original v0
 > vision and aspirational items, see
 > [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
 > For what is planned but not yet shipped, see
