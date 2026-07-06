@@ -5747,6 +5747,222 @@ def _seed_two_prd_project(tmp_path: Path) -> str:
     return project_id
 
 
+def _set_cross_prd_guard(tmp_path: Path, value: str) -> None:
+    """Set crossPrdGuard in the generated project config."""
+    config_path = tmp_path / ".anvil" / "config.yaml"
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    updated: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.startswith("crossPrdGuard:"):
+            updated.append(f"crossPrdGuard: {value}")
+            replaced = True
+        else:
+            updated.append(line)
+    if not replaced:
+        updated.append(f"crossPrdGuard: {value}")
+    config_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+
+
+def _active_claim_count(tmp_path: Path, task_id: str) -> int:
+    """Return active claim count for a task in the temp project's DB."""
+    db = tmp_path / ".anvil" / "state.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM claims WHERE task_id = ? AND status = 'active'",
+                (task_id,),
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+
+class TestT007CrossPrdClaimGuard:
+    """T007: `claim` warns by default across explicit PRD boundaries, and a
+    project config can hard-stop the same mismatch unless the caller forces it.
+    """
+
+    def test_claim_cross_prd_warns_and_proceeds_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        """`claim T001 --prd v0.2` warns because T001 belongs to default PRD."""
+        _seed_two_prd_project(tmp_path)
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", "T001", "--prd", "v0.2", "--actor", "agent-test"]
+        )
+
+        assert result.exit_code == 0, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "Warning:" in combined, combined
+        assert "task 'T001' belongs to PRD 'default'" in combined, combined
+        assert "active PRD 'v0.2'" in combined, combined
+        assert _active_claim_count(tmp_path, "T001") == 1
+
+    def test_claim_cross_prd_warning_is_json_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """JSON callers get the cross-PRD warning in data.warnings."""
+        _seed_two_prd_project(tmp_path)
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "claim",
+                "T001",
+                "--prd",
+                "v0.2",
+                "--actor",
+                "agent-test",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        warnings = payload["data"]["warnings"]
+        assert any("task 'T001' belongs to PRD 'default'" in w for w in warnings)
+        assert _active_claim_count(tmp_path, "T001") == 1
+
+    def test_claim_cross_prd_env_warns_and_proceeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """$ANVIL_PRD activates the same cross-PRD claim guard as --prd."""
+        _seed_two_prd_project(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        result = _invoke_cmd(tmp_path, ["claim", "T001", "--actor", "agent-test"])
+
+        assert result.exit_code == 0, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "task 'T001' belongs to PRD 'default'" in combined, combined
+        assert "active PRD 'v0.2'" in combined, combined
+        assert _active_claim_count(tmp_path, "T001") == 1
+
+    def test_claim_cross_prd_unready_does_not_emit_success_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """Warn-mode text must not say the claim succeeded before it does."""
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = 'T001'")
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", "T001", "--prd", "v0.2", "--actor", "agent-test"]
+        )
+
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "Claimed anyway" not in combined, combined
+        assert "Warning: task 'T001' belongs to PRD" not in combined, combined
+        assert _active_claim_count(tmp_path, "T001") == 0
+
+    def test_claim_prd_guard_refuse_exits_1_without_force(
+        self, tmp_path: Path
+    ) -> None:
+        """crossPrdGuard: refuse turns the default warning into a hard stop."""
+        _seed_two_prd_project(tmp_path)
+        _set_cross_prd_guard(tmp_path, "refuse")
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", "T001", "--prd", "v0.2", "--actor", "agent-test"]
+        )
+
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "task 'T001' belongs to PRD 'default'" in combined, combined
+        assert "Pass --force to override" in combined, combined
+        assert _active_claim_count(tmp_path, "T001") == 0
+
+    def test_claim_prd_guard_refuse_json_reports_code(
+        self, tmp_path: Path
+    ) -> None:
+        """JSON refusal uses a machine-readable cross_prd_guard error code."""
+        _seed_two_prd_project(tmp_path)
+        _set_cross_prd_guard(tmp_path, "refuse")
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "claim",
+                "T001",
+                "--prd",
+                "v0.2",
+                "--actor",
+                "agent-test",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "cross_prd_guard"
+        assert _active_claim_count(tmp_path, "T001") == 0
+
+    def test_claim_prd_guard_invalid_config_soft_loads_to_warn(
+        self, tmp_path: Path
+    ) -> None:
+        """Malformed config follows the CLI soft-load contract: warn, fallback."""
+        _seed_two_prd_project(tmp_path)
+        _set_cross_prd_guard(tmp_path, "block")
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", "T001", "--prd", "v0.2", "--actor", "agent-test"]
+        )
+
+        assert result.exit_code == 0, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "config.yaml load failed" in combined, combined
+        assert "crossPrdGuard" in combined, combined
+        assert "task 'T001' belongs to PRD 'default'" in combined, combined
+        assert _active_claim_count(tmp_path, "T001") == 1
+
+    def test_claim_prd_guard_refuse_force_overrides(
+        self, tmp_path: Path
+    ) -> None:
+        """--force overrides crossPrdGuard: refuse and suppresses the warning."""
+        _seed_two_prd_project(tmp_path)
+        _set_cross_prd_guard(tmp_path, "refuse")
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "claim",
+                "T001",
+                "--prd",
+                "v0.2",
+                "--actor",
+                "agent-test",
+                "--force",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "belongs to PRD" not in combined, combined
+        assert _active_claim_count(tmp_path, "T001") == 1
+
+
 class TestT019PrdScopedCliCommands:
     """T019: the `--prd` flag (and its $ANVIL_PRD env twin) on the READ/filter
     CLI surfaces — next / list / show / packet / score / prd review. The

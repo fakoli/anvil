@@ -38,10 +38,9 @@ def claim(
         "--force",
         help=(
             "Override file-conflict warnings (overlapping likely_files with "
-            "an active claim) AND silence v1.16.0 dependency warnings "
-            "(undone task.dependencies). The claim itself proceeds either "
-            "way for the dependency check; --force only silences the "
-            "noise."
+            "an active claim), override crossPrdGuard: refuse, and silence "
+            "dependency/cross-PRD warnings. The claim itself proceeds either "
+            "way for the dependency check; --force only silences the noise."
         ),
     ),
     actor: str | None = typer.Option(  # noqa: B008
@@ -70,6 +69,7 @@ def claim(
             "auto-generated branch is used (behavior unchanged)."
         ),
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -84,8 +84,8 @@ def claim(
     {"claim": {...}, "branch": "...", "worktree": "..." | null,
     "warnings": [...]}}``. File-conflict and missing-task failures yield a
     ``{"ok": false, ...}`` envelope with a non-zero exit; non-fatal
-    dependency/branch/worktree warnings are collected into ``warnings``
-    instead of being printed to stderr.
+    dependency/cross-PRD/branch/worktree warnings are collected into
+    ``warnings`` instead of being printed to stderr.
     """
 
     from anvil.claims.manager import ClaimError, ClaimManager, ConflictWarning
@@ -139,6 +139,42 @@ def claim(
                 fail("claim", f"task '{task_id}' not found.", code="not_found")
             typer.echo(f"Error: task '{task_id}' not found.", err=True)
             raise typer.Exit(code=1)
+
+        cross_prd_warning: str | None = None
+        # T007: if the caller intentionally scoped the claim loop to a PRD
+        # partition (--prd or $ANVIL_PRD, both arriving through PRD_OPTION), do
+        # not let a typo'd task id silently drift into another PRD's work. Warn
+        # by default; projects can opt into a hard stop with crossPrdGuard:
+        # refuse, and --force still means "I know, proceed".
+        scoped_prd_id = (
+            canonical_prd_id(resolve_prd_id(backend, prd))
+            if prd and prd.strip()
+            else None
+        )
+        if scoped_prd_id is not None:
+            task_prd = backend.get_prd_for_task(task)
+            task_prd_id = (
+                task_prd.id
+                if task_prd is not None
+                else canonical_prd_id(task.prd_id or "default")
+            )
+            if task_prd_id != scoped_prd_id:
+                detail = (
+                    f"task '{task_id}' belongs to PRD '{task_prd_id}', "
+                    f"not active PRD '{scoped_prd_id}'"
+                )
+                guard = cfg.cross_prd_guard if cfg is not None else "warn"
+                if guard == "refuse" and not force:
+                    message = f"{detail}. Pass --force to override."
+                    if json_output:
+                        fail("claim", message, code="cross_prd_guard")
+                    typer.echo(f"Error: {message}", err=True)
+                    raise typer.Exit(code=1)
+                if not force:
+                    cross_prd_warning = (
+                        f"{detail}. Claimed anyway; pass --force to silence "
+                        "this warning."
+                    )
 
         # Pre-claim conflict check (file overlap + group).  Fetch expected_files
         # from likely_files — the manager uses these for overlap detection.
@@ -253,6 +289,12 @@ def claim(
                 fail("claim", str(exc), code="claim_error")
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
+
+        if cross_prd_warning is not None:
+            if json_output:
+                warnings.append(cross_prd_warning)
+            else:
+                typer.echo(f"Warning: {cross_prd_warning}", err=True)
 
         # Git branch creation — non-blocking; warnings go to stderr.
         # v1.15.0: branch_prefix is host-project-configurable so claims

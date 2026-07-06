@@ -10,14 +10,24 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from anvil.cli.install import HARNESSES
 
 
 def _script() -> Path:
     return Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
+
+
+def _sh() -> str:
+    shell = shutil.which("sh")
+    if shell is None:
+        pytest.skip("POSIX sh is not available on this platform")
+    return shell
 
 
 def test_usage_harness_list_matches_the_registry() -> None:
@@ -37,20 +47,20 @@ def test_usage_harness_list_matches_the_registry() -> None:
 
 
 def test_install_script_is_valid_sh() -> None:
-    r = subprocess.run(["sh", "-n", str(_script())], capture_output=True, text=True)
+    r = subprocess.run([_sh(), "-n", str(_script())], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 
 def test_install_script_requires_a_harness_arg() -> None:
     # No arg → usage + exit 2, before any uv/network work.
-    r = subprocess.run(["sh", str(_script())], capture_output=True, text=True)
+    r = subprocess.run([_sh(), str(_script())], capture_output=True, text=True)
     assert r.returncode == 2
     assert "Usage" in r.stderr
 
 
 def test_help_flag_exits_zero_on_stdout() -> None:
     # An explicit -h/--help is not an error: exit 0, usage to stdout.
-    r = subprocess.run(["sh", str(_script()), "--help"], capture_output=True, text=True)
+    r = subprocess.run([_sh(), str(_script()), "--help"], capture_output=True, text=True)
     assert r.returncode == 0
     assert "Usage" in r.stdout
 
@@ -58,7 +68,9 @@ def test_help_flag_exits_zero_on_stdout() -> None:
 def test_claude_code_redirects_to_plugin_marketplace() -> None:
     # claude-code is not an `anvil install` target — redirect to the plugin flow
     # (exit 0), not try to install it. Runs before the uv check, so no stubs.
-    r = subprocess.run(["sh", str(_script()), "claude-code"], capture_output=True, text=True)
+    r = subprocess.run(
+        [_sh(), str(_script()), "claude-code"], capture_output=True, text=True
+    )
     assert r.returncode == 0
     assert "/plugin marketplace add fakoli/anvil" in r.stdout
 
@@ -84,7 +96,9 @@ def _run_with_stubs(
     anvil.write_text("#!/bin/sh\n" f'printf "anvil %s\\n" "$*" >> "{calls}"\nexit 0\n')
     anvil.chmod(0o755)
     env = {**os.environ, "PATH": f"{stub}:{os.environ.get('PATH', '')}", "HOME": str(tmp_path)}
-    r = subprocess.run(["sh", str(_script()), *args], capture_output=True, text=True, env=env)
+    r = subprocess.run(
+        [_sh(), str(_script()), *args], capture_output=True, text=True, env=env
+    )
     return r, (calls.read_text() if calls.exists() else "")
 
 

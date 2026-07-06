@@ -343,8 +343,11 @@ class SqliteBackend:
         # writers are legal and broken deterministically at replay by (ts, id).
         self._max_lamport: int = 0
         # In-process threading lock nested inside the flock for same-process
-        # MCP + CLI thread safety. The outer flock serializes cross-process appends.
-        self._proc_lock = threading.Lock()
+        # MCP + CLI thread safety. The outer flock serializes cross-process
+        # appends. This is re-entrant because higher-level operations such as
+        # ClaimManager.claim() may serialize their pre-append reads on the same
+        # lock, then call append(), whose _append_lock() takes it again.
+        self._proc_lock = threading.RLock()
         # Set True during replay_from_empty and _forward_catch_up so that
         # _write_* methods with audit side-effects (e.g. _write_evidence_submitted)
         # suppress those writes — audit lines must not be appended during replay.
@@ -2085,6 +2088,21 @@ class SqliteBackend:
                     yield
                 finally:
                     _append_lock_release(_lock_fh)
+
+    @contextmanager
+    def claim_operation_lock(self) -> Iterator[None]:
+        """Serialize one logical claim operation on this backend instance.
+
+        The append path already serializes writes, but claim also performs
+        pre-append reads (task status, PRD gate, conflict checks). A single
+        sqlite3 connection is not safe for overlapping reads from many threads,
+        even with ``check_same_thread=False``. This lock lets ClaimManager make
+        those reads and the eventual append one same-process critical section.
+        Cross-process atomicity still comes from the events.jsonl flock and
+        SQLite write transaction inside append().
+        """
+        with self._proc_lock:
+            yield
 
     def _read_tail_window(self) -> list[bytes]:
         """Return candidate raw lines from the end of events.jsonl, oldest first.

@@ -37,6 +37,11 @@ __all__ = ["migrate_workspace"]
 _COMMAND = "migrate-workspace"
 
 
+def _display_path(path: Path) -> str:
+    """Return a stable CLI/JSON path spelling across Windows and POSIX."""
+    return path.as_posix()
+
+
 def migrate_workspace(
     yes: bool = typer.Option(  # noqa: B008
         False,
@@ -66,10 +71,11 @@ def migrate_workspace(
         _report(json_output, {
             "status": "already_migrated",
             "source": None,
-            "target": str(target_anvil),
+            "target": _display_path(target_anvil),
             "applied": False,
             "message": (
-                f"Home workspace already exists at {target_anvil}; nothing to migrate "
+                f"Home workspace already exists at {_display_path(target_anvil)}; "
+                "nothing to migrate "
                 f"(it is authoritative — anvil never overwrites it)."
             ),
         })
@@ -96,10 +102,10 @@ def migrate_workspace(
         _report(json_output, {
             "status": "no_legacy_state",
             "source": None,
-            "target": str(target_anvil),
+            "target": _display_path(target_anvil),
             "applied": False,
             "message": (
-                f"No legacy in-repo .anvil/ with a state.db found under {root}; "
+                f"No legacy in-repo .anvil/ with a state.db found under {_display_path(root)}; "
                 f"nothing to migrate."
             ),
         })
@@ -110,12 +116,13 @@ def migrate_workspace(
     if not yes:
         _report(json_output, {
             "status": "dry_run",
-            "source": str(legacy_src),
-            "target": str(target_anvil),
+            "source": _display_path(legacy_src),
+            "target": _display_path(target_anvil),
             "applied": False,
             "files": files,
             "message": (
-                f"Would copy {files} file(s) from {legacy_src} → {target_anvil}. "
+                f"Would copy {files} file(s) from {_display_path(legacy_src)} → "
+                f"{_display_path(target_anvil)}. "
                 f"Dry run — nothing written. Re-run with --yes to apply."
             ),
         })
@@ -140,13 +147,14 @@ def migrate_workspace(
 
     _report(json_output, {
         "status": "migrated",
-        "source": str(legacy_src),
-        "target": str(target_anvil),
+        "source": _display_path(legacy_src),
+        "target": _display_path(target_anvil),
         "applied": True,
         "files": files,
         "message": (
-            f"Migrated {files} file(s) from {legacy_src} → {target_anvil}. The legacy "
-            f"directory was left in place as a fallback."
+            f"Migrated {files} file(s) from {_display_path(legacy_src)} → "
+            f"{_display_path(target_anvil)}. The legacy directory was left in "
+            "place as a fallback."
         ),
     })
 

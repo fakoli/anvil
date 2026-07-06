@@ -7,7 +7,9 @@ missing-file path, and a full end-to-end run via the Typer app.
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -163,9 +165,10 @@ def test_cli_end_to_end_runs_workflow(tmp_path: Path):
         wf_dir = Path(".anvil/workflows")
         wf_dir.mkdir(parents=True)
         # proof command that passes → step applies end to end
+        proof_command = f'"{sys.executable}" -c "import sys; sys.exit(0)"'
         (wf_dir / "demo.yaml").write_text(
             'name: demo\nsteps:\n  - id: check\n    run: "verify"\n'
-            '    proof:\n      - command: "true"\n',
+            f"    proof:\n      - command: {json.dumps(proof_command)}\n",
             encoding="utf-8",
         )
         result = runner.invoke(app, ["run-workflow", "demo"], catch_exceptions=False)
