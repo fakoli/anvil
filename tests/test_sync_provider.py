@@ -20,6 +20,7 @@ provider, no SDKs — every test runs in-process.
 from __future__ import annotations
 
 import datetime
+import os
 import subprocess
 import sys
 
@@ -630,7 +631,7 @@ class TestRecordKey:
             check=True,
             capture_output=True,
             text=True,
-            env={"PYTHONHASHSEED": "12345"},
+            env={**os.environ, "PYTHONHASHSEED": "12345"},
         )
         child_key = result.stdout.strip()
         assert child_key == expected

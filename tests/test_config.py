@@ -151,6 +151,7 @@ default_lease_minutes: 120
 default_heartbeat_minutes: 10
 git_ops_mode: record_only
 durability: strict
+crossPrdGuard: refuse
 sync_github_enabled: true
 sync_github_conflict_strategy: local_wins
 """
@@ -162,8 +163,45 @@ sync_github_conflict_strategy: local_wins
         assert cfg.default_heartbeat_minutes == 10
         assert cfg.git_ops_mode == "record_only"
         assert cfg.durability == "strict"
+        assert cfg.cross_prd_guard == "refuse"
         assert cfg.sync_github_enabled is True
         assert cfg.sync_github_conflict_strategy == "local_wins"
+
+    def test_cross_prd_guard_defaults_to_warn(self, tmp_path: Path) -> None:
+        """T007 — absent key keeps warn-by-default behaviour."""
+        config_path = _write_config(tmp_path / "config.yaml", _minimal_yaml())
+        cfg = load_config(config_path)
+        assert cfg.cross_prd_guard == "warn"
+
+    def test_cross_prd_guard_refuse_loads(self, tmp_path: Path) -> None:
+        """T007 — crossPrdGuard: refuse is parsed for claim hard-stop mode."""
+        yaml_content = _minimal_yaml() + "crossPrdGuard: refuse\n"
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        cfg = load_config(config_path)
+        assert cfg.cross_prd_guard == "refuse"
+
+    def test_cross_prd_guard_snake_case_alias_loads(
+        self, tmp_path: Path
+    ) -> None:
+        """Programmatic configs may use the dataclass-shaped snake-case key."""
+        yaml_content = _minimal_yaml() + "cross_prd_guard: refuse\n"
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        cfg = load_config(config_path)
+        assert cfg.cross_prd_guard == "refuse"
+
+    def test_cross_prd_guard_invalid_value_raises(self, tmp_path: Path) -> None:
+        """T007 — typo'd guard modes fail at config-load time."""
+        yaml_content = _minimal_yaml() + "crossPrdGuard: block\n"
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        with pytest.raises(ValueError, match="crossPrdGuard"):
+            load_config(config_path)
+
+    def test_cross_prd_guard_in_default_template(self, tmp_path: Path) -> None:
+        """The scaffolded default config declares crossPrdGuard: warn."""
+        config_path = tmp_path / "config.yaml"
+        write_default_config(config_path, project_name="Tmpl Project")
+        cfg = load_config(config_path)
+        assert cfg.cross_prd_guard == "warn"
 
     def test_strict_evidence_defaults_false(self, tmp_path: Path) -> None:
         """T025/B25 — absent key → advisory default (False), back-compat."""
@@ -489,6 +527,11 @@ class TestConfigTemplate:
         cfg = load_config(config_path)
         assert cfg.project_name == "Template Project"
 
+    def test_config_template_includes_cross_prd_guard(self) -> None:
+        """T007 — template exposes the warn-by-default cross-PRD claim guard."""
+        parsed = yaml.safe_load(config_template(project_name="Template Project"))
+        assert parsed["crossPrdGuard"] == "warn"
+
 
 # ---------------------------------------------------------------------------
 # Phase 9 T5 — multi-provider sync.providers config schema
@@ -755,6 +798,40 @@ class TestGlobalConfigPath:
         p = global_config_path()
         assert p == (Path.home() / ".config" / "anvil" / "config.yaml").resolve()
 
+    def test_global_config_honours_home_when_path_home_is_userprofile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On Windows-like resolution, HOME isolates global config with state."""
+        userprofile = tmp_path / "userprofile"
+        home = tmp_path / "home"
+        userprofile.mkdir()
+        home.mkdir()
+        monkeypatch.delenv("ANVIL_GLOBAL_CONFIG", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: userprofile)
+        monkeypatch.setenv("USERPROFILE", str(userprofile))
+        monkeypatch.setenv("HOME", str(home))
+
+        p = global_config_path()
+        assert p == (home / ".config" / "anvil" / "config.yaml").resolve()
+
+    def test_global_config_path_home_monkeypatch_wins_without_userprofile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POSIX tests that monkeypatch Path.home must not write real HOME."""
+        patched_home = tmp_path / "patched-home"
+        env_home = tmp_path / "env-home"
+        patched_home.mkdir()
+        env_home.mkdir()
+        monkeypatch.delenv("ANVIL_GLOBAL_CONFIG", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.delenv("USERPROFILE", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: patched_home)
+        monkeypatch.setenv("HOME", str(env_home))
+
+        p = global_config_path()
+        assert p == (patched_home / ".config" / "anvil" / "config.yaml").resolve()
+
     def test_global_config_honours_xdg_config_home(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -773,6 +850,22 @@ class TestGlobalConfigPath:
         monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(explicit))
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ignored"))
         assert global_config_path() == explicit.resolve()
+
+    def test_global_config_tilde_override_uses_home_semantics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ANVIL_GLOBAL_CONFIG=~/... follows the same HOME isolation."""
+        userprofile = tmp_path / "userprofile"
+        home = tmp_path / "home"
+        userprofile.mkdir()
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: userprofile)
+        monkeypatch.setenv("USERPROFILE", str(userprofile))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", "~/anvil-global.yaml")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ignored"))
+
+        assert global_config_path() == (home / "anvil-global.yaml").resolve()
 
 
 class TestLoadMergedGlobalConfig:
@@ -812,6 +905,18 @@ class TestLoadMergedGlobalConfig:
         project = self._project(tmp_path, "default_lease_minutes: 30\n")
         cfg = load_merged_config(project)
         assert cfg.default_lease_minutes == 30
+
+    def test_global_config_project_cross_prd_alias_overrides_global_primary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Alias normalization must happen before global<project merge."""
+        global_path = tmp_path / "global.yaml"
+        _write_config(global_path, "crossPrdGuard: refuse\n")
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_path))
+
+        project = self._project(tmp_path, "cross_prd_guard: warn\n")
+        cfg = load_merged_config(project)
+        assert cfg.cross_prd_guard == "warn"
 
     def test_global_config_falls_through_to_builtin_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -918,6 +1023,25 @@ class TestLoadMergedGlobalConfig:
 
         cfg = load_merged_config(self._project(tmp_path), global_path=arg_global)
         assert cfg.branch_prefix == "fromarg"
+
+    def test_global_config_explicit_tilde_arg_uses_home_semantics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """load_merged_config(global_path='~/...') uses Anvil HOME semantics."""
+        userprofile = tmp_path / "userprofile"
+        home = tmp_path / "home"
+        userprofile.mkdir()
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: userprofile)
+        monkeypatch.setenv("USERPROFILE", str(userprofile))
+        monkeypatch.setenv("HOME", str(home))
+        _write_config(home / "global.yaml", "branch_prefix: fromhome\n")
+
+        cfg = load_merged_config(
+            self._project(tmp_path),
+            global_path="~/global.yaml",
+        )
+        assert cfg.branch_prefix == "fromhome"
 
     def test_global_config_empty_file_is_no_defaults(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

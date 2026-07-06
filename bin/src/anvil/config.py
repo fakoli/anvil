@@ -199,6 +199,13 @@ class Config:
     # explicit opt-out and produces an unprefixed `<task>-<slug>` branch.
     branch_prefix: str = "agent"
 
+    # T007 — cross-PRD claim guard. When a caller scopes `anvil claim` with
+    # --prd / $ANVIL_PRD but names a task owned by another PRD, warn by default
+    # so "execute this PRD" does not silently drift into another partition.
+    # Projects that want a hard boundary can set crossPrdGuard: refuse; callers
+    # may still override an intentional cross-PRD claim with `--force`.
+    cross_prd_guard: Literal["warn", "refuse"] = "warn"
+
     # v1.21.0 — complexity score → auto-expansion loop.
     #
     # After scoring, every task whose ``complexity`` is at/above
@@ -340,7 +347,7 @@ def load_config(path: str | Path) -> Config:
             "Run `anvil init` to create one."
         )
 
-    data = _read_yaml_mapping(resolved)
+    data = _normalize_config_aliases(_read_yaml_mapping(resolved))
     _validate_required(data, resolved)
     return _build_config(data, resolved)
 
@@ -355,6 +362,40 @@ def load_config(path: str | Path) -> Config:
 _GLOBAL_CONFIG_ENV: Final[str] = "ANVIL_GLOBAL_CONFIG"
 _XDG_CONFIG_HOME_ENV: Final[str] = "XDG_CONFIG_HOME"
 _GLOBAL_CONFIG_SUBPATH: Final[str] = "anvil/config.yaml"
+
+
+def _home_dir() -> Path:
+    """Home directory for global Anvil config, honoring isolated HOME on Windows."""
+    import os
+
+    path_home = Path.home()
+    path_home_resolved = path_home.resolve()
+    home = os.environ.get("HOME")
+    userprofile = os.environ.get("USERPROFILE")
+    if userprofile is not None and userprofile.strip():
+        try:
+            if path_home_resolved != Path(userprofile).expanduser().resolve():
+                return path_home
+        except OSError:
+            return path_home
+    if home is not None and home.strip():
+        home_path = Path(home).expanduser().resolve()
+        if userprofile is None and path_home_resolved != home_path:
+            return path_home
+        return home_path
+    return path_home
+
+
+def _expand_home_path(path: str | Path) -> Path:
+    """Expand a leading ``~`` using Anvil's HOME-aware home resolver."""
+    import os
+
+    raw = os.fspath(path)
+    if raw == "~":
+        return _home_dir()
+    if raw.startswith("~/") or raw.startswith("~\\"):
+        return _home_dir() / raw[2:]
+    return Path(path).expanduser()
 
 
 def global_config_path() -> Path:
@@ -376,13 +417,13 @@ def global_config_path() -> Path:
 
     override = os.environ.get(_GLOBAL_CONFIG_ENV)
     if override is not None and override.strip() != "":
-        return Path(override).expanduser().resolve()
+        return _expand_home_path(override).resolve()
 
     xdg = os.environ.get(_XDG_CONFIG_HOME_ENV)
     if xdg is not None and xdg.strip() != "":
-        return (Path(xdg).expanduser() / _GLOBAL_CONFIG_SUBPATH).resolve()
+        return (_expand_home_path(xdg) / _GLOBAL_CONFIG_SUBPATH).resolve()
 
-    return (Path.home() / ".config" / _GLOBAL_CONFIG_SUBPATH).resolve()
+    return (_home_dir() / ".config" / _GLOBAL_CONFIG_SUBPATH).resolve()
 
 
 def load_merged_config(
@@ -434,7 +475,7 @@ def load_merged_config(
         )
 
     gpath = (
-        Path(global_path).expanduser().resolve()
+        _expand_home_path(global_path).resolve()
         if global_path is not None
         else global_config_path()
     )
@@ -445,9 +486,9 @@ def load_merged_config(
         # carry project_name/project_id, and a broken global config raises the
         # same loud ValueError/YAMLError as a broken project config (the user
         # explicitly wrote it, so a silent skip would hide their typo).
-        global_data = _read_yaml_mapping(gpath)
+        global_data = _normalize_config_aliases(_read_yaml_mapping(gpath))
 
-    project_data = _read_yaml_mapping(resolved)
+    project_data = _normalize_config_aliases(_read_yaml_mapping(resolved))
 
     # Shallow merge: project keys win over global keys. config.yaml is a flat
     # mapping of scalars plus the single nested ``sync`` block; a project that
@@ -475,6 +516,21 @@ def _read_yaml_mapping(resolved: Path) -> dict[str, object]:
             f"Config file {resolved} must be a YAML mapping, got {type(raw).__name__!r}."
         )
     return raw
+
+
+def _normalize_config_aliases(data: dict[str, object]) -> dict[str, object]:
+    """Normalize supported compatibility aliases inside one config layer.
+
+    ``load_merged_config`` merges raw dictionaries by key, so aliases must be
+    normalized before the global<project merge. Otherwise a global primary key
+    can accidentally beat a project alias key even though project config is the
+    higher-precedence layer.
+    """
+    normalized = dict(data)
+    if "cross_prd_guard" in normalized and "crossPrdGuard" not in normalized:
+        normalized["crossPrdGuard"] = normalized["cross_prd_guard"]
+    normalized.pop("cross_prd_guard", None)
+    return normalized
 
 
 def _build_config(data: dict[str, object], resolved: Path) -> Config:
@@ -526,6 +582,12 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
             "leading/trailing slashes and whitespace are not allowed "
             f"({resolved}). Use e.g. 'feature' or 'fix' or 'feature/agent'."
         )
+
+    cross_prd_guard = _validate_literal(
+        data.get("crossPrdGuard", "warn"),
+        ("warn", "refuse"),
+        "crossPrdGuard",
+    )
 
     # v1.21.0 — auto-expansion knobs. ``auto_expand`` follows the same loose
     # bool coercion as ``sync_github_enabled``; the threshold is validated
@@ -664,6 +726,7 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         git_ops_mode=git_ops_mode,  # type: ignore[arg-type]
         durability=durability,  # type: ignore[arg-type]
         branch_prefix=branch_prefix,
+        cross_prd_guard=cross_prd_guard,  # type: ignore[arg-type]
         auto_expand=auto_expand,
         auto_expand_threshold=auto_expand_threshold,
         events_storage=events_storage,  # type: ignore[arg-type]
@@ -1067,6 +1130,16 @@ events_storage: local
 # Nested prefixes (e.g. `feature/agent`) are also accepted verbatim.
 # ---------------------------------------------------------------------------
 branch_prefix: agent
+
+# ---------------------------------------------------------------------------
+# Cross-PRD claim guard (warn | refuse)
+#
+# When `anvil claim` is scoped with --prd or $ANVIL_PRD, but the requested task
+# belongs to a different PRD partition:
+#   warn   — DEFAULT. Warn, then proceed.
+#   refuse — exit 1 unless the caller passes --force.
+# ---------------------------------------------------------------------------
+crossPrdGuard: warn
 
 # ---------------------------------------------------------------------------
 # Auto-expansion (v1.21.0)

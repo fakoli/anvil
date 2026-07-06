@@ -462,6 +462,35 @@ class ClaimManager:
             ClaimError: If any gate fails (task not found, wrong status, PRD gate,
                         or conflict with force=False).
         """
+        lock_factory = getattr(self._backend, "claim_operation_lock", None)
+        if lock_factory is not None:
+            with lock_factory():
+                return self._claim_unlocked(
+                    task_id,
+                    expected_files=expected_files,
+                    claim_type=claim_type,
+                    force=force,
+                    branch=branch,
+                )
+        return self._claim_unlocked(
+            task_id,
+            expected_files=expected_files,
+            claim_type=claim_type,
+            force=force,
+            branch=branch,
+        )
+
+    def _claim_unlocked(
+        self,
+        task_id: str,
+        *,
+        expected_files: list[str] | None = None,
+        claim_type: ClaimType = ClaimType.task,
+        force: bool = False,
+        branch: str | None = None,
+    ) -> ClaimResult:
+        """Claim implementation; caller owns same-backend serialization."""
+
         files: list[str] = expected_files or []
 
         # Gate 1: task must exist.

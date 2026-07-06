@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -197,6 +198,8 @@ class _Outcome:
 def _run_race(
     backend: SqliteBackend,
     attempts: list[tuple[str, str, list[str]]],
+    *,
+    manager_factory: Callable[[str], ClaimManager] | None = None,
 ) -> list[_Outcome]:
     """Fire one claim attempt per thread simultaneously; return every outcome.
 
@@ -210,7 +213,11 @@ def _run_race(
     outcomes_lock = threading.Lock()
 
     def _worker(actor: str, task_id: str, files: list[str]) -> None:
-        manager = ClaimManager(backend, SystemClock(), actor=actor)
+        manager = (
+            manager_factory(actor)
+            if manager_factory is not None
+            else ClaimManager(backend, SystemClock(), actor=actor)
+        )
         won = False
         claim_id: str | None = None
         dirty: BaseException | None = None
@@ -322,6 +329,37 @@ def test_same_task_zero_double_claims(tmp_path: Path) -> None:
             # Persisted state agrees: one active claim for the task.
             assert _active_claim_count_per_task(db_path) == {"T001": 1}
         conn.close()
+    finally:
+        b.close()
+
+
+def test_shared_claim_manager_instance_zero_dirty_errors(tmp_path: Path) -> None:
+    """A single ClaimManager instance shared by threads still serializes reads.
+
+    Regression for the same-backend claim lock: an instance-level recursion flag
+    let thread B skip the backend lock while thread A held it.
+    """
+    db_path = str(tmp_path / "state.db")
+    b = _make_backend(tmp_path)
+    try:
+        _setup_project_and_prd(b)
+        conn = sqlite3.connect(db_path)
+        _insert_feature(conn)
+        _insert_task(conn, task_id="T001", likely_files=["a.py"])
+        conn.close()
+
+        shared_manager = ClaimManager(b, SystemClock(), actor="shared-agent")
+        attempts = [(f"agent-{n}", "T001", ["a.py"]) for n in range(_N_THREADS)]
+        outcomes = _run_race(
+            b,
+            attempts,
+            manager_factory=lambda _actor: shared_manager,
+        )
+
+        _assert_no_dirty_errors(outcomes)
+        winners = [o for o in outcomes if o.won]
+        assert len(winners) == 1
+        assert _active_claim_count_per_task(db_path) == {"T001": 1}
     finally:
         b.close()
 
@@ -490,9 +528,8 @@ def test_cli_claim_honours_fractional_lease_minutes(tmp_path: Path) -> None:
 
     Migrated from test_claim_concurrency.py to preserve B02 coverage.
     """
-    from datetime import UTC, datetime, timedelta
-
     import sqlite3 as _sqlite3
+    from datetime import UTC, datetime, timedelta
 
     from typer.testing import CliRunner
 

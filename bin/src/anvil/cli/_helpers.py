@@ -302,6 +302,32 @@ def _workspace_key(root: Path) -> str:
     return f"{slug}-{digest}"
 
 
+def _home_dir() -> Path:
+    """Return the user home Anvil should use for workspace state.
+
+    Prefer HOME when explicitly set so tests and Unix-like shells can isolate
+    the workspace location consistently on Windows too, where ``Path.home()``
+    normally follows USERPROFILE instead.
+    """
+    path_home = Path.home()
+    path_home_resolved = path_home.resolve()
+    home = os.environ.get("HOME")
+    userprofile = os.environ.get("USERPROFILE")
+    if userprofile is not None and userprofile.strip():
+        try:
+            if path_home_resolved != Path(userprofile).expanduser().resolve():
+                return path_home
+        except OSError:
+            return path_home
+
+    if home is not None and home.strip():
+        home_path = Path(home).expanduser().resolve()
+        if userprofile is None and path_home_resolved != home_path:
+            return path_home
+        return home_path
+    return path_home
+
+
 def _home_workspace_base(loc: Path) -> Path:
     """The HOME-dir base (the dir that CONTAINS ``.anvil/``) for a project's shared
     workspace under ``~/.anvil/workspaces/``, keyed by the canonical repo.
@@ -312,7 +338,7 @@ def _home_workspace_base(loc: Path) -> Path:
     (:func:`_workspace_key`). Only one extra ``exists()`` check, on the default
     no-explicit-cwd path."""
     root = _canonical_project_root(loc)
-    workspaces = Path.home() / ".anvil" / "workspaces"
+    workspaces = _home_dir() / ".anvil" / "workspaces"
     legacy = workspaces / (root.name or "project")
     if (legacy / ".anvil" / "state.db").exists():
         return legacy

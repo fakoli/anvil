@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 
 from typer.testing import CliRunner
 
@@ -54,7 +55,8 @@ def test_keypair_generate_is_idempotent_and_0600(tmp_path) -> None:  # type: ign
     priv2, pub2, sid2 = _signer(tmp_path)  # second call loads, doesn't regenerate
     assert (pub1, sid1) == (pub2, sid2)
     mode = (tmp_path / "keys" / "ed25519.pem").stat().st_mode & 0o777
-    assert oct(mode) == "0o600"
+    if os.name != "nt":
+        assert oct(mode) == "0o600"
     assert sid1 == signing.fingerprint(pub1)
 
 
