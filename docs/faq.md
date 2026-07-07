@@ -2,7 +2,7 @@
 
 Practical answers for evaluating, installing, and operating anvil. For
 positioning ("why is this different from X"), see the comparison table in the
-[README](https://github.com/fakoli/anvil/blob/main/README.md#comparison-vs-alternatives) and
+[README](https://github.com/fakoli/anvil/blob/main/README.md#anvil-vs-an-issue-tracker) and
 [`_positioning.md`](_positioning.md). For architectural depth, see
 [`architecture.md`](architecture.md); for design rationale, see
 [`design.md`](design.md).
@@ -13,8 +13,12 @@ positioning ("why is this different from X"), see the comparison table in the
 
 ### Do I need a GitHub account or repository?
 
-No. Canonical state lives locally in `.anvil/` (SQLite + JSONL) under
-your project root. GitHub Issues is an opt-in *sync target* via the
+No. Canonical state lives locally (SQLite + JSONL) — by default in a
+per-project workspace under your **home** directory,
+`~/.anvil/workspaces/<dir>-<hash8>/.anvil/`, not inside your repo. Run
+`anvil status` to see the exact resolved path, or set
+`ANVIL_STATE_LAYOUT=local` to keep state in-repo at `./.anvil/` instead.
+GitHub Issues is an opt-in *sync target* via the
 bidirectional sync engine — never the source of truth. The CLI works fully
 offline; `init`, `plan`, `claim`, `submit`, and `apply` make zero network
 calls.
@@ -25,9 +29,11 @@ authenticate `gh` or export `GITHUB_TOKEN`, then run
 `anvil sync github`. The mappings flow both ways and conflicts are
 labeled rather than auto-resolved.
 
-See [`design.md` § Why local-first](design.md) for the rationale, and
+See [`design.md` § Why local-first](design.md) for the rationale,
+[`how-to/state-location.md`](how-to/state-location.md) for exactly where
+state lives and how to override it, and
 [`how-to/syncing-with-github.md`](how-to/syncing-with-github.md) for the
-setup walkthrough.
+sync setup walkthrough.
 
 ### Do I need an Anthropic, OpenAI, or other LLM API key?
 
@@ -176,33 +182,38 @@ See [`how-to/getting-started.md`](how-to/getting-started.md) and
 
 The five hooks are wired in
 [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) at the `SessionStart`,
-`PreToolUse`, and `PostToolUse` events — including `heartbeat.sh`, which
+`PreToolUse`, and `PostToolUse` events — including `heartbeat`, which
 fires at `PostToolUse` on Edit/Write/NotebookEdit and Bash and renews the
-active lease. To disable one without
-uninstalling the plugin, comment out or delete the relevant block in
-`hooks.json` and restart your Claude Code session.
+active lease. Every entry's `command` runs the shell-free dispatcher —
+`uv run --project bin python -m anvil.cli hook dispatch <name>` — there is
+no `.sh` script file for the manifest to resolve.
 
-All five hooks are non-blocking by design — they `exit 0` regardless of
-internal failure, never use `set -e` / `set -u` / `set -o pipefail`, and
-wrap CLI calls with `|| true`. A hook that errors out internally already
+To disable one hook without uninstalling the plugin, delete or comment out
+its block in `hooks.json` and restart your Claude Code session. To turn
+every hook off at once, disable or uninstall the anvil plugin through your
+harness's plugin configuration; every hook also fast-paths to a silent
+no-op if it can't resolve any anvil state for the project.
+
+All five hooks are non-blocking by design: each `anvil hook dispatch ...`
+call wraps its body in `try/except Exception: pass` and always exits 0,
+regardless of internal failure. A hook that errors out internally already
 behaves like a disabled hook: it warns once to stderr and gets out of the
 way. See [`design.md` § Why hooks are non-blocking](design.md).
 
-If you want a hook off without editing `hooks.json`, rename the script
-file (e.g., `mv hooks/check-claim.sh hooks/check-claim.sh.off`) — the
-manifest's `command` reference will fail to resolve and the hook becomes a
-silent no-op. To debug a hook that is misbehaving, run the script directly
-from a shell to inspect its stderr; a `ANVIL_HOOK_DEBUG=1` env var
-that redirects hook stderr to `.anvil/.hook-debug.log` is tracked
-as a Phase 11 backlog item ([P11-HK-C2](roadmap.md)) but does not ship
-today.
+To debug a hook that is misbehaving, run the dispatcher directly with a
+sample payload on stdin to inspect its stderr:
+`echo '{}' | uv run --project bin python -m anvil.cli hook dispatch <name>`.
+A `ANVIL_HOOK_DEBUG=1` env var that redirects hook stderr to
+`.anvil/.hook-debug.log` is tracked as a Phase 11 backlog item
+([P11-HK-C2](roadmap.md)) but does not ship today.
 
 ### Where does my data live, and should I commit it to git?
 
-Everything lives under `.anvil/` in your project root:
+By default, nowhere near your repo. State lives in a per-project workspace
+under your home directory, keyed by the project's canonical git repo:
 
 ```text
-.anvil/
+~/.anvil/workspaces/<dir>-<hash8>/.anvil/
 ├── config.yaml         # project-level config (sync providers, lease defaults)
 ├── state.db            # SQLite, WAL mode — the canonical state
 ├── events.jsonl        # append-only audit log (replay source)
@@ -210,31 +221,47 @@ Everything lives under `.anvil/` in your project root:
 └── packets/            # generated work packets (per-task markdown / json)
 ```
 
-Two valid commit policies, both supported:
+`<dir>-<hash8>` is the repo basename plus a short hash of its absolute
+path, so two projects that share a folder name never collide, and every git
+worktree of the same repo resolves to the same workspace. `anvil status`
+prints the exact resolved path on its `Path:` line. See
+[`how-to/state-location.md`](how-to/state-location.md) for the full
+resolution order (including `ANVIL_ROOT` and `ANVIL_STATE_LAYOUT`).
 
-- **Commit everything.** State, audit log, and packets all survive
-  `git clone`. Simplest for solo work or small teams. Beware: `state.db`
-  is binary and merge conflicts are unrecoverable manually (use replay
-  instead).
-- **Gitignore `.anvil/state.db` (and `*.wal`, `*.shm`) but commit
-  `events.jsonl`.** The replay guarantee means `state.db` is regenerable
-  from the event log; this avoids binary merge conflicts while preserving
-  audit history across clones.
+Because the default layout lives outside the repo, there is nothing under
+`.anvil/` for `git clone` to carry — the "commit it to git" question only
+applies if you opt back into the old in-repo layout. Two ways to keep your
+state durable:
 
-The CLI and hooks resolve `STATE_DIR` relative to
-`${CLAUDE_PROJECT_DIR:-$PWD}/.anvil`, so every invocation
-addresses the same project regardless of cwd. See
-[`architecture.md` § Storage layout](architecture.md) and
+- **Back it up out-of-band (default layout).** Use `anvil backup` /
+  `anvil restore` (see [Backup and recovery](#backup-and-recovery) below),
+  or `cp -R` the workspace directory yourself. Nothing here touches git.
+- **Pin an in-repo state dir and commit it.** Set
+  `ANVIL_STATE_LAYOUT=local` so state resolves to `<repo>/.anvil/` again,
+  then pick one of two commit policies:
+  - **Commit everything.** State, audit log, and packets all survive
+    `git clone`. Simplest for solo work or small teams. Beware:
+    `state.db` is binary and merge conflicts are unrecoverable manually
+    (use replay instead).
+  - **Gitignore `state.db`** (and `*.wal`, `*.shm`) but commit
+    `events.jsonl`. The replay guarantee means `state.db` is regenerable
+    from the event log; this avoids binary merge conflicts while
+    preserving audit history across clones.
+
+See [`architecture.md` § Storage layout](architecture.md) and
 [`design.md` § Why local-first](design.md).
 
 ### Can I inspect state with `sqlite3` or SQLite Browser?
 
-Yes. `.anvil/state.db` is a standard SQLite file in WAL mode — any
-SQLite tool works.
+Yes. `state.db` is a standard SQLite file in WAL mode — any SQLite tool
+works. Find its path from `anvil status`'s `Path:` line (by default
+`~/.anvil/workspaces/<dir>-<hash8>/.anvil/state.db`, not a path inside
+your repo):
 
 ```bash
-sqlite3 .anvil/state.db .schema
-sqlite3 .anvil/state.db "SELECT id, status, title FROM tasks;"
+STATE_DIR=$(anvil status | grep '^Path:' | awk '{print $2}')
+sqlite3 "$STATE_DIR/state.db" .schema
+sqlite3 "$STATE_DIR/state.db" "SELECT id, status, title FROM tasks;"
 ```
 
 The schema is version 8; older databases are auto-upgraded via the
@@ -256,10 +283,13 @@ on every mutation being represented in the log).
 
 ### How do I back up `.anvil/`?
 
-Copy the directory wholesale:
+Copy the state directory wholesale — find its path with `anvil status`
+(`Path:` line; by default `~/.anvil/workspaces/<dir>-<hash8>/.anvil/`, not
+a path inside your repo):
 
 ```bash
-cp -R .anvil /backup/location/anvil-$(date +%Y-%m-%d)
+STATE_DIR=$(anvil status | grep '^Path:' | awk '{print $2}')
+cp -R "$STATE_DIR" "/backup/location/anvil-$(date +%Y-%m-%d)"
 ```
 
 That captures `state.db`, `events.jsonl`, `prd.md`, `config.yaml`, and any
@@ -269,40 +299,49 @@ is open at copy time — or shut down active sessions first.
 
 The replay guarantee (see next question) means `events.jsonl` alone is
 enough to reconstruct `state.db`, so the audit log is the *minimum* you must
-preserve. Commit `events.jsonl` to git to keep the audit log available across
-clones.
+preserve. Because the default layout keeps state outside your repo, `git
+commit` doesn't help here unless you've pinned an in-repo state dir with
+`ANVIL_STATE_LAYOUT=local` — otherwise back the audit log up the same way
+as the rest of the state directory, or use `anvil backup` below.
 
-A native `anvil snapshot` subcommand (`sqlite3 .backup` wrapper
-with retention) is planned for v2.1 — see
-[`roadmap.md` § v2.1 → Snapshot / replay](roadmap.md). Shipping today:
-`anvil backup` pushes `events.jsonl` (and optionally `state.db`) to a
-configured `durable_store: s3`, and `anvil restore` pulls it back and
-rebuilds state via replay. `cp -R` remains the fully-local flow.
+Shipping today: `anvil backup` pushes `events.jsonl` (and optionally
+`state.db`, with `--include-db`) to a configured `durable_store: s3`, and
+`anvil restore` pulls it back and rebuilds state via replay. `cp -R`
+remains the fully-local flow. A native `anvil snapshot` subcommand (a
+local `sqlite3 .backup` wrapper with retention) is on the roadmap — see
+[`roadmap.md` § Snapshot / replay](roadmap.md), item P9B-7 — but is not
+yet shipped; `anvil backup` / `restore` and the `anvil replay` command
+(see the next question) are the supported recovery paths today.
 
 ### What if `state.db` gets corrupted?
 
-Restore from a backup of `.anvil/` (the directory is safe to `cp -R`
-— see the previous question). The fastest recovery path today is:
+Restore from a backup of the state directory (safe to `cp -R` — see the
+previous question), or rebuild it directly from `events.jsonl` with the
+shipped `anvil replay` command. The fastest recovery path today:
 
 ```bash
-# Back up the broken db (for forensics), then restore from your last backup.
-mv .anvil/state.db .anvil/state.db.broken
-rm -f .anvil/state.db-wal .anvil/state.db-shm
-cp /backup/location/anvil-YYYY-MM-DD/state.db .anvil/state.db
+STATE_DIR=$(anvil status | grep '^Path:' | awk '{print $2}')
+anvil replay --from-events "$STATE_DIR/events.jsonl" --into /tmp/state.db.rebuilt
+mv "$STATE_DIR/state.db" "$STATE_DIR/state.db.broken"   # keep the broken db for forensics
+rm -f "$STATE_DIR"/state.db-wal "$STATE_DIR"/state.db-shm
+mv /tmp/state.db.rebuilt "$STATE_DIR/state.db"
 ```
+
+`anvil replay --from-events <path> --into <path>` reads every event from
+the source JSONL and replays it into a fresh SQLite database at `--into`
+(deleting and rebuilding that target from scratch). It refuses to target
+the live `state.db` directly, to prevent accidental data loss — which is
+why the example above rebuilds into a scratch path and swaps it in after.
 
 The replay guarantee is the central audit property of the engine: replaying
 every event from `events.jsonl` against an empty database reconstructs
 canonical SQLite state exactly. That property is what makes `events.jsonl`
-the *minimum* you must preserve — commit it to git alongside the repo and
-you have a distributed audit log recoverable from any clone even
-if every local `state.db` is lost.
-
-A native `anvil replay` subcommand that consumes `events.jsonl` and
-rebuilds `state.db` byte-for-byte is on the roadmap but not yet shipped —
-see [`roadmap.md` § v2.1 → Snapshot / replay](roadmap.md) (item P9B-7,
-co-required with the snapshot subcommand). Until then, restore from a
-filesystem backup; the audit log is preserved in git.
+the *minimum* you must preserve. Since the default layout keeps it outside
+your repo, back it up the same way as the rest of the state directory (or
+push it with `anvil backup`, see above). If you've pinned an in-repo state
+dir with `ANVIL_STATE_LAYOUT=local`, committing `events.jsonl` to git also
+gives you a distributed audit log recoverable from any clone even if every
+local `state.db` is lost.
 
 Event ids are assigned inside the mutating transaction, not before it, so
 the JSONL ordering is consistent with the SQLite commit order. See
@@ -314,17 +353,18 @@ the JSONL ordering is consistent with the SQLite commit order. See
 
 ### When will Linear, Monday, or Jira support land?
 
-Per [`roadmap.md`](roadmap.md):
+None yet — `github_issues` is the only sync provider that ships today.
+On the roadmap, per [`roadmap.md`](roadmap.md):
 
-- **v2.0** — `LinearIssuesProvider` (GraphQL transport, item P9B-1) and
+- `LinearIssuesProvider` (GraphQL transport, item P9B-1) and
   `MondayBoardsProvider` (REST + JSON with people-columns, item P9B-2).
   Both are OPEN and in development. Webhook-based sync (P9B-5) is
-  SPEC-FIRST for the same release.
-- **v2.1** — `JiraIssuesProvider` (per-project workflow discovery,
-  P9B-3) and `GitHubProjectsProvider` (Projects v2 board surface,
-  P9B-4). Both OPEN.
+  SPEC-FIRST alongside them.
+- `JiraIssuesProvider` (per-project workflow discovery, P9B-3) and
+  `GitHubProjectsProvider` (Projects v2 board surface, P9B-4). Both OPEN,
+  as follow-on work after Linear/Monday land.
 
-The `SyncProvider` Protocol shipped in v1.8.0 was deliberately
+The `SyncProvider` Protocol has already shipped and is deliberately
 registry-driven so contributors can add providers without engine
 changes. If you want to add one now rather than wait, see the next
 question.
