@@ -136,7 +136,7 @@ The canonical pattern: every provider module calls
 class is bound), and the package `__init__.py` imports each provider
 submodule so registrations fire on package load.
 
-See `sync/providers/github_issues.py:613` for the registration call and
+See `sync/providers/github_issues.py:651` for the registration call and
 `sync/providers/__init__.py` for the side-effect import.
 
 ---
@@ -207,24 +207,11 @@ the remote system uses. Centralise the mapping in a module-level
 `STATUS_TO_LABEL: dict[TaskStatus, str]` and a reverse `LABEL_TO_STATUS`
 so push and fetch agree verbatim.
 
-The GitHub Issues mapping (canonical reference) — see
-`sync/providers/github_issues.py:67`:
-
-```python
-STATUS_TO_LABEL: dict[TaskStatus, str] = {
-    TaskStatus.proposed:     "status:proposed",
-    TaskStatus.drafted:      "status:drafted",
-    TaskStatus.reviewed:     "status:reviewed",
-    TaskStatus.ready:        "status:ready",
-    TaskStatus.claimed:      "status:claimed",
-    TaskStatus.in_progress:  "status:in-progress",
-    TaskStatus.blocked:      "status:blocked",
-    TaskStatus.needs_review: "status:needs-review",
-    TaskStatus.accepted:     "status:accepted",
-    TaskStatus.done:         "status:done",
-    TaskStatus.rejected:     "status:rejected",
-}
-```
+The GitHub Issues provider is the canonical reference implementation —
+see `STATUS_TO_LABEL` in `sync/providers/github_issues.py:67` for the
+source, or [`github-sync.md` → Status label mapping](github-sync.md#status-label-mapping)
+for the rendered table (all 11 statuses, their GitHub label, and open/closed
+state).
 
 Where the provider has a separate open/closed bit (GitHub, Jira), keep
 a `DONE_STATUSES: frozenset[TaskStatus]` so closure semantics live next
@@ -273,13 +260,13 @@ them with secrets.
 
 ---
 
-## Per-provider configuration (v1.9.0)
+## Per-provider configuration
 
 The `sync` CLI iterates *configured providers* — by default every provider
 in `PROVIDER_REGISTRY`, optionally narrowed to an explicit subset via
-`config.yaml`. v1.9.0 added the `sync.providers` top-level config key so
-projects can opt into a deliberate subset (or out of every provider) without
-deregistering modules.
+`config.yaml`. The `sync.providers` top-level config key lets projects opt
+into a deliberate subset (or out of every provider) without deregistering
+modules.
 
 ### Schema
 
@@ -298,7 +285,7 @@ The presence-vs-absence-vs-empty-list distinction is load-bearing:
 
 | YAML form                | `Config.sync_providers`  | Caller behaviour                                            |
 |--------------------------|--------------------------|-------------------------------------------------------------|
-| key absent               | `None`                   | Fall back to `sorted(PROVIDER_REGISTRY)` (v1.8.0 default).  |
+| key absent               | `None`                   | Fall back to `sorted(PROVIDER_REGISTRY)` (the default when no config is present). |
 | `sync.providers: [a, b]` | `("a", "b")`             | Use the explicit list, in order.                            |
 | `sync.providers: []`     | `()` (NOT `None`)        | Opt out of every provider — sync is a no-op.                |
 

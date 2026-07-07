@@ -1,5 +1,9 @@
 # anvil GitHub Issues sync
 
+> **Audience:** end users configuring bidirectional sync against GitHub
+> Issues. For the `SyncProvider` Protocol and how to add another backend
+> (Linear, Monday, Jira), see [`sync-providers.md`](sync-providers.md).
+
 ## What it is
 
 Bidirectional, polling-based sync between anvil tasks and GitHub issues.
@@ -81,14 +85,10 @@ CI runners with `GITHUB_TOKEN`.
 which uses the *list of configured providers* to decide which tasks count
 as "done but unmapped" and need a sync.
 
-**v1.9.0 (Phase 9 T5)** adds the optional `sync.providers` top-level config
-key for explicit selection — see
-[`sync-providers.md` → Per-provider configuration](sync-providers.md#per-provider-configuration-v190)
-for the full schema and three-way semantics (absent / explicit list /
-empty list = opt-out). When the key is absent the engine defaults to
-`sorted(PROVIDER_REGISTRY)` — every registered provider participates,
-preserving v1.8.0 behaviour for projects that have not yet bothered to
-declare a list.
+The optional `sync.providers` top-level config key narrows that list to
+an explicit subset (or opts out of sync entirely with an empty list).
+When the key is absent, the engine defaults to
+`sorted(PROVIDER_REGISTRY)` — every registered provider participates.
 
 ```yaml
 # .anvil/config.yaml — opt-in subset
@@ -98,11 +98,10 @@ sync:
     - linear_issues   # contributor-registered providers also accepted
 ```
 
-When multiple providers are configured, the reconciliation engine emits
-one `missing_sync_mapping` discrepancy *per missing provider per done
-task* (e.g. a task mapped to `github_issues` but not `linear_issues`
-produces a single discrepancy with `payload.missing_provider ==
-"linear_issues"`).
+See [`sync-providers.md` → Per-provider configuration](sync-providers.md#per-provider-configuration)
+for the full schema, the absent/explicit-list/empty-list semantics, and
+how the configured list changes reconciliation's `missing_sync_mapping`
+discrepancies.
 
 ---
 
@@ -118,6 +117,7 @@ Every subcommand under `anvil sync` and its flags.
 | `anvil sync github --push`                        | Push only (skip pull). Useful right after `apply --approve`.             |
 | `anvil sync github --pull`                        | Pull only (skip push). Useful for reconciling remote-side edits.         |
 | `anvil sync github --task T001`                   | Scope a sync pass to a single task.                                      |
+| `anvil sync github --prd P002`                    | Scope a sync pass to one PRD's tasks (multi-PRD; `$ANVIL_PRD` also works). Ignored when `--task` is also given. |
 | `anvil sync github --health`                      | Probe reachability + auth. Exits without touching state.                 |
 | `anvil sync github --fix`                         | Force `remote_wins` on every conflict for this iteration.                |
 | `anvil sync github --watch`                       | Long-running poll loop. Ctrl-C exits.                                    |
@@ -198,11 +198,11 @@ event records the choice in `resolution`.
 | `prompt`        | Interactive prompt: `[local/remote/skip]`. Defaults to local on `--yes` or non-tty. | `prompt_chose_local`, `prompt_chose_remote`, `prompt_skipped`, `prompt_defaulted_to_local` |
 | `manual_merge`  | Write `.anvil/.sync-conflicts/<task_id>.md`; refuse to sync this task. | `manual_merge_file_written`     |
 
-**`_deferred` is the v1.8.0 + v1.9.0 contract.** Recording a `local_wins` /
+**`_deferred` is the current contract.** Recording a `local_wins` /
 `remote_wins` decision does NOT immediately mutate the other side in this
 iteration — the mutation rides the next push (for `local_wins`) or next
 pull (for `remote_wins`) pass. A future release (tracked in
-[`phase-9-backlog.md`](phase-9-backlog.md)) may wire `*_applied` variants
+[`phase-9-backlog.md`](archive/phase-9-backlog.md)) may wire `*_applied` variants
 that mutate immediately; until then the deferred contract is the truthful
 one.
 
@@ -217,10 +217,9 @@ code `2` if any task is parked pending manual merge.
 ## Audit honesty
 
 The audit-event stream is the canonical record of what the sync engine
-actually did vs what was deferred. v1.9.0 (Phase 9 T5) repaired six
-dishonest emissions in v1.8.0 where conflict branches emitted
-`sync.pull.completed` despite no local mutation having occurred — that
-fix makes the JSONL safe to grep for "did this task actually update?".
+actually did vs what was deferred. A deferred conflict-resolution branch
+never emits `sync.pull.completed` — only `sync.pull.deferred` — so the
+JSONL is safe to grep for "did this task actually update?".
 
 ### `sync.pull.completed` vs `sync.pull.deferred` semantics
 
@@ -229,17 +228,15 @@ fix makes the JSONL safe to grep for "did this task actually update?".
 | `sync.pull.completed`  | The pull was honest: fetch succeeded and the mapping was bumped to a truthful state. Includes (1) clean pull mutated the local Task, (2) tombstone (mapping flipped to `external_deleted`, `audit_note="external_deleted"`), (3) no divergence (mapping bumped to `in_sync`), or (4) **local-moved-only** — fetch succeeded, no remote movement observed, mapping bumped to `local_ahead` and a paired `sync.push.deferred` event fires with `resolution="local_moved_no_push"`. |
 | `sync.pull.deferred`   | The pull recorded an intent without mutating local state. Fires on (a) `manual_merge` (the merge file was written, operator must act — `audit_note="manual_merge_pending"`) and (b) the six deferred conflict-resolution branches (`local_wins_deferred`, `remote_wins_deferred`, `prompt_defaulted_to_local`, `prompt_chose_local`, `prompt_chose_remote`, `prompt_skipped`). |
 
-The `local_ahead` mapping state captures a bug-collapse from v1.8.0: when
-the local Task had moved ahead of `last_synced_at` and the remote had not
-changed, the engine used to set `sync_state="in_sync"` (wrong — the local
-was ahead). v1.9.0 sets `sync_state="local_ahead"` and emits a
-`sync.push.deferred` audit event with
-`resolution="local_moved_no_push"` so operators can grep `events.jsonl`
-to find tasks awaiting a follow-up `--push`.
+When the local Task has moved ahead of `last_synced_at` and the remote
+has not changed, the engine sets `sync_state="local_ahead"` and emits a
+`sync.push.deferred` audit event with `resolution="local_moved_no_push"`
+so operators can grep `events.jsonl` to find tasks awaiting a follow-up
+`--push`.
 
-### Resolution token vocabulary (v1.9.0)
+### Resolution token vocabulary
 
-Audit-stream-visible `resolution` strings produced by Phase 9:
+Audit-stream-visible `resolution` strings produced by the sync engine:
 
 | Resolution token              | Emitted on                  | Branch                           |
 |-------------------------------|-----------------------------|----------------------------------|
@@ -250,7 +247,7 @@ Audit-stream-visible `resolution` strings produced by Phase 9:
 | `prompt_chose_remote`         | `sync.pull.deferred`        | `prompt` strategy, user chose remote |
 | `prompt_skipped`              | `sync.pull.deferred`        | `prompt` strategy, user skipped  |
 | `manual_merge_file_written`   | `sync.conflict_detected`    | `manual_merge` strategy          |
-| `local_moved_no_push` (NEW)   | `sync.push.deferred`        | local-moved-only pull path       |
+| `local_moved_no_push`         | `sync.push.deferred`        | local-moved-only pull path       |
 
 The six `local_wins` / `remote_wins` / `prompt_*` tokens also appear on
 the paired `sync.conflict_detected` event (one per conflict) so a
@@ -314,11 +311,11 @@ from these events).
 | `sync.push.started`          | per task, before `provider.push_task` |
 | `sync.push.completed`        | per task, on success                |
 | `sync.push.failed`           | per task, on `SyncProviderError`    |
-| `sync.push.deferred`         | per task, on the local-moved-only pull path (v1.9.0; `resolution="local_moved_no_push"`) — hints that a follow-up `--push` is needed |
+| `sync.push.deferred`         | per task, on the local-moved-only pull path (`resolution="local_moved_no_push"`) — hints that a follow-up `--push` is needed |
 | `sync.pull.started`          | per task, before `provider.fetch_task`|
 | `sync.pull.completed`        | per task, when the pull was honest (see [Audit honesty](#audit-honesty)) |
 | `sync.pull.failed`           | per task, on `SyncProviderError`    |
-| `sync.pull.deferred`         | per task, when `manual_merge` or any of the six deferred conflict-resolution branches recorded an intent without mutating local state (v1.9.0) |
+| `sync.pull.deferred`         | per task, when `manual_merge` or any of the six deferred conflict-resolution branches recorded an intent without mutating local state |
 | `sync.conflict_detected`     | per conflict, every strategy        |
 | `sync_mapping.upserted`      | per successful push (after persist) |
 | `sync_mapping.deleted`       | per explicit mapping removal        |
@@ -349,12 +346,14 @@ audit row failed to write logs to stderr rather than aborting the sync.
 
 ## Migration
 
-v1.8.0 bumps `SCHEMA_VERSION` from `2` to `3` (additive: new
+The `sync_mappings` table was introduced by a schema bump (additive: new
 `external_url` column, new `provider_metadata_json` column, new
 `UNIQUE(external_system, external_id)`, FK flipped to `ON DELETE
-CASCADE`). The upgrade is automatic on first open; no operator action
-required. See [`migrations.md`](migrations.md) for the full diff and
-rollback notes.
+CASCADE`). Every schema step since then has stayed additive, so a
+database at any older version auto-upgrades straight through to the
+current schema on first open — no operator action required. See
+[`migrations.md`](migrations.md) for the full version history, diffs,
+and rollback notes.
 
 ---
 
