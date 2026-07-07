@@ -60,6 +60,7 @@ def measure_task(task: Task) -> PacketSizing:
     lightweight variant applies, which is the right-sizing lever.
     """
     from anvil.context.packets import _render_markdown, is_lightweight
+    from anvil.planning.scoring import review_tier
 
     ctx: dict[str, Any] = {
         "feature": None,
@@ -67,6 +68,10 @@ def measure_task(task: Task) -> PacketSizing:
         "dependencies_open": [],
         "related_decisions": [],
         "active_claim": None,
+        # retro-opps T002 — the header's review-tier line renders in both
+        # variants; derive it with default thresholds so the measurement
+        # matches what render_packet emits.
+        "review_tier": review_tier(task),
     }
     full = _render_markdown(task, lightweight=False, **ctx)
     lite = _render_markdown(task, lightweight=True, **ctx)
