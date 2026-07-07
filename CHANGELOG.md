@@ -6,6 +6,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-07
+
 ### Documented
 
 - **Full docs audit and information-architecture restructure.** A
