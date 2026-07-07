@@ -1,7 +1,11 @@
 # CLI reference
 
-> Single-page reference for all 23 `anvil` CLI commands. For narrative
-> context on common workflows, see
+> Single-page reference for the `anvil` CLI: 33 top-level commands plus 16
+> subcommands grouped under six sub-apps (`prd`, `review`, `hook`, `sync`,
+> `migrate`, `proof`) — 49 commands in total. The most-used lifecycle
+> commands get full Synopsis/Flags/Exit-codes treatment below;
+> [Additional commands (index)](#additional-commands) covers the rest with a
+> one-line entry each. For narrative context on common workflows, see
 > [`how-to/getting-started.md`](how-to/getting-started.md),
 > [`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md),
 > [`how-to/claiming-and-shipping-a-task.md`](how-to/claiming-and-shipping-a-task.md),
@@ -44,6 +48,7 @@
   - [`anvil hook check-claim`](#hook-check-claim)
   - [`anvil hook record-file-change`](#hook-record-file-change)
   - [`anvil hook capture-evidence`](#hook-capture-evidence)
+- [Additional commands (index)](#additional-commands)
 
 ---
 
@@ -71,6 +76,20 @@
 - Actor identity for claims, submissions, and reviews defaults to `$USER`,
   then `agent` (or `human` for `apply`). Override with `--actor`,
   `--reviewer`, etc.
+- **`--json`** is near-universal: almost every command accepts it and, when
+  passed, emits exactly one line of JSON to stdout —
+  `{"ok": true, "command": "<name>", "data": {...}}` on success or
+  `{"ok": false, "command": "<name>", "error": {"code": "...", "message":
+  "..."}}` on failure (printed to stdout even on failure, so a consumer
+  piping stdout always gets parseable JSON) — with no Rich tables, color, or
+  warnings mixed in, so output is safe to pipe into `jq` / `json.load`.
+- **`--prd` / `ANVIL_PRD`** scope a command to one PRD partition on a
+  multi-PRD project (most mutating PRD/planning/claim commands accept it —
+  e.g. `prd review`, `plan`, `score`, `claim`, `next`). Precedence: the
+  `--prd` flag > the `ANVIL_PRD` environment variable > the project's single
+  PRD or marked default PRD. With several non-default PRDs and neither
+  selecting one, the command errors rather than guessing. Single-PRD
+  projects can omit it entirely for unchanged behaviour.
 - Exit codes (consistent across the CLI):
   - `0` — success (including informational no-op states like "no tasks to
     score" or `status --hook-format` on an uninitialised project).
@@ -78,9 +97,11 @@
     `--use-llm` with an explicitly-pinned provider that can't be built, parse
     errors, mutually exclusive flag conflicts, missing required `--reason`,
     etc.).
-  - `2` — operator-input required. Currently emitted only by
-    `sync` / `sync github` / `sync provider` when one or more tasks parked
-    awaiting `manual_merge` resolution.
+  - `2` — meaning is command-specific: for `sync` / `sync github` /
+    `sync provider` it means one or more tasks parked awaiting
+    `manual_merge` resolution; a handful of other commands (`mcp-config`,
+    `install`, `deps`, the native-harness gates) reuse `2` for their own
+    bad-request / block outcomes — see each command's own Exit codes.
 
 ### Global-config layer { #global-config-layer }
 
@@ -335,16 +356,33 @@ tasks that have already advanced past `drafted`.
   augmentation and the no-tasks backstop. For agent-sdk a CLI name like
   `sonnet`/`opus` or a full id; for anthropic/bedrock a model id; for custom
   the route name your endpoint serves.
+- `--prd TEXT` *(optional)* — named PRD to plan (multi-PRD). Reads
+  `.anvil/prds/<id>.md` and scopes feature/task creation, orphan-prune,
+  dependency inference, and `proposed` → `drafted` promotion to that PRD's
+  partition (conflict-group inference still spans all PRDs). Omit for the
+  default PRD (`.anvil/prd.md`).
+- `--no-llm` *(flag)* — disable the LLM task-generation backstop. When the
+  PRD has features + requirements but no `## Tasks` section, the default
+  behaviour calls the LLM to generate tasks and append them to `prd.md`;
+  with `--no-llm` the command fails loudly instead so tasks can be authored
+  manually.
+- `--prune-force` *(flag)* — force-delete orphan tasks (removed from
+  `prd.md`) that have already advanced past `ready` status (claimed /
+  in_progress / needs_review / etc.). Without it, such orphans make `plan`
+  fail loudly so the user can release/complete them first; events/evidence/
+  reviews are preserved as audit history either way — only the task row is
+  deleted.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
 
 - `0` — planning succeeded. Prints `Planned N features, M tasks.` and any
   detected conflict-group count.
-- `1` — `prd.md` not found or unreadable; or an explicitly-pinned provider
+- `1` — `prd.md` not found or unreadable; an explicitly-pinned provider
   (`llm_provider: bedrock`/`custom`) could not be built (missing extra or
-  config). The default agent-sdk provider needs no key, so a missing
-  `ANTHROPIC_API_KEY` is *not* an error.
+  config); the LLM task-generation backstop failed; or an orphan task past
+  `ready` status was found without `--prune-force`. The default agent-sdk
+  provider needs no key, so a missing `ANTHROPIC_API_KEY` is *not* an error.
 
 **Example:**
 
@@ -555,17 +593,37 @@ recommendation. Reaps any stale claims (expired leases) before recommending.
   `agent`. Used to scope the "claimable by me" filter when implemented.
 - `--type TEXT` *(optional)* — only recommend tasks of this type: `feature`,
   `bugfix`, `refactor`, or `modify`.
+- `--max-blast INTEGER` *(optional, `$ANVIL_MAX_BLAST`)* — **[EXPERIMENTAL]**
+  risk ceiling for a low-risk runner: only recommend tasks whose
+  `blast_radius` is confirmed (via `anvil review tasks`) and `<= N`.
+  Unconfirmed/unscored tasks are ineligible even below the ceiling, so the
+  filter fails safe rather than open.
+- `--max-review-risk INTEGER` *(optional, `$ANVIL_MAX_REVIEW_RISK`)* —
+  **[EXPERIMENTAL]** same semantics as `--max-blast` for the confirmed
+  `review_risk` dimension.
+- `--prd TEXT` *(optional, `$ANVIL_PRD`)* — scope the candidate pool to one
+  PRD partition; coordination (conflict-group checks) still spans all PRDs.
+- `-q`, `--quiet` *(flag)* — print nothing; use the exit code as the signal
+  only (see Exit codes below). Loop seam for `jq`-less shells, e.g.
+  `while anvil next -q; do ...; done`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
 
-- `0` — recommendation printed, or "No claimable tasks available." printed.
+- `0` — recommendation printed, or "No claimable tasks available." printed
+  (human mode); or, with `--json` and no `--prd` scoping, the
+  `{"task": null}` envelope is emitted — an empty queue is not an error here.
+- `3` — with `-q`/`--quiet`: prints nothing and exits 3 whenever the queue is
+  empty (the loop-seam signal). Also returned when `--prd` scopes the
+  candidate pool and that PRD has no claimable task (both human and `--json`
+  modes print/emit a PRD-specific message first).
 
 **Example:**
 
 ```bash
 anvil next
 anvil next --type bugfix
+while anvil next -q; do anvil claim "$(anvil next --json | jq -r .data.task.id)"; done
 ```
 
 **See also:** [`anvil claim`](#claim) to actually pick up the task;
@@ -595,8 +653,13 @@ worktree at `../wt-<task_id>/`.
   `agent`.
 - `--lease FLOAT` *(optional)* — lease duration in minutes for this claim.
   Overrides `default_lease_minutes` from config. Lease precedence: this flag
-  > project `config.yaml` > global `config.yaml` > built-in `60` (see
+  > project `config.yaml` > global `config.yaml` > built-in `240` (see
   [Global-config layer](#global-config-layer)).
+- `--branch TEXT` *(optional)* — attach the claim to an existing or
+  caller-named branch instead of generating the default
+  `agent/<task>-<slug>` name. An existing branch is checked out; a new one
+  is created. The resolved branch name is recorded on the claim. Omit for
+  the default auto-generated branch (unchanged behaviour).
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -614,6 +677,7 @@ anvil claim T001
 anvil claim T001 --worktree --actor "alex"
 anvil claim T001 --force            # override conflict warnings
 anvil claim T001 --lease 15         # 15-minute lease (overrides config)
+anvil claim T001 --branch my-existing-branch
 ```
 
 **See also:**
@@ -983,9 +1047,14 @@ stdout (paste-clean) and a one-line `# paste into <file>` hint goes to stderr.
 **Argument:**
 
 - `CLIENT` *(required)* — one of `claude-code`, `cursor`, `windsurf`, `cline`,
-  `vscode`, `zed`, `codex`. The envelope differs per client (top key
-  `mcpServers` / `servers` / `context_servers`, JSON vs TOML for `codex`); the
-  inner `{command, args[, env]}` spec is identical.
+  `vscode`, `zed`, `codex`, `opencode`, `roo`, `amp`, `continue`, `goose`
+  (12 clients). The envelope differs per client: top key `mcpServers` /
+  `servers` / `context_servers` / `mcp` / `amp.mcpServers` / `extensions`,
+  and the format is JSON for most clients, TOML for `codex`, and YAML for
+  `continue` and `goose`. The inner server spec is usually
+  `{command, args[, env]}`; `opencode`, `continue`, and `goose` have their
+  own client-specific shapes (e.g. `opencode` nests env vars under
+  `environment`, not `env`; `goose` uses `cmd`/`envs`).
 
 **Flags:**
 
@@ -1007,6 +1076,7 @@ stdout (paste-clean) and a one-line `# paste into <file>` hint goes to stderr.
 ```bash
 anvil mcp-config cursor              # prints the mcpServers JSON block
 anvil mcp-config codex               # prints the [mcp_servers.anvil] TOML block
+anvil mcp-config continue            # prints the .continue/mcpServers/anvil.yaml block
 anvil mcp-config --uv-run vscode     # explicit uv invocation (no bash)
 anvil mcp-config --json cursor | jq -r .data.config_text
 ```
@@ -1118,3 +1188,116 @@ anvil hook capture-evidence \
 **See also:** [`docs/evidence-buffer.md`](evidence-buffer.md) for the buffer
 format and how `submit --output-file` consumes it;
 `hooks/capture-evidence.sh`.
+
+---
+
+## Additional commands (index) { #additional-commands }
+
+The sections above give full Synopsis/Flags/Exit-codes treatment to the core
+lifecycle commands. anvil ships 25 more — every one real,
+`--help`-documented, and exercised by the test suite — indexed here one line
+at a time so this page's single-reference claim holds. Run
+`anvil <command> --help` (or `anvil <group> <command> --help`) for the live
+flag list; full prose treatment may follow in a later pass.
+
+**Self-description and cross-harness delivery**
+
+- `anvil describe` — Emit a machine-readable manifest of the CLI/MCP command
+  surface (engine version, schema version, every command/tool name)
+  (`--human`, `--json`); read-only, needs no project.
+- `anvil install <harness>` — Deliver anvil's MCP config and instructions to
+  a target harness (codex/openclaw drive their own CLI; others get a merged
+  MCP block) (`--write`, `--rollback`, `--root`, `--automations`,
+  `--cron-recipes`, `--finish-gate`); dry-run by default.
+
+**PRD authoring extras**
+
+- `anvil prd list` — List every PRD in the project (the multi-PRD entry
+  point), marking the default with `*` (`--json`).
+- `anvil prd find-decisions` — Scan a PRD for `[NEEDS DECISION]` markers,
+  open questions, and missing acceptance-criteria/verification fields
+  (`--file`, `--json`); read-only, always exits 0.
+- `anvil prd resolve-decision DECISION_ID` — Back-propagate a resolved
+  decision into the PRD source and record a `prd.decision_resolved` event
+  (`--resolution`/`-r`, `--by`, `--file`, `--json`).
+
+**Planning extras**
+
+- `anvil assumptions` — Rank PRD requirements by
+  `blast_radius x uncertainty` so the riskiest, least-certain requirements
+  surface before planning (`--limit`/`-n`, `--json`); advisory only, never
+  mutates state.
+- `anvil deps` — Apply a batch of dependency-edge edits (`--add`/`--remove
+  SOURCE:TARGET`, repeatable) atomically, rejecting the whole batch on any
+  cycle, unknown task, or self-loop.
+
+**Diagnostics and health** (read-only)
+
+- `anvil doctor` — One-shot health diagnosis: schema/db reachability, config
+  parse status, active/stale claims, replay integrity, reconciliation drift
+  (`--json`); exits non-zero when any finding is ERROR-level.
+- `anvil drift` — Report intent/state/filesystem-git divergence (orphan
+  branches, orphan worktrees, orphan packets, stale claims, vanished
+  expected files) (`--json`); always exits 0 — a report, not a gate.
+- `anvil graph` — Emit the task dependency/state graph as Mermaid, JSON, or
+  a text summary (`--format text|mermaid|json`, `--scope all|feature|task`
+  with `--target`, `--json`).
+- `anvil conflicts` — List persisted conflict groups — tasks whose
+  `likely_files` overlap (`--format text|json`).
+- `anvil notify-digest` — Print a one-line needs-review/blocked summary,
+  staying silent when the queue is clean; built for cron `--announce` jobs
+  (`--json`); always exits 0.
+
+**Native-harness gates** (read-only, default-open; built for
+OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
+
+- `anvil claim-guard` — Check whether an actor holds a claim covering the
+  file(s) it is about to edit before a mutating tool runs (`--actor`,
+  `--file` repeatable, `-q`/`--quiet`, `--json`; exit 2 = block, no claim
+  held).
+- `anvil gate-check` — Finish-gate: block an agent from ending its turn
+  while any of its claimed tasks has incomplete verification evidence
+  (`--actor`, `-q`/`--quiet`, `--json`; exit 2 = block).
+
+**Data lifecycle and maintenance**
+
+- `anvil replay --from-events PATH --into PATH` — Rebuild canonical state
+  from an events log into a scratch SQLite database; refuses to target the
+  live `state.db`.
+- `anvil run-workflow NAME` — Run a declarative
+  `.anvil/workflows/<name>.yaml` workflow to completion through anvil's
+  governed create → claim → run → submit → apply transitions, then exit.
+- `anvil backup` — Push `events.jsonl` (and, with `--include-db`,
+  `state.db`) to the configured S3 `durable_store`.
+- `anvil restore` — Pull `events.jsonl` from S3 and replay it into
+  `state.db` (destructive; `--yes`/`-y` skips the confirmation prompt).
+- `anvil migrate-events --to git` — Rewrite `events.jsonl` into hash-chained,
+  merge-friendly git-backed storage (dry-run by default; `--yes` applies).
+- `anvil migrate state` — Upgrade `.anvil/state.db` to the current engine
+  schema version, backing it up first (dry-run by default; `--yes`
+  applies; `--json`).
+- `anvil migrate-workspace` — One-time copy of legacy in-repo `.anvil/`
+  state into the HOME-workspace layout; never clobbers an existing
+  workspace, copies rather than moves (dry-run by default; `--yes` applies;
+  `--json`).
+
+**Proof verification**
+
+- `anvil proof verify PROOF_FILE` — Verify a signed `AcceptanceProof`
+  off-host: detached Ed25519 signature, signer fingerprint, and trust-list
+  membership (`--trust`, `--project`, `--json`).
+
+**Additional hook subcommands** (internal — see
+[Hook subcommands](#hook-check-claim) above for the contract)
+
+- `anvil hook dispatch NAME` — Shell-free dispatcher for `hooks/hooks.json`
+  (`detect-state`, `check-claim`, `record-file-change`, `capture-evidence`,
+  `heartbeat`); parses the hook JSON payload from stdin and calls the
+  matching subcommand. Always exits 0.
+- `anvil hook stop-gate` — Opt-in Stop-hook evidence gate for Codex/Claude
+  Code: blocks ending the turn (exit 2, `{"decision":"block",...}` on
+  stdout) while a claimed task has no submitted evidence; not wired by
+  default (`--actor`).
+- `anvil hook heartbeat` — PostToolUse lease heartbeat: renews the actor's
+  active claim lease(s) on tool activity so a lazy lease stays fresh
+  (`--actor`); always exits 0.
