@@ -1,6 +1,6 @@
 {
   "id": "anvil-finish-gate",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "name": "anvil finish-gate",
   "description": "anvil's OpenClaw integration: blocks finalizing while a claimed task lacks evidence (before_agent_finalize), auto-captures verification-command output to the claim's evidence buffer (after_tool_call), injects anvil usage guidance into the system prompt for tracked projects (before_prompt_build), and guards mutating tools against editing without an active claim (before_tool_call).",
   "activation": {

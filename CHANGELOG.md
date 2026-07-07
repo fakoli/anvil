@@ -6,6 +6,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-07
+
 ### Fixed
 
 - **SessionStart hook no longer degrades to "status check unavailable" for
