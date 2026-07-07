@@ -112,6 +112,10 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
   is rejected before hook review. ✓
 - **Plugin-root var:** the binary honors **`${CLAUDE_PLUGIN_ROOT}`** (also `PLUGIN_ROOT`; **no**
   `CODEX_PLUGIN_ROOT`) — anvil's existing var is correct, no fallback needed. ✓
+- **SessionStart output contract:** Codex expects SessionStart hooks that inject context to emit
+  JSON on stdout, using `hookSpecificOutput.hookEventName="SessionStart"` and
+  `hookSpecificOutput.additionalContext`. Plain-text stdout is rejected as invalid SessionStart
+  JSON output. ✓
 - **Events fired (0.130.0):** `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,
   `PostToolUse`, `PreCompact`, `PostCompact`, **`Stop`** ("right before Codex ends its turn"). Matcher
   semantics match Claude Code. **Not supported:** `SessionEnd`, `SubagentStart`/`SubagentStop`,

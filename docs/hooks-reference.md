@@ -36,10 +36,13 @@ rejected.
    wait. The scripts themselves aim for well under 200ms on the hot path,
    per comments in each script header. Hooks fire on every matching tool
    call, so the budget is tight.
-5. **Warnings go to stderr; the success path is silent.** Claude Code
+5. **Warnings go to stderr; tool hooks stay quiet on stdout.** Claude Code
    surfaces hook stderr as a user-visible warning; stdout becomes part of
    the model's input context (which would pollute the conversation with
-   bookkeeping noise). The success path produces no output at all.
+   bookkeeping noise). The hot-path tool hooks produce no stdout on success.
+   The SessionStart dispatcher is the exception: it emits a Codex/Claude
+   `hookSpecificOutput` JSON object whose `additionalContext` contains the
+   one-line state banner.
 
 ### Why non-blocking
 
@@ -89,11 +92,13 @@ not assume an in-repo `./.anvil`.
 
 **Purpose.** On session start, detect the project language (Rust, Python,
 TypeScript, or unknown) by inspecting marker files (`Cargo.toml`,
-`pyproject.toml`, `setup.py`, `package.json`, `tsconfig.json`) and print a
-one-line state banner to stderr. The banner becomes visible to the agent
-as part of the session-start context.
+`pyproject.toml`, `setup.py`, `package.json`, `tsconfig.json`) and inject a
+one-line state banner into the session-start context. The shell-free dispatcher
+prints a JSON object with `hookSpecificOutput.hookEventName="SessionStart"` and
+`hookSpecificOutput.additionalContext=<banner>`; plain-text stdout is invalid
+for Codex SessionStart hooks.
 
-**Banner format (stderr).**
+**Banner format (`additionalContext`).**
 - If `.anvil/` is absent:
   > `[anvil] not initialized in this project — run \`anvil init\` to start`
 - If `.anvil/` exists and the CLI is available:
@@ -109,7 +114,10 @@ event fires once per session, so this is the loosest of the four budgets.
 **CLI call.** `anvil status --hook-format` — emits a single line in
 the form `active-claims:N ready-tasks:N blockers:N prd-status:STATUS`.
 
-**Source.** [`hooks/detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh).
+**Source.** [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)
+for the default dispatcher path, and
+[`hooks/detect-state.sh`](https://github.com/fakoli/anvil/blob/main/hooks/detect-state.sh)
+for the legacy shell wrapper.
 
 ---
 
@@ -246,10 +254,10 @@ or `.anvil/.evidence-buffer/orphan.json`.
 
 ### My hook is not running
 
-- Confirm the plugin is loaded by your Claude Code session — the
-  `detect-state.sh` banner fires on every SessionStart and will print
-  either a "not initialized" notice or the project state line. If you
-  see neither, the plugin is not loaded.
+- Confirm the plugin is loaded by your Claude Code or Codex session — the
+  SessionStart dispatcher fires on every session and will inject either a
+  "not initialized" notice or the project state line. If you see neither,
+  the plugin may be unloaded or untrusted.
 - Check the script is executable:
   `ls -la $CLAUDE_PLUGIN_ROOT/hooks/`.
 - Run the script manually to see its output and exit status:
