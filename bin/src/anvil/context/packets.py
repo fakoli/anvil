@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from anvil.config import Config
@@ -509,7 +509,7 @@ def render_packet(
     related_decisions: list[Decision] | None = None,
     active_claim: Claim | None = None,
     lightweight: bool | None = None,
-    review_tier: str | None = None,
+    review_tier: Literal["light", "standard", "max"] | None = None,
     deferred_findings: list[DeferredFinding] | None = None,
     fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> WorkPacket:
