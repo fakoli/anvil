@@ -1,6 +1,6 @@
 # Skills reference
 
-> anvil ships 7 skills that orchestrate workflows around the CLI. Each
+> anvil ships 8 skills that orchestrate workflows around the CLI. Each
 > skill has a trigger phrase (the slash command), a step-by-step procedure,
 > and a clear purpose. This reference indexes each skill and names its
 > source file.
@@ -19,6 +19,7 @@ for the architectural placement.
 graph TD
     StartPRD["start-prd<br/>rough idea → prd.md draft"]
     PRD["prd<br/>parse + review + approve"]
+    ResolveDecisions["resolve-decisions<br/>walk open items as Q&amp;A"]
     Plan["plan<br/>features + tasks + scoring"]
     Claim["claim<br/>acquire lease + branch"]
     Execute["execute<br/>packet → work → submit"]
@@ -26,7 +27,9 @@ graph TD
     StateOps["state-ops<br/>read-only inspection"]
 
     StartPRD --> PRD
+    PRD --> ResolveDecisions
     PRD --> Plan
+    ResolveDecisions --> Plan
     Plan --> Claim
     Claim --> Execute
     Execute --> Finish
@@ -39,14 +42,16 @@ graph TD
 
     classDef lifecycle fill:#1f2937,stroke:#60a5fa,stroke-width:2px,color:#f9fafb
     classDef inspection fill:#374151,stroke:#9ca3af,stroke-width:1px,color:#f9fafb,stroke-dasharray: 5 5
-    class StartPRD,PRD,Plan,Claim,Execute,Finish lifecycle
+    class StartPRD,PRD,ResolveDecisions,Plan,Claim,Execute,Finish lifecycle
     class StateOps inspection
 ```
 
-The six lifecycle skills run in order on the happy path: an idea becomes a
-PRD, the PRD becomes a task graph, tasks get claimed and worked, and
-evidence ships. `state-ops` is the orthogonal read-only utility — safe to
-invoke at any point in any session without changing state.
+The seven lifecycle skills run in order on the happy path: an idea becomes a
+PRD, unresolved `[NEEDS DECISION]` markers and open questions get walked as
+Q&A before the task graph is generated, the PRD becomes a task graph, tasks
+get claimed and worked, and evidence ships. `state-ops` is the orthogonal
+read-only utility — safe to invoke at any point in any session without
+changing state.
 
 ---
 
@@ -119,6 +124,34 @@ cleanly, and clears the review gate.
 
 **See also:** [`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md),
 [`prd-template.md`](prd-template.md) for the canonical schema.
+
+---
+
+## Resolve Decisions
+
+**Trigger:** `/anvil:resolve-decisions`
+
+**Purpose:** Walk the PRD's unresolved items — `[NEEDS DECISION]` markers,
+`## Open Questions`, and missing acceptance-criteria or verification fields —
+as one-question-at-a-time Q&A turns, proposing concrete options when
+possible and applying each chosen answer with `anvil prd resolve-decision`.
+
+**When to use:**
+
+- After `anvil prd parse` succeeds and unresolved items remain — the `prd`
+  skill routes here when `anvil prd find-decisions` reports non-empty results.
+- Before `/anvil:plan` runs, when unresolved decisions would shape task
+  generation — the `plan` skill soft-gates into this skill first.
+- When the user explicitly asks to "resolve open questions" or "answer the
+  NEEDS DECISION items".
+- When `anvil review tasks` blocks tasks for missing acceptance criteria or
+  verification commands.
+
+**Source:** `skills/resolve-decisions/SKILL.md`
+
+**See also:** [`prd`](#prd) for the upstream parse step that surfaces
+decisions, [`plan`](#plan) for the downstream step that consumes a
+fully-resolved PRD.
 
 ---
 

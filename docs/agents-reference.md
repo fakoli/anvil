@@ -52,7 +52,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 **When to dispatch:**
 - After a claimed task has been submitted (status `needs_review`) and before `anvil apply --approve`.
 
-**Iron Rule:** Never modifies any source file, test file, or state file. Reads, analyzes, and reports. If a bug is found, the fix is shown in the report — not applied. The welder agent or the CLI does all writes.
+**Iron Rule:** Never modifies any source file, test file, or state file. Reads, analyzes, and reports. If a bug is found, the fix is shown in the report — not applied. Applying the fix is left to a follow-up implementation pass or the CLI's own writes.
 
 **Output shape:** Markdown report with an Acceptance Criteria table (each criterion marked SATISFIED or UNSATISFIED), Findings grouped by severity (MUST FIX / SHOULD FIX / CONSIDER / NIT), and a one-line Verdict.
 
@@ -71,7 +71,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **Purpose:** Evidence validation. Re-runs verification commands from the task spec, checks each acceptance criterion against fresh evidence, and returns a binary PASS / FAIL scorecard. Different from critic — sentinel validates that evidence proves the work was done; critic reviews whether the code is good.
 
-**Frontmatter:** `color: gray` · `model: opus` · `tools: [Read, Grep, Glob, Bash]`
+**Frontmatter:** `color: gray` · `model: haiku` · `tools: [Read, Grep, Glob, Bash]`
 
 **When to dispatch:**
 - After submission and before merge — the final gate that confirms the evidence actually demonstrates the acceptance criteria pass.
@@ -95,7 +95,7 @@ Tool lists are read from each agent's frontmatter. The `state-keeper` agent decl
 
 **Purpose:** Sync reconciliation. Detects drift between anvil's three sources of truth — the SQLite canonical state, the project filesystem (packets, evidence buffer, worktrees), and git (branches, claims, commits). Returns a structured discrepancy report. Reports only — never remediates.
 
-**Frontmatter:** `color: teal` · `model: opus` · `tools: [Read, Grep, Glob, Bash, Edit, Write]`
+**Frontmatter:** `color: teal` · `model: haiku` · `tools: [Read, Grep, Glob, Bash, Edit, Write]`
 
 Edit and Write are scoped strictly to producing sync-report files under `.anvil/.sync-reports/` when the caller requests one. Source files, state files, evidence files, and git refs are never touched.
 
@@ -126,7 +126,7 @@ Edit and Write are scoped strictly to producing sync-report files under `.anvil/
 
 **Purpose:** Inward-facing documentation maintenance. Owns the `docs/` folder (specs, runbooks, design notes, plan archives), the plugin's CHANGELOG, and the `description` field of `plugin.json`. Audits cross-references — broken wikilinks, mismatched section anchors, dangling `see also` pointers, references to files that moved or were archived.
 
-**Frontmatter:** `color: purple` · `model: opus` · `tools: [Read, Write, Edit, Glob, Grep]`
+**Frontmatter:** `color: purple` · `model: sonnet` · `tools: [Read, Write, Edit, Glob, Grep]`
 
 **When to dispatch:**
 - Trigger phrases: "update anvil docs", "fix broken links", "write the changelog", "doc cross-reference audit", "after-phase docs sweep".
@@ -145,7 +145,7 @@ Edit and Write are scoped strictly to producing sync-report files under `.anvil/
 - `.claude-plugin/plugin.json` (`description` field only).
 
 **What it does NOT own:**
-- `plugin.json`'s structural fields (`name`, `version`, `author`, `repository`, `license`, `keywords`) — those are smith's lane.
+- `plugin.json`'s structural fields (`name`, `version`, `author`, `repository`, `license`, `keywords`) — those change only as part of a version bump, not a docs sweep.
 - Agent or skill internals — those agents/skills speak for themselves.
 
 **CHANGELOG discipline:**
@@ -163,6 +163,6 @@ Edit and Write are scoped strictly to producing sync-report files under `.anvil/
 ## See also
 
 - [Architecture](architecture.md) — where agents sit in the component graph
-- [Skills reference](skills-reference.md) — the seven plugin-owned skills
+- [Skills reference](skills-reference.md) — the eight plugin-owned skills
 - [CLI reference](cli-reference.md) — every command an agent might invoke
 - [Authoring a PRD](how-to/authoring-a-prd.md) — the upstream input that planner consumes
