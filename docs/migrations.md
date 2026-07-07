@@ -1,5 +1,7 @@
 # Migrations
 
+> **Audience:** users upgrading anvil across versions and hitting a schema or workspace-layout change.
+
 `anvil` ships a small schema (one SQLite DB, one JSONL audit log) and
 keeps its migration story minimal: the canonical audit log is `events.jsonl`,
 and `backend.replay_from_empty()` rebuilds `state.db` from scratch on any

@@ -1,5 +1,7 @@
 # Evidence buffer
 
+> **Audience:** users and operators inspecting or troubleshooting captured verification evidence.
+
 `.anvil/.evidence-buffer/` is a transient, append-only directory used by
 the `capture-evidence.sh` hook to record bash-command output between the moment
 a verification command runs and the moment `anvil submit` packages that

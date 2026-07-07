@@ -1,7 +1,8 @@
 # Using Anvil on any coding harness
 
 Anvil's engine does not depend on Claude Code. Any harness can drive the full
-loop through one of two surfaces:
+loop through one of two surfaces. (New to terms like packet, claim, or lease?
+See the [glossary](../glossary.md).)
 
 1. **MCP** — register the `anvil` stdio server. It serves the 14 execution
    tools by default; set `ANVIL_MCP_PLANNING=1` in the server's env to expose

@@ -10,6 +10,8 @@ The PRD **is** the spec. You do not author a workflow file from scratch for the
 common case — Anvil already produced the ready queue. The loop's only job is to
 **transfer that queue into a runtime** and run the body once per task.
 
+New to terms like the loop, packet, or claim? See the [glossary](../glossary.md).
+
 ## 1. PRD → ready queue
 
 Get a queue of `ready` tasks before any loop runs:

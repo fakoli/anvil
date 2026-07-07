@@ -1,5 +1,7 @@
 # Context budget
 
+> **Audience:** contributors — this documents internal budget enforcement, not user-facing behavior.
+
 > A self-imposed token budget on anvil's plugin surface, enforced in CI
 > by [`tests/test_token_budget.py`](https://github.com/fakoli/anvil/blob/main/tests/test_token_budget.py).
 

@@ -4,6 +4,8 @@
 
 If you have not yet authored a PRD and promoted at least one task to `ready`, start at [`getting-started.md`](getting-started.md) and [`authoring-a-prd.md`](authoring-a-prd.md). This document assumes you have an approved PRD and at least one task in `ready`.
 
+New to the terms below (claim, lease, packet, evidence buffer, evidence gate)? See the [glossary](../glossary.md).
+
 ## The lifecycle at a glance
 
 ```text

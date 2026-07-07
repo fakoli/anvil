@@ -1,5 +1,8 @@
 # Two-week bake-off runbook (B50) — measure before scaling
 
+> **Maintainer doc.** This is a contributor runbook, not end-user
+> documentation.
+
 **Why.** Every further fleet abstraction (capability `type`/`tier`, profiles, a
 shared backend, many-runners) must be pulled into existence by *measured*
 mis-routing, not the market metaphor. The economic premise — that **capacity**
@@ -31,7 +34,7 @@ already in doubt — note it and shorten the run.
 Run once a day and append the JSON to a log:
 
 ```bash
-python benchmarks/bakeoff_snapshot.py <state_dir> >> bakeoff-log.jsonl
+uv run --project bin python benchmarks/bakeoff_snapshot.py <state_dir> >> bakeoff-log.jsonl
 ```
 
 It captures: **`needs_review_depth`** (the binding constraint — does review debt
@@ -51,11 +54,11 @@ accepted or reworked?), and **packet right-sizing savings** (B51
 
 ## Results note
 
-Land a short write-up in `docs/research/` (stub:
-[`2026-06-21-bake-off-results.md`](../research/2026-06-21-bake-off-results.md))
-answering: did the pools throttle often enough for the capacity case to hold? did
-naive spillover suffice (no pool concept needed)? what was the local false-pass /
-rework tax? did review debt stay bounded under B49's cap?
+Land a short write-up in `docs/research/` — results will be recorded there
+when the bake-off runs — answering: did the pools throttle often enough for
+the capacity case to hold? did naive spillover suffice (no pool concept
+needed)? what was the local false-pass / rework tax? did review debt stay
+bounded under B49's cap?
 
 ## Kill / pivot trigger (record explicitly)
 

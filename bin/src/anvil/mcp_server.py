@@ -2199,7 +2199,7 @@ def plan_tasks(
     opt out and keep the deterministic parse). The provider defaults to the
     Claude subscription via the Agent SDK; pin anthropic/bedrock/custom in
     .anvil/config.yaml, or set llm_fallback: true for env auto-detect. See
-    docs/llm-providers.md.
+    docs/llm.md.
 
     PRD parse errors surface as warnings; LLM failures raise ToolError rather
     than returning a silent zero-count.

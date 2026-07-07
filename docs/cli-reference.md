@@ -1,5 +1,7 @@
 # CLI reference
 
+> **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
+
 > Single-page reference for the `anvil` CLI: 33 top-level commands plus 16
 > subcommands grouped under six sub-apps (`prd`, `review`, `hook`, `sync`,
 > `migrate`, `proof`) — 49 commands in total. The most-used lifecycle

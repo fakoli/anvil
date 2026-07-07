@@ -15,6 +15,9 @@ default under `~/.anvil/workspaces/...` — see
 [getting-started.md → Where your state lives](getting-started.md#where-your-state-lives)
 for the exact layout and how to override it.
 
+New to terms like requirement, feature, or task in this context? See the
+[glossary](../glossary.md).
+
 ---
 
 ## The PRD lifecycle
@@ -80,8 +83,11 @@ an existing one, breaking every cross-reference. Write `- R001: ...` not just `-
 
 ## A real-ish example
 
-Here is a self-contained PRD for adding JSONL audit export to the `status` command.
-Drop this into `.anvil/prd.md` and run `prd parse` to see the full round-trip.
+Here's the shape of a real PRD — a trimmed fragment, not the full file. For a
+complete, copy-pasteable example with every required and optional section
+filled in, see the PRD template's
+[Quick-Start Example](../prd-template.md#quick-start-example) — that is the
+canonical one to start from.
 
 > **Multi-PRD note.** `.anvil/prd.md` is the **default** PRD's source (conceptually
 > `.anvil/prds/default.md`). A project can hold several release-scoped PRDs in one
@@ -97,44 +103,16 @@ Drop this into `.anvil/prd.md` and run `prd parse` to see the full round-trip.
 ## Summary
 
 Extend the existing `anvil status` command with an opt-in JSONL export so audit
-tooling can stream per-run snapshots without parsing the human-readable output. Targets
-operators integrating anvil output into external dashboards.
+tooling can stream per-run snapshots without parsing the human-readable output.
 
 ## Goals
 
 - Add a `--format jsonl` flag that emits one JSON object per task to stdout.
-- Preserve the existing default human-readable output exactly (no behaviour change without the flag).
-- Include enough fields per row that downstream tooling does not need a second CLI call.
-
-## Non-Goals
-
-- Streaming output via a long-lived subscription (one-shot dump only).
-- Schema versioning negotiation — v1 schema is implicit; bump the CLI version on breaks.
-- Filtering by status / priority at the CLI layer — consumers can `jq` the stream.
 
 ## Requirements
 
 - R001: `status` accepts a `--format` option with values `text` (default) and `jsonl`.
-- R002: With `--format jsonl`, the command writes one JSON object per task to stdout, newline-delimited.
-- R003: Each JSON object includes `id`, `title`, `status`, `priority`, `feature_id`, `claimed_by`, `updated_at`.
-- R004: Without `--format jsonl`, output is byte-identical to the pre-change behaviour.
-- R005: Invalid `--format` values exit 2 with a usage message naming the accepted values.
-- R006: Exit code is 0 on a successful dump even when zero tasks exist (empty stream is valid).
-
-## Acceptance Criteria
-
-- `anvil status --format jsonl | jq -s 'length'` returns the task count.
-- `anvil status` output is unchanged across the upgrade (golden-file test passes).
-- `anvil status --format bogus` exits 2 with a Typer usage message.
-
-## Risks
-
-- Schema drift between this dump and the canonical `Task` model — pin the field list in code, not config.
-- `updated_at` timezone formatting may vary on hosts with non-UTC locales; emit ISO-8601 with explicit `Z`.
-
-## Open Questions
-
-- Should the dump include `Score` fields, or is that a separate `--format jsonl-full`?
+- R002: With `--format jsonl`, the command writes one JSON object per task to stdout.
 
 ## Features
 
@@ -142,13 +120,7 @@ operators integrating anvil output into external dashboards.
 
 Adds the `--format jsonl` code path and the per-row JSON shape.
 
-**Requirements:** R001, R002, R003
-
-### F002: Output mode validation
-
-Validates `--format` values at the CLI boundary and preserves the existing default.
-
-**Requirements:** R004, R005, R006
+**Requirements:** R001, R002
 
 ## Tasks
 
@@ -156,49 +128,23 @@ Validates `--format` values at the CLI boundary and preserves the existing defau
 
 **Feature:** F001
 **Priority:** high
-**Likely files:** bin/src/anvil/cli/status.py
 
-Add a `--format` Typer Option with choices `text` and `jsonl`, defaulting to `text`. Wire
-the parsed value through to a new dispatch function; do not change the existing renderer
-on the default branch.
+Add a `--format` Typer Option with choices `text` and `jsonl`, defaulting to `text`.
 
 **Acceptance criteria:**
 
-- `status --format text` produces output byte-identical to pre-change.
 - `status --format jsonl` reaches the new code path.
-- `status --format bogus` exits 2 with a usage message.
 
 **Verification:**
 
 - `pytest tests/test_cli_status.py -v`
-- `anvil status --format text | diff - tests/golden/status-text.txt`
-
-### T002: Implement JSONL row renderer
-
-**Feature:** F001
-**Priority:** high
-**Likely files:** bin/src/anvil/cli/status.py, bin/src/anvil/cli/_render.py
-
-Build a pure function `render_jsonl(tasks: list[Task]) -> Iterator[str]` that yields one
-JSON string per task with the field list from R003. Use `model_dump(mode="json")` to
-guarantee ISO-8601 timestamps.
-
-**Acceptance criteria:**
-
-- Each yielded line round-trips through `json.loads`.
-- Field set matches R003 exactly (no extras, no missing).
-- Empty input yields zero lines and the function returns cleanly.
-
-**Verification:**
-
-- `pytest tests/test_render_jsonl.py -v`
 ```
 
-Run the parser against it:
+Running `anvil prd parse` against a PRD shaped like this produces:
 
 ```text
 $ anvil prd parse
-Parsed 6 requirements, 2 features, 2 tasks.
+Parsed 2 requirements, 1 features, 1 tasks.
 PRD source: ~/.anvil/workspaces/my-project-183a2542/.anvil/prd.md
 ```
 
@@ -304,7 +250,7 @@ That's it — the default provider is your Claude subscription via the Agent SDK
 key). It just needs the `claude` CLI on PATH and logged in. To use a metered API key,
 AWS Bedrock, or a custom OpenAI-compatible endpoint instead, pin `llm_provider:` in
 `.anvil/config.yaml` (or set `llm_fallback: true` to restore env auto-detection); see
-[`../llm-providers.md`](../llm-providers.md). The model defaults to the subscription's own
+[`../llm.md`](../llm.md#providers). The model defaults to the subscription's own
 default; pin one with `--model`, `llm_tier`, or `llm_model`.
 
 ### Failure mode

@@ -1,8 +1,8 @@
-> ## Archived — see [roadmap.md](roadmap.md) for live planning
+> ## Archived — see [roadmap.md](../roadmap.md) for live planning
 >
 > This file is preserved as a historical audit trail of what was deferred at the
 > close of Phase 9. The live forward-planning source of truth has moved to
-> [`docs/roadmap.md`](roadmap.md) (version × theme organized; evolves continuously).
+> [`docs/roadmap.md`](../roadmap.md) (version × theme organized; evolves continuously).
 >
 > Every forward-looking item below (P9B-1 through P9B-9) has been re-homed in the
 > roadmap with its original ID preserved. Use this file only to understand the
@@ -11,7 +11,7 @@
 # anvil — Post-v1.9.0 Backlog (v2.x roadmap + carry-forward tech debt)
 
 This file is the forward-looking companion to
-[`tech-debt-backlog.md`](tech-debt-backlog.md). Where `tech-debt-backlog.md`
+[`tech-debt-backlog.md`](../tech-debt-backlog.md). Where `tech-debt-backlog.md`
 catalogues items by *origin PR* and tracks their close-out across phases,
 this file catalogues items by *future release intent* — what v2.0 / v2.1 /
 v2.x will plausibly carry.
@@ -216,7 +216,7 @@ Migration path from the flat list form (a list of strings is shorthand for "the 
 
 ## Closed in Phase 9 (cross-reference)
 
-See [`tech-debt-backlog.md`](tech-debt-backlog.md) § "Phase 8 / Phase 9
+See [`tech-debt-backlog.md`](../tech-debt-backlog.md) § "Phase 8 / Phase 9
 closures (sync + LLM cleanups)" for the full list of P9-1..P9-8 entries
 with implementation details and test counts.
 

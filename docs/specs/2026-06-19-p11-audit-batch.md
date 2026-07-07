@@ -3,7 +3,7 @@
 **Date:** 2026-06-19
 **Status:** Draft — needs approval before implementation
 **Plugin:** `anvil`
-**Tracks:** roadmap "Version: next (v1.11 / v2.0 candidate)" and the [7 cross-cutting themes](../roadmap.md#cross-cutting-themes-high-leverage-batches); archived catalog [`docs/phase-11-backlog.md`](../phase-11-backlog.md); source [Phase 10 audit](../audits/2026-05-26-plugin-audit.md) (2026-05-26)
+**Tracks:** roadmap "Version: next (v1.11 / v2.0 candidate)" and the [7 cross-cutting themes](../roadmap.md#cross-cutting-themes-high-leverage-batches); archived catalog [`docs/phase-11-backlog.md`](../archive/phase-11-backlog.md); source [Phase 10 audit](../archive/2026-05-26-plugin-audit.md) (2026-05-26)
 **Breaking:** NO. Every item is non-breaking hygiene (docs, schema-truthfulness, perf, robustness).
 
 ---
@@ -14,7 +14,7 @@ The **P11 batch** is the set of deferred findings from the Phase-10 plugin audit
 (2026-05-26): the five critics (agent / skill / hook / mcp / structure) raised 57
 items below MUST-FIX, of which 56 were carried forward as live. None are
 breaking; the bulk are mechanical. They are catalogued by critic in
-[`phase-11-backlog.md`](../phase-11-backlog.md) and re-homed by version × theme in
+[`phase-11-backlog.md`](../archive/phase-11-backlog.md) and re-homed by version × theme in
 [`roadmap.md`](../roadmap.md).
 
 **Why this is lower-priority than the integrity track.** The roadmap explicitly

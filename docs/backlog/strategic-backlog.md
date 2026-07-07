@@ -202,15 +202,16 @@ placeholder.
 - **Rationale:** E13 (fleet/capacity coordination) is the boldest strategic
   bet and its economic premise — pools throttle often enough that draining
   several flat-rate pools + local spillover matters — rests on
-  `docs/research/2026-06-21-bake-off-results.md`, which is a stub. The
-  positioning doc already defines kill/pivot triggers; they can only fire if
+  a `docs/research/` results write-up (see
+  [`docs/plans/bake-off.md`](../plans/bake-off.md)) that has not been run
+  yet. The positioning doc already defines kill/pivot triggers; they can only fire if
   the experiment runs. Two loops, two weeks, publish whatever it says —
   either it funds E13 or it saves a quarter of misdirected work.
 - **Acceptance:** The bake-off doc is populated with the measured throttle
   frequency, spillover behavior, and packet-quality observations from ≥2
   concurrent pools on real work; an explicit go / narrow / kill call on E13
   scope is recorded in `anvil-backlog.md` E13 header.
-- **Likely files:** `docs/research/2026-06-21-bake-off-results.md`,
+- **Likely files:** `docs/research/` (new results write-up),
   `docs/backlog/anvil-backlog.md`
 - **Depends on:** — (S1/S2 strengthen the "safe to let weak runners pull" arm but aren't blockers)
 

@@ -26,7 +26,7 @@ can be inferred from the code, it does not belong here.
   enforced by a test, so easy to miss): the `README.md` version badge + "Beta —
   vX.Y.Z" lines, and the `anvil --version` / "current vX.Y.Z" examples in
   `docs/how-to/getting-started.md`, `docs/cli-reference.md`, and
-  `docs/architecture.md`. Leave historical snapshots (`docs/BUILD-REPORT.md`,
+  `docs/architecture.md`. Leave historical snapshots (`docs/archive/BUILD-REPORT.md`,
   `benchmarks/RESULTS.md`, old `CHANGELOG.md` entries) untouched.
 - **Bump only when you publish, not per commit.** Claude Code pins plugin pickups
   to the `version` string: an unchanged version means `/plugin marketplace update`
