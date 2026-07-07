@@ -381,14 +381,14 @@ is the reference implementation — read it alongside the contributor
 guide at [`sync-providers.md`](sync-providers.md), which walks through
 the Linear case step by step.
 
-Per-provider acceptance criteria (from `roadmap.md` § v2.0): provider
-module + transport (GraphQL or REST) + full-lifecycle respx tests +
-live nightly workflow gated on the provider's API key secret +
+Per-provider acceptance criteria (from `roadmap.md` § Next → Theme: Sync
+providers): provider module + transport (GraphQL or REST) + full-lifecycle
+respx tests + live nightly workflow gated on the provider's API key secret +
 `anvil sync <provider_id> --health` works.
 
 Provider config schemas in `config.yaml` (item P9B-9) are co-required
 with the first new provider — that work is SPEC-FIRST and tracked
-in the same v2.0 milestone.
+in the same Next bucket.
 
 ### How do I contribute?
 
@@ -401,11 +401,11 @@ prefixed `P11-XX-XN`, Phase 9 carry-forward items prefixed `P9B-N`).
 
 Three contribution shapes most appreciated right now:
 
-- **Sync providers.** Linear / Monday are first-party v2.0 work but
+- **Sync providers.** Linear / Monday providers are on the roadmap but
   community implementations are welcome. Follow
   [`sync-providers.md`](sync-providers.md).
 - **Phase 11 backlog batches.** 56 SHOULD FIX / CONSIDER / NIT items
-  tracked in [`phase-11-backlog.md`](phase-11-backlog.md); the
+  tracked in [`phase-11-backlog.md`](archive/phase-11-backlog.md); the
   cross-cutting themes in `roadmap.md` indicate which items batch
   cleanly.
 - **Test coverage.** Keep the local pytest suite and live-test documentation
