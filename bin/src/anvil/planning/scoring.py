@@ -24,12 +24,13 @@ import json
 import os
 import re
 import sys
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from anvil.config import DEFAULT_AUTO_EXPAND_THRESHOLD
 from anvil.state.models import Score, Task
 
 if TYPE_CHECKING:
+    from anvil.config import Config
     from anvil.planning.llm import LLMProvider
     from anvil.state.models import Requirement
 
@@ -42,6 +43,7 @@ __all__ = [
     "build_recursive_expansion_queue",
     "is_expanded",
     "rank_assumptions",
+    "review_tier",
     "score_requirement_assumption",
     "score_task",
     "score_all",
@@ -365,6 +367,62 @@ def score_task(
             )
 
     return score
+
+
+def review_tier(task: Task, *, config: Config) -> Literal["light", "standard", "max"]:
+    """Derive the review tier for *task*: ``"light"``, ``"standard"``, or ``"max"``.
+
+    retro-opps T001 — a pure projection over the persisted six-dim score plus
+    the B45 confirmation flags. Never persisted: the tier is recomputed at
+    every read so a re-confirmation at the ``anvil review tasks`` gate flips
+    it without any migration or re-scoring.
+
+    Tier rules, layered on the shipped fast-lane split so the two can never
+    disagree:
+
+    - **max** — ``review_risk`` or ``blast_radius`` is at/above
+      ``config.review_tier_max_min``, **or either is None**. An unscored task
+      fails safe to the deepest review (same philosophy as B45's
+      frontier-only default: never hand un-assessed work a lighter gate).
+    - **light** — the task passes the fast-lane gate
+      (:func:`anvil.context.packets.is_lightweight` with the config ceilings)
+      AND ``review_risk <= config.review_tier_light_risk_max`` AND **both**
+      ``blast_radius_confirmed`` and ``review_risk_confirmed`` are True.
+      Heuristic-only low scores never earn a light review — light ⊂
+      fast-lane ∧ confirmed, so a fast-lane packet with unconfirmed risk
+      still gets a standard review (packet size and review depth are
+      deliberately separable).
+    - **standard** — everything else.
+    """
+    # Deferred import: config.py deliberately avoids importing the packets
+    # module at load time; mirror that here so scoring stays light too.
+    from anvil.context.packets import is_lightweight
+
+    scores = task.scores
+    review_risk = scores.review_risk
+    blast_radius = scores.blast_radius
+
+    if review_risk is None or blast_radius is None:
+        return "max"
+    if (
+        review_risk >= config.review_tier_max_min
+        or blast_radius >= config.review_tier_max_min
+    ):
+        return "max"
+
+    if (
+        is_lightweight(
+            task,
+            complexity_max=config.fast_lane_complexity_max,
+            blast_radius_max=config.fast_lane_blast_radius_max,
+        )
+        and review_risk <= config.review_tier_light_risk_max
+        and scores.blast_radius_confirmed
+        and scores.review_risk_confirmed
+    ):
+        return "light"
+
+    return "standard"
 
 
 def score_all(
