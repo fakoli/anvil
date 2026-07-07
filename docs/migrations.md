@@ -17,6 +17,8 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v4      | Git-backed events Phase A (v1.22.0) | `events.id` CHECK widened to accept hash-chained ids (`E-<12 hex>`); nullable `events.seq` column added (replay-assigned display order in git mode; NULL in local mode).      |
 | v5      | Non-feature task types (T015) | `tasks` adds `task_type TEXT NOT NULL DEFAULT 'feature'` so a brownfield PRD can describe bugfix / refactor / modify work. The DEFAULT backfills every existing row to `feature` (the pre-v5 meaning).      |
 | v6      | Typed proofs (SL-3 / B48) | `evidence` adds `proofs TEXT NOT NULL DEFAULT '[]'` — a JSON array of typed `ProofArtifact`s (CommandProof / DiffProof / LinkProof / AssertionProof). The DEFAULT backfills every existing row to "no typed proofs" (the pre-v6 meaning). Additive: legacy string evidence fields stay.      |
+| v7      | Multi-PRD persistence (v0.3 / T002) | `prds` becomes a multi-row table keyed on a single-column `id` PRIMARY KEY (not composite) and gains `title`/`target_version`/`target_tag`/`is_default`/`created_at`/`updated_at`, with a partial unique index enforcing at most one default PRD; `requirements`/`features`/`tasks` each gain a `prd_id` partition column (DEFAULT `'default'`); `requirements` also gains nullable `revision_introduced`/`revision_superseded` lineage columns; `sync_mappings` gains `prd_id`/`entity_kind` columns. The v6→v7 migration rebuilds `prds` (SQLite can't ALTER a PRIMARY KEY) and ALTER-backfills every other column via its DEFAULT, so existing rows adopt the default PRD with zero data loss.      |
+| v8      | Multi-PRD revisions (v0.3 / T023) | `prds` adds `revision INTEGER NOT NULL DEFAULT 1` — the per-PRD monotonic revision counter bumped by `prd.revised`. Purely additive: the DEFAULT backfills every pre-existing v7 PRD row to revision 1. A separate version from v7 (not folded in) because v7 already shipped without it; a DB already stamped v7 must re-enter the migration ladder via the v8 bump to grow the column.      |
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
@@ -47,7 +49,7 @@ If you need to verify the upgrade manually:
 
 ```bash
 $ sqlite3 .anvil/state.db "PRAGMA user_version;"
-4
+3
 ```
 
 If the version is still 1, 2, or 3 after running any `anvil` command, the
@@ -113,13 +115,13 @@ and un-backed-up. For operators who want the migration to be deliberate,
 `anvil migrate state` promotes that same in-init migration to an
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the exact ordered, idempotent forward branches
-(`0/1→5`, `2→5`, `3→5`, `4→5`) that already live in
+(`0/1→8`, `2→8`, `3→8`, `4→8`, `5→8`, `6→8`, `7→8`) that already live in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v4
+Schema migration  : v3 -> v8
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -127,7 +129,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v4.
+Migrated state.db v3 -> v8.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 
@@ -151,6 +153,40 @@ Behaviour:
 The `replay` escape hatch below remains available; `migrate state` is the
 in-place, row-preserving path, while `replay` rebuilds `state.db` from the audit
 log.
+
+## `anvil migrate-workspace` — legacy in-repo state → HOME workspace
+
+Distinct from `anvil migrate state` above: this command moves *where*
+`.anvil/` lives, not the schema inside it. Before the HOME-workspace default
+(B44), `anvil` kept state in-repo at `<repo>/.anvil` (or `<repo>/bin/.anvil`
+for the anvil-on-anvil dogfooding case). `anvil migrate-workspace` copies that
+legacy directory into the canonical HOME workspace
+(`~/.anvil/workspaces/<key>/.anvil`) so a project that predates the HOME
+default resolves its history under the new layout.
+
+Behaviour:
+
+- **Dry-run by default** — reports source → target and a file count, writing
+  nothing; re-run with `--yes` to apply.
+- **No-clobber** — if a HOME workspace already exists for the project, it is
+  authoritative and the command skips entirely (never overwrites it).
+- **Copy, never move** — the legacy directory is left in place as a fallback.
+- **Atomic** — copies into a temp sibling, then does an atomic replace into
+  the target, so an interrupted copy never leaves a half-populated workspace.
+- **Whole-tree** — copies all of `.anvil/` (`state.db` plus `-wal`/`-shm`
+  sidecars, `events.jsonl`, config, prd, `packets/`, `.evidence-buffer/`).
+
+```bash
+# Inspect what would happen (dry run — mutates nothing):
+$ anvil migrate-workspace
+Would copy 12 file(s) from /repo/.anvil → ~/.anvil/workspaces/<key>/.anvil.
+Dry run — nothing written. Re-run with --yes to apply.
+
+# Apply it:
+$ anvil migrate-workspace --yes
+Migrated 12 file(s) from /repo/.anvil → ~/.anvil/workspaces/<key>/.anvil.
+The legacy directory was left in place as a fallback.
+```
 
 ## When you need a real migration
 
