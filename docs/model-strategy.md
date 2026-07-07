@@ -1,6 +1,9 @@
 # Model strategy
 
-This document explains *why* anvil's agents default to specific Claude tiers (Opus / Sonnet / Haiku) and how to override them. Companion to [`docs/llm-providers.md`](llm-providers.md), which covers *how* to configure each provider.
+> **Audience:** contributors and maintainers deciding or reviewing tier
+> defaults. For day-to-day `--use-llm` setup, see [`docs/llm.md`](llm.md).
+
+This document explains *why* anvil's agents default to specific Claude tiers (Opus / Sonnet / Haiku) and how to override them. Companion to [`docs/llm.md`](llm.md), which covers *how* to configure each provider and has the canonical tier/model-id/cost table.
 
 ---
 
@@ -10,7 +13,7 @@ This document explains *why* anvil's agents default to specific Claude tiers (Op
 
 This is the 2026 community consensus, codified in Anthropic's own docs and surfaced via the routing-telemetry issue ([anthropics/claude-code#27665](https://github.com/anthropics/claude-code/issues/27665)) which documented that 93.8% of tokens were being routed to Opus when smarter defaults would cut that to ~30%. Defaulting every agent to Opus is the headline cost anti-pattern in agent setups — it costs roughly 5× more per token than Sonnet without quality wins on most agent work.
 
-anvil's tier defaults (v1.17.0) follow this rule directly: `DEFAULT_TIER = "sonnet"` in `planning/llm.py`, and each agent's frontmatter sets `model:` to the tier appropriate for the work it does.
+anvil's tier defaults follow this rule directly: `DEFAULT_TIER = "sonnet"` in `planning/llm.py`, and each agent's frontmatter sets `model:` to the tier appropriate for the work it does.
 
 ---
 
@@ -48,7 +51,7 @@ Anthropic ships exactly one first-party "escalate on complexity" pattern: the `o
 
 Third-party community routers exist (`tzachbon/claude-model-router-hook`, `0xrdan/claude-router`, `musistudio/claude-code-router`) that classify prompt complexity at the PreToolUse hook level and rewrite the model. None of these are first-party, and anvil does not ship its own router because:
 
-1. **Measuring before optimizing** — most projects' agent spend is dominated by overuse of Opus on simple turns, not by undertuning of any single turn. Switching defaults to Sonnet (already done in v1.17.0) captures the bulk of the savings without dynamic routing.
+1. **Measuring before optimizing** — most projects' agent spend is dominated by overuse of Opus on simple turns, not by undertuning of any single turn. Switching defaults to Sonnet (already the anvil default) captures the bulk of the savings without dynamic routing.
 2. **Cost predictability** — a dynamic router can surprise ops teams when prompt classification flips a critical path to Haiku. The cost win is real, but the failure mode (a planning task accidentally classified as "simple" and run on Haiku) is opaque to debug.
 3. **Opt-in over default** — users who want dynamic routing today can wire `tzachbon/claude-model-router-hook` themselves and override per-agent. Bundling it would force a one-size-fits-all policy.
 
@@ -56,17 +59,14 @@ If a future anvil release ships dynamic escalation, it will be via an explicit `
 
 ---
 
-## Cost reference (May 2026 prices, per million tokens)
+## Cost reference
 
-| Tier | Direct API in / out | Notes |
-| --- | --- | --- |
-| Opus 4.7 | $15 / $75 | Use sparingly; deep reasoning only. |
-| Sonnet 4.6 | $3 / $15 | The default. Roughly **5× cheaper than Opus**. |
-| Haiku 4.5 | $1 / $5 | Roughly **15× cheaper than Opus**. The floor for mechanical work. |
+See [`llm.md` § Cost-tier defaults](llm.md#cost-tier-defaults) for the canonical per-tier
+model-id and price table (kept in one place to avoid drift). At a glance: Sonnet is
+roughly **5× cheaper than Opus** per token, and Haiku roughly **15× cheaper** — the core
+economics behind the headline rule above.
 
-Bedrock pricing varies by region and inference profile. Custom endpoints (vLLM self-hosted) carry hosting cost only; OpenRouter / Together pass through provider rates with a margin.
-
-For a typical anvil planning session (one PRD → tasks generation + 4 expansions + 6 score augmentations + 3 critic reviews), the v1.17.0 tier defaults reduce per-session token spend by ~60% versus the prior "everything inherits Opus" pattern, with no measurable quality regression on the planner and critic paths (which stay on Opus).
+For a typical anvil planning session (one PRD → tasks generation + 4 expansions + 6 score augmentations + 3 critic reviews), the current tier defaults reduce per-session token spend by ~60% versus the prior "everything inherits Opus" pattern, with no measurable quality regression on the planner and critic paths (which stay on Opus).
 
 ---
 

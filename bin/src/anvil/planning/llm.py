@@ -715,7 +715,7 @@ class BedrockProvider:
     * AWS auth flows through the standard boto3 credential chain
       (env vars → ``~/.aws/credentials`` → IAM role for EC2/ECS/EKS).
 
-    Optional install: ``pip install 'anvil[bedrock]'`` pulls in
+    Optional install: ``pip install 'anvil-state[bedrock]'`` pulls in
     ``anthropic[bedrock]`` which adds boto3. The import is deferred so
     users on the Anthropic-API-only path do not pay for boto3 at startup.
 
@@ -894,7 +894,7 @@ class CustomEndpointProvider:
       set ``cached_input_tokens=0``. Servers that expose finer accounting
       (some vLLM builds) can be supported later via a kwarg.
 
-    Optional install: ``pip install 'anvil[custom]'`` pulls in
+    Optional install: ``pip install 'anvil-state[custom]'`` pulls in
     ``openai>=1.0``. Lazy import — only custom-endpoint users pay for it.
 
     Auth resolution order:
