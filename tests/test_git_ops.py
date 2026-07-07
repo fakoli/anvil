@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from anvil.git_ops import freshness as freshness_mod
 from anvil.git_ops.branch import (
     BranchResult,
     _slug,
@@ -20,6 +21,7 @@ from anvil.git_ops.branch import (
     is_git_repo,
     use_named_branch,
 )
+from anvil.git_ops.freshness import BaseRef, check_freshness, resolve_base
 from anvil.git_ops.worktree import (
     WorktreeResult,
     create_worktree_for_task,
@@ -579,3 +581,136 @@ class TestWorkspaceLayoutGitOps:
             cwd=str(project), capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert after == before, "main must not move onto the named branch"
+
+
+# ---------------------------------------------------------------------------
+# TestFreshness (retro-opps:T005) — base resolution + freshness/conflict report
+# ---------------------------------------------------------------------------
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=str(repo), check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def _default_branch(repo: Path) -> str:
+    return _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+
+class TestResolveBase:
+    def test_no_remote_degrades_to_local_default(self, git_repo: Path) -> None:
+        """AC: fixture repo with no remote → local default branch,
+        remote_checked=False, a reason string, no exception."""
+        base = resolve_base(git_repo)
+        assert base.ref == _default_branch(git_repo)
+        assert base.remote_checked is False
+        assert base.reason  # non-empty explanation
+        assert isinstance(base, BaseRef)
+
+    def test_not_a_repo_returns_none_ref(self, tmp_path: Path) -> None:
+        base = resolve_base(tmp_path)  # exists, but not a repo
+        assert base.ref is None
+        assert base.remote_checked is False
+        assert base.reason
+
+    def test_nonexistent_dir_returns_none_ref_without_raising(
+        self, tmp_path: Path
+    ) -> None:
+        base = resolve_base(tmp_path / "not-a-repo-anywhere")
+        assert base.ref is None
+        assert base.remote_checked is False
+        assert "does not exist" in (base.reason or "")
+
+    def test_unreachable_remote_degrades_with_fetch_reason(
+        self, git_repo: Path
+    ) -> None:
+        """origin exists but the fetch fails → local base, reason names it."""
+        _git(git_repo, "remote", "add", "origin", str(git_repo / "nope.git"))
+        base = resolve_base(git_repo)
+        assert base.ref == _default_branch(git_repo)
+        assert base.remote_checked is False
+        assert "fetch failed" in (base.reason or "")
+
+
+class TestCheckFreshness:
+    def test_up_to_date_branch_reports_zero_behind(self, git_repo: Path) -> None:
+        _git(git_repo, "branch", "feature")
+        report = check_freshness("feature", cwd=git_repo)
+        assert report.behind_count == 0
+        assert report.is_stale is False
+        assert report.has_conflicts is False
+
+    def test_branch_two_behind_reports_two(self, git_repo: Path) -> None:
+        """AC: a branch 2 commits behind base reports behind_count == 2."""
+        _git(git_repo, "branch", "feature")
+        for i in range(2):
+            (git_repo / f"file{i}.txt").write_text(f"{i}\n", encoding="utf-8")
+            _git(git_repo, "add", ".")
+            _git(git_repo, "commit", "-m", f"advance {i}")
+        report = check_freshness("feature", cwd=git_repo)
+        assert report.behind_count == 2
+        assert report.is_stale is True
+        assert report.has_conflicts is False  # disjoint files merge cleanly
+
+    def test_textual_conflict_detected(self, git_repo: Path) -> None:
+        """AC: a branch that conflicts with base reports has_conflicts=True."""
+        default = _default_branch(git_repo)
+        _git(git_repo, "checkout", "-b", "feature")
+        (git_repo / "README.md").write_text("feature line\n", encoding="utf-8")
+        _git(git_repo, "add", ".")
+        _git(git_repo, "commit", "-m", "feature edit")
+        _git(git_repo, "checkout", default)
+        (git_repo / "README.md").write_text("main line\n", encoding="utf-8")
+        _git(git_repo, "add", ".")
+        _git(git_repo, "commit", "-m", "main edit")
+        report = check_freshness("feature", cwd=git_repo)
+        assert report.has_conflicts is True
+        assert report.conflict_probe == "merge-tree"
+
+    def test_old_git_probe_skipped_not_failed(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC: without merge-tree support the probe is skipped, not failed."""
+        _git(git_repo, "branch", "feature")
+        real_run_git = freshness_mod._run_git
+
+        def fake_run_git(args: list[str], cwd: Path):  # type: ignore[no-untyped-def]
+            if args and args[0] == "merge-tree":
+                return subprocess.CompletedProcess(
+                    args=["git", *args],
+                    returncode=129,
+                    stdout="",
+                    stderr="error: unknown option `write-tree'",
+                )
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(freshness_mod, "_run_git", fake_run_git)
+        report = check_freshness("feature", cwd=git_repo)
+        assert report.has_conflicts is None
+        assert report.conflict_probe.startswith("skipped:")
+        assert report.behind_count == 0  # freshness half still ran
+
+    def test_missing_branch_reports_reason(self, git_repo: Path) -> None:
+        report = check_freshness("no-such-branch", cwd=git_repo)
+        assert report.behind_count is None
+        assert report.has_conflicts is None
+        assert "not found" in (report.reason or "")
+
+    def test_never_writes_working_tree(self, git_repo: Path) -> None:
+        """AC: no function in the module writes to the repo working tree."""
+        default = _default_branch(git_repo)
+        _git(git_repo, "checkout", "-b", "feature")
+        (git_repo / "README.md").write_text("feature line\n", encoding="utf-8")
+        _git(git_repo, "add", ".")
+        _git(git_repo, "commit", "-m", "feature edit")
+        _git(git_repo, "checkout", default)
+        (git_repo / "README.md").write_text("main line\n", encoding="utf-8")
+        _git(git_repo, "add", ".")
+        _git(git_repo, "commit", "-m", "main edit")
+
+        resolve_base(git_repo)
+        check_freshness("feature", cwd=git_repo)
+
+        assert _git(git_repo, "status", "--porcelain") == ""
+        assert _default_branch(git_repo) == default
