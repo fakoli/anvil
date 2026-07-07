@@ -26,7 +26,7 @@ The toolset is organized by lifecycle phase:
 - **Decision resolution** (`find_decisions`)
 - **Introspection** (`describe_surface`)
 
-The eight workflow tools added in v1.13.0 — `init_project`, `get_project_status`,
+The eight workflow tools — `init_project`, `get_project_status`,
 `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `apply_review_decision` — deliberately omit git operations (branch / worktree creation),
 matching `claim_task`'s long-standing behavior: remote agents may have no git access, so
@@ -214,10 +214,10 @@ criteria and constraints before calling `claim_task`.
 ### `get_next_task`
 
 Returns the single highest-priority `ready` task that has no active claim and no unsatisfied
-dependencies. Sort key (from `ClaimManager.next_claimable()`): `priority desc` (`critical` >
-`high` > `medium` > `low`), then `complexity asc` (lower score wins; unscored tasks rank
-last), then `created_at asc` (oldest first for fairness). Returns `null` when no claimable
-task is available.
+dependencies. Sort key (implemented directly in this tool, not delegated to
+`ClaimManager.next_claimable()`): `priority desc` (`critical` > `high` > `medium` > `low`),
+then `agent_suitability desc` (higher score wins; unscored tasks rank as `0`), then `id asc`
+(stable tiebreak). Returns `null` when no claimable task is available.
 
 Stale-claim reaping runs before the selection, so expired leases are cleared before the
 candidate set is computed. Tasks in active conflict groups (where a conflicting task is
@@ -225,12 +225,25 @@ already claimed) are excluded.
 
 **Inputs**
 
-| Parameter | Type            | Required | Default |
-|-----------|-----------------|----------|---------|
-| `actor`   | `string \| null` | no       | `null`  |
+| Parameter         | Type             | Required | Default |
+|-------------------|------------------|----------|---------|
+| `actor`           | `string \| null` | no       | `null`  |
+| `prd_id`          | `string \| null` | no       | `null`  |
+| `max_blast`       | `int \| null`    | no       | `null`  |
+| `max_review_risk` | `int \| null`    | no       | `null`  |
 
 `actor` is accepted but not used in the selection logic in the current implementation;
 it is reserved for future suitability filtering.
+
+`prd_id` scopes the candidate pool to one PRD partition; the exclusion sets (active claims,
+done-dependency set, active conflict groups) still span all PRDs, so cross-PRD coordination
+still applies. `null` keeps the all-PRDs behavior.
+
+`max_blast` / `max_review_risk` are optional risk-axis ceilings: when set, a task is offered
+only if that dimension is CONFIRMED (human/LLM, not the filename-regex heuristic) and at or
+below the ceiling, using the same `within_risk_ceiling` helper the CLI's
+`ClaimManager.next_claimable` uses — so a weak/local runner can declare a ceiling and never
+be handed high-risk work.
 
 **Output**
 
@@ -369,7 +382,61 @@ to dispatch in parallel this wave.
 
 Every mutating tool runs `detect_and_release_stale` at the top of its call. This is
 automatic — agents do not need to trigger reaping manually. See
-[Stale-claim reaping](#stale-claim-reaping) for details.
+[Stale-claim reaping](#stale-claim-reaping) for details. The one exception is
+`edit_dependencies` below, which only rewrites dependency lists and does not touch claim
+state, so it skips reaping.
+
+---
+
+### `edit_dependencies`
+
+Applies a batch of dependency edits atomically, rejecting cycles. This is a
+planning-gated tool (hidden from the wire unless `ANVIL_MCP_PLANNING=1`; see
+[Tool surface gating](#tool-surface-gating)). It does not run stale-claim reaping — it
+only rewrites dependency lists, so no claim state is touched.
+
+`add` / `remove` are `[source, target]` pairs meaning *source depends on target*. The whole
+batch is validated up front before anything is written: any unknown task ID, self-dependency,
+or resulting cycle rejects the entire batch with no partial apply. Task status is preserved —
+`edit_dependencies` emits a `task.created` upsert per changed task that deliberately omits
+`status` from its write, so a claimed or in-progress task's dependency list can be edited
+without regressing its status.
+
+**Inputs**
+
+| Parameter | Type                     | Required | Default |
+|-----------|--------------------------|----------|---------|
+| `actor`   | `string`                 | yes      |         |
+| `add`     | `list[list[string]] \| null` | no   | `null`  |
+| `remove`  | `list[list[string]] \| null` | no   | `null`  |
+
+At least one of `add` / `remove` must contain an edge, or the tool raises `ToolError`.
+
+**Output**
+
+```json
+{
+  "changed": ["T003"],
+  "added": [["T003", "T001"]],
+  "removed": []
+}
+```
+
+`changed` lists every task whose dependency set was actually mutated; `added` / `removed`
+are the `[source, target]` edges that took effect — no-op edges (e.g. re-adding an edge that
+already exists) are excluded from both.
+
+**Failure modes**
+
+- `ToolError` — no edges supplied (both `add` and `remove` empty).
+- `ToolError` — malformed edge (not a 2-element `[source, target]` pair).
+- `ToolError` — unknown task referenced by an edge.
+- `ToolError` — self-dependency (`source == target`).
+- `ToolError` — the batch would introduce a dependency cycle.
+- `ToolError` — state directory not found.
+
+**When to call**: when a planner agent needs to correct inferred dependencies (add a missing
+edge, drop a spurious one) before promoting tasks to `ready`, without hand-editing state.db.
 
 ---
 
@@ -379,8 +446,9 @@ Acquires an exclusive lease on a task for the given actor. Delegates to
 `ClaimManager.claim`, which writes the `Claim` row in an atomic SQLite transaction.
 Stale-claim reaping runs first.
 
-**Gate**: the PRD must not be in `draft` status. If the PRD is `draft` or missing, the tool
-raises a `ToolError` and no claim is created.
+**Gate**: the task's owning PRD must be in `reviewed` or `approved` status. If the PRD is in
+any other status (e.g. `draft`) or missing, the tool raises a `ToolError` and no claim is
+created.
 
 **Inputs**
 
@@ -415,7 +483,7 @@ and the project-level override is read from `.anvil/config.yaml`.
 
 **Failure modes**
 
-- `ToolError` — PRD is `draft` or missing.
+- `ToolError` — PRD is not in `reviewed` or `approved` status, or missing.
 - `ToolError` — `ClaimError` from `ClaimManager` (task already claimed, task not in claimable state, etc.).
 - `ToolError` — state directory not found.
 
@@ -572,7 +640,7 @@ work without a second round-trip to `get_next_task`.
 
 - `ToolError` — task not found.
 - `ToolError` — no active claim found for the task (claim the task before submitting).
-- `ToolError` — `TransactionAborted` from the backend.
+- `ToolError` — `EventRejected` from the backend.
 - `ToolError` — state directory not found.
 
 **When to call**: when the agent's work is complete and it is ready to hand off to review.
@@ -617,7 +685,7 @@ Stale-claim reaping runs first.
 
 - `ToolError` — task not found.
 - `ToolError` — transition not allowed (message includes current status and valid targets).
-- `ToolError` — `TransactionAborted` from the backend.
+- `ToolError` — `EventRejected` from the backend.
 - `ToolError` — state directory not found.
 
 **When to call**: when a planner agent marks reviewed tasks as `ready` before a work wave,
@@ -626,7 +694,7 @@ that cannot be resolved yet.
 
 ---
 
-### Workflow tools (v1.13.0)
+### Workflow tools
 
 These eight tools complete the lifecycle so a non-Claude-Code MCP client can run the entire
 PRD-to-done flow without touching the CLI. All eight accept an optional `cwd` argument so a
@@ -798,14 +866,36 @@ and `prd review --approve`.
 
 Runs the planner pipeline against the current PRD: emits `feature.created` and
 `task.created` events, runs dependency + conflict-group inference, then promotes
-`proposed → drafted`. Mirrors `anvil plan` in deterministic mode (no LLM
-augmentation — agents that need LLM enrichment must use the CLI).
+`proposed → drafted`. Mirrors `anvil plan`.
+
+`use_llm` defaults to `true`: when the PRD has features but no `## Tasks` section, the
+deterministic parser yields zero tasks, so `plan_tasks` calls the LLM task-generation
+backstop, appends the generated `## Tasks` section to `prd.md`, and re-parses before any
+events are emitted. The provider defaults to the Claude subscription via the Agent SDK; pin
+`anthropic`/`bedrock`/`custom` in `.anvil/config.yaml`, or set `llm_fallback: true` for
+env auto-detect. Set `use_llm=false` to opt out and keep the deterministic parse; if the PRD
+still has zero tasks in that case, `plan_tasks` returns `task_count=0` rather than raising
+(unlike the CLI's `--no-llm`, which fails loudly in the same scenario). When the PRD already
+has a `## Tasks` section, `use_llm` has no effect — the deterministic parse is always used.
 
 **Inputs**
 
-| Parameter | Type             | Required | Default      |
-|-----------|------------------|----------|--------------|
-| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+| Parameter     | Type             | Required | Default      |
+|---------------|------------------|----------|--------------|
+| `cwd`         | `string \| null` | no       | `Path.cwd()` |
+| `use_llm`     | `bool`           | no       | `true`       |
+| `prune_force` | `bool`           | no       | `false`      |
+| `prd_id`      | `string \| null` | no       | `null`       |
+
+`prune_force`: tasks that were in state.db but are absent from the re-parsed PRD are orphans.
+If any orphan has advanced past `ready` status (claimed, in progress, needs review, etc.),
+the tool raises `ToolError` rather than silently discarding claim/evidence history — pass
+`prune_force=true` to delete them anyway (the audit trail is preserved either way).
+
+`prd_id`: PRD partition to plan (multi-PRD). A non-default id reads `.anvil/prds/<id>.md`,
+scopes orphan-prune to that partition, and stamps the partition into every feature/task
+event. `null` (or `"default"` / `"prd"`) keeps the bare `.anvil/prd.md` source and the
+default partition.
 
 **Output**
 
@@ -814,19 +904,31 @@ augmentation — agents that need LLM enrichment must use the CLI).
   "feature_count": 1,
   "task_count": 2,
   "conflict_group_count": 0,
-  "warnings": []
+  "warnings": [],
+  "llm_generated": false,
+  "llm_provider": null,
+  "pruned_task_ids": [],
+  "pruned_feature_ids": []
 }
 ```
 
 `warnings` mirrors the parse errors surfaced as warnings during plan (matching the CLI).
+`llm_generated` is `true` when this call drafted a `## Tasks` section via the LLM backstop
+and appended it to `prd.md`; `llm_provider` names the resolved provider in that case, else
+`null`. `pruned_task_ids` / `pruned_feature_ids` list any IDs deleted by the orphan-prune
+step (empty when nothing was pruned).
 
 **Failure modes**
 
 - `ToolError` — project not initialized.
 - `ToolError` — PRD file not found.
+- `ToolError` — LLM task-generation backstop failed (no provider available, the provider
+  call itself failed, or the response contained no parseable task blocks).
+- `ToolError` — orphan tasks advanced past `ready` and `prune_force` was not set.
+- `ToolError` — `EventRejected` from the backend during event append.
 
-**When to call**: right after `review_prd` (draft → reviewed) so the deterministic plan
-has the latest PRD content.
+**When to call**: right after `review_prd` (draft → reviewed) so the plan reflects the
+latest PRD content.
 
 ---
 
@@ -955,7 +1057,7 @@ is claimable.
 
 ---
 
-### Decision resolution (v1.14.0)
+### Decision resolution
 
 One read-only tool that surfaces unresolved PRD items so the `resolve-decisions` skill can
 drive Q&A with the user. Detection logic lives in `anvil.planning.decisions` and is
@@ -1026,6 +1128,59 @@ anvil prd find-decisions --file path/to/prd.md
 **When to call**: after `parse_prd` succeeds but before `review_prd` or `plan_tasks`, so
 unresolved markers and missing fields are surfaced and resolved before downstream tools
 treat the PRD as ready.
+
+---
+
+### Introspection
+
+One read-only tool that returns a machine-readable manifest of the command surface. It is
+the sibling of `anvil describe` and needs no initialized project.
+
+---
+
+### `describe_surface`
+
+Returns a machine-readable manifest of the anvil command surface: the CLI subcommands and
+MCP tool names this engine exposes, plus the engine version, schema version, and a stable
+`api_version` to pin against. Introspected live from the same builder the CLI `anvil
+describe` uses — the CLI and MCP surfaces can never disagree — so it never needs a project
+to be initialized. This tool is planning-gated (hidden from the wire unless
+`ANVIL_MCP_PLANNING=1`; see [Tool surface gating](#tool-surface-gating)), but the
+introspection surfaces themselves (`anvil describe`, the `--help` tool list, the Docker
+catalog smoke test) always report the full 24-tool surface regardless of the gate.
+
+**Inputs**
+
+None.
+
+**Output**
+
+```json
+{
+  "api_version": "2",
+  "engine_version": "0.4.0",
+  "schema_version": 8,
+  "envelope": "v1.24",
+  "cli": {
+    "commands": ["apply", "..."],
+    "count": 49
+  },
+  "mcp": {
+    "tools": ["claim_task", "..."],
+    "count": 24
+  }
+}
+```
+
+`cli.commands` and `mcp.tools` are both sorted for stable, diffable output. Grouped CLI
+commands render space-joined (e.g. `"prd parse"`) so the exact invocation path is visible.
+
+**Failure modes**
+
+None — always returns a response.
+
+**When to call**: when an MCP-only host needs to discover the full command surface (or pin
+against `api_version`) without shelling out to the CLI.
 
 ---
 
@@ -1168,5 +1323,5 @@ wiring automatically.
 
 - [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — canonical
   design spec: data model, task lifecycle, phasing plan, integration contracts.
-- `hooks.md` — claim discipline hooks: `check-claim.sh`, `record-file-change.sh`,
-  `capture-evidence.sh`, `detect-state.sh`. (Landing in Phase 6 documentation pass.)
+- [`hooks-reference.md`](hooks-reference.md) — claim discipline hooks: `check-claim.sh`,
+  `record-file-change.sh`, `capture-evidence.sh`, `detect-state.sh`.
