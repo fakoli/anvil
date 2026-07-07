@@ -47,7 +47,7 @@ on an empty queue (exit 0). Use `-q` for control flow, `--json` for the id.
 One governed task = the same five steps everywhere. `/anvil:execute` wraps them.
 
 ```
-claim  ->  packet  ->  do the work  ->  submit --evidence  ->  apply
+claim  ->  packet  ->  do the work  ->  submit --commands --files-changed  ->  apply
 ```
 
 ```bash
@@ -78,7 +78,7 @@ scheduled fire (Codex automation), a cron job, or a single CI step.
 ```bash
 # exit 3 = empty (nothing to do, clean); any other non-zero = real error -> propagate
 anvil next -q || { rc=$?; [ "$rc" -eq 3 ] && exit 0; exit "$rc"; }
-task="$(anvil next --json | …)"  # read the id, then run the body once
+task="$(anvil next --json | jq -r '.data.task.id')"  # read the id, then run the body once
 ```
 
 ### Drain until empty
@@ -113,5 +113,7 @@ Committed, copy-ready adapters for each mode:
 | Codex automation | one-per-invocation | `packaging/loops/codex-automation.md` |
 
 Each adapter references this seam and this body — they only change the cadence
-and the per-runtime wiring. For declarative loops **not** derived from a PRD, an
-`anvil run-workflow` + `.anvil/workflows/*.yaml` path is spec'd but deferred.
+and the per-runtime wiring. For declarative loops **not** derived from a PRD,
+`anvil run-workflow <name>` loads `.anvil/workflows/<name>.yaml` and drives each
+step through the same governed transitions (create → claim → run → submit
+evidence → apply) to completion, then exits — no background process.

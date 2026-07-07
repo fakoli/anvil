@@ -18,10 +18,12 @@ loop through one of two surfaces:
   anvil **plugin** itself: install it from the marketplace (see below) or wire
   `.mcp.json` by hand — there is no `anvil install claude-code`.
 - **MCP-only best-effort** — every other harness: install merges the anvil MCP server
-  into the harness's config **where it can write in place**; for the rest (gemini,
-  cline, openhands, continue, goose) `anvil mcp-config <harness>` prints the block to
-  paste. No instruction splice, no skills drop — point the agent at the repo's
-  `AGENTS.md` for usage guidance.
+  into the harness's config **where it can write in place**; for the rest (`cline`,
+  `continue`, `goose`) `anvil mcp-config <harness>` prints the block to paste.
+  `gemini` and `openhands` aren't valid `mcp-config` clients — their MCP config
+  instead ships as a committed reference file (`packaging/gemini/gemini-extension.json`,
+  `packaging/openhands/config.toml.snippet`). No instruction splice, no skills drop —
+  point the agent at the repo's `AGENTS.md` for usage guidance.
 
 Why tiers? Splicing instruction files and dropping skills into a dozen harnesses was
 the blast-radius behind a config-corruption incident. The three supported harnesses
@@ -91,22 +93,25 @@ config this writes.
 | `amp` | MCP-only | merge MCP → `~/.config/amp/settings.json` (`amp.mcpServers`) |
 | `gemini` | MCP-only | MCP ships in `gemini-extension.json` (see `packaging/gemini/`) |
 | `cline` | MCP-only | editor-managed settings — `anvil mcp-config cline` prints the block |
-| `openhands` | MCP-only | `[mcp].stdio_servers` in `config.toml` — `anvil mcp-config openhands` |
+| `openhands` | MCP-only | `[mcp].stdio_servers` in `config.toml` — copy `packaging/openhands/config.toml.snippet` |
 | `continue` | MCP-only | `.continue/mcpServers/anvil.yaml` — `anvil mcp-config continue` |
 | `goose` | MCP-only | `extensions` in `~/.config/goose/config.yaml` — `anvil mcp-config goose` |
 
 **MCP-only** harnesses get just the anvil MCP server — no `AGENTS.md` splice, no
-skills drop. For those without an in-place writer (gemini, cline, openhands,
-continue, goose), run `anvil mcp-config <harness>` to print the paste-ready block —
-it tells you which file to paste it into — and see the committed reference under
-`packaging/<harness>/`. Aider has no MCP client, so it's intentionally absent.
+skills drop. For those without an in-place writer, `cline`, `continue`, and `goose`
+run `anvil mcp-config <harness>` to print the paste-ready block — it tells you which
+file to paste it into — and see the committed reference under `packaging/<harness>/`.
+`gemini` and `openhands` aren't valid `mcp-config` clients, so use their committed
+manifests directly instead: `packaging/gemini/gemini-extension.json` and
+`packaging/openhands/config.toml.snippet`. Aider has no MCP client, so it's
+intentionally absent.
 
 ## Or just use the CLI
 
 ```bash
 anvil init && anvil prd parse && anvil plan && anvil next
 anvil claim T001 && anvil packet T001
-anvil submit T001 --evidence … && anvil apply T001
+anvil submit T001 --commands "uv run pytest -x" --files-changed "src/foo.py" && anvil apply T001
 ```
 
 Every read command takes `--json`. `AGENTS.md` carries the full MCP-tool ⇄
