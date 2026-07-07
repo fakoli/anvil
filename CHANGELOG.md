@@ -6,6 +6,31 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Documented
+
+- **Full docs audit and information-architecture restructure.** A
+  maintainer-only audit (`docs/plans/2026-07-07-docs-assessment.md`) scored
+  every doc against the v0.4.0 code and found drift/audience-mixing as the
+  systemic issues; wave 1-2 accuracy fixes landed in #133 (storage/backup
+  answers, phantom flags, broken harness commands, evidence-buffer lifecycle,
+  skills/agents roster drift, CLI defaults, migrations history, personal-path
+  scrub) alongside new roster-sync tests (`tests/test_docs_rosters.py`) that
+  pin skills-reference, agents-reference, mcp.md, and hooks-reference to their
+  live sources so this class of drift fails CI going forward.
+- **LLM provider docs merged.** `llm-providers.md` is retired into
+  `llm.md`'s canonical provider matrix, precedence rule, and cost table —
+  one page instead of three overlapping ones.
+- **Site nav restructured to separate user docs from contributor docs.** The
+  public site now covers Home / Getting started / How-to guides / Reference /
+  Architecture & design only; a new **Development** section holds
+  sync-providers, the live backlogs, the production-readiness plan, specs,
+  decisions, and the quality/evidence docs (including the two runbooks moved
+  out of How-to: bake-off, packet-quality). Internal competitive-research
+  notes are dropped from the nav (kept in-repo). Superseded plans/backlogs/
+  audits move to `docs/archive/`.
+- **Added a glossary** (`docs/glossary.md`) defining packet, claim, lease,
+  loop, gate, PRD, and workspace in one place.
+
 ## [0.4.0] - 2026-07-06
 
 Release-scoped PRD and cross-harness hardening release. This finishes the

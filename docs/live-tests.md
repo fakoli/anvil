@@ -1,5 +1,11 @@
 # Live GitHub integration tests
 
+> **Status: designed, not yet committed — no such workflow exists in
+> `.github/workflows` yet.** The tests themselves are committed and
+> marker-gated, but the nightly job described below has not landed. Until it
+> does, the "Running locally" runbook is the only way to exercise these
+> tests, and the "Enabling on a fork / repo" steps have no effect.
+
 The anvil plugin ships a small suite of live tests — intended to run
 nightly in CI — that exercises the
 real GitHub Issues REST API. It catches upstream contract drift -- label
@@ -11,13 +17,6 @@ This page is the operator runbook: how to enable the nightly job, how to run
 the same tests locally, and what residue they leave behind in the test repo.
 
 ## Workflow
-
-> **Status: designed, not yet committed.** The repo has no
-> `.github/workflows/anvil-live-github.yml` yet — the tests themselves are
-> committed and marker-gated, but the nightly job below describes the intended
-> workflow. Until it lands, the "Running locally" runbook is the only way to
-> exercise these tests, and the "Enabling on a fork / repo" steps have no
-> effect.
 
 The job is designed to live at `.github/workflows/anvil-live-github.yml`. It:
 

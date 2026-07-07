@@ -1,8 +1,8 @@
-> ## Archived — see [roadmap.md](roadmap.md) for live planning
+> ## Archived — see [roadmap.md](../roadmap.md) for live planning
 >
 > This file is preserved as a historical audit trail of what was deferred at the
 > close of Phase 10 (the plugin-audit pass). The live forward-planning source of
-> truth has moved to [`docs/roadmap.md`](roadmap.md) (version × theme organized;
+> truth has moved to [`docs/roadmap.md`](../roadmap.md) (version × theme organized;
 > evolves continuously).
 >
 > Every deferred item below (P11-XX-XN, 56 live) has been re-homed in the roadmap
@@ -12,7 +12,7 @@
 
 # Phase 11 backlog (and beyond)
 
-**Source:** [Phase 10 audit](audits/2026-05-26-plugin-audit.md)
+**Source:** [Phase 10 audit](2026-05-26-plugin-audit.md)
 **Audit date:** 2026-05-26
 **Auditors:** agent-critic, skill-critic, hook-critic, mcp-critic, structure-critic (fakoli-crew v2.1.0)
 **Subject:** anvil v1.9.0 (post Phase 10 MUST-FIX welder pass)
@@ -21,7 +21,7 @@
 This file catalogs the 57 deferred items from the Phase 10 plugin audit — every
 finding the five critics raised at SHOULD FIX, CONSIDER, or NIT severity. The
 8 MUST FIX items are closed under [Phase 10 T2–T6 welder
-tasks](plans/2026-05-26-phase-10-plugin-audit.md) and are not duplicated here.
+tasks](2026-05-26-phase-10-plugin-audit.md) and are not duplicated here.
 
 **Update (Phase 10 release prep, 2026-05-26):** 1 item from the catalog has been
 closed as a bonus during Phase 10 — see P11-SK-S5 below (`[CLOSED in Phase 10
@@ -48,11 +48,11 @@ Cross-cutting batch fixes are surfaced under [Cross-cutting themes](#cross-cutti
 | **Totals** | **25** | **21** | **11** | **57** |
 
 Per-critic detail anchors in the source audit:
-[agent-critic](audits/2026-05-26-plugin-audit.md#per-critic-detail-agent-critic) ·
-[skill-critic](audits/2026-05-26-plugin-audit.md#per-critic-detail-skill-critic) ·
-[hook-critic](audits/2026-05-26-plugin-audit.md#per-critic-detail-hook-critic) ·
-[mcp-critic](audits/2026-05-26-plugin-audit.md#per-critic-detail-mcp-critic) ·
-[structure-critic](audits/2026-05-26-plugin-audit.md#per-critic-detail-structure-critic).
+[agent-critic](2026-05-26-plugin-audit.md#per-critic-detail-agent-critic) ·
+[skill-critic](2026-05-26-plugin-audit.md#per-critic-detail-skill-critic) ·
+[hook-critic](2026-05-26-plugin-audit.md#per-critic-detail-hook-critic) ·
+[mcp-critic](2026-05-26-plugin-audit.md#per-critic-detail-mcp-critic) ·
+[structure-critic](2026-05-26-plugin-audit.md#per-critic-detail-structure-critic).
 
 ---
 

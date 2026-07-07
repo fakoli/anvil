@@ -1,5 +1,8 @@
 # Packet quality (measuring right-sizing) — B51
 
+> **Maintainer doc.** This is a contributor runbook, not end-user
+> documentation.
+
 A work packet is the exact context an agent needs to execute one task (intent,
 acceptance criteria, scope, non-goals, verification). **Packet quality is a
 first-class, measured workstream**, not an afterthought: a tight, right-sized
@@ -22,7 +25,7 @@ riskier or more complex tasks.
 
 ```bash
 # Aggregate report over a project's backlog (JSON to stdout):
-python -m anvil.context.packet_metrics <state_dir>
+cd bin && uv run python -m anvil.context.packet_metrics <state_dir>
 ```
 
 It reports, per task and in aggregate: the full vs lightweight token counts

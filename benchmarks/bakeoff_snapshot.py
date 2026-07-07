@@ -1,6 +1,6 @@
 """B50 bake-off — one-shot metrics snapshot for the two-week measurement log.
 
-The bake-off (docs/how-to/bake-off.md) measures whether the capacity-coordination
+The bake-off (docs/plans/bake-off.md) measures whether the capacity-coordination
 premise holds before any capacity-pool machinery is built. This script captures
 the LIVE, in-engine half of the daily measurement in one JSON line so it can be
 logged over the two weeks and charted:

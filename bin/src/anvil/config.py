@@ -1046,7 +1046,7 @@ events_path: events.jsonl
 #   sonnet → claude-sonnet-4-6      (us.anthropic.claude-sonnet-4-6 on Bedrock)
 #   haiku  → claude-haiku-4-5       (us.anthropic.claude-haiku-4-5  on Bedrock)
 #
-# See docs/llm-providers.md for the full setup guide.
+# See docs/llm.md for the full setup guide.
 # ---------------------------------------------------------------------------
 llm_provider:                       # agent-sdk | anthropic | bedrock | custom (blank = agent-sdk)
 llm_fallback:                       # true = env auto-detect before agent-sdk (default false)

@@ -2,7 +2,7 @@
 
 Items deferred from PR-level critic + Greptile reviews. Each entry links the originating PR + finding so the rationale survives. Ordered by priority within section.
 
-**Status legend**: `OPEN` = unaddressed; `TARGETED-PN` = scheduled for Phase N; `DONE` = closed in commit; `MOVED-P9-BACKLOG` = forward-carried into [`phase-9-backlog.md`](phase-9-backlog.md) for v2.x tracking; `MOVED-P11-BACKLOG` = consolidated under a Phase 11 audit finding in [`phase-11-backlog.md`](phase-11-backlog.md).
+**Status legend**: `OPEN` = unaddressed; `TARGETED-PN` = scheduled for Phase N; `DONE` = closed in commit; `MOVED-P9-BACKLOG` = forward-carried into [`phase-9-backlog.md`](archive/phase-9-backlog.md) for v2.x tracking; `MOVED-P11-BACKLOG` = consolidated under a Phase 11 audit finding in [`phase-11-backlog.md`](archive/phase-11-backlog.md).
 
 > **Phase 9 (v1.9.0) status, 2026-05-25.** PR #49 (Phase 8) deferred a
 > handful of items that PR #50 (Phase 9) closed: the audit-honesty
