@@ -2,7 +2,7 @@
 
 Task: `v0.4.0:T005` - End-to-end low-ceiling weak OpenClaw runner on Fakoli mini.
 
-Host: `fakoli-mini` (`Darwin Mac 27.0.0`, arm64)
+Host: `<gateway-host>` (`Darwin Mac 27.0.0`, arm64)
 
 ## Result
 
@@ -13,34 +13,34 @@ claim -> verification-command capture -> submit on that low-risk task, and left
 the higher-risk ready task unclaimed.
 
 This file is the evidence artifact for `v0.4.0:T005`. The gateway fixture task
-completed on `fakoli-mini`; the local project task `v0.4.0:T005` is submitted
+completed on `<gateway-host>`; the local project task `v0.4.0:T005` is submitted
 separately through the normal Anvil PR/evidence flow.
 
 Final authoritative OpenClaw run:
 
 - Agent: `fakoli-smith` (`openai/gpt-5.4-mini` configured; run used OpenClaw's `anvil/chat` route)
 - Run id: `fc92b324-1c53-4811-be31-e66c5e230fcb`
-- Session file: `/Users/sdoumbouya/.openclaw/agents/fakoli-smith/sessions/52bd6da4-f4b0-4af5-b277-30381e80316c.jsonl`
-- Workspace: `/Users/sdoumbouya/.openclaw/workspace-fakoli-smith`
-- State: `/Users/sdoumbouya/.anvil/workspaces/workspace-fakoli-smith-fa4a5b87/.anvil`
+- Session file: `~/.openclaw/agents/fakoli-smith/sessions/52bd6da4-f4b0-4af5-b277-30381e80316c.jsonl`
+- Workspace: `~/.openclaw/workspace-fakoli-smith`
+- State: `~/.anvil/workspaces/workspace-fakoli-smith-fa4a5b87/.anvil`
 
 ## Gateway Setup
 
 Installed current Anvil on the gateway from a fresh clone:
 
-- Clone: `/Users/sdoumbouya/anvil-t005-live-bIxJ4w`
+- Clone: `~/anvil-t005-live-bIxJ4w`
 - Linked executables:
-  - `/opt/homebrew/bin/anvil -> /Users/sdoumbouya/.local/bin/anvil`
-  - `/opt/homebrew/bin/anvil-mcp -> /Users/sdoumbouya/.local/bin/anvil-mcp`
+  - `/opt/homebrew/bin/anvil -> ~/.local/bin/anvil`
+  - `/opt/homebrew/bin/anvil-mcp -> ~/.local/bin/anvil-mcp`
 
 The first OpenClaw plugin load selected an older stale copy before the fresh
 plugin path:
 
 ```json
 [
-  "/Users/sdoumbouya/anvil/openclaw-anvil-intent-router",
-  "/Users/sdoumbouya/.openclaw/workspace/openclaw/plugins/anvil/packaging/openclaw/plugin",
-  "/Users/sdoumbouya/anvil-t005-live-bIxJ4w/packaging/openclaw/plugin"
+  "~/anvil/openclaw-anvil-intent-router",
+  "~/.openclaw/workspace/openclaw/plugins/anvil/packaging/openclaw/plugin",
+  "~/anvil-t005-live-bIxJ4w/packaging/openclaw/plugin"
 ]
 ```
 
@@ -50,8 +50,8 @@ install after cleanup succeeded and left the current load paths as:
 
 ```json
 [
-  "/Users/sdoumbouya/anvil/openclaw-anvil-intent-router",
-  "/Users/sdoumbouya/anvil-t005-live-bIxJ4w/packaging/openclaw/plugin"
+  "~/anvil/openclaw-anvil-intent-router",
+  "~/anvil-t005-live-bIxJ4w/packaging/openclaw/plugin"
 ]
 ```
 
@@ -105,7 +105,7 @@ workspace returned `prependSystemContext`:
 ```
 
 The same workspace also passed the runtime probe used by the hook:
-`anvil status --json --cwd /Users/sdoumbouya/.openclaw/workspace-fakoli-smith`
+`anvil status --json --cwd ~/.openclaw/workspace-fakoli-smith`
 returned `ok: true`.
 
 ## Fixture Shape
@@ -120,7 +120,7 @@ After the low-risk task was submitted, the same workspace still showed the
 high-risk task was ready and would be offered without ceilings:
 
 ```text
-anvil next --prd v0.4.0 --json --cwd /Users/sdoumbouya/.openclaw/workspace-fakoli-smith
+anvil next --prd v0.4.0 --json --cwd ~/.openclaw/workspace-fakoli-smith
 -> task.id: v0.4.0:T002
 -> task.status: ready
 -> scores.blast_radius: 5
@@ -130,7 +130,7 @@ anvil next --prd v0.4.0 --json --cwd /Users/sdoumbouya/.openclaw/workspace-fakol
 With the plugin-equivalent env ceiling, no task was offered:
 
 ```text
-ANVIL_PRD=v0.4.0 ANVIL_MAX_BLAST=2 ANVIL_MAX_REVIEW_RISK=2 anvil next --json --cwd /Users/sdoumbouya/.openclaw/workspace-fakoli-smith
+ANVIL_PRD=v0.4.0 ANVIL_MAX_BLAST=2 ANVIL_MAX_REVIEW_RISK=2 anvil next --json --cwd ~/.openclaw/workspace-fakoli-smith
 -> task: null
 -> withheld_reason: risk_ceiling
 ```
@@ -139,19 +139,19 @@ ANVIL_PRD=v0.4.0 ANVIL_MAX_BLAST=2 ANVIL_MAX_REVIEW_RISK=2 anvil next --json --c
 
 Selected raw session excerpts from
 `52bd6da4-f4b0-4af5-b277-30381e80316c.jsonl` show the runner used OpenClaw's
-own `exec` tool with cwd `/Users/sdoumbouya/.openclaw/workspace-fakoli-smith`.
+own `exec` tool with cwd `~/.openclaw/workspace-fakoli-smith`.
 
 Tool calls:
 
 ```json
-{"line":10,"toolCall":"exec","command":"env | sort | grep '^ANVIL_'","workdir":"/Users/sdoumbouya/.openclaw/workspace-fakoli-smith","shell":true}
-{"line":12,"toolCall":"exec","command":"anvil next --json","workdir":"/Users/sdoumbouya/.openclaw/workspace-fakoli-smith"}
-{"line":14,"toolCall":"exec","command":"anvil claim v0.4.0:T001 --actor agent --json","workdir":"/Users/sdoumbouya/.openclaw/workspace-fakoli-smith"}
-{"line":16,"toolCall":"exec","command":"mkdir -p docs && printf 'T005 weak OpenClaw runner proof\\n' > docs/low-risk-note.md","workdir":"/Users/sdoumbouya/.openclaw/workspace-fakoli-smith","shell":true}
-{"line":18,"toolCall":"exec","command":"python3 -m pytest --version || true","workdir":"/Users/sdoumbouya/.openclaw/workspace-fakoli-smith","shell":true}
-{"line":24,"toolCall":"exec","command":"anvil submit v0.4.0:T001 --actor agent --commands \"python3 -m pytest --version || true\" --files-changed docs/low-risk-note.md --json","workdir":"/Users/sdoumbouya/.openclaw/workspace-fakoli-smith"}
-{"line":26,"toolCall":"exec","command":"anvil next --json","workdir":"/Users/sdoumbouya/.openclaw/workspace-fakoli-smith"}
-{"line":28,"toolCall":"exec","command":"anvil show v0.4.0:T002 --json","workdir":"/Users/sdoumbouya/.openclaw/workspace-fakoli-smith"}
+{"line":10,"toolCall":"exec","command":"env | sort | grep '^ANVIL_'","workdir":"~/.openclaw/workspace-fakoli-smith","shell":true}
+{"line":12,"toolCall":"exec","command":"anvil next --json","workdir":"~/.openclaw/workspace-fakoli-smith"}
+{"line":14,"toolCall":"exec","command":"anvil claim v0.4.0:T001 --actor agent --json","workdir":"~/.openclaw/workspace-fakoli-smith"}
+{"line":16,"toolCall":"exec","command":"mkdir -p docs && printf 'T005 weak OpenClaw runner proof\\n' > docs/low-risk-note.md","workdir":"~/.openclaw/workspace-fakoli-smith","shell":true}
+{"line":18,"toolCall":"exec","command":"python3 -m pytest --version || true","workdir":"~/.openclaw/workspace-fakoli-smith","shell":true}
+{"line":24,"toolCall":"exec","command":"anvil submit v0.4.0:T001 --actor agent --commands \"python3 -m pytest --version || true\" --files-changed docs/low-risk-note.md --json","workdir":"~/.openclaw/workspace-fakoli-smith"}
+{"line":26,"toolCall":"exec","command":"anvil next --json","workdir":"~/.openclaw/workspace-fakoli-smith"}
+{"line":28,"toolCall":"exec","command":"anvil show v0.4.0:T002 --json","workdir":"~/.openclaw/workspace-fakoli-smith"}
 ```
 
 Environment observed inside the runner:
@@ -216,7 +216,7 @@ Session line 25 recorded the submit result:
 ```
 
 Gateway event rows from
-`/Users/sdoumbouya/.anvil/workspaces/workspace-fakoli-smith-fa4a5b87/.anvil/events.jsonl`:
+`~/.anvil/workspaces/workspace-fakoli-smith-fa4a5b87/.anvil/events.jsonl`:
 
 ```json
 {"line":32,"action":"claim.created","actor":"agent","target_id":"C1AD7E8D8","task_id":"v0.4.0:T001"}
