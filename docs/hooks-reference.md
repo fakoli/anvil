@@ -109,7 +109,7 @@ for Codex SessionStart hooks.
 **Side effects.** None. Read-only banner.
 
 **Performance.** The script header targets <1s. In practice the SessionStart
-event fires once per session, so this is the loosest of the four budgets.
+event fires once per session, so this is the loosest of the five budgets.
 
 **CLI call.** `anvil status --hook-format` — emits a single line in
 the form `active-claims:N ready-tasks:N blockers:N prd-status:STATUS`.
@@ -250,6 +250,45 @@ or `.anvil/.evidence-buffer/orphan.json`.
 
 ---
 
+### `heartbeat.sh` (PostToolUse: Edit, Write, NotebookEdit, Bash)
+
+**Purpose.** On every matching tool call, renew the acting session's active
+claim lease(s) so a lazy lease stays fresh while real work is happening. This
+is the only hook wired to **two** `hooks.json` entries — one on the
+`Edit|Write|NotebookEdit` matcher, one on the `Bash` matcher — so a heartbeat
+fires regardless of which kind of tool the agent is using.
+
+**Actor resolution.** No `--actor` is passed. The CLI resolves the same
+identity `anvil claim` used (`resolve_actor`: explicit arg > `$ANVIL_ACTOR` >
+`$ANVIL_GATE_ACTOR` > derived `$USER`/fingerprint/`"agent"` + session
+discriminator) so the heartbeat renews the lease the current session actually
+holds instead of a different actor's.
+
+**Skip conditions (silent).** Exits 0 with no output when:
+- No anvil state exists anywhere (`.anvil/`, `bin/.anvil/`, or the HOME
+  workspace's `~/.anvil/workspaces/`).
+- `$CLAUDE_PLUGIN_ROOT` is unset, or the `anvil` binary under it is missing or
+  not executable.
+- The resolved actor holds no active claims (nothing to renew).
+- Renewing a given claim raises (e.g. an already-expired lease) — that claim
+  is skipped, not fatal; the next claim/reclaim handles it.
+
+**Side effects.** For each active claim held by the resolved actor where there
+has been forward progress (a `file_changed` event on an expected file) since
+the last heartbeat, renews the lease timestamp and appends a `claim.renewed`
+row to `events.jsonl`. When there is no such progress, the renewal is a
+no-op — the lease is left unchanged and nothing is appended.
+
+**Performance.** Header targets <200ms, same as the other `PostToolUse`
+hooks.
+
+**CLI call.** `anvil hook heartbeat` (defined in
+[`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py)).
+
+**Source.** [`hooks/heartbeat.sh`](https://github.com/fakoli/anvil/blob/main/hooks/heartbeat.sh).
+
+---
+
 ## Troubleshooting
 
 ### My hook is not running
@@ -342,4 +381,7 @@ existing levers above are the supported workflow today.
 - [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) — the source of truth for
   event-to-script wiring.
 - [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py) —
-  the three `anvil hook ...` subcommands the scripts shell into.
+  the six `anvil hook ...` subcommands: `dispatch`, `check-claim`,
+  `record-file-change`, `capture-evidence`, `heartbeat`, and the opt-in,
+  blocking `stop-gate` (not wired by default — see
+  [`docs/reference/codex.md`](reference/codex.md) for how to enable it).

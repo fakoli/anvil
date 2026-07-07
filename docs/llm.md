@@ -294,8 +294,8 @@ re-scored idempotently.
 
 ## See also
 
-- [`mcp.md`](mcp.md) — MCP server (does not currently expose LLM augmentation; agents that
-  want it call the CLI directly).
+- [`mcp.md`](mcp.md) — MCP server (`plan_tasks` calls the LLM task-generation backstop by
+  default; other LLM augmentation such as `score --use-llm` and `expand` is CLI-only).
 - [`prd-template.md`](prd-template.md) — the deterministic PRD format the parser expects.
 - `specs/2026-05-24-anvil-v0.md` — canonical design spec including the LLM
   augmentation contract.

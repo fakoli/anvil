@@ -95,7 +95,7 @@ llm_model: claude-opus-4-7-20260124
 ### Install
 
 ```bash
-pip install 'anvil[bedrock]'
+uv tool install 'anvil-state[bedrock]'
 ```
 
 This adds `anthropic[bedrock]` (which pulls boto3) on top of the base install.
@@ -145,7 +145,7 @@ bedrock_region: eu-west-1
 ### Install
 
 ```bash
-pip install 'anvil[custom]'
+uv tool install 'anvil-state[custom]'
 ```
 
 This adds the `openai` SDK; anvil uses it with `base_url=` to target any endpoint that speaks `/v1/chat/completions`.

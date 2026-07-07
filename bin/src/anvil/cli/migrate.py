@@ -291,9 +291,10 @@ def migrate_state(
 ) -> None:
     """Upgrade .anvil/state.db to the current engine schema version.
 
-    T009/F006. The ordered, idempotent forward migration branches (0/1→4,
-    2→4, 3→4) ALREADY live inside ``SqliteBackend._check_schema_version`` and
-    run automatically on ``initialize()``. This command promotes that in-init
+    T009/F006. The ordered, idempotent forward migration branches (0/1→8, 2→8,
+    3→8, 4→8, 5→8, 6→8, 7→8) ALREADY live inside
+    ``SqliteBackend._check_schema_version`` and run automatically on
+    ``initialize()``. This command promotes that in-init
     migration to an explicit, backed-up, dry-run-by-default operation — it does
     NOT add a new migration framework.
 

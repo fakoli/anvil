@@ -6,7 +6,7 @@
 **Language:** Python (anvil runtime) + Markdown (critic agent specs) + Bash (smoke-test fixtures and runner)
 **Crew:** fakoli-crew v2.0.0 (8 agents: critic, guido, herald, keeper, scout, sentinel, smith, welder)
 **Branch:** `feat/anvil-phase-10-audit`
-**Working dir:** `/Users/sekoudoumbouya/ai-code/claude-env/fakoli-plugins`
+**Working dir:** `<local-checkout>/fakoli-plugins`
 
 ---
 

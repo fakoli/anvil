@@ -786,7 +786,7 @@ class BedrockProvider:
                 "BedrockProvider requires the bedrock extras. Install with:\n"
                 "    pip install 'anthropic[bedrock]'\n"
                 "or, if you installed anvil from PyPI:\n"
-                "    pip install 'anvil[bedrock]'\n"
+                "    pip install 'anvil-state[bedrock]'\n"
                 "then re-run."
             ) from exc
 
@@ -948,7 +948,7 @@ class CustomEndpointProvider:
                 "CustomEndpointProvider requires the openai SDK. Install with:\n"
                 "    pip install openai\n"
                 "or, if you installed anvil from PyPI:\n"
-                "    pip install 'anvil[custom]'\n"
+                "    pip install 'anvil-state[custom]'\n"
                 "then re-run."
             ) from exc
 

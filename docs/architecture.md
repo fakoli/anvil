@@ -536,12 +536,20 @@ points at a file you can grep.
 | Backend Protocol | [`bin/src/anvil/state/backend.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/backend.py) |
 | SQLite impl + schema | [`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py), [`schema.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/schema.py) |
 | Event payloads | [`bin/src/anvil/state/payloads.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/payloads.py) |
+| Canonical-state snapshot (replay-equivalence) | [`bin/src/anvil/state/snapshot.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/snapshot.py) |
+| Hash-chained event ids (git-backed events) | [`bin/src/anvil/state/hashing.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/hashing.py) |
+| Durable storage seam (push/pull `events.jsonl` to a remote store) | [`bin/src/anvil/state/durable.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/durable.py) |
+| Per-PRD status rollup | [`bin/src/anvil/state/rollup.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/rollup.py) |
 | Claims manager | [`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py) |
 | Stale reaping | [`bin/src/anvil/claims/stale.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py) |
 | Planning (template + LLM + scoring) | [`bin/src/anvil/planning/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/planning) |
 | Context (work packets) | [`bin/src/anvil/context/packets.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) |
 | Review gates | [`bin/src/anvil/review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py) |
 | Git ops | [`bin/src/anvil/git_ops/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/git_ops) |
+| Brownfield scan / ingest (`.anvil/scan.db` → draft PRD + task graph) | [`bin/src/anvil/scan/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/scan) |
+| Declarative workflows (`.anvil/workflows/*.yaml` parse + run) | [`bin/src/anvil/workflows/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/workflows) |
+| Ed25519 proof signing | [`bin/src/anvil/signing.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/signing.py) |
+| Task-id → safe path/branch component | [`bin/src/anvil/naming.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/naming.py) |
 | Sync Protocol + registry | [`bin/src/anvil/sync/provider.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/provider.py), [`registry.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/registry.py) |
 | GitHub provider | [`bin/src/anvil/sync/providers/github_issues.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/providers/github_issues.py) |
 | Reconciliation | [`bin/src/anvil/sync/reconciliation.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/sync/reconciliation.py) |
