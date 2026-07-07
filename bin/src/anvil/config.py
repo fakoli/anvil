@@ -39,6 +39,16 @@ DEFAULT_AUTO_EXPAND_THRESHOLD: Final[int] = 4
 DEFAULT_FAST_LANE_COMPLEXITY_MAX: Final[int] = 2
 DEFAULT_FAST_LANE_BLAST_RADIUS_MAX: Final[int] = 2
 
+# retro-opps T001 — review-tier thresholds. The derived light/standard/max
+# review tier (``planning.scoring.review_tier``) is a pure projection over the
+# six-dim score plus the B45 confirmation flags; these two knobs set where the
+# tier boundaries sit. ``review_tier_max_min`` is the score at/above which
+# review_risk or blast_radius forces the max tier; ``review_tier_light_risk_max``
+# is the highest confirmed review_risk that still earns the light tier (which
+# additionally requires the fast-lane gate and BOTH confirmation flags).
+DEFAULT_REVIEW_TIER_MAX_MIN: Final[int] = 4
+DEFAULT_REVIEW_TIER_LIGHT_RISK_MAX: Final[int] = 2
+
 
 @dataclass(frozen=True)
 class Config:
@@ -293,6 +303,17 @@ class Config:
     # written before these keys existed keeps the exact prior routing.
     fast_lane_complexity_max: int = DEFAULT_FAST_LANE_COMPLEXITY_MAX
     fast_lane_blast_radius_max: int = DEFAULT_FAST_LANE_BLAST_RADIUS_MAX
+
+    # retro-opps T001 — review-tier thresholds consumed by
+    # ``planning.scoring.review_tier``. Same 1-5 score-scale contract and
+    # validation as the fast-lane ceilings above; absent keys keep the
+    # conservative defaults (max at >=4 risk/blast, light only at <=2
+    # confirmed review_risk).
+    #
+    #   review_tier_max_min: 4          # DEFAULT; valid range 1-5
+    #   review_tier_light_risk_max: 2   # DEFAULT; valid range 1-5
+    review_tier_max_min: int = DEFAULT_REVIEW_TIER_MAX_MIN
+    review_tier_light_risk_max: int = DEFAULT_REVIEW_TIER_LIGHT_RISK_MAX
 
     # Phase 9 T5 — multi-provider sync.
     #
@@ -639,6 +660,21 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         resolved,
     )
 
+    # retro-opps T001 — review-tier thresholds. Same 1-5 validation contract
+    # as the fast-lane ceilings; absent keys keep the conservative defaults.
+    review_tier_max_min = _validate_score_ceiling(
+        data.get("review_tier_max_min", DEFAULT_REVIEW_TIER_MAX_MIN),
+        "review_tier_max_min",
+        resolved,
+    )
+    review_tier_light_risk_max = _validate_score_ceiling(
+        data.get(
+            "review_tier_light_risk_max", DEFAULT_REVIEW_TIER_LIGHT_RISK_MAX
+        ),
+        "review_tier_light_risk_max",
+        resolved,
+    )
+
     # v1.22.0 — events storage mode. Absent key → "local" (every pre-existing
     # project keeps sequence ids and strict replay). An invalid value raises
     # at load time like every other literal-typed field: a typo'd mode that
@@ -741,6 +777,8 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         # built-in defaults (see _build_config above), preserving prior routing.
         fast_lane_complexity_max=fast_lane_complexity_max,
         fast_lane_blast_radius_max=fast_lane_blast_radius_max,
+        review_tier_max_min=review_tier_max_min,
+        review_tier_light_risk_max=review_tier_light_risk_max,
         db_path=db_path,
         events_path=events_path,
         # S3 durable storage — mirrors bedrock_region/bedrock_profile pattern.

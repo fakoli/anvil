@@ -13,6 +13,7 @@ import datetime
 
 from anvil.planning.scoring import (
     rank_assumptions,
+    review_tier,
     score_all,
     score_requirement_assumption,
     score_task,
@@ -585,3 +586,116 @@ class TestRankAssumptions:
         ranked = rank_assumptions(reqs)
         # Equal priority/uncertainty → id ascending tiebreak.
         assert [a.requirement_id for a in ranked] == ["R001", "R002", "R003"]
+
+
+# ---------------------------------------------------------------------------
+# review_tier (retro-opps T001) — derive-only light/standard/max projection
+# ---------------------------------------------------------------------------
+
+
+def _tier_config(**overrides: int):
+    """Minimal Config for review_tier tests (defaults: max_min=4, light_risk_max=2)."""
+    from anvil.config import Config
+
+    return Config(project_name="Tier Test", project_id="tier-test", **overrides)
+
+
+def _scored_task(
+    *,
+    complexity: int | None = 2,
+    blast_radius: int | None = 2,
+    review_risk: int | None = 2,
+    blast_confirmed: bool = False,
+    risk_confirmed: bool = False,
+) -> Task:
+    task = _make_task(likely_files=["src/app.py"])
+    return task.model_copy(
+        update={
+            "scores": Score(
+                complexity=complexity,
+                parallelizability=3,
+                context_load=3,
+                blast_radius=blast_radius,
+                review_risk=review_risk,
+                agent_suitability=4,
+                blast_radius_confirmed=blast_confirmed,
+                review_risk_confirmed=risk_confirmed,
+            )
+        }
+    )
+
+
+class TestReviewTier:
+    def test_unscored_task_derives_max(self) -> None:
+        """Any None risk dim fails safe to max — never a lighter gate."""
+        cfg = _tier_config()
+        assert review_tier(_make_task(), config=cfg) == "max"
+        assert review_tier(_scored_task(review_risk=None), config=cfg) == "max"
+        assert review_tier(_scored_task(blast_radius=None), config=cfg) == "max"
+
+    def test_any_dim_none_derives_max_even_with_confirmed_risk(self) -> None:
+        """AC verbatim: ANY dim None → max, even a non-risk dim on an
+        otherwise confirmed-low-risk task (hand-built Scores fail safe)."""
+        task = _scored_task(
+            complexity=None, blast_confirmed=True, risk_confirmed=True
+        )
+        assert review_tier(task, config=_tier_config()) == "max"
+
+    def test_high_risk_derives_max_regardless_of_other_dims(self) -> None:
+        cfg = _tier_config()
+        assert (
+            review_tier(
+                _scored_task(
+                    review_risk=4, blast_confirmed=True, risk_confirmed=True
+                ),
+                config=cfg,
+            )
+            == "max"
+        )
+        assert review_tier(_scored_task(blast_radius=4), config=cfg) == "max"
+        assert review_tier(_scored_task(review_risk=5), config=cfg) == "max"
+
+    def test_confirmed_low_risk_derives_light(self) -> None:
+        """Confirmed 2/2/2 passes fast-lane + risk ceiling + both flags."""
+        task = _scored_task(blast_confirmed=True, risk_confirmed=True)
+        assert review_tier(task, config=_tier_config()) == "light"
+
+    def test_unconfirmed_low_risk_derives_standard_never_light(self) -> None:
+        cfg = _tier_config()
+        assert review_tier(_scored_task(), config=cfg) == "standard"
+        assert (
+            review_tier(_scored_task(blast_confirmed=True), config=cfg)
+            == "standard"
+        )
+        assert (
+            review_tier(_scored_task(risk_confirmed=True), config=cfg)
+            == "standard"
+        )
+
+    def test_mid_risk_confirmed_derives_standard(self) -> None:
+        """review_risk=3 sits between light ceiling (2) and max floor (4)."""
+        task = _scored_task(
+            review_risk=3, blast_confirmed=True, risk_confirmed=True
+        )
+        assert review_tier(task, config=_tier_config()) == "standard"
+
+    def test_fast_lane_failure_blocks_light(self) -> None:
+        """complexity=3 exceeds the 2/2 fast-lane gate → standard, not light."""
+        task = _scored_task(
+            complexity=3, blast_confirmed=True, risk_confirmed=True
+        )
+        assert review_tier(task, config=_tier_config()) == "standard"
+
+    def test_config_knobs_move_the_boundaries(self) -> None:
+        """review_tier_max_min=3 pulls a confirmed risk-3 task up to max."""
+        cfg = _tier_config(review_tier_max_min=3)
+        task = _scored_task(
+            review_risk=3, blast_confirmed=True, risk_confirmed=True
+        )
+        assert review_tier(task, config=cfg) == "max"
+
+    def test_pure_no_mutation(self) -> None:
+        task = _scored_task(blast_confirmed=True, risk_confirmed=True)
+        before = task.model_dump()
+        review_tier(task, config=_tier_config())
+        assert task.model_dump() == before

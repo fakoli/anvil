@@ -259,6 +259,43 @@ sync_github_conflict_strategy: local_wins
         with pytest.raises(ValueError, match="fast_lane_complexity_max"):
             load_config(config_path)
 
+    def test_review_tier_thresholds_default(self, tmp_path: Path) -> None:
+        """retro-opps T001 — absent keys → max_min=4, light_risk_max=2."""
+        config_path = _write_config(tmp_path / "config.yaml", _minimal_yaml())
+        cfg = load_config(config_path)
+        assert cfg.review_tier_max_min == 4
+        assert cfg.review_tier_light_risk_max == 2
+
+    def test_review_tier_thresholds_override(self, tmp_path: Path) -> None:
+        """retro-opps T001 — explicit thresholds are parsed onto Config."""
+        yaml_content = (
+            _minimal_yaml()
+            + "review_tier_max_min: 3\n"
+            + "review_tier_light_risk_max: 1\n"
+        )
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        cfg = load_config(config_path)
+        assert cfg.review_tier_max_min == 3
+        assert cfg.review_tier_light_risk_max == 1
+
+    def test_review_tier_max_min_out_of_range_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """retro-opps T001 — out-of-range review_tier_max_min raises at load."""
+        yaml_content = _minimal_yaml() + "review_tier_max_min: 0\n"
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        with pytest.raises(ValueError, match="review_tier_max_min"):
+            load_config(config_path)
+
+    def test_review_tier_light_risk_max_out_of_range_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """retro-opps T001 — out-of-range review_tier_light_risk_max raises."""
+        yaml_content = _minimal_yaml() + "review_tier_light_risk_max: 6\n"
+        config_path = _write_config(tmp_path / "config.yaml", yaml_content)
+        with pytest.raises(ValueError, match="review_tier_light_risk_max"):
+            load_config(config_path)
+
     def test_fast_lane_blast_radius_max_boolean_rejected(
         self, tmp_path: Path
     ) -> None:
