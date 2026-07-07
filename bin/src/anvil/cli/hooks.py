@@ -133,7 +133,12 @@ def _status_hook_line(cwd: Path | None) -> tuple[str, int]:
     stdout = io.StringIO()
     try:
         with contextlib.redirect_stdout(stdout):
-            status(hook_format=True, json_output=False, cwd=cwd)
+            # Called programmatically (no Click context), so every Typer
+            # Option must be passed explicitly — an omitted ``prd`` leaks the
+            # OptionInfo sentinel into resolve_prd_id(), which crashes on
+            # ``.strip()`` and degrades SessionStart to "status check
+            # unavailable" for every initialized project.
+            status(hook_format=True, prd=None, json_output=False, cwd=cwd)
     except typer.Exit as exc:
         code = int(exc.exit_code or 0)
     except SystemExit as exc:
