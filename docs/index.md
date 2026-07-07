@@ -8,11 +8,9 @@ requirements, tasks, claims, evidence, and reviews in SQLite plus an
 append-only event log, and exposes that state through a CLI (`anvil`) and an
 MCP server (`anvil-mcp`) that any harness can drive.
 
-```bash
-uv tool install anvil-state      # or: pipx install anvil-state
-anvil init --with-sample         # seed a runnable sample project
-anvil next                       # → a ready task, immediately
-```
+`uv tool install anvil-state` gets you the CLI; from there,
+**[Getting started](how-to/getting-started.md)** walks a full project — init,
+PRD, plan, claim, evidence, done — in about five minutes.
 
 ## Start here
 
@@ -26,6 +24,7 @@ anvil next                       # → a ready task, immediately
 - **[Using anvil on any harness](how-to/using-anvil-on-any-harness.md)** —
   wire the MCP server into Claude Code, Codex, Cursor, VS Code, Zed, and
   more with one command.
+- **[FAQ](faq.md)** — installing, storage, backups, and common gotchas.
 
 ## The core ideas
 

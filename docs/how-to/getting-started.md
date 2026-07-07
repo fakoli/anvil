@@ -2,6 +2,8 @@
 
 > anvil is a local-first, backend-neutral project-state layer for humans and AI coding agents — the durable record of every requirement, task, claim, and piece of evidence in your project, stored in SQLite in a per-project workspace under `~/.anvil/` and exposed through a CLI and an MCP server. This walkthrough takes you from an empty directory to a shipped task in about five minutes.
 
+New to anvil's vocabulary — packet, claim, lease, gate? Keep the [glossary](../glossary.md) open in another tab.
+
 ## What you'll do
 
 In ~5 minutes, you will:
@@ -27,10 +29,11 @@ By default anvil keeps state **outside** your project, in a per-project HOME wor
 
 ## Step 1 — Install the plugin
 
-From the fakoli marketplace inside Claude Code:
+Add the marketplace once, then install the plugin, both inside Claude Code:
 
 ```bash
-/plugin install anvil
+/plugin marketplace add fakoli/anvil
+/plugin install anvil@anvil
 ```
 
 The install registers five hooks, wires the MCP server, and makes the five plugin agents discoverable at next session start. Verify with:
@@ -288,6 +291,24 @@ Schema:        8
 ```
 
 The work packet under `.anvil/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).
+
+## Upgrading and uninstalling
+
+- **Upgrade the CLI + MCP server** (installed from PyPI): `uv tool upgrade
+  anvil-state`. State on disk is untouched — `anvil` runs its schema
+  migration automatically the next time it opens `state.db` if the new
+  version ships one.
+- **Upgrade the Claude Code plugin**: `/plugin marketplace update` re-fetches
+  the marketplace so the next `/plugin install`/session start picks up a new
+  published version. A version bump is required upstream for this to have
+  anything new to fetch — see the project's `CHANGELOG.md`.
+- **Roll back a harness install**: `anvil install <harness> --rollback`
+  restores every file `anvil install <harness> --write` modified from its
+  backup and deletes anything anvil created (native installs also run the
+  harness's own removal command, e.g. `codex mcp remove`). To remove the
+  Claude Code plugin itself, use Claude Code's own `/plugin` management UI —
+  the plugin never writes files outside Claude Code's own config, so there is
+  nothing else on disk to clean up.
 
 ## Common stumbles
 

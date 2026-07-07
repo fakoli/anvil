@@ -43,6 +43,8 @@ anvil install <harness>          # wire anvil into Codex, Cursor, VS Code, …
 ```
 
 Python 3.11+ and [uv](https://docs.astral.sh/uv/) are the only requirements.
+Upgrading or uninstalling later? See
+[Upgrading and uninstalling](https://fakoli.github.io/anvil/how-to/getting-started/#upgrading-and-uninstalling).
 
 <details>
 <summary>Other ways to install (Claude Code plugin · one-line script · from source)</summary>
@@ -135,6 +137,7 @@ Full documentation: **[fakoli.github.io/anvil](https://fakoli.github.io/anvil/)*
 - [Getting started](https://fakoli.github.io/anvil/how-to/getting-started/) — first project, end to end
 - [Using anvil on any harness](https://fakoli.github.io/anvil/how-to/using-anvil-on-any-harness/) — Cursor, VS Code, Zed, Codex, …
 - [Architecture](https://fakoli.github.io/anvil/architecture/) · [CLI reference](https://fakoli.github.io/anvil/cli-reference/) · [MCP reference](https://fakoli.github.io/anvil/mcp/)
+- [FAQ](https://fakoli.github.io/anvil/faq/) — installing, storage, backups, and common gotchas
 - [Roadmap](https://fakoli.github.io/anvil/roadmap/) · [CHANGELOG](CHANGELOG.md)
 
 ## Status

@@ -449,7 +449,7 @@ IDs must be zero-padded to three digits: `T001`, `T002`, etc. Subtask IDs (`T001
 A free-form description paragraph may appear after the fields. It is stored in
 `Task.description`.
 
-**`**Dependencies:**` (v1.16.0)** is for SEMANTIC dependencies — Task B truly cannot
+**`**Dependencies:**`** is for SEMANTIC dependencies — Task B truly cannot
 function until Task A is done. Examples: T002 tests `HttpTransport` in 2-process mode
 → T002 depends on T001 (the task that implements `HttpTransport`); T015 migrates data
 to the new schema → T015 depends on T010 (the task that adds the schema). It is NOT
