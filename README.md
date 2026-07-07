@@ -8,7 +8,7 @@
 lease-coordinated state for multi-agent software work.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.4.1-blue.svg)](.claude-plugin/plugin.json)
 [![PyPI](https://img.shields.io/badge/pypi-anvil--state-purple.svg)](https://pypi.org/project/anvil-state/)
 [![Docs](https://img.shields.io/badge/docs-fakoli.github.io%2Fanvil-informational.svg)](https://fakoli.github.io/anvil/)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests)
@@ -32,7 +32,7 @@ Two ideas separate it from an issue tracker:
   typed proofs, reviews gate acceptance, and every accepted task mints a signed,
   replayable `AcceptanceProof` you can verify off-host.
 
-> **Beta — v0.4.0.** The core loop is stable and dogfooded; some command
+> **Beta — v0.4.1.** The core loop is stable and dogfooded; some command
 > surfaces may change before 1.0.
 
 ## Install
@@ -142,7 +142,7 @@ Full documentation: **[fakoli.github.io/anvil](https://fakoli.github.io/anvil/)*
 
 ## Status
 
-Beta (v0.4.0). The full PRD → plan → claim → execute → verify → finish loop
+Beta (v0.4.1). The full PRD → plan → claim → execute → verify → finish loop
 works today, alongside GitHub Issues sync and multi-provider LLM support.
 Near-term focus is correctness for claim races, evidence gates, and replay;
 Linear/Monday providers and webhook sync are on the
