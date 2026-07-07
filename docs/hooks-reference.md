@@ -1,5 +1,7 @@
 # Hooks reference
 
+> **Audience:** users configuring or debugging hook behavior; sections on hook internals (dispatch, wrappers) are contributor detail.
+
 > anvil ships 5 hooks that detect project state, enforce claim
 > discipline, record file changes, renew claim leases, and buffer
 > verification-command output as evidence. All hooks are **non-blocking** by

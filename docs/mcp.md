@@ -1,5 +1,7 @@
 # anvil MCP server
 
+> **Audience:** users installing or integrating the MCP server with an agent harness.
+
 ## What it does
 
 Agents need to read and write canonical project state without each one shelling out to the

@@ -1,5 +1,7 @@
 # Skills reference
 
+> **Audience:** users who want to know what each slash-command skill does and when to invoke it.
+
 > anvil ships 8 skills that orchestrate workflows around the CLI. Each
 > skill has a trigger phrase (the slash command), a step-by-step procedure,
 > and a clear purpose. This reference indexes each skill and names its

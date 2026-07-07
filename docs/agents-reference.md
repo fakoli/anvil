@@ -1,5 +1,7 @@
 # Agents reference
 
+> **Audience:** users who want to know what each plugin-owned agent does and when it runs.
+
 > anvil ships 5 plugin-owned agents. Each has a specific role and runs its full body in this session.
 
 This document is the canonical per-agent reference. For the architectural role of agents inside the plugin, see [architecture.md](architecture.md).

@@ -11,6 +11,8 @@ audit-event vocabulary, schema migrations), see [`../github-sync.md`](../github-
 For the provider Protocol (writing your own Linear / Monday / Jira backend),
 see [`../sync-providers.md`](../sync-providers.md).
 
+New to anvil's vocabulary (task, requirement, workspace)? See the [glossary](../glossary.md).
+
 ---
 
 ## Prerequisites
