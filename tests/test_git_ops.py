@@ -691,6 +691,19 @@ class TestCheckFreshness:
         assert report.conflict_probe.startswith("skipped:")
         assert report.behind_count == 0  # freshness half still ran
 
+    def test_caller_supplied_stale_base_ref_skipped_not_conflict(
+        self, git_repo: Path
+    ) -> None:
+        """Review finding: merge-tree exits 1 for a missing ref too — a
+        caller-supplied BaseRef naming a deleted ref must read as skipped,
+        never as a false has_conflicts=True."""
+        _git(git_repo, "branch", "feature")
+        stale = BaseRef(ref="gone-branch", remote_checked=False, reason=None)
+        report = check_freshness("feature", cwd=git_repo, base=stale)
+        assert report.has_conflicts is None
+        assert report.conflict_probe == "skipped: base ref missing"
+        assert "not found" in (report.reason or "")
+
     def test_missing_branch_reports_reason(self, git_repo: Path) -> None:
         report = check_freshness("no-such-branch", cwd=git_repo)
         assert report.behind_count is None

@@ -58,7 +58,13 @@ class FreshnessReport:
 
     @property
     def is_stale(self) -> bool:
-        """True when the branch is verifiably behind its base."""
+        """True when the branch is VERIFIABLY behind its base.
+
+        Tri-state caution: ``behind_count is None`` (probe failed) also
+        returns False — "not verifiably stale" is not "fresh". A strict
+        gate must check ``behind_count == 0`` explicitly rather than
+        ``not report.is_stale``, or it silently fails open on probe errors.
+        """
         return bool(self.behind_count)
 
 
@@ -214,6 +220,17 @@ def check_freshness(
             has_conflicts=None,
             conflict_probe="skipped: no base ref",
             reason=resolved.reason,
+        )
+    # Re-validate caller-supplied base refs: merge-tree exits 1 for BOTH a
+    # real conflict and a nonexistent ref, so a stale resolve-once/reuse
+    # BaseRef would otherwise read as a false has_conflicts=True.
+    if base is not None and not _ref_exists(resolved.ref, cwd):
+        return FreshnessReport(
+            base=resolved,
+            behind_count=None,
+            has_conflicts=None,
+            conflict_probe="skipped: base ref missing",
+            reason=f"base ref '{resolved.ref}' not found",
         )
     if not _ref_exists(branch, cwd):
         return FreshnessReport(
