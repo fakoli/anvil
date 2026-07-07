@@ -69,8 +69,10 @@ Each bullet is sized to be one small PR (or batched where noted).
    clients (`cli/mcp_config.py CLIENTS`). Point gemini at
    `packaging/gemini/gemini-extension.json` and openhands at
    `packaging/openhands/config.toml.snippet` — or add the two CLIENTS rows in
-   code and document that. Also: the referenced `packaging/continue/` does not
-   exist (same dead pointer in `install.py:206`).
+   code and document that. (Correction 2026-07-07: the audit originally
+   flagged `packaging/continue/` as missing — it exists, at
+   `packaging/continue/.continue/mcpServers/anvil.yaml`, and is pinned by
+   `tests/test_install_manifests.py`; no fix needed there.)
 4. **`docs/evidence-buffer.md` lifecycle is wrong**: `submit` reads buffer
    files but never deletes them (no unlink anywhere in `packet_apply.py`) —
    the doc's "consume-and-rotate / then **deletes**" story is false. The
@@ -105,8 +107,9 @@ Each bullet is sized to be one small PR (or batched where noted).
 9. **Scrub personal machine paths from the public tree** (CLAUDE.md rule):
    `docs/plans/2026-05-25-phase-9.md` and
    `docs/findings/2026-07-05-openclaw-weak-runner.md` both contain
-   `/Users/<name>/…` paths (the findings doc also includes gateway
-   hostnames). Scrub in place; archiving does not fix public exposure.
+   absolute macOS home-directory paths (the findings doc also includes
+   gateway hostnames). Scrub in place; archiving does not fix public
+   exposure.
 10. **`docs/migrations.md`**: history table stops at v6; code is at **v8**
     (schema.py). Forward-branch list, worked example (`v3 -> v4`), and the
     `user_version` = 4 snippet under the "→ v3" section are all stale;
@@ -205,7 +208,8 @@ and those files never drifted. Extend it:
   docs code fences and checks the subcommand + flags exist in the Typer app
   (`--help` parse). Would have caught `--evidence`, `mcp-config gemini`,
   and the lease-default class of errors at PR time.
-- **Path hygiene check**: grep CI step failing on `/Users/` in `docs/`
+- **Path hygiene check**: grep CI step failing on macOS home-directory
+  prefixes (`/Users` + a trailing slash) in `docs/`
   (enforces the CLAUDE.md public-repo rule mechanically).
 - These slot into the existing `docs` job in `ci.yml` alongside
   `mkdocs build --strict` — and are a natural first brick for the planned
