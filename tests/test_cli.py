@@ -471,8 +471,7 @@ class TestStatusInitialized:
         "status check unavailable". CliRunner tests miss this because Typer
         fills ``prd`` in for them; this exercises the bare-function seam.
         """
-        import io as _io
-        import json as _json
+        import io
         from contextlib import redirect_stdout
 
         from anvil.cli.hooks import _dispatch_detect_state
@@ -487,10 +486,10 @@ class TestStatusInitialized:
         finally:
             os.chdir(original_cwd)
 
-        buf = _io.StringIO()
+        buf = io.StringIO()
         with redirect_stdout(buf):
             _dispatch_detect_state({}, tmp_path)
-        context = _json.loads(buf.getvalue())["hookSpecificOutput"]["additionalContext"]
+        context = json.loads(buf.getvalue())["hookSpecificOutput"]["additionalContext"]
 
         assert "status check unavailable" not in context, context
         assert "ready-tasks:" in context, context
