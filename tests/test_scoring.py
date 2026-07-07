@@ -633,6 +633,14 @@ class TestReviewTier:
         assert review_tier(_scored_task(review_risk=None), config=cfg) == "max"
         assert review_tier(_scored_task(blast_radius=None), config=cfg) == "max"
 
+    def test_any_dim_none_derives_max_even_with_confirmed_risk(self) -> None:
+        """AC verbatim: ANY dim None → max, even a non-risk dim on an
+        otherwise confirmed-low-risk task (hand-built Scores fail safe)."""
+        task = _scored_task(
+            complexity=None, blast_confirmed=True, risk_confirmed=True
+        )
+        assert review_tier(task, config=_tier_config()) == "max"
+
     def test_high_risk_derives_max_regardless_of_other_dims(self) -> None:
         cfg = _tier_config()
         assert (

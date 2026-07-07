@@ -402,7 +402,21 @@ def review_tier(task: Task, *, config: Config) -> Literal["light", "standard", "
     review_risk = scores.review_risk
     blast_radius = scores.blast_radius
 
-    if review_risk is None or blast_radius is None:
+    # ANY dim None → max (AC wording, verbatim). The engine writes all six
+    # dims together, so in practice this is the all-None unscored case — but
+    # a hand-built partially-scored Score must fail safe too, not slip into
+    # the light gate on confirmed risk dims alone.
+    if any(
+        value is None
+        for value in (
+            scores.complexity,
+            scores.parallelizability,
+            scores.context_load,
+            blast_radius,
+            review_risk,
+            scores.agent_suitability,
+        )
+    ):
         return "max"
     if (
         review_risk >= config.review_tier_max_min
