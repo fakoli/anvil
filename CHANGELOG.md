@@ -6,6 +6,19 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- **SessionStart hook no longer degrades to "status check unavailable" for
+  initialized projects.** `hooks._status_hook_line` called the `status`
+  command as a bare function without passing `prd`, leaking the Typer
+  `OptionInfo` sentinel into `resolve_prd_id()`, which raised on `.strip()`
+  and was swallowed as exit 1 — so every initialized project's SessionStart
+  context showed the degraded line instead of its real task counts. The call
+  now passes `prd=None`, and `resolve_prd_id()` gained an `isinstance` guard
+  so any future bare caller degrades to default resolution instead of an
+  invisible crash. Covered by a regression test that drives the programmatic
+  `_dispatch_detect_state` seam (which `CliRunner` tests could not reach).
+
 ## [0.4.1] - 2026-07-07
 
 ### Documented

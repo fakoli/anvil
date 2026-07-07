@@ -197,7 +197,11 @@ def resolve_prd_id(backend: SqliteBackend, explicit: str | None = None) -> str:
         PrdAmbiguityError: Several PRDs exist, none is the default, and neither
             an explicit id nor ``$ANVIL_PRD`` chose one.
     """
-    if explicit and explicit.strip():
+    # isinstance guard: a programmatic caller that forgets to pass the CLI
+    # ``prd`` arg leaks a Typer OptionInfo sentinel here — degrade to the
+    # default resolution instead of an invisible AttributeError (see
+    # hooks._status_hook_line).
+    if isinstance(explicit, str) and explicit.strip():
         return explicit.strip()
 
     env_value = os.environ.get(_PRD_ENV)

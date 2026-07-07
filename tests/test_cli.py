@@ -459,6 +459,41 @@ class TestStatusInitialized:
         result = self._init_and_status(tmp_path, extra_status_args=["--hook-format"])
         assert result.exit_code == 0
 
+    def test_detect_state_hook_shows_real_status_for_initialized_project(
+        self, tmp_path: Path
+    ) -> None:
+        """SessionStart detect-state must emit the real status line, not degrade.
+
+        Regression: `_status_hook_line` calls `status()` programmatically (no
+        Click context). Omitting the ``prd`` argument leaked the Typer
+        OptionInfo sentinel into resolve_prd_id(), which raised on ``.strip()``
+        and degraded every initialized project's SessionStart context to
+        "status check unavailable". CliRunner tests miss this because Typer
+        fills ``prd`` in for them; this exercises the bare-function seam.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        from anvil.cli.hooks import _dispatch_detect_state
+
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            init_result = runner.invoke(
+                app, ["init", "--name", "Hook Status"], catch_exceptions=False
+            )
+            assert init_result.exit_code == 0, init_result.output
+        finally:
+            os.chdir(original_cwd)
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _dispatch_detect_state({}, tmp_path)
+        context = json.loads(buf.getvalue())["hookSpecificOutput"]["additionalContext"]
+
+        assert "status check unavailable" not in context, context
+        assert "ready-tasks:" in context, context
+
     def test_status_with_cwd_flag(self, tmp_path: Path) -> None:
         """status --cwd works without changing directory."""
         original_cwd = os.getcwd()
