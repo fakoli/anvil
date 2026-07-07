@@ -746,3 +746,62 @@ class TestFastLaneConfigDrivenThresholds:
         task = _make_task(scores=Score(), required_evidence=_THREE_EVIDENCE)
         packet = fast_lane_packet(task, _make_config())
         assert packet.variant == "full"
+
+
+# ---------------------------------------------------------------------------
+# retro-opps T002 — review tier in the packet (markdown + JSON)
+# ---------------------------------------------------------------------------
+
+
+_CONFIRMED_LIGHT_SCORE = Score(
+    complexity=1,
+    parallelizability=4,
+    context_load=2,
+    blast_radius=1,
+    review_risk=2,
+    agent_suitability=5,
+    blast_radius_confirmed=True,
+    review_risk_confirmed=True,
+)
+
+
+class TestReviewTierInPacket:
+    def test_json_carries_review_tier_for_scored_and_unscored(self) -> None:
+        """AC: packet JSON includes review_tier for scored AND unscored tasks."""
+        scored = render_packet(_make_task(scores=_LIGHT_SCORE))
+        unscored = render_packet(_make_task(scores=Score()))
+        assert scored.json_data["review_tier"] == "standard"  # unconfirmed
+        assert unscored.json_data["review_tier"] == "max"
+
+    def test_markdown_max_tier_carries_max_guidance(self) -> None:
+        packet = render_packet(_make_task(scores=_HEAVY_SCORE))
+        assert "**Review tier:** max" in packet.markdown
+        assert "adversarial review pass" in packet.markdown
+
+    def test_markdown_light_tier_carries_light_guidance(self) -> None:
+        packet = render_packet(_make_task(scores=_CONFIRMED_LIGHT_SCORE))
+        assert "**Review tier:** light" in packet.markdown
+        assert "evidence gate only" in packet.markdown
+
+    def test_explicit_override_wins_over_derivation(self) -> None:
+        """Mirrors the lightweight override: caller-supplied tier is rendered."""
+        packet = render_packet(
+            _make_task(scores=_HEAVY_SCORE), review_tier="standard"
+        )
+        assert packet.json_data["review_tier"] == "standard"
+        assert "**Review tier:** standard" in packet.markdown
+
+    def test_fast_lane_packet_derives_tier_from_config(self) -> None:
+        """Config-aware path: same thresholds drive routing AND tier."""
+        task = _make_task(scores=_CONFIRMED_LIGHT_SCORE)
+        packet = fast_lane_packet(task, _make_config())
+        assert packet.variant == "lightweight"
+        assert packet.json_data["review_tier"] == "light"
+
+    def test_fast_lane_variant_and_tier_can_diverge_when_unconfirmed(self) -> None:
+        """Packet size and review depth are separable: fast-lane packet,
+        standard review when risk flags are unconfirmed."""
+        task = _make_task(scores=_LIGHT_SCORE)
+        packet = fast_lane_packet(task, _make_config())
+        assert packet.variant == "lightweight"
+        assert packet.json_data["review_tier"] == "standard"

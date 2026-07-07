@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from anvil.config import Config
@@ -157,6 +157,24 @@ def is_lightweight(
     return complexity <= complexity_max and blast_radius <= blast_radius_max
 
 
+# retro-opps T002 — one reviewer-guidance sentence per derived review tier
+# (``planning.scoring.review_tier``). Rendered verbatim into the packet header
+# so the depth decision travels with the work instead of living in a skill doc.
+_REVIEW_TIER_GUIDANCE: dict[str, str] = {
+    "light": (
+        "confirmed low-risk fast-lane change; reviewer checks the evidence "
+        "gate only."
+    ),
+    "standard": (
+        "reviewer checks the evidence gate and reads the diff."
+    ),
+    "max": (
+        "high or unconfirmed risk; reviewer runs full verification plus an "
+        "adversarial review pass."
+    ),
+}
+
+
 def _required_evidence_for(
     task: Task,
     *,
@@ -220,6 +238,7 @@ def _render_markdown(
     related_decisions: list[Decision],
     active_claim: Claim | None,
     lightweight: bool,
+    review_tier: str,
     deferred_findings: list[DeferredFinding] | None = None,
     fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> str:
@@ -239,6 +258,12 @@ def _render_markdown(
         f"**Agent suitability:** {_score_str(task.scores.agent_suitability)}"
     )
     lines.append(f"**Complexity:** {_score_str(task.scores.complexity)}")
+    # retro-opps T002 — the derived review depth plus one line of reviewer
+    # guidance, so the packet itself tells the finisher how hard to review.
+    lines.append(
+        f"**Review tier:** {review_tier} — "
+        f"{_REVIEW_TIER_GUIDANCE[review_tier]}"
+    )
     lines.append("")
 
     # --- Goal ---
@@ -390,6 +415,7 @@ def _render_json(
     related_decisions: list[Decision],
     active_claim: Claim | None,
     lightweight: bool,
+    review_tier: str,
     deferred_findings: list[DeferredFinding] | None = None,
     fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> dict[str, Any]:
@@ -465,6 +491,7 @@ def _render_json(
         "required_evidence": rendered_required_evidence,
         "update_protocol": update_protocol,
         "variant": "lightweight" if lightweight else "full",
+        "review_tier": review_tier,
     }
 
 
@@ -482,6 +509,7 @@ def render_packet(
     related_decisions: list[Decision] | None = None,
     active_claim: Claim | None = None,
     lightweight: bool | None = None,
+    review_tier: Literal["light", "standard", "max"] | None = None,
     deferred_findings: list[DeferredFinding] | None = None,
     fast_lane_required_evidence_max: int = FAST_LANE_REQUIRED_EVIDENCE_MAX,
 ) -> WorkPacket:
@@ -518,6 +546,14 @@ def render_packet(
             goal, acceptance criteria, scope, decisions, and claim sections are
             identical in both variants; the lightweight variant right-sizes the
             update-protocol prose AND the required-evidence checklist.
+        review_tier:
+            retro-opps T002 — the derived review depth
+            (``"light"``/``"standard"``/``"max"``) rendered into the packet
+            header and JSON. ``None`` (the default) derives it via
+            :func:`anvil.planning.scoring.review_tier` with the module-default
+            thresholds; config-aware callers (:func:`fast_lane_packet`) pass
+            the config-derived tier so the two can never disagree. Mirrors the
+            ``lightweight`` override pattern exactly.
         deferred_findings:
             T017 — prior unresolved review findings (``reject`` /
             ``needs_changes``) whose touched files overlap this task's incoming
@@ -550,6 +586,14 @@ def render_packet(
     resolved_lightweight: bool = (
         is_lightweight(task) if lightweight is None else lightweight
     )
+    if review_tier is None:
+        # Deferred import: scoring's own is_lightweight import is deferred
+        # too, so neither module pays for the other at load time.
+        from anvil.planning.scoring import review_tier as derive_review_tier
+
+        resolved_review_tier: str = derive_review_tier(task)
+    else:
+        resolved_review_tier = review_tier
 
     markdown = _render_markdown(
         task,
@@ -559,6 +603,7 @@ def render_packet(
         related_decisions=resolved_decisions,
         active_claim=active_claim,
         lightweight=resolved_lightweight,
+        review_tier=resolved_review_tier,
         deferred_findings=resolved_findings,
         fast_lane_required_evidence_max=fast_lane_required_evidence_max,
     )
@@ -570,6 +615,7 @@ def render_packet(
         related_decisions=resolved_decisions,
         active_claim=active_claim,
         lightweight=resolved_lightweight,
+        review_tier=resolved_review_tier,
         deferred_findings=resolved_findings,
         fast_lane_required_evidence_max=fast_lane_required_evidence_max,
     )
@@ -618,6 +664,10 @@ def fast_lane_packet(
         complexity_max=config.fast_lane_complexity_max,
         blast_radius_max=config.fast_lane_blast_radius_max,
     )
+    # retro-opps T002 — derive the review tier from the same config so packet
+    # routing and review depth read one set of thresholds.
+    from anvil.planning.scoring import review_tier as derive_review_tier
+
     return render_packet(
         task,
         feature=feature,
@@ -626,5 +676,6 @@ def fast_lane_packet(
         related_decisions=related_decisions,
         active_claim=active_claim,
         lightweight=lightweight,
+        review_tier=derive_review_tier(task, config=config),
         deferred_findings=deferred_findings,
     )

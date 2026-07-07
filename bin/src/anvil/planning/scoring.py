@@ -26,7 +26,11 @@ import re
 import sys
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from anvil.config import DEFAULT_AUTO_EXPAND_THRESHOLD
+from anvil.config import (
+    DEFAULT_AUTO_EXPAND_THRESHOLD,
+    DEFAULT_REVIEW_TIER_LIGHT_RISK_MAX,
+    DEFAULT_REVIEW_TIER_MAX_MIN,
+)
 from anvil.state.models import Score, Task
 
 if TYPE_CHECKING:
@@ -369,7 +373,9 @@ def score_task(
     return score
 
 
-def review_tier(task: Task, *, config: Config) -> Literal["light", "standard", "max"]:
+def review_tier(
+    task: Task, *, config: Config | None = None
+) -> Literal["light", "standard", "max"]:
     """Derive the review tier for *task*: ``"light"``, ``"standard"``, or ``"max"``.
 
     retro-opps T001 — a pure projection over the persisted six-dim score plus
@@ -393,10 +399,28 @@ def review_tier(task: Task, *, config: Config) -> Literal["light", "standard", "
       still gets a standard review (packet size and review depth are
       deliberately separable).
     - **standard** — everything else.
+
+    ``config=None`` (retro-opps T002) uses the module defaults
+    (``DEFAULT_REVIEW_TIER_*`` and the renderer's built-in fast-lane
+    ceilings) so config-free callers — e.g. the pure packet renderer's
+    no-config fallback path — derive the same conservative tiers a fresh
+    config.yaml would.
     """
     # Deferred import: config.py deliberately avoids importing the packets
     # module at load time; mirror that here so scoring stays light too.
     from anvil.context.packets import is_lightweight
+
+    if config is not None:
+        max_min = config.review_tier_max_min
+        light_risk_max = config.review_tier_light_risk_max
+        lightweight_kwargs = {
+            "complexity_max": config.fast_lane_complexity_max,
+            "blast_radius_max": config.fast_lane_blast_radius_max,
+        }
+    else:
+        max_min = DEFAULT_REVIEW_TIER_MAX_MIN
+        light_risk_max = DEFAULT_REVIEW_TIER_LIGHT_RISK_MAX
+        lightweight_kwargs = {}
 
     scores = task.scores
     review_risk = scores.review_risk
@@ -418,19 +442,12 @@ def review_tier(task: Task, *, config: Config) -> Literal["light", "standard", "
         )
     ):
         return "max"
-    if (
-        review_risk >= config.review_tier_max_min
-        or blast_radius >= config.review_tier_max_min
-    ):
+    if review_risk >= max_min or blast_radius >= max_min:
         return "max"
 
     if (
-        is_lightweight(
-            task,
-            complexity_max=config.fast_lane_complexity_max,
-            blast_radius_max=config.fast_lane_blast_radius_max,
-        )
-        and review_risk <= config.review_tier_light_risk_max
+        is_lightweight(task, **lightweight_kwargs)
+        and review_risk <= light_risk_max
         and scores.blast_radius_confirmed
         and scores.review_risk_confirmed
     ):
