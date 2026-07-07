@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # anvil-mcp — shell wrapper for the MCP server entry point.
-# anvil.mcp_server landed in Phase 6 and registers 13 tools via FastMCP.
+# anvil.mcp_server landed in Phase 6 and registers 24 tools via FastMCP.
 
 # Preserve caller's cwd; see bin/anvil for the rationale.
 ORIGINAL_PWD="$PWD"

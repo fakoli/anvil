@@ -214,14 +214,20 @@ Resolve the file (edit local or accept remote), delete it, then rerun
 `anvil sync github` to continue. The batch exits `2` if any task
 is parked pending manual merge.
 
+(As with every `.anvil/…` path in this guide, `.sync-conflicts/` sits under
+wherever `anvil status` reports state actually lives — by default a
+per-project HOME workspace under `~/.anvil/workspaces/<key>/`, not an
+in-repo directory. See [`getting-started.md#where-your-state-lives`](getting-started.md#where-your-state-lives).)
+
 **`prompt` won't work in `--watch`** (non-tty stdin → defaults to
 `local_wins`). For watch mode, either pick a deterministic strategy
 (`local_wins`, `remote_wins`, `manual_merge`) on the mapping, or accept
 that the prompt path falls back silently. The audit event records
 `resolution="prompt_defaulted_to_local"` so you can grep for these later.
 
-The `--fix` flag forces `remote_wins` for the duration of one sync iteration
-— useful when the remote is the trusted version after an out-of-band edit:
+The `--fix` flag reconciles remote state into local on conflicts — it forces
+a pull for tasks whose `SyncMapping` is in the `conflict` state — useful when
+the remote is the trusted version after an out-of-band edit:
 
 ```bash
 anvil sync github --pull --fix
@@ -270,7 +276,7 @@ flow that the reconciliation engine doesn't own.
 | `external_deleted` on stderr             | Issue was deleted on GitHub. Mapping flips to `external_deleted`; bare `anvil sync` surfaces it as drift; `--fix` prompts to remove the mapping. |
 | Watch mode missed changes during a blip  | The outer `except Exception` keeps polling. Re-run `anvil sync github --pull` once to catch up. |
 | `--fix` without `--yes` in non-tty       | Exits `1` with `--fix requires --yes in non-interactive mode`.                      |
-| Exit code `2` from a sync run            | At least one task is parked in `manual_merge`. Resolve the file under `.anvil/.sync-conflicts/`, delete it, rerun. |
+| Exit code `2` from a sync run            | At least one task is parked in `manual_merge`. Resolve the file under `.anvil/.sync-conflicts/` (workspace-relative — see the note above), delete it, rerun. |
 
 For the complete failure-mode matrix (per-iteration error survival, transport
 flips, audit emission failures), see [`../github-sync.md` → Failure modes](../github-sync.md#failure-modes).

@@ -86,6 +86,8 @@ Run `anvil renew C9F3A210` to extend the lease before it expires.
 | `--worktree` | Also create a git worktree at `../wt-<task_id>/` so you can work on multiple claims in parallel without checkout-thrash. Skipped (with a stderr warning) if the working tree is dirty. |
 | `--force` | Override file-overlap and conflict-group warnings; the conflict event is still logged. Use sparingly. |
 | `--actor <name>` | Identity recorded on the claim. Defaults to `$USER`, then `agent`. |
+| `--lease <minutes>` | Lease duration for this claim, overriding `default_lease_minutes` from project/global `config.yaml` (precedence: this flag > project config > global config > built-in default of `240`). |
+| `--branch <name>` | Attach the claim to an existing or caller-named branch instead of the generated `agent/<task_id>-<slug>` name. The branch is checked out if it exists, created otherwise, and the name is recorded on the claim. |
 
 ### What the claim records
 
@@ -102,6 +104,8 @@ anvil packet T012
 ```
 
 The packet is the complete context one agent needs to execute the task — and nothing else. It is rendered from canonical state by [`context/packets.py::render_packet`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) and written to `.anvil/packets/T012.md`.
+
+> Every `.anvil/…` path in this guide is shorthand for wherever `anvil status` reports state actually lives — by default a per-project HOME workspace under `~/.anvil/workspaces/<key>/`, not an in-repo directory. See [`getting-started.md#where-your-state-lives`](getting-started.md#where-your-state-lives).
 
 Sections in the markdown packet:
 
@@ -152,7 +156,7 @@ Renewed claim 'C9F3A210'.
   Last heartbeat:  2026-05-25T15:23:00+00:00
 ```
 
-The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes`. Only the owning actor can renew an active claim — `renew` fails with `ClaimError` on actor mismatch or non-active status.
+The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes`. Only the owning actor can renew an active claim — `renew` fails with `ClaimError` on actor mismatch or non-active status. Pass `renew C9F3A210 --lease <minutes>` to extend by a different duration than `default_lease_minutes` for this renewal.
 
 ### What happens if you do not renew
 
@@ -173,7 +177,8 @@ Note that `release` takes the **claim ID** (`C9F3A210`), not the task ID — cla
 ```bash
 anvil submit T012 \
     --commands "pytest tests/test_submit.py -v" \
-    --files-changed "bin/src/anvil/cli/packet_apply.py,tests/test_submit.py" \
+    --files-changed "bin/src/anvil/cli/packet_apply.py" \
+    --files-changed "tests/test_submit.py" \
     --output-file /tmp/pytest-output.log \
     --pr-url "https://github.com/you/repo/pull/142"
 ```
@@ -182,14 +187,20 @@ anvil submit T012 \
 
 | Flag | Required? | Effect |
 |---|---|---|
-| `--commands` | yes | Comma-separated verification commands that were run (e.g. `pytest tests/`). |
-| `--files-changed` | yes | Comma-separated file paths modified. |
+| `--commands` | yes | Verification command that was run (e.g. `pytest tests/`). Repeatable — pass `--commands` once per command so a command containing a comma survives intact. |
+| `--files-changed` | yes | File path modified. Repeatable — pass `--files-changed` once per path. |
 | `--output-file` | no | Path to a file whose contents are read (truncated to 8000 chars) and stored as the output excerpt. |
 | `--pr-url` | no | Pull request URL — checked by the evidence gate when `required_evidence` mentions "PR" or "pull request". |
 | `--commit-sha` | no | Commit SHA pinned to this submission. |
 | `--known-limitations` | no | Free-text caveats. Checked by the evidence-gate fallback when a required-evidence item does not match any structured field. |
 | `--screenshots` | no | Comma-separated paths to screenshot files — required when `required_evidence` mentions "screenshot" (the gate checks `evidence.screenshots` is non-empty). |
 | `--actor` | no | Submitting actor; defaults to `$USER`, then `agent`. |
+
+Back-compat: passing `--commands` (or `--files-changed`) exactly once still
+splits that single value on commas, so the older
+`--commands "a,b" --files-changed "x,y"` form keeps working — but the
+repeatable form above is canonical and is the only form that survives a
+value with an embedded comma intact.
 
 `submit` locates the active claim for the task (one per task at most), constructs an `Evidence` row with a fresh ID (`EV` + 8 hex), emits an `evidence.submitted` event, and the backend handler atomically:
 
