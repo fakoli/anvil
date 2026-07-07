@@ -195,7 +195,9 @@ def test_dispatch_detect_state_renders_status_banner(tmp_path, monkeypatch) -> N
         catch_exceptions=False,
     )
     assert r.exit_code == 0
-    assert r.stdout.strip() == (
+    payload = json.loads(r.stdout)
+    assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert payload["hookSpecificOutput"]["additionalContext"] == (
         "[anvil] Language: Python | "
         "active-claims:1 ready-tasks:2 blockers:0 prd-status:approved"
     )

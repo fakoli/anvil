@@ -145,6 +145,19 @@ def _status_hook_line(cwd: Path | None) -> tuple[str, int]:
     return stdout.getvalue().strip().splitlines()[0] if stdout.getvalue().strip() else "", code
 
 
+def _emit_session_start_context(text: str) -> None:
+    typer.echo(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": text,
+                }
+            }
+        )
+    )
+
+
 def _dispatch_detect_state(payload: dict[str, object], cwd: Path | None) -> None:
     language = _language_for_cwd(cwd)
     root = _project_cwd(cwd)
@@ -152,20 +165,22 @@ def _dispatch_detect_state(payload: dict[str, object], cwd: Path | None) -> None
     status_line, status_exit = _status_hook_line(cwd)
 
     if status_exit == 0 and status_line and status_line != "uninitialized":
-        typer.echo(f"[anvil] Language: {language} | {status_line}")
+        _emit_session_start_context(f"[anvil] Language: {language} | {status_line}")
         return
     if status_line == "uninitialized":
         if legacy:
-            typer.echo(
+            _emit_session_start_context(
                 "[anvil] Language: "
                 f"{language} | legacy in-repo .anvil found — run "
                 "`anvil migrate-workspace` to move it into the home workspace"
             )
         else:
-            typer.echo("[anvil] not initialized in this project — run `anvil init` to start")
+            _emit_session_start_context(
+                "[anvil] not initialized in this project — run `anvil init` to start"
+            )
         return
     reason = status_line or f"status check returned exit {status_exit}"
-    typer.echo(f"[anvil] Language: {language} | status check unavailable: {reason}")
+    _emit_session_start_context(f"[anvil] Language: {language} | status check unavailable: {reason}")
 
 
 def _dispatch_check_claim(payload: dict[str, object], cwd: Path | None) -> None:
