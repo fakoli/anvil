@@ -1105,9 +1105,16 @@ def submit_progress(
     task_id: str,
     actor: str,
     notes: str,
+    phase: str | None = None,
+    detail: str | None = None,
 ) -> ProgressResponse:
     """Record a progress note for task_id as a 'progress.noted' audit event.
-    Does NOT change task status. Reaps stale claims first."""
+    Does NOT change task status. Reaps stale claims first.
+
+    ``phase`` (retro-opps T010) is an optional structured label ("build",
+    "tests", "review-fixes", ...) for the heartbeat bus — status surfaces
+    read the latest phase back so operators can see where a long run is
+    without asking. ``detail`` is free-text elaboration for the phase."""
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -1135,6 +1142,14 @@ def submit_progress(
                 "actor": actor,
                 "notes": notes,
                 "noted_at": now.isoformat(),
+                # T010 — omit the keys when unused: a no-phase row stays
+                # byte-identical to the pre-T010 shape, so an OLDER anvil
+                # sharing the same HOME-workspace state dir (installed
+                # plugin vs dev checkout) only hard-fails on rows that
+                # genuinely exercise the feature, not on every progress
+                # note (extra='forbid' on its payload model).
+                **({"phase": phase} if phase is not None else {}),
+                **({"detail": detail} if detail is not None else {}),
             },
         )
         backend.append(draft)

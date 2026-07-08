@@ -6556,6 +6556,21 @@ class TestPayloadValidation:
         assert obj.actor == "agent-guido"
         assert obj.notes == "Fixed the flaky test; CI green."
 
+    def test_progress_noted_payload_accepts_phase_and_detail(self) -> None:
+        """retro-opps T010 — optional phase/detail fields validate; absent
+        keys (old JSONL rows) still replay (covered by ..._validates_good)."""
+        p = self._import_payload_models()
+        obj = p.ProgressNotedPayload.model_validate({
+            "task_id": "T001",
+            "actor": "agent-guido",
+            "notes": "tests running",
+            "noted_at": _T0.isoformat(),
+            "phase": "tests",
+            "detail": "unit suite",
+        })
+        assert obj.phase == "tests"
+        assert obj.detail == "unit suite"
+
     def test_progress_noted_payload_rejects_unknown_key(self) -> None:
         from pydantic import ValidationError as PydanticValidationError
         p = self._import_payload_models()
