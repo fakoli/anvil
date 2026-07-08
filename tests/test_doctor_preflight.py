@@ -240,6 +240,28 @@ class TestPreflightTreeState:
         assert "[OK] tree_state" in result.output
         assert "working tree clean" in result.output
 
+    def test_gitignored_anvil_dir_reads_clean(self, tmp_path: Path) -> None:
+        """Locks in the no-noise guarantee (review): a local-layout project
+        that gitignores .anvil/ — as `anvil migrate` guidance instructs —
+        reads CLEAN, so the probe never emits permanent warning noise."""
+        _git_init(tmp_path)
+        import subprocess
+
+        (tmp_path / ".gitignore").write_text(".anvil/\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", ".gitignore"],
+            cwd=str(tmp_path), check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "ignore anvil state"],
+            cwd=str(tmp_path), check=True, capture_output=True,
+        )
+        _init_project(tmp_path)  # untracked .anvil/ — but gitignored
+        result = _invoke(tmp_path, ["doctor", "--preflight"])
+        assert result.exit_code == 0, result.output
+        assert "[OK] tree_state" in result.output
+        assert "working tree clean" in result.output
+
     def test_non_git_dir_is_info_and_completes(self, tmp_path: Path) -> None:
         """AC: non-git directory → INFO, not ERROR; doctor completes."""
         _init_project(tmp_path)  # no git init
