@@ -185,3 +185,75 @@ class TestDoctorPreflight:
         assert result.exit_code == 0, result.output
         assert "open question" in result.output
         assert "PREFLIGHT: GO" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Tree-state probe (retro-opps:T014)
+# ---------------------------------------------------------------------------
+
+
+def _git_init(tmp_path: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    for key, value in (("user.email", "t@t.t"), ("user.name", "T")):
+        subprocess.run(
+            ["git", "config", key, value],
+            cwd=str(tmp_path), check=True, capture_output=True,
+        )
+    (tmp_path / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(tmp_path), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=str(tmp_path), check=True, capture_output=True,
+    )
+
+
+class TestPreflightTreeState:
+    def test_dirty_repo_warns_but_still_go(self, tmp_path: Path) -> None:
+        """AC: uncommitted changes → WARNING tree-state finding, exit 0 when
+        no ERROR exists (GO with warnings)."""
+        _git_init(tmp_path)
+        _init_project(tmp_path)
+        (tmp_path / "uncommitted.txt").write_text("wip\n", encoding="utf-8")
+        result = _invoke(tmp_path, ["doctor", "--preflight"])
+        assert result.exit_code == 0, result.output
+        assert "uncommitted changes present" in result.output
+        assert "[WARNING] tree_state" in result.output
+        assert "PREFLIGHT: GO" in result.output
+
+    def test_clean_repo_is_ok(self, tmp_path: Path) -> None:
+        """AC: clean repo → tree-state finding is OK."""
+        _git_init(tmp_path)
+        _init_project(tmp_path)
+        # .anvil/ + prd.md are untracked → "dirty" unless ignored; commit them
+        # so the tree is genuinely clean.
+        import subprocess
+
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "anvil state"],
+            cwd=str(tmp_path), check=True, capture_output=True,
+        )
+        result = _invoke(tmp_path, ["doctor", "--preflight"])
+        assert result.exit_code == 0, result.output
+        assert "[OK] tree_state" in result.output
+        assert "working tree clean" in result.output
+
+    def test_non_git_dir_is_info_and_completes(self, tmp_path: Path) -> None:
+        """AC: non-git directory → INFO, not ERROR; doctor completes."""
+        _init_project(tmp_path)  # no git init
+        result = _invoke(tmp_path, ["doctor", "--preflight"])
+        assert result.exit_code == 0, result.output
+        assert "[INFO] tree_state" in result.output
+        assert "not_a_repo" in result.output
+        assert "PREFLIGHT: GO" in result.output
+
+    def test_probe_never_runs_without_preflight(self, tmp_path: Path) -> None:
+        """AC: the probe never runs without --preflight."""
+        _git_init(tmp_path)
+        _init_project(tmp_path)
+        (tmp_path / "uncommitted.txt").write_text("wip\n", encoding="utf-8")
+        result = _invoke(tmp_path, ["doctor"])
+        assert result.exit_code == 0
+        assert "tree_state" not in result.output

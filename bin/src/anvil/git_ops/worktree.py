@@ -45,6 +45,34 @@ def _is_dirty(cwd: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def tree_state(cwd: Path) -> str:
+    """Read-only working-tree state for health probes (retro-opps T014).
+
+    Returns ``"clean"``, ``"dirty"``, ``"not_a_repo"``, or ``"unavailable"``
+    (git missing, timed out, or errored). Unlike :func:`_is_dirty` — whose
+    timeout→dirty bias is right for REFUSING worktree creation — a probe
+    must distinguish "verifiably dirty" from "could not check", so callers
+    can warn on the former and stay informational on the latter.
+    """
+    if not is_git_available():
+        return "unavailable"
+    if not is_git_repo(cwd):
+        return "not_a_repo"
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return "unavailable"
+    if result.returncode != 0:
+        return "unavailable"
+    return "dirty" if result.stdout.strip() else "clean"
+
+
 def create_worktree_for_task(
     task_id: str,
     branch: str,

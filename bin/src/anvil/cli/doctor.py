@@ -175,7 +175,9 @@ def doctor(
     if preflight:
         # Strictly additive: plain `doctor` (no flag) never runs these, so
         # its output and exit behavior stay byte-compatible.
-        findings.extend(_preflight_findings(state_dir, prd))
+        findings.extend(
+            _preflight_findings(state_dir, prd, _resolve_project_root(cwd))
+        )
 
     worst = _worst_severity(findings)
     healthy = worst != _ERROR
@@ -210,14 +212,54 @@ def doctor(
 # ---------------------------------------------------------------------------
 
 
-def _preflight_findings(state_dir: Path, prd: str | None) -> list[_Finding]:
-    """PRD-parse + unresolved-decision probes for ``doctor --preflight``.
+def _preflight_findings(
+    state_dir: Path, prd: str | None, project_root: Path | None = None
+) -> list[_Finding]:
+    """PRD-parse + unresolved-decision + tree-state probes for
+    ``doctor --preflight``.
 
     Total like every doctor probe: each failure becomes a finding, never a
     traceback. The retro pattern this closes: simple PRD format issues
     surfacing deep inside long workflows instead of before they start.
     """
     findings: list[_Finding] = []
+
+    # Probe 0 (T014) — git tree state. Dirty = WARNING (claims auto-create
+    # branches; uncommitted work is suspicious before a long run but not
+    # always fatal); not-a-repo / git-missing / timeout = INFO, never a
+    # crash. Read-only and fast: one `git status --porcelain`.
+    if project_root is not None:
+        try:
+            from anvil.git_ops.worktree import tree_state
+
+            state = tree_state(project_root)
+        except Exception:  # noqa: BLE001 — probe must never kill preflight
+            state = "unavailable"
+        if state == "dirty":
+            findings.append(
+                _Finding(
+                    "tree_state",
+                    _WARNING,
+                    "uncommitted changes present in the working tree — "
+                    "commit or stash before a long workflow.",
+                    {"path": str(project_root)},
+                )
+            )
+        elif state == "clean":
+            findings.append(
+                _Finding(
+                    "tree_state", _OK, "working tree clean.", {}
+                )
+            )
+        else:
+            findings.append(
+                _Finding(
+                    "tree_state",
+                    _INFO,
+                    f"tree state not checkable ({state}).",
+                    {"path": str(project_root)},
+                )
+            )
 
     # Resolve which partition to check. The shared sentinel rule: an explicit
     # --prd / $ANVIL_PRD wins; otherwise the default partition. resolve_prd_id
