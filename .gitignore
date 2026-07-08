@@ -26,3 +26,4 @@ docs/plans/agent-*-status.md
 
 # MkDocs build output (docs site)
 site/
+.claude/worktrees/
