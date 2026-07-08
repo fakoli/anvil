@@ -646,3 +646,78 @@ def _is_pr_related(item_lower: str) -> bool:
     if "pull request" in item_lower:
         return True
     return bool(re.search(r"\bpr\b", item_lower))
+
+
+# ---------------------------------------------------------------------------
+# Advisory intent linter (evidence-contracts:T008, issue #153)
+# ---------------------------------------------------------------------------
+
+# Intent keyword families: a task whose title/description signals one of these
+# high-stakes intents but whose declared contract (claim subjects / ids /
+# assertion artifacts) never mentions the family is at risk of the voice
+# incident — the task INTENDED to prove X, the evidence proves something else.
+# Advisory only: this never blocks, it just surfaces the gap for the reviewer.
+_INTENT_FAMILIES: dict[str, tuple[str, ...]] = {
+    "candidate": ("candidate",),
+    "a/b comparison": ("a/b", "a-b test", "ab test", "compare", "comparison", "versus"),
+    "benchmark": ("benchmark",),
+    "migration": ("migration", "migrate"),
+    "deploy": ("deploy",),
+    "live": ("live",),
+    "security": ("security",),
+}
+
+
+def _keyword_in(keyword: str, text: str) -> bool:
+    """Boundary-aware keyword containment (T008 review).
+
+    Single tokens match on word boundaries — plain substring made ``"live"``
+    fire inside ``deliver``/``delivery`` (false positive) AND, worse, let a
+    contract term like ``delivery_status`` silently SUPPRESS a real "live
+    traffic" warning (false negative, the exact incident this exists to
+    catch). Multi-word / punctuated phrases (``"a-b test"``) stay substring —
+    a word-boundary regex around them is both unnecessary and wrong.
+    """
+    if any(c in keyword for c in " -/"):
+        return keyword in text
+    return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
+
+
+def lint_intent(task: Task) -> list[str]:
+    """Advisory intent/evidence mismatch warnings for a task (T008).
+
+    Pure keyword heuristic: for each intent family the task title/description
+    names, warn unless the declared contract (a claim id/subject or an
+    artifact-assertion path) mentions the same family. Empty when nothing
+    matches or the contract already covers the intent. Never blocks — this is
+    a nudge, not a gate. Best-effort by design: keyword heuristics both
+    over- and under-match, so the warning is advisory and says so.
+    """
+    text = f"{task.title} {task.description}".lower()
+
+    # The contract's own vocabulary: claim ids + subjects, assertion artifacts
+    # and predicate paths — anywhere an author names WHAT is being proven.
+    contract_terms: list[str] = []
+    for claim in task.claims:
+        contract_terms.append(claim.id.lower())
+        contract_terms.append(claim.subject.lower())
+    for assertion in task.verification.artifact_assertions:
+        contract_terms.append(assertion.artifact.lower())
+        if assertion.claim:
+            contract_terms.append(assertion.claim.lower())
+        for pred in assertion.assertions:
+            contract_terms.append(pred.path.lower())
+    contract_blob = " ".join(contract_terms)
+
+    warnings: list[str] = []
+    for family, synonyms in _INTENT_FAMILIES.items():
+        if not any(_keyword_in(kw, text) for kw in synonyms):
+            continue
+        if any(_keyword_in(kw, contract_blob) for kw in synonyms):
+            continue
+        warnings.append(
+            f"task intent mentions {family!r} but no declared claim or "
+            "artifact assertion covers it — the evidence may prove something "
+            "adjacent (advisory)"
+        )
+    return warnings

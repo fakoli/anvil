@@ -8148,3 +8148,154 @@ class TestSubmitCategory:
         envelope = json.loads(result.output.strip().splitlines()[-1])
         assert envelope["error"]["code"] == "invalid_category"
         assert "promotion_quality" in envelope["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# evidence-contracts:T008 — advisory intent/evidence linter at apply
+# ---------------------------------------------------------------------------
+
+
+_INTENT_PRD = """# Project: Intent Linter Fixture
+
+## Summary
+
+Fixture for the advisory intent linter.
+
+## Goals
+
+- Warn on intent/evidence mismatch.
+
+## Requirements
+
+- R001: Intent is surfaced.
+
+## Features
+
+### F001: Intent feature
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Run candidate benchmark matrix
+
+**Feature:** F001
+
+Measure the baseline only — a plain task with no evidence contract, the
+exact voice-incident shape (title promises candidate benchmark, work
+proves baseline).
+
+**Acceptance criteria:**
+
+- Baseline measured.
+
+**Verification:**
+
+- `echo ok`
+
+### T002: Run candidate benchmark matrix covered
+
+**Feature:** F001
+**Claims:** candidate_benchmark_done (measurement: gemma)
+
+Measure the candidate benchmark.
+
+**Acceptance criteria:**
+
+- Candidate measured.
+
+**Verification:**
+
+- `echo ok`
+
+**Artifact assertions:**
+
+```yaml
+- artifact: candidate-benchmark-out.json
+  claim: candidate_benchmark_done
+  assertions:
+    - path: status
+      op: exists
+```
+
+### T003: Add retry backoff to the client
+
+**Feature:** F001
+
+No intent keywords here.
+
+**Acceptance criteria:**
+
+- Retries work.
+
+**Verification:**
+
+- `echo ok`
+"""
+
+
+class TestApplyIntentLinter:
+    def _setup(self, tmp_path: Path, task_id: str) -> None:
+        _do_init(tmp_path, name="Intent Project")
+        _write_prd(tmp_path, _INTENT_PRD)
+        for cmd in (
+            ["prd", "parse"], ["prd", "review"], ["prd", "review", "--approve"],
+            ["plan"], ["review", "tasks"],
+        ):
+            assert _invoke_cmd(tmp_path, cmd).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "intent-agent"]
+        ).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path,
+            ["submit", task_id, "--commands", "echo ok",
+             "--files-changed", "x.py"],
+        ).exit_code == 0
+
+    def test_incident_shape_warns(self, tmp_path: Path) -> None:
+        """T008 AC: title says candidate benchmark, contract proves baseline
+        only → intent warning at apply."""
+        self._setup(tmp_path, "T001")
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        warnings = " ".join(data["intent_warnings"])
+        assert "candidate" in warnings and "benchmark" in warnings
+
+    def test_covered_task_no_warning(self, tmp_path: Path) -> None:
+        """T008 AC: a task whose contract covers the keywords → no warning."""
+        self._setup(tmp_path, "T002")
+        (tmp_path / "candidate-benchmark-out.json").write_text(
+            json.dumps({"status": "measured"}), encoding="utf-8"
+        )
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T002", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["intent_warnings"] == []
+
+    def test_no_intent_keyword_no_warning(self, tmp_path: Path) -> None:
+        self._setup(tmp_path, "T003")
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T003", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["intent_warnings"] == []
+
+    def test_never_changes_exit_code_and_renders_in_review_only(
+        self, tmp_path: Path
+    ) -> None:
+        """T008 AC: linter never changes exit code; renders in review-only
+        mode too."""
+        self._setup(tmp_path, "T001")
+        review = _invoke_cmd(tmp_path, ["apply", "T001", "--json"])
+        assert review.exit_code == 0  # advisory never gates
+        data = json.loads(review.output.strip().splitlines()[-1])["data"]
+        assert data["intent_warnings"], "review-only should surface warnings"
+        human = _invoke_cmd(tmp_path, ["apply", "T001"])
+        assert "Intent check (advisory)" in human.output
+        assert "candidate" in human.output
