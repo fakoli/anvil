@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -715,7 +716,7 @@ def next(  # noqa: A001
         # duplicated). Selection above is untouched — conflict-GROUP holds
         # already exclude candidates; this surfaces the residual overlap a
         # claim's runtime expected_files can introduce outside any group.
-        conflict_warnings: list[dict[str, object]] = []
+        conflict_warnings: list[dict[str, Any]] = []
         if task is not None and task.likely_files:
             conflict_warnings = [
                 {
