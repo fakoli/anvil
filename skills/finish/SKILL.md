@@ -215,7 +215,18 @@ effort at the matching depth instead of reviewing everything at maximum:
 |---|---|
 | `light` | Evidence-gate check only — confirm the submitted commands/files satisfy the required evidence. Confirmed low-risk fast-lane change; no diff read required. |
 | `standard` | Evidence gate **plus** a read of the diff against the acceptance criteria. |
-| `max` | Evidence gate, diff read, **and** an adversarial pass — dispatch the plugin-local `critic` agent (or the session's strongest reviewer) to actively refute the change. High or unconfirmed risk; an unscored task always lands here. |
+| `max` | Evidence gate, diff read, **and** an adversarial pass — dispatch the plugin-local `critic` agent (or the session's strongest reviewer) to actively refute the change. For a task that declares an **evidence contract** (named `claims` / `Artifact assertions`), also dispatch the `sentinel` agent in its **evidence-critic** mode to return a `PROVEN`/`UNPROVEN` verdict per claim (treating diagnostic-category evidence as non-completion) before you approve. High or unconfirmed risk; an unscored task always lands here. |
+
+When the task declares an evidence contract, `anvil apply` prints a
+**claim-grouped verdict** (human `Claim <id>: PROVEN/FAILED/...` lines, or
+the `claim_verdict` JSON key) and, for a task declaring a contract, an
+approval **refuses** with exit 1 / error code `claim_unproven` while any
+enforceable claim is unproven — the task stays in `needs_review`. Read that
+block first: it tells you exactly which claim the mechanical gate could not
+prove, so the `max`-tier evidence critic can focus its semantic pass there.
+An advisory `Intent check` block (`intent_warnings`) flags intents the
+contract never bound — a prompt to ask whether an artifact assertion is
+missing.
 
 The tier is advisory routing for review *effort* — the human
 `apply --approve` decision is unchanged at every tier, and a reviewer may
