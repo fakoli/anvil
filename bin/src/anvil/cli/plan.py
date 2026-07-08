@@ -1771,11 +1771,21 @@ def show(
     finally:
         backend.close()
 
+    # retro-opps T003 — derive-only review tier, recomputed at every read from
+    # the loaded config (None → module defaults).
+    from anvil.cli._helpers import _load_config_optional
+    from anvil.planning.scoring import review_tier
+
+    task_review_tier = review_tier(
+        task, config=_load_config_optional(state_dir)
+    )
+
     if json_output:
         emit_success(
             "show",
             {
                 "task": dump_model(task),
+                "review_tier": task_review_tier,
                 "active_claims": dump_models(task_claims),
                 "recent_events": [
                     {"action": ev_action, "timestamp": str(ev_ts)}
@@ -1793,6 +1803,7 @@ def show(
     typer.echo(f"Feature:  {task.feature_id}")
     typer.echo(f"Status:   {task.status.value}")
     typer.echo(f"Priority: {task.priority.value}")
+    typer.echo(f"Review tier: {task_review_tier}")
 
     _section("Scores")
     s = task.scores

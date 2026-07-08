@@ -717,9 +717,17 @@ def next(  # noqa: A001
         # backs off either way); the reason is surfaced in --json / human mode.
         raise typer.Exit(0 if task is not None else 3)
 
+    # retro-opps T003 — derive-only review tier, computed at read time from
+    # the loaded config (None → module defaults). Recomputed every read, so
+    # a risk confirmation at `anvil review tasks` flips it with no migration.
+    from anvil.planning.scoring import review_tier
+
+    task_review_tier = review_tier(task, config=cfg) if task is not None else None
+
     if json_output:
         data = {
             "task": dump_model(task) if task is not None else None,
+            "review_tier": task_review_tier,
             "withheld_reason": withheld_reason,
         }
         if scoped_empty_message is not None:
@@ -758,6 +766,7 @@ def next(  # noqa: A001
     typer.echo(f"Next recommended task: {task.id}")
     typer.echo(f"  Title:    {task.title}")
     typer.echo(f"  Priority: {task.priority.value}")
+    typer.echo(f"  Review tier: {task_review_tier}")
     if task.scores.complexity is not None:
         typer.echo(f"  Complexity: {task.scores.complexity}")
     typer.echo("")

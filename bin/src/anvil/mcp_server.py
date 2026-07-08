@@ -584,6 +584,37 @@ def _resolve_strict_evidence(strict: bool | None, state_dir: Path) -> bool:
         return False
 
 
+def _load_merged_config_optional(state_dir: Path):  # type: ignore[no-untyped-def]
+    """Soft-load the project config with the GLOBAL layer merged underneath.
+
+    retro-opps T003 (review MUST-FIX): the CLI derives review tiers from
+    ``_load_config_optional`` → ``load_merged_config`` (global merged under
+    project), so the MCP tier surfaces must use the same merged loader —
+    ``load_config`` alone ignores a tier key set only in
+    ``~/.config/anvil/config.yaml`` and silently derives a DIFFERENT tier
+    than ``anvil next``/``show`` for the same task. Returns ``None`` when
+    there is no config.yaml or it fails to parse (derive with defaults).
+    """
+    config_path = state_dir / "config.yaml"
+    if not config_path.exists():
+        return None
+
+    import yaml
+
+    try:
+        from anvil.config import load_merged_config
+
+        return load_merged_config(config_path)
+    except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
+        print(
+            f"Warning: config.yaml load failed "
+            f"({type(exc).__name__}: {exc}); review tier derived from "
+            "built-in defaults for this call.",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _load_fast_lane_config(state_dir: Path):  # type: ignore[no-untyped-def]
     """Soft-load the project config for T020 fast-lane packet routing.
 
@@ -718,7 +749,11 @@ def list_tasks(
 
 @mcp.tool
 def get_task(task_id: str) -> dict[str, Any]:
-    """Return the full Task with the given ID (ToolError if not found)."""
+    """Return the full Task with the given ID (ToolError if not found).
+
+    The response carries a derived ``review_tier`` (light/standard/max,
+    retro-opps T003) computed at read time from the project config —
+    identical to the CLI ``show``/``next`` value for the same task."""
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -727,7 +762,13 @@ def get_task(task_id: str) -> dict[str, Any]:
             raise ToolError(
                 f"Task '{task_id}' not found.",
             )
-        return json.loads(task.model_dump_json())
+        from anvil.planning.scoring import review_tier
+
+        data = json.loads(task.model_dump_json())
+        data["review_tier"] = review_tier(
+            task, config=_load_merged_config_optional(state_dir)
+        )
+        return data
     finally:
         backend.close()
 
@@ -842,7 +883,15 @@ def get_next_task(
 
         candidates.sort(key=_sort_key)
         best = candidates[0]
-        return json.loads(best.model_dump_json())
+        # retro-opps T003 — derived review tier, same computation as the CLI
+        # `next` (identical value for the same task + config).
+        from anvil.planning.scoring import review_tier
+
+        data = json.loads(best.model_dump_json())
+        data["review_tier"] = review_tier(
+            best, config=_load_merged_config_optional(state_dir)
+        )
+        return data
     finally:
         backend.close()
 

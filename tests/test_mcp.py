@@ -739,6 +739,9 @@ class TestGetTask:
         assert task["title"] == "My Task"
         assert task["status"] == "ready"
         assert task["priority"] == "high"
+        # retro-opps T003 — derived tier on every task response; the raw
+        # fixture task is unscored so it fails safe to max.
+        assert task["review_tier"] == "max"
 
     def test_error_on_unknown_task_id(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _init_state_dir(tmp_path)
@@ -750,6 +753,81 @@ class TestGetTask:
 
         with pytest.raises(ToolError, match="not found|nonexistent"):
             _run(run())
+
+    def test_review_tier_matches_cli_with_global_config_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """retro-opps T003 AC (review MUST-FIX): the MCP tier must equal the
+        CLI tier for the same task even when a tier key lives ONLY in the
+        GLOBAL config layer — i.e. both surfaces use the merged loader.
+        Before the fix, MCP used load_config (no global merge) and derived a
+        different tier than `anvil show`."""
+        import json as _json
+        import os as _os
+
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        # Confirmed low-complexity task with review_risk=3: the DEFAULT
+        # light ceiling (2) derives "standard"; a GLOBAL-ONLY
+        # review_tier_light_risk_max: 3 flips it to "light" — but only for
+        # a surface that merges the global layer. Unscored fixtures cannot
+        # catch this (both loaders derive "max" regardless).
+        _add_task(
+            state_dir,
+            task_id="T001",
+            status="ready",
+            priority="high",
+            scores={
+                "complexity": 2,
+                "parallelizability": 3,
+                "context_load": 3,
+                "blast_radius": 2,
+                "review_risk": 3,
+                "agent_suitability": 4,
+                "blast_radius_confirmed": True,
+                "review_risk_confirmed": True,
+            },
+        )
+        # Project config EXISTS and omits the tier key (merge must supply it).
+        (state_dir / "config.yaml").write_text(
+            'project_name: "Tier Parity"\nproject_id: "tier-parity"\n',
+            encoding="utf-8",
+        )
+        global_cfg = tmp_path / "global-config.yaml"
+        global_cfg.write_text(
+            "review_tier_light_risk_max: 3\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("ANVIL_GLOBAL_CONFIG", str(global_cfg))
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("get_task", {"task_id": "T001"}))
+
+        mcp_tier = _run(run())["review_tier"]
+
+        runner = CliRunner()
+        original = _os.getcwd()
+        _os.chdir(tmp_path)
+        try:
+            result = runner.invoke(
+                app, ["show", "T001", "--json"], catch_exceptions=False
+            )
+        finally:
+            _os.chdir(original)
+        assert result.exit_code == 0, result.output
+        cli_tier = _json.loads(result.output.strip().splitlines()[-1])["data"][
+            "review_tier"
+        ]
+
+        assert mcp_tier == cli_tier
+        # Pin that the global layer was genuinely merged (not both-defaulted):
+        # the raised light ceiling admits the confirmed risk-3 task.
+        assert mcp_tier == "light"
 
 
 # ===========================================================================
@@ -773,6 +851,7 @@ class TestGetNextTask:
         assert task is not None
         assert task["id"] == "T002"
         assert task["priority"] == "high"
+        assert task["review_tier"] == "max"  # unscored fixture fails safe
 
     def test_returns_none_when_no_ready_tasks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
