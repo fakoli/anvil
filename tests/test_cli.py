@@ -7283,3 +7283,120 @@ class TestHeartbeatLeaseWarning:
         result = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
         assert result.exit_code == 0
         assert result.output.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# apply merge-check gate (retro-opps:T007) — advisory/strict freshness
+# ---------------------------------------------------------------------------
+
+
+class TestApplyMergeCheck:
+    def _claim_submit(self, tmp_path: Path, task_id: str = "T001") -> None:
+        claim_result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "amc-agent"]
+        )
+        assert claim_result.exit_code == 0, claim_result.output
+        submit_result = _invoke_cmd(
+            tmp_path,
+            [
+                "submit", task_id,
+                "--commands", "echo merged-ok",
+                "--files-changed", "README.md",
+            ],
+        )
+        assert submit_result.exit_code == 0, submit_result.output
+
+    def test_advisory_default_stale_base_still_approves(self, tmp_path: Path) -> None:
+        """AC: advisory (default) — stale base warns but approval proceeds;
+        JSON data gains a merge_check block."""
+        _setup_merge_check_project(tmp_path)
+        self._claim_submit(tmp_path)
+        _advance_default_branch(tmp_path, 2)
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["status"] == "done"
+        assert data["merge_check"]["stale"] is True
+        assert data["merge_check"]["behind_count"] == 2
+
+    def test_strict_stale_base_refuses_with_base_stale(self, tmp_path: Path) -> None:
+        """AC: merge_check: strict + stale base → exit 1, code base_stale."""
+        _setup_merge_check_project(tmp_path)
+        _append_config(tmp_path, "merge_check: strict\n")
+        self._claim_submit(tmp_path)
+        _advance_default_branch(tmp_path, 1)
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert result.exit_code == 1, result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "base_stale"
+        assert envelope["error"]["merge_check"]["behind_count"] == 1
+        # Task must remain in needs_review.
+        show = _invoke_cmd(tmp_path, ["show", "T001", "--json"])
+        status = json.loads(show.output.strip().splitlines()[-1])["data"]["task"]["status"]
+        assert status == "needs_review"
+
+    def test_strict_fresh_base_approves(self, tmp_path: Path) -> None:
+        """AC: strict + fresh base approves normally."""
+        _setup_merge_check_project(tmp_path)
+        _append_config(tmp_path, "merge_check: strict\n")
+        self._claim_submit(tmp_path)
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["status"] == "done"
+        assert data["merge_check"]["stale"] is False
+
+    def test_no_remote_approves_with_local_base_note_only(self, tmp_path: Path) -> None:
+        """AC: offline / no-remote projects approve; the human output carries
+        at most the single local-base note."""
+        _setup_merge_check_project(tmp_path)
+        self._claim_submit(tmp_path)
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "approved by 'rv'" in result.output
+        # Exactly one merge-check line: the local-base note, no STALE warning.
+        assert "Merge check: STALE" not in result.output
+        assert result.output.count("Merge check:") <= 1
+
+    def test_review_only_mode_shows_block_without_gating(self, tmp_path: Path) -> None:
+        """AC: `anvil apply <task>` review-only mode shows the same
+        merge_check block without gating."""
+        _setup_merge_check_project(tmp_path)
+        _append_config(tmp_path, "merge_check: strict\n")
+        self._claim_submit(tmp_path)
+        _advance_default_branch(tmp_path, 1)
+        result = _invoke_cmd(tmp_path, ["apply", "T001", "--json"])
+        assert result.exit_code == 0, result.output  # review-only never gates
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["merge_check"]["stale"] is True
+        assert data["decision"] is None
+
+    def test_off_mode_emits_no_block(self, tmp_path: Path) -> None:
+        _setup_merge_check_project(tmp_path)
+        _append_config(tmp_path, "merge_check: \"off\"\n")
+        self._claim_submit(tmp_path)
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["merge_check"] is None
+
+    def test_reject_never_affected_by_strict(self, tmp_path: Path) -> None:
+        _setup_merge_check_project(tmp_path)
+        _append_config(tmp_path, "merge_check: strict\n")
+        self._claim_submit(tmp_path)
+        _advance_default_branch(tmp_path, 1)
+        result = _invoke_cmd(
+            tmp_path,
+            ["apply", "T001", "--reject", "--reason", "stale anyway", "--json"],
+        )
+        assert result.exit_code == 0, result.output

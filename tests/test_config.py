@@ -287,6 +287,20 @@ sync_github_conflict_strategy: local_wins
         with pytest.raises(ValueError, match="review_tier_max_min"):
             load_config(config_path)
 
+    def test_merge_check_default_and_values(self, tmp_path: Path) -> None:
+        """retro-opps T007 — defaults to advisory; literal-validated."""
+        config_path = _write_config(tmp_path / "config.yaml", _minimal_yaml())
+        assert load_config(config_path).merge_check == "advisory"
+        config_path2 = _write_config(
+            tmp_path / "config2.yaml", _minimal_yaml() + "merge_check: strict\n"
+        )
+        assert load_config(config_path2).merge_check == "strict"
+        config_path3 = _write_config(
+            tmp_path / "config3.yaml", _minimal_yaml() + "merge_check: sometimes\n"
+        )
+        with pytest.raises(ValueError, match="merge_check"):
+            load_config(config_path3)
+
     def test_lease_warning_minutes_default_and_override(
         self, tmp_path: Path
     ) -> None:

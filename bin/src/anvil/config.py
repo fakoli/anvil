@@ -154,6 +154,17 @@ class Config:
     # claim's remaining lease drops below this. 0 disables the warnings.
     # Advisory only: nothing blocks, hooks still always exit 0.
     lease_warning_minutes: float = 10.0
+
+    # retro-opps T007 — pre-merge freshness gate on `anvil apply`.
+    #   off      — no freshness check at apply time.
+    #   advisory — DEFAULT: report base staleness/conflicts alongside the
+    #              evidence gate; approval always proceeds.
+    #   strict   — refuse --approve (exit 1, code base_stale) when the task
+    #              branch is VERIFIABLY behind its base or textually
+    #              conflicted. Offline / unverifiable probes never refuse
+    #              (local-first: same fail-open-on-unknown contract as the
+    #              freshness module documents on is_stale).
+    merge_check: Literal["off", "advisory", "strict"] = "advisory"
     # B46 — hard max-claim-age as a multiple of the base lease. After
     # ``default_lease_minutes * max_claim_age_multiplier`` since a claim was
     # created, ``renew()`` refuses (even if heartbeating), so a wedged agent
@@ -692,6 +703,13 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         "events_storage",
     )
 
+    # retro-opps T007 — apply-time freshness gate mode.
+    merge_check = _validate_literal(
+        data.get("merge_check", "advisory"),
+        ("off", "advisory", "strict"),
+        "merge_check",
+    )
+
     sync_conflict_strategy = _validate_literal(
         data.get("sync_github_conflict_strategy", "prompt"),
         ("local_wins", "remote_wins", "prompt", "manual_merge"),
@@ -761,6 +779,7 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         lease_warning_minutes=float(
             str(data.get("lease_warning_minutes", 10))
         ),
+        merge_check=merge_check,  # type: ignore[arg-type]
         max_claim_age_multiplier=float(
             str(data.get("max_claim_age_multiplier", 4))
         ),
