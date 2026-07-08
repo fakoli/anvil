@@ -11,23 +11,34 @@ can be inferred from the code, it does not belong here.
   lacks repo permissions; the keyring login works once it is unset.
 - **Never commit secrets or anything confidential.** This is a public repo — no
   `.env`, keys, tokens, customer data, or internal-only paths in commits.
-- **A version bump touches three core files in lockstep** (`tests/test_version_sync.py`
-  enforces it): `.claude-plugin/plugin.json`, `bin/pyproject.toml`,
-  `bin/src/anvil/__init__.py` — **and** the per-harness packaging manifests that
-  `tests/test_install_manifests.py` pins to `anvil.__version__`:
+- **Bump the version with `scripts/release.py` — never by hand.** A version bump
+  touches many files in lockstep and is easy to under-do; the helper does all of
+  it from one command and works the same under Claude, Codex, or a bare shell
+  (stdlib only, no `uv` needed):
+
+  ```bash
+  python3 scripts/release.py minor --dry-run   # preview every planned edit
+  python3 scripts/release.py minor             # apply + auto-run the sync tests
+  ```
+
+  It rewrites the three core files (`tests/test_version_sync.py` enforces them:
+  `.claude-plugin/plugin.json`, `bin/pyproject.toml`, `bin/src/anvil/__init__.py`)
+  **and** the per-harness packaging manifests
+  (`tests/test_install_manifests.py` pins them to `anvil.__version__`:
   `packaging/codex/.codex-plugin/plugin.json`,
   `packaging/codex/.agents/plugins/marketplace.json`,
-  `packaging/gemini/gemini-extension.json`, and the OpenClaw native plugin
-  manifests `packaging/openclaw/plugin/openclaw.plugin.json` +
-  `packaging/openclaw/plugin/package.json` (version-locked as of v0.4.0). Add a
-  `CHANGELOG.md` entry. The root
-  `marketplace.json` omits `version`, so it inherits from `plugin.json` — nothing
-  to bump there. Also refresh the **user-facing current-version docs** (not
-  enforced by a test, so easy to miss): the `README.md` version badge + "Beta —
-  vX.Y.Z" lines, and the `anvil --version` / "current vX.Y.Z" examples in
-  `docs/how-to/getting-started.md`, `docs/cli-reference.md`, and
-  `docs/architecture.md`. Leave historical snapshots (`docs/archive/BUILD-REPORT.md`,
-  `benchmarks/RESULTS.md`, old `CHANGELOG.md` entries) untouched.
+  `packaging/gemini/gemini-extension.json`, and the OpenClaw manifests
+  `packaging/openclaw/plugin/openclaw.plugin.json` +
+  `.../package.json`), promotes the `CHANGELOG.md` `## [Unreleased]` block, and
+  refreshes the **user-facing version docs** that no test guards (the `README.md`
+  badge + "Beta — vX.Y.Z" lines and the `anvil X.Y.Z (schema N)` examples in
+  `docs/how-to/getting-started.md`, `docs/cli-reference.md`,
+  `docs/architecture.md` — the schema number is re-synced to
+  `state/schema.py`'s `SCHEMA_VERSION`). It leaves historical snapshots
+  (`docs/archive/**`, `benchmarks/RESULTS.md`, old `CHANGELOG.md` entries)
+  untouched, and the root `marketplace.json` inherits its version from
+  `plugin.json`. The pinned set lives in the script (and `tests/test_release_helper.py`
+  guards it) — when a manifest is added there, add it in both places.
 - **Bump only when you publish, not per commit.** Claude Code pins plugin pickups
   to the `version` string: an unchanged version means `/plugin marketplace update`
   is a no-op and users keep running stale code, however many commits landed. So
