@@ -1,0 +1,7 @@
+{
+  "candidate_identity": {"candidate_id": "gemma4-12b-it", "profile": "voice-fast"},
+  "status": "failed_unavailable",
+  "stage_timings_ms": {"ttfa_ms": null, "llm_ms": null},
+  "topology": {"profile": "voice-fast", "stt_endpoint_host": "stt.internal:8080"},
+  "errors": [{"stage": "stt", "kind": "connection_refused"}]
+}
