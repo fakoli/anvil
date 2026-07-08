@@ -148,6 +148,12 @@ class Config:
     # the author's standing workaround was `--lease 240` — now the default.
     default_lease_minutes: float = 240.0
     default_heartbeat_minutes: float = 5.0
+
+    # retro-opps T008 — pre-expiry lease warning threshold (minutes). The
+    # PostToolUse heartbeat hook and notify-digest warn when an active
+    # claim's remaining lease drops below this. 0 disables the warnings.
+    # Advisory only: nothing blocks, hooks still always exit 0.
+    lease_warning_minutes: float = 10.0
     # B46 — hard max-claim-age as a multiple of the base lease. After
     # ``default_lease_minutes * max_claim_age_multiplier`` since a claim was
     # created, ``renew()`` refuses (even if heartbeating), so a wedged agent
@@ -750,6 +756,10 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         default_lease_minutes=float(str(data.get("default_lease_minutes", 240))),
         default_heartbeat_minutes=float(
             str(data.get("default_heartbeat_minutes", 5))
+        ),
+        # retro-opps T008 — same float coercion as its lease siblings.
+        lease_warning_minutes=float(
+            str(data.get("lease_warning_minutes", 10))
         ),
         max_claim_age_multiplier=float(
             str(data.get("max_claim_age_multiplier", 4))

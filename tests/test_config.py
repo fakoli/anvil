@@ -287,6 +287,18 @@ sync_github_conflict_strategy: local_wins
         with pytest.raises(ValueError, match="review_tier_max_min"):
             load_config(config_path)
 
+    def test_lease_warning_minutes_default_and_override(
+        self, tmp_path: Path
+    ) -> None:
+        """retro-opps T008 — defaults to 10.0; float override loads."""
+        config_path = _write_config(tmp_path / "config.yaml", _minimal_yaml())
+        assert load_config(config_path).lease_warning_minutes == 10.0
+        config_path2 = _write_config(
+            tmp_path / "config2.yaml",
+            _minimal_yaml() + "lease_warning_minutes: 0\n",
+        )
+        assert load_config(config_path2).lease_warning_minutes == 0.0
+
     def test_review_tier_light_risk_max_out_of_range_raises(
         self, tmp_path: Path
     ) -> None:
