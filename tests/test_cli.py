@@ -4848,6 +4848,21 @@ class TestCaptureEvidenceByClaim:
         assert result.exit_code == 0
         assert "zero typed proofs attached" not in result.output
 
+    def test_submit_same_actor_hooks_absent_no_warning_noise(
+        self, tmp_path: Path
+    ) -> None:
+        """Review angle 4: the hooks-less MAJORITY (claim actor == session
+        actor, no proofs, a test command) must NOT be warned — the warning is
+        for a genuine identity mismatch, not for not using typed proofs."""
+        task_id = self._init_and_claim(tmp_path, actor="same-agent")
+        result = _invoke_cmd(
+            tmp_path,
+            ["submit", task_id, "--commands", "pytest -q",
+             "--files-changed", "x.py", "--actor", "same-agent"],
+        )
+        assert result.exit_code == 0
+        assert "zero typed proofs attached" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # Phase 5 — end-to-end: full lifecycle init → done

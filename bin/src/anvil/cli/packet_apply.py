@@ -727,19 +727,23 @@ def submit(
         ran_verification = any(
             _contains_test_keyword(cmd.lower()) for cmd in commands_list
         )
+        # T007 — scope to a genuine identity MISMATCH (the field's namesake).
+        # Firing for every hooks-less single-actor submit that ran a test
+        # command would be noise for the majority who never opted into typed
+        # proofs (review angle 4); the mismatch case is the diagnosable one.
         proof_mismatch_warning: str | None = None
-        if ran_verification and not command_proofs:
-            buffer_hint = state_dir / ".evidence-buffer" / f"{task_claim.id}.json"
-            identity_note = (
-                f"claim actor {task_claim.claimed_by!r} vs session actor "
-                f"{resolved_actor!r}"
-                if task_claim.claimed_by != resolved_actor
-                else f"session actor {resolved_actor!r}"
-            )
+        if (
+            ran_verification
+            and not command_proofs
+            and task_claim.claimed_by != resolved_actor
+        ):
             proof_mismatch_warning = (
                 "verification commands ran but zero typed proofs attached "
-                f"({identity_note}); expected buffer {buffer_hint}. The claim "
-                "gate will treat command proofs as unmet."
+                f"(claim actor {task_claim.claimed_by!r} vs session actor "
+                f"{resolved_actor!r}); a captured proof would buffer under "
+                f"{state_dir / '.evidence-buffer'}/ (per-claim "
+                f"{task_claim.id}.json, or orphan.json under concurrency). "
+                "The claim gate will treat command proofs as unmet."
             )
 
         payload: dict[str, object] = {
