@@ -6,6 +6,50 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **Retro-mined product-opportunity wave (retro-opps PRD — 5 features, 14
+  tasks, PRs #139–#152).** The five highest-leverage opportunities from the
+  post-session-findings retro corpus, dogfooded end-to-end through anvil's
+  own claim → execute → review → apply loop:
+  - **Review Tier Planner** — a derive-only `review_tier`
+    (light/standard/max) computed from the six-dimension score plus the B45
+    risk-confirmation flags (`planning.scoring.review_tier`; knobs
+    `review_tier_max_min`/`review_tier_light_risk_max`). Rendered in work
+    packets, `anvil next`/`show`, and the MCP `get_task`/`get_next_task`
+    responses; the finish skill dispatches critic depth by tier. No schema
+    change. (B15 folded in.)
+  - **Merge Safety Check** — `git_ops/freshness.py` (base resolution with
+    structural offline degradation + `git merge-tree` conflict probe), the
+    `anvil merge-check [--run-checks]` command (verification commands run
+    against the WOULD-BE merge result in a crash-safe throwaway worktree),
+    and a `merge_check: off|advisory|strict` gate on `anvil apply`
+    (strict refuses verifiably-stale/conflicted branches with code
+    `base_stale`; apply-before-merge ordering caveat documented).
+  - **Concurrency Sentinel** — pre-expiry `[anvil:lease]` warnings in the
+    PostToolUse heartbeat hook (marker-file debounced;
+    `lease_warning_minutes` knob, 0 disables), an `expiring_soon` count in
+    `notify-digest`, and advisory `conflict_warnings` on `anvil next` / MCP
+    `get_next_task`. Advisory only — hooks still always exit 0. (Extends
+    B46.)
+  - **Workflow Heartbeat Bus** — optional `phase`/`detail` on the
+    `progress.noted` event (omit-when-None keeps old-reader byte-compat),
+    the `anvil progress TASK_ID PHASE` CLI twin of MCP `submit_progress`,
+    and per-claim `phase / elapsed / lease-expires-in` read-back in
+    `anvil status` (additive `claims` JSON list; claim-scoped phase
+    attribution). (Aligns with roadmap SL-4.)
+  - **Preflight Validator** — `anvil doctor --preflight [--prd]`: PRD-parse,
+    unresolved-decision, and git tree-state probes on the doctor finding
+    chassis with a final `PREFLIGHT: GO/NO-GO` line and
+    `data.preflight`/`data.go` JSON keys; plain `doctor` byte-compatible.
+
+### Fixed
+
+- `resolve_prd_id` hardened against non-string sentinels (invisible
+  AttributeError class from the v0.4.2 SessionStart fix); MCP task tools now
+  derive review tiers through the same merged global+project config loader
+  as the CLI, so the two surfaces cannot disagree.
+
 ## [0.4.2] - 2026-07-07
 
 ### Fixed

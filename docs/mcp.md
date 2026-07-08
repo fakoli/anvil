@@ -201,7 +201,10 @@ Returns the full Task object for a single task ID.
 
 **Output**
 
-A single Task object serialized to JSON (same shape as one element from `list_tasks`).
+A single Task object serialized to JSON (same shape as one element from
+`list_tasks`), plus a derived `review_tier` field (`light`/`standard`/`max`)
+computed at read time from the merged project config — identical to the CLI
+`show`/`next` value for the same task.
 
 **Failure modes**
 
@@ -249,7 +252,12 @@ be handed high-risk work.
 
 **Output**
 
-A Task object serialized to JSON, or `null`.
+A Task object serialized to JSON, or `null`. The object carries two derived
+fields: `review_tier` (`light`/`standard`/`max`, computed at read time from
+the merged project config — identical to the CLI `next` value) and
+`conflict_warnings` (advisory list of `{claim_id, actor, files}` entries
+where the task's `likely_files` overlap an active claim's `expected_files`;
+selection is never altered by these).
 
 **Failure modes**
 
