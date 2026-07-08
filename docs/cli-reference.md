@@ -955,9 +955,11 @@ The overall verdict is the worst per-claim one (`failed` > `blocked` >
 `incomplete` > `diagnostic_only` > `passed`). When any **enforceable**
 unproven claim remains, `--approve` refuses with exit 1 and error code
 `claim_unproven`; the task stays in `needs_review`. Named claims always
-enforce; on the implicit task-level claim, command-proof strictness stays
-governed by `strict_evidence` while artifact contradictions always enforce.
-`--reject` is never gated. An advisory `Intent check` block
+enforce; on the implicit task-level claim, an unmet **command proof alone**
+stays governed by `strict_evidence` — everything else on that claim (an
+artifact-assertion contradiction, an unwritten or missing artifact, no
+evidence submitted, or a `blocked`/`diagnostic_only` category) always
+enforces regardless of `strict_evidence`. `--reject` is never gated. An advisory `Intent check` block
 (`intent_warnings`) additionally flags task intents that no claim or
 assertion covers — never blocking.
 
