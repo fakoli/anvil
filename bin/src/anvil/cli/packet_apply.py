@@ -542,6 +542,16 @@ def _split_repeatable(values: list[str]) -> list[str]:
 
 def submit(
     task_id: str = typer.Argument(..., help="Task ID to submit evidence for (e.g. T001)."),  # noqa: B008
+    category: str = typer.Option(  # noqa: B008
+        "completion",
+        "--category",
+        help=(
+            "Evidence role (evidence-contracts T006): completion (default), "
+            "diagnostic, blocked, advisory, or promotion_quality. "
+            "diagnostic/advisory evidence can never satisfy a completion "
+            "claim; blocked records why the claim could not be proven."
+        ),
+    ),
     commands: list[str] = typer.Option(  # noqa: B008
         ...,
         "--commands",
@@ -620,6 +630,21 @@ def submit(
     from anvil.clock import SystemClock
 
     resolved_actor = resolve_actor(actor)
+
+    # T006 — validate the evidence role up front, naming the valid set.
+    from anvil.state.models import EvidenceCategory
+
+    valid_categories = [c.value for c in EvidenceCategory]
+    if category not in valid_categories:
+        message = (
+            f"invalid --category {category!r}; valid values: "
+            f"{', '.join(valid_categories)}."
+        )
+        if json_output:
+            fail("submit", message, code="invalid_category")
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=1)
+
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="submit", json_output=json_output)
 
@@ -691,6 +716,9 @@ def submit(
             "claim_id": task_claim.id,
             "submitted_by": resolved_actor,
             "evidence_id": evidence_id,
+            # T006 — omit the default so no-category rows keep the pre-v9
+            # byte shape (T010 discipline).
+            **({"category": category} if category != "completion" else {}),
             "commands_run": commands_list,
             "files_changed": files_list,
             "output_excerpt": output_excerpt,
@@ -744,6 +772,7 @@ def submit(
                 screenshots=screenshots_list,
                 known_limitations=known_limitations,
                 proofs=command_proofs,
+                category=category,
                 submitted_at=now,
                 submitted_by=resolved_actor,
             )
@@ -790,6 +819,12 @@ def submit(
         typer.echo(f"  Commit SHA:   {commit_sha}")
     typer.echo("")
     typer.echo(f"Task '{task_id}' status → needs_review.")
+    if category == "blocked":
+        typer.echo(
+            "Category 'blocked' recorded: the claim could not be proven. "
+            "Consider `anvil release` or holding the task rather than "
+            "approving — a blocked submission always refuses the claim gate."
+        )
     typer.echo(f"Run `anvil apply {task_id}` when ready for human review.")
 
     # Gate summary: reuse the gate computed above.

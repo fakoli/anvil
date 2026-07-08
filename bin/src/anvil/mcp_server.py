@@ -1242,10 +1242,24 @@ def submit_completion_evidence(
     output_excerpt: str | None = None,
     pr_url: str | None = None,
     commit_sha: str | None = None,
+    category: str | None = None,
 ) -> EvidenceResponse:
     """Submit completion evidence for task_id (requires an active claim held by
     actor). Auto-releases the claim and moves the task to needs_review; names
-    the next claimable task. Reaps stale claims first."""
+    the next claimable task. Reaps stale claims first.
+
+    ``category`` (evidence-contracts T006) is the evidence role: completion
+    (default), diagnostic, blocked, advisory, or promotion_quality —
+    diagnostic/advisory evidence can never satisfy a completion claim."""
+    if category is not None:
+        from anvil.state.models import EvidenceCategory
+
+        valid = [c.value for c in EvidenceCategory]
+        if category not in valid:
+            raise ToolError(
+                f"invalid_category: {category!r} is not a valid evidence "
+                f"category; valid values: {', '.join(valid)}."
+            )
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -1297,6 +1311,12 @@ def submit_completion_evidence(
                 "claim_id": active_claim.id,
                 "submitted_by": actor,
                 "evidence_id": evidence_id,
+                # T006 — omit-when-default keeps the pre-v9 byte shape.
+                **(
+                    {"category": category}
+                    if category and category != "completion"
+                    else {}
+                ),
                 "commands_run": commands_run,
                 "files_changed": files_changed,
                 "output_excerpt": output_excerpt,
