@@ -218,6 +218,62 @@ class TestOverallOrdering:
         assert verdict.overall == "incomplete"
 
 
+class TestReviewFindings:
+    """Opus review of T004: soundness gaps closed + precedence pinned."""
+
+    def test_declared_claim_with_no_requirements_is_incomplete(
+        self, tmp_path: Path
+    ) -> None:
+        """Recorded decision: a named claim binding zero requirements is
+        structurally unprovable — fail closed, or T005 auto-strict could be
+        gamed by declaring claims without contracts."""
+        task = _task(claims=[TaskClaim(id="unbound")])
+        verdict = evaluate_claims(task, _evidence(), project_root=tmp_path)
+        assert verdict.overall == "incomplete"
+        assert "binds no proof requirements" in verdict.claims[0].missing[0]
+
+    def test_none_evidence_never_proves_a_contract_from_disk(
+        self, tmp_path: Path
+    ) -> None:
+        """A disk-resident artifact must not prove a claim when NO evidence
+        row was submitted — proof decoupled from claim is the incident class."""
+        (tmp_path / "artifact.json").write_text(
+            json.dumps({"status": "measured"}), encoding="utf-8"
+        )
+        task = _contract_task(artifact_assertions=[_assertion()])
+        verdict = evaluate_claims(task, None, project_root=tmp_path)
+        assert verdict.overall == "incomplete"
+        assert "no evidence submitted" in verdict.claims[0].missing[0]
+
+    def test_failing_assertion_outranks_blocked_category(
+        self, tmp_path: Path
+    ) -> None:
+        """Deliberate precedence: a machine-derived contradiction cannot be
+        hidden behind a self-declared blocked category."""
+        (tmp_path / "artifact.json").write_text(
+            json.dumps({"status": "nope"}), encoding="utf-8"
+        )
+        task = _contract_task(artifact_assertions=[_assertion()])
+        verdict = evaluate_claims(
+            task,
+            _evidence(category=EvidenceCategory.blocked),
+            project_root=tmp_path,
+        )
+        assert verdict.overall == "failed"
+
+    def test_promotion_quality_counts_as_completion(self, tmp_path: Path) -> None:
+        (tmp_path / "artifact.json").write_text(
+            json.dumps({"status": "measured"}), encoding="utf-8"
+        )
+        task = _contract_task(artifact_assertions=[_assertion()])
+        verdict = evaluate_claims(
+            task,
+            _evidence(category=EvidenceCategory.promotion_quality),
+            project_root=tmp_path,
+        )
+        assert verdict.overall == "passed"
+
+
 class TestBackCompat:
     def test_contractless_task_yields_implicit_passed(self, tmp_path: Path) -> None:
         """T004 AC: a task with no claims/assertions/proofs produces exactly

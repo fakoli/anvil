@@ -338,6 +338,7 @@ def evaluate_claims(
     for cid, group in groups.items():
         missing: list[str] = []
         failures: list[str] = []
+        has_requirements = bool(group["proofs"]) or bool(group["assertions"])
 
         for req in group["proofs"]:
             if not _proof_satisfies(req, proofs):
@@ -351,7 +352,27 @@ def evaluate_claims(
             else:
                 failures.extend(result.failures)
 
+        # Review finding (T004, recorded decision): a NAMED claim binding
+        # zero requirements is structurally unprovable — fail closed as
+        # incomplete rather than pass vacuously, or T005's auto-strict could
+        # be gamed by declaring claims without contracts. The parser stays
+        # permissive (a WIP PRD may declare labels first); the gate is the
+        # enforcement point. The implicit "" claim is exempt (back-compat).
+        if cid and not has_requirements:
+            missing.append(
+                f"claim {cid!r} binds no proof requirements or artifact "
+                "assertions — declare a contract or remove the claim"
+            )
+        # Review finding: with NO evidence row at all, on-disk artifacts must
+        # not prove a contract-bearing claim (proof decoupled from claim is
+        # the incident class). Only the implicit no-contract claim may pass.
+        elif evidence is None and has_requirements and not missing and not failures:
+            missing.append("no evidence submitted for this task")
+
         if failures:
+            # Deliberate precedence: a machine-derived CONTRADICTION outranks
+            # a self-declared blocked category — an agent cannot hide a
+            # contradicting artifact behind "blocked".
             verdict = "failed"
         elif category is EvidenceCategory.blocked:
             verdict = "blocked"
