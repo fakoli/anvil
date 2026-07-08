@@ -264,6 +264,37 @@ class TestReviewFindings:
         )
         assert verdict.overall == "failed"
 
+    def test_blocked_category_enforces_even_proof_only_implicit_claim(
+        self, tmp_path: Path
+    ) -> None:
+        """Pin the intended asymmetry (Opus review, angle 1): on the implicit
+        claim with ONLY advisory proof gaps, category=completion is NOT
+        enforceable (proof strictness stays opt-in) but category=blocked IS —
+        an affirmative "this isn't done" signal always refuses."""
+        task = _task(
+            verification=Verification(
+                artifact_assertions=[],
+                required_proofs=[
+                    ProofRequirement(
+                        kind=ProofKind.command,
+                        command="pytest -q",
+                        label="`pytest -q` exits 0",
+                    )
+                ],
+            )
+        )
+        completion = evaluate_claims(task, _evidence(), project_root=tmp_path)
+        assert completion.overall == "incomplete"
+        assert completion.enforceable_unproven == []  # advisory only
+
+        blocked = evaluate_claims(
+            task,
+            _evidence(category=EvidenceCategory.blocked),
+            project_root=tmp_path,
+        )
+        assert blocked.overall == "blocked"
+        assert len(blocked.enforceable_unproven) == 1  # affirmative signal
+
     def test_promotion_quality_counts_as_completion(self, tmp_path: Path) -> None:
         (tmp_path / "artifact.json").write_text(
             json.dumps({"status": "measured"}), encoding="utf-8"

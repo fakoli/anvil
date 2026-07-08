@@ -3119,6 +3119,13 @@ def apply_review_decision(
                     project_root=_Path(cwd).resolve() if cwd else _Path.cwd(),
                 )
             except Exception:  # noqa: BLE001 — never brick apply on a gate bug
+                # Review finding: the fail-open must be LOUD on the machine
+                # surface too — a silently skipped gate is the incident class.
+                print(
+                    "anvil-mcp: claim gate could not run (internal error); "
+                    "contract enforcement skipped for this call.",
+                    file=sys.stderr,
+                )
                 contract_verdict = None
             if (
                 contract_verdict is not None
