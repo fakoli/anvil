@@ -7964,6 +7964,42 @@ class TestSubmitCategory:
         )
         assert refused.exit_code == 1
 
+    def test_blocked_on_contractless_task_still_refuses_apply(
+        self, tmp_path: Path
+    ) -> None:
+        """T006 review MUST-FIX (reproduced by the critic): blocked category
+        on a task with NO contract must still refuse apply — the guidance
+        text's guarantee now actually holds."""
+        self._setup_claimed_t002(tmp_path)
+        result = _invoke_cmd(
+            tmp_path,
+            ["submit", "T002", "--category", "blocked",
+             "--commands", "echo ok", "--files-changed", "x.py", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["claim_verdict"]["overall"] == "blocked"  # signal in JSON
+        refused = _invoke_cmd(
+            tmp_path, ["apply", "T002", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert refused.exit_code == 1, refused.output
+        envelope = json.loads(refused.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "claim_unproven"
+        # Completion category on the same contract-less shape stays approvable
+        # (byte-compat pin) — verified by test_default_category_unchanged flow.
+
+    def _setup_claimed_t002(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Category Project")
+        _write_prd(tmp_path, _CONTRACT_GATE_PRD)
+        for cmd in (
+            ["prd", "parse"], ["prd", "review"], ["prd", "review", "--approve"],
+            ["plan"], ["review", "tasks"],
+        ):
+            assert _invoke_cmd(tmp_path, cmd).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path, ["claim", "T002", "--actor", "cat-agent"]
+        ).exit_code == 0
+
     def test_invalid_category_rejected_naming_valid_set(
         self, tmp_path: Path
     ) -> None:

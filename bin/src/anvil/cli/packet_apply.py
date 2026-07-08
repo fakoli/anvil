@@ -299,7 +299,14 @@ def _claim_verdict_block(
         getattr(task, "claims", None)
         or task.verification.artifact_assertions  # type: ignore[attr-defined]
     )
-    if not has_contract:
+    # T006 review MUST-FIX: an affirmative non-completion category is itself
+    # a gate trigger — blocked/diagnostic evidence on a contract-less task
+    # must reach the apply gate, not be silently approvable.
+    category_value = getattr(evidence, "category", None)
+    affirmative_category = bool(
+        category_value is not None and str(category_value) != "completion"
+    )
+    if not has_contract and not affirmative_category:
         return None
     try:
         from anvil.review.gates import evaluate_claims

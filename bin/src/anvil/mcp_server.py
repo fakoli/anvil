@@ -3125,8 +3125,15 @@ def apply_review_decision(
         # accept path, identical to the CLI: a task declaring claims or
         # artifact assertions is held to them independent of strict_evidence.
         # Refuse BEFORE task.applied; rejections are never gated.
+        latest_evidence = backend.get_latest_evidence(task_id)
+        affirmative_category = bool(
+            latest_evidence is not None
+            and str(latest_evidence.category) != "completion"
+        )
         if approve and (
-            task.claims or task.verification.artifact_assertions
+            task.claims
+            or task.verification.artifact_assertions
+            or affirmative_category
         ):
             from pathlib import Path as _Path
 
@@ -3135,7 +3142,7 @@ def apply_review_decision(
             try:
                 contract_verdict = evaluate_claims(
                     task,
-                    backend.get_latest_evidence(task_id),
+                    latest_evidence,
                     project_root=_Path(cwd).resolve() if cwd else _Path.cwd(),
                 )
             except Exception:  # noqa: BLE001 — never brick apply on a gate bug
