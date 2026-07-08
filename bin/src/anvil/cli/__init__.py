@@ -38,6 +38,7 @@ from anvil.cli.plan import (
     show,
 )
 from anvil.cli.prd import prd_app
+from anvil.cli.progress import progress
 from anvil.cli.proof import proof_app
 from anvil.cli.replay import replay
 from anvil.cli.run_workflow import run_workflow
@@ -157,6 +158,7 @@ app.command()(renew)
 app.command()(next)
 app.command()(packet)
 app.command()(submit)
+app.command()(progress)
 app.command()(apply)
 app.command()(replay)
 app.command("run-workflow")(run_workflow)
