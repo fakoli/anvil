@@ -58,15 +58,19 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
+import yaml
+
 from anvil.state.models import (
     DEFAULT_PRD_ID,
     PRD,
+    ArtifactAssertion,
     Feature,
     ProofKind,
     ProofRequirement,
     Requirement,
     Score,
     Task,
+    TaskClaim,
     TaskPriority,
     TaskStatus,
     TaskType,
@@ -762,6 +766,128 @@ def _parse_features(
 # ---------------------------------------------------------------------------
 
 
+def _parse_claims_field(
+    val: str, task_id: str, block_line: int
+) -> tuple[list[TaskClaim], list[ParseError]]:
+    """Parse a ``**Claims:**`` field value into TaskClaims (T002).
+
+    Comma-separated tokens: ``id``, ``id (kind)``, or ``id (kind: subject)``.
+    Unknown kinds are loud ParseErrors (not silently defaulted) — an
+    evidence contract with a typo'd kind is a contract the author did not
+    write.
+    """
+    claims: list[TaskClaim] = []
+    errors: list[ParseError] = []
+    for token in (t.strip() for t in val.split(",")):
+        if not token:
+            continue
+        m = re.match(r"^(?P<id>[A-Za-z0-9_.-]+)(?:\s*\((?P<detail>[^)]*)\))?$", token)
+        if not m:
+            errors.append(
+                ParseError(
+                    section="tasks",
+                    line=block_line,
+                    message=(
+                        f"Task '{task_id}' has a malformed **Claims:** token "
+                        f"{token!r}. Expected 'id', 'id (kind)', or "
+                        "'id (kind: subject)'."
+                    ),
+                )
+            )
+            continue
+        kind_raw, _, subject = (m.group("detail") or "").partition(":")
+        data: dict[str, str] = {"id": m.group("id")}
+        if subject.strip():
+            data["subject"] = subject.strip()
+        if kind_raw.strip():
+            data["kind"] = kind_raw.strip()
+        try:
+            claims.append(TaskClaim.model_validate(data))
+        except Exception as exc:  # noqa: BLE001 — surfaced as a ParseError
+            errors.append(
+                ParseError(
+                    section="tasks",
+                    line=block_line,
+                    message=(
+                        f"Task '{task_id}' claim {token!r} is invalid: {exc}"
+                    ),
+                )
+            )
+    return claims, errors
+
+
+def _parse_assertions_block(
+    block_lines: list[str], start: int, task_id: str, block_line: int
+) -> tuple[int, list[ArtifactAssertion], list[ParseError]]:
+    """Consume the fenced YAML block after ``**Artifact assertions:**`` (T002).
+
+    Returns ``(lines_consumed_after_field_line, assertions, errors)``.
+    Loud on every malformation (missing fence, unclosed fence, invalid YAML,
+    schema mismatch) — consistent with the bullets-not-parsed guard: an
+    evidence contract must never be silently dropped.
+    """
+
+    def _err(message: str) -> tuple[int, list[ArtifactAssertion], list[ParseError]]:
+        return 0, [], [
+            ParseError(section="tasks", line=block_line, message=message)
+        ]
+
+    j = start
+    while j < len(block_lines) and not block_lines[j].strip():
+        j += 1
+    if j >= len(block_lines) or not block_lines[j].strip().startswith("```"):
+        return _err(
+            f"Task '{task_id}': **Artifact assertions:** must be followed by "
+            "a fenced ```yaml block. See docs/prd-template.md."
+        )
+    j += 1  # past the opening fence
+    yaml_lines: list[str] = []
+    while j < len(block_lines) and block_lines[j].strip() != "```":
+        yaml_lines.append(block_lines[j])
+        j += 1
+    if j >= len(block_lines):
+        return _err(
+            f"Task '{task_id}': unclosed ```yaml block under "
+            "**Artifact assertions:**."
+        )
+    consumed = j - start + 1  # through the closing fence
+
+    try:
+        loaded = yaml.safe_load("\n".join(yaml_lines))
+    except yaml.YAMLError as exc:
+        _, _, errs = _err(
+            f"Task '{task_id}': invalid YAML in **Artifact assertions:** "
+            f"block: {exc}"
+        )
+        return consumed, [], errs
+    if loaded is None:
+        loaded = []
+    if not isinstance(loaded, list):
+        _, _, errs = _err(
+            f"Task '{task_id}': **Artifact assertions:** YAML must be a "
+            "list of assertion entries."
+        )
+        return consumed, [], errs
+
+    assertions: list[ArtifactAssertion] = []
+    errors: list[ParseError] = []
+    for idx, entry in enumerate(loaded):
+        try:
+            assertions.append(ArtifactAssertion.model_validate(entry))
+        except Exception as exc:  # noqa: BLE001 — surfaced as a ParseError
+            errors.append(
+                ParseError(
+                    section="tasks",
+                    line=block_line,
+                    message=(
+                        f"Task '{task_id}': artifact assertion #{idx + 1} "
+                        f"is invalid: {exc}"
+                    ),
+                )
+            )
+    return consumed, assertions, errors
+
+
 def _parse_tasks(
     body: list[str],
     start_line: int,
@@ -854,6 +980,8 @@ def _parse_tasks(
         verification_commands: list[str] = []
         dependencies: list[str] = []
         description_parts: list[str] = []
+        claims: list[TaskClaim] = []
+        artifact_assertions: list[ArtifactAssertion] = []
 
         i = 0
         in_acceptance_criteria = False
@@ -935,6 +1063,24 @@ def _parse_tasks(
                     in_verification = True
                     if val:
                         verification_commands.append(val.strip("`"))
+                elif key == "claims":
+                    # Evidence contracts (T002): comma-separated claim tokens —
+                    # ``id``, ``id (kind)``, or ``id (kind: subject)``.
+                    claims_parsed, claim_errs = _parse_claims_field(
+                        val, task_id, block_line
+                    )
+                    claims.extend(claims_parsed)
+                    errors.extend(claim_errs)
+                elif key == "artifact_assertions":
+                    # Evidence contracts (T002): the field line is followed by a
+                    # fenced ```yaml block; consume it here so it never leaks
+                    # into the description prose.
+                    consumed, parsed, block_errs = _parse_assertions_block(
+                        block_lines, i + 1, task_id, block_line
+                    )
+                    artifact_assertions.extend(parsed)
+                    errors.extend(block_errs)
+                    i += consumed
             elif stripped.startswith("- ") and in_acceptance_criteria:
                 m = _BULLET_RE.match(stripped)
                 if m:
@@ -993,8 +1139,10 @@ def _parse_tasks(
                 task_type=task_type,
                 scores=Score(),
                 acceptance_criteria=acceptance_criteria,
+                claims=claims,
                 verification=Verification(
                     commands=verification_commands,
+                    artifact_assertions=artifact_assertions,
                     # SL-3 / B48: turn each verification command into a typed
                     # requirement — the task is accepted only once a CommandProof
                     # records the command exiting 0 (captured by the run hooks;

@@ -1749,3 +1749,126 @@ class TestDuplicateAndSuffixedIds:
     def test_unique_ids_still_parse_clean(self) -> None:
         result = parse_prd(_MINIMAL_PRD)
         assert not result.errors, result.errors
+
+
+# ---------------------------------------------------------------------------
+# Evidence contracts (evidence-contracts:T002) — Claims + Artifact assertions
+# ---------------------------------------------------------------------------
+
+_CONTRACT_PRD_BASE = """\
+# Project: Contract Project
+
+## Summary
+
+Evidence-contract parsing fixture.
+
+## Goals
+
+- Prove claims parse.
+
+## Requirements
+
+- R001: Claims bind to assertions.
+
+## Features
+
+### F001: Contract feature
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Candidate benchmark matrix
+
+**Feature:** F001
+**Claims:** candidate_benchmark_completed (measurement: gemma4-12b-it), docs_updated
+
+Benchmark the candidates.
+
+**Acceptance criteria:**
+
+- Candidates measured.
+
+**Verification:**
+
+- `echo ok`
+
+**Artifact assertions:**
+
+```yaml
+- artifact: evidence/gemma.json
+  claim: candidate_benchmark_completed
+  assertions:
+    - path: status
+      op: equals
+      value: measured
+    - path: stage_timings_ms.llm_ms
+      op: not_null
+  stage_order: [stt, llm, tts]
+  stage_path: errors[*].stage
+  must_not_fail_before: llm
+```
+"""
+
+
+class TestEvidenceContractParsing:
+    def test_claims_and_assertions_parse_with_binding(self) -> None:
+        """T002 AC: one claim + one assertion parse into the T001 models
+        with the claim binding intact."""
+        result = parse_prd(_CONTRACT_PRD_BASE)
+        assert not result.errors, result.errors
+        task = result.tasks[0]
+        assert [(c.id, c.kind.value, c.subject) for c in task.claims] == [
+            ("candidate_benchmark_completed", "measurement", "gemma4-12b-it"),
+            ("docs_updated", "generic", ""),
+        ]
+        assertion = task.verification.artifact_assertions[0]
+        assert assertion.claim == "candidate_benchmark_completed"
+        assert assertion.artifact == "evidence/gemma.json"
+        assert assertion.assertions[1].op.value == "not_null"
+        assert assertion.must_not_fail_before == "llm"
+        assert assertion.stage_order == ["stt", "llm", "tts"]
+        # The YAML never leaks into the description prose.
+        assert "artifact" not in task.description
+        assert task.description == "Benchmark the candidates."
+
+    def test_missing_fence_is_loud_parse_error(self) -> None:
+        """T002 AC: a malformed assertion block yields a ParseError naming
+        the task, not a silent drop."""
+        bad = _CONTRACT_PRD_BASE.replace("```yaml\n", "").replace("```\n", "", 1)
+        result = parse_prd(bad)
+        assert any(
+            "Artifact assertions" in e.message and "T001" in e.message
+            for e in result.errors
+        ), result.errors
+
+    def test_unclosed_fence_is_loud(self) -> None:
+        bad = _CONTRACT_PRD_BASE.rsplit("```", 1)[0]  # drop the closing fence
+        result = parse_prd(bad)
+        assert any("unclosed" in e.message for e in result.errors), result.errors
+
+    def test_invalid_assertion_schema_is_loud(self) -> None:
+        bad = _CONTRACT_PRD_BASE.replace("op: equals", "op: sometimes_equals")
+        result = parse_prd(bad)
+        assert any(
+            "artifact assertion #1 is invalid" in e.message for e in result.errors
+        ), result.errors
+
+    def test_malformed_claims_token_and_unknown_kind_are_loud(self) -> None:
+        bad = _CONTRACT_PRD_BASE.replace(
+            "**Claims:** candidate_benchmark_completed (measurement: gemma4-12b-it), docs_updated",
+            "**Claims:** ok_claim, bad claim token!, typo_kind (measurment)",
+        )
+        result = parse_prd(bad)
+        msgs = " | ".join(e.message for e in result.errors)
+        assert "malformed **Claims:** token" in msgs, msgs
+        assert "typo_kind" in msgs and "invalid" in msgs, msgs
+
+    def test_prd_without_contract_syntax_parses_identically(self) -> None:
+        """T002 AC: existing PRDs (no claims syntax) parse byte-identically —
+        claims empty, no artifact_assertions key in dumps."""
+        result = parse_prd(_MINIMAL_PRD)
+        assert not result.errors
+        for task in result.tasks:
+            assert task.claims == []
+            assert "artifact_assertions" not in task.verification.model_dump()

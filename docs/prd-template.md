@@ -618,3 +618,72 @@ Once `anvil prd parse` succeeds, the PRD status is `draft`. From there:
 The full workflow is described in the spec at
 [`docs/specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md)
 under "Data Flows".
+
+## Evidence contracts (optional): Claims and Artifact assertions
+
+For tasks whose completion must be PROVEN by artifact content — benchmarks,
+migrations, deployments — a task block may declare **claims** and bind
+**artifact assertions** to them. A command exiting 0 only proves the command
+exited 0; an artifact assertion proves the produced artifact contains the
+result the task claims (issue #153). Declaring assertions makes them
+**enforced** at `anvil apply --approve` (refusal code `claim_unproven`).
+
+Syntax inside a `### Txxx:` task block:
+
+- `**Claims:**` — comma-separated tokens: `id`, `id (kind)`, or
+  `id (kind: subject)`. Kinds: `measurement`, `data_integrity`,
+  `behavioral_validation`, `review_verdict`, `generic` (default).
+- `**Artifact assertions:**` — followed by a fenced ` ```yaml ` block
+  containing a LIST of assertion entries. Fields per entry: `artifact`
+  (path relative to the project root), `claim` (a declared claim id),
+  `assertions` (list of `{path, op, value}` predicates over the JSON
+  artifact — ops: `exists`, `not_null`, `equals`, `not_equals`, `contains`,
+  `not_contains`, `gt`, `gte`, `lt`, `lte`, `len_eq`, `len_gte`; paths are
+  dotted with a single-level `[*]` wildcard), and optional phase
+  predicates: `stage_order`, `stage_path`, `must_reach`,
+  `must_not_fail_before`.
+
+Worked example (the voice-benchmark incident this feature exists to
+prevent):
+
+### T005: Run candidate benchmark matrix
+
+**Feature:** F002
+**Priority:** high
+**Claims:** candidate_benchmark_completed (measurement: gemma4-12b-it)
+
+Run bounded benchmark probes for the baseline and each viable candidate.
+
+**Acceptance criteria:**
+
+- Each candidate artifact records identity, stage timings, and errors.
+
+**Verification:**
+
+- `anvil-serving voice benchmark --candidate gemma4-12b-it`
+
+**Artifact assertions:**
+
+```yaml
+- artifact: .anvil/evidence/voice-gemma4-12b.json
+  claim: candidate_benchmark_completed
+  assertions:
+    - path: candidate_identity.candidate_id
+      op: equals
+      value: gemma4-12b-it
+    - path: status
+      op: equals
+      value: measured
+    - path: stage_timings_ms.llm_ms
+      op: not_null
+    - path: errors[*].stage
+      op: not_contains
+      value: stt
+  stage_order: [stt, llm, tts]
+  stage_path: errors[*].stage
+  must_not_fail_before: llm
+```
+
+A malformed block (missing/unclosed fence, invalid YAML, unknown op or
+kind) is a loud `anvil prd parse` error naming the task — an evidence
+contract is never silently dropped.
