@@ -1053,7 +1053,8 @@ are re-evaluated at approval time and an unproven enforceable claim raises
 `ToolError` (`claim_unproven`) with the task left in `needs_review`. Named
 claims always enforce; on the implicit task-level claim an unmet command
 proof alone defers to `strict_evidence`, while an artifact contradiction,
-missing artifact, or `blocked`/`diagnostic_only` category always enforces.
+missing artifact, or `blocked`-category evidence (or a `diagnostic_only`
+verdict from `diagnostic`/`advisory`-category evidence) always enforces.
 
 **Output**
 
