@@ -718,6 +718,34 @@ def submit(
         # observed proofs the gate trusts.
         command_proofs = _read_command_proofs(state_dir, task_claim.id)
 
+        # T007 — zero-proof mismatch warning: if verification-pattern commands
+        # ran this session but NO typed proof attached, the capture hook and
+        # this submit likely disagree on identity (the retro incident). Name
+        # both identities and the buffer path so it is diagnosable, not silent.
+        from anvil.review.gates import _contains_test_keyword
+
+        ran_verification = any(
+            _contains_test_keyword(cmd.lower()) for cmd in commands_list
+        )
+        # T007 — scope to a genuine identity MISMATCH (the field's namesake).
+        # Firing for every hooks-less single-actor submit that ran a test
+        # command would be noise for the majority who never opted into typed
+        # proofs (review angle 4); the mismatch case is the diagnosable one.
+        proof_mismatch_warning: str | None = None
+        if (
+            ran_verification
+            and not command_proofs
+            and task_claim.claimed_by != resolved_actor
+        ):
+            proof_mismatch_warning = (
+                "verification commands ran but zero typed proofs attached "
+                f"(claim actor {task_claim.claimed_by!r} vs session actor "
+                f"{resolved_actor!r}); a captured proof would buffer under "
+                f"{state_dir / '.evidence-buffer'}/ (per-claim "
+                f"{task_claim.id}.json, or orphan.json under concurrency). "
+                "The claim gate will treat command proofs as unmet."
+            )
+
         payload: dict[str, object] = {
             "task_id": task_id,
             "claim_id": task_claim.id,
@@ -809,6 +837,7 @@ def submit(
                     else None
                 ),
                 "claim_verdict": _verdict_json(submit_verdict),  # T005
+                "proof_mismatch_warning": proof_mismatch_warning,  # T007
                 "next_ready": next_ready,
             },
         )
@@ -846,6 +875,8 @@ def submit(
             for item in missing:
                 typer.echo(f"  - {item}")
     _echo_claim_verdict(submit_verdict)
+    if proof_mismatch_warning is not None:
+        typer.echo(f"Warning: {proof_mismatch_warning}", err=True)
 
 
 # ---------------------------------------------------------------------------
