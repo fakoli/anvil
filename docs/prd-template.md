@@ -625,8 +625,10 @@ For tasks whose completion must be PROVEN by artifact content — benchmarks,
 migrations, deployments — a task block may declare **claims** and bind
 **artifact assertions** to them. A command exiting 0 only proves the command
 exited 0; an artifact assertion proves the produced artifact contains the
-result the task claims (issue #153). Declaring assertions makes them
-**enforced** at `anvil apply --approve` (refusal code `claim_unproven`).
+result the task claims (issue #153). Declaring assertions is the contract;
+enforcement at `anvil apply --approve` (refusal code `claim_unproven`) lands
+with evidence-contracts:T005 - until then assertions are parsed and stored
+but not yet gated.
 
 Syntax inside a `### Txxx:` task block:
 

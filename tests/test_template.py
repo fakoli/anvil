@@ -1864,6 +1864,33 @@ class TestEvidenceContractParsing:
         assert "malformed **Claims:** token" in msgs, msgs
         assert "typo_kind" in msgs and "invalid" in msgs, msgs
 
+    def test_dangling_claim_reference_is_loud(self) -> None:
+        """Review finding: an assertion bound to an UNDECLARED claim id must
+        be a ParseError, not a silently stored dangling reference."""
+        bad = _CONTRACT_PRD_BASE.replace(
+            "claim: candidate_benchmark_completed",
+            "claim: candidate_benchmark_compbleted",
+        )
+        result = parse_prd(bad)
+        assert any(
+            "not declared in **Claims:**" in e.message for e in result.errors
+        ), result.errors
+
+    def test_blank_line_before_fence_and_content_after_block(self) -> None:
+        """Review finding: pin the fence-consumption index math - blank line
+        before the opening fence, and prose AFTER the closing fence, both
+        survive without leakage or double-processing."""
+        prd = _CONTRACT_PRD_BASE.replace(
+            "**Artifact assertions:**\n\n```yaml",
+            "**Artifact assertions:**\n\n\n```yaml",
+        ) + "\nTrailing prose after the block.\n"
+        result = parse_prd(prd)
+        assert not result.errors, result.errors
+        task = result.tasks[0]
+        assert len(task.verification.artifact_assertions) == 1
+        assert "Trailing prose after the block." in task.description
+        assert "artifact" not in task.description
+
     def test_prd_without_contract_syntax_parses_identically(self) -> None:
         """T002 AC: existing PRDs (no claims syntax) parse byte-identically —
         claims empty, no artifact_assertions key in dumps."""

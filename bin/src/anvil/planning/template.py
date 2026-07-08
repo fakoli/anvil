@@ -1103,6 +1103,25 @@ def _parse_tasks(
 
         description = " ".join(description_parts).strip()
 
+        # Evidence contracts (T002, review finding): an assertion bound to an
+        # undeclared claim id is a dangling reference - loud, never silent,
+        # in a feature whose premise is "no silent gaps".
+        declared_claim_ids = {c.id for c in claims}
+        for assertion in artifact_assertions:
+            if assertion.claim and assertion.claim not in declared_claim_ids:
+                errors.append(
+                    ParseError(
+                        section="tasks",
+                        line=block_line,
+                        message=(
+                            f"Task {task_id!r}: artifact assertion for "
+                            f"{assertion.artifact!r} references claim "
+                            f"{assertion.claim!r}, which is not declared "
+                            "in **Claims:**."
+                        ),
+                    )
+                )
+
         if not feature_id:
             errors.append(
                 ParseError(
