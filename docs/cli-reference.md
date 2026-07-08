@@ -783,8 +783,10 @@ execute against.
 over the six-dimension score plus the risk-confirmation flags, recomputed at
 every read (never persisted): `max` when any dimension is unscored or
 `review_risk`/`blast_radius` ≥ `review_tier_max_min`; `light` only when the
-task passes the fast-lane gate AND has confirmed
-`review_risk` ≤ `review_tier_light_risk_max`; `standard` otherwise. Two
+task passes the fast-lane gate AND `review_risk` ≤
+`review_tier_light_risk_max` AND **both** the `blast_radius` and
+`review_risk` scores are confirmed (via `anvil review tasks`); `standard`
+otherwise. Two
 `config.yaml` knobs move the boundaries (1–5 score scale, global-config
 mergeable):
 
