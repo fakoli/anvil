@@ -7637,6 +7637,41 @@ class TestStatusClaimReadback:
         data = json.loads(result_json.output.strip().splitlines()[-1])["data"]
         assert data["claims"][0]["phase"] is None
 
+    def test_reclaimed_task_does_not_inherit_prior_phase(
+        self, tmp_path: Path
+    ) -> None:
+        """Review finding: audit rows are append-only, so a re-claimed task
+        keeps prior progress.noted events — the fresh claim must render the
+        placeholder, not the previous claim's stale phase."""
+        import sqlite3 as _sqlite3
+
+        self._setup_with_claim(tmp_path)
+        progress = _invoke_cmd(
+            tmp_path, ["progress", "T001", "old-phase", "--actor", "hb-reader"]
+        )
+        assert progress.exit_code == 0, progress.output
+
+        # Release and re-claim: the new claim starts AFTER the phase event.
+        conn = _sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
+        claim_id = conn.execute(
+            "SELECT id FROM claims WHERE task_id='T001' AND status='active'"
+        ).fetchone()[0]
+        conn.close()
+        release = _invoke_cmd(
+            tmp_path,
+            ["release", claim_id, "--actor", "hb-reader", "--reason", "handoff"],
+        )
+        assert release.exit_code == 0, release.output
+        reclaim = _invoke_cmd(tmp_path, ["claim", "T001", "--actor", "hb-reader"])
+        assert reclaim.exit_code == 0, reclaim.output
+
+        result = _invoke_cmd(tmp_path, ["status", "--json"])
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["claims"][0]["phase"] is None  # stale phase NOT inherited
+        human = _invoke_cmd(tmp_path, ["status"])
+        assert "phase=old-phase" not in human.output
+        assert "phase=-" in human.output
+
     def test_hook_format_single_line_unchanged(self, tmp_path: Path) -> None:
         """AC: --hook-format output is unchanged (SessionStart consumer)."""
         self._setup_with_claim(tmp_path)
@@ -7645,7 +7680,7 @@ class TestStatusClaimReadback:
         )
         result = _invoke_cmd(tmp_path, ["status", "--hook-format"])
         assert result.exit_code == 0
-        lines = [l for l in result.output.strip().splitlines() if l]
+        lines = [line for line in result.output.strip().splitlines() if line]
         assert len(lines) == 1
         assert lines[0].startswith("active-claims:1 ready-tasks:")
         assert "phase" not in lines[0]

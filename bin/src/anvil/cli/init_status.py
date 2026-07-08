@@ -483,7 +483,17 @@ def status(
                 _latest = backend.latest_event_payload(
                     _claim.task_id, "progress.noted"
                 )
-                _phase = _latest[0].get("phase") if _latest is not None else None
+                # Review finding: only attribute a phase recorded during THIS
+                # claim's lifetime — audit rows are append-only, so a
+                # re-claimed task keeps prior progress.noted events and would
+                # otherwise pair a fresh elapsed=0m with a stale phase.
+                _phase = None
+                if _latest is not None:
+                    _evt_ts = datetime.datetime.fromisoformat(_latest[1])
+                    if _evt_ts.tzinfo is None:
+                        _evt_ts = _evt_ts.replace(tzinfo=datetime.UTC)
+                    if _evt_ts >= _claim.created_at:
+                        _phase = _latest[0].get("phase")
             except Exception:  # noqa: BLE001 — read-back is best-effort
                 _phase = None
             claim_details.append(
@@ -630,12 +640,18 @@ def status(
     # exists yet. (--hook-format exits above; its single line is untouched.)
     for detail in claim_details:
         elapsed_min = detail["elapsed_seconds"] // 60
-        expires_min = detail["lease_expires_in_seconds"] // 60
+        expires_seconds = detail["lease_expires_in_seconds"]
+        # Expired-but-unreaped claims read clearer than "-3m" (JSON keeps the
+        # raw negative int — honest for machine consumers).
+        expiry_label = (
+            f"lease-expires-in={expires_seconds // 60}m"
+            if expires_seconds >= 0
+            else "lease=EXPIRED (unreaped)"
+        )
         phase_label = detail["phase"] or "-"
         typer.echo(
             f"  {detail['task_id']} [{detail['actor']}] "
-            f"phase={phase_label} elapsed={elapsed_min}m "
-            f"lease-expires-in={expires_min}m"
+            f"phase={phase_label} elapsed={elapsed_min}m {expiry_label}"
         )
     typer.echo(f"Sync:          {sync_label}")
     # T007/B11 (MUST-FIX 2a): db_schema_version is the TRUE on-disk version read
