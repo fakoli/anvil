@@ -33,6 +33,7 @@
   ],
   "evidence": [
     {
+      "category": "completion",
       "claim_id": "C001",
       "commands_run": [
         "pytest tests/ -v"

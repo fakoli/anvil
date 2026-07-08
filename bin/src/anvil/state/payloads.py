@@ -219,6 +219,10 @@ class TaskCreatedPayload(BaseModel):
     implementation_notes: list[Any] = []
     verification: dict[str, Any] | None = None
     likely_files: list[Any] = []
+    # Evidence contracts (issue #153) — optional so pre-existing JSONL rows
+    # (no ``claims`` key) replay unchanged; sub-validation is delegated to
+    # Task.model_validate like scores/verification.
+    claims: list[Any] | None = None
     parent_task_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
@@ -408,6 +412,9 @@ class EvidenceSubmittedPayload(BaseModel):
     # raises here, not silently at replay). Defaults to [] so pre-SL-3 logs
     # (no ``proofs`` key) stay replayable.
     proofs: list[ProofArtifact] = Field(default_factory=list)
+    # Evidence contracts (issue #153) — optional evidence role; absent key
+    # (every pre-existing row) means completion, the historical meaning.
+    category: str | None = None
 
 
 class TaskAppliedPayload(BaseModel):

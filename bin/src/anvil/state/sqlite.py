@@ -1195,7 +1195,8 @@ class SqliteBackend:
             # zero-padded event/id suffix stays within its digit width.
             "SELECT id, task_id, claim_id, commands_run, output_excerpt, "
             "files_changed, pr_url, commit_sha, screenshots, "
-            "known_limitations, submitted_at, submitted_by, proofs "
+            "known_limitations, submitted_at, submitted_by, proofs, "
+            "category "
             "FROM evidence ORDER BY id ASC"
         ).fetchall()
         return [self._row_to_evidence(row) for row in rows]
@@ -1462,7 +1463,8 @@ class SqliteBackend:
             row = conn.execute(
                 "SELECT id, task_id, claim_id, commands_run, output_excerpt, "
                 "files_changed, pr_url, commit_sha, screenshots, "
-                "known_limitations, submitted_at, submitted_by, proofs "
+                "known_limitations, submitted_at, submitted_by, proofs, "
+                "category "
                 "FROM evidence "
                 "WHERE task_id = ? "
                 "ORDER BY submitted_at DESC "
@@ -1995,6 +1997,29 @@ class SqliteBackend:
             if "duplicate column" not in str(e).lower():
                 raise
 
+    def _m_to_v9(self, conn: sqlite3.Connection) -> None:
+        """v8 → v9: evidence contracts (issue #153 / evidence-contracts PRD).
+
+        Purely additive, duplicate-column tolerant like every ladder step:
+
+        - ``tasks.claims TEXT NOT NULL DEFAULT '[]'`` — the task's named
+          TaskClaims; ``'[]'`` backfills every existing row to "no claims",
+          the correct pre-feature meaning.
+        - ``evidence.category TEXT NOT NULL DEFAULT 'completion'`` — the
+          evidence role; ``'completion'`` backfills the historical meaning
+          (all pre-feature evidence was completion evidence).
+        """
+        for ddl in (
+            "ALTER TABLE tasks ADD COLUMN claims TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE evidence ADD COLUMN "
+            "category TEXT NOT NULL DEFAULT 'completion'",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
     # Ordered migration ladder: (from_version, bound-method). Applied while
     # ``on_disk <= from_version < SCHEMA_VERSION``. Append one tuple per future
     # schema bump; never edit a literal version comparison again.
@@ -2005,6 +2030,7 @@ class SqliteBackend:
         (5, _m_to_v6),
         (6, _m_to_v7),
         (7, _m_to_v8),
+        (8, _m_to_v9),
     ]
 
     @staticmethod
@@ -4688,9 +4714,10 @@ class SqliteBackend:
             INSERT OR IGNORE INTO evidence
                 (id, task_id, claim_id, commands_run, output_excerpt,
                  files_changed, pr_url, commit_sha, screenshots,
-                 known_limitations, proofs, submitted_at, submitted_by)
+                 known_limitations, proofs, category, submitted_at,
+                 submitted_by)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 evidence_id,
@@ -4704,6 +4731,7 @@ class SqliteBackend:
                 json.dumps(screenshots),
                 known_limitations,
                 proofs_json,
+                payload.category or "completion",
                 timestamp,
                 submitted_by,
             ),
@@ -5143,12 +5171,12 @@ class SqliteBackend:
                 (id, prd_id, feature_id, title, description, status, priority,
                  task_type, dependencies, conflict_groups, scores,
                  acceptance_criteria, implementation_notes, verification,
-                 likely_files, parent_task_id, created_at, updated_at)
+                 likely_files, claims, parent_task_id, created_at, updated_at)
             VALUES
                 (:id, :prd_id, :feature_id, :title, :description, :status, :priority,
                  :task_type, :dependencies, :conflict_groups, :scores,
                  :acceptance_criteria, :implementation_notes, :verification,
-                 :likely_files, :parent_task_id, :created_at, :updated_at)
+                 :likely_files, :claims, :parent_task_id, :created_at, :updated_at)
             ON CONFLICT(id) DO UPDATE SET
                 prd_id               = excluded.prd_id,
                 feature_id           = excluded.feature_id,
@@ -5171,6 +5199,7 @@ class SqliteBackend:
                 implementation_notes = excluded.implementation_notes,
                 verification         = excluded.verification,
                 likely_files         = excluded.likely_files,
+                claims               = excluded.claims,
                 parent_task_id       = excluded.parent_task_id,
                 updated_at           = excluded.updated_at
             """,
@@ -5190,6 +5219,7 @@ class SqliteBackend:
                 "implementation_notes": json.dumps(data["implementation_notes"]),
                 "verification": json.dumps(data["verification"]),
                 "likely_files": json.dumps(data["likely_files"]),
+                "claims": json.dumps(data.get("claims") or []),
                 "parent_task_id": data["parent_task_id"],
                 "created_at": data["created_at"],
                 "updated_at": data["updated_at"],
@@ -5308,9 +5338,14 @@ class SqliteBackend:
             "acceptance_criteria",
             "implementation_notes",
             "likely_files",
+            "claims",
         ):
             if isinstance(d.get(col), str):
                 d[col] = json.loads(d[col])
+        # Pre-v9 rows read through an un-migrated SELECT have no claims key;
+        # NULL (pre-backfill) means "no claims". Drop so the default applies.
+        if d.get("claims") is None:
+            d.pop("claims", None)
         for col in ("scores", "verification"):
             if isinstance(d.get(col), str):
                 d[col] = json.loads(d[col])
@@ -5385,6 +5420,9 @@ class SqliteBackend:
             submitted_at = submitted_at.replace(tzinfo=datetime.UTC)
         proofs_raw = row[12] if len(row) > 12 else None
         proofs = TypeAdapter(list[_ProofArtifact]).validate_json(proofs_raw or "[]")
+        # v9 evidence-contracts category is index 13 (appended last so the
+        # pre-v9 indices stay stable); tolerate short rows like proofs does.
+        category = row[13] if len(row) > 13 and row[13] else "completion"
         return _Evidence(
             id=row[0],
             task_id=row[1],
@@ -5397,6 +5435,7 @@ class SqliteBackend:
             screenshots=json.loads(row[8] or "[]"),
             known_limitations=row[9],
             proofs=proofs,
+            category=category,
             submitted_at=submitted_at,
             submitted_by=row[11],
         )

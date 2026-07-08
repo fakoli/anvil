@@ -32,6 +32,7 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -393,6 +394,107 @@ ProofArtifact = Annotated[
 ]
 
 
+class ClaimKind(enum.StrEnum):
+    """What a TaskClaim asserts (issue #153). str-serialisable (house rule)."""
+
+    measurement = "measurement"
+    data_integrity = "data_integrity"
+    behavioral_validation = "behavioral_validation"
+    review_verdict = "review_verdict"
+    generic = "generic"
+
+
+class TaskClaim(BaseModel):
+    """A named claim a task must PROVE before acceptance (evidence contracts).
+
+    Named ``TaskClaim`` (not ``Claim``) because ``Claim`` is the lease model.
+    The claim is the bridge between human intent ("candidate benchmark
+    completed") and machine-checkable evidence: ProofRequirements and
+    ArtifactAssertions bind to a claim id, and the gate reports a verdict
+    per claim.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    id: str
+    subject: str = ""
+    kind: ClaimKind = ClaimKind.generic
+
+
+class EvidenceCategory(enum.StrEnum):
+    """What role submitted evidence is allowed to play (issue #153).
+
+    ``completion`` can satisfy a claim; ``diagnostic``/``advisory`` are
+    useful context that must NEVER satisfy a completion claim (the voice
+    incident: failed candidate rows were excellent diagnostics and zero
+    proof of the benchmark claim); ``blocked`` explains why the claim could
+    not be proven; ``promotion_quality`` marks evidence strong enough for
+    trust/routing decisions.
+    """
+
+    completion = "completion"
+    diagnostic = "diagnostic"
+    blocked = "blocked"
+    advisory = "advisory"
+    promotion_quality = "promotion_quality"
+
+
+class PredicateOp(enum.StrEnum):
+    """Operators of the small, domain-agnostic artifact predicate language."""
+
+    exists = "exists"
+    not_null = "not_null"
+    equals = "equals"
+    not_equals = "not_equals"
+    contains = "contains"
+    not_contains = "not_contains"
+    gt = "gt"
+    gte = "gte"
+    lt = "lt"
+    lte = "lte"
+    len_eq = "len_eq"
+    len_gte = "len_gte"
+
+
+class Predicate(BaseModel):
+    """One machine-checkable assertion over a JSON artifact value.
+
+    ``path`` is a dotted path with an optional single-level ``[*]`` wildcard
+    (e.g. ``stage_timings_ms.llm_ms``, ``errors[*].stage``). ``value`` is the
+    JSON scalar the operator compares against (unused for ``exists`` /
+    ``not_null``).
+    """
+
+    model_config = _MODEL_CONFIG
+
+    path: str
+    op: PredicateOp
+    value: Any | None = None
+
+
+class ArtifactAssertion(BaseModel):
+    """Typed content assertions over a produced artifact, bound to a claim.
+
+    The generic answer to "a command exiting 0 only proves the command
+    exited 0": the artifact must EXIST and its content must satisfy every
+    predicate. Phase predicates express staged work ("the candidate run must
+    reach the llm stage"): ``stage_order`` declares the pipeline order,
+    ``stage_path`` names where failure stages are recorded in the artifact,
+    and ``must_reach`` / ``must_not_fail_before`` gate on them.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    artifact: str  # path relative to the project root
+    format: Literal["json"] = "json"
+    claim: str | None = None  # TaskClaim id this assertion proves
+    assertions: list[Predicate] = Field(default_factory=list)
+    stage_order: list[str] = Field(default_factory=list)
+    stage_path: str | None = None
+    must_reach: str | None = None
+    must_not_fail_before: str | None = None
+
+
 class ProofRequirement(BaseModel):
     """One typed thing a Task demands before it can be accepted."""
 
@@ -405,6 +507,9 @@ class ProofRequirement(BaseModel):
     # link requirements may pin a required URL substring (optional):
     link_contains: str | None = None
     label: str  # human description for packets / errors
+    # Evidence contracts (issue #153): the TaskClaim id this requirement
+    # proves. None keeps today's task-level semantics (implicit claim).
+    claim: str | None = None
 
     @model_validator(mode="after")
     def _command_requirements_pin_a_command(self) -> ProofRequirement:
@@ -430,6 +535,19 @@ class Verification(BaseModel):
     # free-text ``required_evidence`` path stays for back-compat; the gate
     # evaluates both. New planners populate ``required_proofs``.
     required_proofs: list[ProofRequirement] = Field(default_factory=list)
+    # Evidence contracts (issue #153): content assertions over produced
+    # artifacts, optionally bound to task claims. Additive — [] means the
+    # gate behaves exactly as before this feature.
+    artifact_assertions: list[ArtifactAssertion] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_assertions(self, handler: Any) -> dict[str, Any]:
+        # Same omit-when-empty discipline as Task.claims: unused contracts
+        # keep the pre-v9 byte shape.
+        data = handler(self)
+        if not data.get("artifact_assertions"):
+            data.pop("artifact_assertions", None)
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +687,27 @@ class Task(BaseModel):
     implementation_notes: list[str] = Field(default_factory=list)
     verification: Verification = Field(default_factory=Verification)
     likely_files: list[str] = Field(default_factory=list)
+    # Evidence contracts (issue #153): named claims this task must prove.
+    # [] keeps today's behavior exactly (no claims, task-level gate only).
+    claims: list[TaskClaim] = Field(default_factory=list)
+
+    @field_validator("claims", mode="before")
+    @classmethod
+    def _none_claims_is_empty(cls, v: object) -> object:
+        # TaskCreatedPayload defaults claims to None (optional key so pre-v9
+        # JSONL replays unchanged); the handler forwards its model_dump here,
+        # so None must mean "no claims", same as an absent key.
+        return [] if v is None else v
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_claims(self, handler: Any) -> dict[str, Any]:
+        # Omit-when-empty (T010 discipline): a task with no claims serializes
+        # byte-identically to pre-v9, so task.created events and API dumps
+        # only change shape when the feature is genuinely used.
+        data = handler(self)
+        if not data.get("claims"):
+            data.pop("claims", None)
+        return data
     parent_task_id: TaskID | None = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
@@ -639,6 +778,9 @@ class Evidence(BaseModel):
     # fields above stay as descriptive metadata; the gate no longer needs them
     # once a task declares ``required_proofs``.
     proofs: list[ProofArtifact] = Field(default_factory=list)
+    # Evidence contracts (issue #153): what role this evidence may play.
+    # diagnostic/advisory evidence can never satisfy a completion claim.
+    category: EvidenceCategory = EvidenceCategory.completion
     submitted_at: datetime.datetime
     submitted_by: str
 
