@@ -551,8 +551,9 @@ anvil list --type bugfix
 ### `anvil show` { #show }
 
 **Synopsis:** Print full task detail in a human-readable multi-section
-format. Sections: title, feature, status, priority, scores breakdown (all
-six dimensions plus explanation), dependencies, conflict groups, acceptance
+format. Sections: title, feature, status, priority, review tier, scores
+breakdown (all six dimensions plus explanation), dependencies, conflict
+groups, acceptance
 criteria, verification commands, likely files, active claim (if any), and
 the 10 most recent events targeting this task.
 
@@ -585,7 +586,8 @@ anvil show T001
 ### `anvil next` { #next }
 
 **Synopsis:** Pick the highest-priority claimable task **without** claiming
-it. Prints the recommended task id, title, priority, and complexity. Run
+it. Prints the recommended task id, title, priority, review tier, and
+complexity. Run
 `anvil claim TASK_ID` to acquire the lease after reviewing the
 recommendation. Reaps any stale claims (expired leases) before recommending.
 
@@ -774,6 +776,25 @@ execute against.
   `packets/<TASK_ID>.md`; `json` writes `packets/<TASK_ID>.json`. Stdout
   echoes the rendered content matching the selected format.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
+
+**Review tier.** Every packet carries a derived review tier —
+`light` / `standard` / `max` — with one line of reviewer guidance
+(markdown header + `review_tier` JSON key). The tier is a pure projection
+over the six-dimension score plus the risk-confirmation flags, recomputed at
+every read (never persisted): `max` when any dimension is unscored or
+`review_risk`/`blast_radius` ≥ `review_tier_max_min`; `light` only when the
+task passes the fast-lane gate AND has confirmed
+`review_risk` ≤ `review_tier_light_risk_max`; `standard` otherwise. Two
+`config.yaml` knobs move the boundaries (1–5 score scale, global-config
+mergeable):
+
+```yaml
+review_tier_max_min: 4          # DEFAULT; review_risk/blast_radius at/above → max
+review_tier_light_risk_max: 2   # DEFAULT; highest confirmed review_risk still light
+```
+
+The same tier appears on `anvil next`, `anvil show`, and the MCP
+`get_task` / `get_next_task` responses.
 
 **Exit codes:**
 

@@ -180,11 +180,12 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 - **Likely files:** `bin/src/anvil/state/models.py`, `bin/src/anvil/planning/template.py`, `bin/src/anvil/planning/scoring.py`, `bin/src/anvil/context/packets.py`, `bin/tests/test_models.py`
 - **Depends on:** B13
 
-### B15 — Right-size process by score: fast-lane work packets for trivial changes
+### B15 — Right-size process by score: fast-lane work packets + review tiers — SHIPPED
 
-- **Priority:** P3  **Effort:** M  **Type:** feature
+- **Priority:** P3  **Effort:** M  **Type:** feature  **Status:** SHIPPED (two halves)
 - **Rationale:** where-all-tools-fail: no tool routes by measured complexity/blast-radius while still recording proof — it's heavyweight-everything or untracked-ad-hoc (tinySpec spec-kit#1174). The six-dimension score + evidence trail is an anvil-shaped answer nobody offers; a fast-lane keeps trivial tasks tracked without full ceremony.
-- **Acceptance:** Tasks scoring below configurable complexity/blast thresholds render a minimal work packet (fewer required evidence fields, single-step) while still recording a completion-evidence transition. Threshold is config-driven. Test: a trivial-scored task completes via the fast-lane and still produces an immutable evidence record; a high-blast task still requires the full packet.
+- **Shipped, half 1 — fast-lane packets (T020):** tasks at/below the configurable `fast_lane_complexity_max`/`fast_lane_blast_radius_max` ceilings render a minimal single-step packet with a trimmed required-evidence checklist, still recording the full immutable evidence transition (`context/packets.py fast_lane_packet`).
+- **Shipped, half 2 — review tiers (retro-opps F001, 2026-07-07):** a derive-only `review_tier` (light/standard/max) computed from the six-dim score + B45 confirmation flags, layered on the fast-lane gate (`planning.scoring.review_tier`; knobs `review_tier_max_min`/`review_tier_light_risk_max`). Rendered in work packets, `anvil next`/`show`, and MCP `get_task`/`get_next_task`; `/anvil:finish` dispatches critic depth by tier. Light requires BOTH risk-confirmation flags — heuristic-only low scores never earn a light review. No schema change.
 - **Likely files:** `bin/src/anvil/context/packets.py`, `bin/src/anvil/planning/scoring.py`, `bin/src/anvil/config.py`, `bin/tests/test_context.py`
 - **Depends on:** B14
 

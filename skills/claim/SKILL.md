@@ -71,13 +71,14 @@ Once `next` returns a candidate (or the user picks one from the ready queue), ru
 anvil show T012
 ```
 
-Returns: title, feature, status, priority, all six score dimensions (`complexity`, `parallelizability`, `context_load`, `blast_radius`, `review_risk`, `agent_suitability`) with explanation, dependency chain, conflict groups, acceptance criteria, verification commands, `Likely Files`, any active claim on this task, and recent events.
+Returns: title, feature, status, priority, the derived review tier, all six score dimensions (`complexity`, `parallelizability`, `context_load`, `blast_radius`, `review_risk`, `agent_suitability`) with explanation, dependency chain, conflict groups, acceptance criteria, verification commands, `Likely Files`, any active claim on this task, and recent events.
 
 Audit the result inline and surface anything that should give the user pause before the claim fires:
 
 - The acceptance criteria are concrete and independently verifiable — not aspirational descriptions.
 - `complexity` is 3 or under. A score of 4 or 5 means the task should have been expanded via `anvil expand --use-llm` during planning. Claiming an oversized task and then abandoning it mid-way wastes the lease window.
 - `agent_suitability` matches the current executor. A score of 1 or 2 signals that the task requires architectural judgment, significant human context, or decisions that a model is likely to get wrong. Defer those tasks.
+- The **review tier** (`light`/`standard`/`max`, also on `anvil next` and the work packet) tells you up front how deep the eventual review will go — a `max`-tier task deserves a stronger executor and incremental commits, since `/anvil:finish` will dispatch an adversarial critic pass against it.
 - `Likely Files` does not include files that look like they belong to a different subsystem, which would be a sign the task scope drifted during authoring.
 
 Present the inspection summary and ask:
