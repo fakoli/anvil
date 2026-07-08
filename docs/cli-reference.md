@@ -908,13 +908,42 @@ mode — prints the evidence-gate summary and the current status. With
   or `human`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
+**Merge check.** Review-only mode and `--approve` also run a cheap
+base-freshness probe against the task's claim branch (behind-count vs
+`origin/<default>`, textual-conflict check; never the heavy merged-tree run
+— that is [`anvil merge-check --run-checks`](#additional-commands)). The
+`merge_check` config knob sets the mode:
+
+```yaml
+merge_check: advisory   # DEFAULT — report staleness, approval proceeds
+# merge_check: strict   # refuse --approve (exit 1, code base_stale) when the
+#                       # branch is VERIFIABLY behind its base or conflicted
+# merge_check: "off"    # skip the probe entirely
+```
+
+Local-first: offline / no-remote projects degrade to the local default
+branch and are never refused; an unverifiable probe never gates (a probe
+*error* under `strict` prints a stderr warning and skips the gate rather
+than blocking). `--reject` is never affected. The JSON envelope carries the
+report under `data.merge_check` (and inside `error.merge_check` on a strict
+refusal).
+
+> **Ordering caveat — apply before you merge.** The probe measures the
+> task's *local* claim branch against the base. In a merge-first workflow
+> (PR squash-merged, then `apply`), the surviving local branch is behind the
+> base *by its own merge commit* and reads as `STALE` — a false positive
+> (there is no reliable git signal for "already squash-merged"). Run
+> `apply --approve` before merging the PR, or expect the advisory note; do
+> not enable `merge_check: strict` in a merge-first workflow.
+
 **Exit codes:**
 
 - `0` — review decision recorded, **or** review-only mode (neither
   `--approve` nor `--reject`) printed the summary.
 - `1` — `TASK_ID` not found; task is not in `needs_review` status; both
-  `--approve` and `--reject` were passed; or `--reject` was passed without
-  `--reason`.
+  `--approve` and `--reject` were passed; `--reject` was passed without
+  `--reason`; or `merge_check: strict` refused a stale/conflicted branch
+  (code `base_stale`).
 
 **Example:**
 

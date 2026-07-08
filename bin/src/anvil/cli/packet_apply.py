@@ -202,6 +202,86 @@ def _resolve_strict_evidence(strict_flag: bool | None, state_dir: Path) -> bool:
     return config.strict_evidence
 
 
+def _merge_check_block(
+    task_id: str,
+    backend: object,
+    state_dir: Path,
+    cwd: Path | None,
+) -> tuple[str, dict[str, object] | None]:
+    """Cheap base-freshness report for the apply gate (retro-opps T007).
+
+    Returns ``(mode, block)`` where mode is the resolved ``merge_check``
+    config value (flagless: config > default "advisory") and block is the
+    report dict, ``{"skipped": reason}`` when no branch is resolvable, or
+    ``None`` when mode is "off" or the probe itself errored. NEVER runs the
+    heavy merged-tree checks (that is `anvil merge-check --run-checks`) and
+    never raises — an advisory surface must not break `apply`.
+    """
+    cfg = _load_config_optional(state_dir)
+    mode = cfg.merge_check if cfg is not None else "advisory"
+    if mode == "off":
+        return mode, None
+    try:
+        from anvil.cli.merge_check import _branch_for_task
+        from anvil.git_ops.freshness import check_freshness, resolve_base
+
+        project_root = (cwd or Path.cwd()).resolve()
+        branch = _branch_for_task(backend, task_id, project_root)
+        if branch is None:
+            return mode, {"skipped": "no branch recorded for this task"}
+        base = resolve_base(project_root)
+        report = check_freshness(branch, cwd=project_root, base=base)
+        return mode, {
+            "task_id": task_id,
+            "branch": branch,
+            "base_ref": report.base.ref,
+            "remote_checked": report.base.remote_checked,
+            "base_reason": report.base.reason,
+            "behind_count": report.behind_count,
+            "has_conflicts": report.has_conflicts,
+            # T005 review guidance: gate on VERIFIABLE staleness only —
+            # behind_count None (probe failed) or offline degradation must
+            # never read as stale (local-first).
+            "stale": bool(report.behind_count) or report.has_conflicts is True,
+        }
+    except Exception:  # noqa: BLE001 — advisory probe must never break apply
+        if mode == "strict":
+            # Review finding: a strict user must SEE that the gate was
+            # skipped, or a crashing probe becomes a false sense of security.
+            typer.echo(
+                "Warning: merge check could not run (probe error); "
+                "strict merge gate skipped for this apply.",
+                err=True,
+            )
+        return mode, None
+
+
+def _echo_merge_check_block(block: dict[str, object] | None) -> None:
+    """Human-mode rendering of the merge-check block. Quiet when clean."""
+    if block is None:
+        return
+    if "skipped" in block:
+        return  # nothing useful to say; JSON carries the reason
+    if block["stale"]:
+        detail = []
+        if block["behind_count"]:
+            detail.append(
+                f"{block['behind_count']} commit(s) behind {block['base_ref']}"
+            )
+        if block["has_conflicts"] is True:
+            detail.append("merged tree has textual conflicts")
+        typer.echo(f"Merge check: STALE — {'; '.join(detail)}.")
+        typer.echo(
+            f"  Run `anvil merge-check {block['task_id']} --run-checks` "
+            "after rebasing to re-verify."
+        )
+    elif not block["remote_checked"]:
+        typer.echo(
+            f"Merge check: local base '{block['base_ref']}' used "
+            f"({block['base_reason']})."
+        )
+
+
 def _compute_next_ready(backend: object, actor: str) -> dict[str, object] | None:
     """Return a compact descriptor of the next claimable task, or None (T014).
 
@@ -758,6 +838,15 @@ def apply(
             )
             raise typer.Exit(code=1)
 
+        # retro-opps T007 — cheap base-freshness probe alongside the evidence
+        # gate. Computed once for review-only AND --approve; --reject is never
+        # affected (rejecting a stale branch is exactly the right move).
+        merge_mode, merge_block = (
+            _merge_check_block(task_id, backend, state_dir, cwd)
+            if not reject
+            else ("off", None)
+        )
+
         # Review-only mode: neither --approve nor --reject; show evidence summary.
         if not approve and not reject:
             # Fetch the latest evidence row for this task via the Backend protocol.
@@ -794,6 +883,7 @@ def apply(
                             else None
                         ),
                         "task": dump_model(task),
+                        "merge_check": merge_block,  # T007 — same block as --approve
                         # No decision in review-only mode, so no proof is emitted;
                         # carry the key (null) to keep the apply envelope uniform.
                         "proof_path": None,
@@ -818,6 +908,7 @@ def apply(
             else:
                 typer.echo(f"Task '{task_id}' awaiting review (status: needs_review).")
                 typer.echo("No evidence found — run `anvil submit` first.")
+            _echo_merge_check_block(merge_block)
             typer.echo("")
             typer.echo(
                 "Pass --approve to accept or --reject --reason TEXT to reject."
@@ -921,6 +1012,41 @@ def apply(
                     )
                     raise typer.Exit(code=1)
 
+            # retro-opps T007 — merge_check: strict refuses approval when the
+            # branch is VERIFIABLY stale or conflicted, BEFORE the task.applied
+            # event. Unverifiable probes (behind_count None) and offline
+            # degradation never refuse — local-first. advisory/off never enter.
+            if (
+                merge_mode == "strict"
+                and merge_block is not None
+                and merge_block.get("stale")
+            ):
+                if json_output:
+                    from anvil.cli._json import fail_with
+
+                    fail_with(
+                        "apply",
+                        f"merge check refused approval of task '{task_id}': "
+                        f"branch '{merge_block['branch']}' is stale against "
+                        f"{merge_block['base_ref']}. Task remains in "
+                        "needs_review.",
+                        code="base_stale",
+                        extra={"merge_check": merge_block},
+                    )
+                typer.echo(
+                    f"Error: merge check REFUSED approval of task '{task_id}': "
+                    f"branch '{merge_block['branch']}' is stale against "
+                    f"{merge_block['base_ref']}. Task remains in needs_review.",
+                    err=True,
+                )
+                _echo_merge_check_block(merge_block)
+                typer.echo(
+                    "Rebase/merge the base and re-verify, or set "
+                    "merge_check: advisory in config.yaml.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+
         from anvil.clock import SystemClock
 
         clock = SystemClock()
@@ -1002,11 +1128,13 @@ def apply(
                 "task": dump_model(result_task) if result_task is not None else None,
                 "next_ready": apply_next_ready,
                 "proof_path": str(proof_path) if proof_path is not None else None,
+                "merge_check": merge_block,  # T007 — null when mode off/probe failed
             },
         )
         return
 
     if approve:
+        _echo_merge_check_block(merge_block)
         typer.echo(f"Task '{task_id}' approved by '{resolved_reviewer}' → done.")
         if proof_path is not None:
             typer.echo(f"  Signed proof: {proof_path}")

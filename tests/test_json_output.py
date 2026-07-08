@@ -414,6 +414,7 @@ _APPLY_KEYS = {
     "task",
     "next_ready",  # T014
     "proof_path",  # B48 part 2 — path to the emitted signed AcceptanceProof (or null)
+    "merge_check",  # retro-opps T007 — base-freshness block (or null)
 }
 
 
