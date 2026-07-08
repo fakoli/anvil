@@ -116,17 +116,24 @@ class TestIncidentGate:
         assert verdict.overall == "failed"
         (unproven,) = verdict.enforceable_unproven
         assert unproven.claim == "candidate_benchmark_completed"
-        # The failure names the pre-LLM stage and the missing candidate status.
+        # Pin the INCIDENT semantics specifically: the pre-LLM phase failure
+        # (the must_not_fail_before guarantee) AND the not-measured status —
+        # not merely "something failed".
         joined = " ".join(unproven.failures)
-        assert "stt" in joined or "before" in joined
+        assert "before 'llm'" in joined  # the phase predicate, independently
+        assert "'status'" in joined and "measured" in joined
 
-    def test_failed_rows_marked_diagnostic_are_diagnostic_only(
+    def test_passing_artifact_marked_diagnostic_is_demoted(
         self, tmp_path: Path
     ) -> None:
-        """AC2: the SAME failing artifact submitted as diagnostic yields a
-        diagnostic_only verdict — still not approvable, but honestly labeled
-        as context rather than a false completion."""
-        _place("candidate-measured.json", tmp_path)  # even a passing artifact…
+        """AC2: an otherwise-PASSING artifact submitted as diagnostic is
+        demoted to diagnostic_only — still not approvable. This is the only
+        artifact that can reach diagnostic_only: a failing artifact marked
+        diagnostic stays failed (contradiction outranks category — pinned by
+        test_failed_artifact_marked_diagnostic_stays_failed below). The
+        guarantee: a passing benchmark cannot be laundered into a completion
+        by labeling it context."""
+        _place("candidate-measured.json", tmp_path)
         verdict = evaluate_claims(
             _incident_task(),
             _evidence(category=EvidenceCategory.diagnostic),
@@ -134,6 +141,22 @@ class TestIncidentGate:
         )
         assert verdict.overall == "diagnostic_only"
         assert verdict.enforceable_unproven  # not approvable
+
+    def test_failed_artifact_marked_diagnostic_stays_failed(
+        self, tmp_path: Path
+    ) -> None:
+        """The precedence AC2 depends on: a FAILED candidate marked diagnostic
+        stays failed — a contradiction outranks the self-declared category, so
+        the failure can't be softened to a milder verdict (gates.py). Both
+        remain non-approvable, but the louder signal must survive."""
+        _place("candidate-failed-stt.json", tmp_path)
+        verdict = evaluate_claims(
+            _incident_task(),
+            _evidence(category=EvidenceCategory.diagnostic),
+            project_root=tmp_path,
+        )
+        assert verdict.overall == "failed"
+        assert verdict.enforceable_unproven
 
     def test_corrected_measured_candidate_approves(self, tmp_path: Path) -> None:
         """AC3 at the gate: the corrected artifact (measured, non-null
@@ -150,7 +173,10 @@ class TestIncidentGate:
         verdict = evaluate_claims(_incident_task(), _evidence(), project_root=tmp_path)
         assert verdict.overall == "failed"
         joined = " ".join(verdict.enforceable_unproven[0].failures)
-        assert "profile" in joined or "topology" in joined
+        # Attributable to topology specifically — the measured run of the
+        # WRONG profile/host is not the claimed benchmark.
+        assert "topology.profile" in joined
+        assert "topology.stt_endpoint_host" in joined
 
 
 # ---------------------------------------------------------------------------
