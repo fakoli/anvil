@@ -460,6 +460,11 @@ class ProgressNotedPayload(BaseModel):
     actor: str
     notes: str
     noted_at: str
+    # retro-opps T010 — optional structured phase for the heartbeat bus.
+    # Optional so every pre-T010 JSONL row still replays; extra='forbid'
+    # still rejects unknown keys.
+    phase: str | None = None
+    detail: str | None = None
 
 
 class SyncMappingUpsertedPayload(BaseModel):

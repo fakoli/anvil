@@ -1268,6 +1268,36 @@ class TestSubmitProgress:
         resp = _run(run())
         assert resp["recorded"] is True
 
+    def test_phase_is_recorded_in_event_payload(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """retro-opps T010 — submit_progress(phase=...) lands in the
+        progress.noted JSONL payload."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("submit_progress", {
+                    "task_id": "T001",
+                    "actor": "agent-x",
+                    "notes": "running tests",
+                    "phase": "tests",
+                }))
+
+        resp = _run(run())
+        assert resp["recorded"] is True
+
+        events = (state_dir / "events.jsonl").read_text(encoding="utf-8")
+        rows = [json.loads(line) for line in events.strip().splitlines()]
+        progress_rows = [r for r in rows if r["action"] == "progress.noted"]
+        assert progress_rows, "no progress.noted event appended"
+        payload = progress_rows[-1]["payload_json"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        assert payload["phase"] == "tests"
+        assert payload["detail"] is None
+
     def test_does_not_change_task_status(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """submit_progress records a note but must not change the task status."""
         state_dir = _init_state_dir(tmp_path)
