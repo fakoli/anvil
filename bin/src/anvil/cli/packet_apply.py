@@ -340,6 +340,15 @@ def _verdict_json(verdict: object) -> dict[str, object] | None:
     }
 
 
+def _echo_intent_warnings(warnings: list[str]) -> None:
+    """Advisory intent/evidence-mismatch block (T008). Silent when empty."""
+    if not warnings:
+        return
+    typer.echo("Intent check (advisory):")
+    for w in warnings:
+        typer.echo(f"  - {w}")
+
+
 def _echo_claim_verdict(verdict: object) -> None:
     """Human rendering, grouped by claim. Quiet when everything passed."""
     if verdict is None:
@@ -1004,6 +1013,12 @@ def apply(
             else None
         )
 
+        # evidence-contracts:T008 — advisory intent linter, same lifecycle as
+        # the verdict (review-only + approve, never on reject). Never gates.
+        from anvil.review.gates import lint_intent
+
+        intent_warnings = [] if reject else lint_intent(task)
+
         # Review-only mode: neither --approve nor --reject; show evidence summary.
         if not approve and not reject:
             # Fetch the latest evidence row for this task via the Backend protocol.
@@ -1042,6 +1057,7 @@ def apply(
                         "task": dump_model(task),
                         "merge_check": merge_block,  # T007 — same block as --approve
                         "claim_verdict": _verdict_json(contract_verdict),
+                        "intent_warnings": intent_warnings,  # T008
                         # No decision in review-only mode, so no proof is emitted;
                         # carry the key (null) to keep the apply envelope uniform.
                         "proof_path": None,
@@ -1068,6 +1084,7 @@ def apply(
                 typer.echo("No evidence found — run `anvil submit` first.")
             _echo_merge_check_block(merge_block)
             _echo_claim_verdict(contract_verdict)
+            _echo_intent_warnings(intent_warnings)
             typer.echo("")
             typer.echo(
                 "Pass --approve to accept or --reject --reason TEXT to reject."
@@ -1318,6 +1335,7 @@ def apply(
                 "proof_path": str(proof_path) if proof_path is not None else None,
                 "merge_check": merge_block,  # T007 — null when mode off/probe failed
                 "claim_verdict": _verdict_json(contract_verdict),  # T005
+                "intent_warnings": intent_warnings,  # T008
             },
         )
         return
@@ -1325,6 +1343,7 @@ def apply(
     if approve:
         _echo_merge_check_block(merge_block)
         _echo_claim_verdict(contract_verdict)
+        _echo_intent_warnings(intent_warnings)
         typer.echo(f"Task '{task_id}' approved by '{resolved_reviewer}' → done.")
         if proof_path is not None:
             typer.echo(f"  Signed proof: {proof_path}")
