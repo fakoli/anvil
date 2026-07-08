@@ -7684,3 +7684,198 @@ class TestStatusClaimReadback:
         assert len(lines) == 1
         assert lines[0].startswith("active-claims:1 ready-tasks:")
         assert "phase" not in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# apply claim gate (evidence-contracts:T005) — auto-strict on contracts
+# ---------------------------------------------------------------------------
+
+
+_CONTRACT_GATE_PRD = """# Project: Contract Gate Fixture
+
+## Summary
+
+Fixture for the auto-strict claim gate.
+
+## Goals
+
+- Refuse unproven claims at apply.
+
+## Requirements
+
+- R001: Declared contracts are enforced.
+
+## Features
+
+### F001: Gate feature
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Candidate benchmark task
+
+**Feature:** F001
+**Claims:** candidate_measured (measurement: gemma)
+
+Benchmark it.
+
+**Acceptance criteria:**
+
+- Candidate measured.
+
+**Verification:**
+
+- `echo ok`
+
+**Artifact assertions:**
+
+```yaml
+- artifact: evidence-out.json
+  claim: candidate_measured
+  assertions:
+    - path: status
+      op: equals
+      value: measured
+    - path: llm_ms
+      op: not_null
+```
+
+### T002: Plain task without contract
+
+**Feature:** F001
+
+No contract here.
+
+**Acceptance criteria:**
+
+- Exists.
+
+**Verification:**
+
+- `echo ok`
+"""
+
+
+class TestApplyClaimGate:
+    def _setup(self, tmp_path: Path, task_id: str = "T001") -> None:
+        _do_init(tmp_path, name="Contract Gate Project")
+        _write_prd(tmp_path, _CONTRACT_GATE_PRD)
+        for cmd in (
+            ["prd", "parse"], ["prd", "review"], ["prd", "review", "--approve"],
+            ["plan"], ["review", "tasks"],
+        ):
+            assert _invoke_cmd(tmp_path, cmd).exit_code == 0
+        claim_result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "cg-agent"]
+        )
+        assert claim_result.exit_code == 0, claim_result.output
+        submit_result = _invoke_cmd(
+            tmp_path,
+            ["submit", task_id, "--commands", "echo ok",
+             "--files-changed", "x.py"],
+        )
+        assert submit_result.exit_code == 0, submit_result.output
+
+    def test_failing_assertion_refuses_then_fixed_approves(
+        self, tmp_path: Path
+    ) -> None:
+        """T005 AC: failing assertion → exit 1 code claim_unproven, task
+        stays needs_review; the same task approves once the assertion passes."""
+        self._setup(tmp_path)
+        (tmp_path / "evidence-out.json").write_text(
+            json.dumps({"status": "failed", "llm_ms": None}), encoding="utf-8"
+        )
+        refused = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert refused.exit_code == 1, refused.output
+        envelope = json.loads(refused.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "claim_unproven"
+        verdict = envelope["error"]["claim_verdict"]
+        assert verdict["overall"] == "failed"
+        assert verdict["claims"][0]["claim"] == "candidate_measured"
+
+        show = _invoke_cmd(tmp_path, ["show", "T001", "--json"])
+        status = json.loads(show.output.strip().splitlines()[-1])["data"]["task"]["status"]
+        assert status == "needs_review"  # refusal left the task in review
+
+        (tmp_path / "evidence-out.json").write_text(
+            json.dumps({"status": "measured", "llm_ms": 356.8}), encoding="utf-8"
+        )
+        approved = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert approved.exit_code == 0, approved.output
+        data = json.loads(approved.output.strip().splitlines()[-1])["data"]
+        assert data["status"] == "done"
+        # The NAMED contract claim is proven; the overall verdict honestly
+        # stays incomplete because the planner's UNBOUND command proof never
+        # attached (the actor gap T007 closes) — advisory, so approval
+        # proceeded. Enforcement scope pinned by this very flow.
+        by_claim = {
+            c["claim"]: c["verdict"] for c in data["claim_verdict"]["claims"]
+        }
+        assert by_claim["candidate_measured"] == "passed"
+
+    def test_human_output_names_claim_and_failing_predicate(
+        self, tmp_path: Path
+    ) -> None:
+        """T005 AC: human output names the unproven claim, the failing
+        predicate, and the observed value."""
+        self._setup(tmp_path)
+        (tmp_path / "evidence-out.json").write_text(
+            json.dumps({"status": "failed", "llm_ms": None}), encoding="utf-8"
+        )
+        refused = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv"]
+        )
+        assert refused.exit_code == 1
+        assert "claim gate REFUSED" in refused.output
+        assert "candidate_measured" in refused.output
+        assert "'status'" in refused.output  # failing predicate path
+        assert "failed" in refused.output  # observed value
+
+    def test_missing_artifact_is_incomplete_refusal(self, tmp_path: Path) -> None:
+        self._setup(tmp_path)  # artifact never written
+        refused = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert refused.exit_code == 1
+        envelope = json.loads(refused.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "claim_unproven"
+        assert envelope["error"]["claim_verdict"]["overall"] == "incomplete"
+
+    def test_contractless_task_keeps_advisory_behavior(
+        self, tmp_path: Path
+    ) -> None:
+        """T005 AC: no assertions → today's advisory behavior, envelope keys
+        additive only (claim_verdict null)."""
+        self._setup(tmp_path, task_id="T002")
+        approved = _invoke_cmd(
+            tmp_path, ["apply", "T002", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert approved.exit_code == 0, approved.output
+        data = json.loads(approved.output.strip().splitlines()[-1])["data"]
+        assert data["status"] == "done"
+        assert data["claim_verdict"] is None
+
+    def test_review_only_and_submit_show_verdict(self, tmp_path: Path) -> None:
+        self._setup(tmp_path)
+        (tmp_path / "evidence-out.json").write_text(
+            json.dumps({"status": "failed", "llm_ms": 1}), encoding="utf-8"
+        )
+        review = _invoke_cmd(tmp_path, ["apply", "T001", "--json"])
+        assert review.exit_code == 0  # review-only never gates
+        data = json.loads(review.output.strip().splitlines()[-1])["data"]
+        assert data["claim_verdict"]["overall"] == "failed"
+        human = _invoke_cmd(tmp_path, ["apply", "T001"])
+        assert "Claim candidate_measured: FAILED" in human.output
+
+    def test_reject_never_gated_by_contract(self, tmp_path: Path) -> None:
+        self._setup(tmp_path)
+        rejected = _invoke_cmd(
+            tmp_path,
+            ["apply", "T001", "--reject", "--reason", "unproven anyway", "--json"],
+        )
+        assert rejected.exit_code == 0, rejected.output

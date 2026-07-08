@@ -1685,6 +1685,77 @@ class TestNextReadyField:
         # T002 is higher priority but excluded by file overlap; T003 wins.
         assert resp["next_ready"]["id"] == "T003"
 
+    def test_apply_review_decision_enforces_claim_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """evidence-contracts:T005 AC4 (review finding): the MCP apply path
+        enforces the contract identically to the CLI — ToolError
+        claim_unproven on a failing assertion, task stays needs_review,
+        approves once the artifact passes."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="approved")
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="needs_review")
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x"
+        )
+        _add_evidence(
+            state_dir, evidence_id="EV0001", task_id="T001", claim_id="C001",
+            commands_run=["echo ok"], files_changed=["x.py"],
+        )
+        # Attach the evidence contract directly (the fixture INSERT predates
+        # claims/verification knobs).
+        conn = sqlite3.connect(str(state_dir / "state.db"))
+        conn.execute(
+            "UPDATE tasks SET claims = ?, verification = ? WHERE id = 'T001'",
+            (
+                json.dumps([{"id": "candidate_measured", "subject": "gemma"}]),
+                json.dumps({
+                    "commands": ["echo ok"],
+                    "artifact_assertions": [{
+                        "artifact": "evidence-out.json",
+                        "claim": "candidate_measured",
+                        "assertions": [
+                            {"path": "status", "op": "equals", "value": "measured"}
+                        ],
+                    }],
+                }),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        (tmp_path / "evidence-out.json").write_text(
+            json.dumps({"status": "failed"}), encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def refuse() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("apply_review_decision", {
+                    "task_id": "T001", "approve": True, "reviewer": "human",
+                })
+
+        with pytest.raises(ToolError, match="claim_unproven"):
+            _run(refuse())
+
+        async def status_of() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("get_task", {"task_id": "T001"}))
+
+        assert _run(status_of())["status"] == "needs_review"
+
+        (tmp_path / "evidence-out.json").write_text(
+            json.dumps({"status": "measured"}), encoding="utf-8"
+        )
+
+        async def approve() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("apply_review_decision", {
+                    "task_id": "T001", "approve": True, "reviewer": "human",
+                }))
+
+        assert _run(approve())["decision"] == "accepted"
+
     def test_apply_review_decision_names_next_ready(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

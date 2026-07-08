@@ -3101,6 +3101,47 @@ def apply_review_decision(
                     "pass strict=False to override for this call.",
                 )
 
+        # evidence-contracts:T005 — AUTO-STRICT contract gate on the MCP
+        # accept path, identical to the CLI: a task declaring claims or
+        # artifact assertions is held to them independent of strict_evidence.
+        # Refuse BEFORE task.applied; rejections are never gated.
+        if approve and (
+            task.claims or task.verification.artifact_assertions
+        ):
+            from pathlib import Path as _Path
+
+            from anvil.review.gates import evaluate_claims
+
+            try:
+                contract_verdict = evaluate_claims(
+                    task,
+                    backend.get_latest_evidence(task_id),
+                    project_root=_Path(cwd).resolve() if cwd else _Path.cwd(),
+                )
+            except Exception:  # noqa: BLE001 — never brick apply on a gate bug
+                # Review finding: the fail-open must be LOUD on the machine
+                # surface too — a silently skipped gate is the incident class.
+                print(
+                    "anvil-mcp: claim gate could not run (internal error); "
+                    "contract enforcement skipped for this call.",
+                    file=sys.stderr,
+                )
+                contract_verdict = None
+            if (
+                contract_verdict is not None
+                and contract_verdict.enforceable_unproven
+            ):
+                unproven = ", ".join(
+                    f"{cv.claim or '(task)'} [{cv.verdict}]: "
+                    + "; ".join(cv.failures + cv.missing + cv.proof_missing)
+                    for cv in contract_verdict.enforceable_unproven
+                )
+                raise ToolError(
+                    f"claim_unproven: claim gate refused approval of task "
+                    f"'{task_id}'; unproven claim(s): {unproven}. Task "
+                    "remains in needs_review.",
+                )
+
         decision = "accepted" if approve else "rejected"
         clock = SystemClock()
         now = clock.now()
