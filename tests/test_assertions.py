@@ -135,6 +135,23 @@ class TestOperators:
             tmp_path, _MEASURED,
             Predicate(path="rows[*].score", op="gte", value=3),
         ).passed
+        # Review MUST-FIX: both polarities for every comparison operator.
+        assert _one(
+            tmp_path, _MEASURED,
+            Predicate(path="stage_timings_ms.llm_ms", op="gt", value=0),
+        ).passed
+        assert not _one(
+            tmp_path, _MEASURED,
+            Predicate(path="stage_timings_ms.llm_ms", op="lt", value=0),
+        ).passed
+        assert not _one(
+            tmp_path, _MEASURED,
+            Predicate(path="stage_timings_ms.ttfa_ms", op="gte", value=1000),
+        ).passed
+        assert _one(
+            tmp_path, _MEASURED,
+            Predicate(path="stage_timings_ms.ttfa_ms", op="lte", value=1000),
+        ).passed
 
     def test_numeric_on_null_is_failure_not_crash(self, tmp_path: Path) -> None:
         r = _one(
@@ -158,6 +175,9 @@ class TestOperators:
             Predicate(path="stage_timings_ms.llm_ms", op="len_gte", value=1),
         )
         assert not r.passed and "no length" in r.failures[0]
+        # Review MUST-FIX: the ordinary too-short failing branch.
+        r2 = _one(tmp_path, _MEASURED, Predicate(path="rows", op="len_gte", value=5))
+        assert not r2.passed and "fails len_gte" in r2.failures[0]
 
 
 class TestMalformation:
@@ -237,6 +257,38 @@ class TestPhasePredicates:
     def test_unknown_target_stage_is_loud(self, tmp_path: Path) -> None:
         r = _one(tmp_path, _MEASURED, must_reach="deploy", **self._STAGES)
         assert not r.passed and "not in stage_order" in r.failures[0]
+
+
+class TestReviewFindings:
+    def test_unknown_recorded_stage_is_loud(self, tmp_path: Path) -> None:
+        """Review finding: a typo'd stage name in the ARTIFACT must fail the
+        phase check loudly, not be silently filtered out."""
+        typoed = dict(_FAILED_STT, errors=[{"stage": "sst", "kind": "x"}])
+        r = _one(
+            tmp_path, typoed, must_not_fail_before="llm",
+            stage_order=["stt", "llm", "tts"], stage_path="errors[*].stage",
+        )
+        assert not r.passed
+        assert "unknown stage(s)" in r.failures[0]
+
+    def test_artifact_path_escaping_project_root_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Review finding: reading outside the project root is never a
+        legitimate contract — escaping paths are failed assertions."""
+        outside = tmp_path.parent / "outside-secret.json"
+        outside.write_text(json.dumps({"x": 1}), encoding="utf-8")
+        try:
+            for path in ("../outside-secret.json", str(outside)):
+                assertion = ArtifactAssertion(
+                    artifact=path,
+                    assertions=[Predicate(path="x", op="exists")],
+                )
+                (result,) = evaluate_assertions([assertion], tmp_path)
+                assert not result.passed, path
+                assert "escapes the project root" in result.failures[0]
+        finally:
+            outside.unlink()
 
 
 class TestClaimBindingCarrythrough:

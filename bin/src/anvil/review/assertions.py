@@ -166,6 +166,14 @@ def _check_phases(doc: Any, assertion: ArtifactAssertion) -> list[str]:
         ]
     order = {stage: idx for idx, stage in enumerate(assertion.stage_order)}
     found, stages = _resolve_path(doc, assertion.stage_path)
+    # Review finding: a stage value the artifact records that stage_order
+    # does not know (typo, rename, casing) must be LOUD — silently filtering
+    # it would let the exact incident class this engine exists for pass.
+    unknown = sorted({s for s in (stages if found else []) if s not in order})
+    if unknown:
+        failures.append(
+            f"artifact records unknown stage(s) {unknown!r} not in stage_order"
+        )
     failed_stages = [s for s in stages if s in order] if found else []
 
     if assertion.must_not_fail_before is not None:
@@ -208,11 +216,29 @@ def evaluate_assertions(
     """
     results: list[AssertionResult] = []
     for assertion in assertions:
-        artifact_path = project_root / assertion.artifact
+        # Trust note: PRD-declared paths share the trust boundary of
+        # verification commands (which run with shell=True) — but reading
+        # OUTSIDE the project root is never a legitimate contract, so an
+        # escaping path is a failed assertion, not a capability.
+        artifact_path = (project_root / assertion.artifact).resolve()
         failures: list[str] = []
         observed: dict[str, Any] = {}
 
         try:
+            root_resolved = project_root.resolve()
+            if not artifact_path.is_relative_to(root_resolved):
+                results.append(
+                    AssertionResult(
+                        artifact=assertion.artifact,
+                        claim=assertion.claim,
+                        passed=False,
+                        failures=[
+                            f"artifact path {assertion.artifact!r} escapes "
+                            "the project root"
+                        ],
+                    )
+                )
+                continue
             raw = artifact_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             results.append(
