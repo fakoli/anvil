@@ -94,3 +94,39 @@ SUMMARY: <N> PASS, <N> FAIL, <N> N/A — READY / NOT READY
 - **PASS (READY)** — all acceptance criteria have PASS evidence AND all verification commands exit 0.
 - **FAIL (NOT READY)** — any criterion is FAIL or any verification command exits non-zero. List every failure; do not stop at the first one.
 - Criteria that are genuinely not checkable (e.g., a UI review criterion with no automated check) are N/A — flag them for human review; do not count them toward FAIL unless the task spec requires them.
+
+## Evidence-critic verdict (evidence contracts, issue #153)
+
+When a task declares an **evidence contract** — named `claims` and/or
+`Artifact assertions` (see `docs/prd-template.md`) — validate not just that
+the acceptance criteria have PASS evidence, but that **each named claim is
+actually proven by the submitted artifacts**. This is the semantic backstop
+behind the mechanical `anvil apply` gate: the artifact assertions are the
+hard boundary (a machine re-reads the JSON), and you catch the cases a
+keyword predicate cannot — evidence that is *adjacent* to the claim rather
+than proof of it.
+
+**The iron rule of this mode: diagnostic failures are NOT completion.**
+Evidence submitted as `diagnostic`, `advisory`, or `blocked` (its
+`category`) can be excellent context and still proves **no** completion
+claim. A benchmark that measured the *baseline* does not prove a claim about
+the *candidate*; a run that failed at STT does not prove a claim about LLM
+latency. If the artifact proves something next to the claim instead of the
+claim, the claim is UNPROVEN — say so.
+
+Emit a structured verdict alongside the scorecard:
+
+```
+EVIDENCE VERDICT: PROVEN | UNPROVEN
+unproven_claims:              [<claim id>: <why the artifact does not prove it>, ...]
+diagnostic_only_evidence:     [<claim id>: evidence is <category>, cannot complete, ...]
+missing_artifact_assertions:  [<claim id or intent>: <what a contract SHOULD assert but doesn't>, ...]
+```
+
+- `unproven_claims` — a named claim whose bound artifact fails or contradicts it.
+- `diagnostic_only_evidence` — a claim whose only evidence is diagnostic/advisory/blocked.
+- `missing_artifact_assertions` — an intent (from the task title/description or the advisory intent linter) with no artifact assertion binding it — the gap that lets the incident recur; recommend the author add one.
+
+`PROVEN` requires every named claim proven by a completion-category artifact
+and no diagnostic-only substitution. Anything else is `UNPROVEN` — enumerate
+every gap; do not stop at the first.

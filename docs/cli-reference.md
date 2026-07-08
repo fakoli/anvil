@@ -936,14 +936,40 @@ refusal).
 > `apply --approve` before merging the PR, or expect the advisory note; do
 > not enable `merge_check: strict` in a merge-first workflow.
 
+**Evidence-contract gate (auto-strict).** A task that declares an evidence
+contract — named `claims` and/or `Artifact assertions` in its PRD block (see
+`docs/prd-template.md`) — is held to it at `--approve` **independent of
+`strict_evidence`**. `apply` re-evaluates the artifacts at approval time and
+prints a per-claim verdict (`claim_verdict` JSON key; human `Claim <id>:
+<VERDICT>` lines). Per-claim verdict vocabulary:
+
+| Verdict | Meaning |
+|---|---|
+| `passed` | every bound assertion/proof satisfied on completion-category evidence |
+| `failed` | an artifact assertion **contradicted** the claim on an existing artifact |
+| `incomplete` | a required proof is unmet, the artifact is not yet written, a named claim binds no contract, or no evidence was submitted |
+| `blocked` | the evidence's `category` is `blocked` — the claim could not be proven |
+| `diagnostic_only` | assertions pass but the evidence is `diagnostic`/`advisory` — excellent context, proves no completion claim |
+
+The overall verdict is the worst per-claim one (`failed` > `blocked` >
+`incomplete` > `diagnostic_only` > `passed`). When any **enforceable**
+unproven claim remains, `--approve` refuses with exit 1 and error code
+`claim_unproven`; the task stays in `needs_review`. Named claims always
+enforce; on the implicit task-level claim, command-proof strictness stays
+governed by `strict_evidence` while artifact contradictions always enforce.
+`--reject` is never gated. An advisory `Intent check` block
+(`intent_warnings`) additionally flags task intents that no claim or
+assertion covers — never blocking.
+
 **Exit codes:**
 
 - `0` — review decision recorded, **or** review-only mode (neither
   `--approve` nor `--reject`) printed the summary.
 - `1` — `TASK_ID` not found; task is not in `needs_review` status; both
   `--approve` and `--reject` were passed; `--reject` was passed without
-  `--reason`; or `merge_check: strict` refused a stale/conflicted branch
-  (code `base_stale`).
+  `--reason`; `merge_check: strict` refused a stale/conflicted branch
+  (code `base_stale`); or the **claim gate** refused a task whose evidence
+  contract has an unproven claim (code `claim_unproven`, see below).
 
 **Example:**
 
