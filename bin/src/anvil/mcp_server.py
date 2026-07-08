@@ -891,6 +891,27 @@ def get_next_task(
         data["review_tier"] = review_tier(
             best, config=_load_merged_config_optional(state_dir)
         )
+        # retro-opps T009 — advisory collision visibility, same
+        # ClaimManager.check_conflicts seam as the CLI `next` (read-only).
+        conflict_warnings: list[dict[str, Any]] = []
+        if best.likely_files:
+            from anvil.claims.manager import ClaimManager
+            from anvil.clock import SystemClock
+
+            manager = ClaimManager(
+                backend, SystemClock(), actor=actor or "mcp"
+            )
+            conflict_warnings = [
+                {
+                    "claim_id": w.other_claim_id,
+                    "actor": w.other_actor,
+                    "files": list(w.overlapping_files),
+                }
+                for w in manager.check_conflicts(
+                    best.id, list(best.likely_files)
+                )
+            ]
+        data["conflict_warnings"] = conflict_warnings
         return data
     finally:
         backend.close()

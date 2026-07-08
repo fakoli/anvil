@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -708,6 +709,23 @@ def next(  # noqa: A001
                     f"No claimable tasks in this PRD ({scoped_prd_id})."
                 )
                 withheld_reason = "no_claimable_tasks_in_prd"
+
+        # retro-opps T009 — ADVISORY collision visibility: the selected task's
+        # likely_files intersected with active claims' expected_files, via the
+        # same ClaimManager.check_conflicts the claim gate uses (never
+        # duplicated). Selection above is untouched — conflict-GROUP holds
+        # already exclude candidates; this surfaces the residual overlap a
+        # claim's runtime expected_files can introduce outside any group.
+        conflict_warnings: list[dict[str, Any]] = []
+        if task is not None and task.likely_files:
+            conflict_warnings = [
+                {
+                    "claim_id": w.other_claim_id,
+                    "actor": w.other_actor,
+                    "files": list(w.overlapping_files),
+                }
+                for w in manager.check_conflicts(task.id, list(task.likely_files))
+            ]
     finally:
         backend.close()
 
@@ -728,6 +746,7 @@ def next(  # noqa: A001
         data = {
             "task": dump_model(task) if task is not None else None,
             "review_tier": task_review_tier,
+            "conflict_warnings": conflict_warnings,
             "withheld_reason": withheld_reason,
         }
         if scoped_empty_message is not None:
@@ -769,5 +788,10 @@ def next(  # noqa: A001
     typer.echo(f"  Review tier: {task_review_tier}")
     if task.scores.complexity is not None:
         typer.echo(f"  Complexity: {task.scores.complexity}")
+    for warning in conflict_warnings:
+        typer.echo(
+            f"  Conflict warning: files {', '.join(warning['files'])} overlap "
+            f"active claim {warning['claim_id']} ({warning['actor']})."
+        )
     typer.echo("")
     typer.echo(f"Run `anvil claim {task.id}` to acquire the lease.")

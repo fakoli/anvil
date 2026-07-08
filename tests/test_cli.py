@@ -7425,3 +7425,156 @@ class TestApplyMergeCheck:
             ["apply", "T001", "--reject", "--reason", "stale anyway", "--json"],
         )
         assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# next conflict warnings (retro-opps:T009) — advisory collision visibility
+# ---------------------------------------------------------------------------
+
+
+_CONFLICT_WARN_PRD = """# Project: Conflict Warning Fixture
+
+## Summary
+
+Fixture for anvil next conflict-warning tests.
+
+## Goals
+
+- Surface residual file overlap on next.
+
+## Requirements
+
+- R001: next warns on likely-file overlap with active claims.
+
+## Features
+
+### F001: Fixture feature
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: First task
+
+**Feature:** F001
+**Likely files:** src/alpha.py
+
+Task with alpha scope.
+
+**Acceptance criteria:**
+
+- alpha exists.
+
+**Verification:**
+
+- `echo ok`
+
+### T002: Second task
+
+**Feature:** F001
+**Likely files:** src/beta.py
+
+Task with beta scope — no likely-file overlap with T001, so no conflict
+group; the overlap in the tests below comes from the CLAIM's runtime
+expected_files.
+
+**Acceptance criteria:**
+
+- beta exists.
+
+**Verification:**
+
+- `echo ok`
+"""
+
+
+def _claim_with_expected_files(
+    tmp_path: Path, task_id: str, actor: str, expected_files: list[str]
+) -> None:
+    """Create an active claim with EXPLICIT expected_files via ClaimManager
+    (the CLI derives expected_files from likely_files, so the residual-overlap
+    scenario needs the programmatic seam)."""
+    from anvil.claims.manager import ClaimManager
+    from anvil.clock import SystemClock
+    from anvil.state.sqlite import SqliteBackend
+
+    state_dir = tmp_path / ".anvil"
+    backend = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(state_dir / "events.jsonl"),
+        clock=SystemClock(),
+    )
+    backend.initialize()
+    try:
+        manager = ClaimManager(backend, SystemClock(), actor=actor)
+        manager.claim(task_id, expected_files=expected_files)
+    finally:
+        backend.close()
+
+
+class TestNextConflictWarnings:
+    def _setup(self, tmp_path: Path) -> None:
+        _do_init(tmp_path, name="Conflict Warn Project")
+        _write_prd(tmp_path, _CONFLICT_WARN_PRD)
+        for cmd in (
+            ["prd", "parse"], ["prd", "review"], ["prd", "review", "--approve"],
+            ["plan"], ["review", "tasks"],
+        ):
+            assert _invoke_cmd(tmp_path, cmd).exit_code == 0
+
+    def test_overlapping_claim_produces_warning_without_changing_selection(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: another actor's claim overlapping the recommended task's
+        likely_files → non-empty conflict_warnings naming claim, owner, files;
+        the recommended task is unchanged."""
+        self._setup(tmp_path)
+        # other-agent claims T001 but declares runtime scope over BETA —
+        # T002's file — creating the residual overlap no conflict group covers.
+        _claim_with_expected_files(
+            tmp_path, "T001", "other-agent", ["src/beta.py"]
+        )
+        result = _invoke_cmd(tmp_path, ["next", "--actor", "me", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["task"]["id"] == "T002"  # selection untouched
+        assert len(data["conflict_warnings"]) == 1
+        warning = data["conflict_warnings"][0]
+        assert warning["actor"] == "other-agent"
+        assert warning["files"] == ["src/beta.py"]
+        assert warning["claim_id"]
+
+        human = _invoke_cmd(tmp_path, ["next", "--actor", "me"])
+        assert "Conflict warning:" in human.output
+        assert "src/beta.py" in human.output
+
+    def test_no_overlap_empty_warnings_and_no_extra_line(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: no overlap → empty list, no extra human line."""
+        self._setup(tmp_path)
+        _claim_with_expected_files(
+            tmp_path, "T001", "other-agent", ["src/alpha.py"]
+        )
+        result = _invoke_cmd(tmp_path, ["next", "--actor", "me", "--json"])
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["task"]["id"] == "T002"
+        assert data["conflict_warnings"] == []
+        human = _invoke_cmd(tmp_path, ["next", "--actor", "me"])
+        assert "Conflict warning:" not in human.output
+
+    def test_claim_behavior_unchanged(self, tmp_path: Path) -> None:
+        """AC: `anvil claim` (existing warning + --force) is unchanged —
+        claiming T002 with the overlapping claim active still warns/refuses
+        exactly as before via the same check_conflicts seam."""
+        self._setup(tmp_path)
+        _claim_with_expected_files(
+            tmp_path, "T001", "other-agent", ["src/beta.py"]
+        )
+        refused = _invoke_cmd(tmp_path, ["claim", "T002", "--actor", "me"])
+        assert refused.exit_code == 1
+        assert "conflict" in refused.output.lower()
+        forced = _invoke_cmd(
+            tmp_path, ["claim", "T002", "--actor", "me", "--force"]
+        )
+        assert forced.exit_code == 0, forced.output

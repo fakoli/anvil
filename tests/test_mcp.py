@@ -852,6 +852,44 @@ class TestGetNextTask:
         assert task["id"] == "T002"
         assert task["priority"] == "high"
         assert task["review_tier"] == "max"  # unscored fixture fails safe
+        assert task["conflict_warnings"] == []  # T009 — no active overlap
+
+    def test_conflict_warnings_surface_residual_overlap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """retro-opps T009 — a claim whose runtime expected_files overlap the
+        recommended task's likely_files (no conflict group) yields advisory
+        conflict_warnings; selection is untouched."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(
+            state_dir, task_id="T001", status="claimed",
+            likely_files=["src/alpha.py"],
+        )
+        _add_task(
+            state_dir, task_id="T002", status="ready", priority="high",
+            likely_files=["src/beta.py"],
+        )
+        _add_active_claim(
+            state_dir, claim_id="C042", task_id="T001",
+            claimed_by="other-agent", expected_files=["src/beta.py"],
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("get_next_task", {}))
+
+        task = _run(run())
+        assert task is not None
+        assert task["id"] == "T002"  # selection untouched
+        assert task["conflict_warnings"] == [
+            {
+                "claim_id": "C042",
+                "actor": "other-agent",
+                "files": ["src/beta.py"],
+            }
+        ]
 
     def test_returns_none_when_no_ready_tasks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
