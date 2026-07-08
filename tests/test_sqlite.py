@@ -5515,7 +5515,7 @@ class TestSchemaVersionPhase8:
     TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_six(self) -> None:
+    def test_schema_version_is_nine(self) -> None:
         """The evidence-contracts ship floor is SCHEMA_VERSION == 9
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153)."""

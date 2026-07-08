@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from anvil.state.models import DEFAULT_PRD_ID, ProofArtifact
+from anvil.state.models import DEFAULT_PRD_ID, EvidenceCategory, ProofArtifact
 
 
 class ProjectCreatedPayload(BaseModel):
@@ -414,7 +414,9 @@ class EvidenceSubmittedPayload(BaseModel):
     proofs: list[ProofArtifact] = Field(default_factory=list)
     # Evidence contracts (issue #153) — optional evidence role; absent key
     # (every pre-existing row) means completion, the historical meaning.
-    category: str | None = None
+    # Typed as the enum (review finding): an out-of-range category must be
+    # rejected at WRITE time, not poison every later evidence read.
+    category: EvidenceCategory | None = None
 
 
 class TaskAppliedPayload(BaseModel):
