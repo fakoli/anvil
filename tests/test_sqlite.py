@@ -5515,10 +5515,11 @@ class TestSchemaVersionPhase8:
     TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_six(self) -> None:
-        """The v0.3 multi-PRD revisions ship floor is SCHEMA_VERSION == 8
-        (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023)."""
-        assert SCHEMA_VERSION == 8
+    def test_schema_version_is_nine(self) -> None:
+        """The evidence-contracts ship floor is SCHEMA_VERSION == 9
+        (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
+        v9 = tasks.claims + evidence.category, issue #153)."""
+        assert SCHEMA_VERSION == 9
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -7914,6 +7915,136 @@ class TestV6ToV7Migration:
             b.close()
 
 
+class TestV8ToV9Migration:
+    """evidence-contracts T001 — v8 -> v9 adds ``tasks.claims`` and
+    ``evidence.category``. A DB stamped at v8 must grow both via the ladder
+    (the version-equal early-return would otherwise skip them forever), all
+    rows preserved, re-run a no-op."""
+
+    def _stand_up_v8_db(self, tmp_path: Path) -> Path:
+        """Cheapest honest v8 db: initialize with the CURRENT engine, then
+        strip the v9 columns and re-stamp user_version=8 — exactly the shape
+        a pre-evidence-contracts build wrote (SQLite 3.35+ DROP COLUMN)."""
+        b = _make_backend(tmp_path)
+        _setup_project(b)
+        b.append(_make_event(
+            "feature.created", _make_feature_payload(feat_id="F001"),
+            event_id="E000010", target_kind="feature", target_id="F001",
+        ))
+        b.append(_make_event(
+            "task.created", _make_task_payload(task_id="T001"),
+            event_id="E000011", target_kind="task", target_id="T001",
+        ))
+        b.close()
+        db_path = tmp_path / "state.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("ALTER TABLE tasks DROP COLUMN claims")
+        conn.execute("ALTER TABLE evidence DROP COLUMN category")
+        conn.execute("PRAGMA user_version = 8")
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_v8_db_gains_claims_and_category_and_stamps_v9(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = self._stand_up_v8_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        assert "claims" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        conn.close()
+
+        b = _make_backend(tmp_path)  # initialize() runs the ladder
+        try:
+            assert b.get_schema_version() == 9
+            task = b.get_task("T001")
+            assert task is not None
+            assert task.claims == []  # row preserved, backfilled to "no claims"
+        finally:
+            b.close()
+
+        conn = sqlite3.connect(str(db_path))
+        assert "claims" in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        assert "category" in {
+            r[1] for r in conn.execute("PRAGMA table_info(evidence)")
+        }
+        conn.close()
+
+        # Re-open (re-run of the ladder) is a no-op, not a duplicate-column crash.
+        b2 = _make_backend(tmp_path)
+        b2.close()
+
+    def test_task_with_claims_roundtrips_through_backend(
+        self, tmp_path: Path
+    ) -> None:
+        """T001 AC: claims + artifact assertions survive create -> get -> list."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            b.append(_make_event(
+                "feature.created", _make_feature_payload(feat_id="F001"),
+                event_id="E000010", target_kind="feature", target_id="F001",
+            ))
+            payload = _make_task_payload(task_id="T001")
+            payload["claims"] = [
+                {"id": "candidate_benchmark_completed",
+                 "subject": "gemma4-12b-it", "kind": "measurement"}
+            ]
+            payload["verification"] = {
+                "commands": ["echo ok"],
+                "artifact_assertions": [
+                    {
+                        "artifact": "evidence/gemma.json",
+                        "claim": "candidate_benchmark_completed",
+                        "assertions": [
+                            {"path": "status", "op": "equals", "value": "measured"},
+                            {"path": "stage_timings_ms.llm_ms", "op": "not_null"},
+                        ],
+                        "stage_order": ["stt", "llm", "tts"],
+                        "stage_path": "errors[*].stage",
+                        "must_not_fail_before": "llm",
+                    }
+                ],
+            }
+            b.append(_make_event(
+                "task.created", payload,
+                event_id="E000011", target_kind="task", target_id="T001",
+            ))
+            task = b.get_task("T001")
+            assert task is not None
+            assert task.claims[0].id == "candidate_benchmark_completed"
+            assert task.claims[0].kind.value == "measurement"
+            va = task.verification.artifact_assertions[0]
+            assert va.claim == "candidate_benchmark_completed"
+            assert va.assertions[1].op.value == "not_null"
+            assert va.must_not_fail_before == "llm"
+            listed = [t for t in b.list_tasks() if t.id == "T001"][0]
+            assert listed.claims == task.claims
+        finally:
+            b.close()
+
+    def test_claimless_task_dump_keeps_pre_v9_shape(self, tmp_path: Path) -> None:
+        """T001 AC: omit-when-empty — no claims/artifact_assertions keys in
+        dumps of tasks that don't use the feature (byte-shape parity)."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            b.append(_make_event(
+                "feature.created", _make_feature_payload(feat_id="F001"),
+                event_id="E000010", target_kind="feature", target_id="F001",
+            ))
+            b.append(_make_event(
+                "task.created", _make_task_payload(task_id="T001"),
+                event_id="E000011", target_kind="task", target_id="T001",
+            ))
+            task = b.get_task("T001")
+            assert task is not None
+            dump = task.model_dump(mode="json")
+            assert "claims" not in dump
+            assert "artifact_assertions" not in dump["verification"]
+        finally:
+            b.close()
+
+
 class TestV7ToV8Migration:
     """T023 — the v7 -> v8 migration adds the per-PRD ``revision`` counter.
 
@@ -8003,7 +8134,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 8
+            assert b.get_schema_version() == SCHEMA_VERSION == 9
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.

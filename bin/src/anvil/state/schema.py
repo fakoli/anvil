@@ -64,7 +64,7 @@ Version history
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 8
+SCHEMA_VERSION: int = 9
 
 
 def get_schema_version() -> int:
@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     implementation_notes TEXT NOT NULL DEFAULT '[]',
     verification         TEXT NOT NULL DEFAULT '{}',
     likely_files         TEXT NOT NULL DEFAULT '[]',
+    claims               TEXT NOT NULL DEFAULT '[]',
     parent_task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     created_at           TEXT NOT NULL,
     updated_at           TEXT NOT NULL
@@ -212,6 +213,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     screenshots         TEXT NOT NULL DEFAULT '[]',
     known_limitations   TEXT,
     proofs              TEXT NOT NULL DEFAULT '[]',
+    category            TEXT NOT NULL DEFAULT 'completion',
     submitted_at        TEXT NOT NULL,
     submitted_by        TEXT NOT NULL
 );

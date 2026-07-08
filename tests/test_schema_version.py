@@ -41,9 +41,9 @@ def _init(tmp_path: Path) -> None:
 
 
 def test_get_schema_version_matches_constant() -> None:
-    """The public accessor returns the SCHEMA_VERSION constant (==8)."""
+    """The public accessor returns the SCHEMA_VERSION constant (==9)."""
     assert get_schema_version() == SCHEMA_VERSION
-    assert get_schema_version() == 8
+    assert get_schema_version() == 9
 
 
 def test_backend_get_schema_version_matches_constant(tmp_path: Path) -> None:
