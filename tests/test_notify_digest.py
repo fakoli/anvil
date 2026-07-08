@@ -33,19 +33,31 @@ notify_mod = sys.modules["anvil.cli.notify_digest"]
 runner = CliRunner()
 
 
-def _stub_backend(*statuses: str) -> object:
+def _stub_backend(*statuses: str, claims: list | None = None) -> object:
     """A minimal backend whose ``list_tasks`` returns objects with just ``.status``
-    (all notify-digest reads)."""
+    and whose ``list_active_claims`` returns *claims* (T008 lease warnings)."""
     tasks = [types.SimpleNamespace(status=s) for s in statuses]
+    active_claims = claims or []
 
     class _B:
         def list_tasks(self) -> list:  # noqa: D401
             return tasks
 
+        def list_active_claims(self) -> list:
+            return active_claims
+
         def close(self) -> None:
             pass
 
     return _B()
+
+
+def _claim_expiring_in(minutes: float) -> object:
+    from datetime import UTC, datetime, timedelta
+
+    return types.SimpleNamespace(
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=minutes)
+    )
 
 
 # --- real-backend integration: the silent paths ---------------------------------
@@ -144,4 +156,44 @@ def test_notify_digest_json_envelope_always_emits(
     r = runner.invoke(app, ["notify-digest", "--json"], catch_exceptions=False)
     assert r.exit_code == 0
     data = json.loads(r.stdout)["data"]
-    assert data == {"needs_review": 1, "blocked": 2, "total": 3}
+    assert data == {
+        "needs_review": 1,
+        "blocked": 2,
+        "expiring_soon": 0,
+        "total": 3,
+    }
+
+
+# --- T008: expiring-lease counts ------------------------------------------------
+
+
+def test_notify_digest_counts_expiring_leases(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(notify_mod, "_resolve_state_dir", lambda cwd: tmp_path)
+    monkeypatch.setattr(
+        notify_mod,
+        "_open_backend",
+        lambda sd: _stub_backend(
+            "ready", claims=[_claim_expiring_in(5), _claim_expiring_in(60)]
+        ),
+    )
+    r = runner.invoke(app, ["notify-digest"], catch_exceptions=False)
+    assert r.exit_code == 0
+    assert "1 lease(s) expiring soon" in r.stdout
+
+    rj = runner.invoke(app, ["notify-digest", "--json"], catch_exceptions=False)
+    data = json.loads(rj.stdout)["data"]
+    assert data["expiring_soon"] == 1
+
+
+def test_notify_digest_expiring_leases_silent_when_all_healthy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(notify_mod, "_resolve_state_dir", lambda cwd: tmp_path)
+    monkeypatch.setattr(
+        notify_mod,
+        "_open_backend",
+        lambda sd: _stub_backend("ready", claims=[_claim_expiring_in(120)]),
+    )
+    r = runner.invoke(app, ["notify-digest"], catch_exceptions=False)
+    assert r.exit_code == 0
+    assert r.stdout.strip() == ""

@@ -7221,3 +7221,65 @@ class TestMergeCheck:
         assert result.exit_code == 1
         envelope = json.loads(result.output.strip().splitlines()[-1])
         assert envelope["error"]["code"] == "branch_not_found"
+
+
+# ---------------------------------------------------------------------------
+# heartbeat pre-expiry lease warning (retro-opps:T008)
+# ---------------------------------------------------------------------------
+
+
+def _append_config(tmp_path: Path, extra_yaml: str) -> None:
+    cfg = tmp_path / ".anvil" / "config.yaml"
+    cfg.write_text(cfg.read_text(encoding="utf-8") + extra_yaml, encoding="utf-8")
+
+
+class TestHeartbeatLeaseWarning:
+    def _setup_short_lease_claim(self, tmp_path: Path) -> None:
+        """Project whose config renews leases to 5m — below the 10m warning."""
+        _setup_merge_check_project(tmp_path)
+        _append_config(tmp_path, "default_lease_minutes: 5\n")
+        claim_result = _invoke_cmd(
+            tmp_path, ["claim", "T001", "--actor", "hb-agent", "--lease", "5"]
+        )
+        assert claim_result.exit_code == 0, claim_result.output
+
+    def test_warns_once_across_consecutive_invocations(self, tmp_path: Path) -> None:
+        """AC: exactly one [anvil:lease] warning across two heartbeats, exit 0."""
+        self._setup_short_lease_claim(tmp_path)
+        first = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
+        assert first.exit_code == 0
+        assert "[anvil:lease] WARNING" in first.output
+        assert "anvil renew" in first.output
+        second = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
+        assert second.exit_code == 0
+        assert "[anvil:lease]" not in second.output  # debounced
+
+    def test_renewed_above_threshold_rearms_the_warning(self, tmp_path: Path) -> None:
+        """AC: crossing back above the threshold clears the marker so a later
+        crossing warns again."""
+        self._setup_short_lease_claim(tmp_path)
+        first = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
+        assert "[anvil:lease] WARNING" in first.output
+        # Drop the threshold below the 5m lease → claim is now "healthy",
+        # which must clear the debounce marker.
+        _append_config(tmp_path, "lease_warning_minutes: 2\n")
+        healthy = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
+        assert "[anvil:lease]" not in healthy.output
+        # Threshold back above the lease → a fresh crossing warns again.
+        _append_config(tmp_path, "lease_warning_minutes: 10\n")
+        again = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
+        assert "[anvil:lease] WARNING" in again.output
+
+    def test_zero_threshold_disables_warnings(self, tmp_path: Path) -> None:
+        """AC: lease_warning_minutes: 0 produces no warnings."""
+        self._setup_short_lease_claim(tmp_path)
+        _append_config(tmp_path, "lease_warning_minutes: 0\n")
+        result = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
+        assert result.exit_code == 0
+        assert "[anvil:lease]" not in result.output
+
+    def test_uninitialized_project_silent_exit_0(self, tmp_path: Path) -> None:
+        """AC: an uninitialized project produces no output and exit 0."""
+        result = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
+        assert result.exit_code == 0
+        assert result.output.strip() == ""

@@ -185,7 +185,9 @@ def _dispatch_detect_state(payload: dict[str, object], cwd: Path | None) -> None
             )
         return
     reason = status_line or f"status check returned exit {status_exit}"
-    _emit_session_start_context(f"[anvil] Language: {language} | status check unavailable: {reason}")
+    _emit_session_start_context(
+        f"[anvil] Language: {language} | status check unavailable: {reason}"
+    )
 
 
 def _dispatch_check_claim(payload: dict[str, object], cwd: Path | None) -> None:
@@ -637,6 +639,43 @@ def hook_stop_gate(
     raise typer.Exit(code=2)
 
 
+def _warn_expiring_leases(
+    backend,  # noqa: ANN001
+    clock,  # noqa: ANN001
+    actor: str,
+    warn_minutes: float,
+    state_dir: Path,
+) -> None:
+    """Emit ONE stderr warning per claim per threshold-crossing (T008).
+
+    Debounced via a plain marker file in the state tmp dir (no extra DB
+    round-trip: the hook fires on every PostToolUse). Crossing back above
+    the threshold — a successful renew — removes the marker so a later
+    crossing warns again. Best-effort: every error is swallowed by the
+    caller's hook guard.
+    """
+    now = clock.now()
+    markers_dir = state_dir / "tmp"
+    for claim in backend.list_active_claims():
+        if claim.claimed_by != actor:
+            continue
+        remaining = (claim.lease_expires_at - now).total_seconds() / 60.0
+        marker = markers_dir / f"lease-warn-{claim.id}"
+        if remaining < warn_minutes:
+            if not marker.exists():
+                typer.echo(
+                    f"[anvil:lease] WARNING: claim {claim.id} "
+                    f"(task {claim.task_id}) lease expires in "
+                    f"{max(remaining, 0):.0f}m — commit progress or run "
+                    f"'anvil renew {claim.id}'.",
+                    err=True,
+                )
+                markers_dir.mkdir(parents=True, exist_ok=True)
+                marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+
+
 @hook_app.command("heartbeat")
 def hook_heartbeat(
     actor: str | None = typer.Option(  # noqa: B008
@@ -685,6 +724,18 @@ def hook_heartbeat(
                     manager.renew(claim_id)
                 except Exception:  # noqa: BLE001 — expired/contended lease: skip, not fatal
                     pass
+
+            # retro-opps T008 — pre-expiry advisory warning. Runs AFTER the
+            # renew loop and reads the post-renew lease_expires_at, whatever
+            # the B46 progress gate decided — the progress-gated decline is
+            # precisely the case where a lease silently dies mid-work.
+            warn_minutes = (
+                cfg.lease_warning_minutes if cfg is not None else 10.0
+            )
+            if warn_minutes > 0:
+                _warn_expiring_leases(
+                    backend, clock, resolved_actor, warn_minutes, state_dir
+                )
         finally:
             backend.close()
     except typer.Exit:
