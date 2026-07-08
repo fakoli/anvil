@@ -7014,3 +7014,203 @@ def test_force_utf8_stdio_lets_arrow_encode_under_cp1252(
     sys.stdout.write("Task 'T001' status → needs_review.\n")
     sys.stdout.flush()
     assert "→".encode() in raw_out.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# merge-check (retro-opps:T006) — freshness + merged-tree verification
+# ---------------------------------------------------------------------------
+
+
+_MERGE_CHECK_PRD = """# Project: Merge Check Fixture
+
+## Summary
+
+Fixture project for anvil merge-check tests.
+
+## Goals
+
+- Exercise the merge-check freshness and merged-tree verification paths.
+
+## Requirements
+
+- R001: Verification commands run against the merged tree.
+
+## Features
+
+### F001: Merge check fixture feature
+
+**Requirements:** R001
+
+## Tasks
+
+### T001: Passing verification task
+
+**Feature:** F001
+
+Task whose merged-tree check passes.
+
+**Acceptance criteria:**
+
+- echo runs.
+
+**Verification:**
+
+- `echo merged-ok`
+
+### T002: Failing verification task
+
+**Feature:** F001
+
+Task whose merged-tree check fails deterministically.
+
+**Acceptance criteria:**
+
+- false fails.
+
+**Verification:**
+
+- `false`
+"""
+
+
+def _setup_merge_check_project(tmp_path: Path) -> None:
+    """git init + anvil init + the merge-check PRD, planned and promoted."""
+    import subprocess as _subprocess
+
+    _subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    for key, value in (("user.email", "test@test.test"), ("user.name", "Test User")):
+        _subprocess.run(
+            ["git", "config", key, value],
+            cwd=str(tmp_path), check=True, capture_output=True,
+        )
+    (tmp_path / "README.md").write_text("initial\n", encoding="utf-8")
+    _subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
+    _subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=str(tmp_path), check=True, capture_output=True,
+    )
+    _do_init(tmp_path, name="Merge Check Project")
+    _write_prd(tmp_path, _MERGE_CHECK_PRD)
+    _invoke_cmd(tmp_path, ["prd", "parse"])
+    _invoke_cmd(tmp_path, ["prd", "review"])
+    _invoke_cmd(tmp_path, ["prd", "review", "--approve"])
+    _invoke_cmd(tmp_path, ["plan"])
+    _invoke_cmd(tmp_path, ["review", "tasks"])
+
+
+def _git_out(tmp_path: Path, *args: str) -> str:
+    import subprocess as _subprocess
+
+    return _subprocess.run(
+        ["git", *args], cwd=str(tmp_path), check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _advance_default_branch(tmp_path: Path, commits: int) -> None:
+    """Move the default branch ahead by *commits* without disturbing HEAD."""
+    import subprocess as _subprocess
+
+    current = _git_out(tmp_path, "rev-parse", "--abbrev-ref", "HEAD")
+    default = "main" if _subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "main"],
+        cwd=str(tmp_path), capture_output=True,
+    ).returncode == 0 else "master"
+    _git_out(tmp_path, "checkout", default)
+    for i in range(commits):
+        (tmp_path / f"base-advance-{i}.txt").write_text(f"{i}\n", encoding="utf-8")
+        # Add ONLY the advance file — `git add .` would commit the untracked
+        # in-repo .anvil/ state dir onto the default branch, and switching
+        # back to the agent branch would then DELETE the state db.
+        _git_out(tmp_path, "add", f"base-advance-{i}.txt")
+        _git_out(tmp_path, "commit", "-m", f"advance base {i}")
+    _git_out(tmp_path, "checkout", current)
+
+
+class TestMergeCheck:
+    def test_fresh_branch_json_envelope_exit_0(self, tmp_path: Path) -> None:
+        """AC: --json emits behind_count/has_conflicts/base_ref/remote_checked/
+        checks; AC: no remote → exit 0 with the local base reported."""
+        _setup_merge_check_project(tmp_path)
+        claim_result = _invoke_cmd(tmp_path, ["claim", "T001", "--actor", "mc-agent"])
+        assert claim_result.exit_code == 0, claim_result.output
+        result = _invoke_cmd(tmp_path, ["merge-check", "T001", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["behind_count"] == 0
+        assert data["has_conflicts"] is False
+        assert data["base_ref"] in ("main", "master")
+        assert data["remote_checked"] is False  # fixture has no remote
+        assert data["checks"] == []
+
+    def test_stale_base_exits_1(self, tmp_path: Path) -> None:
+        _setup_merge_check_project(tmp_path)
+        claim_result = _invoke_cmd(tmp_path, ["claim", "T001", "--actor", "mc-agent"])
+        assert claim_result.exit_code == 0, claim_result.output
+        _advance_default_branch(tmp_path, 2)
+        result = _invoke_cmd(tmp_path, ["merge-check", "T001", "--json"])
+        assert result.exit_code == 1, result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["ok"] is False
+        assert "2 commit(s) behind" in envelope["error"]["message"]
+
+    def test_run_checks_failure_named_and_worktree_removed(
+        self, tmp_path: Path
+    ) -> None:
+        """AC: base moved + failing merged-tree check → exit 1, the failing
+        command is named, and the throwaway worktree is removed on failure."""
+        _setup_merge_check_project(tmp_path)
+        claim_result = _invoke_cmd(tmp_path, ["claim", "T002", "--actor", "mc-agent"])
+        assert claim_result.exit_code == 0, claim_result.output
+        # Advance base with a DISJOINT file so the merge is clean but stale.
+        _advance_default_branch(tmp_path, 1)
+        result = _invoke_cmd(tmp_path, ["merge-check", "T002", "--run-checks"])
+        assert result.exit_code == 1, result.output
+        assert "false" in result.output  # failing command named
+        tmp_area = tmp_path / ".anvil" / "tmp"
+        leftover = list(tmp_area.glob("merge-check-*")) if tmp_area.exists() else []
+        assert leftover == [], f"throwaway worktree not cleaned: {leftover}"
+
+    def test_run_checks_pass_records_exit_codes(self, tmp_path: Path) -> None:
+        _setup_merge_check_project(tmp_path)
+        claim_result = _invoke_cmd(tmp_path, ["claim", "T001", "--actor", "mc-agent"])
+        assert claim_result.exit_code == 0, claim_result.output
+        result = _invoke_cmd(
+            tmp_path, ["merge-check", "T001", "--run-checks", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["checks"] == [
+            {"command": "echo merged-ok", "exit_code": 0, "detail": None}
+        ]
+
+    def test_working_tree_and_branch_untouched(self, tmp_path: Path) -> None:
+        """AC: the user's working tree and current branch are untouched."""
+        _setup_merge_check_project(tmp_path)
+        claim_result = _invoke_cmd(tmp_path, ["claim", "T002", "--actor", "mc-agent"])
+        assert claim_result.exit_code == 0, claim_result.output
+        _advance_default_branch(tmp_path, 1)
+        branch_before = _git_out(tmp_path, "rev-parse", "--abbrev-ref", "HEAD")
+        _invoke_cmd(tmp_path, ["merge-check", "T002", "--run-checks"])
+        assert _git_out(tmp_path, "rev-parse", "--abbrev-ref", "HEAD") == branch_before
+        status = _git_out(tmp_path, "status", "--porcelain")
+        # The .anvil state dir mutates (events/db) but no TRACKED file may.
+        tracked_changes = [
+            line for line in status.splitlines() if not line.endswith((".anvil/", ".anvil"))
+            and "/.anvil/" not in line and not line.strip().startswith("?? .anvil")
+        ]
+        assert tracked_changes == [], tracked_changes
+
+    def test_unknown_task_fails_cleanly(self, tmp_path: Path) -> None:
+        _setup_merge_check_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["merge-check", "T999", "--json"])
+        assert result.exit_code == 1
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "task_not_found"
+
+    def test_unclaimed_task_reports_branch_not_found(self, tmp_path: Path) -> None:
+        _setup_merge_check_project(tmp_path)
+        result = _invoke_cmd(tmp_path, ["merge-check", "T001", "--json"])
+        assert result.exit_code == 1
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "branch_not_found"
