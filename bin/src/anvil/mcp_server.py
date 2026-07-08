@@ -1142,11 +1142,14 @@ def submit_progress(
                 "actor": actor,
                 "notes": notes,
                 "noted_at": now.isoformat(),
-                # T010 — optional structured phase; None keys are carried
-                # explicitly so the payload model's schema stays the single
-                # source of truth (extra='forbid' both ways).
-                "phase": phase,
-                "detail": detail,
+                # T010 — omit the keys when unused: a no-phase row stays
+                # byte-identical to the pre-T010 shape, so an OLDER anvil
+                # sharing the same HOME-workspace state dir (installed
+                # plugin vs dev checkout) only hard-fails on rows that
+                # genuinely exercise the feature, not on every progress
+                # note (extra='forbid' on its payload model).
+                **({"phase": phase} if phase is not None else {}),
+                **({"detail": detail} if detail is not None else {}),
             },
         )
         backend.append(draft)

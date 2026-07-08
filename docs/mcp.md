@@ -569,6 +569,8 @@ to re-enter the `ready` pool.
 
 Records an in-progress note for a task without changing its status. Writes a
 `progress.noted` event to the JSONL audit log. Does not require an active claim.
+`phase` is an optional structured label ("build", "tests", "review-fixes", …)
+for the heartbeat bus; `detail` is free-text elaboration for the phase.
 
 **Inputs**
 
@@ -577,6 +579,8 @@ Records an in-progress note for a task without changing its status. Writes a
 | `task_id` | `string` | yes      |
 | `actor`   | `string` | yes      |
 | `notes`   | `string` | yes      |
+| `phase`   | `string` | no       |
+| `detail`  | `string` | no       |
 
 **Output**
 
