@@ -836,6 +836,13 @@ satisfies the task's `required_evidence`.
 - `--commands TEXT` *(required)* — comma-separated verification commands
   that were run.
 - `--files-changed TEXT` *(required)* — comma-separated file paths modified.
+- `--category TEXT` *(optional, default `completion`)* — the evidence role
+  (evidence contracts, issue #153): `completion`, `diagnostic`, `blocked`,
+  `advisory`, or `promotion_quality`. `diagnostic`/`advisory` evidence can
+  never satisfy a completion claim; `blocked` records that the claim could
+  not be proven (and refuses the claim gate). An invalid value exits 1 with
+  code `invalid_category`. See the evidence-contract gate under
+  [`anvil apply`](#apply).
 - `--output-file PATH` *(optional)* — path to a file whose content is used
   as the output excerpt (read with `errors="replace"`, truncated to 8000
   chars).

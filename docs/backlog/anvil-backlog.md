@@ -247,7 +247,15 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 
 ### B22 — Structured contract/schema fields per task, enforced by review gates
 
-- **Status:** Deferred — post-v1
+- **Status:** ✅ Implemented — the **evidence-contracts** PRD (issue #153).
+  Tasks now carry structured `claims` and `Artifact assertions` authored in
+  the PRD template, evaluated by a per-claim gate (`review/assertions.py` +
+  `evaluate_claims`) that refuses `apply --approve` with `claim_unproven`
+  when a declared claim is unproven — the enforced-contract lever this item
+  called for, realized as evidence contracts rather than the originally
+  sketched interface/schema fields. See `docs/prd-template.md` (authoring),
+  `docs/cli-reference.md` (the gate + verdict vocabulary), and the
+  voice-incident regression (`tests/test_evidence_contracts_incident.py`).
 - **Priority:** P3  **Effort:** L  **Type:** feature
 - **Rationale:** Deferred. The failure mode it addresses (under-specified cross-agent contracts) only becomes acute once real parallel-claim usage exists, so it is not on the path to v1. ~65% of integration bugs root-cause to under-specified specs; no tool pins API/schema contracts as verifiable task fields gated by review before parallel work begins (BMAD#1904). This becomes acute precisely BECAUSE anvil enables parallel claims — both a risk and an opportunity to own. Pairs with EARS/Gherkin-style acceptance fields (spec-kit#1356) to raise parser reliability.
 - **Acceptance:** Tasks support optional structured contract fields (e.g. interface/schema reference) that, when a task is marked as a cross-agent interface, are required and enforced by the `review_tasks` gate before promotion to ready. Test: a task flagged as an interface with no contract is blocked at review; supplying a valid contract promotes it.
