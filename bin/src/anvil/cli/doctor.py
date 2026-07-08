@@ -223,18 +223,10 @@ def _preflight_findings(state_dir: Path, prd: str | None) -> list[_Finding]:
     # --prd / $ANVIL_PRD wins; otherwise the default partition. resolve_prd_id
     # needs an open backend; fall back to the raw value on any hiccup so the
     # probe still runs against SOME file rather than dying on resolution.
-    prd_id = prd or "default"
-    if prd:
-        try:
-            from anvil.cli._helpers import _open_backend, resolve_prd_id
-
-            backend = _open_backend(state_dir)
-            try:
-                prd_id = resolve_prd_id(backend, prd)
-            finally:
-                backend.close()
-        except Exception:  # noqa: BLE001 — resolution failure must not kill the probe
-            prd_id = prd
+    # PRD_OPTION already carries $ANVIL_PRD into ``prd``, and the explicit
+    # tier of resolve_prd_id is a pure strip() — no backend needed for a
+    # read-only probe (review finding: the backend open was near-redundant).
+    prd_id = prd.strip() if prd and prd.strip() else "default"
 
     prd_path = prd_source_path(state_dir, prd_id)
 
@@ -297,6 +289,9 @@ def _preflight_findings(state_dir: Path, prd: str | None) -> list[_Finding]:
                 },
             )
         )
+        # Symmetry with the missing/unreadable/crash branches: a decisions
+        # scan over a PARTIAL parse adds noise, not signal — already NO-GO.
+        return findings
     else:
         findings.append(
             _Finding(

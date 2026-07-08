@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from anvil.cli import app
@@ -149,6 +150,31 @@ class TestDoctorPreflight:
         assert result.exit_code == 1
         assert "PRD source not found" in result.output
         assert "PREFLIGHT: NO-GO" in result.output
+
+    def test_named_prd_partition_probed(self, tmp_path: Path) -> None:
+        """Coverage (review finding): --prd <name> probes prds/<name>.md."""
+        assert _invoke(tmp_path, ["init", "--name", "Named"]).exit_code == 0
+        prds_dir = tmp_path / ".anvil" / "prds"
+        prds_dir.mkdir()
+        (prds_dir / "v2.md").write_text(_CLEAN_PRD, encoding="utf-8")
+        result = _invoke(tmp_path, ["doctor", "--preflight", "--prd", "v2"])
+        assert result.exit_code == 0, result.output
+        assert "PREFLIGHT: GO" in result.output
+        missing = _invoke(tmp_path, ["doctor", "--preflight", "--prd", "ghost"])
+        assert missing.exit_code == 1
+        assert "prds/ghost.md" in missing.output.replace("\\", "/")
+
+    def test_plain_doctor_ignores_anvil_prd_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Coverage (review finding): $ANVIL_PRD set must not change plain
+        doctor at all — prd is only consumed under --preflight."""
+        _init_project(tmp_path)
+        baseline = _invoke(tmp_path, ["doctor", "--json"])
+        monkeypatch.setenv("ANVIL_PRD", "nonexistent-partition")
+        with_env = _invoke(tmp_path, ["doctor", "--json"])
+        assert with_env.exit_code == baseline.exit_code == 0
+        assert with_env.output == baseline.output  # byte-identical
 
     def test_open_questions_warn_but_still_go(self, tmp_path: Path) -> None:
         """Open questions are informational by template convention →
