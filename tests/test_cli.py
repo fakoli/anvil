@@ -7390,6 +7390,31 @@ class TestApplyMergeCheck:
         data = json.loads(result.output.strip().splitlines()[-1])["data"]
         assert data["merge_check"] is None
 
+    def test_strict_probe_error_fails_open_with_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review finding: a crashing probe under strict must fail OPEN
+        (approve proceeds, merge_check null) and say so on stderr — the
+        load-bearing 'probe can never break apply' guarantee."""
+        import anvil.git_ops.freshness as freshness_mod
+
+        _setup_merge_check_project(tmp_path)
+        _append_config(tmp_path, "merge_check: strict\n")
+        self._claim_submit(tmp_path)
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("probe exploded")
+
+        monkeypatch.setattr(freshness_mod, "resolve_base", boom)
+        result = _invoke_cmd(
+            tmp_path, ["apply", "T001", "--approve", "--reviewer", "rv", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output.strip().splitlines()[-1])["data"]
+        assert data["status"] == "done"
+        assert data["merge_check"] is None
+        assert "merge check could not run" in result.output
+
     def test_reject_never_affected_by_strict(self, tmp_path: Path) -> None:
         _setup_merge_check_project(tmp_path)
         _append_config(tmp_path, "merge_check: strict\n")

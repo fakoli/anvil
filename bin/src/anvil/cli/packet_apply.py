@@ -245,6 +245,14 @@ def _merge_check_block(
             "stale": bool(report.behind_count) or report.has_conflicts is True,
         }
     except Exception:  # noqa: BLE001 — advisory probe must never break apply
+        if mode == "strict":
+            # Review finding: a strict user must SEE that the gate was
+            # skipped, or a crashing probe becomes a false sense of security.
+            typer.echo(
+                "Warning: merge check could not run (probe error); "
+                "strict merge gate skipped for this apply.",
+                err=True,
+            )
         return mode, None
 
 

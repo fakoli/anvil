@@ -922,9 +922,19 @@ merge_check: advisory   # DEFAULT — report staleness, approval proceeds
 ```
 
 Local-first: offline / no-remote projects degrade to the local default
-branch and are never refused; an unverifiable probe never gates. `--reject`
-is never affected. The JSON envelope carries the report under
-`data.merge_check` (and inside `error.merge_check` on a strict refusal).
+branch and are never refused; an unverifiable probe never gates (a probe
+*error* under `strict` prints a stderr warning and skips the gate rather
+than blocking). `--reject` is never affected. The JSON envelope carries the
+report under `data.merge_check` (and inside `error.merge_check` on a strict
+refusal).
+
+> **Ordering caveat — apply before you merge.** The probe measures the
+> task's *local* claim branch against the base. In a merge-first workflow
+> (PR squash-merged, then `apply`), the surviving local branch is behind the
+> base *by its own merge commit* and reads as `STALE` — a false positive
+> (there is no reliable git signal for "already squash-merged"). Run
+> `apply --approve` before merging the PR, or expect the advisory note; do
+> not enable `merge_check: strict` in a merge-first workflow.
 
 **Exit codes:**
 
