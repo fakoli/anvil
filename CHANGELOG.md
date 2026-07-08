@@ -42,6 +42,49 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
     unresolved-decision, and git tree-state probes on the doctor finding
     chassis with a final `PREFLIGHT: GO/NO-GO` line and
     `data.preflight`/`data.go` JSON keys; plain `doctor` byte-compatible.
+- **Evidence contracts (evidence-contracts PRD — issue #153, 7 features, 11
+  tasks, PRs #155–#165).** Completion evidence can now be bound to named
+  claims and machine-checked against artifact content, so "done" is a
+  verified transition rather than a self-report — closing the voice-benchmark
+  incident where a task claimed it benchmarked a candidate while the evidence
+  showed only the baseline was measured. Schema v9 (additive: `tasks.claims`,
+  `evidence.category`).
+  - **Claims + artifact assertions** — task blocks author `**Claims:**`
+    (named claims with a kind) and `**Artifact assertions:**` (a fenced
+    `yaml` block of predicates over a JSON artifact: 12 operators, a
+    single-level `[*]` wildcard, and phase predicates `must_reach` /
+    `must_not_fail_before` over a declared `stage_order`). Parsed into typed
+    models with claim bindings; loud on every malformation and on an
+    assertion referencing an undeclared claim.
+  - **Predicate engine** (`review/assertions.py`) — a pure, total evaluator:
+    missing artifact, malformed JSON, and unresolvable paths are failed
+    assertions with reasons, never tracebacks; paths escaping the project
+    root are refused; unknown recorded stages fail loudly.
+  - **Per-claim gate** (`review/gates.py:evaluate_claims`) — typed proofs and
+    artifact assertions grouped by claim into `passed` / `failed` /
+    `incomplete` / `blocked` / `diagnostic_only` verdicts (overall = the
+    worst); a named claim binding no contract is `incomplete`, not a vacuous
+    pass.
+  - **Auto-strict apply** — a task declaring an evidence contract is held to
+    it independent of `strict_evidence`: `anvil apply --approve` (CLI and MCP)
+    re-evaluates the artifacts at approval time and refuses with code
+    `claim_unproven` while any enforceable claim is unproven; the task stays
+    in `needs_review`. `--reject` is never gated.
+  - **Evidence categories** — `anvil submit --category` /
+    MCP `category` (`completion` default · `diagnostic` · `blocked` ·
+    `advisory` · `promotion_quality`): diagnostic/advisory evidence can never
+    satisfy a completion claim, and a blocked/diagnostic submission refuses
+    apply even on a contract-less task.
+  - **Advisory intent linter** — `apply` flags task intents (candidate,
+    benchmark, migration, deploy, live, security, …) that no declared claim
+    or assertion covers (`intent_warnings`); word-boundary matched, never
+    blocking.
+  - **Proof attribution fix** — the capture-evidence hook now attaches
+    CommandProofs by active claim rather than requiring a matching session
+    actor (the retro's own incident, where the SL-3 proof gate was silently
+    inert), with a submit-time mismatch warning.
+  - Sentinel gains an evidence-critic verdict mode; the voice incident is
+    pinned by an end-to-end regression fixture. B22 folded in.
 
 ### Fixed
 
