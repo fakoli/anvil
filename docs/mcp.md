@@ -1195,7 +1195,7 @@ None.
 {
   "api_version": "2",
   "engine_version": "0.4.0",
-  "schema_version": 8,
+  "schema_version": 9,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "..."],

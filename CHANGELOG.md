@@ -6,6 +6,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-08
+
 ### Added
 
 - **Retro-mined product-opportunity wave (retro-opps PRD — 5 features, 14
