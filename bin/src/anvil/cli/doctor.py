@@ -56,9 +56,11 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 from anvil.cli._helpers import (
+    PRD_OPTION,
     StateRootError,
     _resolve_project_root,
     _resolve_state_dir,
+    prd_source_path,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 
@@ -114,6 +116,17 @@ class _Finding:
 
 
 def doctor(
+    preflight: bool = typer.Option(  # noqa: B008
+        False,
+        "--preflight",
+        help=(
+            "retro-opps T013: GO/NO-GO gate before a long workflow — adds "
+            "PRD-parse, unresolved-decision, and (T014) tree-state probes to "
+            "the standard health checks, prints a final PREFLIGHT: GO/NO-GO "
+            "line, and keeps doctor's exit contract (1 on any ERROR)."
+        ),
+    ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -159,26 +172,199 @@ def doctor(
         raise typer.Exit(code=1)
 
     findings = _diagnose(state_dir, _resolve_project_root(cwd))
+    if preflight:
+        # Strictly additive: plain `doctor` (no flag) never runs these, so
+        # its output and exit behavior stay byte-compatible.
+        findings.extend(_preflight_findings(state_dir, prd))
 
     worst = _worst_severity(findings)
     healthy = worst != _ERROR
 
     if json_output:
-        emit_success(
-            _COMMAND,
-            {
-                "healthy": healthy,
-                "worst_severity": worst,
-                "findings": [f.to_json() for f in findings],
-            },
-        )
+        data: dict[str, Any] = {
+            "healthy": healthy,
+            "worst_severity": worst,
+            "findings": [f.to_json() for f in findings],
+        }
+        if preflight:
+            data["preflight"] = True
+            data["go"] = healthy
+        emit_success(_COMMAND, data)
         if not healthy:
             raise typer.Exit(code=1)
         return
 
     _print_human(findings, healthy=healthy, worst=worst)
+    if preflight:
+        typer.echo(
+            "PREFLIGHT: GO"
+            if healthy
+            else "PREFLIGHT: NO-GO — fix the ERROR finding(s) above."
+        )
     if not healthy:
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# Preflight probes (retro-opps T013)
+# ---------------------------------------------------------------------------
+
+
+def _preflight_findings(state_dir: Path, prd: str | None) -> list[_Finding]:
+    """PRD-parse + unresolved-decision probes for ``doctor --preflight``.
+
+    Total like every doctor probe: each failure becomes a finding, never a
+    traceback. The retro pattern this closes: simple PRD format issues
+    surfacing deep inside long workflows instead of before they start.
+    """
+    findings: list[_Finding] = []
+
+    # Resolve which partition to check. The shared sentinel rule: an explicit
+    # --prd / $ANVIL_PRD wins; otherwise the default partition. resolve_prd_id
+    # needs an open backend; fall back to the raw value on any hiccup so the
+    # probe still runs against SOME file rather than dying on resolution.
+    # PRD_OPTION already carries $ANVIL_PRD into ``prd``, and the explicit
+    # tier of resolve_prd_id is a pure strip() — no backend needed for a
+    # read-only probe (review finding: the backend open was near-redundant).
+    prd_id = prd.strip() if prd and prd.strip() else "default"
+
+    prd_path = prd_source_path(state_dir, prd_id)
+
+    # Probe 1 — the PRD parses cleanly.
+    if not prd_path.exists():
+        findings.append(
+            _Finding(
+                "prd_parse",
+                _ERROR,
+                f"PRD source not found at {prd_path} — author it, then run "
+                "`anvil prd parse`.",
+                {"path": str(prd_path), "prd_id": prd_id},
+            )
+        )
+        return findings  # nothing further to probe without a file
+
+    try:
+        markdown = prd_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        findings.append(
+            _Finding(
+                "prd_parse",
+                _ERROR,
+                f"PRD source unreadable at {prd_path}: {exc}",
+                {"path": str(prd_path), "prd_id": prd_id},
+            )
+        )
+        return findings
+
+    from anvil.planning.template import parse_prd
+
+    try:
+        parsed = parse_prd(markdown, prd_id=prd_id)
+    except Exception as exc:  # noqa: BLE001 — a parser crash IS the finding
+        findings.append(
+            _Finding(
+                "prd_parse",
+                _ERROR,
+                f"PRD at {prd_path} failed to parse: "
+                f"{type(exc).__name__}: {exc}",
+                {"path": str(prd_path), "prd_id": prd_id},
+            )
+        )
+        return findings
+
+    if parsed.errors:
+        findings.append(
+            _Finding(
+                "prd_parse",
+                _ERROR,
+                f"PRD at {prd_path} has {len(parsed.errors)} parse error(s); "
+                "fix them before starting a long workflow.",
+                {
+                    "path": str(prd_path),
+                    "prd_id": prd_id,
+                    "errors": [
+                        f"[{e.section}:{e.line}] {e.message}"
+                        for e in parsed.errors
+                    ],
+                },
+            )
+        )
+        # Symmetry with the missing/unreadable/crash branches: a decisions
+        # scan over a PARTIAL parse adds noise, not signal — already NO-GO.
+        return findings
+    else:
+        findings.append(
+            _Finding(
+                "prd_parse",
+                _OK,
+                f"PRD at {prd_path} parses cleanly "
+                f"({len(parsed.requirements)} requirements, "
+                f"{len(parsed.features)} features, {len(parsed.tasks)} tasks).",
+                {"path": str(prd_path), "prd_id": prd_id},
+            )
+        )
+
+    # Probe 2 — unresolved decisions. needs_decision markers and tasks
+    # missing acceptance/verification are exactly the deep-workflow failures
+    # the retros recorded → ERROR; open questions are informational by the
+    # template's own convention → WARNING.
+    from anvil.planning.decisions import DecisionKind, find_unresolved_decisions
+
+    try:
+        unresolved = find_unresolved_decisions(
+            markdown, prd=parsed.prd, tasks=parsed.tasks
+        )
+    except Exception as exc:  # noqa: BLE001
+        findings.append(
+            _Finding(
+                "prd_decisions",
+                _WARNING,
+                f"decision scan failed: {type(exc).__name__}: {exc}",
+                {"path": str(prd_path)},
+            )
+        )
+        return findings
+
+    blocking = [
+        d
+        for d in unresolved
+        if d.kind in (DecisionKind.needs_decision, DecisionKind.missing_field)
+    ]
+    open_questions = [
+        d for d in unresolved if d.kind is DecisionKind.open_question
+    ]
+    if blocking:
+        findings.append(
+            _Finding(
+                "prd_decisions",
+                _ERROR,
+                f"{len(blocking)} unresolved decision item(s) "
+                "(needs-decision markers / missing acceptance-verification "
+                "fields) — run `anvil prd find-decisions` and resolve before "
+                "a long workflow.",
+                {"blocking": [d.location for d in blocking]},
+            )
+        )
+    if open_questions:
+        findings.append(
+            _Finding(
+                "prd_decisions",
+                _WARNING,
+                f"{len(open_questions)} open question(s) in the PRD "
+                "(informational).",
+                {"open_questions": [d.location for d in open_questions]},
+            )
+        )
+    if not blocking and not open_questions:
+        findings.append(
+            _Finding(
+                "prd_decisions",
+                _OK,
+                "no unresolved decision items.",
+                {},
+            )
+        )
+    return findings
 
 
 # ---------------------------------------------------------------------------
