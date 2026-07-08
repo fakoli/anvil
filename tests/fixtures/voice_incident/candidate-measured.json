@@ -1,0 +1,7 @@
+{
+  "candidate_identity": {"candidate_id": "gemma4-12b-it", "profile": "voice-fast"},
+  "status": "measured",
+  "stage_timings_ms": {"ttfa_ms": 611.29, "llm_ms": 356.82},
+  "topology": {"profile": "voice-fast", "stt_endpoint_host": "stt.internal:8080"},
+  "errors": []
+}
