@@ -211,6 +211,14 @@ class Backend(Protocol):
         most-recent first. Used by `show` to surface task history."""
         ...
 
+    def latest_event_payload(
+        self, target_id: str, action: str
+    ) -> tuple[dict, str] | None:
+        """Return the most recent *action* event's (payload, timestamp_iso)
+        for ``target_id``, or None. retro-opps T012 — the heartbeat-bus
+        read-back seam (``list_events`` drops payloads)."""
+        ...
+
     def first_event_id(self, target_id: str) -> str | None:
         """Return the id of the earliest-recorded event for ``target_id``, or
         None if it has none. Used to bind an ``AcceptanceProof`` to the

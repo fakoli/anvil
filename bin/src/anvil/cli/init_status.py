@@ -469,6 +469,37 @@ def status(
                 for claim in backend.list_active_claims()
                 if claim.task_id in scoped_task_ids
             ]
+
+        # retro-opps T012 — heartbeat-bus read-back: latest progress.noted
+        # phase + elapsed + time-to-lease-expiry per active claim. Computed
+        # while the backend is open; best-effort (a read hiccup on one claim
+        # must not break status).
+        from anvil.clock import SystemClock as _SystemClock
+
+        _now = _SystemClock().now()
+        claim_details: list[dict[str, object]] = []
+        for _claim in active_claims:
+            try:
+                _latest = backend.latest_event_payload(
+                    _claim.task_id, "progress.noted"
+                )
+                _phase = _latest[0].get("phase") if _latest is not None else None
+            except Exception:  # noqa: BLE001 — read-back is best-effort
+                _phase = None
+            claim_details.append(
+                {
+                    "claim_id": _claim.id,
+                    "task_id": _claim.task_id,
+                    "actor": _claim.claimed_by,
+                    "phase": _phase,
+                    "elapsed_seconds": int(
+                        (_now - _claim.created_at).total_seconds()
+                    ),
+                    "lease_expires_in_seconds": int(
+                        (_claim.lease_expires_at - _now).total_seconds()
+                    ),
+                }
+            )
     finally:
         backend.close()
 
@@ -507,6 +538,9 @@ def status(
                     "done": done_count,
                 },
                 "active_claims": active_claim_count,
+                # retro-opps T012 — per-claim heartbeat-bus read-back
+                # (additive; active_claims stays the count for compat).
+                "claims": claim_details,
                 # T020: additive per-PRD rollup alongside the flat project totals.
                 "prds": [dump_model(entry) for entry in rollup],
                 # T007/B11: code-targeted schema version (== SCHEMA_VERSION),
@@ -591,6 +625,18 @@ def status(
         f"{done_count} done)"
     )
     typer.echo(f"Active claims: {active_claim_count}")
+    # retro-opps T012 — one line per active claim: latest phase, elapsed since
+    # claim, minutes to lease expiry. Placeholder phase when no progress event
+    # exists yet. (--hook-format exits above; its single line is untouched.)
+    for detail in claim_details:
+        elapsed_min = detail["elapsed_seconds"] // 60
+        expires_min = detail["lease_expires_in_seconds"] // 60
+        phase_label = detail["phase"] or "-"
+        typer.echo(
+            f"  {detail['task_id']} [{detail['actor']}] "
+            f"phase={phase_label} elapsed={elapsed_min}m "
+            f"lease-expires-in={expires_min}m"
+        )
     typer.echo(f"Sync:          {sync_label}")
     # T007/B11 (MUST-FIX 2a): db_schema_version is the TRUE on-disk version read
     # BEFORE this status call opened (and thereby auto-migrated) the db. When it

@@ -1408,6 +1408,38 @@ class SqliteBackend:
             ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
+    def latest_event_payload(
+        self, target_id: str, action: str
+    ) -> tuple[dict, str] | None:
+        """Return the most recent *action* event's (payload, timestamp_iso)
+        for ``target_id``, or None (retro-opps T012).
+
+        ``list_events`` deliberately drops payloads, so the heartbeat-bus
+        read-back (latest ``progress.noted`` phase per active claim) needs
+        this one-row fetch. Ordered by rowid (insertion order) like
+        ``first_event_id`` so it is scheme-agnostic. A malformed payload
+        row returns None rather than raising — status surfaces are
+        best-effort readers.
+        """
+        import json as _json
+
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT payload_json, timestamp FROM events "
+            "WHERE target_id = ? AND action = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (target_id, action),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = _json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload, row[1]
+
     def first_event_id(self, target_id: str) -> str | None:
         """Return the id of the earliest-recorded event for ``target_id``.
 
