@@ -4731,6 +4731,125 @@ class TestHookCaptureEvidence:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# evidence-contracts:T007 — attach proofs by active claim + mismatch warning
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureEvidenceByClaim:
+    def _init_and_claim(self, tmp_path: Path, actor: str) -> str:
+        """Full setup through a claim held by `actor`; returns the task id."""
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        assert _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", actor]
+        ).exit_code == 0
+        return task_id
+
+    def _buffer_dir(self, tmp_path: Path) -> Path:
+        return tmp_path / ".anvil" / ".evidence-buffer"
+
+    def test_single_claim_captures_regardless_of_actor(
+        self, tmp_path: Path
+    ) -> None:
+        """T007 AC1: a claim made with an explicit --actor different from the
+        session actor STILL accumulates CommandProofs — the retro incident."""
+        self._init_and_claim(tmp_path, actor="claude-opus-retro")
+        result = _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "session-alice"],
+        )
+        assert result.exit_code == 0
+        buffers = list(self._buffer_dir(tmp_path).glob("C*.json"))
+        assert len(buffers) == 1, "proof did not attach to the single active claim"
+        assert (self._buffer_dir(tmp_path) / "orphan.json").exists() is False
+        assert "pytest" in buffers[0].read_text(encoding="utf-8")
+
+    def test_two_claims_disambiguate_by_actor_else_orphan(
+        self, tmp_path: Path
+    ) -> None:
+        """T007 AC2: with two active claims by different actors, an exact
+        actor match attaches to the right claim; an unmatched session actor
+        falls back to orphan (never cross-attached)."""
+        _do_init_and_plan(tmp_path, with_git=False)
+        # Claim two independent ready tasks as different actors.
+        ready = _invoke_cmd(tmp_path, ["list", "--status", "ready", "--json"])
+        ids = [t["id"] for t in json.loads(ready.output.strip().splitlines()[-1])["data"]["tasks"]]
+        assert len(ids) >= 2, "need two ready tasks for this test"
+        assert _invoke_cmd(
+            tmp_path, ["claim", ids[0], "--actor", "actor-a", "--force"]
+        ).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path, ["claim", ids[1], "--actor", "actor-b", "--force"]
+        ).exit_code == 0
+
+        # Exact actor match → attaches to actor-a's claim only.
+        assert _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "actor-a"],
+        ).exit_code == 0
+        claim_buffers = sorted(b.name for b in self._buffer_dir(tmp_path).glob("C*.json"))
+        assert len(claim_buffers) == 1
+
+        # Unmatched session actor with two claims → orphan (ambiguous).
+        assert _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "actor-nobody"],
+        ).exit_code == 0
+        assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
+
+    def test_submit_zero_proof_mismatch_warns(self, tmp_path: Path) -> None:
+        """T007 AC3: submit with verification commands but zero attached
+        proofs prints the mismatch warning naming both identities."""
+        task_id = self._init_and_claim(tmp_path, actor="claude-opus-retro")
+        # No capture-evidence run → buffer empty.
+        result = _invoke_cmd(
+            tmp_path,
+            ["submit", task_id, "--commands", "pytest -q",
+             "--files-changed", "x.py", "--actor", "session-bob"],
+        )
+        assert result.exit_code == 0
+        assert "zero typed proofs attached" in result.output
+        assert "claude-opus-retro" in result.output
+        assert "session-bob" in result.output
+
+    def test_submit_with_attached_proof_prints_no_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """T007 AC3 (converse): a real attached proof → no warning."""
+        task_id = self._init_and_claim(tmp_path, actor="proof-agent")
+        assert _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "proof-agent"],
+        ).exit_code == 0
+        result = _invoke_cmd(
+            tmp_path,
+            ["submit", task_id, "--commands", "pytest -q",
+             "--files-changed", "x.py", "--actor", "proof-agent"],
+        )
+        assert result.exit_code == 0
+        assert "zero typed proofs attached" not in result.output
+
+    def test_submit_non_verification_command_no_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-verification command (no test keyword) → no false warning."""
+        task_id = self._init_and_claim(tmp_path, actor="claude-opus-retro")
+        result = _invoke_cmd(
+            tmp_path,
+            ["submit", task_id, "--commands", "echo done",
+             "--files-changed", "x.py", "--actor", "session-bob"],
+        )
+        assert result.exit_code == 0
+        assert "zero typed proofs attached" not in result.output
+
+
+# ---------------------------------------------------------------------------
 # Phase 5 — end-to-end: full lifecycle init → done
 # ---------------------------------------------------------------------------
 

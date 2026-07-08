@@ -430,6 +430,27 @@ def hook_record_file_change(
     raise typer.Exit(code=0)
 
 
+def _resolve_capture_claim(active_claims: list, actor: str) -> str | None:
+    """Pick the claim a captured proof belongs to (evidence-contracts:T007).
+
+    The retro incident: a claim made with an explicit ``--actor`` different
+    from the session-derived actor never accumulated CommandProofs, because
+    the hook required ``claimed_by == actor`` — silently disabling the
+    strongest audit feature anvil has. Now a single active claim OWNS every
+    capture regardless of actor; with several, an exact actor match
+    disambiguates; anything still ambiguous falls back to the orphan buffer
+    (never cross-attach a proof to the wrong claim).
+    """
+    if not active_claims:
+        return None
+    if len(active_claims) == 1:
+        return active_claims[0].id
+    actor_matches = [c for c in active_claims if c.claimed_by == actor]
+    if len(actor_matches) == 1:
+        return actor_matches[0].id
+    return None  # zero or ambiguous actor matches among many claims → orphan
+
+
 @hook_app.command("capture-evidence")
 def hook_capture_evidence(
     command: str = typer.Option(..., "--command", help="Full bash command string that was run."),  # noqa: B008
@@ -523,10 +544,9 @@ def hook_capture_evidence(
             )
             _backend.initialize()
             try:
-                for active_claim in _backend.list_active_claims():
-                    if active_claim.claimed_by == actor:
-                        claim_id = active_claim.id
-                        break
+                claim_id = _resolve_capture_claim(
+                    list(_backend.list_active_claims()), actor
+                )
             finally:
                 _backend.close()
         except Exception:  # noqa: BLE001
