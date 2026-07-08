@@ -718,7 +718,11 @@ def list_tasks(
 
 @mcp.tool
 def get_task(task_id: str) -> dict[str, Any]:
-    """Return the full Task with the given ID (ToolError if not found)."""
+    """Return the full Task with the given ID (ToolError if not found).
+
+    The response carries a derived ``review_tier`` (light/standard/max,
+    retro-opps T003) computed at read time from the project config —
+    identical to the CLI ``show``/``next`` value for the same task."""
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -727,7 +731,13 @@ def get_task(task_id: str) -> dict[str, Any]:
             raise ToolError(
                 f"Task '{task_id}' not found.",
             )
-        return json.loads(task.model_dump_json())
+        from anvil.planning.scoring import review_tier
+
+        data = json.loads(task.model_dump_json())
+        data["review_tier"] = review_tier(
+            task, config=_load_fast_lane_config(state_dir)
+        )
+        return data
     finally:
         backend.close()
 
@@ -842,7 +852,15 @@ def get_next_task(
 
         candidates.sort(key=_sort_key)
         best = candidates[0]
-        return json.loads(best.model_dump_json())
+        # retro-opps T003 — derived review tier, same computation as the CLI
+        # `next` (identical value for the same task + config).
+        from anvil.planning.scoring import review_tier
+
+        data = json.loads(best.model_dump_json())
+        data["review_tier"] = review_tier(
+            best, config=_load_fast_lane_config(state_dir)
+        )
+        return data
     finally:
         backend.close()
 

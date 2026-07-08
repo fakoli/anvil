@@ -739,6 +739,9 @@ class TestGetTask:
         assert task["title"] == "My Task"
         assert task["status"] == "ready"
         assert task["priority"] == "high"
+        # retro-opps T003 — derived tier on every task response; the raw
+        # fixture task is unscored so it fails safe to max.
+        assert task["review_tier"] == "max"
 
     def test_error_on_unknown_task_id(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _init_state_dir(tmp_path)
@@ -773,6 +776,7 @@ class TestGetNextTask:
         assert task is not None
         assert task["id"] == "T002"
         assert task["priority"] == "high"
+        assert task["review_tier"] in {"light", "standard", "max"}
 
     def test_returns_none_when_no_ready_tasks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
