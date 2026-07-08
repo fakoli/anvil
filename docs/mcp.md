@@ -626,6 +626,13 @@ Submits completion evidence for a task. Requires an active claim. Emits an
 | `output_excerpt` | `string \| null`        | no       | `null`  |
 | `pr_url`         | `string \| null`        | no       | `null`  |
 | `commit_sha`     | `string \| null`        | no       | `null`  |
+| `category`       | `string \| null`        | no       | `null`  |
+
+`category` (evidence contracts, issue #153) is the evidence role —
+`completion` (the default when omitted), `diagnostic`, `blocked`,
+`advisory`, or `promotion_quality`. `diagnostic`/`advisory` evidence can
+never satisfy a completion claim; an invalid value raises `ToolError`
+(`invalid_category`). Mirrors `anvil submit --category`.
 
 **Output**
 
@@ -1036,7 +1043,18 @@ to `drafted` for rework. Mirrors `anvil apply TASK_ID --approve` and `--reject
 | `approve`   | `bool`           | yes      |           |
 | `reviewer`  | `string`         | no       | `"human"` |
 | `reason`    | `string \| null` | no       | `null` (required when `approve=false`) |
+| `strict`    | `bool \| null`   | no       | `null` (defers to config `strict_evidence`) |
 | `cwd`      | `string \| null` | no       | `Path.cwd()` |
+
+When the task declares an **evidence contract** (named `claims` and/or
+`Artifact assertions`, see [PRD template](prd-template.md)), `approve=true`
+is held to it **independent of `strict`/`strict_evidence`**: the artifacts
+are re-evaluated at approval time and an unproven enforceable claim raises
+`ToolError` (`claim_unproven`) with the task left in `needs_review`. Named
+claims always enforce; on the implicit task-level claim an unmet command
+proof alone defers to `strict_evidence`, while an artifact contradiction,
+missing artifact, or `blocked`-category evidence (or a `diagnostic_only`
+verdict from `diagnostic`/`advisory`-category evidence) always enforces.
 
 **Output**
 
@@ -1067,6 +1085,10 @@ is claimable.
 - `ToolError` — task not found.
 - `ToolError` — task not in `needs_review` status (submit evidence first).
 - `ToolError` — `approve=false` without a `reason`.
+- `ToolError` — `claim_unproven`: the task's evidence contract has an
+  enforceable unproven claim (approval refused; task stays `needs_review`).
+- `ToolError` — `evidence_incomplete`: strict evidence mode and required
+  evidence is missing.
 - `ToolError` — project not initialized.
 
 ---
