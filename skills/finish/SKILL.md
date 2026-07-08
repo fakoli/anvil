@@ -203,6 +203,25 @@ For **decision-presentation discipline** — how to surface multi-option disposi
 
 Before invoking `anvil apply`, you may dispatch the plugin-local `sentinel` agent (if available in this session) against the task's evidence bundle. Sentinel produces a pass/fail recommendation that supplements — but does not replace — the reviewer's judgment. The `apply` call is always a human decision.
 
+### Tier-aware review depth
+
+The work packet (and `anvil show` / `anvil next`) carries a derived
+**review tier** — `light`, `standard`, or `max` — computed from the task's
+six-dimension score plus its risk-confirmation flags. Read the packet's
+`Review tier:` line (or the `review_tier` JSON key) and dispatch review
+effort at the matching depth instead of reviewing everything at maximum:
+
+| Review tier | What the reviewer runs before `apply` |
+|---|---|
+| `light` | Evidence-gate check only — confirm the submitted commands/files satisfy the required evidence. Confirmed low-risk fast-lane change; no diff read required. |
+| `standard` | Evidence gate **plus** a read of the diff against the acceptance criteria. |
+| `max` | Evidence gate, diff read, **and** an adversarial pass — dispatch the plugin-local `critic` agent (or the session's strongest reviewer) to actively refute the change. High or unconfirmed risk; an unscored task always lands here. |
+
+The tier is advisory routing for review *effort* — the human
+`apply --approve` decision is unchanged at every tier, and a reviewer may
+always choose a deeper pass than the tier suggests (never a shallower one
+for `max`).
+
 ---
 
 ## Scope and limitations
