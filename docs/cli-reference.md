@@ -1289,7 +1289,23 @@ flag list; full prose treatment may follow in a later pass.
 
 - `anvil doctor` — One-shot health diagnosis: schema/db reachability, config
   parse status, active/stale claims, replay integrity, reconciliation drift
-  (`--json`); exits non-zero when any finding is ERROR-level.
+  (`--json`); exits non-zero when any finding is ERROR-level. With
+  `--preflight [--prd <id>]`, adds PRD-parse, unresolved-decision, and git
+  tree-state probes plus a final `PREFLIGHT: GO`/`NO-GO` verdict line
+  (JSON: `data.preflight`/`data.go`) — the GO/NO-GO gate to run before a
+  long workflow.
+- `anvil merge-check <task>` — Pre-merge freshness report for the task's
+  claim branch: behind-count vs `origin/<default>` (offline degrades to the
+  local base) and a `git merge-tree` textual-conflict probe; with
+  `--run-checks`, runs the task's verification commands against the
+  would-be merge result in a throwaway worktree (`--json`); exit 1 when
+  stale, conflicted, or a merged-tree check fails. See also the
+  `merge_check` config knob on [`anvil apply`](#apply).
+- `anvil progress <task> <phase>` — Record a structured progress phase
+  (`build`, `tests`, …) as a `progress.noted` audit event; task status
+  never changes and no claim is required (`--detail`, `--actor`, `--json`).
+  `anvil status` shows each active claim's latest phase, elapsed time, and
+  lease-expiry countdown.
 - `anvil drift` — Report intent/state/filesystem-git divergence (orphan
   branches, orphan worktrees, orphan packets, stale claims, vanished
   expected files) (`--json`); always exits 0 — a report, not a gate.
@@ -1298,9 +1314,10 @@ flag list; full prose treatment may follow in a later pass.
   with `--target`, `--json`).
 - `anvil conflicts` — List persisted conflict groups — tasks whose
   `likely_files` overlap (`--format text|json`).
-- `anvil notify-digest` — Print a one-line needs-review/blocked summary,
-  staying silent when the queue is clean; built for cron `--announce` jobs
-  (`--json`); always exits 0.
+- `anvil notify-digest` — Print a one-line needs-review/blocked/
+  leases-expiring-soon summary, staying silent when the queue is clean;
+  built for cron `--announce` jobs (`--json`, incl. `expiring_soon`);
+  always exits 0.
 
 **Native-harness gates** (read-only, default-open; built for
 OpenClaw/Codex-style `before_tool_call` / `before_agent_finalize` hooks)
