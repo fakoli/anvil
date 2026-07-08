@@ -22,6 +22,7 @@ from anvil.cli.hooks import hook_app
 from anvil.cli.init_status import init, status
 from anvil.cli.install import install
 from anvil.cli.mcp_config import mcp_config
+from anvil.cli.merge_check import merge_check
 from anvil.cli.migrate import migrate_app, migrate_events
 from anvil.cli.migrate_workspace import migrate_workspace
 from anvil.cli.notify_digest import notify_digest
@@ -137,6 +138,7 @@ app.command()(install)
 app.command()(scan)
 app.command()(drift)
 app.command("claim-guard")(claim_guard)
+app.command("merge-check")(merge_check)
 app.command("gate-check")(gate_check)
 app.command()(graph)
 app.command()(conflicts)
