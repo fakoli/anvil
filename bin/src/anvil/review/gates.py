@@ -433,9 +433,22 @@ def evaluate_claims(
         )
 
     if not verdicts:
-        # No contract declared at all — the implicit claim passes; the
-        # legacy gate (evidence_complete) still governs its own surfaces.
-        verdicts = [ClaimVerdict(claim="", verdict="passed")]
+        # No contract declared. The implicit claim still honors the evidence
+        # TAXONOMY (T006 review MUST-FIX): an affirmative blocked/diagnostic
+        # category is a "this is not done" signal that must reach the apply
+        # gate even without a contract — otherwise `submit --category
+        # blocked` on a plain task is silently approvable, the exact
+        # incident class. Completion evidence keeps the historical pass.
+        if category is EvidenceCategory.blocked:
+            implicit = "blocked"
+        elif category in (
+            EvidenceCategory.diagnostic,
+            EvidenceCategory.advisory,
+        ):
+            implicit = "diagnostic_only"
+        else:
+            implicit = "passed"
+        verdicts = [ClaimVerdict(claim="", verdict=implicit)]
 
     overall = verdicts[0].verdict
     for cv in verdicts[1:]:

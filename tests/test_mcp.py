@@ -1685,6 +1685,50 @@ class TestNextReadyField:
         # T002 is higher priority but excluded by file overlap; T003 wins.
         assert resp["next_ready"]["id"] == "T003"
 
+    def test_submit_evidence_category_recorded_and_invalid_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """evidence-contracts:T006 — MCP category param records the same
+        evidence shape as the CLI; invalid values are rejected naming the
+        valid set."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="approved")
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def bad() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("submit_completion_evidence", {
+                    "task_id": "T001", "actor": "agent-x",
+                    "commands_run": ["echo ok"], "files_changed": ["x.py"],
+                    "category": "sometimes",
+                })
+
+        with pytest.raises(ToolError, match="invalid_category"):
+            _run(bad())
+
+        async def good() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("submit_completion_evidence", {
+                    "task_id": "T001", "actor": "agent-x",
+                    "commands_run": ["echo ok"], "files_changed": ["x.py"],
+                    "category": "diagnostic",
+                }))
+
+        assert _run(good())["evidence_id"]
+        import sqlite3 as _sq
+
+        conn = _sq.connect(str(state_dir / "state.db"))
+        row = conn.execute(
+            "SELECT category FROM evidence WHERE task_id='T001'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "diagnostic"
+
     def test_apply_review_decision_enforces_claim_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
