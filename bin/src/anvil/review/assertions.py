@@ -49,6 +49,9 @@ class AssertionResult:
     passed: bool
     failures: list[str] = field(default_factory=list)
     observed: dict[str, Any] = field(default_factory=dict)
+    # T004: a not-yet-written artifact is INCOMPLETE evidence, not a
+    # contradiction — the gate maps this flag to the incomplete verdict.
+    missing_artifact: bool = False
 
 
 def _resolve_path(doc: Any, path: str) -> tuple[bool, list[Any]]:
@@ -247,6 +250,7 @@ def evaluate_assertions(
                     claim=assertion.claim,
                     passed=False,
                     failures=[f"artifact {assertion.artifact!r} does not exist"],
+                    missing_artifact=True,
                 )
             )
             continue
