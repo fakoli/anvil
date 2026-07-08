@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from anvil.state.models import (
     AssertionProof,
@@ -232,6 +233,152 @@ def _evidence_text_matches(required_lower: str, corpus_lower: str) -> bool:
     pattern = r"\S+".join(re.escape(seg) for seg in segments)
     return re.search(pattern, corpus_lower) is not None
 
+
+# ---------------------------------------------------------------------------
+# Evidence contracts (evidence-contracts:T004, issue #153) — per-claim gate
+# ---------------------------------------------------------------------------
+
+# Verdict severity order: the OVERALL verdict is the worst per-claim one.
+_VERDICT_ORDER = ("failed", "blocked", "incomplete", "diagnostic_only", "passed")
+
+
+@dataclass(frozen=True)
+class ClaimVerdict:
+    """The gate's answer for ONE claim: does the evidence prove it?"""
+
+    claim: str  # claim id; "" is the implicit task-level claim
+    verdict: str  # passed | failed | incomplete | blocked | diagnostic_only
+    missing: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GateVerdict:
+    """Per-claim verdicts plus the overall (worst) verdict."""
+
+    overall: str
+    claims: list[ClaimVerdict] = field(default_factory=list)
+
+    @property
+    def unproven(self) -> list[ClaimVerdict]:
+        return [c for c in self.claims if c.verdict != "passed"]
+
+
+def _worse(a: str, b: str) -> str:
+    return a if _VERDICT_ORDER.index(a) <= _VERDICT_ORDER.index(b) else b
+
+
+def evaluate_claims(
+    task: Task,
+    evidence: Evidence | None,
+    *,
+    project_root: Path,
+) -> GateVerdict:
+    """Evaluate the task's evidence CONTRACT, grouped by claim (T004).
+
+    Both requirement surfaces participate: typed ``required_proofs`` and
+    ``artifact_assertions``, each grouped by its ``claim`` binding (an
+    unbound requirement belongs to the implicit task-level claim ``""``).
+    Verdict semantics per claim:
+
+    - ``failed`` — an artifact assertion evaluated and CONTRADICTED the
+      claim (predicate/phase failure on an existing artifact).
+    - ``incomplete`` — a required proof is unsatisfied or a required
+      artifact does not exist yet.
+    - ``blocked`` — the evidence's category is ``blocked``: the claim
+      could not be proven for an environmental reason worth recording.
+    - ``diagnostic_only`` — requirements would pass, but the evidence is
+      ``diagnostic``/``advisory`` and can never satisfy a completion
+      claim (the voice-incident rule).
+    - ``passed`` — every bound requirement satisfied on completion (or
+      promotion_quality) evidence.
+
+    A task with no claims, no assertions, and no typed proofs yields a
+    single implicit claim whose verdict is ``passed`` — byte-compatible
+    with pre-contract behavior (the legacy ``evidence_complete`` gate is
+    unchanged and still governs advisory/strict command-proof flows).
+    """
+    from anvil.review.assertions import evaluate_assertions
+    from anvil.state.models import EvidenceCategory
+
+    category = (
+        evidence.category if evidence is not None else EvidenceCategory.completion
+    )
+    proofs = list(evidence.proofs) if evidence is not None else []
+
+    # Group requirements by claim id ("" = implicit task-level claim).
+    claim_ids: list[str] = [c.id for c in task.claims]
+    groups: dict[str, dict[str, list]] = {
+        cid: {"proofs": [], "assertions": []} for cid in claim_ids
+    }
+
+    def _group(claim: str | None) -> dict[str, list]:
+        key = claim or ""
+        if key not in groups:
+            groups[key] = {"proofs": [], "assertions": []}
+        return groups[key]
+
+    for req in task.verification.required_proofs:
+        _group(req.claim)["proofs"].append(req)
+    for assertion in task.verification.artifact_assertions:
+        _group(assertion.claim)["assertions"].append(assertion)
+
+    # One engine pass over ALL assertions, indexed back per claim.
+    all_assertions = list(task.verification.artifact_assertions)
+    assertion_results = (
+        evaluate_assertions(all_assertions, project_root)
+        if all_assertions
+        else []
+    )
+    results_by_claim: dict[str, list] = {}
+    for result in assertion_results:
+        results_by_claim.setdefault(result.claim or "", []).append(result)
+
+    verdicts: list[ClaimVerdict] = []
+    for cid, group in groups.items():
+        missing: list[str] = []
+        failures: list[str] = []
+
+        for req in group["proofs"]:
+            if not _proof_satisfies(req, proofs):
+                missing.append(req.label)
+
+        for result in results_by_claim.get(cid, []):
+            if result.passed:
+                continue
+            if result.missing_artifact:
+                missing.extend(result.failures)
+            else:
+                failures.extend(result.failures)
+
+        if failures:
+            verdict = "failed"
+        elif category is EvidenceCategory.blocked:
+            verdict = "blocked"
+        elif missing:
+            verdict = "incomplete"
+        elif category in (
+            EvidenceCategory.diagnostic,
+            EvidenceCategory.advisory,
+        ):
+            # The voice-incident rule: diagnostic evidence may be excellent
+            # context and still proves NO completion claim.
+            verdict = "diagnostic_only"
+        else:
+            verdict = "passed"
+        verdicts.append(
+            ClaimVerdict(claim=cid, verdict=verdict, missing=missing, failures=failures)
+        )
+
+    if not verdicts:
+        # No contract declared at all — the implicit claim passes; the
+        # legacy gate (evidence_complete) still governs its own surfaces.
+        verdicts = [ClaimVerdict(claim="", verdict="passed")]
+
+    overall = verdicts[0].verdict
+    for cv in verdicts[1:]:
+        overall = _worse(overall, cv.verdict)
+    return GateVerdict(overall=overall, claims=verdicts)
 
 def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
     """Validate that Evidence satisfies the Task's declared requirements.
