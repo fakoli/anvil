@@ -12,7 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from anvil.review.gates import evaluate_claims, evidence_complete
+from anvil.review.gates import evaluate_claims, evidence_complete, lint_intent
 from anvil.state.models import (
     ArtifactAssertion,
     CommandProof,
@@ -341,3 +341,34 @@ class TestBackCompat:
         verdict = evaluate_claims(task, _evidence(), project_root=tmp_path)
         assert verdict.overall == "passed"
         assert verdict.claims[0].claim == ""
+
+
+class TestIntentLinterWordBoundaries:
+    """T008 review SHOULD-FIX: single-token intent keywords match on word
+    boundaries so 'live' does not leak into 'deliver'/'delivery'."""
+
+    def test_deliver_does_not_trigger_live_false_positive(self) -> None:
+        task = _task(
+            title="Deliver the notification digest",
+            description="Ship the digest email on schedule.",
+        )
+        assert lint_intent(task) == []
+
+    def test_live_intent_not_suppressed_by_delivery_contract(self) -> None:
+        """The damaging false NEGATIVE: a claim id containing 'delivery' must
+        not silently swallow a real 'live traffic' intent warning."""
+        task = _task(
+            title="Validate the live traffic cutover",
+            description="Confirm the service handles live production traffic.",
+            claims=[TaskClaim(id="delivery_status_check", subject="the delivery pipeline")],
+        )
+        warnings = " ".join(lint_intent(task))
+        assert "live" in warnings
+
+    def test_genuine_live_coverage_still_suppresses(self) -> None:
+        task = _task(
+            title="Validate live cutover",
+            description="x",
+            claims=[TaskClaim(id="live_traffic_ok", subject="live")],
+        )
+        assert lint_intent(task) == []

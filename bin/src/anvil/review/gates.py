@@ -668,6 +668,21 @@ _INTENT_FAMILIES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _keyword_in(keyword: str, text: str) -> bool:
+    """Boundary-aware keyword containment (T008 review).
+
+    Single tokens match on word boundaries — plain substring made ``"live"``
+    fire inside ``deliver``/``delivery`` (false positive) AND, worse, let a
+    contract term like ``delivery_status`` silently SUPPRESS a real "live
+    traffic" warning (false negative, the exact incident this exists to
+    catch). Multi-word / punctuated phrases (``"a-b test"``) stay substring —
+    a word-boundary regex around them is both unnecessary and wrong.
+    """
+    if any(c in keyword for c in " -/"):
+        return keyword in text
+    return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
+
+
 def lint_intent(task: Task) -> list[str]:
     """Advisory intent/evidence mismatch warnings for a task (T008).
 
@@ -696,9 +711,9 @@ def lint_intent(task: Task) -> list[str]:
 
     warnings: list[str] = []
     for family, synonyms in _INTENT_FAMILIES.items():
-        if not any(kw in text for kw in synonyms):
+        if not any(_keyword_in(kw, text) for kw in synonyms):
             continue
-        if any(kw in contract_blob for kw in synonyms):
+        if any(_keyword_in(kw, contract_blob) for kw in synonyms):
             continue
         warnings.append(
             f"task intent mentions {family!r} but no declared claim or "
