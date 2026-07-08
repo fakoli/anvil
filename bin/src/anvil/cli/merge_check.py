@@ -20,13 +20,15 @@ merged-tree check exits non-zero.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import typer
 
 from anvil.cli._helpers import _resolve_state_dir
-from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.cli._json import JSON_OPTION, emit_success, fail, fail_with
 from anvil.git_ops.branch import _GIT_TIMEOUT_SECONDS
 from anvil.git_ops.freshness import FreshnessReport, check_freshness, resolve_base
 from anvil.naming import safe_path_component
@@ -183,6 +185,10 @@ def _run_merged_tree_checks(
         _git(
             ["worktree", "remove", "--force", str(worktree_path)], repo_root
         )
+        # A SIGKILLed prior run leaves registered-but-gone worktree metadata
+        # that drift/doctor cannot see (detached worktrees carry no branch
+        # line); prune keeps the registry clean so nothing accumulates.
+        _git(["worktree", "prune"], repo_root)
 
 
 def _json_data(
@@ -300,17 +306,31 @@ def merge_check(
             if commit_oid is None:
                 checks_error = build_error
             else:
-                worktree_path = (
-                    state_dir
-                    / "tmp"
-                    / f"merge-check-{safe_path_component(task_id).lower()}"
+                # Unique per RUN, not per task: a deterministic path would be
+                # poisoned forever by a SIGKILLed prior run (worktree add on
+                # an existing registered path exits 128, and drift/doctor are
+                # blind to detached worktrees). mkdtemp keeps reruns and
+                # concurrent checks collision-free; the finally cleans up.
+                tmp_root = state_dir / "tmp"
+                tmp_root.mkdir(parents=True, exist_ok=True)
+                run_dir = Path(
+                    tempfile.mkdtemp(
+                        prefix=(
+                            f"merge-check-"
+                            f"{safe_path_component(task_id).lower()}-"
+                        ),
+                        dir=tmp_root,
+                    )
                 )
-                checks, checks_error = _run_merged_tree_checks(
-                    verification_commands,
-                    commit_oid,
-                    repo_root=project_root,
-                    worktree_path=worktree_path,
-                )
+                try:
+                    checks, checks_error = _run_merged_tree_checks(
+                        verification_commands,
+                        commit_oid,
+                        repo_root=project_root,
+                        worktree_path=run_dir / "wt",
+                    )
+                finally:
+                    shutil.rmtree(run_dir, ignore_errors=True)
 
     failed_checks = [
         c for c in checks if c["exit_code"] != 0 or c["exit_code"] is None
@@ -332,7 +352,15 @@ def merge_check(
                 parts.append("merged tree has textual conflicts")
             if failed_checks:
                 parts.append(f"{len(failed_checks)} merged-tree check(s) failed")
-            fail(_COMMAND, "; ".join(parts), code="merge_check_failed")
+            # fail_with, not fail: a CI consumer gating on this command needs
+            # the structured report (behind_count, checks, ...) on the FAILURE
+            # path — which is the path this command exists to report.
+            fail_with(
+                _COMMAND,
+                "; ".join(parts),
+                code="merge_check_failed",
+                extra=data,
+            )
         return
 
     typer.echo(f"merge-check {task_id} (branch: {branch})")

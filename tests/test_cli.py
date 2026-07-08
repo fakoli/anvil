@@ -7153,6 +7153,13 @@ class TestMergeCheck:
         envelope = json.loads(result.output.strip().splitlines()[-1])
         assert envelope["ok"] is False
         assert "2 commit(s) behind" in envelope["error"]["message"]
+        # SF-1 (review finding): the FAILURE envelope must carry the full
+        # structured report, not just prose — CI consumers gate on it.
+        assert envelope["error"]["behind_count"] == 2
+        assert envelope["error"]["has_conflicts"] is False
+        assert envelope["error"]["base_ref"] in ("main", "master")
+        assert envelope["error"]["remote_checked"] is False
+        assert envelope["error"]["checks"] == []
 
     def test_run_checks_failure_named_and_worktree_removed(
         self, tmp_path: Path
