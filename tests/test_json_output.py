@@ -236,7 +236,8 @@ class TestShowJson:
         data = _assert_success(_parse_envelope(res), "show")
         assert data["task"]["id"] == "T001"
         assert "scores" in data["task"]
-        assert data["review_tier"] in {"light", "standard", "max"}  # T003
+        # T003 — scored (fixture runs `anvil score`) but unconfirmed → standard.
+        assert data["review_tier"] == "standard"
         assert isinstance(data["active_claims"], list)
         assert isinstance(data["recent_events"], list)
 
@@ -256,9 +257,10 @@ class TestNextJson:
         data = _assert_success(_parse_envelope(res), "next")
         assert data["task"] is not None
         assert data["task"]["id"] in {"T001", "T002"}
-        # retro-opps T003 — derive-only review tier on every next response
-        # (unscored fixture tasks fail safe to max).
-        assert data["review_tier"] in {"light", "standard", "max"}
+        # retro-opps T003 — derive-only review tier on every next response.
+        # _planned_project runs `anvil score` (scored, UNCONFIRMED risk), so
+        # the tier is "standard" — never "light" without confirmation.
+        assert data["review_tier"] == "standard"
 
     def test_next_json_empty_queue_is_null_not_error(self, tmp_path: Path) -> None:
         # A freshly-initialized project with no ready tasks → task is null,

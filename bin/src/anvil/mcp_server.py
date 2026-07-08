@@ -584,6 +584,37 @@ def _resolve_strict_evidence(strict: bool | None, state_dir: Path) -> bool:
         return False
 
 
+def _load_merged_config_optional(state_dir: Path):  # type: ignore[no-untyped-def]
+    """Soft-load the project config with the GLOBAL layer merged underneath.
+
+    retro-opps T003 (review MUST-FIX): the CLI derives review tiers from
+    ``_load_config_optional`` → ``load_merged_config`` (global merged under
+    project), so the MCP tier surfaces must use the same merged loader —
+    ``load_config`` alone ignores a tier key set only in
+    ``~/.config/anvil/config.yaml`` and silently derives a DIFFERENT tier
+    than ``anvil next``/``show`` for the same task. Returns ``None`` when
+    there is no config.yaml or it fails to parse (derive with defaults).
+    """
+    config_path = state_dir / "config.yaml"
+    if not config_path.exists():
+        return None
+
+    import yaml
+
+    try:
+        from anvil.config import load_merged_config
+
+        return load_merged_config(config_path)
+    except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
+        print(
+            f"Warning: config.yaml load failed "
+            f"({type(exc).__name__}: {exc}); review tier derived from "
+            "built-in defaults for this call.",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _load_fast_lane_config(state_dir: Path):  # type: ignore[no-untyped-def]
     """Soft-load the project config for T020 fast-lane packet routing.
 
@@ -735,7 +766,7 @@ def get_task(task_id: str) -> dict[str, Any]:
 
         data = json.loads(task.model_dump_json())
         data["review_tier"] = review_tier(
-            task, config=_load_fast_lane_config(state_dir)
+            task, config=_load_merged_config_optional(state_dir)
         )
         return data
     finally:
@@ -858,7 +889,7 @@ def get_next_task(
 
         data = json.loads(best.model_dump_json())
         data["review_tier"] = review_tier(
-            best, config=_load_fast_lane_config(state_dir)
+            best, config=_load_merged_config_optional(state_dir)
         )
         return data
     finally:
