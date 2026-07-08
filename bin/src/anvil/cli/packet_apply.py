@@ -282,6 +282,74 @@ def _echo_merge_check_block(block: dict[str, object] | None) -> None:
         )
 
 
+def _claim_verdict_block(
+    task: object,
+    evidence: object,
+    cwd: Path | None,
+) -> object:
+    """GateVerdict for tasks that declare an evidence CONTRACT, else None.
+
+    evidence-contracts:T005 — the contract surface is task.claims or
+    artifact_assertions (auto-strict per the locked decision); command-
+    proof-only tasks keep the advisory/strict_evidence behavior. The gate
+    is total by design; a crash here is a bug and fails OPEN with a loud
+    stderr warning (merge-check precedent) so apply is never bricked.
+    """
+    has_contract = bool(
+        getattr(task, "claims", None)
+        or task.verification.artifact_assertions  # type: ignore[attr-defined]
+    )
+    if not has_contract:
+        return None
+    try:
+        from anvil.review.gates import evaluate_claims
+
+        project_root = (cwd or Path.cwd()).resolve()
+        return evaluate_claims(task, evidence, project_root=project_root)
+    except Exception:  # noqa: BLE001 — never brick apply on a gate bug
+        typer.echo(
+            "Warning: claim gate could not run (internal error); "
+            "contract enforcement skipped for this call.",
+            err=True,
+        )
+        return None
+
+
+def _verdict_json(verdict: object) -> dict[str, object] | None:
+    if verdict is None:
+        return None
+    return {
+        "overall": verdict.overall,  # type: ignore[attr-defined]
+        "claims": [
+            {
+                "claim": c.claim,
+                "verdict": c.verdict,
+                "missing": list(c.missing),
+                "proof_missing": list(c.proof_missing),
+                "failures": list(c.failures),
+            }
+            for c in verdict.claims  # type: ignore[attr-defined]
+        ],
+    }
+
+
+def _echo_claim_verdict(verdict: object) -> None:
+    """Human rendering, grouped by claim. Quiet when everything passed."""
+    if verdict is None:
+        return
+    for cv in verdict.claims:  # type: ignore[attr-defined]
+        label = cv.claim or "(task)"
+        if cv.verdict == "passed":
+            typer.echo(f"Claim {label}: PROVEN")
+            continue
+        typer.echo(f"Claim {label}: {cv.verdict.upper()}")
+        for item in cv.failures:
+            typer.echo(f"  - failed: {item}")
+        for item in cv.missing:
+            typer.echo(f"  - missing: {item}")
+        for item in cv.proof_missing:
+            typer.echo(f"  - proof not attached: {item}")
+
 def _compute_next_ready(backend: object, actor: str) -> dict[str, object] | None:
     """Return a compact descriptor of the next claimable task, or None (T014).
 
@@ -680,8 +748,12 @@ def submit(
                 submitted_by=resolved_actor,
             )
             gate = evidence_complete(fresh_task, evidence_obj)
+            # evidence-contracts:T005 — show the contract verdict at submit
+            # so the agent sees unproven claims BEFORE review.
+            submit_verdict = _claim_verdict_block(fresh_task, evidence_obj, cwd)
         except Exception:  # noqa: BLE001
             gate = None  # gate summary is informational; never block the command
+            submit_verdict = None
 
     if json_output:
         emit_success(
@@ -700,6 +772,7 @@ def submit(
                     if gate is not None
                     else None
                 ),
+                "claim_verdict": _verdict_json(submit_verdict),  # T005
                 "next_ready": next_ready,
             },
         )
@@ -730,6 +803,7 @@ def submit(
             )
             for item in missing:
                 typer.echo(f"  - {item}")
+    _echo_claim_verdict(submit_verdict)
 
 
 # ---------------------------------------------------------------------------
@@ -847,6 +921,16 @@ def apply(
             else ("off", None)
         )
 
+        # evidence-contracts:T005 — per-claim contract verdict, computed once
+        # for review-only AND --approve; --reject is never affected.
+        contract_verdict = (
+            _claim_verdict_block(
+                task, backend.get_latest_evidence(task_id), cwd
+            )
+            if not reject
+            else None
+        )
+
         # Review-only mode: neither --approve nor --reject; show evidence summary.
         if not approve and not reject:
             # Fetch the latest evidence row for this task via the Backend protocol.
@@ -884,6 +968,7 @@ def apply(
                         ),
                         "task": dump_model(task),
                         "merge_check": merge_block,  # T007 — same block as --approve
+                        "claim_verdict": _verdict_json(contract_verdict),
                         # No decision in review-only mode, so no proof is emitted;
                         # carry the key (null) to keep the apply envelope uniform.
                         "proof_path": None,
@@ -909,6 +994,7 @@ def apply(
                 typer.echo(f"Task '{task_id}' awaiting review (status: needs_review).")
                 typer.echo("No evidence found — run `anvil submit` first.")
             _echo_merge_check_block(merge_block)
+            _echo_claim_verdict(contract_verdict)
             typer.echo("")
             typer.echo(
                 "Pass --approve to accept or --reject --reason TEXT to reject."
@@ -1047,6 +1133,35 @@ def apply(
                 )
                 raise typer.Exit(code=1)
 
+            # evidence-contracts:T005 — AUTO-STRICT: a task that declares an
+            # evidence contract (claims / artifact assertions) is held to it,
+            # independent of strict_evidence. Refuse BEFORE task.applied so
+            # the task stays in needs_review. --reject is never gated.
+            if contract_verdict is not None and contract_verdict.enforceable_unproven:
+                unproven_names = [
+                    cv.claim or "(task)"
+                    for cv in contract_verdict.enforceable_unproven
+                ]
+                if json_output:
+                    from anvil.cli._json import fail_with
+
+                    fail_with(
+                        "apply",
+                        f"claim gate refused approval of task '{task_id}': "
+                        f"unproven claim(s) {', '.join(unproven_names)}. "
+                        "Task remains in needs_review.",
+                        code="claim_unproven",
+                        extra={"claim_verdict": _verdict_json(contract_verdict)},
+                    )
+                typer.echo(
+                    f"Error: claim gate REFUSED approval of task '{task_id}': "
+                    f"unproven claim(s): {', '.join(unproven_names)}. "
+                    "Task remains in needs_review.",
+                    err=True,
+                )
+                _echo_claim_verdict(contract_verdict)
+                raise typer.Exit(code=1)
+
         from anvil.clock import SystemClock
 
         clock = SystemClock()
@@ -1129,12 +1244,14 @@ def apply(
                 "next_ready": apply_next_ready,
                 "proof_path": str(proof_path) if proof_path is not None else None,
                 "merge_check": merge_block,  # T007 — null when mode off/probe failed
+                "claim_verdict": _verdict_json(contract_verdict),  # T005
             },
         )
         return
 
     if approve:
         _echo_merge_check_block(merge_block)
+        _echo_claim_verdict(contract_verdict)
         typer.echo(f"Task '{task_id}' approved by '{resolved_reviewer}' → done.")
         if proof_path is not None:
             typer.echo(f"  Signed proof: {proof_path}")

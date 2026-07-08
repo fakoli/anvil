@@ -244,11 +244,19 @@ _VERDICT_ORDER = ("failed", "blocked", "incomplete", "diagnostic_only", "passed"
 
 @dataclass(frozen=True)
 class ClaimVerdict:
-    """The gate's answer for ONE claim: does the evidence prove it?"""
+    """The gate's answer for ONE claim: does the evidence prove it?
+
+    ``proof_missing`` (unsatisfied ProofRequirement labels) is kept separate
+    from ``missing`` (artifact absences + structural gaps) because the T005
+    enforcement scope differs: command-proof strictness on the IMPLICIT
+    claim stays governed by strict_evidence (the locked decision), while
+    contract items always enforce.
+    """
 
     claim: str  # claim id; "" is the implicit task-level claim
     verdict: str  # passed | failed | incomplete | blocked | diagnostic_only
     missing: list[str] = field(default_factory=list)
+    proof_missing: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
 
@@ -262,6 +270,26 @@ class GateVerdict:
     @property
     def unproven(self) -> list[ClaimVerdict]:
         return [c for c in self.claims if c.verdict != "passed"]
+
+    @property
+    def enforceable_unproven(self) -> list[ClaimVerdict]:
+        """Unproven claims the T005 auto-strict gate refuses on.
+
+        NAMED claims always enforce (the author wrote the contract). The
+        implicit "" claim enforces only its CONTRACT items — assertion
+        failures and non-proof gaps — while unsatisfied command proofs on it
+        stay governed by strict_evidence, exactly as before this feature.
+        """
+        out: list[ClaimVerdict] = []
+        for c in self.claims:
+            if c.verdict == "passed":
+                continue
+            if c.claim or c.failures or c.missing or c.verdict in (
+                "blocked",
+                "diagnostic_only",
+            ):
+                out.append(c)
+        return out
 
 
 def _worse(a: str, b: str) -> str:
@@ -340,9 +368,10 @@ def evaluate_claims(
         failures: list[str] = []
         has_requirements = bool(group["proofs"]) or bool(group["assertions"])
 
+        proof_missing: list[str] = []
         for req in group["proofs"]:
             if not _proof_satisfies(req, proofs):
-                missing.append(req.label)
+                proof_missing.append(req.label)
 
         for result in results_by_claim.get(cid, []):
             if result.passed:
@@ -366,7 +395,13 @@ def evaluate_claims(
         # Review finding: with NO evidence row at all, on-disk artifacts must
         # not prove a contract-bearing claim (proof decoupled from claim is
         # the incident class). Only the implicit no-contract claim may pass.
-        elif evidence is None and has_requirements and not missing and not failures:
+        elif (
+            evidence is None
+            and has_requirements
+            and not missing
+            and not proof_missing
+            and not failures
+        ):
             missing.append("no evidence submitted for this task")
 
         if failures:
@@ -376,7 +411,7 @@ def evaluate_claims(
             verdict = "failed"
         elif category is EvidenceCategory.blocked:
             verdict = "blocked"
-        elif missing:
+        elif missing or proof_missing:
             verdict = "incomplete"
         elif category in (
             EvidenceCategory.diagnostic,
@@ -388,7 +423,13 @@ def evaluate_claims(
         else:
             verdict = "passed"
         verdicts.append(
-            ClaimVerdict(claim=cid, verdict=verdict, missing=missing, failures=failures)
+            ClaimVerdict(
+                claim=cid,
+                verdict=verdict,
+                missing=missing,
+                proof_missing=proof_missing,
+                failures=failures,
+            )
         )
 
     if not verdicts:

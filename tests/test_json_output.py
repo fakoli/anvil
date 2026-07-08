@@ -415,6 +415,7 @@ _APPLY_KEYS = {
     "next_ready",  # T014
     "proof_path",  # B48 part 2 — path to the emitted signed AcceptanceProof (or null)
     "merge_check",  # retro-opps T007 — base-freshness block (or null)
+    "claim_verdict",  # evidence-contracts T005 — per-claim gate verdict (or null)
 }
 
 

@@ -146,7 +146,10 @@ class TestClaimVerdicts:
         )
         verdict = evaluate_claims(task, _evidence(), project_root=tmp_path)
         assert verdict.overall == "incomplete"
-        assert verdict.claims[0].missing == ["`pytest -q` exits 0"]
+        # T005 refinement: unsatisfied proof labels live in proof_missing —
+        # named claims still enforce them; the implicit claim's stay advisory.
+        assert verdict.claims[0].proof_missing == ["`pytest -q` exits 0"]
+        assert verdict.claims[0].missing == []
 
     def test_satisfied_proof_requirement_passes(self, tmp_path: Path) -> None:
         task = _contract_task(
