@@ -36,6 +36,8 @@ from anvil.cli._json import (
     fail,
 )
 from anvil.state.backend import EventRejected
+from anvil.state.models import TERMINAL_TASK_STATUSES
+from anvil.state.rollup import PrdRollupEntry, compute_prd_rollup
 
 if TYPE_CHECKING:
     from anvil.config import Config
@@ -1576,10 +1578,6 @@ def review_tasks(
 # ---------------------------------------------------------------------------
 
 
-# Statuses that mean "finished — no work left". Everything else is "open".
-_TERMINAL_TASK_STATUSES = frozenset({"done", "accepted", "rejected"})
-
-
 def list_tasks(
     status: str | None = typer.Option(  # noqa: B008
         None,
@@ -1589,7 +1587,10 @@ def list_tasks(
     open_only: bool = typer.Option(  # noqa: B008
         False,
         "--open",
-        help="Show only unfinished tasks (exclude done/accepted/rejected).",
+        help=(
+            "Show only unfinished tasks (hide done/accepted; rejected tasks"
+            " await rework and stay open)."
+        ),
     ),
     summary: bool = typer.Option(  # noqa: B008
         False,
@@ -1624,6 +1625,15 @@ def list_tasks(
     ``--prd`` (T019) scopes the listing to one PRD partition via
     ``list_tasks(prd_id=...)``. Omitting it on a single-PRD project keeps the
     pre-T019 behaviour (all PRDs listed).
+
+    ``--open`` hides terminal tasks (``TERMINAL_TASK_STATUSES``: done and
+    accepted — rejected tasks await rework, so they stay open). ``--summary``
+    rolls tasks up per PRD via the shared :func:`compute_prd_rollup` helper;
+    the Total column always shows true per-PRD totals, and combining with
+    ``--open`` hides PRDs that have nothing open. In summary mode the
+    ``--json`` payload is ``{"summary": [{"prd", "open", "total",
+    "by_status"}, ...], "prd_count": N, "open": X, "total": Y,
+    "filters": {...}}`` under the same envelope.
     """
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="list", json_output=json_output)
@@ -1641,25 +1651,32 @@ def list_tasks(
             task_type=task_type,
             prd_id=scoped_prd_id,
         )
+        prds = backend.list_prds() if summary else []
     finally:
         backend.close()
 
-    if open_only:
-        tasks = [t for t in tasks if t.status.value not in _TERMINAL_TASK_STATUSES]
+    filters_payload = {
+        "status": status,
+        "open": open_only,
+        "feature": feature,
+        "task_type": task_type,
+        "prd": scoped_prd_id,
+    }
 
     if summary:
+        # The rollup sees the fetched (status/feature/type/prd-filtered) tasks
+        # UNFILTERED by --open, so Total stays the true per-PRD count; --open
+        # only decides which rows are shown.
         _emit_task_summary(
-            tasks,
+            compute_prd_rollup(prds, tasks, []),
+            open_only=open_only,
             json_output=json_output,
-            filters={
-                "status": status,
-                "open": open_only,
-                "feature": feature,
-                "task_type": task_type,
-                "prd": scoped_prd_id,
-            },
+            filters=filters_payload,
         )
         return
+
+    if open_only:
+        tasks = [t for t in tasks if t.status not in TERMINAL_TASK_STATUSES]
 
     if json_output:
         emit_success(
@@ -1667,13 +1684,7 @@ def list_tasks(
             {
                 "tasks": dump_models(tasks),
                 "count": len(tasks),
-                "filters": {
-                    "status": status,
-                    "open": open_only,
-                    "feature": feature,
-                    "task_type": task_type,
-                    "prd": scoped_prd_id,
-                },
+                "filters": filters_payload,
             },
         )
         return
@@ -1682,6 +1693,8 @@ def list_tasks(
         filters = []
         if status:
             filters.append(f"status={status}")
+        if open_only:
+            filters.append("open")
         if feature:
             filters.append(f"feature={feature}")
         if task_type:
@@ -1733,35 +1746,36 @@ def list_tasks(
 
 
 def _emit_task_summary(
-    tasks: list[Any],
+    entries: list[PrdRollupEntry],
     *,
+    open_only: bool,
     json_output: bool,
     filters: dict[str, Any],
 ) -> None:
-    """Roll ``tasks`` up per PRD: open count, total, and a status breakdown.
+    """Render per-PRD rollup entries: open count, total, status breakdown.
 
-    PRDs with open work sort first (then by name), so the answer to "is there
-    anything left to do here" is the top of the list. ``prd_id`` is a readable
-    slug (e.g. 'operator-cli-v2'), so no PRD lookup is needed.
+    Consumes :func:`compute_prd_rollup` (the shared helper behind ``anvil
+    status`` and the MCP project-summary tools) so the per-PRD numbers never
+    drift between surfaces; only presentation lives here. PRDs with open work
+    sort first (then by id) so "is there anything left?" is the top row.
+    ``open_only`` hides fully-terminal PRDs from display but the open/total
+    footer always reports the whole fetched set — Total never lies.
     """
-    from collections import defaultdict
-
-    groups: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for task in tasks:
-        groups[task.prd_id][task.status.value] += 1
-
     rows = []
-    for prd_id, counts in groups.items():
-        total = sum(counts.values())
-        open_n = sum(
-            n for s, n in counts.items() if s not in _TERMINAL_TASK_STATUSES
+    for entry in entries:
+        open_n = entry.total_tasks - sum(
+            entry.task_counts.get(s, 0) for s in TERMINAL_TASK_STATUSES
         )
-        rows.append((prd_id, open_n, total, dict(counts)))
+        # task_counts is exhaustive over TaskStatus; show only what's present.
+        counts = {s: n for s, n in entry.task_counts.items() if n}
+        rows.append((entry.prd_id or "(none)", open_n, entry.total_tasks, counts))
     # Open work first, then alphabetical — the busy PRDs float to the top.
     rows.sort(key=lambda r: (-r[1], r[0]))
 
     open_total = sum(r[1] for r in rows)
     grand_total = sum(r[2] for r in rows)
+    if open_only:
+        rows = [r for r in rows if r[1] > 0]
 
     if json_output:
         emit_success(
@@ -1780,7 +1794,7 @@ def _emit_task_summary(
         return
 
     if not rows:
-        typer.echo("No tasks found.")
+        typer.echo("No open tasks." if open_only else "No tasks found.")
         return
 
     prd_w = max(len("PRD"), max(len(r[0]) for r in rows))
@@ -1788,7 +1802,8 @@ def _emit_task_summary(
     typer.echo(header)
     typer.echo("-" * len(header))
     for prd_id, open_n, total, counts in rows:
-        breakdown = ", ".join(f"{s}:{n}" for s, n in sorted(counts.items()))
+        # task_counts preserves TaskStatus declaration order — lifecycle order.
+        breakdown = ", ".join(f"{s}:{n}" for s, n in counts.items())
         typer.echo(f"{prd_id:<{prd_w}}  {open_n:>5}  {total:>5}  {breakdown}")
     typer.echo(
         f"\n{len(rows)} PRD(s), {open_total} open of {grand_total} total."

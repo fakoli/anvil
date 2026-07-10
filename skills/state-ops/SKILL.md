@@ -90,7 +90,7 @@ For a single-line machine-readable form (with the `prd-status:` / `ready-tasks:`
 ### Step 2 — List tasks by filter
 
 ```bash
-anvil list [--status STATUS] [--feature FEATURE_ID] [--type TYPE]
+anvil list [--open] [--summary] [--status STATUS] [--feature FEATURE_ID] [--type TYPE]
 ```
 
 Prints a table with columns `TaskID | Title | Status | Priority | Type | Score | Feature` (the `Score` column is `complexity/agent_suitability`, e.g. `2/2`, or `unscored` until `anvil score` runs):
@@ -106,6 +106,11 @@ T002    Implement list output       ready   medium    feature            2/2  F0
 
 Filters:
 
+- `--open` — only unfinished tasks (hides terminal `done`/`accepted`;
+  `rejected` awaits rework and stays open). The fastest answer to "is there
+  anything left to do?".
+- `--summary` — per-PRD rollup (`PRD | Open | Total | Breakdown`) instead of
+  one row per task; combine with `--open` to see only PRDs with open work.
 - `--status ready` — tasks available to claim right now.
 - `--status in_progress` — tasks currently under active claims.
 - `--feature F001` — all tasks scoped to a specific feature.

@@ -527,6 +527,15 @@ Prints a table with columns: TaskID, Title, Status, Priority, Type, Score
 
 - `--status TEXT` *(optional)* — filter by task status (e.g. `ready`,
   `drafted`, `reviewed`, `in_progress`, `needs_review`, `done`).
+- `--open` *(optional)* — show only unfinished tasks: hides the terminal
+  statuses `done` and `accepted`. A task resting at `rejected` awaits rework,
+  so it counts as open.
+- `--summary` *(optional)* — roll tasks up per PRD instead of listing each
+  one: table columns `PRD | Open | Total | Breakdown`, PRDs with open work
+  first. `Total` is always the true per-PRD count; combining with `--open`
+  only hides PRDs that have nothing open. With `--json` the `data` payload is
+  `{"summary": [{"prd", "open", "total", "by_status"}, ...], "prd_count",
+  "open", "total", "filters"}`.
 - `--feature TEXT` *(optional)* — filter by feature id (e.g. `F001`).
 - `--type TEXT` *(optional)* — filter by task type: `feature` (default),
   `bugfix`, `refactor`, or `modify`.
@@ -541,6 +550,7 @@ Prints a table with columns: TaskID, Title, Status, Priority, Type, Score
 ```bash
 anvil list
 anvil list --status ready
+anvil list --open --summary   # "what's left, per PRD?" in one call
 anvil list --feature F001 --status drafted
 anvil list --type bugfix
 ```

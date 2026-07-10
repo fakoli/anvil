@@ -54,7 +54,7 @@ anvil apply T001           # apply the review verdict
 | Review tasks | `review_tasks` | `anvil review tasks …` |
 | Apply review decision | `apply_review_decision` | `anvil apply` |
 | Find open decisions | `find_decisions` | `anvil prd find-decisions` |
-| List tasks | `list_tasks` | `anvil list` |
+| List tasks | `list_tasks` | `anvil list` (`--open`/`--summary` are CLI-only; for a per-PRD rollup over MCP use `get_project_summary`) |
 | Show one task | `get_task` | `anvil show <id>` |
 | Next ready task | `get_next_task` | `anvil next` |
 | Claim task | `claim_task` | `anvil claim <id>` |

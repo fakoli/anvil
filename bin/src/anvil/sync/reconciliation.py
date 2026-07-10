@@ -658,7 +658,10 @@ class ReconciliationEngine:
         doesn't" has no safe automatic remediation: only a human can decide
         whether to rewrite the file, amend the plan, or reopen the task.
         """
-        _terminal = {"done", "accepted"}
+        # Canonical terminal set (state/models.py) — was a hand-rolled local
+        # copy until `list --open` grew a second one and they had to converge.
+        from anvil.state.models import TERMINAL_TASK_STATUSES as _terminal
+
         # ``likely_files`` are CHECKOUT-relative (e.g. ``src/widget.py``), not
         # ``.anvil/``-relative — resolve against the checkout root.
         project_root = self._checkout_root
