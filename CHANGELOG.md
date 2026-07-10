@@ -8,6 +8,12 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **`anvil list --open` and `anvil list --summary`** — answering "what's
+  left to do?" no longer requires composing per-status filters or raw SQL.
+  `--open` hides terminal tasks (done/accepted/rejected); `--summary` rolls
+  tasks up per PRD (open count, total, status breakdown) with open work
+  sorted first. Both compose with the existing `--status`/`--feature`/
+  `--type`/`--prd` filters and `--json` envelope.
 - **Worktree isolation policy (`worktree_isolation: off|advisory|require`,
   default advisory)** — retro-corpus concurrency theme. `advisory` warns when
   a new claim would share the working tree with another active claim;

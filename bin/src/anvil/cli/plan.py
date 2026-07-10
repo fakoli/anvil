@@ -1576,11 +1576,25 @@ def review_tasks(
 # ---------------------------------------------------------------------------
 
 
+# Statuses that mean "finished — no work left". Everything else is "open".
+_TERMINAL_TASK_STATUSES = frozenset({"done", "accepted", "rejected"})
+
+
 def list_tasks(
     status: str | None = typer.Option(  # noqa: B008
         None,
         "--status",
         help="Filter by task status (e.g. ready, drafted, reviewed).",
+    ),
+    open_only: bool = typer.Option(  # noqa: B008
+        False,
+        "--open",
+        help="Show only unfinished tasks (exclude done/accepted/rejected).",
+    ),
+    summary: bool = typer.Option(  # noqa: B008
+        False,
+        "--summary",
+        help="Roll up counts per PRD instead of listing every task.",
     ),
     feature: str | None = typer.Option(  # noqa: B008
         None,
@@ -1630,6 +1644,23 @@ def list_tasks(
     finally:
         backend.close()
 
+    if open_only:
+        tasks = [t for t in tasks if t.status.value not in _TERMINAL_TASK_STATUSES]
+
+    if summary:
+        _emit_task_summary(
+            tasks,
+            json_output=json_output,
+            filters={
+                "status": status,
+                "open": open_only,
+                "feature": feature,
+                "task_type": task_type,
+                "prd": scoped_prd_id,
+            },
+        )
+        return
+
     if json_output:
         emit_success(
             "list",
@@ -1638,6 +1669,7 @@ def list_tasks(
                 "count": len(tasks),
                 "filters": {
                     "status": status,
+                    "open": open_only,
                     "feature": feature,
                     "task_type": task_type,
                     "prd": scoped_prd_id,
@@ -1698,6 +1730,69 @@ def list_tasks(
         )
 
     typer.echo(f"\n{len(tasks)} task(s) listed.")
+
+
+def _emit_task_summary(
+    tasks: list[Any],
+    *,
+    json_output: bool,
+    filters: dict[str, Any],
+) -> None:
+    """Roll ``tasks`` up per PRD: open count, total, and a status breakdown.
+
+    PRDs with open work sort first (then by name), so the answer to "is there
+    anything left to do here" is the top of the list. ``prd_id`` is a readable
+    slug (e.g. 'operator-cli-v2'), so no PRD lookup is needed.
+    """
+    from collections import defaultdict
+
+    groups: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for task in tasks:
+        groups[task.prd_id][task.status.value] += 1
+
+    rows = []
+    for prd_id, counts in groups.items():
+        total = sum(counts.values())
+        open_n = sum(
+            n for s, n in counts.items() if s not in _TERMINAL_TASK_STATUSES
+        )
+        rows.append((prd_id, open_n, total, dict(counts)))
+    # Open work first, then alphabetical — the busy PRDs float to the top.
+    rows.sort(key=lambda r: (-r[1], r[0]))
+
+    open_total = sum(r[1] for r in rows)
+    grand_total = sum(r[2] for r in rows)
+
+    if json_output:
+        emit_success(
+            "list",
+            {
+                "summary": [
+                    {"prd": p, "open": o, "total": t, "by_status": c}
+                    for p, o, t, c in rows
+                ],
+                "prd_count": len(rows),
+                "open": open_total,
+                "total": grand_total,
+                "filters": filters,
+            },
+        )
+        return
+
+    if not rows:
+        typer.echo("No tasks found.")
+        return
+
+    prd_w = max(len("PRD"), max(len(r[0]) for r in rows))
+    header = f"{'PRD':<{prd_w}}  {'Open':>5}  {'Total':>5}  Breakdown"
+    typer.echo(header)
+    typer.echo("-" * len(header))
+    for prd_id, open_n, total, counts in rows:
+        breakdown = ", ".join(f"{s}:{n}" for s, n in sorted(counts.items()))
+        typer.echo(f"{prd_id:<{prd_w}}  {open_n:>5}  {total:>5}  {breakdown}")
+    typer.echo(
+        f"\n{len(rows)} PRD(s), {open_total} open of {grand_total} total."
+    )
 
 
 # ---------------------------------------------------------------------------
