@@ -6,6 +6,30 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **Worktree isolation policy (`worktree_isolation: off|advisory|require`,
+  default advisory)** — retro-corpus concurrency theme. `advisory` warns when
+  a new claim would share the working tree with another active claim;
+  `require` makes `anvil claim` isolate into a worktree by default, with an
+  explicit `--shared-tree` opt-out for read-only/docs work. The claim and
+  execute skills now document the policy and instruct agents to work inside
+  the claim's worktree.
+- **Distinct-actor fail-fast (schema v10: `claims.session_id`)** — a claim's
+  loop session (ANVIL_SESSION_ID / CLAUDE_CODE_SESSION_ID) is recorded
+  independently of the actor string, so two loops sharing a pinned
+  ANVIL_ACTOR are detected: a claim — or a lease renewal — arriving from a
+  different session under the same actor is refused (claim accepts --force;
+  renewal does not), instead of silently letting loop B renew or release
+  loop A's leases. Claims with no session identity skip the check
+  (local-first, never guess). Additive v9→v10 migration; NULL backfill.
+
+### Fixed
+
+- `scripts/release.py` printed a `✎` glyph that crashes cp1252 Windows
+  consoles (the encoding-gotcha class the repo purged from host output);
+  now ASCII.
+
 ## [0.5.0] - 2026-07-08
 
 ### Added

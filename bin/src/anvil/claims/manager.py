@@ -166,6 +166,13 @@ class ClaimManager:
         self._backend = backend
         self._clock = clock
         self._actor = actor
+        # The current loop's session discriminator — recorded on new claims and
+        # compared on claim/renew for the same-actor/different-session
+        # fail-fast. Resolved from the environment here (not threaded through
+        # every constructor) so all CLI/MCP/hook entry points get it for free.
+        from anvil.naming import session_discriminator
+
+        self._session_id = session_discriminator()
         self._default_lease = default_lease_minutes
         self._default_heartbeat = default_heartbeat_minutes
         # B46: a wedged agent that keeps heartbeating must still lose its claim
@@ -530,6 +537,34 @@ class ClaimManager:
         except transitions.TransitionError as exc:
             raise ClaimError(str(exc)) from exc
 
+        # Gate 3.5 — distinct-actor fail-fast (retro corpus, concurrency
+        # theme): two concurrent LOOPS sharing one actor string (typically a
+        # pinned ANVIL_ACTOR) corrupt each other's leases — heartbeats renew
+        # the wrong claim, releases release the wrong claim. When BOTH the new
+        # claim and an existing ACTIVE claim carry a session id and they
+        # differ while the actor is identical, that is two live loops sharing
+        # an actor: refuse (force overrides). NULL/absent sessions skip the
+        # check — local-first, never guess.
+        if self._session_id is not None:
+            shared = [
+                c for c in self._backend.list_active_claims()
+                if c.claimed_by == self._actor
+                and c.session_id is not None
+                and c.session_id != self._session_id
+            ]
+            if shared and not force:
+                sightings = "; ".join(
+                    f"claim {c.id} on task {c.task_id} (session {c.session_id})"
+                    for c in shared
+                )
+                raise ClaimError(
+                    f"Actor '{self._actor}' already has active claim(s) from a "
+                    f"DIFFERENT session: {sightings}. Two concurrent loops are "
+                    "sharing one actor id — give each loop its own ANVIL_ACTOR "
+                    "(or unset it to get a per-session default). "
+                    "Use force=True to override."
+                )
+
         # Gate 4 + 5: file overlap and conflict_group checks.
         conflicts = self.check_conflicts(task_id, files)
         if conflicts:
@@ -815,6 +850,24 @@ class ClaimManager:
                 f"not '{self._actor}'. Only the owning actor can renew a claim."
             )
 
+        # Distinct-actor fail-fast, renewal side: a renew arriving from a
+        # DIFFERENT session than the one that created the claim is the
+        # smoking gun of two loops sharing an actor id — refuse rather than
+        # let loop B keep loop A's lease alive (B47's shared-env heartbeat
+        # legitimately re-resolves the SAME session, so equal ids pass).
+        if (
+            self._session_id is not None
+            and claim.session_id is not None
+            and claim.session_id != self._session_id
+        ):
+            raise ClaimError(
+                f"Claim '{claim_id}' was created by session "
+                f"'{claim.session_id}' but this renew comes from session "
+                f"'{self._session_id}' under the same actor "
+                f"'{self._actor}'. Two concurrent loops are sharing one "
+                "actor id — give each loop its own ANVIL_ACTOR."
+            )
+
         if claim.status != ClaimStatus.active:
             raise ClaimError(
                 f"Claim '{claim_id}' has status '{claim.status}'; "
@@ -979,6 +1032,7 @@ class ClaimManager:
             status=ClaimStatus.active,
             branch=branch,
             worktree_path=None,
+            session_id=self._session_id,
             expected_files=expected_files,
             created_at=now,
             lease_expires_at=lease_expires,

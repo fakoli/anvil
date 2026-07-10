@@ -11,6 +11,7 @@
       "lease_expires_at": "2026-05-24T19:20:00Z",
       "release_reason": "auto-released on submit",
       "released_at": "2026-05-24T18:30:00Z",
+      "session_id": null,
       "status": "released",
       "task_id": "T001",
       "worktree_path": null
@@ -26,6 +27,7 @@
       "lease_expires_at": "2026-05-24T19:35:00Z",
       "release_reason": "lease_expired",
       "released_at": "2026-05-24T20:35:00Z",
+      "session_id": null,
       "status": "stale",
       "task_id": "T002",
       "worktree_path": null

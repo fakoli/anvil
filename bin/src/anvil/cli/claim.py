@@ -34,6 +34,16 @@ def claim(
         "--worktree",
         help="Also create a git worktree at ../wt-<task_id>/.",
     ),
+    shared_tree: bool = typer.Option(  # noqa: B008
+        False,
+        "--shared-tree",
+        help=(
+            "Explicitly claim into the shared checkout even when "
+            "worktree_isolation: require is configured (for read-only / "
+            "docs-only work that cannot conflict). Also silences the "
+            "advisory shared-checkout warning."
+        ),
+    ),
     force: bool = typer.Option(  # noqa: B008
         False,
         "--force",
@@ -259,6 +269,48 @@ def claim(
         # recorded on the claim itself. The default (auto-generated) path is
         # unchanged: the branch is created AFTER the claim and is not stored on
         # the claim row (it is reported in the JSON envelope / human output).
+        # retro corpus (concurrency theme) — worktree isolation policy.
+        # Applied BEFORE branch/claim so both checkout decisions see the
+        # final `worktree` value.
+        #   require  — write-capable claims are isolated by default: behave
+        #              as if --worktree was passed unless the operator
+        #              explicitly opts out with --shared-tree.
+        #   advisory — warn when this claim would share the working tree
+        #              with another ACTIVE claim (neither isolated).
+        #   off      — flag-only behavior, as before.
+        isolation = cfg.worktree_isolation if cfg is not None else "advisory"
+        if shared_tree:
+            pass  # explicit opt-out: no auto-isolation, no advisory warning
+        elif isolation == "require" and not worktree:
+            worktree = True
+            note = (
+                "worktree_isolation: require — claiming into an isolated "
+                "worktree (pass --shared-tree for read-only/shared work)."
+            )
+            if json_output:
+                warnings.append(note)
+            else:
+                typer.echo(note, err=True)
+        elif isolation == "advisory" and not worktree:
+            shared_active = [
+                c for c in backend.list_active_claims()
+                if not c.worktree_path
+            ]
+            if shared_active:
+                others = ", ".join(
+                    f"{c.task_id} ({c.claimed_by})" for c in shared_active[:4]
+                )
+                note = (
+                    f"{len(shared_active)} other active claim(s) share this "
+                    f"checkout ({others}) — concurrent edits can collide. "
+                    "Use --worktree, or set worktree_isolation: require to "
+                    "isolate by default."
+                )
+                if json_output:
+                    warnings.append(note)
+                else:
+                    typer.echo(f"Warning: {note}", err=True)
+
         recorded_branch: str | None = None
         if branch is not None:
             # checkout=not worktree: with --worktree, don't move main's HEAD onto

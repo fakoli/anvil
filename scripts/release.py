@@ -179,7 +179,7 @@ def run(spec: str, date: str, dry_run: bool, verify: bool) -> int:
     # --- report ---
     print("\nchanges:")
     for c in ed.changes:
-        print(f"  ✎ {c}")
+        print(f"  edit {c}")
     if ed.skipped:
         print("\nskipped (no-op / not applicable):")
         for s in ed.skipped:

@@ -64,7 +64,7 @@ Version history
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 9
+SCHEMA_VERSION: int = 10
 
 
 def get_schema_version() -> int:
@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS claims (
     status             TEXT NOT NULL DEFAULT 'active',
     branch             TEXT,
     worktree_path      TEXT,
+    session_id         TEXT,
     expected_files     TEXT NOT NULL DEFAULT '[]',
     created_at         TEXT NOT NULL,
     lease_expires_at   TEXT NOT NULL,

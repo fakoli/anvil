@@ -2023,6 +2023,22 @@ class SqliteBackend:
     # Ordered migration ladder: (from_version, bound-method). Applied while
     # ``on_disk <= from_version < SCHEMA_VERSION``. Append one tuple per future
     # schema bump; never edit a literal version comparison again.
+    def _m_to_v10(self, conn: sqlite3.Connection) -> None:
+        """v9 -> v10: distinct-actor fail-fast (retro corpus, concurrency theme).
+
+        Purely additive, duplicate-column tolerant like every ladder step:
+
+        - ``claims.session_id TEXT`` (nullable) — the claiming loop's session
+          discriminator, recorded independently of the actor string. NULL
+          backfills every existing row to "session unknown", the correct
+          pre-feature meaning (the fail-fast skips NULL-session claims).
+        """
+        try:
+            conn.execute("ALTER TABLE claims ADD COLUMN session_id TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -2031,6 +2047,7 @@ class SqliteBackend:
         (6, _m_to_v7),
         (7, _m_to_v8),
         (8, _m_to_v9),
+        (9, _m_to_v10),
     ]
 
     @staticmethod
@@ -4285,10 +4302,10 @@ class SqliteBackend:
             """
             INSERT OR IGNORE INTO claims
                 (id, task_id, claimed_by, claim_type, status, branch,
-                 worktree_path, expected_files, created_at,
+                 worktree_path, session_id, expected_files, created_at,
                  lease_expires_at, last_heartbeat_at, released_at, release_reason)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             """,
             (
                 claim_id,
@@ -4298,6 +4315,7 @@ class SqliteBackend:
                 status,
                 branch,
                 worktree_path,
+                getattr(payload, "session_id", None),
                 json.dumps(expected_files),
                 created_at,
                 lease_expires_at,

@@ -90,6 +90,11 @@ Do the work directly in this session. Read the work packet, implement against th
 
 ### Step 3a — Implementation discipline
 
+Work where the claim lives: if the claim created a worktree (the default under
+`worktree_isolation: require`, or `--worktree`), do ALL edits inside that
+worktree directory — never in the shared checkout, where a concurrent loop's
+edits can collide with yours.
+
 Commit incrementally to the claim's branch:
 
 ```
