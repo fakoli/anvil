@@ -62,12 +62,14 @@ _PRD_ENV = "ANVIL_PRD"
 def _session_discriminator() -> str | None:
     """A per-loop session id — shared across ONE loop's subprocesses but
     distinct between sibling loops — or None when no session env is set.
-    Delegates to the leaf ``anvil.naming`` module so the claims engine can use
-    the SAME resolution for the distinct-actor fail-fast without importing
-    upward from cli/."""
+    Delegates to the leaf ``anvil.naming`` module (the claims engine uses the
+    SAME resolution for the distinct-actor fail-fast), sliced to 12 chars
+    here because this feeds the human-readable actor suffix; the fail-fast
+    compares the FULL id."""
     from anvil.naming import session_discriminator
 
-    return session_discriminator()
+    value = session_discriminator()
+    return value[:12] if value else None
 
 
 def _base_default_actor() -> str:

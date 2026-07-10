@@ -735,8 +735,22 @@ def hook_heartbeat(
         try:
             cfg = _load_config_optional(state_dir)
             lease_kwargs = _lease_manager_kwargs(cfg, lease_override=None)
+            # Session filter (distinct-actor fail-fast, v10): under a shared
+            # pinned ANVIL_ACTOR this loop's heartbeat must renew only ITS OWN
+            # claims — renewing a sibling loop's lease is the corruption the
+            # retro corpus documented. NULL sessions (either side) renew as
+            # before: local-first, never guess.
+            from anvil.naming import session_discriminator
+
+            _hb_session = session_discriminator()
             claim_ids = [
-                c.id for c in backend.list_active_claims() if c.claimed_by == resolved_actor
+                c.id for c in backend.list_active_claims()
+                if c.claimed_by == resolved_actor
+                and (
+                    _hb_session is None
+                    or c.session_id is None
+                    or c.session_id == _hb_session
+                )
             ]
             for claim_id in claim_ids:
                 try:

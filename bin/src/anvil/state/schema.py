@@ -52,6 +52,12 @@ Version history
   the new columns) keep working unchanged — Phase 0 is purely additive at the
   write layer.
 - v8: v0.3 multi-PRD revisions (T023). ``prds`` gains ``revision`` — the per-PRD
+- v9: evidence contracts (issue #153) — ``tasks.claims`` (named TaskClaims,
+  default ``'[]'``) and ``evidence.category`` (default ``'completion'``).
+- v10: distinct-actor fail-fast (retro corpus, concurrency theme) —
+  ``claims.session_id TEXT`` (nullable): the claiming loop's session
+  discriminator, recorded independently of the actor string; NULL backfill
+  means session-unknown and is skipped by the guard.
   monotonic revision counter (INTEGER NOT NULL DEFAULT 1) bumped by
   ``prd.revised``. Purely additive: the v7->v8 migration ALTER-adds the column
   with a DEFAULT, so every pre-existing v7 PRD row backfills to revision 1.

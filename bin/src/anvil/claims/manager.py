@@ -551,6 +551,10 @@ class ClaimManager:
                 if c.claimed_by == self._actor
                 and c.session_id is not None
                 and c.session_id != self._session_id
+                # A lease-expired claim is a CRASHED loop awaiting the
+                # reaper, not a concurrent one — refusing on it would force
+                # --force on every crash-restart under a pinned actor.
+                and c.lease_expires_at > now
             ]
             if shared and not force:
                 sightings = "; ".join(
@@ -850,22 +854,26 @@ class ClaimManager:
                 f"not '{self._actor}'. Only the owning actor can renew a claim."
             )
 
-        # Distinct-actor fail-fast, renewal side: a renew arriving from a
-        # DIFFERENT session than the one that created the claim is the
-        # smoking gun of two loops sharing an actor id — refuse rather than
-        # let loop B keep loop A's lease alive (B47's shared-env heartbeat
-        # legitimately re-resolves the SAME session, so equal ids pass).
+        # Distinct-actor anomaly, renewal side: a renew arriving from a
+        # DIFFERENT session than the one that created the claim usually means
+        # two loops share an actor id. WARN, do not refuse: legitimate
+        # cross-process surfaces (a persistent MCP server, a hook subprocess
+        # with different env, a claim renewed from a later shell) resolve
+        # different sessions for the SAME owner, and a hard refusal here was
+        # silently swallowed by the heartbeat's non-fatal handler — killing
+        # leases mid-work. The actual corruption vector (the heartbeat hook
+        # renewing a sibling loop's claim wholesale) is closed at the hook by
+        # a session filter; claim-time keeps the hard gate.
         if (
             self._session_id is not None
             and claim.session_id is not None
             and claim.session_id != self._session_id
         ):
-            raise ClaimError(
-                f"Claim '{claim_id}' was created by session "
-                f"'{claim.session_id}' but this renew comes from session "
-                f"'{self._session_id}' under the same actor "
-                f"'{self._actor}'. Two concurrent loops are sharing one "
-                "actor id — give each loop its own ANVIL_ACTOR."
+            logger.warning(
+                "Claim %r was created by session %r but this renew comes "
+                "from session %r under the same actor %r — if two loops "
+                "share one actor id, give each its own ANVIL_ACTOR.",
+                claim_id, claim.session_id, self._session_id, self._actor,
             )
 
         if claim.status != ClaimStatus.active:

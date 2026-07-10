@@ -92,12 +92,12 @@ class TestSessionDiscriminator:
     def test_reads_anvil_session_id_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANVIL_SESSION_ID", "sess-alpha-123456789")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "other")
-        assert session_discriminator() == "sess-alpha-1"  # sliced to 12
+        assert session_discriminator() == "sess-alpha-123456789"  # FULL id (identity is load-bearing)
 
     def test_falls_back_to_claude_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ANVIL_SESSION_ID", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-sess-42")
-        assert session_discriminator() == "claude-sess-"
+        assert session_discriminator() == "claude-sess-42"
 
     def test_none_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ANVIL_SESSION_ID", raising=False)
@@ -124,7 +124,7 @@ class TestDistinctActorFailFast:
         b = self._two_ready(tmp_path)
         try:
             result = _manager(b).claim("T001")
-            assert result.claim.session_id == "loop-a-sessi"  # 12 chars
+            assert result.claim.session_id == "loop-a-session"  # full id recorded
         finally:
             b.close()
 
@@ -199,9 +199,17 @@ class TestDistinctActorFailFast:
 
 
 class TestRenewSessionGuard:
-    def test_renew_from_other_session_refused(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_renew_from_other_session_warns_but_renews(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        # Review finding: a hard refusal here false-positived on legitimate
+        # cross-process surfaces (persistent MCP server, hook subprocess env)
+        # and was silently swallowed by the heartbeat, killing leases. The
+        # anomaly is WARNED; the corruption vector is closed by the heartbeat
+        # hook's session filter instead.
+        import logging
+
         b = _make_backend(tmp_path)
         _setup_project(b)
         _insert_ready_task(b, "T001")
@@ -209,8 +217,15 @@ class TestRenewSessionGuard:
             monkeypatch.setenv("ANVIL_SESSION_ID", "loop-a")
             claim = _manager(b).claim("T001").claim
             monkeypatch.setenv("ANVIL_SESSION_ID", "loop-b")
-            with pytest.raises(ClaimError, match="sharing one"):
-                _manager(b).renew(claim.id)
+            with caplog.at_level(logging.WARNING, logger="anvil.claims.manager"):
+                try:
+                    _manager(b).renew(claim.id)
+                except ClaimError as exc:
+                    # Any refusal must come from OTHER gates (e.g. the B46
+                    # forward-progress no-op path), never the session guard.
+                    assert "sharing one" not in str(exc)
+            assert any("give each its own ANVIL_ACTOR" in r.message
+                       for r in caplog.records)
         finally:
             b.close()
 
@@ -231,6 +246,33 @@ class TestRenewSessionGuard:
                 m.renew(claim.id)
             except ClaimError as exc:
                 assert "sharing one" not in str(exc)
+        finally:
+            b.close()
+
+
+class TestCrashedLoopReclaim:
+    def test_lease_expired_claim_does_not_false_refuse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review finding: a crashed loop's lease-expired-but-unreaped claim
+        # must not trip the fail-fast for its restarted successor (new
+        # session, same pinned actor). Only live-lease claims count.
+        from datetime import timedelta
+
+        b = _make_backend(tmp_path)
+        _setup_project(b)
+        _insert_ready_task(b, "T001")
+        _insert_ready_task(b, "T002")
+        try:
+            monkeypatch.setenv("ANVIL_SESSION_ID", "crashed-loop")
+            ClaimManager(
+                b, FrozenClock(_T0), actor="loop-actor", default_lease_minutes=1
+            ).claim("T001")
+            # Restarted loop, new session, later clock: T001's lease is dead.
+            monkeypatch.setenv("ANVIL_SESSION_ID", "restarted-loop")
+            later = FrozenClock(_T0 + timedelta(minutes=5))
+            result = ClaimManager(b, later, actor="loop-actor").claim("T002")
+            assert result.claim.task_id == "T002"
         finally:
             b.close()
 

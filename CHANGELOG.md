@@ -12,17 +12,25 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   default advisory)** — retro-corpus concurrency theme. `advisory` warns when
   a new claim would share the working tree with another active claim;
   `require` makes `anvil claim` isolate into a worktree by default, with an
-  explicit `--shared-tree` opt-out for read-only/docs work. The claim and
-  execute skills now document the policy and instruct agents to work inside
-  the claim's worktree.
+  explicit `--shared-tree` opt-out for read-only/docs work — fail-closed: if
+  the worktree cannot be created the claim is released and refused (`--force`
+  keeps it). The MCP `claim_task` tool honors the same policy (refuses under
+  `require` unless `shared_tree=true`; returns the advisory warning in a new
+  response `warnings` list). The claim and execute skills document the policy
+  and instruct agents to work inside the claim's worktree.
 - **Distinct-actor fail-fast (schema v10: `claims.session_id`)** — a claim's
   loop session (ANVIL_SESSION_ID / CLAUDE_CODE_SESSION_ID) is recorded
   independently of the actor string, so two loops sharing a pinned
-  ANVIL_ACTOR are detected: a claim — or a lease renewal — arriving from a
-  different session under the same actor is refused (claim accepts --force;
-  renewal does not), instead of silently letting loop B renew or release
-  loop A's leases. Claims with no session identity skip the check
-  (local-first, never guess). Additive v9→v10 migration; NULL backfill.
+  ANVIL_ACTOR are detected: a claim arriving from a different LIVE session
+  under the same actor is refused (--force overrides; lease-expired claims
+  from a crashed loop do not count), and the heartbeat hook renews only its
+  own session's claims — closing the cross-loop lease-renewal vector at its
+  source. A cross-session direct renew logs a loud warning (not a refusal:
+  persistent MCP servers and hook subprocesses legitimately resolve different
+  sessions for the same owner). Session ids compare at FULL length — never
+  truncated — because prefix-sharing pinned ids would silently defeat the
+  guard. Claims with no session identity skip the check (local-first, never
+  guess). Additive v9→v10 migration; NULL backfill.
 
 ### Fixed
 

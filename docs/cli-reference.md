@@ -648,6 +648,7 @@ worktree at `../wt-<task_id>/`.
 **Flags:**
 
 - `--worktree` *(flag)* — also create a git worktree at `../wt-<task_id>/`.
+- `--shared-tree` *(flag)* — claim into the shared checkout even under `worktree_isolation: require` (read-only/docs work); also silences the advisory shared-checkout warning.
   Skipped with a stderr warning when no branch was created (e.g. when the
   branch already exists).
 - `--force` *(flag)* — override the pre-claim conflict warnings. Without
@@ -927,6 +928,25 @@ merge_check: advisory   # DEFAULT — report staleness, approval proceeds
 #                       # branch is VERIFIABLY behind its base or conflicted
 # merge_check: "off"    # skip the probe entirely
 ```
+
+**Worktree isolation.** The `worktree_isolation` config knob sets the claim
+isolation mode:
+
+```yaml
+worktree_isolation: advisory   # DEFAULT — warn when a new claim would share
+#                              # the working tree with another active claim
+# worktree_isolation: require  # every claim isolates into a git worktree by
+#                              # default (as if --worktree); --shared-tree is
+#                              # the explicit opt-out. Fail-closed: if the
+#                              # worktree cannot be created the claim is
+#                              # released and refused (--force keeps it).
+# worktree_isolation: "off"    # flag-only (--worktree) behavior
+```
+
+The MCP `claim_task` tool honors the same policy: under `require` it refuses
+unless `shared_tree=true` (the MCP server cannot create worktrees itself);
+under `advisory` the shared-checkout warning is returned in the response
+`warnings` list.
 
 Local-first: offline / no-remote projects degrade to the local default
 branch and are never refused; an unverifiable probe never gates (a probe
