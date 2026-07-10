@@ -165,6 +165,14 @@ class Config:
     #              (local-first: same fail-open-on-unknown contract as the
     #              freshness module documents on is_stale).
     merge_check: Literal["off", "advisory", "strict"] = "advisory"
+    # retro corpus (concurrency theme) — worktree isolation for claims.
+    #   off      — no isolation behavior beyond the --worktree flag.
+    #   advisory — DEFAULT: when a new claim would share the working tree
+    #              with another ACTIVE claim (neither in a worktree), warn.
+    #   require  — write-capable claims are isolated BY DEFAULT: `anvil
+    #              claim` behaves as if --worktree was passed; an explicit
+    #              --shared-tree opts a claim out (read-only / doc work).
+    worktree_isolation: Literal["off", "advisory", "require"] = "advisory"
     # B46 — hard max-claim-age as a multiple of the base lease. After
     # ``default_lease_minutes * max_claim_age_multiplier`` since a claim was
     # created, ``renew()`` refuses (even if heartbeating), so a wedged agent
@@ -710,6 +718,13 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         "merge_check",
     )
 
+    # retro corpus — claim worktree-isolation mode.
+    worktree_isolation = _validate_literal(
+        data.get("worktree_isolation", "advisory"),
+        ("off", "advisory", "require"),
+        "worktree_isolation",
+    )
+
     sync_conflict_strategy = _validate_literal(
         data.get("sync_github_conflict_strategy", "prompt"),
         ("local_wins", "remote_wins", "prompt", "manual_merge"),
@@ -780,6 +795,7 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
             str(data.get("lease_warning_minutes", 10))
         ),
         merge_check=merge_check,  # type: ignore[arg-type]
+        worktree_isolation=worktree_isolation,  # type: ignore[arg-type]
         max_claim_age_multiplier=float(
             str(data.get("max_claim_age_multiplier", 4))
         ),

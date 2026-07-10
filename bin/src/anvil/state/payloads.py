@@ -335,6 +335,7 @@ class ClaimCreatedPayload(BaseModel):
     last_heartbeat_at: str
     branch: str | None = None
     worktree_path: str | None = None
+    session_id: str | None = None
     expected_files: list[Any] = []
     # Optional terminal-state fields — present when reading back a Claim
     # model that has already been released/staled (e.g. in replay scenarios

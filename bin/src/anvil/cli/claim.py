@@ -34,6 +34,16 @@ def claim(
         "--worktree",
         help="Also create a git worktree at ../wt-<task_id>/.",
     ),
+    shared_tree: bool = typer.Option(  # noqa: B008
+        False,
+        "--shared-tree",
+        help=(
+            "Explicitly claim into the shared checkout even when "
+            "worktree_isolation: require is configured (for read-only / "
+            "docs-only work that cannot conflict). Also silences the "
+            "advisory shared-checkout warning."
+        ),
+    ),
     force: bool = typer.Option(  # noqa: B008
         False,
         "--force",
@@ -259,6 +269,52 @@ def claim(
         # recorded on the claim itself. The default (auto-generated) path is
         # unchanged: the branch is created AFTER the claim and is not stored on
         # the claim row (it is reported in the JSON envelope / human output).
+        # retro corpus (concurrency theme) — worktree isolation policy.
+        # Applied BEFORE branch/claim so both checkout decisions see the
+        # final `worktree` value.
+        #   require  — write-capable claims are isolated by default: behave
+        #              as if --worktree was passed unless the operator
+        #              explicitly opts out with --shared-tree.
+        #   advisory — warn when this claim would share the working tree
+        #              with another ACTIVE claim (neither isolated).
+        #   off      — flag-only behavior, as before.
+        isolation = cfg.worktree_isolation if cfg is not None else "advisory"
+        isolation_required = False
+        if not shared_tree and not worktree:
+            if isolation == "require":
+                # Isolation by default is the feature (unlike refuse-style
+                # gates, acting IS what the operator opted into); failure to
+                # actually isolate fails the claim below (fail-closed).
+                worktree = True
+                isolation_required = True
+                note = (
+                    "worktree_isolation: require — claiming into an isolated "
+                    "worktree (pass --shared-tree for read-only/shared work)."
+                )
+                if json_output:
+                    warnings.append(note)
+                else:
+                    typer.echo(note, err=True)
+            elif isolation == "advisory":
+                shared_active = [
+                    c for c in backend.list_active_claims()
+                    if not c.worktree_path
+                ]
+                if shared_active:
+                    others = ", ".join(
+                        f"{c.task_id} ({c.claimed_by})" for c in shared_active[:4]
+                    )
+                    note = (
+                        f"{len(shared_active)} other active claim(s) share this "
+                        f"checkout ({others}) — concurrent edits can collide. "
+                        "Use --worktree, or set worktree_isolation: require to "
+                        "isolate by default."
+                    )
+                    if json_output:
+                        warnings.append(note)
+                    else:
+                        typer.echo(f"Warning: {note}", err=True)
+
         recorded_branch: str | None = None
         if branch is not None:
             # checkout=not worktree: with --worktree, don't move main's HEAD onto
@@ -337,6 +393,7 @@ def claim(
 
         # Optional worktree creation.
         worktree_path: str | None = None
+        worktree_failure: str | None = None
         if worktree:
             if branch_result.created and branch_result.branch:
                 wt_result = create_worktree_for_task(
@@ -346,20 +403,42 @@ def claim(
                 )
                 if wt_result.created:
                     worktree_path = wt_result.path
-                elif json_output:
-                    warnings.append(f"worktree not created — {wt_result.reason}")
+                else:
+                    worktree_failure = wt_result.reason or "unknown"
+                    if json_output:
+                        warnings.append(f"worktree not created — {wt_result.reason}")
+                    else:
+                        typer.echo(
+                            f"Warning: worktree not created — {wt_result.reason}",
+                            err=True,
+                        )
+            else:
+                worktree_failure = "no branch was created"
+                if json_output:
+                    warnings.append("--worktree skipped because no branch was created.")
                 else:
                     typer.echo(
-                        f"Warning: worktree not created — {wt_result.reason}",
+                        "Warning: --worktree skipped because no branch was created.",
                         err=True,
                     )
-            elif json_output:
-                warnings.append("--worktree skipped because no branch was created.")
-            else:
-                typer.echo(
-                    "Warning: --worktree skipped because no branch was created.",
-                    err=True,
-                )
+
+        # worktree_isolation: require is FAIL-CLOSED: when isolation was the
+        # configured default and could not actually be established, a
+        # write-capable claim must not silently proceed in the shared
+        # checkout — release the claim and refuse with the escape hatches
+        # spelled out. (--force keeps the claim, matching the other gates.)
+        if isolation_required and worktree_path is None and not force:
+            manager.release(result.claim.id, reason="worktree_isolation_failed")
+            message = (
+                f"worktree_isolation: require, but no worktree could be "
+                f"created ({worktree_failure}); claim released. Fix the git "
+                "state, or pass --shared-tree (read-only work) or --force "
+                "(keep the claim in the shared checkout)."
+            )
+            if json_output:
+                fail("claim", message, code="worktree_isolation_failed")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1)
 
         claim_obj = result.claim
     finally:

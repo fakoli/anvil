@@ -18,7 +18,29 @@ onto it in the follow-up that closes #108.1.
 
 from __future__ import annotations
 
+import os
 import re
+
+# Env vars that identify ONE agent loop/session (shared across that loop's
+# subprocesses, distinct between sibling loops). Lives here — the leaf naming
+# module — so both cli._helpers (actor naming) and claims.manager (the
+# same-actor/different-session fail-fast) import it downward with no cycle.
+_SESSION_ENV_VARS = ("ANVIL_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
+
+
+def session_discriminator() -> str | None:
+    """The per-loop session id, FULL length, or None when no session env is
+    set. Identity comparisons (the same-actor/different-session fail-fast)
+    must use the full value: truncation is lossy, and a user-pinned
+    ANVIL_SESSION_ID with a shared prefix (loop-prod-1 / loop-prod-2, or any
+    timestamp-ordered id) would collide and silently defeat the guard.
+    Display/actor-suffix call sites slice for readability themselves."""
+    for var in _SESSION_ENV_VARS:
+        value = os.environ.get(var)
+        if value and value.strip():
+            return value.strip()
+    return None
+
 
 # The Windows-reserved filename set ``<>:"/\|?*`` plus C0 control characters.
 # Every one is illegal in a Windows filename; ``:`` additionally opens an NTFS

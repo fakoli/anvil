@@ -59,18 +59,17 @@ _PRD_ENV = "ANVIL_PRD"
 # machine/user (B47/#103). Prefer the anvil-owned id; fall back to the Claude
 # Code harness session id. Every subprocess of a single loop inherits the same
 # value, so claim/heartbeat/gate/guard still resolve the SAME actor.
-_SESSION_ENV_VARS = ("ANVIL_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
-
-
 def _session_discriminator() -> str | None:
     """A per-loop session id — shared across ONE loop's subprocesses but
-    distinct between sibling loops — or None when no session env is set. Sliced
-    short so the composed actor id stays readable."""
-    for var in _SESSION_ENV_VARS:
-        value = os.environ.get(var)
-        if value and value.strip():
-            return value.strip()[:12]
-    return None
+    distinct between sibling loops — or None when no session env is set.
+    Delegates to the leaf ``anvil.naming`` module (the claims engine uses the
+    SAME resolution for the distinct-actor fail-fast), sliced to 12 chars
+    here because this feeds the human-readable actor suffix; the fail-fast
+    compares the FULL id."""
+    from anvil.naming import session_discriminator
+
+    value = session_discriminator()
+    return value[:12] if value else None
 
 
 def _base_default_actor() -> str:

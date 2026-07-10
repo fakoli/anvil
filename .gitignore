@@ -27,3 +27,6 @@ docs/plans/agent-*-status.md
 # MkDocs build output (docs site)
 site/
 .claude/worktrees/
+
+# anvil-pulse dashboard runtime (pid/log files)
+.anvil-pulse/

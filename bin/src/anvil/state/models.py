@@ -731,6 +731,12 @@ class Claim(BaseModel):
     branch: str | None = None
     worktree_path: str | None = None
     expected_files: list[str] = Field(default_factory=list)
+    # The claiming loop's session discriminator (ANVIL_SESSION_ID /
+    # CLAUDE_CODE_SESSION_ID), recorded INDEPENDENTLY of the actor string so
+    # two loops sharing a pinned ANVIL_ACTOR are still distinguishable — the
+    # basis of the same-actor/different-session fail-fast. None for claims
+    # made with no session env (and for all pre-v10 claims).
+    session_id: str | None = None
     created_at: datetime.datetime
     lease_expires_at: datetime.datetime
     last_heartbeat_at: datetime.datetime

@@ -199,6 +199,9 @@ class ClaimResponse(BaseModel):
     branch: str | None
     worktree_path: str | None
     expected_files: list[str]
+    # Advisory notes (e.g. the worktree_isolation shared-checkout warning);
+    # additive with a default so existing readers are unaffected.
+    warnings: list[str] = []
 
 
 class ReleaseResponse(BaseModel):
@@ -928,12 +931,20 @@ def claim_task(
     claimed_by: str,
     expected_files: list[str] | None = None,
     lease_duration_seconds: int = 900,
+    shared_tree: bool = False,
 ) -> ClaimResponse:
     """Acquire an exclusive lease on task_id for claimed_by.
 
     Reaps stale claims first; refuses (ToolError) unless the task's OWNING PRD
     is reviewed/approved (enforced by ClaimManager's per-PRD gate, T011/T012).
     lease_duration_seconds defaults to 900 (15 min).
+
+    Honors the worktree_isolation policy (config.yaml): under ``require`` this
+    tool REFUSES unless shared_tree=true — the MCP server cannot create git
+    worktrees, so an isolated claim must go through ``anvil claim`` (CLI);
+    shared_tree=true acknowledges a deliberately shared-checkout claim
+    (read-only/docs work). Under ``advisory`` a shared-checkout collision
+    warning is returned in the response.
     """
     claimed_by = _require_actor(claimed_by)
     state_dir = _resolve_state_dir()
@@ -943,6 +954,38 @@ def claim_task(
         from anvil.clock import SystemClock
 
         _reap_stale(backend)
+
+        # worktree_isolation parity with the CLI (review finding: the policy
+        # lived only in cli/claim.py, so MCP claims silently bypassed it).
+        from anvil.cli._helpers import _load_config_optional
+
+        cfg = _load_config_optional(state_dir)
+        isolation = cfg.worktree_isolation if cfg is not None else "advisory"
+        isolation_warnings: list[str] = []
+        if not shared_tree:
+            if isolation == "require":
+                raise ToolError(
+                    "worktree_isolation: require — this MCP tool cannot "
+                    "create git worktrees. Claim via the CLI (`anvil claim "
+                    f"{task_id} --worktree`), or pass shared_tree=true to "
+                    "deliberately claim into the shared checkout "
+                    "(read-only/docs work)."
+                )
+            if isolation == "advisory":
+                shared_active = [
+                    c for c in backend.list_active_claims()
+                    if not c.worktree_path
+                ]
+                if shared_active:
+                    others = ", ".join(
+                        f"{c.task_id} ({c.claimed_by})"
+                        for c in shared_active[:4]
+                    )
+                    isolation_warnings.append(
+                        f"{len(shared_active)} other active claim(s) share "
+                        f"this checkout ({others}) — concurrent edits can "
+                        "collide; prefer `anvil claim --worktree` (CLI)."
+                    )
 
         # The PRD gate is enforced inside ClaimManager.claim() via
         # get_prd_for_task (T011/T012): the task's OWNING PRD must be reviewed or
@@ -974,6 +1017,7 @@ def claim_task(
             branch=claim.branch,
             worktree_path=claim.worktree_path,
             expected_files=claim.expected_files,
+            warnings=isolation_warnings,
         )
     finally:
         backend.close()

@@ -126,3 +126,15 @@ def approved_backend(backend, frozen_clock):  # type: ignore[no-untyped-def]
     backend.append(_ev("prd.reviewed", {"project_id": "proj-1", "reviewer": "a"}, "prd", "proj-1"))
     backend.append(_ev("prd.approved", {"project_id": "proj-1", "approver": "b"}, "prd", "proj-1"))
     return backend
+
+
+@pytest.fixture(autouse=True)
+def _scrub_session_env(monkeypatch):
+    """The distinct-actor fail-fast (schema v10) resolves ANVIL_SESSION_ID /
+    CLAUDE_CODE_SESSION_ID from the environment. The suite frequently runs
+    INSIDE a harness session where those are set, which would couple test
+    behavior to ambient env (the gate silently exercised with a constant
+    ambient session instead of the intended NULL-session default). Scrub both;
+    tests that exercise the gate set their own via monkeypatch.setenv."""
+    monkeypatch.delenv("ANVIL_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)

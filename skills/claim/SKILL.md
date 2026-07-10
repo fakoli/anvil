@@ -147,6 +147,10 @@ anvil claim T012 --worktree
 
 This creates `../wt-t012/` with the branch already checked out. Each worktree is fully independent — no stashing required when switching between tasks.
 
+**Isolation policy** (`worktree_isolation` in config.yaml): `advisory` (default) warns when a new claim would share the checkout with another active claim; `require` makes every claim isolate into a worktree automatically — pass `--shared-tree` to opt a genuinely read-only/docs-only claim out. For any project running more than one loop concurrently, recommend `require`.
+
+**One actor per loop**: each concurrent loop must use a distinct actor. If `ANVIL_ACTOR` is pinned, give each loop its own value — a claim (or lease renewal) arriving from a different session under the same actor is refused outright, because shared actors let one loop renew or release another loop's leases.
+
 Without a git repo present, `claim` still succeeds. It prints a warning to stderr and omits the `Branch:` line:
 
 ```
