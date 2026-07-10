@@ -883,3 +883,105 @@ class TestAssumptionsCommand:
         result = runner.invoke(app, ["assumptions", "--help"])
         assert result.exit_code == 0
         assert "--limit" in result.output
+
+
+# ---------------------------------------------------------------------------
+# list --open / --summary (PR #170)
+# ---------------------------------------------------------------------------
+
+
+def _seed_status_tasks(tmp_path: Path, ids_with_status: list[tuple[str, str]]) -> None:
+    """Seed tasks with explicit statuses via raw SQLite (same idiom as
+    ``_seed_dep_tasks``) so the open/terminal split is deterministic.
+
+    Note: the live state machine auto-promotes ``rejected`` → ``drafted`` and
+    ``accepted`` → ``done`` in the same transaction; seeding those resting
+    states directly models legacy/crashed-loop DBs, which is exactly what
+    ``--open`` must classify correctly (rejected = open, accepted = finished).
+    """
+    _do_init(tmp_path, name="List Test Project")
+    db_path = tmp_path / ".anvil" / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT OR IGNORE INTO features "
+        "(id, title, description, status, requirements, tasks) "
+        "VALUES ('F001', 'List Feature', 'desc', 'proposed', '[]', '[]')"
+    )
+    for task_id, task_status in ids_with_status:
+        conn.execute(
+            """INSERT OR REPLACE INTO tasks
+            (id, feature_id, title, description, status, priority, task_type,
+             dependencies, conflict_groups, scores, acceptance_criteria,
+             implementation_notes, verification, likely_files,
+             parent_task_id, created_at, updated_at)
+            VALUES (?, 'F001', ?, 'desc', ?, 'medium', 'feature',
+             '[]', '[]', '{}', '["x"]', '[]', '{}', '[]',
+             NULL, '2024-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00')""",
+            (task_id, f"Title {task_id}", task_status),
+        )
+    conn.commit()
+    conn.close()
+
+
+class TestListOpenAndSummary:
+    """PR #170: `--open` (terminal-status filter via the canonical
+    ``TERMINAL_TASK_STATUSES``) and `--summary` (per-PRD rollup reusing
+    ``compute_prd_rollup``). Rejected is OPEN (awaits rework); Total in
+    summary mode is never reduced by ``--open``."""
+
+    SEED = [
+        ("T001", "done"),
+        ("T002", "accepted"),
+        ("T003", "rejected"),
+        ("T004", "ready"),
+        ("T005", "claimed"),
+        ("T006", "needs_review"),
+    ]
+
+    def test_open_excludes_only_terminal_statuses(self, tmp_path: Path) -> None:
+        _seed_status_tasks(tmp_path, self.SEED)
+        result = _invoke_cmd(tmp_path, ["list", "--open", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        # rejected (T003) awaits rework -> open; done/accepted are terminal.
+        assert data["count"] == 4
+        assert sorted(t["id"] for t in data["tasks"]) == [
+            "T003",
+            "T004",
+            "T005",
+            "T006",
+        ]
+
+    def test_summary_rolls_up_per_prd(self, tmp_path: Path) -> None:
+        _seed_status_tasks(tmp_path, self.SEED)
+        result = _invoke_cmd(tmp_path, ["list", "--summary", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["total"] == 6
+        assert data["open"] == 4
+        (row,) = data["summary"]
+        assert row["open"] == 4
+        assert row["total"] == 6
+        assert row["by_status"]["done"] == 1
+        assert "proposed" not in row["by_status"]  # zero counts elided
+
+    def test_open_summary_keeps_true_totals(self, tmp_path: Path) -> None:
+        """--open hides fully-terminal PRDs but never shrinks Total."""
+        _seed_status_tasks(tmp_path, self.SEED)
+        result = _invoke_cmd(tmp_path, ["list", "--open", "--summary"])
+        assert result.exit_code == 0, result.output
+        assert "1 PRD(s), 4 open of 6 total." in result.output
+
+    def test_open_all_terminal_says_no_open_tasks(self, tmp_path: Path) -> None:
+        _seed_status_tasks(tmp_path, [("T001", "done"), ("T002", "accepted")])
+        result = _invoke_cmd(tmp_path, ["list", "--open"])
+        assert result.exit_code == 0, result.output
+        assert "No tasks found (open)." in result.output
+        summary = _invoke_cmd(tmp_path, ["list", "--open", "--summary"])
+        assert "No open tasks." in summary.output
+
+    def test_help_documents_new_flags(self) -> None:
+        result = runner.invoke(app, ["list", "--help"])
+        assert result.exit_code == 0
+        assert "--open" in result.output
+        assert "--summary" in result.output

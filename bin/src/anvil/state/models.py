@@ -149,6 +149,17 @@ class TaskStatus(enum.StrEnum):
     rejected = "rejected"
 
 
+# Statuses meaning "finished — no work left". ``rejected`` is deliberately NOT
+# terminal: rejection auto-promotes back to ``drafted`` for rework (see
+# ``_handle_task_applied`` in state/sqlite.py), so a task *resting* at
+# ``rejected`` (legacy DB or crashed loop) is stuck open work, not a finished
+# task. Single source of truth — `list --open`, sync reconciliation, and any
+# future surface import this rather than hand-rolling their own set.
+TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
+    {TaskStatus.accepted, TaskStatus.done}
+)
+
+
 class TaskPriority(enum.StrEnum):
     low = "low"
     medium = "medium"
