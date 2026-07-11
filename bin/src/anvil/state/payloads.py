@@ -18,11 +18,21 @@ Constraining them here would duplicate that validation.
 
 from __future__ import annotations
 
+import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from anvil.state.models import DEFAULT_PRD_ID, EvidenceCategory, ProofArtifact
+from anvil.state.models import (
+    DEFAULT_PRD_ID,
+    BundleCheckpoint,
+    BundleReviewPolicy,
+    BundleStatus,
+    BundleThroughputBudget,
+    DelegatedAgentObservation,
+    EvidenceCategory,
+    ProofArtifact,
+)
 
 
 class ProjectCreatedPayload(BaseModel):
@@ -318,6 +328,74 @@ class ConflictGroupUpsertedPayload(BaseModel):
     name: str
     task_ids: list[Any] = []
     reason: str = ""
+
+
+class BundleCreatedPayload(BaseModel):
+    """Complete canonical fact for ``bundle.created`` replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    prd_id: str
+    task_ids: list[str]
+    coordinator: str
+    status: BundleStatus = BundleStatus.planned
+    branch: str | None = None
+    worktree_path: str | None = None
+    review_policy: BundleReviewPolicy = Field(default_factory=BundleReviewPolicy)
+    throughput_budget: BundleThroughputBudget = Field(
+        default_factory=BundleThroughputBudget
+    )
+    delegated_agents: list[DelegatedAgentObservation] = Field(default_factory=list)
+    checkpoint: BundleCheckpoint | None = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+    @field_validator("created_at", "updated_at", mode="after")
+    @classmethod
+    def _validate_utc(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle timestamps must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+    @field_validator("task_ids")
+    @classmethod
+    def _validate_members(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("bundle requires at least one task")
+        if len(value) != len(set(value)):
+            raise ValueError("bundle task_ids must be unique")
+        return value
+
+
+class BundleStatusChangedPayload(BaseModel):
+    """Payload for an explicit coordinator-level lifecycle transition."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    bundle_id: str
+    creation_event_id: str
+    from_status: BundleStatus = Field(alias="from")
+    to_status: BundleStatus = Field(alias="to")
+    changed_at: datetime.datetime
+    reason: str | None = None
+
+    @field_validator("changed_at", mode="after")
+    @classmethod
+    def _validate_changed_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("changed_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
+class BundleAgentObservedPayload(BaseModel):
+    """Payload for optional delegated-agent metadata; never a lifecycle gate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    observation: DelegatedAgentObservation
 
 
 class ClaimCreatedPayload(BaseModel):
@@ -935,6 +1013,9 @@ ACTION_TO_PAYLOAD: dict[str, type[BaseModel]] = {
 
 __all__ = [
     "ACTION_TO_PAYLOAD",
+    "BundleAgentObservedPayload",
+    "BundleCreatedPayload",
+    "BundleStatusChangedPayload",
     "ClaimCreatedPayload",
     "ClaimReleasedPayload",
     "ClaimRenewedPayload",

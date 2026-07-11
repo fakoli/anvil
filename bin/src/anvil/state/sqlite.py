@@ -52,11 +52,14 @@ from anvil.state.hashing import hash_event_id
 from anvil.state.models import (
     DEFAULT_PRD_ID,
     PRD,
+    TERMINAL_BUNDLE_STATUSES,
+    BundleStatus,
     Claim,
     ClaimStatus,
     ConflictGroup,
     Event,
     EventDraft,
+    ExecutionBundle,
     Feature,
     Project,
     Requirement,
@@ -68,6 +71,9 @@ from anvil.state.models import (
 )
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
+    BundleAgentObservedPayload,
+    BundleCreatedPayload,
+    BundleStatusChangedPayload,
     ClaimCreatedPayload,
     ClaimReleasedPayload,
     ClaimRenewedPayload,
@@ -111,6 +117,42 @@ logger = logging.getLogger(__name__)
 _TASK_OUTCOME_TO_REVIEW_DECISION: dict[str, str] = {
     "accepted": ReviewDecision.approve,
     "rejected": ReviewDecision.needs_changes,
+}
+
+_BUNDLE_TRANSITIONS: dict[BundleStatus, frozenset[BundleStatus]] = {
+    BundleStatus.planned: frozenset(
+        {BundleStatus.active, BundleStatus.replan_required, BundleStatus.superseded}
+    ),
+    BundleStatus.active: frozenset(
+        {
+            BundleStatus.implemented_unreviewed,
+            BundleStatus.replan_required,
+            BundleStatus.superseded,
+        }
+    ),
+    BundleStatus.implemented_unreviewed: frozenset(
+        {
+            BundleStatus.active,
+            BundleStatus.reviewed_unintegrated,
+            BundleStatus.replan_required,
+        }
+    ),
+    BundleStatus.reviewed_unintegrated: frozenset(
+        {
+            BundleStatus.active,
+            BundleStatus.integrated,
+            BundleStatus.replan_required,
+        }
+    ),
+    BundleStatus.integrated: frozenset(
+        {BundleStatus.merged, BundleStatus.completed, BundleStatus.replan_required}
+    ),
+    BundleStatus.merged: frozenset({BundleStatus.completed}),
+    BundleStatus.replan_required: frozenset(
+        {BundleStatus.planned, BundleStatus.active, BundleStatus.superseded}
+    ),
+    BundleStatus.completed: frozenset(),
+    BundleStatus.superseded: frozenset(),
 }
 
 
@@ -1113,6 +1155,35 @@ class SqliteBackend:
         rows = conn.execute(f"SELECT * FROM tasks {where}", params).fetchall()
         return [self._row_to_task(row, conn) for row in rows]
 
+    def get_bundle(self, bundle_id: str) -> ExecutionBundle | None:
+        """Return one execution bundle with ordered membership, or None."""
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT * FROM execution_bundles WHERE id = ?", (bundle_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_bundle(row, conn)
+
+    def list_bundles(
+        self, *, prd_id: str | None = None, status: str | None = None
+    ) -> list[ExecutionBundle]:
+        """Return execution bundles in deterministic ID order."""
+        conn = self._require_conn()
+        clauses: list[str] = []
+        params: list[str] = []
+        if prd_id is not None:
+            clauses.append("prd_id = ?")
+            params.append(prd_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = conn.execute(
+            f"SELECT * FROM execution_bundles {where}ORDER BY id", params
+        ).fetchall()
+        return [self._row_to_bundle(row, conn) for row in rows]
+
     def get_claim(self, claim_id: str) -> Claim | None:
         """Return the Claim with the given ID, or None if not found."""
         conn = self._require_conn()
@@ -2039,6 +2110,47 @@ class SqliteBackend:
             if "duplicate column" not in str(exc).lower():
                 raise
 
+    def _m_to_v11(self, conn: sqlite3.Connection) -> None:
+        """v10 -> v11: first-class execution bundle persistence.
+
+        The current DDL runs before the migration ladder, so these statements
+        are intentionally idempotent. Keeping the ladder step is load-bearing:
+        it is what permits a genuine v10 database to be stamped v11 only after
+        every bundle table and index exists.
+        """
+        statements = (
+            """CREATE TABLE IF NOT EXISTS execution_bundles (
+                id TEXT PRIMARY KEY,
+                creation_event_id TEXT NOT NULL UNIQUE,
+                prd_id TEXT NOT NULL REFERENCES prds(id) ON DELETE RESTRICT,
+                coordinator TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'planned',
+                branch TEXT,
+                worktree_path TEXT,
+                review_policy TEXT NOT NULL DEFAULT '{}',
+                throughput_budget TEXT NOT NULL DEFAULT '{}',
+                delegated_agents TEXT NOT NULL DEFAULT '[]',
+                checkpoint TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_execution_bundles_status "
+            "ON execution_bundles (status)",
+            "CREATE INDEX IF NOT EXISTS idx_execution_bundles_prd_status "
+            "ON execution_bundles (prd_id, status)",
+            """CREATE TABLE IF NOT EXISTS execution_bundle_members (
+                bundle_id TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+                position INTEGER NOT NULL CHECK (position >= 0),
+                PRIMARY KEY (bundle_id, task_id),
+                UNIQUE (bundle_id, position)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task "
+            "ON execution_bundle_members (task_id)",
+        )
+        for ddl in statements:
+            conn.execute(ddl)
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -2048,6 +2160,7 @@ class SqliteBackend:
         (7, _m_to_v8),
         (8, _m_to_v9),
         (9, _m_to_v10),
+        (10, _m_to_v11),
     ]
 
     @staticmethod
@@ -2643,6 +2756,21 @@ class SqliteBackend:
                 ConflictGroupUpsertedPayload,
                 self._check_conflict_group_upserted,
                 self._write_conflict_group_upserted,
+            ),
+            "bundle.created": ActionSpec(
+                BundleCreatedPayload,
+                self._check_bundle_created,
+                self._write_bundle_created,
+            ),
+            "bundle.status_changed": ActionSpec(
+                BundleStatusChangedPayload,
+                self._check_bundle_status_changed,
+                self._write_bundle_status_changed,
+            ),
+            "bundle.agent_observed": ActionSpec(
+                BundleAgentObservedPayload,
+                self._check_bundle_agent_observed,
+                self._write_bundle_agent_observed,
             ),
             # Phase 8: pull-applies-remote — local Task gets title/desc/status
             # rewritten from the remote payload after a non-conflict pull.
@@ -3477,6 +3605,305 @@ class SqliteBackend:
             },
         )
 
+    def _check_bundle_created(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleCreatedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate complete bundle membership against a fresh WAL snapshot."""
+        _ = event
+        try:
+            bundle_data = payload.model_dump(mode="json")
+            # The log authority assigns the real creation_event_id only after
+            # this pre-log check succeeds. A placeholder completes the state
+            # model for relational validation without trusting caller input.
+            bundle_data["creation_event_id"] = "E000000"
+            bundle = ExecutionBundle.model_validate(bundle_data)
+        except Exception as exc:
+            raise EventRejected(f"bundle.created: invalid bundle payload: {exc}") from exc
+        if bundle.status is not BundleStatus.planned:
+            raise EventRejected("bundle.created: initial status must be 'planned'.")
+
+        # Mirror claim.created's fresh-snapshot discipline. A competing claim or
+        # bundle append may have committed after an earlier read on this WAL
+        # connection; BEGIN IMMEDIATE refreshes the snapshot under the append
+        # flock before any canonical log line is written.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._validate_bundle_created_locked(conn, bundle)
+        finally:
+            conn.execute("COMMIT")
+
+    @staticmethod
+    def _validate_bundle_created_locked(
+        conn: sqlite3.Connection, bundle: ExecutionBundle
+    ) -> None:
+        if conn.execute(
+            "SELECT 1 FROM execution_bundles WHERE id = ?", (bundle.id,)
+        ).fetchone():
+            raise EventRejected(f"bundle.created: bundle '{bundle.id}' already exists.")
+
+        if conn.execute(
+            "SELECT 1 FROM prds WHERE id = ?", (bundle.prd_id,)
+        ).fetchone() is None:
+            raise EventRejected(
+                f"bundle.created: owning PRD '{bundle.prd_id}' not found."
+            )
+
+        placeholders = ",".join("?" for _ in bundle.task_ids)
+        task_rows = conn.execute(
+            f"SELECT id, prd_id FROM tasks WHERE id IN ({placeholders})",
+            tuple(bundle.task_ids),
+        ).fetchall()
+        tasks_by_id = {row[0]: row[1] for row in task_rows}
+        missing = [task_id for task_id in bundle.task_ids if task_id not in tasks_by_id]
+        if missing:
+            raise EventRejected(f"bundle.created: member tasks not found: {missing}.")
+        cross_prd = [
+            task_id
+            for task_id in bundle.task_ids
+            if tasks_by_id[task_id] != bundle.prd_id
+        ]
+        if cross_prd:
+            raise EventRejected(
+                f"bundle.created: member tasks belong to another PRD: {cross_prd}."
+            )
+
+        terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
+        terminal_placeholders = ",".join("?" for _ in terminal)
+        membership_rows = conn.execute(
+            f"""SELECT m.task_id, b.id
+                  FROM execution_bundle_members m
+                  JOIN execution_bundles b ON b.id = m.bundle_id
+                 WHERE m.task_id IN ({placeholders})
+                   AND b.status NOT IN ({terminal_placeholders})
+                 ORDER BY m.task_id, b.id""",
+            tuple(bundle.task_ids) + terminal,
+        ).fetchall()
+        if membership_rows:
+            conflicts = [(row[0], row[1]) for row in membership_rows]
+            raise EventRejected(
+                f"bundle.created: member tasks already belong to active bundles: {conflicts}."
+            )
+
+        claim_rows = conn.execute(
+            f"SELECT task_id, id, claimed_by FROM claims "
+            f"WHERE status = 'active' AND task_id IN ({placeholders}) "
+            "ORDER BY task_id, id",
+            tuple(bundle.task_ids),
+        ).fetchall()
+        if claim_rows:
+            claims = [(row[0], row[1], row[2]) for row in claim_rows]
+            raise EventRejected(
+                f"bundle.created: member tasks have incompatible active claims: {claims}."
+            )
+
+    @staticmethod
+    def _write_bundle_created(
+        conn: sqlite3.Connection,
+        payload: BundleCreatedPayload,
+        event: Event,
+    ) -> None:
+        """Persist the complete creation fact and ordered membership."""
+        bundle_data = payload.model_dump(mode="json")
+        bundle_data["creation_event_id"] = event.id
+        bundle = ExecutionBundle.model_validate(bundle_data)
+        # Git-backed histories may contain two independently valid creations
+        # for the same stable id. Replay is write-only, so converge by keeping
+        # the first HLC-ordered creation as one atomic fact. Never combine the
+        # first row with later membership, which would synthesize a bundle that
+        # appeared in neither branch.
+        if conn.execute(
+            "SELECT 1 FROM execution_bundles WHERE id = ?", (bundle.id,)
+        ).fetchone():
+            return
+        placeholders = ",".join("?" for _ in bundle.task_ids)
+        terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
+        terminal_placeholders = ",".join("?" for _ in terminal)
+        existing_membership = conn.execute(
+            f"""SELECT 1
+                  FROM execution_bundle_members m
+                  JOIN execution_bundles b ON b.id = m.bundle_id
+                 WHERE m.task_id IN ({placeholders})
+                   AND b.status NOT IN ({terminal_placeholders})
+                 LIMIT 1""",
+            tuple(bundle.task_ids) + terminal,
+        ).fetchone()
+        if existing_membership is not None:
+            # Two git branches can independently create different bundle IDs
+            # around the same task. The ordered replay winner owns the complete
+            # membership fact; skip the loser atomically rather than projecting
+            # two active bundles that live append would have refused.
+            return
+        if conn.execute(
+            f"SELECT 1 FROM claims WHERE status = 'active' "
+            f"AND task_id IN ({placeholders}) LIMIT 1",
+            tuple(bundle.task_ids),
+        ).fetchone():
+            # Claim/bundle exclusion is symmetric under replay: whichever fact
+            # wins event ordering owns the task, matching both live checks.
+            return
+        data = bundle.model_dump(mode="json")
+        conn.execute(
+            """INSERT INTO execution_bundles
+                   (id, creation_event_id, prd_id, coordinator, status, branch, worktree_path,
+                    review_policy, throughput_budget, delegated_agents,
+                    checkpoint, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                bundle.id,
+                bundle.creation_event_id,
+                bundle.prd_id,
+                bundle.coordinator,
+                bundle.status.value,
+                bundle.branch,
+                bundle.worktree_path,
+                json.dumps(data["review_policy"], sort_keys=True),
+                json.dumps(data["throughput_budget"], sort_keys=True),
+                json.dumps(data["delegated_agents"], sort_keys=True),
+                json.dumps(data["checkpoint"], sort_keys=True)
+                if data["checkpoint"] is not None
+                else None,
+                bundle.created_at.isoformat(),
+                bundle.updated_at.isoformat(),
+            ),
+        )
+        for position, task_id in enumerate(bundle.task_ids):
+            conn.execute(
+                "INSERT INTO execution_bundle_members "
+                "(bundle_id, task_id, position) VALUES (?, ?, ?)",
+                (bundle.id, task_id, position),
+            )
+
+    def _check_bundle_status_changed(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleStatusChangedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Reject stale or illegal bundle lifecycle transitions before logging."""
+        _ = event
+        try:
+            from_status = BundleStatus(payload.from_status)
+            to_status = BundleStatus(payload.to_status)
+        except ValueError as exc:
+            raise EventRejected(f"bundle.status_changed: invalid status: {exc}") from exc
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT status, creation_event_id FROM execution_bundles WHERE id = ?",
+                (payload.bundle_id,),
+            ).fetchone()
+            if row is None:
+                raise EventRejected(
+                    f"bundle.status_changed: bundle '{payload.bundle_id}' not found."
+                )
+            actual = BundleStatus(row[0])
+            if row[1] != payload.creation_event_id:
+                raise EventRejected(
+                    f"bundle.status_changed: creation event does not match "
+                    f"bundle '{payload.bundle_id}'."
+                )
+            if actual is to_status:
+                raise IdempotentNoOp(
+                    f"bundle '{payload.bundle_id}' is already '{to_status.value}'"
+                )
+            if actual is not from_status:
+                raise EventRejected(
+                    f"bundle.status_changed: stale transition for '{payload.bundle_id}': "
+                    f"expected '{from_status.value}', found '{actual.value}'."
+                )
+            if to_status not in _BUNDLE_TRANSITIONS[actual]:
+                raise EventRejected(
+                    f"bundle.status_changed: illegal transition "
+                    f"'{actual.value}' -> '{to_status.value}'."
+                )
+        finally:
+            conn.execute("COMMIT")
+
+    @staticmethod
+    def _write_bundle_status_changed(
+        conn: sqlite3.Connection,
+        payload: BundleStatusChangedPayload,
+        event: Event,
+    ) -> None:
+        _ = event
+        conn.execute(
+            "UPDATE execution_bundles SET status = ?, updated_at = ? "
+            "WHERE id = ? AND creation_event_id = ? AND status = ?",
+            (
+                payload.to_status,
+                payload.changed_at.isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.from_status,
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_agent_observed(
+        conn: sqlite3.Connection,
+        payload: BundleAgentObservedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate observation ownership only; handle state never gates lifecycle."""
+        _ = event
+        row = conn.execute(
+            "SELECT creation_event_id FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if row is None:
+            raise EventRejected(
+                f"bundle.agent_observed: bundle '{payload.bundle_id}' not found."
+            )
+        if row[0] != payload.creation_event_id:
+            raise EventRejected(
+                f"bundle.agent_observed: creation event does not match "
+                f"bundle '{payload.bundle_id}'."
+            )
+        member_rows = conn.execute(
+            "SELECT task_id FROM execution_bundle_members WHERE bundle_id = ?",
+            (payload.bundle_id,),
+        ).fetchall()
+        members = {row[0] for row in member_rows}
+        outside = [task_id for task_id in payload.observation.task_ids if task_id not in members]
+        if outside:
+            raise EventRejected(
+                f"bundle.agent_observed: observation references non-member tasks: {outside}."
+            )
+
+    @staticmethod
+    def _write_bundle_agent_observed(
+        conn: sqlite3.Connection,
+        payload: BundleAgentObservedPayload,
+        event: Event,
+    ) -> None:
+        row = conn.execute(
+            "SELECT delegated_agents FROM execution_bundles "
+            "WHERE id = ? AND creation_event_id = ?",
+            (payload.bundle_id, payload.creation_event_id),
+        ).fetchone()
+        if row is None:
+            return
+        observations = json.loads(row[0] or "[]") if row is not None else []
+        new_observation = payload.observation.model_dump(mode="json")
+        observations = [
+            item for item in observations if item.get("id") != payload.observation.id
+        ]
+        observations.append(new_observation)
+        observations.sort(key=lambda item: item["id"])
+        conn.execute(
+            "UPDATE execution_bundles SET delegated_agents = ?, updated_at = ? "
+            "WHERE id = ? AND creation_event_id = ?",
+            (
+                json.dumps(observations, sort_keys=True),
+                event.timestamp.isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+            ),
+        )
+
     @staticmethod
     def _normalize_task_payload(task_dict: dict[str, Any]) -> dict[str, Any]:
         """Coerce a minimal Task payload's None scores/verification to ``{}``.
@@ -3801,11 +4228,16 @@ class SqliteBackend:
         evidence_count = conn.execute(
             "SELECT COUNT(*) FROM evidence WHERE task_id = ?", (task_id,)
         ).fetchone()[0]
-        if claim_count or evidence_count:
+        bundle_count = conn.execute(
+            "SELECT COUNT(*) FROM execution_bundle_members WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+        if claim_count or evidence_count or bundle_count:
             raise EventRejected(
                 f"task.deleted: cannot delete task '{task_id}' — it has "
                 f"{claim_count} claim row(s) and {evidence_count} evidence "
-                "row(s) that are FK-protected by schema. The audit history "
+                f"row(s), plus {bundle_count} bundle membership row(s), that "
+                "are FK-protected by schema. The audit history "
                 "intentionally outlives the task. Re-add the task to "
                 "prd.md if you want to preserve a working entry, or "
                 "accept that the orphan is conceptually dropped but its "
@@ -4086,6 +4518,25 @@ class SqliteBackend:
                 "this task."
             )
 
+        terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
+        placeholders = ",".join("?" for _ in terminal)
+        active_bundle = conn.execute(
+            f"""SELECT b.id
+                  FROM execution_bundle_members m
+                  JOIN execution_bundles b ON b.id = m.bundle_id
+                 WHERE m.task_id = ?
+                   AND b.status NOT IN ({placeholders})
+                 ORDER BY b.id
+                 LIMIT 1""",
+            (payload.task_id,) + terminal,
+        ).fetchone()
+        if active_bundle is not None:
+            raise EventRejected(
+                f"claim.created: task '{payload.task_id}' belongs to active "
+                f"execution bundle '{active_bundle[0]}'. Use the bundle "
+                "coordinator claim flow instead of an independent task claim."
+            )
+
         # Replay / idempotent re-apply: if THIS claim id is already present we
         # are re-seeing a committed event (crash-recovery forward catch-up or a
         # duplicated git-merged line). Its own row would otherwise register as a
@@ -4295,6 +4746,27 @@ class SqliteBackend:
         worktree_path: str | None = payload.worktree_path
         expected_files = payload.expected_files
         timestamp: str = event.timestamp.isoformat()
+
+        terminal = tuple(bundle_status.value for bundle_status in TERMINAL_BUNDLE_STATUSES)
+        terminal_placeholders = ",".join("?" for _ in terminal)
+        # Git branches can independently create a bundle and claim one of its
+        # tasks. The claim may already have evidence/review descendants, so
+        # dropping it would poison replay on those FKs. Deterministically let
+        # the complete claim lineage win in merged history: retire competing
+        # bundles, then project the claim normally. Live append still rejects
+        # this ordering in _validate_claim_created_locked.
+        conn.execute(
+            f"""UPDATE execution_bundles
+                   SET status = 'superseded', updated_at = ?
+                 WHERE id IN (
+                    SELECT b.id
+                      FROM execution_bundle_members m
+                      JOIN execution_bundles b ON b.id = m.bundle_id
+                     WHERE m.task_id = ?
+                       AND b.status NOT IN ({terminal_placeholders})
+                 )""",
+            (timestamp, task_id) + terminal,
+        )
 
         # INSERT OR IGNORE: idempotent on replay — duplicate claim.created events
         # (after crash mid-transaction) do not produce duplicate rows.
@@ -5368,6 +5840,26 @@ class SqliteBackend:
             if isinstance(d.get(col), str):
                 d[col] = json.loads(d[col])
         return Task.model_validate(d)
+
+    @staticmethod
+    def _row_to_bundle(row: Any, conn: sqlite3.Connection) -> ExecutionBundle:
+        """Deserialise a bundle row plus normalized, position-ordered members."""
+        d = dict(row)
+        member_rows = conn.execute(
+            "SELECT task_id FROM execution_bundle_members "
+            "WHERE bundle_id = ? ORDER BY position",
+            (d["id"],),
+        ).fetchall()
+        d["task_ids"] = [member[0] for member in member_rows]
+        for column in (
+            "review_policy",
+            "throughput_budget",
+            "delegated_agents",
+            "checkpoint",
+        ):
+            if isinstance(d.get(column), str):
+                d[column] = json.loads(d[column])
+        return ExecutionBundle.model_validate(d)
 
     def _row_to_claim(self, row: Any) -> Claim:
         """Deserialise a claims row into a Claim model instance."""

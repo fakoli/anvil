@@ -52,25 +52,23 @@ Version history
   the new columns) keep working unchanged — Phase 0 is purely additive at the
   write layer.
 - v8: v0.3 multi-PRD revisions (T023). ``prds`` gains ``revision`` — the per-PRD
+  monotonic revision counter (INTEGER NOT NULL DEFAULT 1) bumped by
+  ``prd.revised``. Purely additive: the v7->v8 migration ALTER-adds the column
+  with a DEFAULT, so every pre-existing v7 PRD row backfills to revision 1.
 - v9: evidence contracts (issue #153) — ``tasks.claims`` (named TaskClaims,
   default ``'[]'``) and ``evidence.category`` (default ``'completion'``).
 - v10: distinct-actor fail-fast (retro corpus, concurrency theme) —
   ``claims.session_id TEXT`` (nullable): the claiming loop's session
   discriminator, recorded independently of the actor string; NULL backfill
   means session-unknown and is skipped by the guard.
-  monotonic revision counter (INTEGER NOT NULL DEFAULT 1) bumped by
-  ``prd.revised``. Purely additive: the v7->v8 migration ALTER-adds the column
-  with a DEFAULT, so every pre-existing v7 PRD row backfills to revision 1.
-  This is a SEPARATE schema version (NOT folded into v7) because v7 already
-  shipped without ``revision``; a DB already stamped at v7 must re-enter the
-  migration ladder via the v8 bump to grow the column — modifying v7 in place
-  would leave those DBs missing the column (the version-equal early-return
-  skips the ladder).
+- v11: execution bundles (issue #171) — ``execution_bundles`` stores the
+  coordinator-owned lifecycle and policy metadata; ``execution_bundle_members``
+  stores ordered task membership with FK-protected history.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 10
+SCHEMA_VERSION: int = 11
 
 
 def get_schema_version() -> int:
@@ -189,6 +187,39 @@ CREATE INDEX IF NOT EXISTS idx_tasks_feature_status ON tasks (feature_id, status
 
 CREATE INDEX IF NOT EXISTS idx_tasks_prd_status ON tasks (prd_id, status);
 
+CREATE TABLE IF NOT EXISTS execution_bundles (
+    id                 TEXT PRIMARY KEY,
+    creation_event_id  TEXT NOT NULL UNIQUE,
+    prd_id             TEXT NOT NULL REFERENCES prds(id) ON DELETE RESTRICT,
+    coordinator        TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'planned',
+    branch             TEXT,
+    worktree_path      TEXT,
+    review_policy      TEXT NOT NULL DEFAULT '{}',
+    throughput_budget  TEXT NOT NULL DEFAULT '{}',
+    delegated_agents   TEXT NOT NULL DEFAULT '[]',
+    checkpoint         TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_bundles_status
+    ON execution_bundles (status);
+
+CREATE INDEX IF NOT EXISTS idx_execution_bundles_prd_status
+    ON execution_bundles (prd_id, status);
+
+CREATE TABLE IF NOT EXISTS execution_bundle_members (
+    bundle_id  TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    position   INTEGER NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (bundle_id, task_id),
+    UNIQUE (bundle_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task
+    ON execution_bundle_members (task_id);
+
 CREATE TABLE IF NOT EXISTS claims (
     id                 TEXT PRIMARY KEY,
     task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
@@ -294,7 +325,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 7;
+PRAGMA user_version = 11;
 """
 
 

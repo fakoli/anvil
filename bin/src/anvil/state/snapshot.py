@@ -88,7 +88,8 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
         Any object satisfying the read side of the Backend protocol. Only
         the ``get_project``, ``list_prds``, ``list_features``, ``list_tasks``,
         ``list_claims``, ``list_reviews``, ``list_evidence``,
-        ``list_requirements``, and ``list_sync_mappings`` methods are used.
+        ``list_requirements``, ``list_sync_mappings``, and ``list_bundles``
+        methods are used.
 
     Returns
     -------
@@ -98,7 +99,7 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
     """
     project = backend.get_project()
 
-    return {
+    state = {
         # Singleton: one-or-None, emitted directly (no list wrapper).
         "project": project.model_dump(mode="json") if project is not None else None,
         # T024: ALL PRDs, sorted by id, replacing the legacy singleton ``prd``.
@@ -203,3 +204,16 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
             )
         ],
     }
+
+    # Bundle state is a new canonical collection, but legacy no-bundle
+    # snapshots are a committed byte contract. Omit the key while empty (the
+    # same additive/omit-when-empty discipline used by Task.claims) and include
+    # the full sorted collection as soon as any bundle exists.
+    list_bundles = getattr(backend, "list_bundles", None)
+    bundles = list_bundles() if list_bundles is not None else []
+    if bundles:
+        state["bundles"] = [
+            bundle.model_dump(mode="json")
+            for bundle in sorted(bundles, key=lambda bundle: bundle.id)
+        ]
+    return state

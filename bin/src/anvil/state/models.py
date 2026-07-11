@@ -47,8 +47,10 @@ __all__ = [
     "ReviewID",
     "EventID",
     "PRDID",
+    "BundleID",
     # Constants
     "DEFAULT_PRD_ID",
+    "TERMINAL_BUNDLE_STATUSES",
     # Enums
     "PRDStatus",
     "FeatureStatus",
@@ -57,6 +59,8 @@ __all__ = [
     "TaskType",
     "ClaimType",
     "ClaimStatus",
+    "BundleStatus",
+    "DelegatedAgentStatus",
     "ReviewTargetKind",
     "ReviewDecision",
     "ExternalSystem",
@@ -80,6 +84,11 @@ __all__ = [
     "Task",
     "Claim",
     "Evidence",
+    "BundleReviewPolicy",
+    "BundleThroughputBudget",
+    "DelegatedAgentObservation",
+    "BundleCheckpoint",
+    "ExecutionBundle",
     "EventRange",
     "AcceptanceProof",
     "Decision",
@@ -105,6 +114,7 @@ EventID: TypeAlias = str  # monotonic E000001 (local) or hash-chained E-3f9a2c4d
 # PRD identity: 'default' for the implicit/migrated PRD, human-chosen
 # (e.g. 'v0.2') for named PRDs.
 PRDID: TypeAlias = str
+BundleID: TypeAlias = str
 
 # The single default PRD that owns all rows on a pre-multi-PRD (migrated) DB.
 DEFAULT_PRD_ID = "default"
@@ -206,6 +216,35 @@ class ClaimStatus(enum.StrEnum):
     released = "released"
     stale = "stale"
     force_released = "force_released"
+
+
+class BundleStatus(enum.StrEnum):
+    """Coordinator-level delivery state; member Task state remains authoritative."""
+
+    planned = "planned"
+    active = "active"
+    implemented_unreviewed = "implemented_unreviewed"
+    reviewed_unintegrated = "reviewed_unintegrated"
+    integrated = "integrated"
+    merged = "merged"
+    replan_required = "replan_required"
+    completed = "completed"
+    superseded = "superseded"
+
+
+TERMINAL_BUNDLE_STATUSES: frozenset[BundleStatus] = frozenset(
+    {BundleStatus.merged, BundleStatus.completed, BundleStatus.superseded}
+)
+
+
+class DelegatedAgentStatus(enum.StrEnum):
+    """Observed harness handle state; informational and never a lifecycle gate."""
+
+    active = "active"
+    completed = "completed"
+    stale = "stale"
+    closed = "closed"
+    missing = "missing"
 
 
 class ReviewTargetKind(enum.StrEnum):
@@ -727,6 +766,139 @@ class Task(BaseModel):
     @classmethod
     def _validate_utc(cls, v: datetime.datetime) -> datetime.datetime:
         return _require_utc(v, "created_at / updated_at")
+
+
+class BundleReviewPolicy(BaseModel):
+    """Bounded independent-review policy stored with an execution bundle."""
+
+    model_config = _MODEL_CONFIG
+
+    max_reviews: int = Field(default=1, ge=1)
+    max_rereviews: int = Field(default=1, ge=0)
+    independent_reviewer_required: bool = True
+    required_angles: list[str] = Field(default_factory=list)
+
+
+class BundleThroughputBudget(BaseModel):
+    """Planning limits captured at bundle creation for an auditable decision."""
+
+    model_config = _MODEL_CONFIG
+
+    # 500 keeps every membership query below SQLite's conservative variable
+    # ceiling even after status parameters are added. It is an escape hatch
+    # above the normal threshold, not permission for an unbounded SQL request.
+    max_tasks: int = Field(default=12, ge=1, le=500)
+    max_serial_stages: int = Field(default=6, ge=1, le=500)
+
+
+class DelegatedAgentObservation(BaseModel):
+    """One optional harness-handle observation; never controls bundle state."""
+
+    model_config = _MODEL_CONFIG
+
+    id: str
+    handle: str | None = None
+    runtime: str | None = None
+    task_ids: list[TaskID] = Field(default_factory=list)
+    status: DelegatedAgentStatus
+    observed_at: datetime.datetime
+    detail: str | None = None
+
+    @field_validator("observed_at", mode="after")
+    @classmethod
+    def _validate_observed_at(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "observed_at")
+
+
+class BundleCheckpoint(BaseModel):
+    """Optional delivery reference; metadata only, never task evidence."""
+
+    model_config = _MODEL_CONFIG
+
+    commit_sha: str | None = None
+    pr_url: str | None = None
+    recorded_at: datetime.datetime
+    recorded_by: str
+
+    @field_validator("recorded_at", mode="after")
+    @classmethod
+    def _validate_recorded_at(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "recorded_at")
+
+    @model_validator(mode="after")
+    def _requires_reference(self) -> BundleCheckpoint:
+        if not self.commit_sha and not self.pr_url:
+            raise ValueError("bundle checkpoint requires commit_sha or pr_url")
+        return self
+
+
+class ExecutionBundle(BaseModel):
+    """Coordinator-owned execution unit over ordered, independently-audited tasks."""
+
+    model_config = _MODEL_CONFIG
+
+    id: BundleID
+    creation_event_id: EventID
+    prd_id: PRDID
+    task_ids: list[TaskID]
+    coordinator: str
+    status: BundleStatus = BundleStatus.planned
+    branch: str | None = None
+    worktree_path: str | None = None
+    review_policy: BundleReviewPolicy = Field(default_factory=BundleReviewPolicy)
+    throughput_budget: BundleThroughputBudget = Field(
+        default_factory=BundleThroughputBudget
+    )
+    delegated_agents: list[DelegatedAgentObservation] = Field(default_factory=list)
+    checkpoint: BundleCheckpoint | None = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+    @field_validator("task_ids")
+    @classmethod
+    def _validate_task_ids(cls, v: list[TaskID]) -> list[TaskID]:
+        if not v:
+            raise ValueError("execution bundle requires at least one task")
+        if len(v) != len(set(v)):
+            raise ValueError("execution bundle task_ids must be unique")
+        return v
+
+    @field_validator("delegated_agents")
+    @classmethod
+    def _validate_observation_ids(
+        cls, v: list[DelegatedAgentObservation]
+    ) -> list[DelegatedAgentObservation]:
+        ids = [observation.id for observation in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("delegated agent observation ids must be unique")
+        return v
+
+    @field_validator("created_at", "updated_at", mode="after")
+    @classmethod
+    def _validate_bundle_utc(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "created_at / updated_at")
+
+    @model_validator(mode="after")
+    def _validate_members_fit_budget(self) -> ExecutionBundle:
+        if len(self.task_ids) > self.throughput_budget.max_tasks:
+            raise ValueError(
+                f"execution bundle has {len(self.task_ids)} tasks but its "
+                f"throughput budget permits {self.throughput_budget.max_tasks}"
+            )
+        members = set(self.task_ids)
+        outside = sorted(
+            {
+                task_id
+                for observation in self.delegated_agents
+                for task_id in observation.task_ids
+                if task_id not in members
+            }
+        )
+        if outside:
+            raise ValueError(
+                f"delegated agent observations reference non-member tasks: {outside}"
+            )
+        return self
 
 
 class Claim(BaseModel):

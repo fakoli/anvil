@@ -21,6 +21,27 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v6      | Typed proofs (SL-3 / B48) | `evidence` adds `proofs TEXT NOT NULL DEFAULT '[]'` — a JSON array of typed `ProofArtifact`s (CommandProof / DiffProof / LinkProof / AssertionProof). The DEFAULT backfills every existing row to "no typed proofs" (the pre-v6 meaning). Additive: legacy string evidence fields stay.      |
 | v7      | Multi-PRD persistence (v0.3 / T002) | `prds` becomes a multi-row table keyed on a single-column `id` PRIMARY KEY (not composite) and gains `title`/`target_version`/`target_tag`/`is_default`/`created_at`/`updated_at`, with a partial unique index enforcing at most one default PRD; `requirements`/`features`/`tasks` each gain a `prd_id` partition column (DEFAULT `'default'`); `requirements` also gains nullable `revision_introduced`/`revision_superseded` lineage columns; `sync_mappings` gains `prd_id`/`entity_kind` columns. The v6→v7 migration rebuilds `prds` (SQLite can't ALTER a PRIMARY KEY) and ALTER-backfills every other column via its DEFAULT, so existing rows adopt the default PRD with zero data loss.      |
 | v8      | Multi-PRD revisions (v0.3 / T023) | `prds` adds `revision INTEGER NOT NULL DEFAULT 1` — the per-PRD monotonic revision counter bumped by `prd.revised`. Purely additive: the DEFAULT backfills every pre-existing v7 PRD row to revision 1. A separate version from v7 (not folded in) because v7 already shipped without it; a DB already stamped v7 must re-enter the migration ladder via the v8 bump to grow the column.      |
+| v9      | Evidence contracts (issue #153) | `tasks` adds `claims`; `evidence` adds `category`. Additive defaults preserve pre-contract behavior. |
+| v10     | Distinct-actor concurrency guard | `claims` adds nullable `session_id`; historical claims remain session-unknown. |
+| v11     | Execution bundles (issue #171) | Adds `execution_bundles` plus FK-protected, position-ordered `execution_bundle_members`. Bundle policy and optional agent observations are JSON columns; existing task/claim/evidence rows are unchanged. |
+
+## Execution bundles — v0-v10 → v11 auto-upgrade
+
+The v11 migration is additive. It creates two new tables and three indexes; it
+does not rewrite existing entities:
+
+- `execution_bundles` stores coordinator-owned lifecycle, review policy,
+  throughput budget, optional agent observations, and delivery metadata.
+- `execution_bundle_members` stores ordered task membership with `RESTRICT`
+  foreign keys so task or bundle history cannot be deleted underneath an audit
+  record.
+
+Current DDL runs before the ordered migration ladder, and the v10→v11 ladder
+step repeats the table/index creation idempotently. The schema version is
+stamped 11 only after the complete transaction succeeds. A failure rolls back
+without changing `PRAGMA user_version`; reopening retries safely. Replaying an
+older `events.jsonl` produces no bundle rows and preserves the legacy snapshot
+shape.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 

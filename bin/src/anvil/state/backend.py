@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         Event,
         EventDraft,
         Evidence,
+        ExecutionBundle,
         Feature,
         Project,
         Requirement,
@@ -114,6 +115,16 @@ class Backend(Protocol):
 
     def get_claim(self, claim_id: str) -> Claim | None:
         """Return the Claim with the given ID, or None if not found."""
+        ...
+
+    def get_bundle(self, bundle_id: str) -> ExecutionBundle | None:
+        """Return the execution bundle with the given ID, or None."""
+        ...
+
+    def list_bundles(
+        self, *, prd_id: str | None = None, status: str | None = None
+    ) -> list[ExecutionBundle]:
+        """Return execution bundles in stable ID order, optionally filtered."""
         ...
 
     def get_feature(self, feature_id: str) -> Feature | None:
