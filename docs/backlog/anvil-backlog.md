@@ -247,7 +247,8 @@ Be the durable, runtime-neutral state-of-record for AI-and-human software work: 
 
 ### B22 — Structured contract/schema fields per task, enforced by review gates
 
-- **Status:** ✅ Implemented — the **evidence-contracts** PRD (issue #153).
+- **Status:** ✅ Resolved — GitHub issue #153 was implemented by the
+  **evidence-contracts** PRD (11 tasks, PRs #155–#165) and shipped in v0.5.0.
   Tasks now carry structured `claims` and `Artifact assertions` authored in
   the PRD template, evaluated by a per-claim gate (`review/assertions.py` +
   `evaluate_claims`) that refuses `apply --approve` with `claim_unproven`
