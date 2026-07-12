@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from anvil.bundles.eligibility import analyze_bundle_graph
+
 if TYPE_CHECKING:
     from anvil.state.models import (
         PRD,
@@ -133,33 +135,11 @@ def compute_bundle_rollup(
         for task in members:
             counts[task.status.value] = counts.get(task.status.value, 0) + 1
         member_ids = {task.id for task in members}
-        memo: dict[str, int] = {}
-
-        def depth(
-            task_id: str,
-            visiting: frozenset[str] = frozenset(),
-            *,
-            memo: dict[str, int] = memo,
-            member_ids: set[str] = member_ids,
-            tasks_by_id: dict[str, Task] = tasks_by_id,
-        ) -> int:
-            if task_id in memo:
-                return memo[task_id]
-            if task_id in visiting:
-                return 0
-            task = tasks_by_id[task_id]
-            value = 1 + max(
-                (
-                    depth(dep, visiting | {task_id})
-                    for dep in task.dependencies
-                    if dep in member_ids
-                ),
-                default=0,
-            )
-            memo[task_id] = value
-            return value
-
-        critical_depth = max((depth(task.id) for task in members), default=0)
+        graph = analyze_bundle_graph(
+            [task.id for task in members],
+            {task.id: list(task.dependencies) for task in members},
+        )
+        critical_depth = graph.critical_path_depth
         completion_memo: dict[str, bool] = {}
 
         def dependency_closed(
@@ -184,7 +164,11 @@ def compute_bundle_rollup(
             return complete
 
         completed_depth = max(
-            (depth(task.id) for task in members if dependency_closed(task.id)),
+            (
+                (graph.depth_by_task or {}).get(task.id, 0)
+                for task in members
+                if dependency_closed(task.id)
+            ),
             default=0,
         )
         current_reviews = [
@@ -248,6 +232,12 @@ def compute_bundle_rollup(
                 f"{bundle.throughput_budget.max_serial_stages}.",
                 "Split the dependency chain or explicitly replan the bundle.",
             )
+        if graph.dependency_cycle:
+            refuse(
+                "dependency_cycle",
+                "member dependency cycle: " + " -> ".join(graph.dependency_cycle) + ".",
+                "Break the cycle and replan the bundle before claiming it.",
+            )
         missing_members = [task_id for task_id in bundle.task_ids if task_id not in tasks_by_id]
         if missing_members:
             refuse(
@@ -300,11 +290,29 @@ def compute_bundle_rollup(
                 f"active claims conflict with the bundle: {sorted(conflicting_claims)}.",
                 "Wait for or release the conflicting claims before claiming the bundle.",
             )
-        if bundle.status.value == "replan_required":
+        required_review_count = max(
+            3, len(bundle.review_policy.required_angles or [])
+        )
+        review_budget_exhausted = bool(
+            latest_round
+            and latest_round - 1 >= bundle.review_policy.max_rereviews
+            and len({review.reviewed_by for review in round_reviews})
+            >= required_review_count
+            and len({review.angle for review in round_reviews})
+            >= required_review_count
+            and any(review.decision.value != "approve" for review in round_reviews)
+        )
+        if bundle.status.value == "replan_required" and review_budget_exhausted:
             refuse(
                 "review_budget_exhausted",
                 f"adversarial review exhausted {bundle.review_policy.max_rereviews} rereviews.",
                 "Resolve the blocking findings and create a replacement plan/bundle.",
+            )
+        elif bundle.status.value == "replan_required":
+            refuse(
+                "replan_required",
+                "bundle requires replanning for a non-review-budget lifecycle reason.",
+                "Inspect recent bundle events, resolve the recorded cause, and replan.",
             )
         elif bundle.status.value == "superseded":
             refuse(

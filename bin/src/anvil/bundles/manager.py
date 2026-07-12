@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from anvil.bundles.eligibility import analyze_bundle_graph
 from anvil.clock import Clock
 from anvil.context.packets import (
     BundleMemberPacketContext,
@@ -144,6 +145,22 @@ class BundleManager:
                 raise BundleError(f"Bundle member task '{task_id}' not found.")
             tasks.append(task)
         members = set(bundle.task_ids)
+        graph = analyze_bundle_graph(
+            bundle.task_ids,
+            {task.id: list(task.dependencies) for task in tasks},
+        )
+        if graph.dependency_cycle:
+            raise BundleError(
+                "Bundle member dependency cycle: "
+                + " -> ".join(graph.dependency_cycle)
+                + "."
+            )
+        if graph.critical_path_depth > bundle.throughput_budget.max_serial_stages:
+            raise BundleError(
+                f"Bundle critical path {graph.critical_path_depth} exceeds "
+                "max_serial_stages "
+                f"{bundle.throughput_budget.max_serial_stages}."
+            )
         for task in tasks:
             if task.status is not TaskStatus.ready:
                 raise BundleError(f"Bundle member '{task.id}' is not ready.")

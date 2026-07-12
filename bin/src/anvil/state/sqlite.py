@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel
 
+from anvil.bundles.eligibility import analyze_bundle_graph
 from anvil.state.backend import (
     BackendError,  # noqa: F401
     EventRejected,
@@ -5048,7 +5049,7 @@ class SqliteBackend:
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                "SELECT creation_event_id, coordinator, status "
+                "SELECT creation_event_id, coordinator, status, throughput_budget "
                 "FROM execution_bundles WHERE id = ?",
                 (payload.bundle_id,),
             ).fetchone()
@@ -5109,6 +5110,23 @@ class SqliteBackend:
             if not_ready:
                 raise EventRejected(
                     f"bundle.claimed: member tasks are not ready: {not_ready}."
+                )
+            graph = analyze_bundle_graph(
+                member_ids,
+                {member[0]: json.loads(member[2] or "[]") for member in member_rows},
+            )
+            if graph.dependency_cycle:
+                raise EventRejected(
+                    "bundle.claimed: member dependency cycle: "
+                    + " -> ".join(graph.dependency_cycle)
+                    + "."
+                )
+            throughput_budget = json.loads(row[3] or "{}")
+            max_serial_stages = int(throughput_budget.get("max_serial_stages", 6))
+            if graph.critical_path_depth > max_serial_stages:
+                raise EventRejected(
+                    f"bundle.claimed: critical path {graph.critical_path_depth} "
+                    f"exceeds max_serial_stages {max_serial_stages}."
                 )
 
             members = set(member_ids)
@@ -5180,7 +5198,8 @@ class SqliteBackend:
         ):
             return
         bundle_row = conn.execute(
-            "SELECT status, creation_event_id FROM execution_bundles WHERE id = ?",
+            "SELECT status, creation_event_id, throughput_budget "
+            "FROM execution_bundles WHERE id = ?",
             (payload.bundle_id,),
         ).fetchone()
         if (
@@ -5214,6 +5233,15 @@ class SqliteBackend:
             (payload.bundle_id,),
         ).fetchall()
         if [row[0] for row in replay_members] != member_ids:
+            return
+        graph = analyze_bundle_graph(
+            member_ids,
+            {row[0]: json.loads(row[2] or "[]") for row in replay_members},
+        )
+        throughput_budget = json.loads(bundle_row[2] or "{}")
+        if graph.dependency_cycle or graph.critical_path_depth > int(
+            throughput_budget.get("max_serial_stages", 6)
+        ):
             return
         expected_files: list[str] = []
         external_dependencies: list[str] = []

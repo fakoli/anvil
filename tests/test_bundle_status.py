@@ -17,6 +17,7 @@ from anvil.state.models import (
     BundleStatus,
     BundleThroughputBudget,
     Claim,
+    EventDraft,
     ExecutionBundle,
     ReviewDecision,
     Task,
@@ -147,6 +148,9 @@ def test_rollup_cycle_is_not_dependency_closed() -> None:
     entry = compute_bundle_rollup([bundle], tasks, [], [], now=_NOW)[0]
 
     assert entry.critical_path_stage == 0
+    assert entry.critical_path_depth == 0
+    assert not entry.claimable
+    assert "dependency_cycle" in {refusal["code"] for refusal in entry.refusals}
 
 
 def test_rollup_prefers_active_coordinator_claim_generation() -> None:
@@ -260,8 +264,36 @@ def test_rollup_explains_all_bundle_refusal_classes() -> None:
         [],
         now=_NOW,
     )[0]
+    assert "replan_required" in {refusal["code"] for refusal in replan.refusals}
+    exhausted_bundle = bundle.model_copy(
+        update={
+            "status": BundleStatus.replan_required,
+            "review_disposition_event_id": "E010",
+        }
+    )
+    exhausted_reviews = [
+        BundleReviewVerdict(
+            id=f"BR{index}",
+            bundle_id="B001",
+            creation_event_id="E001",
+            disposition_event_id="E010",
+            review_round=2,
+            angle=angle,
+            reviewed_by=f"reviewer-{index}",
+            decision=(
+                ReviewDecision.reject
+                if angle == "security"
+                else ReviewDecision.approve
+            ),
+            created_at=_NOW,
+        )
+        for index, angle in enumerate(("correctness", "security", "integration"), 1)
+    ]
+    exhausted = compute_bundle_rollup(
+        [exhausted_bundle], tasks, [], exhausted_reviews, now=_NOW
+    )[0]
     assert "review_budget_exhausted" in {
-        refusal["code"] for refusal in replan.refusals
+        refusal["code"] for refusal in exhausted.refusals
     }
     superseded = compute_bundle_rollup(
         [
@@ -307,6 +339,55 @@ def test_next_bundle_recommends_claimable_bundle(tmp_path) -> None:
     assert data["bundle"]["bundle_id"] == "B001"
     assert data["bundle"]["claimable"] is True
     assert data["bundle_refusals"] == []
+
+
+def test_scoped_status_keeps_cross_prd_bundle_conflicts(tmp_path) -> None:
+    from tests.test_bundle_state import (
+        _T0,
+        _claim_payload,
+        _create_bundle,
+    )
+    from tests.test_bundle_state import (
+        _backend as state_backend,
+    )
+    from tests.test_bundle_state import (
+        _seed as state_seed,
+    )
+
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    backend = state_backend(state_dir)
+    try:
+        state_seed(backend, second_prd=True)
+        _create_bundle(backend)
+        conn = backend._require_conn()
+        conn.execute(
+            "UPDATE tasks SET conflict_groups = '[\"shared\"]' "
+            "WHERE id IN ('release:T001', 'other:T001')"
+        )
+        conn.commit()
+        backend.append(
+            EventDraft(
+                timestamp=_T0,
+                actor="worker",
+                action="claim.created",
+                target_kind="claim",
+                target_id="C-OTHER",
+                payload_json=_claim_payload("C-OTHER", "other:T001"),
+            )
+        )
+    finally:
+        backend.close()
+
+    result = CliRunner().invoke(
+        app,
+        ["status", "--prd", "release", "--json", "--cwd", str(tmp_path)],
+        env={"ANVIL_STATE_LAYOUT": "local"},
+    )
+
+    assert result.exit_code == 0, result.output
+    bundle = json.loads(result.output)["data"]["bundles"][0]
+    assert "conflicts" in {refusal["code"] for refusal in bundle["refusals"]}
 
 
 def test_status_human_and_json_include_bundle_integration_rollup(tmp_path) -> None:

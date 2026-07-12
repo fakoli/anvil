@@ -88,6 +88,8 @@ def _seed(
     internal_dependency: bool = False,
     external_dependency_status: str | None = None,
     required_evidence: list[str] | None = None,
+    cyclic_dependency: bool = False,
+    throughput_budget: dict | None = None,
 ) -> str:
     backend.append(
         _event(
@@ -157,6 +159,10 @@ def _seed(
         status = "ready"
         if task_id == "release:T002" and internal_dependency:
             dependencies = ["release:T001"]
+        if cyclic_dependency:
+            dependencies = [
+                "release:T002" if task_id == "release:T001" else "release:T001"
+            ]
         if task_id == "release:T002" and external_dependency_status is not None:
             dependencies = ["release:T000"]
         if task_id == "release:T000":
@@ -207,7 +213,7 @@ def _seed(
                 "coordinator": "coordinator",
                 "status": "planned",
                 "review_policy": {},
-                "throughput_budget": {},
+                "throughput_budget": throughput_budget or {},
                 "delegated_agents": [
                     {
                         "id": "optional-worker",
@@ -297,6 +303,65 @@ def test_claim_creates_one_public_claim_and_ordered_member_authorizations(
         assert result.claim.member_claim_ids["release:T002"] in packet.markdown
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize(
+    ("seed_options", "error_pattern"),
+    [
+        (
+            {
+                "internal_dependency": True,
+                "throughput_budget": {"max_tasks": 2, "max_serial_stages": 1},
+            },
+            "critical path 2 exceeds max_serial_stages 1",
+        ),
+        ({"cyclic_dependency": True}, "member dependency cycle"),
+    ],
+)
+def test_bundle_graph_refusal_is_shared_by_preflight_live_and_replay(
+    tmp_path: Path,
+    seed_options: dict,
+    error_pattern: str,
+) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend, **seed_options)
+        with pytest.raises(BundleError, match=error_pattern):
+            _manager(backend, tmp_path).preflight("B001")
+        payload = _bundle_claim_payload(backend, "BC-GRAPH")
+        draft = _event(
+            "bundle.claimed",
+            "bundle",
+            "B001",
+            payload,
+            actor="coordinator",
+        )
+        with pytest.raises(EventRejected, match=error_pattern):
+            backend.append(draft)
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=draft.timestamp,
+                actor=draft.actor,
+                action=draft.action,
+                target_kind=draft.target_kind,
+                target_id=draft.target_id,
+                payload_json=draft.payload_json,
+            ),
+        )
+    finally:
+        backend.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle_claim("B001") is None
+        assert replay.get_bundle("B001").status is BundleStatus.planned  # type: ignore[union-attr]
+    finally:
+        replay.close()
 
 
 def test_external_dependency_refuses_atomically_but_done_dependency_allows(

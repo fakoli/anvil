@@ -454,11 +454,13 @@ def status(
             if status_prd
             else None
         )
+        project_active_claims = backend.list_active_claims()
+        project_tasks = backend.list_tasks()
         if scoped_prd_id is None:
             prd_model = backend.get_prd()
             prds = backend.list_prds()
-            all_tasks = backend.list_tasks()
-            active_claims = backend.list_active_claims()
+            all_tasks = project_tasks
+            active_claims = project_active_claims
         else:
             prd_model = backend.get_prd(scoped_prd_id)
             prds = [prd_model] if prd_model is not None else []
@@ -466,7 +468,7 @@ def status(
             scoped_task_ids = {task.id for task in all_tasks}
             active_claims = [
                 claim
-                for claim in backend.list_active_claims()
+                for claim in project_active_claims
                 if claim.task_id in scoped_task_ids
             ]
 
@@ -524,10 +526,10 @@ def status(
         ]
         bundle_rollup = compute_bundle_rollup(
             bundles,
-            all_tasks,
+            project_tasks,
             bundle_claims,
             bundle_reviews,
-            active_claims,
+            project_active_claims,
             now=_now,
         )
     finally:
