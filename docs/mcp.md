@@ -395,10 +395,11 @@ to dispatch in parallel this wave.
 
 ### Mutating tools
 
-Lease-sensitive task and bundle claim, renew, and release tools run
-`detect_and_release_stale` at the top of their call. This is automatic — agents do not
-need to trigger reaping manually. Other mutators validate their own lifecycle preconditions
-but do not promise a global stale-claim sweep. See
+`claim_task`, `claim_bundle`, `release_task`, `renew_claim`, `submit_progress`,
+`submit_completion_evidence`, `update_task_status`, and `get_project_summary` run
+`detect_and_release_stale` at the top of their call. This is automatic on those paths.
+Other mutators validate their own lifecycle preconditions but do not promise a global
+stale-claim sweep. See
 [Stale-claim reaping](#stale-claim-reaping) for details.
 
 ---
@@ -1351,19 +1352,20 @@ before deciding whether to retry, release, or escalate.
 
 ## Stale-claim reaping
 
-Every mutating tool (`claim_task`, `release_task`, `renew_claim`, `submit_progress`,
-`submit_completion_evidence`, `update_task_status`) and `get_project_summary` call
-`detect_and_release_stale` before performing their operation. This is automatic — agents do
-not need to trigger reaping manually.
+`claim_task`, `claim_bundle`, `release_task`, `renew_claim`, `submit_progress`,
+`submit_completion_evidence`, `update_task_status`, and `get_project_summary` call
+`detect_and_release_stale` before performing their operation. Other tools, including
+`get_next_task`, do not promise reaping.
 
 Reaping scans all active claims, identifies those whose `lease_expires_at` timestamp has
 passed, marks them stale, and returns the associated tasks to the `ready` pool. If the
 reaper itself throws an exception, the error is swallowed and the main operation proceeds
 (best-effort, never blocking).
 
-The practical consequence: an agent that calls `get_next_task` will never receive a task
-whose claim expired seconds ago — the expired claim is cleared in the same call before the
-candidate set is built.
+For an MCP-only queue loop, call `get_project_summary` before `get_next_task` when lease
+expiry may have occurred. The summary call performs the best-effort reap; the subsequent
+candidate lookup sees the refreshed state. Do not rely on `get_next_task` alone to clear an
+expired claim.
 
 ---
 

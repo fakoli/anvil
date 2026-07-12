@@ -180,6 +180,8 @@ uv run --project bin python benchmarks/bundle_workflow_fixture.py
 The output contains descriptive summaries and signed deltas only—no weighted score and no
 declared winner. Values are fail-closed: impossible metrics, mismatched pairs, and an
 accepted result without the full ordered target plus a commit SHA are rejected. If either
-policy has an incomplete trial, time and token-efficiency deltas are suppressed. The
-fixture validates metric plumbing; it is explicitly synthetic and is not an empirical
+policy has an incomplete trial, every cross-policy delta is suppressed. The comparator
+hash-checks referenced raw logs and structurally binds acceptance-command results to the
+accepted commit; it does not execute those commands or prove that the Git object exists.
+The fixture validates metric plumbing; it is explicitly synthetic and is not an empirical
 performance claim. See [the benchmark README](https://github.com/fakoli/anvil/blob/main/benchmarks/README.md#coordinator-policy-comparison-fixture) for the capture rules.

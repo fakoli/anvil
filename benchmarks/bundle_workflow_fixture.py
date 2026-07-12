@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from collections import defaultdict
@@ -46,7 +47,7 @@ def _mean(values: list[int]) -> float:
     return round(sum(values) / len(values), 4)
 
 
-def _validate_workload(document: dict[str, Any]) -> tuple[list[str], int]:
+def _validate_workload(document: dict[str, Any]) -> tuple[list[str], list[str], int]:
     workload = document.get("workload")
     if not isinstance(workload, dict):
         raise ValueError("workload must be an object")
@@ -70,10 +71,17 @@ def _validate_workload(document: dict[str, Any]) -> tuple[list[str], int]:
     )
     if target != len(normalized):
         raise ValueError("required_accepted_tasks must equal the workload task count")
-    return normalized, target
+    return normalized, commands, target
 
 
-def _validate_observation(row: Any, *, task_ids: list[str], target: int) -> dict[str, Any]:
+def _validate_observation(
+    row: Any,
+    *,
+    task_ids: list[str],
+    acceptance_commands: list[str],
+    target: int,
+    base_dir: Path | None,
+) -> dict[str, Any]:
     if not isinstance(row, dict):
         raise ValueError("each observation must be an object")
     policy = _string(row.get("policy"), "observation.policy")
@@ -86,8 +94,29 @@ def _validate_observation(row: Any, *, task_ids: list[str], target: int) -> dict
     provenance = row.get("provenance")
     if not isinstance(provenance, dict):
         raise ValueError("observation.provenance must be an object")
-    _string(provenance.get("kind"), "observation.provenance.kind")
-    _string(provenance.get("reference"), "observation.provenance.reference")
+    provenance_kind = _string(provenance.get("kind"), "observation.provenance.kind")
+    if provenance_kind not in {"synthetic", "raw_session_log"}:
+        raise ValueError("observation.provenance.kind is not supported")
+    provenance_ref = _string(provenance.get("reference"), "observation.provenance.reference")
+    provenance_sha = _sha(
+        provenance.get("content_sha256"),
+        "observation.provenance.content_sha256",
+        64,
+    )
+    if provenance_kind == "raw_session_log":
+        if base_dir is None:
+            raise ValueError("raw_session_log provenance requires a fixture base directory")
+        candidate = (base_dir / provenance_ref).resolve()
+        root = base_dir.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("raw_session_log provenance escapes the fixture directory") from exc
+        if not candidate.is_file():
+            raise ValueError(f"raw_session_log provenance does not exist: {provenance_ref}")
+        actual_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if actual_sha != provenance_sha:
+            raise ValueError("raw_session_log provenance content hash does not match")
 
     for field in COUNT_FIELDS:
         _integer(row.get(field), f"observation.{field}")
@@ -110,6 +139,9 @@ def _validate_observation(row: Any, *, task_ids: list[str], target: int) -> dict
 
     commit = row.get("accepted_commit_sha")
     accepted_at = row.get("accepted_commit_ms")
+    acceptance_results = row.get("acceptance_results")
+    if not isinstance(acceptance_results, list):
+        raise ValueError("observation.acceptance_results must be a list")
     complete = len(accepted) == target
     if complete:
         if accepted != task_ids:
@@ -118,8 +150,19 @@ def _validate_observation(row: Any, *, task_ids: list[str], target: int) -> dict
         completed = _integer(accepted_at, "observation.accepted_commit_ms", positive=True)
         if completed <= started:
             raise ValueError("accepted_commit_ms must be after run_started_ms")
-    elif commit is not None or accepted_at is not None:
-        raise ValueError("incomplete observations cannot claim an accepted commit")
+        result_commands: list[str] = []
+        for result in acceptance_results:
+            if not isinstance(result, dict):
+                raise ValueError("each acceptance result must be an object")
+            result_commands.append(_string(result.get("command"), "acceptance_results[].command"))
+            if _integer(result.get("exit_code"), "acceptance_results[].exit_code") != 0:
+                raise ValueError("acceptance command exit_code must be zero")
+            if result.get("commit_sha") != commit:
+                raise ValueError("acceptance result commit_sha must match accepted commit")
+        if result_commands != acceptance_commands:
+            raise ValueError("acceptance results must match workload commands in order")
+    elif commit is not None or accepted_at is not None or acceptance_results:
+        raise ValueError("incomplete observations cannot claim accepted commit evidence")
     return row
 
 
@@ -163,17 +206,32 @@ def summarize_policy(observations: list[dict[str, Any]], *, target: int) -> dict
     }
 
 
-def compare_fixture(document: Any) -> dict[str, Any]:
+def compare_fixture(document: Any, *, base_dir: Path | None = None) -> dict[str, Any]:
     """Return descriptive summaries and signed deltas for rigorously paired runs."""
     if not isinstance(document, dict):
         raise ValueError("fixture must be an object")
     if document.get("schema_version") != 1:
         raise ValueError("unsupported fixture schema_version")
-    task_ids, target = _validate_workload(document)
+    task_ids, acceptance_commands, target = _validate_workload(document)
     rows = document.get("observations")
     if not isinstance(rows, list):
         raise ValueError("observations must be a list")
-    validated = [_validate_observation(row, task_ids=task_ids, target=target) for row in rows]
+    validated = [
+        _validate_observation(
+            row,
+            task_ids=task_ids,
+            acceptance_commands=acceptance_commands,
+            target=target,
+            base_dir=base_dir,
+        )
+        for row in rows
+    ]
+    provenance_kinds = {row["provenance"]["kind"] for row in validated}
+    if len(provenance_kinds) != 1:
+        raise ValueError("all observations must use one provenance kind")
+    provenance_refs = [row["provenance"]["reference"] for row in validated]
+    if len(set(provenance_refs)) != len(provenance_refs):
+        raise ValueError("observation provenance references must be unique")
     run_ids = [row["run_id"] for row in validated]
     if len(set(run_ids)) != len(run_ids):
         raise ValueError("observation.run_id values must be unique")
@@ -202,22 +260,31 @@ def compare_fixture(document: Any) -> dict[str, Any]:
         "human_interventions_mean",
     )
     deltas = {}
+    both_policies_complete = all(summaries[policy]["all_trials_complete"] for policy in POLICIES)
     for field in delta_fields:
         left, right = baseline[field], candidate[field]
         deltas[field] = (
-            round(float(right) - float(left), 4) if left is not None and right is not None else None
+            round(float(right) - float(left), 4)
+            if both_policies_complete and left is not None and right is not None
+            else None
         )
     return {
         "schema_version": 1,
         "fixture_id": _string(document.get("fixture_id"), "fixture_id"),
         "descriptive_only": True,
+        "provenance_kind": next(iter(provenance_kinds)),
+        "verification_scope": (
+            "schema_and_referenced_log_hashes"
+            if provenance_kinds == {"raw_session_log"}
+            else "synthetic_schema_only"
+        ),
         "policies": summaries,
         "coordinator_first_minus_task_per_agent": deltas,
     }
 
 
 def load_and_compare(path: Path = DEFAULT_FIXTURE) -> dict[str, Any]:
-    return compare_fixture(json.loads(path.read_text(encoding="utf-8")))
+    return compare_fixture(json.loads(path.read_text(encoding="utf-8")), base_dir=path.parent)
 
 
 def main() -> None:

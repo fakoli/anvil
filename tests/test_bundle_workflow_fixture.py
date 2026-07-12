@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -33,6 +34,7 @@ def test_fixture_records_required_raw_metrics_for_paired_policies() -> None:
         "accepted_commit_ms",
         "accepted_commit_sha",
         "accepted_task_ids",
+        "acceptance_results",
         "coordinator_tokens",
         "delegate_tokens",
         "review_findings",
@@ -93,6 +95,7 @@ def test_incomplete_arm_suppresses_time_and_efficiency_deltas() -> None:
             row["accepted_task_ids"] = ["T001", "T002"]
             row["accepted_commit_sha"] = None
             row["accepted_commit_ms"] = None
+            row["acceptance_results"] = []
     result = compare_fixture(source)
     candidate = result["policies"]["coordinator_first"]
     assert candidate["all_trials_complete"] is False
@@ -101,6 +104,7 @@ def test_incomplete_arm_suppresses_time_and_efficiency_deltas() -> None:
     deltas = result["coordinator_first_minus_task_per_agent"]
     assert deltas["time_to_accepted_commit_ms_mean"] is None
     assert deltas["accepted_tasks_per_1k_tokens"] is None
+    assert all(value is None for value in deltas.values())
 
 
 def test_zero_token_acceptance_suppresses_efficiency_and_negative_delegate_fails() -> None:
@@ -141,6 +145,8 @@ def test_comparison_rejects_unpaired_or_duplicate_trials() -> None:
     duplicate = _source()
     duplicate_row = deepcopy(duplicate["observations"][0])
     duplicate_row["run_id"] = "duplicate-baseline"
+    duplicate_row["provenance"]["reference"] = "fixture:duplicate-baseline"
+    duplicate_row["provenance"]["content_sha256"] = "e" * 64
     duplicate["observations"].append(duplicate_row)
     with pytest.raises(ValueError, match="each trial id only once"):
         compare_fixture(duplicate)
@@ -167,6 +173,18 @@ def test_comparison_rejects_unproven_or_invalid_acceptance() -> None:
     with pytest.raises(ValueError, match="after run_started_ms"):
         compare_fixture(early_commit)
 
+    mismatched_result = _source()
+    mismatched_result["observations"][0]["acceptance_results"][0]["commit_sha"] = (
+        "9999999999999999999999999999999999999999"
+    )
+    with pytest.raises(ValueError, match="must match accepted commit"):
+        compare_fixture(mismatched_result)
+
+    failed_command = _source()
+    failed_command["observations"][0]["acceptance_results"][0]["exit_code"] = 1
+    with pytest.raises(ValueError, match="exit_code must be zero"):
+        compare_fixture(failed_command)
+
 
 def test_comparison_rejects_malformed_container_and_workload_identity() -> None:
     with pytest.raises(ValueError, match="fixture must be an object"):
@@ -181,3 +199,26 @@ def test_comparison_rejects_malformed_container_and_workload_identity() -> None:
     duplicate_tasks["workload"]["task_ids"][-1] = "T001"
     with pytest.raises(ValueError, match="task_ids must be unique"):
         compare_fixture(duplicate_tasks)
+
+
+def test_raw_provenance_requires_a_resolvable_hash_checked_log(tmp_path: Path) -> None:
+    source = _source()
+    for index, row in enumerate(source["observations"]):
+        row["provenance"] = {
+            "kind": "raw_session_log",
+            "reference": f"run-{index}.jsonl",
+            "content_sha256": "a" * 64,
+        }
+    with pytest.raises(ValueError, match="does not exist"):
+        compare_fixture(source, base_dir=tmp_path)
+
+    for index, row in enumerate(source["observations"]):
+        content = f'{{"run": {index}}}\n'.encode()
+        (tmp_path / f"run-{index}.jsonl").write_bytes(content)
+        row["provenance"]["content_sha256"] = hashlib.sha256(content).hexdigest()
+    result = compare_fixture(source, base_dir=tmp_path)
+    assert result["verification_scope"] == "schema_and_referenced_log_hashes"
+
+    source["observations"][0]["provenance"]["content_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="content hash does not match"):
+        compare_fixture(source, base_dir=tmp_path)

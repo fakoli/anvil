@@ -161,12 +161,34 @@ and signed `coordinator_first - task_per_agent` deltas. If either policy has an 
 trial, time and efficiency comparisons are suppressed instead of treating missing
 acceptance as a fast result.
 
+Capture fields have one meaning across both arms:
+
+- `coordinator_tokens` and each `delegate_tokens` value are normalized model-usage totals:
+  input + output + reasoning tokens. Cached input is already a subset of input and is not
+  added again. Reviewer usage belongs to the coordinator unless the capture protocol
+  explicitly treats that reviewer as a delegate in both arms.
+- `review_findings` counts unique actionable finding IDs, not comments or repeated
+  mentions. `rereviews` counts distinct review rounds after round 1; three reviewers in
+  the same first round add zero re-reviews.
+- `wait_ms` is the union of wall-clock intervals in which the delivery could not proceed
+  because of a delegate, lease, review, CI, or human dependency. Overlapping waits count
+  once. `human_interventions` counts distinct human turns that provide clarification,
+  approval, conflict resolution, or recovery action.
+- Accepted-task efficiency is emitted only when every paired trial proves the full ordered
+  target, supplies one accepted commit SHA, and records every workload acceptance command
+  with exit code 0 tied to that SHA.
+
 This fixture is a contract test for the measurement pipeline, not a live model result. It
 uses no model or vendor names, emits no weighted score or winner, and must not be cited as
 evidence that one model family is intrinsically better. For an empirical run, preserve
 the same task graph, initial commit, acceptance commands, trial seeds, and execution
 profile across both policies; replace only the observation values, use
 `provenance.kind="raw_session_log"`, and retain the referenced logs.
+For raw provenance, the comparator resolves each unique reference beneath the fixture
+directory and verifies its SHA-256. It validates the structure and binding of command
+results but does not execute commands, inspect the Git object database, or recompute the
+task-graph hash; empirical claims must retain independently verifiable logs and repository
+state. The output's `verification_scope` makes this boundary explicit.
 
 ## Roadmap — `--live`
 
