@@ -51,7 +51,7 @@ graph TD
 
     subgraph Entry["Entry surfaces"]
         CLI["CLI<br/>anvil &lt;cmd&gt;"]
-        MCP["MCP server<br/>FastMCP stdio<br/>24 tools (14 on default surface)"]
+        MCP["MCP server<br/>FastMCP stdio<br/>35 tools (24 on default surface)"]
         Hooks["Hooks<br/>SessionStart / PreToolUse / PostToolUse"]
     end
 
@@ -120,7 +120,7 @@ Source: [`assets/diagrams/component.mmd`](https://github.com/fakoli/anvil/blob/m
 |---|---|---|
 | Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](https://github.com/fakoli/anvil/blob/main/.claude-plugin/plugin.json) |
 | CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
-| MCP server | Runtime-neutral capability surface — 24 registered stdio tools; the default execution surface serves 14 on the wire, and the 10 planning-tagged tools require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
+| MCP server | Runtime-neutral capability surface — 35 registered stdio tools; the default execution surface serves 24 on the wire, and the 11 planning-tagged tools require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
 | Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json), [`hooks/*.sh`](https://github.com/fakoli/anvil/tree/main/hooks) |
 | Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](https://github.com/fakoli/anvil/tree/main/skills) |
 | Plugin agents | Specialist roles owned by this plugin | [`agents/*.md`](https://github.com/fakoli/anvil/tree/main/agents) |
@@ -437,13 +437,13 @@ in [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/b
 - Hooks: `hook ...` (sub-app — called by `hooks/*.sh`)
 - Sync: `sync ...` (sub-app — `sync github`, `sync github --health`, ...)
 
-### MCP tools (24)
+### MCP tools (35)
 
 Full reference is at [`docs/mcp.md`](mcp.md). Source:
 [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py).
 
-All 24 tools are registered, but the default execution surface serves 14
-on the wire; the 10 planning-tagged tools (`parse_prd`, `plan_tasks`,
+All 35 tools are registered, but the default execution surface serves 24
+on the wire; the 11 planning-tagged tools (`parse_prd`, `plan_tasks`,
 `score_tasks`, ...) require `ANVIL_MCP_PLANNING=1` (`mcp_server.py`
 tag-disables them at startup).
 
@@ -529,7 +529,7 @@ points at a file you can grep.
 | Layer | File(s) |
 |---|---|
 | Entry: CLI assembly | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
-| Entry: MCP server (24 tools) | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
+| Entry: MCP server (35 tools) | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
 | Entry: hooks manifest | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) |
 | Type system | [`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py) |
 | Transitions (pure) | [`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py) |
@@ -596,7 +596,7 @@ and welder-effort estimates.
 
 - [`_positioning.md`](_positioning.md) — differentiators and the Terraform analogy (internal positioning reference)
 - [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — the original 358-line v0 build spec (this document is its condensed shipped sibling)
-- [`mcp.md`](mcp.md) — full 24-tool MCP reference with error envelope contract
+- [`mcp.md`](mcp.md) — full 35-tool MCP reference with error envelope contract
 - [`github-sync.md`](github-sync.md) — bidirectional GitHub Issues sync reference
 - [`sync-providers.md`](sync-providers.md) — contributor guide for new sync providers
 - [`prd-template.md`](prd-template.md) — PRD authoring schema and worked example

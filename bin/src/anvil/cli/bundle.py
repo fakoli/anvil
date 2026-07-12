@@ -9,7 +9,9 @@ import typer
 
 from anvil.cli._helpers import (
     _open_backend,
+    _reap_stale_claims,
     _require_state_dir,
+    _resolve_project_root,
     _resolve_state_dir,
     resolve_actor,
 )
@@ -160,7 +162,9 @@ def list_bundles(
         )
 
 
-def _manager(backend, state_dir: Path, actor: str):  # type: ignore[no-untyped-def]
+def _manager(
+    backend, state_dir: Path, actor: str, *, cwd: Path | None = None
+):  # type: ignore[no-untyped-def]
     from anvil.bundles.manager import BundleManager
     from anvil.clock import SystemClock
 
@@ -168,7 +172,7 @@ def _manager(backend, state_dir: Path, actor: str):  # type: ignore[no-untyped-d
         backend,
         SystemClock(),
         actor=actor,
-        project_root=state_dir.parent,
+        project_root=_resolve_project_root(cwd),
     )
 
 
@@ -186,6 +190,7 @@ def claim_bundle(
     command = "bundle claim"
     state_dir, backend = _state(cwd, command, json_output)
     try:
+        _reap_stale_claims(backend)
         from anvil.cli._helpers import _load_config_optional
 
         cfg = _load_config_optional(state_dir)
@@ -209,7 +214,9 @@ def claim_bundle(
                     f"{len(shared)} active task claim(s) share this checkout; "
                     "prefer the top-level CLI worktree claim path."
                 )
-        result = _manager(backend, state_dir, resolve_actor(actor)).claim(bundle_id)
+        result = _manager(
+            backend, state_dir, resolve_actor(actor), cwd=cwd
+        ).claim(bundle_id)
     except BundleError as exc:
         _fail(command, str(exc), json_output)
     finally:
@@ -242,7 +249,10 @@ def renew_bundle(
     command = "bundle renew"
     state_dir, backend = _state(cwd, command, json_output)
     try:
-        claim = _manager(backend, state_dir, resolve_actor(actor)).renew(bundle_id)
+        _reap_stale_claims(backend)
+        claim = _manager(
+            backend, state_dir, resolve_actor(actor), cwd=cwd
+        ).renew(bundle_id)
     except BundleError as exc:
         _fail(command, str(exc), json_output)
     finally:
@@ -267,7 +277,8 @@ def release_bundle(
     command = "bundle release"
     state_dir, backend = _state(cwd, command, json_output)
     try:
-        manager = _manager(backend, state_dir, resolve_actor(actor))
+        _reap_stale_claims(backend)
+        manager = _manager(backend, state_dir, resolve_actor(actor), cwd=cwd)
         manager.release(bundle_id, reason=reason)
         claim = backend.get_bundle_claim(bundle_id)
         bundle = backend.get_bundle(bundle_id)
@@ -299,7 +310,9 @@ def bundle_packet(
     command = "bundle packet"
     state_dir, backend = _state(cwd, command, json_output)
     try:
-        packet = _manager(backend, state_dir, resolve_actor(actor)).packet(bundle_id)
+        packet = _manager(
+            backend, state_dir, resolve_actor(actor), cwd=cwd
+        ).packet(bundle_id)
     except BundleError as exc:
         _fail(command, str(exc), json_output)
     finally:
@@ -331,7 +344,7 @@ def bundle_progress(
     command = "bundle progress"
     state_dir, backend = _state(cwd, command, json_output)
     try:
-        _manager(backend, state_dir, resolve_actor(actor)).note_progress(
+        _manager(backend, state_dir, resolve_actor(actor), cwd=cwd).note_progress(
             bundle_id,
             phase=phase,
             detail=detail,
@@ -361,7 +374,7 @@ def complete_bundle(
     state_dir, backend = _state(cwd, command, json_output)
     try:
         readiness = _manager(
-            backend, state_dir, resolve_actor(actor)
+            backend, state_dir, resolve_actor(actor), cwd=cwd
         ).mark_implemented(bundle_id)
         if not readiness.can_mark_implemented:
             _fail(

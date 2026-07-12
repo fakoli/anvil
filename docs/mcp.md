@@ -6,7 +6,7 @@
 
 Agents need to read and write canonical project state without each one shelling out to the
 CLI per operation and without fighting over the same SQLite rows. The MCP server has 24
-registered tools (14 on the wire by default — see
+registered tools (24 on the wire by default — see
 [Tool surface gating](#tool-surface-gating)) over stdio so that any MCP-compatible
 runtime — Claude Code, Codex, Cursor, OpenHands,
 Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
@@ -38,7 +38,7 @@ the MCP surface stays git-free. Git side-effects remain CLI-only.
 
 ## Tool surface gating
 
-All 24 tools are registered, but the live stdio server exposes only the **14 execution
+All 35 tools are registered, but the live stdio server exposes only the **24 execution
 tools** on the wire by default — the turn-to-turn loop an agent runs while doing work:
 
 `get_next_task`, `claim_task`, `release_task`, `renew_claim`, `submit_progress`,
@@ -46,14 +46,14 @@ tools** on the wire by default — the turn-to-turn loop an agent runs while doi
 `get_project_summary`, `list_tasks`, `check_conflicts`, `generate_work_packet`,
 `get_dependency_graph`
 
-The other **10 planning tools** are hidden by default so steady-state execution clients
+The other **11 planning tools** are hidden by default so steady-state execution clients
 never pay their schema cost on every turn:
 
 `init_project`, `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `apply_review_decision`, `edit_dependencies`, `find_decisions`, `describe_surface`
 
 Set `ANVIL_MCP_PLANNING=1` (any of `1`/`true`/`yes`/`on`) in the server's environment to
-keep all 24 tools on the wire — use it for the planning phase, or run a second server
+keep all 35 tools on the wire — use it for the planning phase, or run a second server
 entry with the flag set. No tool is removed by the gate: introspection surfaces
 (`anvil describe`, the `--help` tool list, the Docker catalog smoke test) always report
 all 24.
@@ -1183,7 +1183,7 @@ describe` uses — the CLI and MCP surfaces can never disagree — so it never n
 to be initialized. This tool is planning-gated (hidden from the wire unless
 `ANVIL_MCP_PLANNING=1`; see [Tool surface gating](#tool-surface-gating)), but the
 introspection surfaces themselves (`anvil describe`, the `--help` tool list, the Docker
-catalog smoke test) always report the full 24-tool surface regardless of the gate.
+catalog smoke test) always report the full 35-tool surface regardless of the gate.
 
 **Inputs**
 

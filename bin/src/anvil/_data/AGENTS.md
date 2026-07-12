@@ -12,7 +12,7 @@ equivalent surfaces:
 
 - **CLI** — `anvil <command>` (single mutator, no harness dependency; on PATH
   after `uv tool install anvil-state`).
-- **MCP** — `anvil-mcp` (FastMCP stdio; 14 execution tools by default, all 24
+- **MCP** — `anvil-mcp` (FastMCP stdio; 24 execution tools by default, all 35
   with `ANVIL_MCP_PLANNING=1`). Run `anvil mcp-config <your-client>` to print
   client-specific config.
 
@@ -74,16 +74,16 @@ anvil apply T001           # apply the review verdict
 
 ### Execution vs planning surface (MCP)
 
-To keep the per-turn context lean, the MCP server exposes only the **14
+To keep the per-turn context lean, the MCP server exposes only the **24
 execution tools** by default — the turn-to-turn loop (next/claim/packet/submit/
-status/conflicts/deps). The **10 one-shot planning tools** (`init_project`,
+status/conflicts/deps). The **11 one-shot planning tools** (`init_project`,
 `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `apply_review_decision`, `edit_dependencies`, `find_decisions`,
-`describe_surface`) are **hidden by default** and re-appear when the server is
+`describe_surface`, `create_bundle`) are **hidden by default** and re-appear when the server is
 started with **`ANVIL_MCP_PLANNING=1`** (or `true`/`yes`/`on`). Nothing is
 removed — every capability stays reachable via the CLI command in the same row,
-and the full 24-tool surface returns the moment the env flag is set. Use it for
-the planning phase; the steady-state execution loop needs none of the 10.
+and the full 35-tool surface returns the moment the env flag is set. Use it for
+the planning phase; the steady-state execution loop needs none of the 11.
 
 ## Notes
 - Review disposition policy: before presenting any Anvil task in

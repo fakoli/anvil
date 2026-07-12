@@ -299,6 +299,18 @@ class BundleCheckpointRecord(BaseModel):
     recorded_by: str
 
 
+class DelegatedAgentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    handle: str | None = None
+    runtime: str | None = None
+    task_ids: list[str] = Field(default_factory=list)
+    status: str
+    observed_at: str
+    detail: str | None = None
+
+
 class BundleRecord(BaseModel):
     """Compact explicit wire schema for an execution bundle."""
 
@@ -317,7 +329,7 @@ class BundleRecord(BaseModel):
     worktree_path: str | None = None
     review_policy: BundleReviewPolicyRecord
     throughput_budget: BundleThroughputBudgetRecord
-    delegated_agents: list[dict[str, Any]] = Field(default_factory=list)
+    delegated_agents: list[DelegatedAgentRecord] = Field(default_factory=list)
     checkpoint: BundleCheckpointRecord | None = None
     created_at: str
     updated_at: str
@@ -1221,10 +1233,12 @@ def release_task(
     task_id: str,
     actor: str,
     reason: str | None = None,
+    target_kind: Literal["task", "bundle"] = "task",
+    cwd: str | None = None,
 ) -> ReleaseResponse:
-    """Release a task claim, or a coordinator bundle claim when task_id is a bundle ID."""
+    """Release a task claim, or an explicit target_kind=bundle coordinator claim."""
     actor = _require_actor(actor)
-    state_dir = _resolve_state_dir()
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
@@ -1232,14 +1246,14 @@ def release_task(
 
         _reap_stale(backend)
 
-        if backend.get_bundle(task_id) is not None:
+        if target_kind == "bundle":
             from anvil.bundles.manager import BundleError
 
             claim = backend.get_bundle_claim(task_id)
             if claim is None or claim.status.value != "active":
                 raise ToolError(f"No active bundle claim found for '{task_id}'.")
             try:
-                _bundle_manager(backend, state_dir, actor).release(
+                _bundle_manager(backend, state_dir, actor, cwd=cwd).release(
                     task_id, reason=reason
                 )
             except BundleError as exc:
@@ -1279,10 +1293,12 @@ def renew_claim(
     task_id: str,
     actor: str,
     extend_seconds: int = 900,
+    target_kind: Literal["task", "bundle"] = "task",
+    cwd: str | None = None,
 ) -> RenewResponse:
-    """Renew a task claim, or a coordinator bundle claim when task_id is a bundle ID."""
+    """Renew a task claim, or an explicit target_kind=bundle coordinator claim."""
     actor = _require_actor(actor)
-    state_dir = _resolve_state_dir()
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
@@ -1290,7 +1306,7 @@ def renew_claim(
 
         _reap_stale(backend)
 
-        if backend.get_bundle(task_id) is not None:
+        if target_kind == "bundle":
             from anvil.bundles.manager import BundleError
 
             claim = backend.get_bundle_claim(task_id)
@@ -1310,6 +1326,7 @@ def renew_claim(
                     lease_minutes=max(
                         1.0, (remaining_seconds + extend_seconds) / 60.0
                     ),
+                    cwd=cwd,
                 ).renew(task_id)
             except BundleError as exc:
                 raise ToolError(f"bundle_error: {exc}") from exc
@@ -3654,15 +3671,22 @@ def _bundle_checkpoint_record(checkpoint: Any) -> BundleCheckpointRecord:
     return BundleCheckpointRecord.model_validate(checkpoint.model_dump(mode="json"))
 
 
-def _bundle_manager(backend: Any, state_dir: Path, actor: str, lease_minutes: float = 240):
+def _bundle_manager(
+    backend: Any,
+    state_dir: Path,
+    actor: str,
+    lease_minutes: float = 240,
+    cwd: str | None = None,
+):
     from anvil.bundles.manager import BundleManager
+    from anvil.cli._helpers import _resolve_project_root
     from anvil.clock import SystemClock
 
     return BundleManager(
         backend,
         SystemClock(),
         actor=_require_actor(actor),
-        project_root=state_dir.parent,
+        project_root=_resolve_project_root(Path(cwd) if cwd else None),
         lease_minutes=lease_minutes,
     )
 
@@ -3794,7 +3818,11 @@ def claim_bundle(
                 )
         try:
             result = _bundle_manager(
-                backend, state_dir, actor, lease_minutes=lease_minutes
+                backend,
+                state_dir,
+                actor,
+                lease_minutes=lease_minutes,
+                cwd=cwd,
             ).claim(bundle_id)
         except (BundleError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
@@ -3821,7 +3849,9 @@ def generate_bundle_packet(
     backend = _open_backend(state_dir)
     try:
         try:
-            packet = _bundle_manager(backend, state_dir, actor).packet(bundle_id)
+            packet = _bundle_manager(backend, state_dir, actor, cwd=cwd).packet(
+                bundle_id
+            )
         except BundleError as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         return WorkPacketResponse(
@@ -3849,14 +3879,21 @@ def submit_bundle_progress(
     backend = _open_backend(state_dir)
     try:
         try:
-            manager = _bundle_manager(backend, state_dir, actor)
-            manager.note_progress(
-                bundle_id,
-                phase=phase,
-                detail=detail,
-                member_task_ids=member_task_ids,
-            )
-            readiness = manager.mark_implemented(bundle_id) if complete else None
+            manager = _bundle_manager(backend, state_dir, actor, cwd=cwd)
+            if complete:
+                # Completion is a retry-safe gate, not a progress mutation.
+                # Do not append progress before proving readiness: a failed
+                # completion must leave history unchanged, and an identical
+                # retry after success must remain idempotent like CLI complete.
+                readiness = manager.mark_implemented(bundle_id)
+            else:
+                manager.note_progress(
+                    bundle_id,
+                    phase=phase,
+                    detail=detail,
+                    member_task_ids=member_task_ids,
+                )
+                readiness = None
         except BundleError as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         if readiness is not None and not readiness.can_mark_implemented:

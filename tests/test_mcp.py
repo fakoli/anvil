@@ -608,6 +608,17 @@ class TestBundleTools:
                         },
                     )
                 )
+                completed_retry = _data(
+                    await client.call_tool(
+                        "submit_bundle_progress",
+                        {
+                            "bundle_id": "B001",
+                            "actor": "coordinator",
+                            "phase": "implemented",
+                            "complete": True,
+                        },
+                    )
+                )
                 reviews = []
                 for reviewer, angle in (
                     ("reviewer-a", "correctness"),
@@ -655,6 +666,7 @@ class TestBundleTools:
                         packet,
                         progress,
                         completed,
+                        completed_retry,
                         reviews,
                         finalized,
                         reconciled,
@@ -663,13 +675,23 @@ class TestBundleTools:
                 )
 
         created, listed, fetched, status, checkpoint, claimed, tail = _run(run())
-        packet, progress, completed, reviews, finalized, reconciled, superseded = tail
+        (
+            packet,
+            progress,
+            completed,
+            completed_retry,
+            reviews,
+            finalized,
+            reconciled,
+            superseded,
+        ) = tail
         assert created["bundle"]["id"] == "B001"
         assert [entry["id"] for entry in listed["bundles"]] == ["B001", "B002"]
         assert fetched["claim"] is None
         assert status["bundles"][0]["bundle_id"] == "B001"
         assert checkpoint["checkpoint"]["commit_sha"] == "abc123"
         assert completed["bundle"]["status"] == "implemented_unreviewed"
+        assert completed_retry["bundle"]["status"] == "implemented_unreviewed"
         assert reviews[-1]["gate"]["passed"] is True
         assert finalized["bundle"]["status"] == "reviewed_unintegrated"
         assert reconciled["bundle"]["status"] == "integrated"
@@ -685,9 +707,74 @@ class TestBundleTools:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._seed(tmp_path)
-        monkeypatch.chdir(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        cwd = str(tmp_path)
 
         async def run() -> tuple[Any, Any]:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                        "cwd": cwd,
+                    },
+                )
+                await client.call_tool(
+                    "claim_bundle",
+                    {"bundle_id": "B001", "actor": "coordinator", "cwd": cwd},
+                )
+                await client.call_tool(
+                    "submit_bundle_progress",
+                    {
+                        "bundle_id": "B001",
+                        "actor": "coordinator",
+                        "phase": "working",
+                        "cwd": cwd,
+                    },
+                )
+                renewed = _data(
+                    await client.call_tool(
+                        "renew_claim",
+                        {
+                            "task_id": "B001",
+                            "actor": "coordinator",
+                            "target_kind": "bundle",
+                            "cwd": cwd,
+                        },
+                    )
+                )
+                released = _data(
+                    await client.call_tool(
+                        "release_task",
+                        {
+                            "task_id": "B001",
+                            "actor": "coordinator",
+                            "reason": "handoff",
+                            "target_kind": "bundle",
+                            "cwd": cwd,
+                        },
+                    )
+                )
+                return renewed, released
+
+        renewed, released = _run(run())
+        assert renewed["renewed"] is True
+        assert released["released"] is True
+        assert released["claim_id"].startswith("BC")
+
+    def test_failed_bundle_completion_does_not_append_progress(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def setup_and_fail() -> None:
             async with Client(mcp) as client:
                 await client.call_tool(
                     "create_bundle",
@@ -703,36 +790,81 @@ class TestBundleTools:
                     "claim_bundle",
                     {"bundle_id": "B001", "actor": "coordinator"},
                 )
-                await client.call_tool(
-                    "submit_bundle_progress",
-                    {
-                        "bundle_id": "B001",
-                        "actor": "coordinator",
-                        "phase": "working",
-                    },
+                before = len(
+                    (tmp_path / ".anvil" / "events.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
                 )
-                renewed = _data(
+                with pytest.raises(ToolError, match="bundle_not_ready"):
                     await client.call_tool(
-                        "renew_claim",
-                        {"task_id": "B001", "actor": "coordinator"},
-                    )
-                )
-                released = _data(
-                    await client.call_tool(
-                        "release_task",
+                        "submit_bundle_progress",
                         {
-                            "task_id": "B001",
+                            "bundle_id": "B001",
                             "actor": "coordinator",
-                            "reason": "handoff",
+                            "phase": "implemented",
+                            "complete": True,
                         },
                     )
+                after = len(
+                    (tmp_path / ".anvil" / "events.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
                 )
-                return renewed, released
+                assert after == before
 
-        renewed, released = _run(run())
-        assert renewed["renewed"] is True
-        assert released["released"] is True
-        assert released["claim_id"].startswith("BC")
+        _run(setup_and_fail())
+
+    def test_lease_target_kind_disambiguates_colliding_ids(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path)
+        _add_task(tmp_path / ".anvil", task_id="B001")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[Any, Any]:
+            async with Client(mcp) as client:
+                task_claim = _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "B001", "claimed_by": "task-worker"},
+                    )
+                )
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                    },
+                )
+                bundle_claim = _data(
+                    await client.call_tool(
+                        "claim_bundle",
+                        {"bundle_id": "B001", "actor": "coordinator"},
+                    )
+                )
+                released_task = _data(
+                    await client.call_tool(
+                        "release_task",
+                        {"task_id": "B001", "actor": "task-worker"},
+                    )
+                )
+                still_active = _data(
+                    await client.call_tool("get_bundle", {"bundle_id": "B001"})
+                )
+                return task_claim, (
+                    bundle_claim,
+                    released_task,
+                    still_active,
+                )
+
+        task_claim, tail = _run(run())
+        bundle_claim, released_task, still_active = tail
+        assert released_task["claim_id"] == task_claim["id"]
+        assert released_task["claim_id"] != bundle_claim["claim"]["id"]
+        assert still_active["claim"]["status"] == "active"
 
     def test_registered_bundle_output_schema_names_core_fields(self) -> None:
         tools = _run(mcp.local_provider.list_tools())
@@ -743,6 +875,33 @@ class TestBundleTools:
         assert {"id", "status", "task_ids", "coordinator"} <= set(
             bundle_schema["properties"]
         )
+        agents_schema = bundle_schema["properties"]["delegated_agents"]["items"]
+        if "$ref" in agents_schema:
+            agents_schema = schema["$defs"][agents_schema["$ref"].split("/")[-1]]
+        assert {"id", "status", "task_ids", "observed_at"} <= set(
+            agents_schema["properties"]
+        )
+
+    def test_bundle_manager_uses_per_call_checkout_for_artifact_root(
+        self, tmp_path: Path
+    ) -> None:
+        """Explicit MCP cwd must win over a detached HOME-workspace state dir."""
+        from anvil.mcp_server import _bundle_manager, _open_backend
+
+        workspace = tmp_path / "home" / ".anvil" / "workspaces" / "project"
+        workspace.mkdir(parents=True)
+        state_dir = _init_state_dir(workspace)
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        backend = _open_backend(state_dir)
+        try:
+            manager = _bundle_manager(
+                backend, state_dir, "coordinator", cwd=str(checkout)
+            )
+            assert manager._project_root == checkout.resolve()
+            assert manager._project_root != state_dir.parent
+        finally:
+            backend.close()
 
     @pytest.mark.parametrize(
         ("tool_name", "arguments"),

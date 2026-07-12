@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -276,3 +277,56 @@ def test_bundle_review_finalize_checkpoint_and_reconcile_json(tmp_path) -> None:
     )
     assert reconciled.exit_code == 0, reconciled.output
     assert json.loads(reconciled.output)["data"]["bundle"]["status"] == "integrated"
+
+
+def test_bundle_manager_resolves_artifacts_against_explicit_checkout(tmp_path) -> None:
+    """HOME-workspace state must never become the artifact assertion root."""
+    from anvil.cli.bundle import _manager
+
+    state_dir = tmp_path / "home" / ".anvil" / "workspaces" / "project" / ".anvil"
+    state_dir.mkdir(parents=True)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    backend = _backend(state_dir)
+    try:
+        manager = _manager(backend, state_dir, "coordinator", cwd=Path(checkout))
+        assert manager._project_root == checkout.resolve()
+        assert manager._project_root != state_dir.parent
+    finally:
+        backend.close()
+
+
+def test_bundle_lease_mutations_run_stale_reaper(tmp_path, monkeypatch) -> None:
+    """Bundle claim/renew/release have the same stale-state preflight as tasks."""
+    import anvil.cli.bundle as bundle_cli
+
+    _seed_cli_project(tmp_path)
+    calls: list[object] = []
+    monkeypatch.setattr(bundle_cli, "_reap_stale_claims", calls.append)
+
+    created = _invoke(
+        tmp_path,
+        [
+            "bundle",
+            "create",
+            "B001",
+            "release:T001",
+            "--prd",
+            "release",
+            "--coordinator",
+            "coordinator",
+            "--actor",
+            "planner",
+            "--json",
+        ],
+    )
+    assert created.exit_code == 0, created.output
+
+    for action in ("claim", "renew", "release"):
+        result = _invoke(
+            tmp_path,
+            ["bundle", action, "B001", "--actor", "coordinator", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+
+    assert len(calls) == 3

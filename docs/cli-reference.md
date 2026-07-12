@@ -1158,7 +1158,7 @@ GitHub-specific alias.
 **Synopsis:** Print the paste-ready MCP server config block for a target MCP
 client, with the `anvil` server pointed at this checkout's `bin/anvil-mcp` by
 **absolute path** (not `${CLAUDE_PLUGIN_ROOT}`), so any MCP-capable harness gets
-the full 24-tool surface. Read-only and project-free (mirrors `anvil describe`):
+the full 35-tool surface. Read-only and project-free (mirrors `anvil describe`):
 it never opens a backend, runs from any directory, and only *prints* config — it
 never mutates the client's own settings file. In text mode the config goes to
 stdout (paste-clean) and a one-line `# paste into <file>` hint goes to stderr.
