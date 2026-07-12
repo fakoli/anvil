@@ -134,7 +134,8 @@ class BundleManager:
             raise BundleError(
                 f"Bundle '{bundle_id}' status is '{bundle.status.value}', expected planned."
             )
-        if self._backend.get_bundle_claim(bundle_id) is not None:
+        existing_claim = self._backend.get_bundle_claim(bundle_id)
+        if existing_claim is not None and existing_claim.status.value == "active":
             raise BundleError(f"Bundle '{bundle_id}' already has a coordinator claim.")
         tasks = []
         for task_id in bundle.task_ids:

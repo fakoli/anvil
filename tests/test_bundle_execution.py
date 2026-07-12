@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -446,6 +447,23 @@ def test_public_lease_renew_and_stale_reap_are_atomic(tmp_path: Path) -> None:
     try:
         _seed(backend)
         result = _manager(backend, tmp_path).claim("B001")
+        with pytest.raises(EventRejected, match="detected_at must match event time"):
+            backend.append(
+                EventDraft(
+                    timestamp=_NOW,
+                    actor="system",
+                    action="bundle.claim_stale",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_claim_id": result.claim.id,
+                        "bundle_id": "B001",
+                        "detected_at": (_NOW + timedelta(days=1)).isoformat(),
+                        "actor": "system",
+                    },
+                )
+            )
+        assert backend.get_bundle_claim("B001").status.value == "active"  # type: ignore[union-attr]
         renewed_at = _NOW + timedelta(minutes=30)
         renewed = BundleManager(
             backend,
@@ -478,6 +496,60 @@ def test_public_lease_renew_and_stale_reap_are_atomic(tmp_path: Path) -> None:
             backend.get_task(task_id).status.value == "ready"  # type: ignore[union-attr]
             for task_id in ("release:T001", "release:T002")
         )
+    finally:
+        backend.close()
+
+
+def test_replanned_bundle_can_acquire_a_new_claim_generation(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        manager = _manager(backend, tmp_path)
+        first = manager.claim("B001")
+        manager.release("B001", reason="replan")
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        backend.append(
+            EventDraft(
+                timestamp=_NOW + timedelta(minutes=1),
+                actor="coordinator",
+                action="bundle.status_changed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "from": "replan_required",
+                    "to": "planned",
+                    "changed_at": (_NOW + timedelta(minutes=1)).isoformat(),
+                },
+            )
+        )
+        second = BundleManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=2)),
+            actor="coordinator",
+            project_root=tmp_path,
+        ).claim("B001")
+        assert second.claim.id != first.claim.id
+        assert second.claim.status.value == "active"
+        assert len(backend.list_bundle_claims()) == 2
+    finally:
+        backend.close()
+
+
+def test_expired_public_claim_cannot_be_renewed(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        _manager(backend, tmp_path).claim("B001")
+        with pytest.raises(BundleError, match="lease has expired"):
+            BundleManager(
+                backend,
+                FrozenClock(_NOW + timedelta(hours=5)),
+                actor="coordinator",
+                project_root=tmp_path,
+            ).renew("B001")
     finally:
         backend.close()
 
@@ -675,6 +747,43 @@ def test_replay_fences_losing_bundle_claim_status_descendant(tmp_path: Path) -> 
         replay.close()
 
 
+def test_replay_ignores_attacker_bundle_release_descendant(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source)
+        winner = _manager(source, source_root).claim("B001")
+        _append_raw(
+            source_root,
+            Event(
+                id=_next_event_id(source_root),
+                timestamp=_NOW + timedelta(minutes=1),
+                actor="attacker",
+                action="bundle.claim_released",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_claim_id": winner.claim.id,
+                    "bundle_id": "B001",
+                    "released_by": "attacker",
+                    "release_reason": "spoof",
+                },
+            ),
+        )
+    finally:
+        source.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        assert replay.get_bundle_claim("B001").status.value == "active"  # type: ignore[union-attr]
+        assert replay.get_bundle("B001").status is BundleStatus.active  # type: ignore[union-attr]
+    finally:
+        replay.close()
+
+
 @pytest.mark.parametrize("bundle_first", [False, True])
 def test_replay_aggregate_conflict_is_first_event_wins(
     tmp_path: Path, bundle_first: bool
@@ -708,11 +817,19 @@ def test_replay_aggregate_conflict_is_first_event_wins(
               ("bundle.claimed", "bundle", "B001", "coordinator", bundle_payload)]
     )
     for offset, (action, kind, target, actor, payload) in enumerate(actions, start=1):
+        event_time = _NOW + timedelta(seconds=offset)
+        if action == "bundle.claimed":
+            payload = {
+                **payload,
+                "created_at": event_time.isoformat(),
+                "last_heartbeat_at": event_time.isoformat(),
+                "lease_expires_at": (event_time + timedelta(hours=4)).isoformat(),
+            }
         _append_raw(
             source_root,
             Event(
                 id=_next_event_id(source_root),
-                timestamp=_NOW + timedelta(seconds=offset),
+                timestamp=event_time,
                 actor=actor,
                 action=action,
                 target_kind=kind,
@@ -738,6 +855,9 @@ def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
 ) -> None:
     state_dir = tmp_path / ".anvil"
     state_dir.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True
+    )
     backend = _backend(state_dir)
     try:
         _seed(backend)

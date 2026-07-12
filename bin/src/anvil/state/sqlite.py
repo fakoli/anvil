@@ -1195,7 +1195,9 @@ class SqliteBackend:
         """Return the public coordinator claim for a bundle, if present."""
         conn = self._require_conn()
         row = conn.execute(
-            "SELECT * FROM bundle_claims WHERE bundle_id = ?", (bundle_id,)
+            "SELECT * FROM bundle_claims WHERE bundle_id = ? "
+            "ORDER BY (status = 'active') DESC, created_at DESC, id DESC LIMIT 1",
+            (bundle_id,),
         ).fetchone()
         return self._row_to_bundle_claim(row) if row is not None else None
 
@@ -2217,7 +2219,7 @@ class SqliteBackend:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS bundle_claims (
                 id TEXT PRIMARY KEY,
-                bundle_id TEXT NOT NULL UNIQUE
+                bundle_id TEXT NOT NULL
                     REFERENCES execution_bundles(id) ON DELETE RESTRICT,
                 claimed_by TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
@@ -2236,6 +2238,10 @@ class SqliteBackend:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_bundle_claims_status "
             "ON bundle_claims (status)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_claims_active_bundle "
+            "ON bundle_claims (bundle_id) WHERE status = 'active'"
         )
         try:
             conn.execute(
@@ -4177,7 +4183,7 @@ class SqliteBackend:
                     f"bundle.claimed: bundle status is '{row[2]}', expected 'planned'."
                 )
             if conn.execute(
-                "SELECT 1 FROM bundle_claims WHERE bundle_id = ?",
+                "SELECT 1 FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
                 (payload.bundle_id,),
             ).fetchone():
                 raise EventRejected("bundle.claimed: bundle already has a claim.")
@@ -4280,6 +4286,14 @@ class SqliteBackend:
     ) -> None:
         if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
             return
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.actor != payload.claimed_by
+            or payload.created_at != event_time
+            or payload.last_heartbeat_at != event_time
+            or payload.lease_expires_at <= event_time
+        ):
+            return
         bundle_row = conn.execute(
             "SELECT status, creation_event_id FROM execution_bundles WHERE id = ?",
             (payload.bundle_id,),
@@ -4289,7 +4303,7 @@ class SqliteBackend:
             or bundle_row[0] != "planned"
             or bundle_row[1] != payload.creation_event_id
             or conn.execute(
-                "SELECT 1 FROM bundle_claims WHERE bundle_id = ?",
+                "SELECT 1 FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
                 (payload.bundle_id,),
             ).fetchone()
         ):
@@ -4505,8 +4519,13 @@ class SqliteBackend:
             raise EventRejected("bundle.claim_renewed: active claim not found.")
         if row[0] != payload.renewed_by:
             raise EventRejected("bundle.claim_renewed: only the coordinator may renew.")
-        if payload.last_heartbeat_at != event.timestamp.astimezone(datetime.UTC):
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if payload.last_heartbeat_at != event_time:
             raise EventRejected("bundle.claim_renewed: heartbeat must match event time.")
+        if datetime.datetime.fromisoformat(row[2]) < event_time:
+            raise EventRejected("bundle.claim_renewed: claim lease has expired.")
+        if datetime.datetime.fromisoformat(row[3]) >= event_time:
+            raise EventRejected("bundle.claim_renewed: heartbeat must move forward.")
         if payload.lease_expires_at <= payload.last_heartbeat_at:
             raise EventRejected("bundle.claim_renewed: expiry must follow heartbeat.")
 
@@ -4518,7 +4537,22 @@ class SqliteBackend:
     ) -> None:
         if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
             return
-        conn.execute(
+        row = conn.execute(
+            "SELECT claimed_by, lease_expires_at, last_heartbeat_at FROM bundle_claims "
+            "WHERE id = ? AND bundle_id = ? AND status = 'active'",
+            (payload.bundle_claim_id, payload.bundle_id),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            row is None
+            or row[0] != payload.renewed_by
+            or payload.last_heartbeat_at != event_time
+            or datetime.datetime.fromisoformat(row[1]) < event_time
+            or datetime.datetime.fromisoformat(row[2]) >= event_time
+            or payload.lease_expires_at <= event_time
+        ):
+            return
+        cursor = conn.execute(
             "UPDATE bundle_claims SET lease_expires_at = ?, last_heartbeat_at = ? "
             "WHERE id = ? AND bundle_id = ? AND status = 'active'",
             (
@@ -4528,6 +4562,8 @@ class SqliteBackend:
                 payload.bundle_id,
             ),
         )
+        if cursor.rowcount != 1:
+            return
         conn.execute(
             "UPDATE claims SET lease_expires_at = ?, last_heartbeat_at = ? "
             "WHERE bundle_claim_id = ? AND status = 'active'",
@@ -4562,6 +4598,19 @@ class SqliteBackend:
         payload: BundleClaimReleasedPayload,
         event: Event,
     ) -> None:
+        row = conn.execute(
+            "SELECT claimed_by FROM bundle_claims WHERE id = ? AND bundle_id = ? "
+            "AND status = 'active'",
+            (payload.bundle_claim_id, payload.bundle_id),
+        ).fetchone()
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.released_by
+            or row is None
+            or row[0] != payload.released_by
+        ):
+            return
         SqliteBackend._write_bundle_claim_terminal(
             conn,
             bundle_claim_id=payload.bundle_claim_id,
@@ -4581,6 +4630,8 @@ class SqliteBackend:
             raise EventRejected("bundle.claim_stale: event target mismatch.")
         if event.actor != payload.actor:
             raise EventRejected("bundle.claim_stale: event actor mismatch.")
+        if payload.detected_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.claim_stale: detected_at must match event time.")
         row = self._bundle_claim_lifecycle_row(
             conn, payload.bundle_claim_id, payload.bundle_id
         )
@@ -4595,12 +4646,27 @@ class SqliteBackend:
         payload: BundleClaimStalePayload,
         event: Event,
     ) -> None:
+        row = conn.execute(
+            "SELECT lease_expires_at FROM bundle_claims WHERE id = ? "
+            "AND bundle_id = ? AND status = 'active'",
+            (payload.bundle_claim_id, payload.bundle_id),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.actor
+            or payload.detected_at != event_time
+            or row is None
+            or datetime.datetime.fromisoformat(row[0]) >= event_time
+        ):
+            return
         SqliteBackend._write_bundle_claim_terminal(
             conn,
             bundle_claim_id=payload.bundle_claim_id,
             bundle_id=payload.bundle_id,
             terminal_status="stale",
-            timestamp=event.timestamp.astimezone(datetime.UTC).isoformat(),
+            timestamp=event_time.isoformat(),
             reason="lease_expired",
         )
 

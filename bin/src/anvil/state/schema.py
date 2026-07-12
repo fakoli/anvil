@@ -225,7 +225,7 @@ CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task
 
 CREATE TABLE IF NOT EXISTS bundle_claims (
     id                 TEXT PRIMARY KEY,
-    bundle_id          TEXT NOT NULL UNIQUE REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    bundle_id          TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
     claimed_by         TEXT NOT NULL,
     status             TEXT NOT NULL DEFAULT 'active',
     branch             TEXT,
@@ -241,6 +241,8 @@ CREATE TABLE IF NOT EXISTS bundle_claims (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bundle_claims_status ON bundle_claims (status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_claims_active_bundle
+    ON bundle_claims (bundle_id) WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS claims (
     id                 TEXT PRIMARY KEY,

@@ -426,6 +426,13 @@ class BundleClaimedPayload(BaseModel):
     lease_expires_at: datetime.datetime
     last_heartbeat_at: datetime.datetime
 
+    @field_validator("id", "bundle_id", "creation_event_id", "claimed_by")
+    @classmethod
+    def _validate_nonblank_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle claim identity fields must not be blank")
+        return value
+
     @field_validator("created_at", "lease_expires_at", "last_heartbeat_at")
     @classmethod
     def _validate_timestamps(cls, value: datetime.datetime) -> datetime.datetime:
@@ -467,6 +474,15 @@ class BundleProgressNotedPayload(BaseModel):
     member_task_ids: list[str] = Field(default_factory=list)
     noted_at: datetime.datetime
 
+    @field_validator(
+        "bundle_id", "creation_event_id", "bundle_claim_id", "actor", "phase"
+    )
+    @classmethod
+    def _validate_nonblank_progress(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle progress identity and phase must not be blank")
+        return value
+
     @field_validator("noted_at")
     @classmethod
     def _validate_noted_at(cls, value: datetime.datetime) -> datetime.datetime:
@@ -491,6 +507,20 @@ class BundleClaimRenewedPayload(BaseModel):
     lease_expires_at: datetime.datetime
     last_heartbeat_at: datetime.datetime
 
+    @field_validator("bundle_claim_id", "bundle_id", "renewed_by")
+    @classmethod
+    def _validate_nonblank_renewal(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle renewal identity must not be blank")
+        return value
+
+    @field_validator("lease_expires_at", "last_heartbeat_at")
+    @classmethod
+    def _validate_renewed_times(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle renewal timestamps must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
 
 class BundleClaimReleasedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -500,6 +530,13 @@ class BundleClaimReleasedPayload(BaseModel):
     released_by: str = Field(min_length=1)
     release_reason: str | None = None
 
+    @field_validator("bundle_claim_id", "bundle_id", "released_by")
+    @classmethod
+    def _validate_nonblank_release(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle release identity must not be blank")
+        return value
+
 
 class BundleClaimStalePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -508,6 +545,20 @@ class BundleClaimStalePayload(BaseModel):
     bundle_id: str = Field(min_length=1)
     detected_at: datetime.datetime
     actor: str = Field(min_length=1)
+
+    @field_validator("bundle_claim_id", "bundle_id", "actor")
+    @classmethod
+    def _validate_nonblank_stale(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle stale identity must not be blank")
+        return value
+
+    @field_validator("detected_at")
+    @classmethod
+    def _validate_detected_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("detected_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
 
 
 class ClaimCreatedPayload(BaseModel):

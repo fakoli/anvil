@@ -170,30 +170,26 @@ def claim(
                     fail("claim", str(exc), code="bundle_claim_error")
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
+            from anvil.naming import safe_path_component
+
             branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
-            if branch is not None:
-                branch_result = use_named_branch(
-                    branch, cwd=resolved_cwd, checkout=not worktree
+            isolation = cfg.worktree_isolation if cfg is not None else "advisory"
+            if isolation == "require" and not shared_tree:
+                worktree = True
+            recorded_branch = branch or (
+                f"{branch_prefix}/{safe_path_component(task_id).lower()}-bundle"[:80]
+            )
+            worktree_path = (
+                str(
+                    resolved_cwd.parent
+                    / f"wt-{safe_path_component(task_id).lower()}"
                 )
-                recorded_branch = branch_result.branch or branch
-            else:
-                branch_result = create_branch_for_task(
-                    task_id,
-                    f"bundle {task_id}",
-                    cwd=resolved_cwd,
-                    branch_prefix=branch_prefix,
-                    checkout=not worktree,
-                )
-                recorded_branch = branch_result.branch
-            worktree_path: str | None = None
-            if worktree and branch_result.created and branch_result.branch:
-                wt_result = create_worktree_for_task(
-                    task_id, branch_result.branch, cwd=resolved_cwd
-                )
-                if wt_result.created:
-                    worktree_path = wt_result.path
-                else:
-                    warnings.append(f"worktree not created — {wt_result.reason}")
+                if worktree
+                else None
+            )
+            # Reserve state before external Git mutation. This closes the
+            # preflight->append race: once this succeeds, competing claims see
+            # the internal member authorizations and lose cleanly.
             try:
                 bundle_result = bundle_manager.claim(
                     task_id,
@@ -205,6 +201,39 @@ def claim(
                     fail("claim", str(exc), code="bundle_claim_error")
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
+            branch_result = use_named_branch(
+                recorded_branch, cwd=resolved_cwd, checkout=not worktree
+            )
+            if not branch_result.created or branch_result.branch is None:
+                bundle_manager.release(task_id, reason="git branch creation failed")
+                message = f"git branch not created — {branch_result.reason}"
+                if json_output:
+                    fail("claim", message, code="git_branch_failed")
+                typer.echo(f"Error: {message}", err=True)
+                raise typer.Exit(code=1)
+            if worktree:
+                wt_result = create_worktree_for_task(
+                    task_id, branch_result.branch, cwd=resolved_cwd
+                )
+                if not wt_result.created:
+                    bundle_manager.release(task_id, reason="git worktree creation failed")
+                    # A freshly-created, unchecked branch is safe to remove as
+                    # compensation; an existing branch is never deleted.
+                    if branch_result.reason is None:
+                        import subprocess
+
+                        subprocess.run(
+                            ["git", "branch", "-D", branch_result.branch],
+                            cwd=str(resolved_cwd),
+                            capture_output=True,
+                            timeout=10,
+                            check=False,
+                        )
+                    message = f"worktree not created — {wt_result.reason}"
+                    if json_output:
+                        fail("claim", message, code="git_worktree_failed")
+                    typer.echo(f"Error: {message}", err=True)
+                    raise typer.Exit(code=1)
             if json_output:
                 emit_success(
                     "claim",
