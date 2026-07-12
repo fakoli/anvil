@@ -5246,7 +5246,8 @@ class SqliteBackend:
         # standalone or internal bundle authorization already owns this task;
         # losing claim descendants fail closed because their claim row is absent.
         if conn.execute(
-            "SELECT 1 FROM claims WHERE task_id = ? AND status = 'active' LIMIT 1",
+            "SELECT 1 FROM claims WHERE task_id = ? AND status = 'active' "
+            "AND bundle_claim_id IS NOT NULL LIMIT 1",
             (task_id,),
         ).fetchone():
             return
