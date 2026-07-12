@@ -554,6 +554,31 @@ def test_expired_public_claim_cannot_be_renewed(tmp_path: Path) -> None:
         backend.close()
 
 
+def test_public_renewal_cannot_shorten_coordinator_or_child_leases(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        claimed = _manager(backend, tmp_path).claim("B001")
+        original_expiry = claimed.claim.lease_expires_at
+        with pytest.raises(BundleError, match="must extend the lease"):
+            BundleManager(
+                backend,
+                FrozenClock(_NOW + timedelta(minutes=1)),
+                actor="coordinator",
+                project_root=tmp_path,
+                lease_minutes=1,
+            ).renew("B001")
+        assert backend.get_bundle_claim("B001").lease_expires_at == original_expiry  # type: ignore[union-attr]
+        assert all(
+            backend.get_claim(claim_id).lease_expires_at == original_expiry  # type: ignore[union-attr]
+            for claim_id in claimed.claim.member_claim_ids.values()
+        )
+    finally:
+        backend.close()
+
+
 def test_same_coordinator_cannot_overlap_bundle_child_authorization(
     tmp_path: Path,
 ) -> None:

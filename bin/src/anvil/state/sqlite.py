@@ -4526,6 +4526,8 @@ class SqliteBackend:
             raise EventRejected("bundle.claim_renewed: claim lease has expired.")
         if datetime.datetime.fromisoformat(row[3]) >= event_time:
             raise EventRejected("bundle.claim_renewed: heartbeat must move forward.")
+        if payload.lease_expires_at <= datetime.datetime.fromisoformat(row[2]):
+            raise EventRejected("bundle.claim_renewed: new expiry must extend the lease.")
         if payload.lease_expires_at <= payload.last_heartbeat_at:
             raise EventRejected("bundle.claim_renewed: expiry must follow heartbeat.")
 
@@ -4550,6 +4552,7 @@ class SqliteBackend:
             or datetime.datetime.fromisoformat(row[1]) < event_time
             or datetime.datetime.fromisoformat(row[2]) >= event_time
             or payload.lease_expires_at <= event_time
+            or payload.lease_expires_at <= datetime.datetime.fromisoformat(row[1])
         ):
             return
         cursor = conn.execute(
