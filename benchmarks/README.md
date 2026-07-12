@@ -145,18 +145,28 @@ Run it from the repository root:
 uv run --project bin python benchmarks/bundle_workflow_fixture.py
 ```
 
-The committed `fixtures/bundle_workflow.json` contains paired synthetic observations for
-identical trial seeds. It records time-to-accepted-commit, coordinator and per-delegate
-tokens, accepted task count, review findings, re-reviews, wait time, and human
-interventions. `bundle_workflow_fixture.py` derives total tokens, accepted tasks per 1,000
-tokens, per-policy means, and signed `coordinator_first - task_per_agent` deltas.
+The committed `fixtures/bundle_workflow.json` contains paired synthetic observations. The
+shared workload pins a task-graph hash, initial commit, ordered target task IDs, and
+acceptance commands. Each pair must have the same trial ID, integer seed, and opaque
+execution-profile ID; each arm carries a run ID and provenance reference. A completed arm
+must name the full ordered accepted-task target, a valid commit SHA, and a commit timestamp
+after its start.
+
+The fixture records coordinator and per-delegate tokens, review findings, re-reviews, wait
+time, and human interventions as exact nonnegative integers. The comparator rejects
+malformed containers, coerced strings/floats/bools, negative values, unknown tasks,
+duplicate or unpaired trials, identity mismatches, and unproven acceptance. It derives
+time-to-accepted-commit, total tokens, accepted tasks per 1,000 tokens, per-policy means,
+and signed `coordinator_first - task_per_agent` deltas. If either policy has an incomplete
+trial, time and efficiency comparisons are suppressed instead of treating missing
+acceptance as a fast result.
 
 This fixture is a contract test for the measurement pipeline, not a live model result. It
 uses no model or vendor names, emits no weighted score or winner, and must not be cited as
 evidence that one model family is intrinsically better. For an empirical run, preserve
 the same task graph, initial commit, acceptance commands, trial seeds, and execution
-profile across both policies; replace only the observation values and retain the raw
-session logs as provenance.
+profile across both policies; replace only the observation values, use
+`provenance.kind="raw_session_log"`, and retain the referenced logs.
 
 ## Roadmap — `--live`
 

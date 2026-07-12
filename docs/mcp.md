@@ -395,11 +395,11 @@ to dispatch in parallel this wave.
 
 ### Mutating tools
 
-Every mutating tool runs `detect_and_release_stale` at the top of its call. This is
-automatic — agents do not need to trigger reaping manually. See
-[Stale-claim reaping](#stale-claim-reaping) for details. The one exception is
-`edit_dependencies` below, which only rewrites dependency lists and does not touch claim
-state, so it skips reaping.
+Lease-sensitive task and bundle claim, renew, and release tools run
+`detect_and_release_stale` at the top of their call. This is automatic — agents do not
+need to trigger reaping manually. Other mutators validate their own lifecycle preconditions
+but do not promise a global stale-claim sweep. See
+[Stale-claim reaping](#stale-claim-reaping) for details.
 
 ---
 

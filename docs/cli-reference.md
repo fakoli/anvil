@@ -864,9 +864,12 @@ isolation otherwise directs callers to the top-level Git-aware bundle claim path
 
 ### `anvil bundle release` { #bundle-release }
 
-`anvil bundle release B001 [--reason TEXT]` releases the coordinator claim, returns its
-members to ready state after stale-claim reaping, and marks the bundle
-`replan_required`. Release is not pause/resume.
+While a bundle is `active`, `anvil bundle release B001 [--reason TEXT]` releases the
+coordinator claim and marks the bundle `replan_required`. Only members with active
+authorizations return to `ready`; already-submitted members remain `needs_review`.
+Releasing after completion does not reset the review-state bundle or its submitted
+members, and the public surface cannot reacquire that coordinator claim. Release is not
+pause/resume; see the recovery guide below.
 
 ### `anvil bundle packet` { #bundle-packet }
 

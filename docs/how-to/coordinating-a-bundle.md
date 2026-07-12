@@ -90,11 +90,13 @@ deadline.
 | Situation | Safe response |
 |---|---|
 | A delegate stalls while the coordinator lease is active | Take the member back, record progress, renew the bundle lease, and continue. |
-| The coordinator stops intentionally | `anvil bundle release B001 --reason "handoff" --actor lead`; members return to ready and the bundle becomes `replan_required`. Release is not pause/resume. |
-| The coordinator lease expires | The next lease-sensitive mutation reaps the coordinator and member claims as stale, returns members to ready, and marks the bundle `replan_required`. A stale lease cannot be renewed. |
+| The coordinator stops while the bundle is `active` | `anvil bundle release B001 --reason "handoff" --actor lead` marks the bundle `replan_required`. Members that still have active authorizations return to `ready`; members already submitted remain `needs_review`. Release is not pause/resume. |
+| The coordinator lease expires while the bundle is `active` | The next lease-sensitive mutation reaps active coordinator/member claims, resets only actively authorized members, and marks the bundle `replan_required`. A stale lease cannot be renewed. |
+| The coordinator claim is released or expires after `bundle complete` | Do not expect a reset: the bundle and submitted member statuses remain in review state, but finalization requires an active coordinator claim. The public surface cannot reclaim that bundle; create an eligible replacement and supersede the stranded source. |
 | `bundle complete` reports `bundle_not_ready` | Fix the per-member blockers. The failed completion is retry-safe and appends no progress event. |
-| Review gate is incomplete | Add distinct reviewers or missing angles in the current round. |
-| A review requests changes within the re-review budget | Fix and resubmit affected member evidence, then record the next review round. |
+| Review gate is incomplete and the review cap has room | Add distinct reviewers using the still-missing angles. Assign required angles before dispatching reviewers; once the cap is consumed, a missing-angle round has no public repair. |
+| A reviewer corrects analysis without implementation changes | A later review round may record the corrected verdict when the gate permits it. Review rounds do not mint fresh member evidence. |
+| A review requires implementation or evidence changes | Do not edit in place: member submissions already released their authorizations, and no public reauthorization/resubmit path exists. Revise the plan, create an eligible replacement, and supersede the source. |
 | Re-review budget is exhausted | Revise the task plan, create an eligible replacement bundle, then supersede the old bundle. |
 | Delivery metadata arrives late or is retried | Re-run `bundle reconcile` with the same commit or PR reference; reconciliation is idempotent. |
 
@@ -112,6 +114,11 @@ creation rules also prevent a new nonterminal bundle from reusing tasks still ow
 old nonterminal bundle. Supersession is therefore a history-preserving redirect to a
 revised/disjoint plan, not an in-place regrouping mechanism. Never edit SQLite or rewrite
 `events.jsonl` to work around this constraint.
+
+These limits are intentionally explicit: the current public contract has no same-bundle
+member reauthorization, no in-place regrouping, and no way to reacquire a coordinator
+claim after completion. Treat any recovery that needs new code or new evidence as a new
+bundle generation.
 
 ## Checkpoints and reconciliation
 
@@ -152,8 +159,10 @@ bundle.
 ## Model-neutral comparison protocol
 
 The committed fixture compares `task_per_agent` and `coordinator_first` as execution
-policies, not models or vendors. Each paired trial uses the same synthetic workload and
-seed, then records:
+policies, not models or vendors. Its shared workload pins the task-graph hash, initial
+commit, ordered target tasks, and acceptance commands. Each paired trial must use the same
+integer seed and opaque execution-profile ID, and each arm retains a provenance reference.
+It then records:
 
 - time to an accepted commit;
 - coordinator tokens and delegate tokens;
@@ -169,5 +178,8 @@ uv run --project bin python benchmarks/bundle_workflow_fixture.py
 ```
 
 The output contains descriptive summaries and signed deltas only—no weighted score and no
-declared winner. The fixture validates metric plumbing; it is explicitly synthetic and is
-not an empirical performance claim. See [the benchmark README](https://github.com/fakoli/anvil/blob/main/benchmarks/README.md#coordinator-policy-comparison-fixture) for the capture rules.
+declared winner. Values are fail-closed: impossible metrics, mismatched pairs, and an
+accepted result without the full ordered target plus a commit SHA are rejected. If either
+policy has an incomplete trial, time and token-efficiency deltas are suppressed. The
+fixture validates metric plumbing; it is explicitly synthetic and is not an empirical
+performance claim. See [the benchmark README](https://github.com/fakoli/anvil/blob/main/benchmarks/README.md#coordinator-policy-comparison-fixture) for the capture rules.
