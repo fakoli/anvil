@@ -912,7 +912,7 @@ reconciles checkpoint and integration state.
 
 ### `anvil bundle supersede` { #bundle-supersede }
 
-`anvil bundle supersede B001 B002` marks `B001` superseded by replacement `B002` while
+`anvil bundle supersede B001 --replacement B002` marks `B001` superseded by replacement `B002` while
 retaining the original audit history.
 
 The normal lifecycle is:

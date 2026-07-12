@@ -564,8 +564,9 @@ be active at the point of the call.
 | `target_kind`    | `"task" \| "bundle"` | no | `"task"` |
 | `cwd`            | `string \| null` | no | `Path.cwd()` |
 
-`extend_seconds` is converted to minutes (floor, minimum 1). The default extends by 15
-minutes from the time of the call.
+`extend_seconds` is converted to minutes (floor, minimum 1). For task claims, the default
+extends by 15 minutes from the time of the call. For bundle claims it adds that interval to
+the later of the current lease expiry or the current time.
 For a coordinator bundle lease, pass the bundle ID as `task_id` and set
 `target_kind="bundle"`.
 

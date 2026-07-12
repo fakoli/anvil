@@ -68,6 +68,20 @@ anvil apply T001           # apply the review verdict
 | Dependency graph | `get_dependency_graph` | `anvil graph` |
 | Edit dependencies | `edit_dependencies` | `anvil deps --add/--remove` |
 | Describe surface | `describe_surface` | `anvil describe` |
+| Create bundle | `create_bundle` | `anvil bundle create` |
+| List bundles | `list_bundles` | `anvil bundle list` |
+| Show bundle | `get_bundle` | `anvil bundle show <id>` |
+| Bundle rollup/status | `get_project_status` | `anvil bundle status [id]` |
+| Claim bundle | `claim_bundle` | `anvil bundle claim <id>` |
+| Renew bundle lease | `renew_claim` with `target_kind="bundle"` | `anvil bundle renew <id>` |
+| Release bundle lease | `release_task` with `target_kind="bundle"` | `anvil bundle release <id>` |
+| Bundle work packet | `generate_bundle_packet` | `anvil bundle packet <id>` |
+| Bundle progress/completion | `submit_bundle_progress` | `anvil bundle progress` / `anvil bundle complete` |
+| Record bundle review | `record_bundle_review` | `anvil bundle review <id>` |
+| Finalize bundle review | `finalize_bundle_review` | `anvil bundle finalize-review <id>` |
+| Checkpoint bundle delivery | `checkpoint_bundle` | `anvil bundle checkpoint <id>` |
+| Reconcile bundle delivery | `reconcile_bundle` | `anvil bundle reconcile <id>` |
+| Supersede bundle | `supersede_bundle` | `anvil bundle supersede <id> --replacement <id>` |
 
 (Exact tool names mirror `bin/src/anvil/mcp_server.py`; CLI commands mirror
 `bin/src/anvil/cli/__init__.py`. Run `anvil describe --json` for the live list.)

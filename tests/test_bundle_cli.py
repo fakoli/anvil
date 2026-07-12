@@ -154,6 +154,47 @@ def test_bundle_delivery_errors_match_stable_json_code(tmp_path) -> None:
     assert json.loads(result.output)["error"]["code"] == "bundle_error"
 
 
+def test_bundle_supersede_uses_required_replacement_option(tmp_path) -> None:
+    _seed_cli_project(tmp_path)
+    for bundle_id, task_id in (
+        ("B001", "release:T001"),
+        ("B002", "release:T002"),
+    ):
+        created = _invoke(
+            tmp_path,
+            [
+                "bundle",
+                "create",
+                bundle_id,
+                task_id,
+                "--prd",
+                "release",
+                "--coordinator",
+                "coordinator",
+                "--actor",
+                "planner",
+                "--json",
+            ],
+        )
+        assert created.exit_code == 0, created.output
+
+    result = _invoke(
+        tmp_path,
+        [
+            "bundle",
+            "supersede",
+            "B001",
+            "--replacement",
+            "B002",
+            "--actor",
+            "coordinator",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["data"]["bundle"]["superseded_by"] == "B002"
+
+
 def test_bundle_review_finalize_checkpoint_and_reconcile_json(tmp_path) -> None:
     _seed_cli_project(tmp_path)
     created = _invoke(
