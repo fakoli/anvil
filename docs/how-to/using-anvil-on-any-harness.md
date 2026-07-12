@@ -120,6 +120,18 @@ CLI-command table — codex gets it spliced in automatically; for any MCP-only
 harness, point the agent at the repo's `AGENTS.md` (or paste it where the harness
 reads instructions) to give it the same map.
 
+For a milestone that should land as one reviewed delivery, create and claim an execution
+bundle instead of handing each task off independently:
+
+```bash
+anvil bundle create B001 T001 T002 --prd release --coordinator lead --actor lead
+anvil bundle claim B001 --actor lead --shared-tree
+anvil bundle packet B001 --actor lead
+```
+
+The coordinator-only, bounded-delegation, recovery, and review flow is in
+[Coordinating a milestone bundle](coordinating-a-bundle.md).
+
 ## Claude Code
 
 Two options. Install as a plugin from the marketplace (MCP auto-starts, hooks

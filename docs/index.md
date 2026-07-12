@@ -24,6 +24,9 @@ PRD, plan, claim, evidence, done — in about five minutes.
 - **[Using anvil on any harness](how-to/using-anvil-on-any-harness.md)** —
   wire the MCP server into Claude Code, Codex, Cursor, VS Code, Zed, and
   more with one command.
+- **[Coordinating a milestone bundle](how-to/coordinating-a-bundle.md)** —
+  keep integration in one coordinator loop, use bounded delegation, and recover
+  stalled or replanned work without losing history.
 - **[FAQ](faq.md)** — installing, storage, backups, and common gotchas.
 
 ## The core ideas

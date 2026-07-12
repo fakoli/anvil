@@ -104,6 +104,13 @@ Durable, leased state makes **both** resumable and safe to run concurrently:
 single-winner leases mean two runners never claim the same task, and a crashed
 run loses no progress — re-run and it continues from whatever is still `ready`.
 
+### Milestone-sized work
+
+When several related tasks should produce one reviewed delivery, use a coordinator-first
+execution bundle instead of forcing one conversational handoff per task. The coordinator
+keeps integration in the main loop and may delegate bounded work without transferring
+Anvil ownership. See [Coordinating a milestone bundle](coordinating-a-bundle.md).
+
 ## 5. Per-runtime adapters
 
 Committed, copy-ready adapters for each mode:

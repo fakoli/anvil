@@ -83,6 +83,11 @@ anvil apply T001           # apply the review verdict
 | Reconcile bundle delivery | `reconcile_bundle` | `anvil bundle reconcile <id>` |
 | Supersede bundle | `supersede_bundle` | `anvil bundle supersede <id> --replacement <id>` |
 
+For execution bundles, one coordinator owns the bundle and all member-state mutations.
+Delegates return bounded work to that coordinator; they do not independently claim bundle
+members. A released or stale bundle enters `replan_required`, not a resumable paused state.
+See `docs/how-to/coordinating-a-bundle.md` for the complete recovery and review flow.
+
 (Exact tool names mirror `bin/src/anvil/mcp_server.py`; CLI commands mirror
 `bin/src/anvil/cli/__init__.py`. Run `anvil describe --json` for the live list.)
 

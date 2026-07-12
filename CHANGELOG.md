@@ -8,6 +8,17 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Coordinator-first execution bundles (issue #171)** — ordered, same-PRD task bundles
+  with one coordinator lease, atomic member authorizations, aggregate packets and status,
+  evidence-bound completion, bounded independent review rounds, delivery checkpoints,
+  idempotent reconciliation, and history-preserving supersession. The complete lifecycle
+  is exposed through deterministic CLI and typed MCP contracts (API v3; 24 execution tools
+  by default, 35 with planning enabled). Existing task graphs adopt bundles additively;
+  task IDs, dependencies, claims, evidence, and replay history remain canonical. A new
+  coordinator workflow guide covers bounded delegation, stalled-worker recovery, replan,
+  migration, and delivery semantics. The model-neutral benchmark fixture records time to
+  accepted commit, coordinator/delegate tokens, accepted-task efficiency, review findings,
+  re-reviews, waits, and human interventions without ranking models or vendors.
 - **`anvil list --open` and `anvil list --summary`** — answering "what's
   left to do?" no longer requires composing per-status filters or raw SQL.
   `--open` hides terminal tasks per the new canonical

@@ -58,6 +58,12 @@ the linked task claims are internal authorizations that preserve the existing
 task-scoped evidence and disposition contract. The nullable link leaves every
 pre-v12 task claim byte-compatible in legacy snapshots.
 
+Existing tasks do not need conversion before bundle adoption. Bundle creation adds ordered
+membership without rewriting task IDs, dependencies, claims, or evidence. Historical
+evidence remains auditable, while a newly claimed bundle requires fresh evidence bound to
+its new member authorizations. Follow the guarded adoption sequence in
+[Coordinating a milestone bundle](how-to/coordinating-a-bundle.md#adopting-existing-tasks-without-losing-history).
+
 ## Bundle review dispositions — v12 → v13 auto-upgrade
 
 The v13 migration adds `execution_bundles.review_disposition_event_id` and

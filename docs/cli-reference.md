@@ -864,8 +864,9 @@ isolation otherwise directs callers to the top-level Git-aware bundle claim path
 
 ### `anvil bundle release` { #bundle-release }
 
-`anvil bundle release B001 [--reason TEXT]` releases the coordinator claim and returns its
-members to ready state after stale-claim reaping.
+`anvil bundle release B001 [--reason TEXT]` releases the coordinator claim, returns its
+members to ready state after stale-claim reaping, and marks the bundle
+`replan_required`. Release is not pause/resume.
 
 ### `anvil bundle packet` { #bundle-packet }
 
@@ -908,7 +909,8 @@ metadata; at least one delivery identifier is required.
 ### `anvil bundle reconcile` { #bundle-reconcile }
 
 `anvil bundle reconcile B001 [--commit SHA] [--pr-url URL] [--merged]` idempotently
-reconciles checkpoint and integration state.
+reconciles checkpoint and integration state. At least one of `--commit` or `--pr-url` is
+required; `--merged` alone is not a delivery reference.
 
 ### `anvil bundle supersede` { #bundle-supersede }
 
@@ -922,6 +924,10 @@ create -> claim -> packet/progress -> member submit -> complete
        -> review (independent reviewers) -> finalize-review
        -> checkpoint/reconcile
 ```
+
+See [Coordinating a milestone bundle](how-to/coordinating-a-bundle.md) for runnable
+coordinator-only and bounded-delegation flows, replan recovery, adoption, and delivery
+semantics.
 
 ---
 

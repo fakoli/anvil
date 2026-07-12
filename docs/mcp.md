@@ -11,8 +11,7 @@ registered tools (24 on the wire by default — see
 runtime — Claude Code, Codex, Cursor, OpenHands,
 Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
 apply workflow as first-class tool calls. Read-only tools return structured Pydantic
-objects; mutating tools run stale-claim reaping before writing, so the state the agent sees
-is always fresh.
+objects; lease-sensitive claim, renew, and release tools reap stale claims before writing.
 
 The toolset is organized by lifecycle phase:
 
@@ -794,19 +793,26 @@ gate; missing angles, insufficient independent approvals, or blocking verdicts f
 
 ### `checkpoint_bundle`
 
-Records delivery metadata for a reviewed bundle. Inputs are `bundle_id`, `actor`, and at
-least one of `commit_sha` or `pr_url`. Returns `BundleCheckpointResponse`.
+Records delivery metadata for a bundle. The recommended sequence checkpoints after review,
+but the operation itself validates only the bundle and delivery reference. Inputs are
+`bundle_id`, `actor`, and at least one of `commit_sha` or `pr_url`. Returns
+`BundleCheckpointResponse`.
 
 ### `reconcile_bundle`
 
-Idempotently reconciles delivery state from optional `commit_sha`, `pr_url`, and `merged`
-for `bundle_id`. Returns `BundleDetailResponse`; a proven integration advances the bundle
+Idempotently reconciles delivery state from `commit_sha` or `pr_url`, plus optional
+`merged`, for `bundle_id`. At least one delivery reference is required; `merged` alone is
+not sufficient. Returns `BundleDetailResponse`; a proven integration advances the bundle
 without duplicating prior checkpoint events.
 
 ### `supersede_bundle`
 
 Marks `bundle_id` superseded by `replacement_bundle_id` while retaining its audit history.
 Requires `actor` and returns `BundleDetailResponse`.
+
+See [Coordinating a milestone bundle](how-to/coordinating-a-bundle.md) for ownership,
+bounded delegation, stalled-worker recovery, review rework, adoption, supersession, and
+delivery examples.
 
 ---
 

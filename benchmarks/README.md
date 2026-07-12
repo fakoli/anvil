@@ -130,6 +130,34 @@ coercion. (The crash scenario still fast-forwards the lease by backdating
   complete), not an LLM's reasoning. That isolates the coordination mechanism, which is
   what the claim is about.
 
+## Coordinator policy comparison fixture
+
+The bundle workflow fixture is a separate, deterministic protocol for comparing two
+execution policies over the same accepted-task target:
+
+- `task_per_agent` — tasks are handed to independent workers;
+- `coordinator_first` — one coordinator owns the integrated bundle and may use bounded
+  delegates.
+
+Run it from the repository root:
+
+```bash
+uv run --project bin python benchmarks/bundle_workflow_fixture.py
+```
+
+The committed `fixtures/bundle_workflow.json` contains paired synthetic observations for
+identical trial seeds. It records time-to-accepted-commit, coordinator and per-delegate
+tokens, accepted task count, review findings, re-reviews, wait time, and human
+interventions. `bundle_workflow_fixture.py` derives total tokens, accepted tasks per 1,000
+tokens, per-policy means, and signed `coordinator_first - task_per_agent` deltas.
+
+This fixture is a contract test for the measurement pipeline, not a live model result. It
+uses no model or vendor names, emits no weighted score or winner, and must not be cited as
+evidence that one model family is intrinsically better. For an empirical run, preserve
+the same task graph, initial commit, acceptance commands, trial seeds, and execution
+profile across both policies; replace only the observation values and retain the raw
+session logs as provenance.
+
 ## Roadmap — `--live`
 
 `--live` is a phase-2 stub today. It will replace the simulated actor loop with real

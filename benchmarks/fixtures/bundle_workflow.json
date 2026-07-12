@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "fixture_id": "coordinator-policy-contract-v1",
+  "description": "Synthetic deterministic observations for validating the comparison protocol; not empirical model results.",
+  "workload": {
+    "execution_profile_id": "opaque-profile-v1",
+    "task_ids": ["T001", "T002", "T003", "T004"],
+    "acceptance_target": "one reviewed and accepted commit containing all four tasks"
+  },
+  "observations": [
+    {
+      "policy": "task_per_agent",
+      "trial": "seed-17",
+      "accepted_tasks": 4,
+      "time_to_accepted_commit_ms": 8200,
+      "coordinator_tokens": 900,
+      "delegate_tokens": {"worker_a": 2100, "worker_b": 1950, "worker_c": 1800, "worker_d": 2050},
+      "review_findings": 5,
+      "rereviews": 2,
+      "wait_ms": 1700,
+      "human_interventions": 2
+    },
+    {
+      "policy": "task_per_agent",
+      "trial": "seed-29",
+      "accepted_tasks": 4,
+      "time_to_accepted_commit_ms": 7900,
+      "coordinator_tokens": 850,
+      "delegate_tokens": {"worker_a": 2000, "worker_b": 1900, "worker_c": 1850, "worker_d": 2000},
+      "review_findings": 4,
+      "rereviews": 2,
+      "wait_ms": 1500,
+      "human_interventions": 1
+    },
+    {
+      "policy": "coordinator_first",
+      "trial": "seed-17",
+      "accepted_tasks": 4,
+      "time_to_accepted_commit_ms": 6900,
+      "coordinator_tokens": 2600,
+      "delegate_tokens": {"delegate_a": 1700, "delegate_b": 1600},
+      "review_findings": 3,
+      "rereviews": 1,
+      "wait_ms": 900,
+      "human_interventions": 1
+    },
+    {
+      "policy": "coordinator_first",
+      "trial": "seed-29",
+      "accepted_tasks": 4,
+      "time_to_accepted_commit_ms": 7100,
+      "coordinator_tokens": 2500,
+      "delegate_tokens": {"delegate_a": 1650, "delegate_b": 1550},
+      "review_findings": 3,
+      "rereviews": 1,
+      "wait_ms": 1000,
+      "human_interventions": 1
+    }
+  ]
+}
