@@ -132,7 +132,13 @@ def test_bundle_plan_normalizes_equivalent_project_paths_deterministically() -> 
     assert first.proposed_bundles[0].task_ids == ("T001", "T002")
     assert first.serial_depth == 2
 
-    for unsafe in ("../outside.py", "/absolute.py", "C:/absolute.py"):
+    for unsafe in (
+        "../outside.py",
+        "/absolute.py",
+        "C:/absolute.py",
+        "C:drive-relative.py",
+        "src/file.py:stream",
+    ):
         with pytest.raises(BundlePlanningError, match="project"):
             build_bundle_plan([_task("T001", [unsafe])])
 

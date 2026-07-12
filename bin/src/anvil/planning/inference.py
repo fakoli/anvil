@@ -152,7 +152,7 @@ def _canonical_project_path(path: str) -> str:
     if (
         not candidate
         or candidate.startswith("/")
-        or re.match(r"^[A-Za-z]:/", candidate)
+        or ":" in candidate
     ):
         raise BundlePlanningError(
             f"bundle planning requires a project-relative file path: {path!r}"
