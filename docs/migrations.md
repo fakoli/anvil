@@ -63,6 +63,9 @@ membership without rewriting task IDs, dependencies, claims, or evidence. Histor
 evidence remains auditable, while a newly claimed bundle requires fresh evidence bound to
 its new member authorizations. Follow the guarded adoption sequence in
 [Coordinating a milestone bundle](how-to/coordinating-a-bundle.md#adopting-existing-tasks-without-losing-history).
+When a bundle reaches `replan_required`, a replacement generation may retain the same task
+IDs; supersession preserves old evidence, reopens shared review-state members, and gives
+the replacement fresh claim/evidence lineage.
 
 ## Bundle review dispositions — v12 → v13 auto-upgrade
 

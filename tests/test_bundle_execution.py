@@ -1047,6 +1047,43 @@ def test_expired_public_claim_cannot_be_renewed(tmp_path: Path) -> None:
         backend.close()
 
 
+def test_expired_coordinator_cannot_log_phantom_bundle_completion(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        claimed = _manager(backend, tmp_path).claim("B001")
+        for index, task_id in enumerate(("release:T001", "release:T002"), start=1):
+            backend.append(
+                _event(
+                    "evidence.submitted",
+                    "task",
+                    task_id,
+                    {
+                        "task_id": task_id,
+                        "claim_id": claimed.claim.member_claim_ids[task_id],
+                        "submitted_by": "coordinator",
+                        "evidence_id": f"EV-EXPIRED-{index}",
+                        "commands_run": [f"verify-{task_id}"],
+                        "files_changed": [f"src/{index}.py"],
+                    },
+                )
+            )
+        before = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(BundleError, match="coordinator lease has expired"):
+            BundleManager(
+                backend,
+                FrozenClock(_NOW + timedelta(hours=5)),
+                actor="coordinator",
+                project_root=tmp_path,
+            ).mark_implemented("B001")
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before
+        assert backend.get_bundle("B001").status is BundleStatus.active  # type: ignore[union-attr]
+    finally:
+        backend.close()
+
+
 def test_public_renewal_cannot_shorten_coordinator_or_child_leases(
     tmp_path: Path,
 ) -> None:

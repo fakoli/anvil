@@ -809,7 +809,9 @@ without duplicating prior checkpoint events.
 ### `supersede_bundle`
 
 Marks `bundle_id` superseded by `replacement_bundle_id` while retaining its audit history.
-Requires `actor` and returns `BundleDetailResponse`.
+Requires `actor` and returns `BundleDetailResponse`. A replacement created after the
+source reaches `replan_required` may retain the same member task IDs; supersession reopens
+shared review-state tasks for fresh replacement evidence without deleting prior evidence.
 
 See [Coordinating a milestone bundle](how-to/coordinating-a-bundle.md) for ownership,
 bounded delegation, stalled-worker recovery, review rework, adoption, supersession, and

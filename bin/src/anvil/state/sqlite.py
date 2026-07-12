@@ -3979,6 +3979,7 @@ class SqliteBackend:
                   JOIN execution_bundles b ON b.id = m.bundle_id
                  WHERE m.task_id IN ({placeholders})
                    AND b.status NOT IN ({terminal_placeholders})
+                   AND b.status != 'replan_required'
                  ORDER BY m.task_id, b.id""",
             tuple(bundle.task_ids) + terminal,
         ).fetchall()
@@ -4030,6 +4031,7 @@ class SqliteBackend:
                   JOIN execution_bundles b ON b.id = m.bundle_id
                  WHERE m.task_id IN ({placeholders})
                    AND b.status NOT IN ({terminal_placeholders})
+                   AND b.status != 'replan_required'
                  LIMIT 1""",
             tuple(bundle.task_ids) + terminal,
         ).fetchone()
@@ -4152,6 +4154,12 @@ class SqliteBackend:
                 if active_bundle_claim is None:
                     raise EventRejected(
                         "bundle.status_changed: active coordinator claim not found."
+                    )
+                if datetime.datetime.fromisoformat(
+                    active_bundle_claim[2]
+                ) < event.timestamp.astimezone(datetime.UTC):
+                    raise EventRejected(
+                        "bundle.status_changed: coordinator lease has expired."
                     )
                 coordinator = conn.execute(
                     "SELECT coordinator FROM execution_bundles WHERE id = ?",
@@ -4883,6 +4891,27 @@ class SqliteBackend:
                 timestamp=event_time.isoformat(),
                 reason=f"superseded by {payload.replacement_bundle_id}",
             )
+        # A replacement may deliberately retain members from a replanned
+        # source generation. Reopen only previously-submitted members; their
+        # evidence remains immutable history, while the replacement claim will
+        # mint fresh member authorizations for the next evidence generation.
+        conn.execute(
+            """UPDATE tasks SET status = 'ready', updated_at = ?
+                 WHERE status = 'needs_review'
+                   AND id IN (
+                       SELECT source.task_id
+                         FROM execution_bundle_members source
+                         JOIN execution_bundle_members replacement
+                           ON replacement.task_id = source.task_id
+                        WHERE source.bundle_id = ?
+                          AND replacement.bundle_id = ?
+                   )""",
+            (
+                event_time.isoformat(),
+                payload.bundle_id,
+                payload.replacement_bundle_id,
+            ),
+        )
         conn.execute(
             "UPDATE execution_bundles SET status = 'superseded', superseded_by = ?, "
             "updated_at = ? WHERE id = ? AND creation_event_id = ?",

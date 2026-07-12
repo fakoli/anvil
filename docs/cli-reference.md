@@ -918,7 +918,9 @@ required; `--merged` alone is not a delivery reference.
 ### `anvil bundle supersede` { #bundle-supersede }
 
 `anvil bundle supersede B001 --replacement B002` marks `B001` superseded by replacement `B002` while
-retaining the original audit history.
+retaining the original audit history. A replacement created after the source reaches
+`replan_required` may retain the same members; supersession reopens shared
+`needs_review` tasks to `ready` while preserving their prior evidence.
 
 The normal lifecycle is:
 

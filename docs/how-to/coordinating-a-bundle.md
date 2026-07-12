@@ -96,29 +96,31 @@ deadline.
 | `bundle complete` reports `bundle_not_ready` | Fix the per-member blockers. The failed completion is retry-safe and appends no progress event. |
 | Review gate is incomplete and the review cap has room | Add distinct reviewers using the still-missing angles. Assign required angles before dispatching reviewers; once the cap is consumed, a missing-angle round has no public repair. |
 | A reviewer corrects analysis without implementation changes | A later review round may record the corrected verdict when the gate permits it. Review rounds do not mint fresh member evidence. |
-| A review requires implementation or evidence changes | Do not edit in place: member submissions already released their authorizations, and no public reauthorization/resubmit path exists. Revise the plan, create an eligible replacement, and supersede the source. |
+| A review requires implementation or evidence changes | Do not edit in place: member submissions already released their authorizations, and no public reauthorization/resubmit path exists. Complete the bounded review gate to `replan_required` when possible, then create a replacement generation and supersede the source. |
 | Re-review budget is exhausted | Revise the task plan, create an eligible replacement bundle, then supersede the old bundle. |
 | Delivery metadata arrives late or is retried | Re-run `bundle reconcile` with the same commit or PR reference; reconciliation is idempotent. |
 
 There is no public transition from `replan_required` back to `planned`. Recovery therefore
-uses revised/new task IDs and a replacement bundle:
+uses a replacement bundle generation:
 
 ```bash
-anvil bundle create B002 T101 T102 --prd release \
+anvil bundle create B002 T001 T002 --prd release \
   --coordinator lead --actor lead
 anvil bundle supersede B001 --replacement B002 --actor lead
 ```
 
-The replacement must already exist, be nonterminal, and belong to the same PRD. Current
-creation rules also prevent a new nonterminal bundle from reusing tasks still owned by the
-old nonterminal bundle. Supersession is therefore a history-preserving redirect to a
-revised/disjoint plan, not an in-place regrouping mechanism. Never edit SQLite or rewrite
-`events.jsonl` to work around this constraint.
+The replacement must already exist, be nonterminal, and belong to the same PRD. Creation
+may reuse members from a source that has reached `replan_required`; membership in any other
+nonterminal bundle still fails closed. Supersession atomically reopens shared
+`needs_review` tasks to `ready`, preserves their prior evidence, and lets the replacement
+claim mint fresh member authorizations. A replacement may instead use revised/new task IDs
+when the task graph itself changed or when the source never reached `replan_required`.
+Never edit SQLite or rewrite `events.jsonl` to work around these constraints.
 
 These limits are intentionally explicit: the current public contract has no same-bundle
-member reauthorization, no in-place regrouping, and no way to reacquire a coordinator
-claim after completion. Treat any recovery that needs new code or new evidence as a new
-bundle generation.
+member reauthorization and no way to reacquire a coordinator claim after completion.
+Treat any recovery that needs new code or new evidence as a new bundle generation, even
+when that generation retains the same task IDs.
 
 ## Checkpoints and reconciliation
 

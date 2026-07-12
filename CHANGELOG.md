@@ -16,7 +16,9 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   by default, 35 with planning enabled). Existing task graphs adopt bundles additively;
   task IDs, dependencies, claims, evidence, and replay history remain canonical. A new
   coordinator workflow guide covers bounded delegation, stalled-worker recovery, replan,
-  migration, and delivery semantics. The model-neutral benchmark fixture records time to
+  migration, and delivery semantics. Replanned bundles can create a same-member replacement
+  generation; supersession preserves old evidence while reopening shared members for fresh
+  authorizations. The model-neutral benchmark fixture records time to
   accepted commit, coordinator/delegate tokens, accepted-task efficiency, review findings,
   re-reviews, waits, and human interventions without ranking models or vendors.
 - **`anvil list --open` and `anvil list --summary`** — answering "what's
