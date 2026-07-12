@@ -71,11 +71,13 @@ Version history
   exact ``implemented_unreviewed`` transition that opened their review cycle.
 - v14: bundle delivery lineage (issue #171) — bundles record a named
   superseding bundle while preserving the existing checkpoint JSON metadata.
+- v15: authoritative bundle result time (issue #171) — the projection stores
+  the timestamp of the last applied reviewed/integrated/merged/completed result.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 14
+SCHEMA_VERSION: int = 15
 
 
 def get_schema_version() -> int:
@@ -202,6 +204,7 @@ CREATE TABLE IF NOT EXISTS execution_bundles (
     status             TEXT NOT NULL DEFAULT 'planned',
     review_disposition_event_id TEXT,
     superseded_by      TEXT REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    last_result_at     TEXT,
     branch             TEXT,
     worktree_path      TEXT,
     review_policy      TEXT NOT NULL DEFAULT '{}',

@@ -1370,7 +1370,7 @@ def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: 
 
     migrated = _backend(tmp_path)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 14
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 15
         assert migrated.get_project().name == "Before migration"  # type: ignore[union-attr]
         tables = {
             row[0]
@@ -1446,7 +1446,27 @@ def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> No
             }
         assert "review_disposition_event_id" in bundle_columns
         assert "disposition_event_id" in review_columns
-        assert migrated.get_schema_version() == 14
+        assert migrated.get_schema_version() == 15
+    finally:
+        migrated.close()
+
+
+def test_v14_bundle_schema_migrates_to_result_projection(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    backend.close()
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("ALTER TABLE execution_bundles DROP COLUMN last_result_at")
+        conn.execute("PRAGMA user_version = 14")
+        conn.commit()
+
+    migrated = _backend(tmp_path)
+    try:
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+            }
+        assert "last_result_at" in columns
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 15
     finally:
         migrated.close()
 

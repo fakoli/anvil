@@ -100,7 +100,6 @@ def compute_bundle_rollup(
     reviews: list[BundleReviewVerdict],
     *,
     now: datetime.datetime,
-    result_times: dict[str, datetime.datetime] | None = None,
 ) -> list[BundleRollupEntry]:
     tasks_by_id = {task.id: task for task in tasks}
     claims_by_bundle: dict[str, BundleClaim] = {}
@@ -114,7 +113,6 @@ def compute_bundle_rollup(
         ),
     ):
         claims_by_bundle[claim.bundle_id] = claim
-    result_times = result_times or {}
     entries: list[BundleRollupEntry] = []
     result_statuses = {
         "reviewed_unintegrated",
@@ -160,6 +158,7 @@ def compute_bundle_rollup(
 
         def dependency_closed(
             task_id: str,
+            visiting: frozenset[str] = frozenset(),
             *,
             completion_memo: dict[str, bool] = completion_memo,
             member_ids: set[str] = member_ids,
@@ -167,9 +166,11 @@ def compute_bundle_rollup(
         ) -> bool:
             if task_id in completion_memo:
                 return completion_memo[task_id]
+            if task_id in visiting:
+                return False
             task = tasks_by_id[task_id]
             complete = task.status.value in done_statuses and all(
-                dependency_closed(dep)
+                dependency_closed(dep, visiting | {task_id})
                 for dep in task.dependencies
                 if dep in member_ids
             )
@@ -191,9 +192,7 @@ def compute_bundle_rollup(
             review for review in current_reviews if review.review_round == latest_round
         ]
         last_result = (
-            result_times.get(bundle.id)
-            if bundle.status.value in result_statuses
-            else None
+            bundle.last_result_at if bundle.status.value in result_statuses else None
         )
         checkpoint = (
             bundle.checkpoint.model_dump(mode="json")

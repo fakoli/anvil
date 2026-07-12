@@ -2183,6 +2183,7 @@ class SqliteBackend:
                 status TEXT NOT NULL DEFAULT 'planned',
                 review_disposition_event_id TEXT,
                 superseded_by TEXT REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                last_result_at TEXT,
                 branch TEXT,
                 worktree_path TEXT,
                 review_policy TEXT NOT NULL DEFAULT '{}',
@@ -2380,6 +2381,14 @@ class SqliteBackend:
                 "REFERENCES execution_bundles(id) ON DELETE RESTRICT"
             )
 
+    def _m_to_v15(self, conn: sqlite3.Connection) -> None:
+        """v14 -> v15: authoritative applied lifecycle-result timestamp."""
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+        }
+        if "last_result_at" not in columns:
+            conn.execute("ALTER TABLE execution_bundles ADD COLUMN last_result_at TEXT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -2393,6 +2402,7 @@ class SqliteBackend:
         (11, _m_to_v12),
         (12, _m_to_v13),
         (13, _m_to_v14),
+        (14, _m_to_v15),
     ]
 
     @staticmethod
@@ -4449,15 +4459,28 @@ class SqliteBackend:
             if payload.to_status is BundleStatus.implemented_unreviewed
             else None
         )
+        last_result_at = (
+            payload.changed_at.isoformat()
+            if payload.to_status
+            in {
+                BundleStatus.reviewed_unintegrated,
+                BundleStatus.integrated,
+                BundleStatus.merged,
+                BundleStatus.completed,
+            }
+            else None
+        )
         conn.execute(
             "UPDATE execution_bundles SET status = ?, updated_at = ?, "
-            "review_disposition_event_id = COALESCE(?, review_disposition_event_id) "
+            "review_disposition_event_id = COALESCE(?, review_disposition_event_id), "
+            "last_result_at = COALESCE(?, last_result_at) "
             "WHERE id = ? AND creation_event_id = ? AND status = ? "
             "AND updated_at <= ?",
             (
                 payload.to_status,
                 payload.changed_at.isoformat(),
                 disposition_event_id,
+                last_result_at,
                 payload.bundle_id,
                 payload.creation_event_id,
                 payload.from_status,
@@ -4762,7 +4785,8 @@ class SqliteBackend:
             (payload.bundle_id,),
         ).fetchone()
         replacement = conn.execute(
-            "SELECT prd_id, status, superseded_by FROM execution_bundles WHERE id = ?",
+            "SELECT prd_id, status, superseded_by, created_at, updated_at "
+            "FROM execution_bundles WHERE id = ?",
             (payload.replacement_bundle_id,),
         ).fetchone()
         if source is None or source[0] != payload.creation_event_id:
@@ -4779,6 +4803,11 @@ class SqliteBackend:
             raise EventRejected("bundle.superseded: replacement must exist in the same PRD.")
         if replacement[1] in {status.value for status in TERMINAL_BUNDLE_STATUSES}:
             raise EventRejected("bundle.superseded: replacement is terminal.")
+        if max(
+            datetime.datetime.fromisoformat(replacement[3]),
+            datetime.datetime.fromisoformat(replacement[4]),
+        ) > event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.superseded: supersession predates replacement state.")
 
     @staticmethod
     def _write_bundle_superseded(
@@ -4793,7 +4822,8 @@ class SqliteBackend:
             (payload.bundle_id,),
         ).fetchone()
         replacement = conn.execute(
-            "SELECT prd_id, status FROM execution_bundles WHERE id = ?",
+            "SELECT prd_id, status, created_at, updated_at "
+            "FROM execution_bundles WHERE id = ?",
             (payload.replacement_bundle_id,),
         ).fetchone()
         event_time = event.timestamp.astimezone(datetime.UTC)
@@ -4813,6 +4843,11 @@ class SqliteBackend:
             or replacement[1] in {
                 status.value for status in TERMINAL_BUNDLE_STATUSES
             }
+            or max(
+                datetime.datetime.fromisoformat(replacement[2]),
+                datetime.datetime.fromisoformat(replacement[3]),
+            )
+            > event_time
         ):
             return
         active_claim = conn.execute(

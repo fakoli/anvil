@@ -911,6 +911,7 @@ class ExecutionBundle(BaseModel):
     status: BundleStatus = BundleStatus.planned
     review_disposition_event_id: EventID | None = None
     superseded_by: BundleID | None = None
+    last_result_at: datetime.datetime | None = None
     branch: str | None = None
     worktree_path: str | None = None
     review_policy: BundleReviewPolicy = Field(default_factory=BundleReviewPolicy)
@@ -953,6 +954,13 @@ class ExecutionBundle(BaseModel):
     def _validate_bundle_utc(cls, v: datetime.datetime) -> datetime.datetime:
         return _require_utc(v, "created_at / updated_at")
 
+    @field_validator("last_result_at", mode="after")
+    @classmethod
+    def _validate_last_result_at(
+        cls, value: datetime.datetime | None
+    ) -> datetime.datetime | None:
+        return _require_utc(value, "last_result_at") if value is not None else None
+
     @model_validator(mode="after")
     def _validate_members_fit_budget(self) -> ExecutionBundle:
         if self.updated_at < self.created_at:
@@ -984,6 +992,8 @@ class ExecutionBundle(BaseModel):
             data.pop("review_disposition_event_id", None)
         if data.get("superseded_by") is None:
             data.pop("superseded_by", None)
+        if data.get("last_result_at") is None:
+            data.pop("last_result_at", None)
         return data
 
 

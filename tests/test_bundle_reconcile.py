@@ -114,6 +114,80 @@ def test_supersession_preserves_source_and_replays_replacement(tmp_path) -> None
                 },
             )
         )
+        future = _NOW + timedelta(minutes=10)
+        backend.append(
+            EventDraft(
+                timestamp=future,
+                actor="seed",
+                action="task.created",
+                target_kind="task",
+                target_id="release:T004",
+                payload_json={
+                    "id": "release:T004",
+                    "feature_id": "release:F001",
+                    "prd_id": "release",
+                    "title": "Future replacement member",
+                    "description": "",
+                    "status": "ready",
+                    "priority": "high",
+                    "task_type": "feature",
+                    "dependencies": [],
+                    "conflict_groups": [],
+                    "scores": {},
+                    "acceptance_criteria": ["Done"],
+                    "implementation_notes": [],
+                    "verification": {"commands": ["verify"]},
+                    "likely_files": ["src/4.py"],
+                    "parent_task_id": None,
+                    "created_at": future.isoformat(),
+                    "updated_at": future.isoformat(),
+                },
+            )
+        )
+        backend.append(
+            EventDraft(
+                timestamp=future,
+                actor="seed",
+                action="bundle.created",
+                target_kind="bundle",
+                target_id="B003",
+                payload_json={
+                    "id": "B003",
+                    "prd_id": "release",
+                    "task_ids": ["release:T004"],
+                    "coordinator": "coordinator",
+                    "status": "planned",
+                    "review_policy": {},
+                    "throughput_budget": {},
+                    "created_at": future.isoformat(),
+                    "updated_at": future.isoformat(),
+                },
+            )
+        )
+        with pytest.raises(BundleDeliveryError, match="predates replacement state"):
+            BundleDeliveryManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).supersede("B001", replacement_bundle_id="B003")
+        source_bundle = backend.get_bundle("B001")
+        assert source_bundle is not None
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=_NOW,
+                actor="coordinator",
+                action="bundle.superseded",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": source_bundle.creation_event_id,
+                    "replacement_bundle_id": "B003",
+                    "superseded_by_actor": "coordinator",
+                    "superseded_at": _NOW.isoformat(),
+                },
+            ),
+        )
         with pytest.raises(BundleDeliveryError, match="predates"):
             BundleDeliveryManager(
                 backend,
@@ -141,6 +215,7 @@ def test_supersession_preserves_source_and_replays_replacement(tmp_path) -> None
     try:
         replay.replay_from_empty(str(tmp_path / "events.jsonl"))
         assert serialize_state(replay) == source
+        assert replay.get_bundle("B003").status is BundleStatus.planned  # type: ignore[union-attr]
     finally:
         replay.close()
 
@@ -208,5 +283,61 @@ def test_delivery_events_reject_forged_and_backdated_mutations(tmp_path) -> None
     try:
         replay.replay_from_empty(str(tmp_path / "events.jsonl"))
         assert replay.get_bundle("B001").checkpoint is None  # type: ignore[union-attr]
+    finally:
+        replay.close()
+
+
+def test_replay_result_time_ignores_forged_status_event(tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        for reviewer, angle in (
+            ("reviewer-a", "correctness"),
+            ("reviewer-b", "security"),
+            ("reviewer-c", "integration"),
+        ):
+            BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
+                "B001",
+                review_round=1,
+                angle=angle,
+                decision=ReviewDecision.approve,
+            )
+        BundleReviewManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).finalize("B001")
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        assert bundle.last_result_at == _NOW
+        forged_at = _NOW + timedelta(hours=1)
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=forged_at,
+                actor="attacker",
+                action="bundle.status_changed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "from": "reviewed_unintegrated",
+                    "to": "integrated",
+                    "changed_at": forged_at.isoformat(),
+                },
+            ),
+        )
+    finally:
+        backend.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        replayed = replay.get_bundle("B001")
+        assert replayed is not None
+        assert replayed.status is BundleStatus.reviewed_unintegrated
+        assert replayed.last_result_at == _NOW
     finally:
         replay.close()

@@ -60,6 +60,7 @@ def test_rollup_surfaces_critical_path_review_checkpoint_and_warning() -> None:
         task_ids=["T001", "T002"],
         coordinator="coordinator",
         status=BundleStatus.reviewed_unintegrated,
+        last_result_at=_NOW,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -83,7 +84,6 @@ def test_rollup_surfaces_critical_path_review_checkpoint_and_warning() -> None:
         [],
         reviews,
         now=_NOW + timedelta(minutes=2),
-        result_times={"B001": _NOW},
     )[0]
     assert entry.critical_path_stage == 1
     assert entry.critical_path_depth == 2
@@ -106,7 +106,6 @@ def test_rollup_surfaces_critical_path_review_checkpoint_and_warning() -> None:
         [],
         reviews,
         now=_NOW,
-        result_times={"B001": _NOW},
     )[0].checkpoint_warning is None
 
     blocked_prefix = [
@@ -116,6 +115,36 @@ def test_rollup_surfaces_critical_path_review_checkpoint_and_warning() -> None:
     assert compute_bundle_rollup(
         [bundle], blocked_prefix, [], reviews, now=_NOW
     )[0].critical_path_stage == 0
+
+
+def test_rollup_cycle_is_not_dependency_closed() -> None:
+    tasks = [
+        Task(
+            id=task_id,
+            feature_id="F001",
+            title=task_id,
+            description="",
+            status=TaskStatus.done,
+            priority=TaskPriority.high,
+            dependencies=[dependency],
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        for task_id, dependency in (("T001", "T002"), ("T002", "T001"))
+    ]
+    bundle = ExecutionBundle(
+        id="B001",
+        creation_event_id="E001",
+        prd_id="default",
+        task_ids=["T001", "T002"],
+        coordinator="coordinator",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+    entry = compute_bundle_rollup([bundle], tasks, [], [], now=_NOW)[0]
+
+    assert entry.critical_path_stage == 0
 
 
 def test_rollup_prefers_active_coordinator_claim_generation() -> None:

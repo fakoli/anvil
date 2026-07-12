@@ -27,6 +27,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v12     | Bundle coordinator claims (issue #171) | Adds one public `bundle_claims` lease per execution bundle and nullable `claims.bundle_claim_id` links for atomic internal member evidence authorizations. Existing task claims remain unlinked and unchanged. |
 | v13     | Bundle review dispositions (issue #171) | Binds every adversarial verdict to the exact `implemented_unreviewed` transition that opened its review cycle, preventing an older quorum from satisfying later rework. |
 | v14     | Bundle delivery lineage (issue #171) | Adds a named `superseded_by` bundle reference while retaining checkpoint and reconciliation history. |
+| v15     | Bundle result projection (issue #171) | Adds authoritative `last_result_at` timing for applied reviewed/integrated/merged/completed transitions. |
 
 ## Execution bundles — v0-v10 → v11 auto-upgrade
 
@@ -69,6 +70,13 @@ cannot silently satisfy a newly opened needs-review disposition.
 The v14 migration adds nullable `execution_bundles.superseded_by`. Existing
 bundles remain unsuperseded; new supersession events preserve both source and
 replacement bundle rows and all task evidence.
+
+## Bundle result projection — v14 → v15 auto-upgrade
+
+The v15 migration adds nullable `execution_bundles.last_result_at`. New applied
+reviewed, integrated, merged, and completed transitions update it atomically
+with bundle status. Historical bundles retain NULL rather than deriving a
+potentially forged result time from unapplied audit-log events.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
