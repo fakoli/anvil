@@ -83,6 +83,7 @@ __all__ = [
     "Feature",
     "Task",
     "Claim",
+    "BundleClaim",
     "Evidence",
     "BundleReviewPolicy",
     "BundleThroughputBudget",
@@ -937,6 +938,9 @@ class Claim(BaseModel):
     branch: str | None = None
     worktree_path: str | None = None
     expected_files: list[str] = Field(default_factory=list)
+    # Internal authorization created atomically under one public bundle claim.
+    # None preserves the legacy standalone-task claim shape.
+    bundle_claim_id: str | None = None
     # The claiming loop's session discriminator (ANVIL_SESSION_ID /
     # CLAUDE_CODE_SESSION_ID), recorded INDEPENDENTLY of the actor string so
     # two loops sharing a pinned ANVIL_ACTOR are still distinguishable — the
@@ -960,6 +964,44 @@ class Claim(BaseModel):
         cls, v: datetime.datetime
     ) -> datetime.datetime:
         return _require_utc(v, "created_at / lease_expires_at / last_heartbeat_at")
+
+
+class BundleClaim(BaseModel):
+    """One public coordinator lease over an execution bundle.
+
+    ``member_claim_ids`` are internal task authorizations used only to preserve
+    the existing task-scoped evidence and disposition contract.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    id: ClaimID
+    bundle_id: BundleID
+    claimed_by: str
+    status: ClaimStatus = ClaimStatus.active
+    branch: str | None = None
+    worktree_path: str | None = None
+    session_id: str | None = None
+    expected_files: list[str] = Field(default_factory=list)
+    member_claim_ids: dict[TaskID, ClaimID]
+    created_at: datetime.datetime
+    lease_expires_at: datetime.datetime
+    last_heartbeat_at: datetime.datetime
+    released_at: datetime.datetime | None = None
+    release_reason: str | None = None
+
+    @field_validator("created_at", "lease_expires_at", "last_heartbeat_at")
+    @classmethod
+    def _validate_required_utc(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "bundle claim timestamps")
+
+    @model_validator(mode="after")
+    def _validate_member_claims(self) -> BundleClaim:
+        if not self.member_claim_ids:
+            raise ValueError("bundle claim requires member claim authorizations")
+        if len(set(self.member_claim_ids.values())) != len(self.member_claim_ids):
+            raise ValueError("bundle member claim ids must be unique")
+        return self
 
     @field_validator("released_at", mode="after")
     @classmethod

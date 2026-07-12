@@ -1306,7 +1306,7 @@ def test_empty_snapshot_omits_bundles_for_legacy_byte_shape(tmp_path: Path) -> N
         backend.close()
 
 
-def test_v10_database_auto_migrates_to_v11_without_losing_project(tmp_path: Path) -> None:
+def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: Path) -> None:
     backend = _backend(tmp_path)
     try:
         backend.append(
@@ -1330,12 +1330,13 @@ def test_v10_database_auto_migrates_to_v11_without_losing_project(tmp_path: Path
         conn.execute("DROP TABLE execution_bundle_members")
         conn.execute("DROP TABLE execution_bundles")
         conn.execute("DROP TABLE claim_replay_lineages")
+        conn.execute("DROP TABLE bundle_claims")
         conn.execute("PRAGMA user_version = 10")
         conn.commit()
 
     migrated = _backend(tmp_path)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 11
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 12
         assert migrated.get_project().name == "Before migration"  # type: ignore[union-attr]
         tables = {
             row[0]
@@ -1347,6 +1348,7 @@ def test_v10_database_auto_migrates_to_v11_without_losing_project(tmp_path: Path
             "execution_bundles",
             "execution_bundle_members",
             "claim_replay_lineages",
+            "bundle_claims",
         } <= tables
     finally:
         migrated.close()
@@ -1373,6 +1375,7 @@ def test_v10_upgrade_seeds_claim_lineage_before_log_ahead_catchup(
         conn.execute("DROP TABLE execution_bundle_members")
         conn.execute("DROP TABLE execution_bundles")
         conn.execute("DROP TABLE claim_replay_lineages")
+        conn.execute("DROP TABLE bundle_claims")
         conn.execute("PRAGMA user_version = 10")
         conn.commit()
 

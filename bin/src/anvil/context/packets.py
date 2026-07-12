@@ -23,9 +23,12 @@ if TYPE_CHECKING:
     from anvil.config import Config
     from anvil.review.gates import DeferredFinding
     from anvil.state.models import (
+        BundleClaim,
         Claim,
         Decision,
+        ExecutionBundle,
         Feature,
+        Requirement,
         Task,
     )
 
@@ -34,9 +37,12 @@ __all__ = [
     "LIGHTWEIGHT_BLAST_RADIUS_MAX",
     "LIGHTWEIGHT_COMPLEXITY_MAX",
     "WorkPacket",
+    "BundleMemberPacketContext",
+    "BundleWorkPacket",
     "fast_lane_packet",
     "is_lightweight",
     "render_packet",
+    "render_bundle_packet",
 ]
 
 
@@ -108,6 +114,170 @@ class WorkPacket:
     markdown: str
     json_data: dict[str, Any]
     variant: str = "full"
+
+
+@dataclass(frozen=True)
+class BundleMemberPacketContext:
+    """Complete task context used by the pure aggregate packet renderer."""
+
+    task: Task
+    feature: Feature
+    requirements: list[Requirement]
+    dependencies: list[Task]
+
+
+@dataclass(frozen=True)
+class BundleWorkPacket:
+    bundle_id: str
+    markdown: str
+    json_data: dict[str, Any]
+
+
+def render_bundle_packet(
+    bundle: ExecutionBundle,
+    members: list[BundleMemberPacketContext],
+    *,
+    bundle_claim: BundleClaim | None = None,
+) -> BundleWorkPacket:
+    """Render one untrimmed coordinator packet for an ordered execution bundle."""
+    supplied = [member.task.id for member in members]
+    if supplied != bundle.task_ids:
+        raise ValueError("bundle packet members must match stored member order")
+    if any(member.task.prd_id != bundle.prd_id for member in members):
+        raise ValueError("bundle packet members must belong to the owning PRD")
+
+    member_ids = set(bundle.task_ids)
+    likely_files: list[str] = []
+    verification_commands: list[str] = []
+    file_owners: dict[str, list[str]] = {}
+    internal_edges: list[dict[str, str]] = []
+    open_external: list[str] = []
+    member_json: list[dict[str, Any]] = []
+    lines = [
+        f"# Bundle {bundle.id}",
+        "",
+        f"**PRD:** {bundle.prd_id}",
+        f"**Status:** {bundle.status.value}",
+        f"**Coordinator:** {bundle.coordinator}",
+        f"**Branch:** {bundle.branch or '—'}",
+        f"**Worktree:** {bundle.worktree_path or '—'}",
+        "",
+        "## Ordered member work",
+        "",
+    ]
+    for position, context in enumerate(members, start=1):
+        task = context.task
+        dependency_by_id = {dependency.id: dependency for dependency in context.dependencies}
+        for dependency_id in task.dependencies:
+            if dependency_id in member_ids:
+                internal_edges.append({"from": dependency_id, "to": task.id})
+            elif dependency_by_id.get(dependency_id) is None or dependency_by_id[
+                dependency_id
+            ].status.value != "done":
+                if dependency_id not in open_external:
+                    open_external.append(dependency_id)
+        for path in task.likely_files:
+            if path not in likely_files:
+                likely_files.append(path)
+            file_owners.setdefault(path, []).append(task.id)
+        for command in task.verification.commands:
+            if command not in verification_commands:
+                verification_commands.append(command)
+        child_claim_id = (
+            bundle_claim.member_claim_ids.get(task.id) if bundle_claim is not None else None
+        )
+        member_json.append(
+            {
+                "position": position,
+                "task": task.model_dump(mode="json"),
+                "feature": context.feature.model_dump(mode="json"),
+                "requirements": [
+                    requirement.model_dump(mode="json")
+                    for requirement in context.requirements
+                ],
+                "dependencies": [
+                    dependency.model_dump(mode="json")
+                    for dependency in context.dependencies
+                ],
+                "member_claim_id": child_claim_id,
+            }
+        )
+        lines.extend(
+            [
+                f"### {position}. {task.id} — {task.title}",
+                "",
+                task.description or "(no description)",
+                "",
+                "Requirements:",
+                *(
+                    [
+                        f"- {requirement.id}: {requirement.text}"
+                        for requirement in context.requirements
+                    ]
+                    or ["- None linked."]
+                ),
+                "",
+                "Acceptance criteria:",
+                *([f"- {item}" for item in task.acceptance_criteria] or ["- None declared."]),
+                "",
+                "Task claims:",
+                *(
+                    [f"- {claim.id}: {claim.subject} ({claim.kind.value})" for claim in task.claims]
+                    or ["- None declared."]
+                ),
+                "",
+                "Verification commands:",
+                *(
+                    [f"- `{command}`" for command in task.verification.commands]
+                    or ["- None declared."]
+                ),
+                "",
+                f"Member evidence claim: {child_claim_id or 'created when the bundle is claimed'}",
+                "",
+            ]
+        )
+    shared_files = [
+        {"path": path, "tasks": owners}
+        for path, owners in file_owners.items()
+        if len(owners) > 1
+    ]
+    risks = [f"shared file {item['path']}: {', '.join(item['tasks'])}" for item in shared_files]
+    risks.extend(f"open external dependency: {dependency}" for dependency in open_external)
+    lines.extend(
+        [
+            "## Integration risks",
+            "",
+            *([f"- {risk}" for risk in risks] or ["- None detected."]),
+            "",
+            "## Completion contract",
+            "",
+            (
+                "Each member keeps independent evidence and disposition. Partial "
+                "evidence leaves the bundle active and reports the unproven members. "
+                "Optional delegated-agent observations are informational and never "
+                "gate progress."
+            ),
+            "",
+        ]
+    )
+    data = {
+        "bundle": bundle.model_dump(mode="json"),
+        "bundle_claim": bundle_claim.model_dump(mode="json") if bundle_claim else None,
+        "members": member_json,
+        "aggregate": {
+            "likely_files": likely_files,
+            "verification_commands": verification_commands,
+            "internal_dependency_edges": internal_edges,
+            "open_external_dependencies": open_external,
+            "shared_file_overlaps": shared_files,
+            "integration_risks": risks,
+        },
+    }
+    return BundleWorkPacket(
+        bundle_id=bundle.id,
+        markdown="\n".join(lines).rstrip() + "\n",
+        json_data=data,
+    )
 
 
 # ---------------------------------------------------------------------------

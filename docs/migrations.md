@@ -24,6 +24,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v9      | Evidence contracts (issue #153) | `tasks` adds `claims`; `evidence` adds `category`. Additive defaults preserve pre-contract behavior. |
 | v10     | Distinct-actor concurrency guard | `claims` adds nullable `session_id`; historical claims remain session-unknown. |
 | v11     | Execution bundles (issue #171) | Adds `execution_bundles`, FK-protected position-ordered `execution_bundle_members`, and internal `claim_replay_lineages` fencing for divergent legacy claim IDs. Bundle policy and optional agent observations are JSON columns; existing task/claim/evidence rows are unchanged. |
+| v12     | Bundle coordinator claims (issue #171) | Adds one public `bundle_claims` lease per execution bundle and nullable `claims.bundle_claim_id` links for atomic internal member evidence authorizations. Existing task claims remain unlinked and unchanged. |
 
 ## Execution bundles — v0-v10 → v11 auto-upgrade
 
@@ -45,6 +46,14 @@ stamped 11 only after the complete transaction succeeds. A failure rolls back
 without changing `PRAGMA user_version`; reopening retries safely. Replaying an
 older `events.jsonl` produces no bundle rows and preserves the legacy snapshot
 shape.
+
+## Bundle coordinator claims — v11 → v12 auto-upgrade
+
+The v12 migration creates `bundle_claims` and adds nullable
+`claims.bundle_claim_id`. A bundle claim is the single public coordinator lease;
+the linked task claims are internal authorizations that preserve the existing
+task-scoped evidence and disposition contract. The nullable link leaves every
+pre-v12 task claim byte-compatible in legacy snapshots.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 

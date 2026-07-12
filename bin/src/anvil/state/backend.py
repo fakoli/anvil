@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from anvil.state.models import (
         PRD,
+        BundleClaim,
         Claim,
         ConflictGroup,
         Event,
@@ -125,6 +126,14 @@ class Backend(Protocol):
         self, *, prd_id: str | None = None, status: str | None = None
     ) -> list[ExecutionBundle]:
         """Return execution bundles in stable ID order, optionally filtered."""
+        ...
+
+    def get_bundle_claim(self, bundle_id: str) -> BundleClaim | None:
+        """Return the public coordinator claim for a bundle, if present."""
+        ...
+
+    def list_bundle_claims(self, *, status: str | None = None) -> list[BundleClaim]:
+        """Return coordinator bundle claims in stable ID order."""
         ...
 
     def get_feature(self, feature_id: str) -> Feature | None:

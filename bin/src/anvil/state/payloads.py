@@ -21,7 +21,7 @@ from __future__ import annotations
 import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from anvil.state.models import (
     DEFAULT_PRD_ID,
@@ -398,6 +398,73 @@ class BundleAgentObservedPayload(BaseModel):
     observation: DelegatedAgentObservation
 
 
+class BundleMemberClaimPayload(BaseModel):
+    """One internal task authorization under a public bundle claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    task_id: str
+
+
+class BundleClaimedPayload(BaseModel):
+    """Atomic coordinator claim plus all member evidence authorizations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    bundle_id: str
+    creation_event_id: str
+    claimed_by: str
+    branch: str | None = None
+    worktree_path: str | None = None
+    session_id: str | None = None
+    expected_files: list[str] = Field(default_factory=list)
+    member_claims: list[BundleMemberClaimPayload]
+    created_at: datetime.datetime
+    lease_expires_at: datetime.datetime
+    last_heartbeat_at: datetime.datetime
+
+    @field_validator("created_at", "lease_expires_at", "last_heartbeat_at")
+    @classmethod
+    def _validate_timestamps(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle claim timestamps must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+    @model_validator(mode="after")
+    def _validate_member_claims(self) -> BundleClaimedPayload:
+        if not self.member_claims:
+            raise ValueError("bundle claim requires member claims")
+        ids = [member.id for member in self.member_claims]
+        tasks = [member.task_id for member in self.member_claims]
+        if len(ids) != len(set(ids)) or len(tasks) != len(set(tasks)):
+            raise ValueError("bundle member claim ids and task ids must be unique")
+        return self
+
+
+class BundleProgressNotedPayload(BaseModel):
+    """Audit-only coordinator progress for an active bundle claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    bundle_claim_id: str
+    actor: str
+    phase: str
+    detail: str | None = None
+    member_task_ids: list[str] = Field(default_factory=list)
+    noted_at: datetime.datetime
+
+    @field_validator("noted_at")
+    @classmethod
+    def _validate_noted_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("noted_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
 class ClaimCreatedPayload(BaseModel):
     """Payload for 'claim.created'."""
 
@@ -405,6 +472,7 @@ class ClaimCreatedPayload(BaseModel):
 
     id: str
     task_id: str
+    bundle_claim_id: str | None = None
     claimed_by: str
     claim_type: str
     status: str
@@ -1014,7 +1082,10 @@ ACTION_TO_PAYLOAD: dict[str, type[BaseModel]] = {
 __all__ = [
     "ACTION_TO_PAYLOAD",
     "BundleAgentObservedPayload",
+    "BundleClaimedPayload",
     "BundleCreatedPayload",
+    "BundleMemberClaimPayload",
+    "BundleProgressNotedPayload",
     "BundleStatusChangedPayload",
     "ClaimCreatedPayload",
     "ClaimReleasedPayload",

@@ -64,11 +64,14 @@ Version history
 - v11: execution bundles (issue #171) — ``execution_bundles`` stores the
   coordinator-owned lifecycle and policy metadata; ``execution_bundle_members``
   stores ordered task membership with FK-protected history.
+- v12: coordinator bundle claims (issue #171) — ``bundle_claims`` stores one
+  public lease and ``claims.bundle_claim_id`` links internal member evidence
+  authorizations without changing standalone task claims.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 11
+SCHEMA_VERSION: int = 12
 
 
 def get_schema_version() -> int:
@@ -220,6 +223,25 @@ CREATE TABLE IF NOT EXISTS execution_bundle_members (
 CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task
     ON execution_bundle_members (task_id);
 
+CREATE TABLE IF NOT EXISTS bundle_claims (
+    id                 TEXT PRIMARY KEY,
+    bundle_id          TEXT NOT NULL UNIQUE REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    claimed_by         TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'active',
+    branch             TEXT,
+    worktree_path      TEXT,
+    session_id         TEXT,
+    expected_files     TEXT NOT NULL DEFAULT '[]',
+    member_claim_ids   TEXT NOT NULL DEFAULT '{}',
+    created_at         TEXT NOT NULL,
+    lease_expires_at   TEXT NOT NULL,
+    last_heartbeat_at  TEXT NOT NULL,
+    released_at        TEXT,
+    release_reason     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundle_claims_status ON bundle_claims (status);
+
 CREATE TABLE IF NOT EXISTS claims (
     id                 TEXT PRIMARY KEY,
     task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
@@ -229,6 +251,7 @@ CREATE TABLE IF NOT EXISTS claims (
     branch             TEXT,
     worktree_path      TEXT,
     session_id         TEXT,
+    bundle_claim_id    TEXT REFERENCES bundle_claims(id) ON DELETE RESTRICT,
     expected_files     TEXT NOT NULL DEFAULT '[]',
     created_at         TEXT NOT NULL,
     lease_expires_at   TEXT NOT NULL,

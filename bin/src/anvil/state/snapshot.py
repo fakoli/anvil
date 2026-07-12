@@ -147,7 +147,10 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
         # test depends on this so terminal claim states are part of the
         # compared snapshot.
         "claims": [
-            c.model_dump(mode="json")
+            c.model_dump(
+                mode="json",
+                exclude={"bundle_claim_id"} if c.bundle_claim_id is None else set(),
+            )
             for c in sorted(backend.list_claims(), key=lambda c: c.id)
         ],
         "reviews": [
@@ -216,4 +219,11 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
             bundle.model_dump(mode="json")
             for bundle in sorted(bundles, key=lambda bundle: bundle.id)
         ]
+        list_bundle_claims = getattr(backend, "list_bundle_claims", None)
+        bundle_claims = list_bundle_claims() if list_bundle_claims is not None else []
+        if bundle_claims:
+            state["bundle_claims"] = [
+                claim.model_dump(mode="json")
+                for claim in sorted(bundle_claims, key=lambda claim: claim.id)
+            ]
     return state

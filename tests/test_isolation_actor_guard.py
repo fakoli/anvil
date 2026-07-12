@@ -14,7 +14,6 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -311,7 +310,7 @@ class TestSchemaV10:
         try:
             with sqlite3.connect(db_path) as conn:
                 v = conn.execute("PRAGMA user_version").fetchone()[0]
-            assert v == 11
+            assert v == 12
         finally:
             b2.close()
 

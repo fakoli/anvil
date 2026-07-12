@@ -395,6 +395,11 @@ def _compute_next_ready(backend: object, actor: str) -> dict[str, object] | None
 
 def packet(
     task_id: str = typer.Argument(..., help="Task ID to render a work packet for (e.g. T001)."),  # noqa: B008
+    bundle_mode: bool = typer.Option(  # noqa: B008
+        False,
+        "--bundle",
+        help="Render an aggregate execution-bundle packet.",
+    ),
     fmt: str = typer.Option(  # noqa: B008
         "md",
         "--format",
@@ -424,6 +429,38 @@ def packet(
     backend = _open_backend(state_dir)
     try:
         _reap_stale_claims(backend)
+
+        if bundle_mode:
+            from anvil.bundles.manager import BundleError, BundleManager
+            from anvil.clock import SystemClock
+
+            execution_bundle = backend.get_bundle(task_id)
+            if execution_bundle is None:
+                typer.echo(f"Error: bundle '{task_id}' not found.", err=True)
+                raise typer.Exit(code=1)
+            try:
+                work_packet = BundleManager(
+                    backend,
+                    SystemClock(),
+                    actor=execution_bundle.coordinator,
+                    project_root=Path.cwd(),
+                ).packet(task_id)
+            except BundleError as exc:
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            packets_dir = state_dir / "packets"
+            packets_dir.mkdir(exist_ok=True)
+            if fmt == "json":
+                out_path = packets_dir / f"{safe_path_component(task_id)}.json"
+                content = json.dumps(work_packet.json_data, indent=2)
+            else:
+                out_path = packets_dir / f"{safe_path_component(task_id)}.md"
+                content = work_packet.markdown
+            out_path.write_text(content, encoding="utf-8")
+            typer.echo(f"Wrote packet to {out_path}")
+            typer.echo("")
+            typer.echo(content)
+            return
 
         # Fetch the task.
         task = backend.get_task(task_id)

@@ -54,6 +54,7 @@ from anvil.state.models import (
     DEFAULT_PRD_ID,
     PRD,
     TERMINAL_BUNDLE_STATUSES,
+    BundleClaim,
     BundleStatus,
     Claim,
     ClaimStatus,
@@ -73,7 +74,9 @@ from anvil.state.models import (
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
     BundleAgentObservedPayload,
+    BundleClaimedPayload,
     BundleCreatedPayload,
+    BundleProgressNotedPayload,
     BundleStatusChangedPayload,
     ClaimCreatedPayload,
     ClaimReleasedPayload,
@@ -1185,6 +1188,24 @@ class SqliteBackend:
         ).fetchall()
         return [self._row_to_bundle(row, conn) for row in rows]
 
+    def get_bundle_claim(self, bundle_id: str) -> BundleClaim | None:
+        """Return the public coordinator claim for a bundle, if present."""
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT * FROM bundle_claims WHERE bundle_id = ?", (bundle_id,)
+        ).fetchone()
+        return self._row_to_bundle_claim(row) if row is not None else None
+
+    def list_bundle_claims(self, *, status: str | None = None) -> list[BundleClaim]:
+        conn = self._require_conn()
+        if status is None:
+            rows = conn.execute("SELECT * FROM bundle_claims ORDER BY id").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM bundle_claims WHERE status = ? ORDER BY id", (status,)
+            ).fetchall()
+        return [self._row_to_bundle_claim(row) for row in rows]
+
     def get_claim(self, claim_id: str) -> Claim | None:
         """Return the Claim with the given ID, or None if not found."""
         conn = self._require_conn()
@@ -2188,6 +2209,40 @@ class SqliteBackend:
                 (claim_id, fingerprint),
             )
 
+    def _m_to_v12(self, conn: sqlite3.Connection) -> None:
+        """v11 -> v12: coordinator bundle claims and member authorizations."""
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS bundle_claims (
+                id TEXT PRIMARY KEY,
+                bundle_id TEXT NOT NULL UNIQUE
+                    REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                claimed_by TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                branch TEXT,
+                worktree_path TEXT,
+                session_id TEXT,
+                expected_files TEXT NOT NULL DEFAULT '[]',
+                member_claim_ids TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL,
+                last_heartbeat_at TEXT NOT NULL,
+                released_at TEXT,
+                release_reason TEXT
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bundle_claims_status "
+            "ON bundle_claims (status)"
+        )
+        try:
+            conn.execute(
+                "ALTER TABLE claims ADD COLUMN bundle_claim_id TEXT "
+                "REFERENCES bundle_claims(id) ON DELETE RESTRICT"
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -2198,6 +2253,7 @@ class SqliteBackend:
         (8, _m_to_v9),
         (9, _m_to_v10),
         (10, _m_to_v11),
+        (11, _m_to_v12),
     ]
 
     @staticmethod
@@ -2808,6 +2864,16 @@ class SqliteBackend:
                 BundleAgentObservedPayload,
                 self._check_bundle_agent_observed,
                 self._write_bundle_agent_observed,
+            ),
+            "bundle.claimed": ActionSpec(
+                BundleClaimedPayload,
+                self._check_bundle_claimed,
+                self._write_bundle_claimed,
+            ),
+            "bundle.progress_noted": ActionSpec(
+                BundleProgressNotedPayload,
+                self._check_bundle_progress_noted,
+                self._write_audit_only,
             ),
             # Phase 8: pull-applies-remote — local Task gets title/desc/status
             # rewritten from the remote payload after a non-conflict pull.
@@ -3873,6 +3939,37 @@ class SqliteBackend:
                     f"bundle.status_changed: illegal transition "
                     f"'{actual.value}' -> '{to_status.value}'."
                 )
+            if to_status is BundleStatus.implemented_unreviewed:
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may mark "
+                        "a bundle implemented."
+                    )
+                incomplete = conn.execute(
+                    """SELECT m.task_id
+                         FROM execution_bundle_members m
+                         JOIN tasks t ON t.id = m.task_id
+                        WHERE m.bundle_id = ?
+                          AND (
+                            t.status NOT IN ('needs_review', 'accepted', 'done')
+                            OR NOT EXISTS (
+                                SELECT 1 FROM evidence e
+                                 WHERE e.task_id = m.task_id
+                                   AND e.category IN ('completion', 'promotion_quality')
+                            )
+                          )
+                        ORDER BY m.position""",
+                    (payload.bundle_id,),
+                ).fetchall()
+                if incomplete:
+                    raise EventRejected(
+                        "bundle.status_changed: member completion evidence is "
+                        f"incomplete: {[row[0] for row in incomplete]}."
+                    )
         finally:
             conn.execute("COMMIT")
 
@@ -3982,6 +4079,263 @@ class SqliteBackend:
                 payload.creation_event_id,
             ),
         )
+
+    def _check_bundle_claimed(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleClaimedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate the complete coordinator reservation on a fresh snapshot."""
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected(
+                f"bundle.claimed: event target must be bundle '{payload.bundle_id}'."
+            )
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT creation_event_id, coordinator, status "
+                "FROM execution_bundles WHERE id = ?",
+                (payload.bundle_id,),
+            ).fetchone()
+            if row is None:
+                raise EventRejected(
+                    f"bundle.claimed: bundle '{payload.bundle_id}' not found."
+                )
+            if row[0] != payload.creation_event_id:
+                raise EventRejected("bundle.claimed: creation event does not match.")
+            if row[1] != payload.claimed_by:
+                raise EventRejected(
+                    f"bundle.claimed: coordinator is '{row[1]}', not "
+                    f"'{payload.claimed_by}'."
+                )
+            if row[2] != BundleStatus.planned.value:
+                raise EventRejected(
+                    f"bundle.claimed: bundle status is '{row[2]}', expected 'planned'."
+                )
+            if conn.execute(
+                "SELECT 1 FROM bundle_claims WHERE bundle_id = ?",
+                (payload.bundle_id,),
+            ).fetchone():
+                raise EventRejected("bundle.claimed: bundle already has a claim.")
+
+            member_rows = conn.execute(
+                "SELECT m.task_id, t.status, t.dependencies, t.likely_files, "
+                "t.conflict_groups FROM execution_bundle_members m "
+                "JOIN tasks t ON t.id = m.task_id WHERE m.bundle_id = ? "
+                "ORDER BY m.position",
+                (payload.bundle_id,),
+            ).fetchall()
+            member_ids = [member[0] for member in member_rows]
+            supplied_ids = [member.task_id for member in payload.member_claims]
+            if supplied_ids != member_ids:
+                raise EventRejected(
+                    "bundle.claimed: member claims must match stored member order."
+                )
+            not_ready = [row[0] for row in member_rows if row[1] != "ready"]
+            if not_ready:
+                raise EventRejected(
+                    f"bundle.claimed: member tasks are not ready: {not_ready}."
+                )
+
+            members = set(member_ids)
+            external_dependencies: list[str] = []
+            expected_files: list[str] = []
+            bundle_groups: set[str] = set()
+            for member in member_rows:
+                for dependency in json.loads(member[2] or "[]"):
+                    if dependency not in members and dependency not in external_dependencies:
+                        external_dependencies.append(dependency)
+                for file_path in json.loads(member[3] or "[]"):
+                    if file_path not in expected_files:
+                        expected_files.append(file_path)
+                bundle_groups.update(json.loads(member[4] or "[]"))
+            if payload.expected_files != expected_files:
+                raise EventRejected(
+                    "bundle.claimed: expected_files must equal the ordered member union."
+                )
+            if external_dependencies:
+                placeholders = ",".join("?" for _ in external_dependencies)
+                dep_rows = conn.execute(
+                    f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+                    tuple(external_dependencies),
+                ).fetchall()
+                dep_status = {dep[0]: dep[1] for dep in dep_rows}
+                blocked = [
+                    dep for dep in external_dependencies if dep_status.get(dep) != "done"
+                ]
+                if blocked:
+                    raise EventRejected(
+                        f"bundle.claimed: external dependencies are not done: {blocked}."
+                    )
+
+            active_rows = conn.execute(
+                "SELECT c.id, c.task_id, c.expected_files, t.conflict_groups "
+                "FROM claims c JOIN tasks t ON t.id = c.task_id "
+                "WHERE c.status = 'active' ORDER BY c.id"
+            ).fetchall()
+            conflicts: list[str] = []
+            expected_set = set(expected_files)
+            for active in active_rows:
+                overlap = sorted(expected_set & set(json.loads(active[2] or "[]")))
+                group_overlap = sorted(
+                    bundle_groups & set(json.loads(active[3] or "[]"))
+                )
+                if active[1] in members or overlap or group_overlap:
+                    conflicts.append(active[0])
+            if conflicts:
+                raise EventRejected(
+                    f"bundle.claimed: conflicts with active claims: {conflicts}."
+                )
+        finally:
+            conn.execute("COMMIT")
+
+    def _write_bundle_claimed(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleClaimedPayload,
+        event: Event,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            return
+        bundle_row = conn.execute(
+            "SELECT status, creation_event_id FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if (
+            bundle_row is None
+            or bundle_row[0] != "planned"
+            or bundle_row[1] != payload.creation_event_id
+            or conn.execute(
+                "SELECT 1 FROM bundle_claims WHERE bundle_id = ?",
+                (payload.bundle_id,),
+            ).fetchone()
+        ):
+            return
+        member_ids = [member.task_id for member in payload.member_claims]
+        placeholders = ",".join("?" for _ in member_ids)
+        if conn.execute(
+            f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) "
+            "AND status != 'ready' LIMIT 1",
+            tuple(member_ids),
+        ).fetchone() or conn.execute(
+            f"SELECT 1 FROM claims WHERE task_id IN ({placeholders}) "
+            "AND status = 'active' LIMIT 1",
+            tuple(member_ids),
+        ).fetchone():
+            return
+        member_claim_ids = {
+            member.task_id: member.id for member in payload.member_claims
+        }
+        conn.execute(
+            """INSERT INTO bundle_claims
+               (id, bundle_id, claimed_by, status, branch, worktree_path,
+                session_id, expected_files, member_claim_ids, created_at,
+                lease_expires_at, last_heartbeat_at, released_at, release_reason)
+               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+            (
+                payload.id,
+                payload.bundle_id,
+                payload.claimed_by,
+                payload.branch,
+                payload.worktree_path,
+                payload.session_id,
+                json.dumps(payload.expected_files),
+                json.dumps(member_claim_ids, sort_keys=True),
+                payload.created_at.isoformat(),
+                payload.lease_expires_at.isoformat(),
+                payload.last_heartbeat_at.isoformat(),
+            ),
+        )
+        member_rows = conn.execute(
+            "SELECT m.task_id, t.likely_files FROM execution_bundle_members m "
+            "JOIN tasks t ON t.id = m.task_id WHERE m.bundle_id = ? "
+            "ORDER BY m.position",
+            (payload.bundle_id,),
+        ).fetchall()
+        claims_by_task = {member.task_id: member.id for member in payload.member_claims}
+        for task_id, likely_files_json in member_rows:
+            claim_id = claims_by_task[task_id]
+            conn.execute(
+                """INSERT INTO claims
+                   (id, task_id, claimed_by, claim_type, status, branch,
+                    worktree_path, session_id, bundle_claim_id, expected_files,
+                    created_at, lease_expires_at, last_heartbeat_at,
+                    released_at, release_reason)
+                   VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+                (
+                    claim_id,
+                    task_id,
+                    payload.claimed_by,
+                    payload.branch,
+                    payload.worktree_path,
+                    payload.session_id,
+                    payload.id,
+                    likely_files_json or "[]",
+                    payload.created_at.isoformat(),
+                    payload.lease_expires_at.isoformat(),
+                    payload.last_heartbeat_at.isoformat(),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO claim_replay_lineages "
+                "(claim_id, creation_fingerprint) VALUES (?, ?)",
+                (claim_id, f"bundle-child:{payload.id}:{task_id}"),
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'claimed', updated_at = ? "
+                "WHERE id = ? AND status = 'ready'",
+                (event.timestamp.astimezone(datetime.UTC).isoformat(), task_id),
+            )
+        conn.execute(
+            "UPDATE execution_bundles SET status = 'active', branch = ?, "
+            "worktree_path = ?, updated_at = ? WHERE id = ? "
+            "AND creation_event_id = ? AND status = 'planned'",
+            (
+                payload.branch,
+                payload.worktree_path,
+                event.timestamp.astimezone(datetime.UTC).isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_progress_noted(
+        conn: sqlite3.Connection,
+        payload: BundleProgressNotedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.progress_noted: event target mismatch.")
+        row = conn.execute(
+            "SELECT b.creation_event_id, b.status, c.id, c.claimed_by, c.status "
+            "FROM execution_bundles b JOIN bundle_claims c ON c.bundle_id = b.id "
+            "WHERE b.id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if row is None:
+            raise EventRejected("bundle.progress_noted: active claim not found.")
+        if (
+            row[0] != payload.creation_event_id
+            or row[1] != "active"
+            or row[2] != payload.bundle_claim_id
+            or row[3] != payload.actor
+            or row[4] != "active"
+        ):
+            raise EventRejected("bundle.progress_noted: coordinator claim mismatch.")
+        members = {
+            member[0]
+            for member in conn.execute(
+                "SELECT task_id FROM execution_bundle_members WHERE bundle_id = ?",
+                (payload.bundle_id,),
+            ).fetchall()
+        }
+        outside = [task for task in payload.member_task_ids if task not in members]
+        if outside:
+            raise EventRejected(
+                f"bundle.progress_noted: non-member tasks referenced: {outside}."
+            )
 
     @staticmethod
     def _normalize_task_payload(task_dict: dict[str, Any]) -> dict[str, Any]:
@@ -4886,6 +5240,15 @@ class SqliteBackend:
                     "WHERE claim_id = ?",
                     (claim_id,),
                 )
+            return
+
+        # Replay is write-only. Preserve first-writer exclusion when a prior
+        # standalone or internal bundle authorization already owns this task;
+        # losing claim descendants fail closed because their claim row is absent.
+        if conn.execute(
+            "SELECT 1 FROM claims WHERE task_id = ? AND status = 'active' LIMIT 1",
+            (task_id,),
+        ).fetchone():
             return
 
         terminal = tuple(bundle_status.value for bundle_status in TERMINAL_BUNDLE_STATUSES)
@@ -6042,6 +6405,14 @@ class SqliteBackend:
             if isinstance(d.get(column), str):
                 d[column] = json.loads(d[column])
         return ExecutionBundle.model_validate(d)
+
+    @staticmethod
+    def _row_to_bundle_claim(row: Any) -> BundleClaim:
+        d = dict(row)
+        for column in ("expected_files", "member_claim_ids"):
+            if isinstance(d.get(column), str):
+                d[column] = json.loads(d[column])
+        return BundleClaim.model_validate(d)
 
     def _row_to_claim(self, row: Any) -> Claim:
         """Deserialise a claims row into a Claim model instance."""

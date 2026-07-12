@@ -29,6 +29,11 @@ from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
 
 def claim(
     task_id: str = typer.Argument(..., help="Task ID to claim (e.g. T001)."),  # noqa: B008
+    bundle_mode: bool = typer.Option(  # noqa: B008
+        False,
+        "--bundle",
+        help="Claim TASK_ID as an execution bundle using one coordinator lease.",
+    ),
     worktree: bool = typer.Option(  # noqa: B008
         False,
         "--worktree",
@@ -141,6 +146,77 @@ def claim(
         manager = ClaimManager(
             backend, clock, actor=resolved_actor, **lease_kwargs
         )
+
+        if bundle_mode:
+            from anvil.bundles.manager import BundleError, BundleManager
+
+            execution_bundle = backend.get_bundle(task_id)
+            if execution_bundle is None:
+                if json_output:
+                    fail("claim", f"bundle '{task_id}' not found.", code="not_found")
+                typer.echo(f"Error: bundle '{task_id}' not found.", err=True)
+                raise typer.Exit(code=1)
+            branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
+            if branch is not None:
+                branch_result = use_named_branch(
+                    branch, cwd=resolved_cwd, checkout=not worktree
+                )
+                recorded_branch = branch_result.branch or branch
+            else:
+                branch_result = create_branch_for_task(
+                    task_id,
+                    f"bundle {task_id}",
+                    cwd=resolved_cwd,
+                    branch_prefix=branch_prefix,
+                    checkout=not worktree,
+                )
+                recorded_branch = branch_result.branch
+            worktree_path: str | None = None
+            if worktree and branch_result.created and branch_result.branch:
+                wt_result = create_worktree_for_task(
+                    task_id, branch_result.branch, cwd=resolved_cwd
+                )
+                if wt_result.created:
+                    worktree_path = wt_result.path
+                else:
+                    warnings.append(f"worktree not created — {wt_result.reason}")
+            bundle_manager = BundleManager(
+                backend,
+                clock,
+                actor=resolved_actor,
+                project_root=resolved_cwd,
+                lease_minutes=lease_kwargs.get("default_lease_minutes", 240),
+            )
+            try:
+                bundle_result = bundle_manager.claim(
+                    task_id,
+                    branch=recorded_branch,
+                    worktree_path=worktree_path,
+                )
+            except BundleError as exc:
+                if json_output:
+                    fail("claim", str(exc), code="bundle_claim_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if json_output:
+                emit_success(
+                    "claim",
+                    {
+                        "bundle": dump_model(bundle_result.bundle),
+                        "claim": dump_model(bundle_result.claim),
+                        "branch": recorded_branch,
+                        "worktree": worktree_path,
+                        "warnings": warnings,
+                    },
+                )
+                return
+            typer.echo(
+                f"Claimed bundle '{task_id}' as '{resolved_actor}' with "
+                f"coordinator claim {bundle_result.claim.id}."
+            )
+            typer.echo(f"  Branch: {recorded_branch or '—'}")
+            typer.echo(f"  Worktree: {worktree_path or '—'}")
+            return
 
         # Gate: task must exist.
         task = backend.get_task(task_id)
