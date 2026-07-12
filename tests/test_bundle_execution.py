@@ -364,6 +364,34 @@ def test_bundle_graph_refusal_is_shared_by_preflight_live_and_replay(
         replay.close()
 
 
+def test_atomic_bundle_claim_rejects_max_tasks_projection_drift(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        payload = _bundle_claim_payload(backend, "BC-TOO-MANY")
+        conn = backend._require_conn()
+        conn.execute(
+            "UPDATE execution_bundles SET throughput_budget = ? WHERE id = 'B001'",
+            ('{"max_tasks": 1, "max_serial_stages": 6}',),
+        )
+        conn.commit()
+        with pytest.raises(EventRejected, match="2 members exceed max_tasks 1"):
+            backend.append(
+                _event(
+                    "bundle.claimed",
+                    "bundle",
+                    "B001",
+                    payload,
+                    actor="coordinator",
+                )
+            )
+        assert backend.get_bundle_claim("B001") is None
+    finally:
+        backend.close()
+
+
 def test_external_dependency_refuses_atomically_but_done_dependency_allows(
     tmp_path: Path,
 ) -> None:

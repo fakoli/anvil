@@ -149,6 +149,11 @@ class BundleManager:
             bundle.task_ids,
             {task.id: list(task.dependencies) for task in tasks},
         )
+        if len(bundle.task_ids) > bundle.throughput_budget.max_tasks:
+            raise BundleError(
+                f"Bundle has {len(bundle.task_ids)} members, exceeding max_tasks "
+                f"{bundle.throughput_budget.max_tasks}."
+            )
         if graph.dependency_cycle:
             raise BundleError(
                 "Bundle member dependency cycle: "

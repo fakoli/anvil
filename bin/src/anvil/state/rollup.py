@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from anvil.bundles.eligibility import analyze_bundle_graph
+from anvil.review.gates import evaluate_bundle_reviews
 
 if TYPE_CHECKING:
     from anvil.state.models import (
@@ -290,18 +291,11 @@ def compute_bundle_rollup(
                 f"active claims conflict with the bundle: {sorted(conflicting_claims)}.",
                 "Wait for or release the conflicting claims before claiming the bundle.",
             )
-        required_review_count = max(
-            3, len(bundle.review_policy.required_angles or [])
-        )
-        review_budget_exhausted = bool(
-            latest_round
-            and latest_round - 1 >= bundle.review_policy.max_rereviews
-            and len({review.reviewed_by for review in round_reviews})
-            >= required_review_count
-            and len({review.angle for review in round_reviews})
-            >= required_review_count
-            and any(review.decision.value != "approve" for review in round_reviews)
-        )
+        review_budget_exhausted = evaluate_bundle_reviews(
+            bundle.review_policy,
+            current_reviews,
+            coordinator=bundle.coordinator,
+        ).replan_required
         if bundle.status.value == "replan_required" and review_budget_exhausted:
             refuse(
                 "review_budget_exhausted",

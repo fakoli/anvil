@@ -4387,6 +4387,10 @@ class SqliteBackend:
             return
         if payload.changed_at != event.timestamp.astimezone(datetime.UTC):
             return
+        if payload.to_status not in _BUNDLE_TRANSITIONS.get(
+            payload.from_status, frozenset()
+        ):
+            return
         if payload.to_status in {
             BundleStatus.reviewed_unintegrated,
             BundleStatus.replan_required,
@@ -5122,6 +5126,12 @@ class SqliteBackend:
                     + "."
                 )
             throughput_budget = json.loads(row[3] or "{}")
+            max_tasks = int(throughput_budget.get("max_tasks", 12))
+            if len(member_ids) > max_tasks:
+                raise EventRejected(
+                    f"bundle.claimed: {len(member_ids)} members exceed "
+                    f"max_tasks {max_tasks}."
+                )
             max_serial_stages = int(throughput_budget.get("max_serial_stages", 6))
             if graph.critical_path_depth > max_serial_stages:
                 raise EventRejected(
@@ -5239,8 +5249,11 @@ class SqliteBackend:
             {row[0]: json.loads(row[2] or "[]") for row in replay_members},
         )
         throughput_budget = json.loads(bundle_row[2] or "{}")
-        if graph.dependency_cycle or graph.critical_path_depth > int(
-            throughput_budget.get("max_serial_stages", 6)
+        if (
+            len(member_ids) > int(throughput_budget.get("max_tasks", 12))
+            or graph.dependency_cycle
+            or graph.critical_path_depth
+            > int(throughput_budget.get("max_serial_stages", 6))
         ):
             return
         expected_files: list[str] = []

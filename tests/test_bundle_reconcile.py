@@ -358,3 +358,45 @@ def test_replay_result_time_ignores_forged_status_event(tmp_path) -> None:
         assert replayed.last_result_at == _NOW
     finally:
         replay.close()
+
+
+def test_replay_rejects_illegal_bundle_status_transition(tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        from tests.test_bundle_execution import _seed
+
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=_NOW,
+                actor="coordinator",
+                action="bundle.status_changed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "from": "planned",
+                    "to": "completed",
+                    "changed_at": _NOW.isoformat(),
+                },
+            ),
+        )
+    finally:
+        backend.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        replayed = replay.get_bundle("B001")
+        assert replayed is not None
+        assert replayed.status is BundleStatus.planned
+        assert replayed.last_result_at is None
+    finally:
+        replay.close()

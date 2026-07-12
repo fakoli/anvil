@@ -295,6 +295,19 @@ def test_rollup_explains_all_bundle_refusal_classes() -> None:
     assert "review_budget_exhausted" in {
         refusal["code"] for refusal in exhausted.refusals
     }
+    wrong_angles = [
+        review.model_copy(update={"angle": angle})
+        for review, angle in zip(
+            exhausted_reviews, ("foo", "bar", "baz"), strict=True
+        )
+    ]
+    generic = compute_bundle_rollup(
+        [exhausted_bundle], tasks, [], wrong_angles, now=_NOW
+    )[0]
+    assert "replan_required" in {refusal["code"] for refusal in generic.refusals}
+    assert "review_budget_exhausted" not in {
+        refusal["code"] for refusal in generic.refusals
+    }
     superseded = compute_bundle_rollup(
         [
             bundle.model_copy(
