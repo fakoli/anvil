@@ -1370,7 +1370,7 @@ def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: 
 
     migrated = _backend(tmp_path)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 12
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 13
         assert migrated.get_project().name == "Before migration"  # type: ignore[union-attr]
         tables = {
             row[0]
@@ -1384,6 +1384,69 @@ def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: 
             "claim_replay_lineages",
             "bundle_claims",
         } <= tables
+    finally:
+        migrated.close()
+
+
+def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    backend.close()
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_bundle_review_verdicts_round")
+        conn.execute("DROP TABLE bundle_review_verdicts")
+        conn.execute(
+            """CREATE TABLE bundle_review_verdicts (
+                id TEXT PRIMARY KEY,
+                bundle_id TEXT NOT NULL,
+                creation_event_id TEXT NOT NULL,
+                review_round INTEGER NOT NULL,
+                angle TEXT NOT NULL,
+                reviewed_by TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (bundle_id, creation_event_id, review_round, angle, reviewed_by)
+            )"""
+        )
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+        }
+        if "review_disposition_event_id" in columns:
+            conn.execute("ALTER TABLE execution_bundles RENAME TO execution_bundles_v13")
+            conn.execute(
+                """CREATE TABLE execution_bundles (
+                    id TEXT PRIMARY KEY,
+                    creation_event_id TEXT NOT NULL UNIQUE,
+                    prd_id TEXT NOT NULL,
+                    coordinator TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    branch TEXT,
+                    worktree_path TEXT,
+                    review_policy TEXT NOT NULL DEFAULT '{}',
+                    throughput_budget TEXT NOT NULL DEFAULT '{}',
+                    delegated_agents TEXT NOT NULL DEFAULT '[]',
+                    checkpoint TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            conn.execute("DROP TABLE execution_bundles_v13")
+        conn.execute("PRAGMA user_version = 12")
+        conn.commit()
+
+    migrated = _backend(tmp_path)
+    try:
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            bundle_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+            }
+            review_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(bundle_review_verdicts)")
+            }
+        assert "review_disposition_event_id" in bundle_columns
+        assert "disposition_event_id" in review_columns
+        assert migrated.get_schema_version() == 13
     finally:
         migrated.close()
 

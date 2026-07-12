@@ -25,6 +25,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v10     | Distinct-actor concurrency guard | `claims` adds nullable `session_id`; historical claims remain session-unknown. |
 | v11     | Execution bundles (issue #171) | Adds `execution_bundles`, FK-protected position-ordered `execution_bundle_members`, and internal `claim_replay_lineages` fencing for divergent legacy claim IDs. Bundle policy and optional agent observations are JSON columns; existing task/claim/evidence rows are unchanged. |
 | v12     | Bundle coordinator claims (issue #171) | Adds one public `bundle_claims` lease per execution bundle and nullable `claims.bundle_claim_id` links for atomic internal member evidence authorizations. Existing task claims remain unlinked and unchanged. |
+| v13     | Bundle review dispositions (issue #171) | Binds every adversarial verdict to the exact `implemented_unreviewed` transition that opened its review cycle, preventing an older quorum from satisfying later rework. |
 
 ## Execution bundles — v0-v10 → v11 auto-upgrade
 
@@ -54,6 +55,13 @@ The v12 migration creates `bundle_claims` and adds nullable
 the linked task claims are internal authorizations that preserve the existing
 task-scoped evidence and disposition contract. The nullable link leaves every
 pre-v12 task claim byte-compatible in legacy snapshots.
+
+## Bundle review dispositions — v12 → v13 auto-upgrade
+
+The v13 migration adds `execution_bundles.review_disposition_event_id` and
+rebuilds `bundle_review_verdicts` with an explicit disposition-event lineage.
+Historical verdicts are retained as `legacy-unbound`; they remain auditable but
+cannot silently satisfy a newly opened needs-review disposition.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 

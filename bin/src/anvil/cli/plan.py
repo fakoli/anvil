@@ -539,12 +539,11 @@ def plan(
         from anvil.planning.inference import (
             BundlePlanningError,
             build_bundle_plan,
-            infer_dependencies,
         )
 
         try:
             bundle_report = build_bundle_plan(
-                infer_dependencies(parsed.tasks),
+                parsed.tasks,
                 max_tasks=(
                     config.bundle_max_tasks if config else DEFAULT_BUNDLE_MAX_TASKS
                 ),

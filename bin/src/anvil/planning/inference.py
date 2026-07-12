@@ -28,6 +28,7 @@ Heuristics
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 import sys
 from dataclasses import asdict, dataclass
@@ -146,6 +147,24 @@ class BundlePlanningError(ValueError):
     """The proposed execution graph cannot be costed safely."""
 
 
+def _canonical_project_path(path: str) -> str:
+    candidate = path.strip().replace("\\", "/")
+    if (
+        not candidate
+        or candidate.startswith("/")
+        or re.match(r"^[A-Za-z]:/", candidate)
+    ):
+        raise BundlePlanningError(
+            f"bundle planning requires a project-relative file path: {path!r}"
+        )
+    normalized = posixpath.normpath(candidate)
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        raise BundlePlanningError(
+            f"bundle planning file path escapes the project: {path!r}"
+        )
+    return normalized
+
+
 def _serial_depth(tasks: list[Task]) -> int:
     by_id = {task.id: task for task in tasks}
     visiting: list[str] = []
@@ -215,7 +234,33 @@ def build_bundle_plan(
     duplicates = sorted({task_id for task_id in ids if ids.count(task_id) > 1})
     if duplicates:
         raise BundlePlanningError(f"bundle planning found duplicate task ids: {duplicates}")
-    ordered = sorted(tasks, key=lambda task: task.id)
+    ordered_input = sorted(tasks, key=lambda task: task.id)
+    canonical_files: dict[str, frozenset[str]] = {
+        task.id: frozenset(_canonical_project_path(path) for path in task.likely_files)
+        for task in ordered_input
+    }
+    display_path: dict[str, str] = {}
+    for task in ordered_input:
+        for path in task.likely_files:
+            display_path.setdefault(_canonical_project_path(path), path)
+    inferred_dependencies = {
+        task.id: set(task.dependencies) for task in ordered_input
+    }
+    for left in ordered_input:
+        for right in ordered_input:
+            if (
+                left.id != right.id
+                and canonical_files[left.id]
+                and canonical_files[left.id] < canonical_files[right.id]
+                and left.id not in inferred_dependencies[right.id]
+            ):
+                inferred_dependencies[left.id].add(right.id)
+    ordered = [
+        task.model_copy(
+            update={"dependencies": sorted(inferred_dependencies[task.id])}
+        )
+        for task in ordered_input
+    ]
     task_ids = {task.id for task in ordered}
     missing_dependencies = sorted(
         {
@@ -239,9 +284,9 @@ def build_bundle_plan(
                 adjacency[task.id].add(dependency)
                 adjacency[dependency].add(task.id)
     for index, left in enumerate(ordered):
-        left_files = set(left.likely_files)
+        left_files = set(canonical_files[left.id])
         for right in ordered[index + 1 :]:
-            overlap = left_files & set(right.likely_files)
+            overlap = left_files & set(canonical_files[right.id])
             if not overlap:
                 continue
             overlap_pair_count += 1
@@ -270,21 +315,27 @@ def build_bundle_plan(
     high_risk: set[str] = set()
     for index, component in enumerate(components, start=1):
         members = [by_id[task_id] for task_id in component]
-        member_files = [set(task.likely_files) for task in members]
+        member_files = [set(canonical_files[task.id]) for task in members]
         component_overlap = {
             path
             for left_index, left in enumerate(member_files)
             for right in member_files[left_index + 1 :]
             for path in left & right
         }
-        angles, policies = _risk_angles(members)
+        risk_members = [
+            task.model_copy(update={"likely_files": sorted(canonical_files[task.id])})
+            for task in members
+        ]
+        angles, policies = _risk_angles(risk_members)
         high_risk.update(policies)
         proposals.append(
             BundleProposal(
                 id=f"BP{index:03d}",
                 task_ids=component,
                 serial_depth=_serial_depth(members),
-                overlap_files=tuple(sorted(component_overlap)),
+                overlap_files=tuple(
+                    display_path[path] for path in sorted(component_overlap)
+                ),
                 review_angles=angles,
                 expected_reviews=max(3, len(angles)),
             )
@@ -302,7 +353,7 @@ def build_bundle_plan(
         task_count=len(ordered),
         serial_depth=serial_depth,
         overlap_pair_count=overlap_pair_count,
-        overlap_files=tuple(sorted(overlap_files)),
+        overlap_files=tuple(display_path[path] for path in sorted(overlap_files)),
         proposed_bundles=tuple(proposals),
         expected_review_count=sum(item.expected_reviews for item in proposals),
         high_risk_policies=tuple(sorted(high_risk)),

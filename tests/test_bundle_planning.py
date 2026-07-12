@@ -63,6 +63,7 @@ def _verdict(
         id=f"BR{index:03d}",
         bundle_id="B001",
         creation_event_id="E000001",
+        disposition_event_id="E000002",
         review_round=review_round,
         angle=angle,
         reviewed_by=reviewer,
@@ -116,6 +117,24 @@ def test_bundle_plan_rejects_malformed_graphs_and_limits() -> None:
     for limit in (0, -1, 501, True):
         with pytest.raises(BundlePlanningError, match="range 1-500"):
             build_bundle_plan([_task("T001", [])], max_tasks=limit)  # type: ignore[arg-type]
+
+
+def test_bundle_plan_normalizes_equivalent_project_paths_deterministically() -> None:
+    tasks = [
+        _task("T001", ["src/x.py"]),
+        _task("T002", ["./src\\x.py", "src/y.py"]),
+    ]
+    first = build_bundle_plan(tasks)
+    second = build_bundle_plan(list(reversed(tasks)))
+    assert first.to_dict() == second.to_dict()
+    assert first.overlap_pair_count == 1
+    assert first.overlap_files == ("src/x.py",)
+    assert first.proposed_bundles[0].task_ids == ("T001", "T002")
+    assert first.serial_depth == 2
+
+    for unsafe in ("../outside.py", "/absolute.py", "C:/absolute.py"):
+        with pytest.raises(BundlePlanningError, match="project"):
+            build_bundle_plan([_task("T001", [unsafe])])
 
 
 def test_review_gate_requires_three_distinct_non_author_angles() -> None:

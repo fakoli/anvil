@@ -809,6 +809,7 @@ class BundleReviewVerdict(BaseModel):
     id: ReviewID
     bundle_id: BundleID
     creation_event_id: EventID
+    disposition_event_id: EventID
     review_round: int = Field(ge=1)
     angle: str
     reviewed_by: str
@@ -908,6 +909,7 @@ class ExecutionBundle(BaseModel):
     task_ids: list[TaskID]
     coordinator: str
     status: BundleStatus = BundleStatus.planned
+    review_disposition_event_id: EventID | None = None
     branch: str | None = None
     worktree_path: str | None = None
     review_policy: BundleReviewPolicy = Field(default_factory=BundleReviewPolicy)
@@ -973,6 +975,13 @@ class ExecutionBundle(BaseModel):
                 f"delegated agent observations reference non-member tasks: {outside}"
             )
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_review_disposition(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("review_disposition_event_id") is None:
+            data.pop("review_disposition_event_id", None)
+        return data
 
 
 class Claim(BaseModel):

@@ -26,9 +26,16 @@ class BundleReviewManager:
         bundle = self._backend.get_bundle(bundle_id)
         if bundle is None:
             raise BundleReviewError(f"Bundle '{bundle_id}' not found.")
+        if bundle.review_disposition_event_id is None:
+            raise BundleReviewError(
+                "Bundle has no active needs-review disposition."
+            )
         return evaluate_bundle_reviews(
             bundle.review_policy,
-            self._backend.list_bundle_reviews(bundle_id),
+            self._backend.list_bundle_reviews(
+                bundle_id,
+                disposition_event_id=bundle.review_disposition_event_id,
+            ),
             coordinator=bundle.coordinator,
         )
 
@@ -44,6 +51,10 @@ class BundleReviewManager:
         bundle = self._backend.get_bundle(bundle_id)
         if bundle is None:
             raise BundleReviewError(f"Bundle '{bundle_id}' not found.")
+        if bundle.review_disposition_event_id is None:
+            raise BundleReviewError(
+                "Bundle has no active needs-review disposition."
+            )
         now = self._clock.now()
         try:
             self._backend.append(
@@ -57,6 +68,7 @@ class BundleReviewManager:
                         "id": f"BR{uuid.uuid4().hex[:8].upper()}",
                         "bundle_id": bundle_id,
                         "creation_event_id": bundle.creation_event_id,
+                        "disposition_event_id": bundle.review_disposition_event_id,
                         "review_round": review_round,
                         "angle": angle,
                         "reviewed_by": self._actor,

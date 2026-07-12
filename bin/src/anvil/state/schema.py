@@ -67,11 +67,13 @@ Version history
 - v12: coordinator bundle claims (issue #171) — ``bundle_claims`` stores one
   public lease and ``claims.bundle_claim_id`` links internal member evidence
   authorizations without changing standalone task claims.
+- v13: bundle review dispositions (issue #171) — review verdicts bind to the
+  exact ``implemented_unreviewed`` transition that opened their review cycle.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 12
+SCHEMA_VERSION: int = 13
 
 
 def get_schema_version() -> int:
@@ -196,6 +198,7 @@ CREATE TABLE IF NOT EXISTS execution_bundles (
     prd_id             TEXT NOT NULL REFERENCES prds(id) ON DELETE RESTRICT,
     coordinator        TEXT NOT NULL,
     status             TEXT NOT NULL DEFAULT 'planned',
+    review_disposition_event_id TEXT,
     branch             TEXT,
     worktree_path      TEXT,
     review_policy      TEXT NOT NULL DEFAULT '{}',
@@ -227,17 +230,20 @@ CREATE TABLE IF NOT EXISTS bundle_review_verdicts (
     id                 TEXT PRIMARY KEY,
     bundle_id          TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
     creation_event_id  TEXT NOT NULL,
+    disposition_event_id TEXT NOT NULL,
     review_round       INTEGER NOT NULL CHECK (review_round >= 1),
     angle              TEXT NOT NULL,
     reviewed_by        TEXT NOT NULL,
     decision           TEXT NOT NULL,
     notes              TEXT,
     created_at         TEXT NOT NULL,
-    UNIQUE (bundle_id, creation_event_id, review_round, angle, reviewed_by)
+    UNIQUE (bundle_id, creation_event_id, disposition_event_id,
+            review_round, angle, reviewed_by)
 );
 
 CREATE INDEX IF NOT EXISTS idx_bundle_review_verdicts_round
-    ON bundle_review_verdicts (bundle_id, creation_event_id, review_round);
+    ON bundle_review_verdicts
+       (bundle_id, creation_event_id, disposition_event_id, review_round);
 
 CREATE TABLE IF NOT EXISTS bundle_claims (
     id                 TEXT PRIMARY KEY,

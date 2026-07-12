@@ -409,6 +409,7 @@ class BundleReviewRecordedPayload(BaseModel):
     id: str
     bundle_id: str
     creation_event_id: str
+    disposition_event_id: str
     review_round: int = Field(ge=1)
     angle: str
     reviewed_by: str
@@ -416,7 +417,14 @@ class BundleReviewRecordedPayload(BaseModel):
     notes: str | None = None
     created_at: datetime.datetime
 
-    @field_validator("id", "bundle_id", "creation_event_id", "angle", "reviewed_by")
+    @field_validator(
+        "id",
+        "bundle_id",
+        "creation_event_id",
+        "disposition_event_id",
+        "angle",
+        "reviewed_by",
+    )
     @classmethod
     def _validate_review_identity(cls, value: str) -> str:
         if not value.strip():

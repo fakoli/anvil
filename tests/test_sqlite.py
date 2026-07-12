@@ -5516,13 +5516,13 @@ class TestSchemaVersionPhase8:
     """
 
     def test_schema_version_is_eleven(self) -> None:
-        """The coordinator-bundle ship floor is SCHEMA_VERSION == 12
+        """The coordinator-bundle review lineage ships at SCHEMA_VERSION == 13
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
         v11 = execution bundles + ordered membership, issue #171;
-        v12 = coordinator bundle claims, issue #171)."""
-        assert SCHEMA_VERSION == 12
+        v12 = coordinator bundle claims; v13 = review dispositions, issue #171)."""
+        assert SCHEMA_VERSION == 13
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -7958,7 +7958,7 @@ class TestV8ToV9Migration:
 
         b = _make_backend(tmp_path)  # initialize() runs the ladder
         try:
-            assert b.get_schema_version() == 12
+            assert b.get_schema_version() == 13
             task = b.get_task("T001")
             assert task is not None
             assert task.claims == []  # row preserved, backfilled to "no claims"
@@ -8137,7 +8137,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 12
+            assert b.get_schema_version() == SCHEMA_VERSION == 13
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.

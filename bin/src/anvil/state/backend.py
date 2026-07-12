@@ -137,7 +137,9 @@ class Backend(Protocol):
         """Return coordinator bundle claims in stable ID order."""
         ...
 
-    def list_bundle_reviews(self, bundle_id: str) -> list[BundleReviewVerdict]:
+    def list_bundle_reviews(
+        self, bundle_id: str, *, disposition_event_id: str | None = None
+    ) -> list[BundleReviewVerdict]:
         """Return adversarial verdicts for a bundle in deterministic order."""
         ...
 

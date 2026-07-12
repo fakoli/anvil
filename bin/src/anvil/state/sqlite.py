@@ -1215,13 +1215,23 @@ class SqliteBackend:
             ).fetchall()
         return [self._row_to_bundle_claim(row) for row in rows]
 
-    def list_bundle_reviews(self, bundle_id: str) -> list[BundleReviewVerdict]:
+    def list_bundle_reviews(
+        self, bundle_id: str, *, disposition_event_id: str | None = None
+    ) -> list[BundleReviewVerdict]:
         conn = self._require_conn()
-        rows = conn.execute(
-            "SELECT * FROM bundle_review_verdicts WHERE bundle_id = ? "
-            "ORDER BY review_round, angle, reviewed_by, id",
-            (bundle_id,),
-        ).fetchall()
+        if disposition_event_id is None:
+            rows = conn.execute(
+                "SELECT * FROM bundle_review_verdicts WHERE bundle_id = ? "
+                "ORDER BY disposition_event_id, review_round, angle, reviewed_by, id",
+                (bundle_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM bundle_review_verdicts WHERE bundle_id = ? "
+                "AND disposition_event_id = ? "
+                "ORDER BY review_round, angle, reviewed_by, id",
+                (bundle_id, disposition_event_id),
+            ).fetchall()
         return [BundleReviewVerdict.model_validate(dict(row)) for row in rows]
 
     def get_claim(self, claim_id: str) -> Claim | None:
@@ -1763,7 +1773,11 @@ class SqliteBackend:
                     # propagates on every DB, incl. fresh/current (review FIX 4).
                     after = msg.partition("no such column:")[2].strip().split()
                     missing_col = after[0] if after else ""
-                    if is_index and missing_col in ("prd_id", "is_default"):
+                    if is_index and missing_col in (
+                        "prd_id",
+                        "is_default",
+                        "disposition_event_id",
+                    ):
                         continue
                     raise
             conn.execute("COMMIT")
@@ -2165,6 +2179,7 @@ class SqliteBackend:
                 prd_id TEXT NOT NULL REFERENCES prds(id) ON DELETE RESTRICT,
                 coordinator TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'planned',
+                review_disposition_event_id TEXT,
                 branch TEXT,
                 worktree_path TEXT,
                 review_policy TEXT NOT NULL DEFAULT '{}',
@@ -2192,16 +2207,19 @@ class SqliteBackend:
                 bundle_id TEXT NOT NULL
                     REFERENCES execution_bundles(id) ON DELETE RESTRICT,
                 creation_event_id TEXT NOT NULL,
+                disposition_event_id TEXT NOT NULL,
                 review_round INTEGER NOT NULL CHECK (review_round >= 1),
                 angle TEXT NOT NULL,
                 reviewed_by TEXT NOT NULL,
                 decision TEXT NOT NULL,
                 notes TEXT,
                 created_at TEXT NOT NULL,
-                UNIQUE (bundle_id, creation_event_id, review_round, angle, reviewed_by)
+                UNIQUE (bundle_id, creation_event_id, disposition_event_id,
+                        review_round, angle, reviewed_by)
             )""",
             "CREATE INDEX IF NOT EXISTS idx_bundle_review_verdicts_round "
-            "ON bundle_review_verdicts (bundle_id, creation_event_id, review_round)",
+            "ON bundle_review_verdicts "
+            "(bundle_id, creation_event_id, disposition_event_id, review_round)",
             """CREATE TABLE IF NOT EXISTS claim_replay_lineages (
                 claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE RESTRICT,
                 creation_fingerprint TEXT NOT NULL,
@@ -2280,6 +2298,74 @@ class SqliteBackend:
             if "duplicate column" not in str(exc).lower():
                 raise
 
+    def _m_to_v13(self, conn: sqlite3.Connection) -> None:
+        """v12 -> v13: bind reviews to one implemented disposition event."""
+        bundle_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+        }
+        if "review_disposition_event_id" not in bundle_columns:
+            conn.execute(
+                "ALTER TABLE execution_bundles "
+                "ADD COLUMN review_disposition_event_id TEXT"
+            )
+
+        review_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(bundle_review_verdicts)")
+        }
+        if review_columns and "disposition_event_id" not in review_columns:
+            conn.execute("ALTER TABLE bundle_review_verdicts RENAME TO bundle_review_verdicts_v12")
+            conn.execute(
+                """CREATE TABLE bundle_review_verdicts (
+                    id TEXT PRIMARY KEY,
+                    bundle_id TEXT NOT NULL
+                        REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                    creation_event_id TEXT NOT NULL,
+                    disposition_event_id TEXT NOT NULL,
+                    review_round INTEGER NOT NULL CHECK (review_round >= 1),
+                    angle TEXT NOT NULL,
+                    reviewed_by TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (bundle_id, creation_event_id, disposition_event_id,
+                            review_round, angle, reviewed_by)
+                )"""
+            )
+            conn.execute(
+                "INSERT INTO bundle_review_verdicts "
+                "(id, bundle_id, creation_event_id, disposition_event_id, "
+                "review_round, angle, reviewed_by, decision, notes, created_at) "
+                "SELECT id, bundle_id, creation_event_id, 'legacy-unbound', "
+                "review_round, angle, reviewed_by, decision, notes, created_at "
+                "FROM bundle_review_verdicts_v12"
+            )
+            conn.execute("DROP TABLE bundle_review_verdicts_v12")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bundle_review_verdicts_round "
+            "ON bundle_review_verdicts "
+            "(bundle_id, creation_event_id, disposition_event_id, review_round)"
+        )
+
+        latest_by_bundle: dict[str, str] = {}
+        rows = conn.execute(
+            "SELECT id, target_id, payload_json FROM events "
+            "WHERE action = 'bundle.status_changed' AND target_kind = 'bundle' "
+            "ORDER BY rowid"
+        ).fetchall()
+        for event_id, bundle_id, payload_json in rows:
+            try:
+                payload = json.loads(payload_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if payload.get("to") == BundleStatus.implemented_unreviewed.value:
+                latest_by_bundle[bundle_id] = event_id
+        for bundle_id, event_id in latest_by_bundle.items():
+            conn.execute(
+                "UPDATE execution_bundles SET review_disposition_event_id = ? "
+                "WHERE id = ?",
+                (event_id, bundle_id),
+            )
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -2291,6 +2377,7 @@ class SqliteBackend:
         (9, _m_to_v10),
         (10, _m_to_v11),
         (11, _m_to_v12),
+        (12, _m_to_v13),
     ]
 
     @staticmethod
@@ -4114,11 +4201,12 @@ class SqliteBackend:
         conn: sqlite3.Connection, bundle_id: str, creation_event_id: str
     ) -> bool:
         bundle_row = conn.execute(
-            "SELECT coordinator, review_policy FROM execution_bundles "
+            "SELECT coordinator, review_policy, review_disposition_event_id "
+            "FROM execution_bundles "
             "WHERE id = ? AND creation_event_id = ?",
             (bundle_id, creation_event_id),
         ).fetchone()
-        if bundle_row is None:
+        if bundle_row is None or bundle_row[2] is None:
             return False
         try:
             policy = BundleReviewPolicy.model_validate(json.loads(bundle_row[1]))
@@ -4126,15 +4214,17 @@ class SqliteBackend:
             return False
         round_row = conn.execute(
             "SELECT MAX(review_round) FROM bundle_review_verdicts "
-            "WHERE bundle_id = ? AND creation_event_id = ?",
-            (bundle_id, creation_event_id),
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ?",
+            (bundle_id, creation_event_id, bundle_row[2]),
         ).fetchone()
         if round_row is None or round_row[0] is None:
             return False
         rows = conn.execute(
             "SELECT angle, reviewed_by, decision FROM bundle_review_verdicts "
-            "WHERE bundle_id = ? AND creation_event_id = ? AND review_round = ?",
-            (bundle_id, creation_event_id, round_row[0]),
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ? AND review_round = ?",
+            (bundle_id, creation_event_id, bundle_row[2], round_row[0]),
         ).fetchall()
         if any(row[2] != ReviewDecision.approve.value for row in rows):
             return False
@@ -4159,14 +4249,16 @@ class SqliteBackend:
         conn: sqlite3.Connection,
         bundle_id: str,
         creation_event_id: str,
+        disposition_event_id: str,
         review_round: int,
         policy: BundleReviewPolicy,
         coordinator: str,
     ) -> bool:
         rows = conn.execute(
             "SELECT angle, reviewed_by, decision FROM bundle_review_verdicts "
-            "WHERE bundle_id = ? AND creation_event_id = ? AND review_round = ?",
-            (bundle_id, creation_event_id, review_round),
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ? AND review_round = ?",
+            (bundle_id, creation_event_id, disposition_event_id, review_round),
         ).fetchall()
         reviewers = {row[1] for row in rows}
         angles = {row[0] for row in rows}
@@ -4190,11 +4282,12 @@ class SqliteBackend:
         conn: sqlite3.Connection, bundle_id: str, creation_event_id: str
     ) -> bool:
         row = conn.execute(
-            "SELECT coordinator, review_policy FROM execution_bundles "
+            "SELECT coordinator, review_policy, review_disposition_event_id "
+            "FROM execution_bundles "
             "WHERE id = ? AND creation_event_id = ?",
             (bundle_id, creation_event_id),
         ).fetchone()
-        if row is None:
+        if row is None or row[2] is None:
             return False
         try:
             policy = BundleReviewPolicy.model_validate(json.loads(row[1]))
@@ -4202,8 +4295,9 @@ class SqliteBackend:
             return False
         round_row = conn.execute(
             "SELECT MAX(review_round) FROM bundle_review_verdicts "
-            "WHERE bundle_id = ? AND creation_event_id = ?",
-            (bundle_id, creation_event_id),
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ?",
+            (bundle_id, creation_event_id, row[2]),
         ).fetchone()
         if round_row is None or round_row[0] is None:
             return False
@@ -4214,6 +4308,7 @@ class SqliteBackend:
                 conn,
                 bundle_id,
                 creation_event_id,
+                row[2],
                 review_round,
                 policy,
                 row[0],
@@ -4308,13 +4403,20 @@ class SqliteBackend:
                     return
         if active_claim is not None and payload.bundle_claim_id != active_claim[0]:
             return
+        disposition_event_id = (
+            event.id
+            if payload.to_status is BundleStatus.implemented_unreviewed
+            else None
+        )
         conn.execute(
-            "UPDATE execution_bundles SET status = ?, updated_at = ? "
+            "UPDATE execution_bundles SET status = ?, updated_at = ?, "
+            "review_disposition_event_id = COALESCE(?, review_disposition_event_id) "
             "WHERE id = ? AND creation_event_id = ? AND status = ? "
             "AND updated_at <= ?",
             (
                 payload.to_status,
                 payload.changed_at.isoformat(),
+                disposition_event_id,
                 payload.bundle_id,
                 payload.creation_event_id,
                 payload.from_status,
@@ -4420,12 +4522,15 @@ class SqliteBackend:
         if payload.created_at != event.timestamp.astimezone(datetime.UTC):
             raise EventRejected("bundle.review_recorded: created_at must match event time.")
         row = conn.execute(
-            "SELECT creation_event_id, coordinator, status, review_policy "
+            "SELECT creation_event_id, coordinator, status, review_policy, "
+            "review_disposition_event_id "
             "FROM execution_bundles WHERE id = ?",
             (payload.bundle_id,),
         ).fetchone()
         if row is None or row[0] != payload.creation_event_id:
             raise EventRejected("bundle.review_recorded: bundle generation not found.")
+        if row[4] != payload.disposition_event_id:
+            raise EventRejected("bundle.review_recorded: stale review disposition.")
         if row[2] != BundleStatus.implemented_unreviewed.value:
             raise EventRejected(
                 "bundle.review_recorded: bundle must be implemented_unreviewed."
@@ -4457,10 +4562,12 @@ class SqliteBackend:
             raise EventRejected(f"bundle.review_recorded: id '{payload.id}' already exists.")
         duplicate_reviewer = conn.execute(
             "SELECT 1 FROM bundle_review_verdicts WHERE bundle_id = ? "
-            "AND creation_event_id = ? AND review_round = ? AND reviewed_by = ?",
+            "AND creation_event_id = ? AND disposition_event_id = ? "
+            "AND review_round = ? AND reviewed_by = ?",
             (
                 payload.bundle_id,
                 payload.creation_event_id,
+                payload.disposition_event_id,
                 payload.review_round,
                 payload.reviewed_by,
             ),
@@ -4471,10 +4578,12 @@ class SqliteBackend:
             )
         round_count = conn.execute(
             "SELECT COUNT(*) FROM bundle_review_verdicts WHERE bundle_id = ? "
-            "AND creation_event_id = ? AND review_round = ?",
+            "AND creation_event_id = ? AND disposition_event_id = ? "
+            "AND review_round = ?",
             (
                 payload.bundle_id,
                 payload.creation_event_id,
+                payload.disposition_event_id,
                 payload.review_round,
             ),
         ).fetchone()[0]
@@ -4482,8 +4591,13 @@ class SqliteBackend:
             raise EventRejected("bundle.review_recorded: review cap reached.")
         max_round = conn.execute(
             "SELECT COALESCE(MAX(review_round), 0) FROM bundle_review_verdicts "
-            "WHERE bundle_id = ? AND creation_event_id = ?",
-            (payload.bundle_id, payload.creation_event_id),
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.disposition_event_id,
+            ),
         ).fetchone()[0]
         if payload.review_round > max_round + 1:
             raise EventRejected("bundle.review_recorded: review rounds must be contiguous.")
@@ -4492,6 +4606,7 @@ class SqliteBackend:
                 conn,
                 payload.bundle_id,
                 payload.creation_event_id,
+                payload.disposition_event_id,
                 max_round,
                 policy,
                 row[1],
@@ -4527,7 +4642,8 @@ class SqliteBackend:
         event: Event,
     ) -> None:
         row = conn.execute(
-            "SELECT creation_event_id, coordinator, status, review_policy "
+            "SELECT creation_event_id, coordinator, status, review_policy, "
+            "review_disposition_event_id "
             "FROM execution_bundles WHERE id = ?",
             (payload.bundle_id,),
         ).fetchone()
@@ -4538,6 +4654,7 @@ class SqliteBackend:
             or payload.created_at != event.timestamp.astimezone(datetime.UTC)
             or row is None
             or row[0] != payload.creation_event_id
+            or row[4] != payload.disposition_event_id
             or row[2] != BundleStatus.implemented_unreviewed.value
         ):
             return
@@ -4565,8 +4682,13 @@ class SqliteBackend:
             return
         max_round = conn.execute(
             "SELECT COALESCE(MAX(review_round), 0) FROM bundle_review_verdicts "
-            "WHERE bundle_id = ? AND creation_event_id = ?",
-            (payload.bundle_id, payload.creation_event_id),
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.disposition_event_id,
+            ),
         ).fetchone()[0]
         if payload.review_round > max_round + 1:
             return
@@ -4575,6 +4697,7 @@ class SqliteBackend:
                 conn,
                 payload.bundle_id,
                 payload.creation_event_id,
+                payload.disposition_event_id,
                 max_round,
                 policy,
                 row[1],
@@ -4583,12 +4706,14 @@ class SqliteBackend:
             return
         duplicate = conn.execute(
             "SELECT 1 FROM bundle_review_verdicts WHERE id = ? OR "
-            "(bundle_id = ? AND creation_event_id = ? AND review_round = ? "
+            "(bundle_id = ? AND creation_event_id = ? AND disposition_event_id = ? "
+            "AND review_round = ? "
             "AND reviewed_by = ?)",
             (
                 payload.id,
                 payload.bundle_id,
                 payload.creation_event_id,
+                payload.disposition_event_id,
                 payload.review_round,
                 payload.reviewed_by,
             ),
@@ -4597,10 +4722,12 @@ class SqliteBackend:
             return
         round_count = conn.execute(
             "SELECT COUNT(*) FROM bundle_review_verdicts WHERE bundle_id = ? "
-            "AND creation_event_id = ? AND review_round = ?",
+            "AND creation_event_id = ? AND disposition_event_id = ? "
+            "AND review_round = ?",
             (
                 payload.bundle_id,
                 payload.creation_event_id,
+                payload.disposition_event_id,
                 payload.review_round,
             ),
         ).fetchone()[0]
@@ -4608,12 +4735,14 @@ class SqliteBackend:
             return
         conn.execute(
             "INSERT INTO bundle_review_verdicts "
-            "(id, bundle_id, creation_event_id, review_round, angle, reviewed_by, "
-            "decision, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, bundle_id, creation_event_id, disposition_event_id, "
+            "review_round, angle, reviewed_by, decision, notes, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 payload.id,
                 payload.bundle_id,
                 payload.creation_event_id,
+                payload.disposition_event_id,
                 payload.review_round,
                 payload.angle.strip().lower(),
                 payload.reviewed_by,

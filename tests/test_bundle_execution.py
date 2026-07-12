@@ -431,6 +431,88 @@ def test_three_independent_bundle_reviews_gate_transition_and_replay(
         replay.close()
 
 
+def test_new_implemented_disposition_cannot_reuse_prior_review_quorum(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        first_disposition = backend.get_bundle("B001").review_disposition_event_id  # type: ignore[union-attr]
+        for reviewer, angle in (
+            ("reviewer-a", "correctness"),
+            ("reviewer-b", "security"),
+            ("reviewer-c", "integration"),
+        ):
+            BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
+                "B001",
+                review_round=1,
+                angle=angle,
+                decision=ReviewDecision.approve,
+            )
+        BundleReviewManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).finalize("B001")
+        bundle = backend.get_bundle("B001")
+        claim = backend.get_bundle_claim("B001")
+        assert bundle is not None and claim is not None
+        for from_status, to_status in (
+            ("reviewed_unintegrated", "replan_required"),
+            ("replan_required", "active"),
+            ("active", "implemented_unreviewed"),
+        ):
+            backend.append(
+                _event(
+                    "bundle.status_changed",
+                    "bundle",
+                    "B001",
+                    {
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "bundle_claim_id": claim.id,
+                        "from": from_status,
+                        "to": to_status,
+                        "changed_at": _NOW.isoformat(),
+                    },
+                    actor="coordinator",
+                )
+            )
+        reopened = backend.get_bundle("B001")
+        assert reopened is not None
+        assert reopened.review_disposition_event_id != first_disposition
+        gate = BundleReviewManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).gate("B001")
+        assert not gate.passed
+        assert gate.reviews_used == 0
+        with pytest.raises(BundleReviewError, match="remains incomplete"):
+            BundleReviewManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).finalize("B001")
+        assert len(backend.list_bundle_reviews("B001")) == 3
+        assert backend.list_bundle_reviews(
+            "B001",
+            disposition_event_id=reopened.review_disposition_event_id,
+        ) == []
+        reopened_disposition = reopened.review_disposition_event_id
+        source_snapshot = serialize_state(backend)
+    finally:
+        backend.close()
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert serialize_state(replay) == source_snapshot
+        replayed = replay.get_bundle("B001")
+        assert replayed is not None
+        assert replayed.review_disposition_event_id == reopened_disposition
+        assert replay.list_bundle_reviews(
+            "B001", disposition_event_id=reopened_disposition
+        ) == []
+    finally:
+        replay.close()
+
+
 def test_bundle_review_gate_rejects_self_review_duplicate_angles_and_forged_pass(
     tmp_path: Path,
 ) -> None:
@@ -623,6 +705,7 @@ def test_replay_ignores_coordinator_self_review_and_forged_gate_pass(
                     "id": "BR-FORGED",
                     "bundle_id": "B001",
                     "creation_event_id": bundle.creation_event_id,
+                    "disposition_event_id": bundle.review_disposition_event_id,
                     "review_round": 1,
                     "angle": "correctness",
                     "reviewed_by": "coordinator",
