@@ -809,6 +809,50 @@ def test_replay_ignores_attacker_bundle_release_descendant(tmp_path: Path) -> No
         replay.close()
 
 
+def test_replay_ignores_attacker_impersonating_coordinator_renewal(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source)
+        winner = _manager(source, source_root).claim("B001")
+        original_expiry = winner.claim.lease_expires_at
+        original_heartbeat = winner.claim.last_heartbeat_at
+        _append_raw(
+            source_root,
+            Event(
+                id=_next_event_id(source_root),
+                timestamp=_NOW + timedelta(minutes=1),
+                actor="attacker",
+                action="bundle.claim_renewed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_claim_id": winner.claim.id,
+                    "bundle_id": "B001",
+                    "renewed_by": "coordinator",
+                    "lease_expires_at": (_NOW + timedelta(hours=8)).isoformat(),
+                    "last_heartbeat_at": (_NOW + timedelta(minutes=1)).isoformat(),
+                },
+            ),
+        )
+    finally:
+        source.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        replayed = replay.get_bundle_claim("B001")
+        assert replayed is not None
+        assert replayed.lease_expires_at == original_expiry
+        assert replayed.last_heartbeat_at == original_heartbeat
+    finally:
+        replay.close()
+
+
 @pytest.mark.parametrize("bundle_first", [False, True])
 def test_replay_aggregate_conflict_is_first_event_wins(
     tmp_path: Path, bundle_first: bool
@@ -933,3 +977,53 @@ def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
     )
     assert progress.exit_code == 0, progress.output
     assert "Progress recorded for bundle" in progress.output
+
+    backend = _backend(state_dir)
+    try:
+        bundle_claim = backend.get_bundle_claim("B001")
+        assert bundle_claim is not None
+        claim_id = bundle_claim.id
+    finally:
+        backend.close()
+    renewed = runner.invoke(
+        app,
+        [
+            "renew",
+            claim_id,
+            "--actor",
+            "coordinator",
+            "--lease",
+            "300",
+            "--cwd",
+            str(tmp_path),
+        ],
+        env=env,
+    )
+    assert renewed.exit_code == 0, renewed.output
+    released = runner.invoke(
+        app,
+        [
+            "release",
+            claim_id,
+            "--force",
+            "--actor",
+            "recovery-operator",
+            "--reason",
+            "abandoned coordinator",
+            "--cwd",
+            str(tmp_path),
+        ],
+        env=env,
+    )
+    assert released.exit_code == 0, released.output
+    backend = _backend(state_dir)
+    try:
+        bundle_claim = backend.get_bundle_claim("B001")
+        assert bundle_claim is not None
+        assert bundle_claim.status.value == "force_released"
+        assert all(
+            backend.get_claim(claim_id).status.value == "force_released"  # type: ignore[union-attr]
+            for claim_id in bundle_claim.member_claim_ids.values()
+        )
+    finally:
+        backend.close()

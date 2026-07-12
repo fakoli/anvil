@@ -529,6 +529,7 @@ class BundleClaimReleasedPayload(BaseModel):
     bundle_id: str = Field(min_length=1)
     released_by: str = Field(min_length=1)
     release_reason: str | None = None
+    force: bool = False
 
     @field_validator("bundle_claim_id", "bundle_id", "released_by")
     @classmethod

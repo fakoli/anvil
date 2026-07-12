@@ -291,7 +291,13 @@ class BundleManager:
             raise BundleError("Renewed bundle claim disappeared.")
         return renewed
 
-    def release(self, bundle_id: str, *, reason: str | None = None) -> None:
+    def release(
+        self,
+        bundle_id: str,
+        *,
+        force: bool = False,
+        reason: str | None = None,
+    ) -> None:
         claim = self._backend.get_bundle_claim(bundle_id)
         if claim is None:
             raise BundleError(f"Bundle '{bundle_id}' has no coordinator claim.")
@@ -309,6 +315,7 @@ class BundleManager:
                         "bundle_id": bundle_id,
                         "released_by": self._actor,
                         "release_reason": reason,
+                        "force": force,
                     },
                 )
             )

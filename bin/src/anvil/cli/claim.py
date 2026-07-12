@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from typing import Any
 
@@ -639,7 +640,7 @@ def release(
         clock = SystemClock()
         _reap_stale_claims(backend)
 
-        bundle_claim = next(
+        bundle_claim = builtins.next(
             (claim for claim in backend.list_bundle_claims() if claim.id == claim_id),
             None,
         )
@@ -652,7 +653,7 @@ def release(
                     clock,
                     actor=resolved_actor,
                     project_root=_resolve_project_dir(cwd),
-                ).release(bundle_claim.bundle_id, reason=reason)
+                ).release(bundle_claim.bundle_id, force=force, reason=reason)
             except BundleError as exc:
                 if json_output:
                     fail("release", str(exc), code="bundle_claim_error")
@@ -749,7 +750,7 @@ def renew(
         clock = SystemClock()
         _reap_stale_claims(backend)
 
-        bundle_claim = next(
+        bundle_claim = builtins.next(
             (claim for claim in backend.list_bundle_claims() if claim.id == claim_id),
             None,
         )

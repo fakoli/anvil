@@ -4547,6 +4547,7 @@ class SqliteBackend:
         event_time = event.timestamp.astimezone(datetime.UTC)
         if (
             row is None
+            or event.actor != payload.renewed_by
             or row[0] != payload.renewed_by
             or payload.last_heartbeat_at != event_time
             or datetime.datetime.fromisoformat(row[1]) < event_time
@@ -4592,7 +4593,7 @@ class SqliteBackend:
         )
         if row is None or row[1] != "active":
             raise EventRejected("bundle.claim_released: active claim not found.")
-        if row[0] != payload.released_by:
+        if not payload.force and row[0] != payload.released_by:
             raise EventRejected("bundle.claim_released: only the coordinator may release.")
 
     @staticmethod
@@ -4611,14 +4612,14 @@ class SqliteBackend:
             or event.target_id != payload.bundle_id
             or event.actor != payload.released_by
             or row is None
-            or row[0] != payload.released_by
+            or (not payload.force and row[0] != payload.released_by)
         ):
             return
         SqliteBackend._write_bundle_claim_terminal(
             conn,
             bundle_claim_id=payload.bundle_claim_id,
             bundle_id=payload.bundle_id,
-            terminal_status="released",
+            terminal_status="force_released" if payload.force else "released",
             timestamp=event.timestamp.astimezone(datetime.UTC).isoformat(),
             reason=payload.release_reason,
         )
