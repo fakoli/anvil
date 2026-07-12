@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +235,48 @@ def test_bundle_model_preserves_order_and_rejects_duplicate_members() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"id": ""}, "id and coordinator must not be empty"),
+        ({"coordinator": "   "}, "id and coordinator must not be empty"),
+        (
+            {"updated_at": (_T0 - timedelta(seconds=1)).isoformat()},
+            "updated_at must not precede created_at",
+        ),
+    ],
+)
+def test_bundle_model_rejects_malformed_identity_and_chronology(
+    override: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ExecutionBundle.model_validate(
+            {**_bundle_payload(), **override, "creation_event_id": "E000001"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"id": ""}, "observation id must not be empty"),
+        ({"task_ids": ["release:T001", "release:T001"]}, "must be unique"),
+    ],
+)
+def test_delegated_agent_observation_rejects_malformed_identity_and_members(
+    override: dict[str, Any], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        DelegatedAgentObservation.model_validate(
+            {
+                "id": "obs-1",
+                "task_ids": [],
+                "status": DelegatedAgentStatus.active,
+                "observed_at": _T0,
+                **override,
+            }
+        )
+
+
 @pytest.mark.parametrize("status", list(DelegatedAgentStatus))
 def test_delegated_agent_statuses_allow_missing_handles(
     status: DelegatedAgentStatus,
@@ -347,6 +389,214 @@ def test_bundle_size_over_budget_rejects_before_sql_or_log(tmp_path: Path) -> No
                 )
             )
         assert backend.get_bundle("B001") is None
+        assert _event_count(tmp_path) == before
+    finally:
+        backend.close()
+
+
+def test_bundle_event_targets_are_bound_before_log(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        before = _event_count(tmp_path)
+        with pytest.raises(EventRejected, match="event target must be bundle 'B001'"):
+            backend.append(
+                _event(
+                    "bundle.created",
+                    _bundle_payload(),
+                    target_kind="task",
+                    target_id="release:T002",
+                )
+            )
+        assert backend.get_bundle("B001") is None
+        assert _event_count(tmp_path) == before
+
+        creation_event_id = _create_bundle(backend)
+        for action, payload in (
+            (
+                "bundle.status_changed",
+                {
+                    "bundle_id": "B001",
+                    "creation_event_id": creation_event_id,
+                    "from": "planned",
+                    "to": "active",
+                    "changed_at": _T0.isoformat(),
+                },
+            ),
+            (
+                "bundle.agent_observed",
+                {
+                    "bundle_id": "B001",
+                    "creation_event_id": creation_event_id,
+                    "observation": {
+                        "id": "wrong-target",
+                        "task_ids": [],
+                        "status": "active",
+                        "observed_at": _T0.isoformat(),
+                    },
+                },
+            ),
+        ):
+            before = _event_count(tmp_path)
+            with pytest.raises(EventRejected, match="event target must be bundle 'B001'"):
+                backend.append(
+                    _event(
+                        action,
+                        payload,
+                        target_kind="task",
+                        target_id="release:T002",
+                    )
+                )
+            assert _event_count(tmp_path) == before
+    finally:
+        backend.close()
+
+
+def test_status_change_cannot_rewind_bundle_chronology(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        creation_event_id = _create_bundle(backend)
+        before = _event_count(tmp_path)
+        with pytest.raises(EventRejected, match="must not precede"):
+            backend.append(
+                _event(
+                    "bundle.status_changed",
+                    {
+                        "bundle_id": "B001",
+                        "creation_event_id": creation_event_id,
+                        "from": "planned",
+                        "to": "active",
+                        "changed_at": (_T0 - timedelta(days=1)).isoformat(),
+                    },
+                    target_kind="bundle",
+                    target_id="B001",
+                )
+            )
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        assert bundle.status is BundleStatus.planned
+        assert bundle.updated_at == _T0
+        assert _event_count(tmp_path) == before
+    finally:
+        backend.close()
+
+
+def test_agent_observation_preserves_monotonic_bundle_chronology(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        creation_event_id = _create_bundle(backend)
+        later = _T0 + timedelta(hours=1)
+        backend.append(
+            _event(
+                "bundle.status_changed",
+                {
+                    "bundle_id": "B001",
+                    "creation_event_id": creation_event_id,
+                    "from": "planned",
+                    "to": "active",
+                    "changed_at": later.isoformat(),
+                },
+                target_kind="bundle",
+                target_id="B001",
+            )
+        )
+        backend.append(
+            _event(
+                "bundle.agent_observed",
+                {
+                    "bundle_id": "B001",
+                    "creation_event_id": creation_event_id,
+                    "observation": {
+                        "id": "late-arrival",
+                        "task_ids": [],
+                        "status": "active",
+                        "observed_at": _T0.isoformat(),
+                    },
+                },
+                target_kind="bundle",
+                target_id="B001",
+            )
+        )
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        assert bundle.updated_at == later
+        assert bundle.delegated_agents[0].id == "late-arrival"
+    finally:
+        backend.close()
+
+
+def test_claim_created_target_refusal_is_atomic(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        before = _event_count(tmp_path)
+        with pytest.raises(EventRejected, match="event target must be claim 'C001'"):
+            backend.append(
+                _event(
+                    "claim.created",
+                    _claim_payload("C001", "release:T001"),
+                    target_kind="task",
+                    target_id="release:T001",
+                )
+            )
+        assert backend.get_claim("C001") is None
+        assert backend.get_task("release:T001").status.value == "ready"  # type: ignore[union-attr]
+        assert _event_count(tmp_path) == before
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize(
+    ("claim_id", "message"),
+    [
+        ("C-other-task", "belongs to task 'release:T002'"),
+        ("C-missing", "claim 'C-missing' not found"),
+    ],
+)
+def test_evidence_claim_pairing_refuses_before_log(
+    tmp_path: Path, claim_id: str, message: str
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        backend.append(
+            _event(
+                "claim.created",
+                _claim_payload("C-task", "release:T001"),
+                target_kind="claim",
+                target_id="C-task",
+            )
+        )
+        backend.append(
+            _event(
+                "claim.created",
+                _claim_payload("C-other-task", "release:T002"),
+                target_kind="claim",
+                target_id="C-other-task",
+            )
+        )
+        before = _event_count(tmp_path)
+        with pytest.raises(EventRejected, match=message):
+            backend.append(
+                _event(
+                    "evidence.submitted",
+                    {
+                        "task_id": "release:T001",
+                        "claim_id": claim_id,
+                        "submitted_by": "worker",
+                        "evidence_id": "EV-invalid-pair",
+                        "commands_run": ["pytest -q"],
+                        "files_changed": [],
+                    },
+                    target_kind="task",
+                    target_id="release:T001",
+                )
+            )
+        assert backend.get_latest_evidence("release:T001") is None
         assert _event_count(tmp_path) == before
     finally:
         backend.close()
@@ -736,6 +986,260 @@ def test_replay_claim_bundle_exclusion_is_first_event_wins(tmp_path: Path) -> No
         replay.close()
 
 
+def test_replay_duplicate_claim_id_has_no_losing_projection_side_effects(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source)
+        _create_bundle(source, task_ids=["release:T001"])
+        source.append(
+            _event(
+                "claim.created",
+                _claim_payload("C-DUP", "release:T002"),
+                target_kind="claim",
+                target_id="C-DUP",
+            )
+        )
+    finally:
+        source.close()
+    next_id = _event_count(source_root) + 1
+    _append_raw_event(
+        source_root,
+        Event(
+            id=f"E{next_id:06d}",
+            timestamp=_T0 + timedelta(seconds=1),
+            actor="other-branch",
+            action="claim.created",
+            target_kind="claim",
+            target_id="C-DUP",
+            payload_json=_claim_payload("C-DUP", "release:T001"),
+        ),
+    )
+    next_id = _event_count(source_root) + 1
+    _append_raw_event(
+        source_root,
+        Event(
+            id=f"E{next_id:06d}",
+            timestamp=_T0 + timedelta(seconds=2),
+            actor="other-branch",
+            action="evidence.submitted",
+            target_kind="task",
+            target_id="release:T001",
+            payload_json={
+                "task_id": "release:T001",
+                "claim_id": "C-DUP",
+                "submitted_by": "other-branch",
+                "evidence_id": "EV-DUP",
+                "commands_run": ["pytest -q"],
+                "files_changed": ["src/loser.py"],
+            },
+        ),
+    )
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        claim = replay.get_claim("C-DUP")
+        assert claim is not None
+        assert claim.task_id == "release:T002"
+        assert claim.status.value == "active"
+        assert replay.get_task("release:T001").status.value == "ready"  # type: ignore[union-attr]
+        assert replay.get_bundle("B001").status is BundleStatus.planned  # type: ignore[union-attr]
+        assert replay.get_latest_evidence("release:T001") is None
+    finally:
+        replay.close()
+
+
+@pytest.mark.parametrize(
+    ("action", "payload"),
+    [
+        (
+            "claim.released",
+            {
+                "claim_id": "C-SAME",
+                "released_by": "loser",
+                "release_reason": "losing branch",
+            },
+        ),
+        (
+            "claim.renewed",
+            {
+                "claim_id": "C-SAME",
+                "renewed_by": "loser",
+                "lease_expires_at": (_T0 + timedelta(hours=5)).isoformat(),
+                "last_heartbeat_at": (_T0 + timedelta(hours=4)).isoformat(),
+            },
+        ),
+        (
+            "claim.stale",
+            {
+                "claim_id": "C-SAME",
+                "task_id": "release:T001",
+                "expired_at": (_T0 - timedelta(hours=1)).isoformat(),
+                "detected_at": (_T0 + timedelta(hours=2)).isoformat(),
+                "reason": "lease_expired",
+                "actor": "loser",
+            },
+        ),
+    ],
+)
+def test_replay_quarantines_same_task_divergent_claim_descendants(
+    tmp_path: Path, action: str, payload: dict[str, Any]
+) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source)
+        source.append(
+            _event(
+                "claim.created",
+                _claim_payload("C-SAME", "release:T001"),
+                target_kind="claim",
+                target_id="C-SAME",
+            )
+        )
+    finally:
+        source.close()
+
+    losing_creation = _claim_payload("C-SAME", "release:T001")
+    losing_creation["claimed_by"] = "loser"
+    next_id = _event_count(source_root) + 1
+    _append_raw_event(
+        source_root,
+        Event(
+            id=f"E{next_id:06d}",
+            timestamp=_T0 + timedelta(seconds=1),
+            actor="loser",
+            action="claim.created",
+            target_kind="claim",
+            target_id="C-SAME",
+            payload_json=losing_creation,
+        ),
+    )
+    next_id = _event_count(source_root) + 1
+    _append_raw_event(
+        source_root,
+        Event(
+            id=f"E{next_id:06d}",
+            timestamp=_T0 + timedelta(seconds=2),
+            actor="loser",
+            action=action,
+            target_kind="claim",
+            target_id="C-SAME",
+            payload_json=payload,
+        ),
+    )
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        claim = replay.get_claim("C-SAME")
+        assert claim is not None
+        assert claim.claimed_by == "worker"
+        assert claim.status.value == "active"
+        assert claim.lease_expires_at == _T0 + timedelta(hours=1)
+        assert claim.last_heartbeat_at == _T0
+        assert replay.get_task("release:T001").status.value == "claimed"  # type: ignore[union-attr]
+        before = _event_count(replay_root)
+        with pytest.raises(EventRejected, match="divergent creation lineages"):
+            replay.append(
+                _event(
+                    action,
+                    payload,
+                    target_kind="claim",
+                    target_id="C-SAME",
+                )
+            )
+        assert _event_count(replay_root) == before
+    finally:
+        replay.close()
+
+
+def test_replay_malformed_claim_target_cannot_supersede_bundle(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source)
+        _create_bundle(source, task_ids=["release:T001"])
+    finally:
+        source.close()
+    next_id = _event_count(source_root) + 1
+    _append_raw_event(
+        source_root,
+        Event(
+            id=f"E{next_id:06d}",
+            timestamp=_T0 + timedelta(seconds=1),
+            actor="malformed-branch",
+            action="claim.created",
+            target_kind="task",
+            target_id="release:T001",
+            payload_json=_claim_payload("C-wrong-target", "release:T001"),
+        ),
+    )
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        assert replay.get_claim("C-wrong-target") is None
+        assert replay.get_task("release:T001").status.value == "ready"  # type: ignore[union-attr]
+        assert replay.get_bundle("B001").status is BundleStatus.planned  # type: ignore[union-attr]
+    finally:
+        replay.close()
+
+
+def test_replay_claim_supersession_preserves_monotonic_bundle_chronology(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source)
+        _create_bundle(source, task_ids=["release:T001"])
+    finally:
+        source.close()
+    next_id = _event_count(source_root) + 1
+    _append_raw_event(
+        source_root,
+        Event(
+            id=f"E{next_id:06d}",
+            # Lexically later than 18:00+00:00, but chronologically one hour
+            # earlier. Claim projection must compare/store canonical UTC.
+            timestamp=datetime(
+                2026, 7, 11, 19, 0, tzinfo=timezone(timedelta(hours=2))
+            ),
+            actor="claim-branch",
+            action="claim.created",
+            target_kind="claim",
+            target_id="C-older-clock",
+            payload_json=_claim_payload("C-older-clock", "release:T001"),
+        ),
+    )
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        bundle = replay.get_bundle("B001")
+        assert bundle is not None
+        assert bundle.status is BundleStatus.superseded
+        assert bundle.updated_at == _T0
+    finally:
+        replay.close()
+
+
 def test_replay_ignores_stale_divergent_status_transition(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
     replay_root = tmp_path / "replay"
@@ -804,28 +1308,30 @@ def test_empty_snapshot_omits_bundles_for_legacy_byte_shape(tmp_path: Path) -> N
 
 def test_v10_database_auto_migrates_to_v11_without_losing_project(tmp_path: Path) -> None:
     backend = _backend(tmp_path)
-    backend.append(
-        _event(
-            "project.created",
-            {
-                "id": "proj",
-                "name": "Before migration",
-                "description": "",
-                "created_at": _T0.isoformat(),
-                "updated_at": _T0.isoformat(),
-            },
-            target_kind="project",
-            target_id="proj",
+    try:
+        backend.append(
+            _event(
+                "project.created",
+                {
+                    "id": "proj",
+                    "name": "Before migration",
+                    "description": "",
+                    "created_at": _T0.isoformat(),
+                    "updated_at": _T0.isoformat(),
+                },
+                target_kind="project",
+                target_id="proj",
+            )
         )
-    )
-    backend.close()
+    finally:
+        backend.close()
 
-    conn = sqlite3.connect(tmp_path / "state.db")
-    conn.execute("DROP TABLE execution_bundle_members")
-    conn.execute("DROP TABLE execution_bundles")
-    conn.execute("PRAGMA user_version = 10")
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("DROP TABLE execution_bundle_members")
+        conn.execute("DROP TABLE execution_bundles")
+        conn.execute("DROP TABLE claim_replay_lineages")
+        conn.execute("PRAGMA user_version = 10")
+        conn.commit()
 
     migrated = _backend(tmp_path)
     try:
@@ -837,6 +1343,84 @@ def test_v10_database_auto_migrates_to_v11_without_losing_project(tmp_path: Path
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"execution_bundles", "execution_bundle_members"} <= tables
+        assert {
+            "execution_bundles",
+            "execution_bundle_members",
+            "claim_replay_lineages",
+        } <= tables
     finally:
         migrated.close()
+
+
+def test_v10_upgrade_seeds_claim_lineage_before_log_ahead_catchup(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        backend.append(
+            _event(
+                "claim.created",
+                _claim_payload("C-UPGRADE", "release:T001"),
+                target_kind="claim",
+                target_id="C-UPGRADE",
+            )
+        )
+    finally:
+        backend.close()
+
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("DROP TABLE execution_bundle_members")
+        conn.execute("DROP TABLE execution_bundles")
+        conn.execute("DROP TABLE claim_replay_lineages")
+        conn.execute("PRAGMA user_version = 10")
+        conn.commit()
+
+    losing_creation = _claim_payload("C-UPGRADE", "release:T001")
+    losing_creation["claimed_by"] = "loser"
+    next_id = _event_count(tmp_path) + 1
+    _append_raw_event(
+        tmp_path,
+        Event(
+            id=f"E{next_id:06d}",
+            timestamp=_T0 + timedelta(seconds=1),
+            actor="loser",
+            action="claim.created",
+            target_kind="claim",
+            target_id="C-UPGRADE",
+            payload_json=losing_creation,
+        ),
+    )
+    next_id = _event_count(tmp_path) + 1
+    _append_raw_event(
+        tmp_path,
+        Event(
+            id=f"E{next_id:06d}",
+            timestamp=_T0 + timedelta(seconds=2),
+            actor="loser",
+            action="claim.released",
+            target_kind="claim",
+            target_id="C-UPGRADE",
+            payload_json={
+                "claim_id": "C-UPGRADE",
+                "released_by": "loser",
+                "release_reason": "losing lineage",
+            },
+        ),
+    )
+
+    upgraded = _backend(tmp_path)
+    try:
+        claim = upgraded.get_claim("C-UPGRADE")
+        assert claim is not None
+        assert claim.claimed_by == "worker"
+        assert claim.status.value == "active"
+        assert upgraded.get_task("release:T001").status.value == "claimed"  # type: ignore[union-attr]
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            collision = conn.execute(
+                "SELECT collision_detected FROM claim_replay_lineages "
+                "WHERE claim_id = 'C-UPGRADE'"
+            ).fetchone()
+        assert collision == (1,)
+    finally:
+        upgraded.close()

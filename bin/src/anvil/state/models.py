@@ -804,6 +804,20 @@ class DelegatedAgentObservation(BaseModel):
     observed_at: datetime.datetime
     detail: str | None = None
 
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("delegated agent observation id must not be empty")
+        return v
+
+    @field_validator("task_ids")
+    @classmethod
+    def _validate_task_ids(cls, v: list[TaskID]) -> list[TaskID]:
+        if len(v) != len(set(v)):
+            raise ValueError("delegated agent observation task_ids must be unique")
+        return v
+
     @field_validator("observed_at", mode="after")
     @classmethod
     def _validate_observed_at(cls, v: datetime.datetime) -> datetime.datetime:
@@ -854,6 +868,13 @@ class ExecutionBundle(BaseModel):
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
+    @field_validator("id", "coordinator")
+    @classmethod
+    def _validate_required_identity(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("execution bundle id and coordinator must not be empty")
+        return v
+
     @field_validator("task_ids")
     @classmethod
     def _validate_task_ids(cls, v: list[TaskID]) -> list[TaskID]:
@@ -880,6 +901,8 @@ class ExecutionBundle(BaseModel):
 
     @model_validator(mode="after")
     def _validate_members_fit_budget(self) -> ExecutionBundle:
+        if self.updated_at < self.created_at:
+            raise ValueError("execution bundle updated_at must not precede created_at")
         if len(self.task_ids) > self.throughput_budget.max_tasks:
             raise ValueError(
                 f"execution bundle has {len(self.task_ids)} tasks but its "

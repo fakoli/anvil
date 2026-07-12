@@ -86,6 +86,13 @@ and the full 24-tool surface returns the moment the env flag is set. Use it for
 the planning phase; the steady-state execution loop needs none of the 10.
 
 ## Notes
+- Review disposition policy: before presenting any Anvil task in
+  `needs_review` for acceptance, run at least three independent adversarial
+  reviews with distinct angles. Treat any unresolved blocking finding as a
+  failed gate; fix it and repeat the affected reviews. Record the reviewers,
+  angles, verdicts, and supporting commands in the task or PR evidence. This
+  review gate is automatic for every task, but it does not replace the human
+  confirmation required before the immutable `anvil apply --approve` event.
 - Claude Code and Codex can run Anvil's non-blocking
   SessionStart/PreToolUse/PostToolUse **hooks** from `hooks/hooks.json`; the
   manifest uses a shell-free `uv run --quiet ... anvil.cli hook dispatch ...`

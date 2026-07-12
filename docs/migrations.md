@@ -23,11 +23,11 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v8      | Multi-PRD revisions (v0.3 / T023) | `prds` adds `revision INTEGER NOT NULL DEFAULT 1` — the per-PRD monotonic revision counter bumped by `prd.revised`. Purely additive: the DEFAULT backfills every pre-existing v7 PRD row to revision 1. A separate version from v7 (not folded in) because v7 already shipped without it; a DB already stamped v7 must re-enter the migration ladder via the v8 bump to grow the column.      |
 | v9      | Evidence contracts (issue #153) | `tasks` adds `claims`; `evidence` adds `category`. Additive defaults preserve pre-contract behavior. |
 | v10     | Distinct-actor concurrency guard | `claims` adds nullable `session_id`; historical claims remain session-unknown. |
-| v11     | Execution bundles (issue #171) | Adds `execution_bundles` plus FK-protected, position-ordered `execution_bundle_members`. Bundle policy and optional agent observations are JSON columns; existing task/claim/evidence rows are unchanged. |
+| v11     | Execution bundles (issue #171) | Adds `execution_bundles`, FK-protected position-ordered `execution_bundle_members`, and internal `claim_replay_lineages` fencing for divergent legacy claim IDs. Bundle policy and optional agent observations are JSON columns; existing task/claim/evidence rows are unchanged. |
 
 ## Execution bundles — v0-v10 → v11 auto-upgrade
 
-The v11 migration is additive. It creates two new tables and three indexes; it
+The v11 migration is additive. It creates three new tables and three indexes; it
 does not rewrite existing entities:
 
 - `execution_bundles` stores coordinator-owned lifecycle, review policy,
@@ -35,6 +35,9 @@ does not rewrite existing entities:
 - `execution_bundle_members` stores ordered task membership with `RESTRICT`
   foreign keys so task or bundle history cannot be deleted underneath an audit
   record.
+- `claim_replay_lineages` fingerprints immutable claim-creation facts and
+  fail-closes descendants when merged legacy events reuse one claim ID for
+  divergent creations that cannot identify a unique lineage.
 
 Current DDL runs before the ordered migration ladder, and the v10→v11 ladder
 step repeats the table/index creation idempotently. The schema version is

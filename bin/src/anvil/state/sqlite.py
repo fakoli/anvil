@@ -25,6 +25,7 @@ try:
     import msvcrt  # Windows byte-range file locking (locking)
 except ImportError:  # POSIX: msvcrt is Windows-only.
     msvcrt = None  # type: ignore[assignment]
+import datetime
 import json
 import logging
 import os
@@ -2147,9 +2148,45 @@ class SqliteBackend:
             )""",
             "CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task "
             "ON execution_bundle_members (task_id)",
+            """CREATE TABLE IF NOT EXISTS claim_replay_lineages (
+                claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE RESTRICT,
+                creation_fingerprint TEXT NOT NULL,
+                collision_detected INTEGER NOT NULL DEFAULT 0
+                    CHECK (collision_detected IN (0, 1))
+            )""",
         )
         for ddl in statements:
             conn.execute(ddl)
+
+        # Genuine v10 projections already contain claims. Seed their immutable
+        # creation fingerprint from the earliest stored creation event before
+        # forward catch-up can encounter a divergent duplicate. If historical
+        # event data is unavailable or malformed, use an explicit unknown
+        # sentinel: any future claim.created payload will differ and therefore
+        # fail closed by marking the lineage collided.
+        claim_rows = conn.execute("SELECT id FROM claims ORDER BY id").fetchall()
+        for claim_row in claim_rows:
+            claim_id = claim_row[0]
+            event_row = conn.execute(
+                "SELECT payload_json FROM events "
+                "WHERE action = 'claim.created' AND target_kind = 'claim' "
+                "AND target_id = ? ORDER BY rowid LIMIT 1",
+                (claim_id,),
+            ).fetchone()
+            fingerprint = f"legacy-unknown:{claim_id}"
+            if event_row is not None:
+                try:
+                    creation_payload = ClaimCreatedPayload.model_validate(
+                        json.loads(event_row[0])
+                    )
+                    fingerprint = self._claim_creation_fingerprint(creation_payload)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            conn.execute(
+                "INSERT OR IGNORE INTO claim_replay_lineages "
+                "(claim_id, creation_fingerprint) VALUES (?, ?)",
+                (claim_id, fingerprint),
+            )
 
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
@@ -3612,7 +3649,11 @@ class SqliteBackend:
         event: EventDraft,
     ) -> None:
         """Validate complete bundle membership against a fresh WAL snapshot."""
-        _ = event
+        if event.target_kind != "bundle" or event.target_id != payload.id:
+            raise EventRejected(
+                "bundle.created: event target must be bundle "
+                f"'{payload.id}', got {event.target_kind} '{event.target_id}'."
+            )
         try:
             bundle_data = payload.model_dump(mode="json")
             # The log authority assigns the real creation_event_id only after
@@ -3706,6 +3747,8 @@ class SqliteBackend:
         event: Event,
     ) -> None:
         """Persist the complete creation fact and ordered membership."""
+        if event.target_kind != "bundle" or event.target_id != payload.id:
+            return
         bundle_data = payload.model_dump(mode="json")
         bundle_data["creation_event_id"] = event.id
         bundle = ExecutionBundle.model_validate(bundle_data)
@@ -3783,7 +3826,11 @@ class SqliteBackend:
         event: EventDraft,
     ) -> None:
         """Reject stale or illegal bundle lifecycle transitions before logging."""
-        _ = event
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected(
+                "bundle.status_changed: event target must be bundle "
+                f"'{payload.bundle_id}', got {event.target_kind} '{event.target_id}'."
+            )
         try:
             from_status = BundleStatus(payload.from_status)
             to_status = BundleStatus(payload.to_status)
@@ -3792,7 +3839,8 @@ class SqliteBackend:
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
-                "SELECT status, creation_event_id FROM execution_bundles WHERE id = ?",
+                "SELECT status, creation_event_id, updated_at "
+                "FROM execution_bundles WHERE id = ?",
                 (payload.bundle_id,),
             ).fetchone()
             if row is None:
@@ -3804,6 +3852,12 @@ class SqliteBackend:
                 raise EventRejected(
                     f"bundle.status_changed: creation event does not match "
                     f"bundle '{payload.bundle_id}'."
+                )
+            current_updated_at = datetime.datetime.fromisoformat(row[2])
+            if payload.changed_at < current_updated_at:
+                raise EventRejected(
+                    f"bundle.status_changed: changed_at for '{payload.bundle_id}' "
+                    "must not precede its current updated_at."
                 )
             if actual is to_status:
                 raise IdempotentNoOp(
@@ -3828,16 +3882,19 @@ class SqliteBackend:
         payload: BundleStatusChangedPayload,
         event: Event,
     ) -> None:
-        _ = event
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            return
         conn.execute(
             "UPDATE execution_bundles SET status = ?, updated_at = ? "
-            "WHERE id = ? AND creation_event_id = ? AND status = ?",
+            "WHERE id = ? AND creation_event_id = ? AND status = ? "
+            "AND updated_at <= ?",
             (
                 payload.to_status,
                 payload.changed_at.isoformat(),
                 payload.bundle_id,
                 payload.creation_event_id,
                 payload.from_status,
+                payload.changed_at.isoformat(),
             ),
         )
 
@@ -3848,7 +3905,11 @@ class SqliteBackend:
         event: EventDraft,
     ) -> None:
         """Validate observation ownership only; handle state never gates lifecycle."""
-        _ = event
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected(
+                "bundle.agent_observed: event target must be bundle "
+                f"'{payload.bundle_id}', got {event.target_kind} '{event.target_id}'."
+            )
         row = conn.execute(
             "SELECT creation_event_id FROM execution_bundles WHERE id = ?",
             (payload.bundle_id,),
@@ -3879,8 +3940,10 @@ class SqliteBackend:
         payload: BundleAgentObservedPayload,
         event: Event,
     ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            return
         row = conn.execute(
-            "SELECT delegated_agents FROM execution_bundles "
+            "SELECT delegated_agents, updated_at FROM execution_bundles "
             "WHERE id = ? AND creation_event_id = ?",
             (payload.bundle_id, payload.creation_event_id),
         ).fetchone()
@@ -3888,17 +3951,33 @@ class SqliteBackend:
             return
         observations = json.loads(row[0] or "[]") if row is not None else []
         new_observation = payload.observation.model_dump(mode="json")
+        previous = next(
+            (
+                item
+                for item in observations
+                if item.get("id") == payload.observation.id
+            ),
+            None,
+        )
+        if previous is not None:
+            previous_observed_at = datetime.datetime.fromisoformat(
+                previous["observed_at"]
+            )
+            if previous_observed_at >= payload.observation.observed_at:
+                return
         observations = [
             item for item in observations if item.get("id") != payload.observation.id
         ]
         observations.append(new_observation)
         observations.sort(key=lambda item: item["id"])
+        current_updated_at = datetime.datetime.fromisoformat(row[1])
+        projected_updated_at = max(current_updated_at, event.timestamp)
         conn.execute(
             "UPDATE execution_bundles SET delegated_agents = ?, updated_at = ? "
             "WHERE id = ? AND creation_event_id = ?",
             (
                 json.dumps(observations, sort_keys=True),
-                event.timestamp.isoformat(),
+                projected_updated_at.isoformat(),
                 payload.bundle_id,
                 payload.creation_event_id,
             ),
@@ -3954,7 +4033,6 @@ class SqliteBackend:
         The payload was already validated by ``_check_task_created``; the
         ``model_validate`` here is an infallible rebuild.
         """
-        _ = event
         task_dict = self._normalize_task_payload(payload.model_dump(mode="json"))
         task = Task.model_validate(task_dict)
         self._insert_task_row(conn, task)
@@ -4431,6 +4509,34 @@ class SqliteBackend:
     # Phase 4 handlers — claim lifecycle
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _claim_creation_fingerprint(payload: ClaimCreatedPayload) -> str:
+        """Return a canonical identity for one immutable claim creation fact."""
+        return json.dumps(
+            payload.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _claim_replay_collision(conn: sqlite3.Connection, claim_id: str) -> bool:
+        row = conn.execute(
+            "SELECT collision_detected FROM claim_replay_lineages "
+            "WHERE claim_id = ?",
+            (claim_id,),
+        ).fetchone()
+        return row is not None and bool(row[0])
+
+    @classmethod
+    def _reject_claim_replay_collision(
+        cls, conn: sqlite3.Connection, claim_id: str, action: str
+    ) -> None:
+        if cls._claim_replay_collision(conn, claim_id):
+            raise EventRejected(
+                f"{action}: claim '{claim_id}' has divergent creation lineages; "
+                "descendant events are quarantined."
+            )
+
     def _check_claim_created(
         self,
         conn: sqlite3.Connection,
@@ -4466,7 +4572,11 @@ class SqliteBackend:
         defaults to False, but replay applies via ``_write_*`` only and never
         runs this check, so the default is irrelevant on the replay path.
         """
-        _ = event
+        if event.target_kind != "claim" or event.target_id != payload.id:
+            raise EventRejected(
+                "claim.created: event target must be claim "
+                f"'{payload.id}', got {event.target_kind} '{event.target_id}'."
+            )
         # WAL snapshot freshness (TOCTOU correctness). This check runs in the
         # append() validation phase, and the connection is in autocommit mode.
         # Earlier reads in THIS same claim command (get_task / get_prd /
@@ -4745,7 +4855,38 @@ class SqliteBackend:
         branch: str | None = payload.branch
         worktree_path: str | None = payload.worktree_path
         expected_files = payload.expected_files
-        timestamp: str = event.timestamp.isoformat()
+        timestamp: str = event.timestamp.astimezone(datetime.UTC).isoformat()
+
+        if event.target_kind != "claim" or event.target_id != claim_id:
+            return
+
+        # A claim ID identifies one immutable creation fact. Merged branches
+        # can independently reuse an ID for different tasks; the first
+        # HLC-ordered fact wins, and a losing duplicate must have no projection
+        # side effects on either its task or a competing bundle.
+        existing_claim = conn.execute(
+            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if existing_claim is not None:
+            fingerprint = self._claim_creation_fingerprint(payload)
+            lineage = conn.execute(
+                "SELECT creation_fingerprint FROM claim_replay_lineages "
+                "WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
+            if lineage is None:
+                conn.execute(
+                    "INSERT INTO claim_replay_lineages "
+                    "(claim_id, creation_fingerprint) VALUES (?, ?)",
+                    (claim_id, fingerprint),
+                )
+            elif lineage[0] != fingerprint:
+                conn.execute(
+                    "UPDATE claim_replay_lineages SET collision_detected = 1 "
+                    "WHERE claim_id = ?",
+                    (claim_id,),
+                )
+            return
 
         terminal = tuple(bundle_status.value for bundle_status in TERMINAL_BUNDLE_STATUSES)
         terminal_placeholders = ",".join("?" for _ in terminal)
@@ -4757,7 +4898,11 @@ class SqliteBackend:
         # this ordering in _validate_claim_created_locked.
         conn.execute(
             f"""UPDATE execution_bundles
-                   SET status = 'superseded', updated_at = ?
+                   SET status = 'superseded',
+                       updated_at = CASE
+                           WHEN updated_at < ? THEN ?
+                           ELSE updated_at
+                       END
                  WHERE id IN (
                     SELECT b.id
                       FROM execution_bundle_members m
@@ -4765,7 +4910,7 @@ class SqliteBackend:
                      WHERE m.task_id = ?
                        AND b.status NOT IN ({terminal_placeholders})
                  )""",
-            (timestamp, task_id) + terminal,
+            (timestamp, timestamp, task_id) + terminal,
         )
 
         # INSERT OR IGNORE: idempotent on replay — duplicate claim.created events
@@ -4793,6 +4938,11 @@ class SqliteBackend:
                 lease_expires_at,
                 last_heartbeat_at,
             ),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO claim_replay_lineages "
+            "(claim_id, creation_fingerprint) VALUES (?, ?)",
+            (claim_id, self._claim_creation_fingerprint(payload)),
         )
 
         # Side-effect: transition the task status from 'ready' → 'claimed'.
@@ -4840,6 +4990,7 @@ class SqliteBackend:
         """
         _ = event
         claim_id: str = payload.claim_id
+        self._reject_claim_replay_collision(conn, claim_id, "claim.released")
         row = conn.execute(
             "SELECT status FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
@@ -4879,6 +5030,8 @@ class SqliteBackend:
         advanced).
         """
         claim_id: str = payload.claim_id
+        if self._claim_replay_collision(conn, claim_id):
+            return
         release_reason: str | None = payload.release_reason
         force: bool = payload.force
         timestamp: str = event.timestamp.isoformat()
@@ -4934,6 +5087,7 @@ class SqliteBackend:
         """
         _ = event
         claim_id: str = payload.claim_id
+        self._reject_claim_replay_collision(conn, claim_id, "claim.renewed")
         row = conn.execute(
             "SELECT status FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
@@ -4967,8 +5121,10 @@ class SqliteBackend:
         The event-level timestamp is not used here — the renewed lease timestamps
         come from the payload itself.
         """
-        _ = event
         claim_id: str = payload.claim_id
+        if self._claim_replay_collision(conn, claim_id):
+            return
+        _ = event
         lease_expires_at: str = payload.lease_expires_at
         last_heartbeat_at: str = payload.last_heartbeat_at
 
@@ -4999,6 +5155,7 @@ class SqliteBackend:
         """
         _ = event
         claim_id: str = payload.claim_id
+        self._reject_claim_replay_collision(conn, claim_id, "claim.stale")
         row = conn.execute(
             "SELECT status FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
@@ -5035,6 +5192,8 @@ class SqliteBackend:
         UPDATE is a no-op — that is intentional and not an error.
         """
         claim_id: str = payload.claim_id
+        if self._claim_replay_collision(conn, claim_id):
+            return
         timestamp: str = event.timestamp.isoformat()
 
         conn.execute(
@@ -5110,6 +5269,20 @@ class SqliteBackend:
         evidence_id: str = payload.evidence_id
         task_id: str = payload.task_id
 
+        claim_row = conn.execute(
+            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if claim_row is None:
+            raise EventRejected(
+                f"evidence.submitted: claim '{claim_id}' not found."
+            )
+        if claim_row[0] != task_id:
+            raise EventRejected(
+                f"evidence.submitted: claim '{claim_id}' belongs to task "
+                f"'{claim_row[0]}', not '{task_id}'."
+            )
+        self._reject_claim_replay_collision(conn, claim_id, "evidence.submitted")
+
         # CL-8 idempotency guard: a second submit under a DIFFERENT evidence_id
         # is a double-submit; the old handler emitted a warn line and returned.
         existing_row = conn.execute(
@@ -5181,6 +5354,15 @@ class SqliteBackend:
         """
         task_id: str = payload.task_id
         claim_id: str = payload.claim_id
+        claim_row = conn.execute(
+            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if (
+            claim_row is None
+            or claim_row[0] != task_id
+            or self._claim_replay_collision(conn, claim_id)
+        ):
+            return
         submitted_by: str = payload.submitted_by
         evidence_id: str = payload.evidence_id
         commands_run: list[Any] = payload.commands_run

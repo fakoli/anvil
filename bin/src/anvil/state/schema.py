@@ -239,6 +239,16 @@ CREATE TABLE IF NOT EXISTS claims (
 
 CREATE INDEX IF NOT EXISTS idx_claims_task_status ON claims (task_id, status);
 
+-- Internal replay quarantine for divergent branches that reused one claim ID
+-- for different immutable creation facts. Claim child events lack a creation
+-- lineage token in the legacy event contract, so quarantining descendants is
+-- the only deterministic fail-closed projection.
+CREATE TABLE IF NOT EXISTS claim_replay_lineages (
+    claim_id              TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE RESTRICT,
+    creation_fingerprint  TEXT NOT NULL,
+    collision_detected    INTEGER NOT NULL DEFAULT 0 CHECK (collision_detected IN (0, 1))
+);
+
 CREATE TABLE IF NOT EXISTS evidence (
     id                  TEXT PRIMARY KEY,
     task_id             TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
