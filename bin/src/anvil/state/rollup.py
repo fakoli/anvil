@@ -91,6 +91,9 @@ class BundleRollupEntry(BaseModel):
     checkpoint: dict[str, Any] | None = None
     checkpoint_warning: str | None = None
     superseded_by: str | None = None
+    throughput: dict[str, int | bool] = Field(default_factory=dict)
+    claimable: bool = False
+    refusals: list[dict[str, str]] = Field(default_factory=list)
 
 
 def compute_bundle_rollup(
@@ -98,8 +101,10 @@ def compute_bundle_rollup(
     tasks: list[Task],
     bundle_claims: list[BundleClaim],
     reviews: list[BundleReviewVerdict],
+    active_claims: list[Claim] | None = None,
     *,
     now: datetime.datetime,
+    actor: str | None = None,
 ) -> list[BundleRollupEntry]:
     tasks_by_id = {task.id: task for task in tasks}
     claims_by_bundle: dict[str, BundleClaim] = {}
@@ -121,6 +126,7 @@ def compute_bundle_rollup(
         "completed",
     }
     done_statuses = {"accepted", "done"}
+    active_claims = active_claims or []
     for bundle in sorted(bundles, key=lambda item: item.id):
         members = [tasks_by_id[task_id] for task_id in bundle.task_ids if task_id in tasks_by_id]
         counts: dict[str, int] = {}
@@ -205,6 +211,129 @@ def compute_bundle_rollup(
                 "Reviewed bundle has no delivery checkpoint; record a commit or PR."
             )
         claim = claims_by_bundle.get(bundle.id)
+        refusals: list[dict[str, str]] = []
+
+        def refuse(
+            code: str,
+            detail: str,
+            remediation: str,
+            *,
+            refusals: list[dict[str, str]] = refusals,
+        ) -> None:
+            refusals.append(
+                {"code": code, "detail": detail, "remediation": remediation}
+            )
+
+        throughput = {
+            "tasks": len(bundle.task_ids),
+            "max_tasks": bundle.throughput_budget.max_tasks,
+            "serial_stages": critical_depth,
+            "max_serial_stages": bundle.throughput_budget.max_serial_stages,
+            "within_budget": (
+                len(bundle.task_ids) <= bundle.throughput_budget.max_tasks
+                and critical_depth <= bundle.throughput_budget.max_serial_stages
+            ),
+        }
+        if len(bundle.task_ids) > bundle.throughput_budget.max_tasks:
+            refuse(
+                "throughput_tasks",
+                f"{len(bundle.task_ids)} members exceed max_tasks "
+                f"{bundle.throughput_budget.max_tasks}.",
+                "Split or replan the bundle with fewer member tasks.",
+            )
+        if critical_depth > bundle.throughput_budget.max_serial_stages:
+            refuse(
+                "throughput_serial_stages",
+                f"critical path {critical_depth} exceeds max_serial_stages "
+                f"{bundle.throughput_budget.max_serial_stages}.",
+                "Split the dependency chain or explicitly replan the bundle.",
+            )
+        missing_members = [task_id for task_id in bundle.task_ids if task_id not in tasks_by_id]
+        if missing_members:
+            refuse(
+                "missing_members",
+                f"member tasks are missing: {missing_members}.",
+                "Restore the missing task projections before claiming the bundle.",
+            )
+        not_ready = [task.id for task in members if task.status.value != "ready"]
+        if bundle.status.value == "planned" and not_ready:
+            refuse(
+                "members_not_ready",
+                f"member tasks are not ready: {not_ready}.",
+                "Finish review/dependencies and promote every member to ready.",
+            )
+        external_blockers = sorted(
+            {
+                dependency_id
+                for task in members
+                for dependency_id in task.dependencies
+                if dependency_id not in member_ids
+                and (
+                    dependency_id not in tasks_by_id
+                    or tasks_by_id[dependency_id].status.value != "done"
+                )
+            }
+        )
+        if external_blockers:
+            refuse(
+                "dependencies",
+                f"external dependencies are not done: {external_blockers}.",
+                "Complete the external dependencies, then run `anvil next --bundle` again.",
+            )
+        expected_files = {path for task in members for path in task.likely_files}
+        bundle_groups = {group for task in members for group in task.conflict_groups}
+        conflicting_claims: list[str] = []
+        for active in active_claims:
+            active_task = tasks_by_id.get(active.task_id)
+            if (
+                active.task_id in member_ids
+                or expected_files.intersection(active.expected_files)
+                or (
+                    active_task is not None
+                    and bundle_groups.intersection(active_task.conflict_groups)
+                )
+            ):
+                conflicting_claims.append(active.id)
+        if conflicting_claims:
+            refuse(
+                "conflicts",
+                f"active claims conflict with the bundle: {sorted(conflicting_claims)}.",
+                "Wait for or release the conflicting claims before claiming the bundle.",
+            )
+        if bundle.status.value == "replan_required":
+            refuse(
+                "review_budget_exhausted",
+                f"adversarial review exhausted {bundle.review_policy.max_rereviews} rereviews.",
+                "Resolve the blocking findings and create a replacement plan/bundle.",
+            )
+        elif bundle.status.value == "superseded":
+            refuse(
+                "superseded",
+                f"bundle was superseded by {bundle.superseded_by or 'an unknown bundle'}.",
+                (
+                    f"Continue with bundle {bundle.superseded_by}."
+                    if bundle.superseded_by
+                    else "Inspect bundle history and select the replacement."
+                ),
+            )
+        elif bundle.status.value != "planned":
+            refuse(
+                "status",
+                f"bundle status is {bundle.status.value}, expected planned.",
+                "Resume its current lifecycle stage instead of creating another claim.",
+            )
+        if claim is not None and claim.status.value == "active":
+            refuse(
+                "already_claimed",
+                f"coordinator claim {claim.id} is already active.",
+                "Resume or release the existing coordinator claim.",
+            )
+        if actor is not None and bundle.coordinator != actor:
+            refuse(
+                "coordinator",
+                f"coordinator is {bundle.coordinator}, not {actor}.",
+                f"Run as {bundle.coordinator} or assign a replacement bundle.",
+            )
         entries.append(
             BundleRollupEntry(
                 bundle_id=bundle.id,
@@ -233,6 +362,9 @@ def compute_bundle_rollup(
                 checkpoint=checkpoint,
                 checkpoint_warning=warning,
                 superseded_by=bundle.superseded_by,
+                throughput=throughput,
+                claimable=not refusals,
+                refusals=refusals,
             )
         )
     return entries

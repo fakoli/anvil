@@ -2388,6 +2388,15 @@ class SqliteBackend:
         }
         if "last_result_at" not in columns:
             conn.execute("ALTER TABLE execution_bundles ADD COLUMN last_result_at TEXT")
+        # v14 did not retain the exact result transition separately. Use the
+        # projection's own last-applied mutation time as a conservative
+        # baseline; never inspect raw event payloads, which may include replay
+        # no-ops. New v15 transitions record the exact result time.
+        conn.execute(
+            "UPDATE execution_bundles SET last_result_at = updated_at "
+            "WHERE last_result_at IS NULL AND status IN "
+            "('reviewed_unintegrated', 'integrated', 'merged', 'completed')"
+        )
 
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
@@ -4081,6 +4090,10 @@ class SqliteBackend:
                 "bundle.status_changed: event target must be bundle "
                 f"'{payload.bundle_id}', got {event.target_kind} '{event.target_id}'."
             )
+        if payload.changed_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected(
+                "bundle.status_changed: changed_at must match event time."
+            )
         try:
             from_status = BundleStatus(payload.from_status)
             to_status = BundleStatus(payload.to_status)
@@ -4370,6 +4383,8 @@ class SqliteBackend:
         event: Event,
     ) -> None:
         if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            return
+        if payload.changed_at != event.timestamp.astimezone(datetime.UTC):
             return
         if payload.to_status in {
             BundleStatus.reviewed_unintegrated,

@@ -15,6 +15,8 @@ from anvil.state.models import (
     BundleClaim,
     BundleReviewVerdict,
     BundleStatus,
+    BundleThroughputBudget,
+    Claim,
     ExecutionBundle,
     ReviewDecision,
     Task,
@@ -23,7 +25,7 @@ from anvil.state.models import (
 )
 from anvil.state.rollup import compute_bundle_rollup
 from tests.test_bundle_execution import _NOW as _EXEC_NOW
-from tests.test_bundle_execution import _backend, _implement_bundle
+from tests.test_bundle_execution import _backend, _implement_bundle, _seed
 
 _NOW = datetime(2026, 7, 12, 1, 0, tzinfo=UTC)
 
@@ -182,6 +184,129 @@ def test_rollup_prefers_active_coordinator_claim_generation() -> None:
     ]
     entry = compute_bundle_rollup([bundle], [], claims, [], now=_NOW)[0]
     assert entry.coordinator_claim["id"] == "BCA"  # type: ignore[index]
+
+
+def test_rollup_explains_all_bundle_refusal_classes() -> None:
+    tasks = [
+        Task(
+            id="T001",
+            feature_id="F001",
+            title="Member one",
+            description="",
+            status=TaskStatus.ready,
+            priority=TaskPriority.high,
+            dependencies=["EXT"],
+            likely_files=["src/shared.py"],
+            created_at=_NOW,
+            updated_at=_NOW,
+        ),
+        Task(
+            id="T002",
+            feature_id="F001",
+            title="Member two",
+            description="",
+            status=TaskStatus.ready,
+            priority=TaskPriority.high,
+            dependencies=["T001"],
+            created_at=_NOW,
+            updated_at=_NOW,
+        ),
+        Task(
+            id="EXT",
+            feature_id="F001",
+            title="External blocker",
+            description="",
+            status=TaskStatus.claimed,
+            priority=TaskPriority.high,
+            created_at=_NOW,
+            updated_at=_NOW,
+        ),
+    ]
+    bundle = ExecutionBundle(
+        id="B001",
+        creation_event_id="E001",
+        prd_id="default",
+        task_ids=["T001", "T002"],
+        coordinator="coordinator",
+        throughput_budget=BundleThroughputBudget(max_tasks=2, max_serial_stages=1),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    active_claim = Claim(
+        id="C001",
+        task_id="EXT",
+        claimed_by="worker",
+        expected_files=["src/shared.py"],
+        created_at=_NOW,
+        lease_expires_at=_NOW + timedelta(hours=1),
+        last_heartbeat_at=_NOW,
+    )
+
+    entry = compute_bundle_rollup(
+        [bundle], tasks, [], [], [active_claim], now=_NOW, actor="coordinator"
+    )[0]
+    assert {refusal["code"] for refusal in entry.refusals} >= {
+        "throughput_serial_stages",
+        "dependencies",
+        "conflicts",
+    }
+    assert all(refusal["remediation"] for refusal in entry.refusals)
+    assert not entry.claimable
+
+    replan = compute_bundle_rollup(
+        [bundle.model_copy(update={"status": BundleStatus.replan_required})],
+        tasks,
+        [],
+        [],
+        now=_NOW,
+    )[0]
+    assert "review_budget_exhausted" in {
+        refusal["code"] for refusal in replan.refusals
+    }
+    superseded = compute_bundle_rollup(
+        [
+            bundle.model_copy(
+                update={"status": BundleStatus.superseded, "superseded_by": "B002"}
+            )
+        ],
+        tasks,
+        [],
+        [],
+        now=_NOW,
+    )[0]
+    assert superseded.refusals[-1]["code"] == "superseded"
+    assert "B002" in superseded.refusals[-1]["remediation"]
+
+
+def test_next_bundle_recommends_claimable_bundle(tmp_path) -> None:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    backend = _backend(state_dir)
+    try:
+        _seed(backend)
+    finally:
+        backend.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "next",
+            "--bundle",
+            "--actor",
+            "coordinator",
+            "--json",
+            "--cwd",
+            str(tmp_path),
+        ],
+        env={"ANVIL_STATE_LAYOUT": "local"},
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)["data"]
+    assert data["bundle"]["bundle_id"] == "B001"
+    assert data["bundle"]["claimable"] is True
+    assert data["bundle_refusals"] == []
 
 
 def test_status_human_and_json_include_bundle_integration_rollup(tmp_path) -> None:

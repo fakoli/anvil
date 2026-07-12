@@ -821,6 +821,11 @@ def next(  # noqa: A001
         "--actor",
         help="Actor identity; defaults to $USER or 'agent'.",
     ),
+    bundle_mode: bool = typer.Option(  # noqa: B008
+        False,
+        "--bundle",
+        help="Recommend a claimable execution bundle and explain bundle refusals.",
+    ),
     task_type: str | None = typer.Option(  # noqa: B008
         None,
         "--type",
@@ -903,6 +908,68 @@ def next(  # noqa: A001
         # stays byte-identical to pre-T019. Collapse the default sentinel ('prd')
         # so `--prd prd` narrows to the stored prd_id='default' partition.
         scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd)) if prd else None
+        if bundle_mode:
+            from anvil.state.rollup import compute_bundle_rollup
+
+            bundles = backend.list_bundles(prd_id=scoped_prd_id)
+            bundle_ids = {bundle.id for bundle in bundles}
+            rollups = compute_bundle_rollup(
+                bundles,
+                backend.list_tasks(),
+                [
+                    claim
+                    for claim in backend.list_bundle_claims()
+                    if claim.bundle_id in bundle_ids
+                ],
+                [
+                    review
+                    for bundle in bundles
+                    for review in backend.list_bundle_reviews(bundle.id)
+                ],
+                backend.list_active_claims(),
+                now=clock.now(),
+                actor=resolved_actor,
+            )
+            selected = builtins.next(
+                (entry for entry in rollups if entry.claimable), None
+            )
+            if quiet:
+                raise typer.Exit(0 if selected is not None else 3)
+            if json_output:
+                emit_success(
+                    "next",
+                    {
+                        "bundle": dump_model(selected) if selected else None,
+                        "bundle_refusals": [
+                            dump_model(entry) for entry in rollups if not entry.claimable
+                        ],
+                        "withheld_reason": None if selected else "bundle_refused",
+                    },
+                )
+                return
+            if selected is not None:
+                typer.echo(f"Next recommended bundle: {selected.bundle_id}")
+                typer.echo(f"  Coordinator: {selected.coordinator}")
+                typer.echo(
+                    "  Throughput: "
+                    f"tasks={selected.throughput['tasks']}/"
+                    f"{selected.throughput['max_tasks']} serial-stages="
+                    f"{selected.throughput['serial_stages']}/"
+                    f"{selected.throughput['max_serial_stages']}"
+                )
+                typer.echo("")
+                typer.echo(
+                    f"Run `anvil claim --bundle {selected.bundle_id}` to acquire the lease."
+                )
+                return
+            typer.echo("No claimable execution bundles available.")
+            for entry in rollups:
+                for refusal in entry.refusals:
+                    typer.echo(
+                        f"  {entry.bundle_id} [{refusal['code']}]: "
+                        f"{refusal['detail']} Remediation: {refusal['remediation']}"
+                    )
+            return
         scoped_ready_tasks = (
             backend.list_tasks(
                 status="ready", task_type=task_type, prd_id=scoped_prd_id

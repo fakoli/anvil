@@ -527,6 +527,7 @@ def status(
             all_tasks,
             bundle_claims,
             bundle_reviews,
+            active_claims,
             now=_now,
         )
     finally:
@@ -681,6 +682,20 @@ def status(
             typer.echo(f"  Warning: {bundle.checkpoint_warning}")
         if bundle.superseded_by:
             typer.echo(f"  Superseded by: {bundle.superseded_by}")
+        typer.echo(
+            "  Throughput: "
+            f"tasks={bundle.throughput.get('tasks', 0)}/"
+            f"{bundle.throughput.get('max_tasks', 0)} serial-stages="
+            f"{bundle.throughput.get('serial_stages', 0)}/"
+            f"{bundle.throughput.get('max_serial_stages', 0)}"
+        )
+        if bundle.claimable:
+            typer.echo("  Claimability: ready (`anvil next --bundle`)")
+        for refusal in bundle.refusals:
+            typer.echo(
+                f"  Refusal [{refusal['code']}]: {refusal['detail']} "
+                f"Remediation: {refusal['remediation']}"
+            )
 
     typer.echo("")
     typer.echo("PROJECT TOTAL")

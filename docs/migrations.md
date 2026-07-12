@@ -75,8 +75,10 @@ replacement bundle rows and all task evidence.
 
 The v15 migration adds nullable `execution_bundles.last_result_at`. New applied
 reviewed, integrated, merged, and completed transitions update it atomically
-with bundle status. Historical bundles retain NULL rather than deriving a
-potentially forged result time from unapplied audit-log events.
+with bundle status. For an existing bundle already in one of those states, the
+migration uses the projection's `updated_at` as a conservative baseline; it
+does not derive timing from raw audit-log events that may have been replay
+no-ops. Future result transitions replace that baseline with their exact time.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 

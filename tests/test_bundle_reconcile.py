@@ -311,6 +311,23 @@ def test_replay_result_time_ignores_forged_status_event(tmp_path) -> None:
         assert bundle is not None
         assert bundle.last_result_at == _NOW
         forged_at = _NOW + timedelta(hours=1)
+        with pytest.raises(EventRejected, match="changed_at must match event time"):
+            backend.append(
+                EventDraft(
+                    timestamp=forged_at,
+                    actor="coordinator",
+                    action="bundle.status_changed",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "from": "reviewed_unintegrated",
+                        "to": "integrated",
+                        "changed_at": (forged_at + timedelta(days=1)).isoformat(),
+                    },
+                )
+            )
         _append_raw(
             tmp_path,
             Event(

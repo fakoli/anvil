@@ -47,9 +47,10 @@ def _event(
     *,
     target_kind: str,
     target_id: str,
+    timestamp: datetime | None = None,
 ) -> EventDraft:
     return EventDraft(
-        timestamp=_T0,
+        timestamp=timestamp or _T0,
         actor="coordinator",
         action=action,
         target_kind=target_kind,
@@ -468,9 +469,10 @@ def test_status_change_cannot_rewind_bundle_chronology(tmp_path: Path) -> None:
                         "from": "planned",
                         "to": "active",
                         "changed_at": (_T0 - timedelta(days=1)).isoformat(),
-                    },
-                    target_kind="bundle",
-                    target_id="B001",
+                        },
+                        target_kind="bundle",
+                        target_id="B001",
+                        timestamp=_T0 - timedelta(days=1),
                 )
             )
         bundle = backend.get_bundle("B001")
@@ -499,10 +501,11 @@ def test_agent_observation_preserves_monotonic_bundle_chronology(
                     "from": "planned",
                     "to": "active",
                     "changed_at": later.isoformat(),
-                },
-                target_kind="bundle",
-                target_id="B001",
-            )
+                    },
+                    target_kind="bundle",
+                    target_id="B001",
+                    timestamp=later,
+                )
         )
         backend.append(
             _event(
@@ -1453,8 +1456,16 @@ def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> No
 
 def test_v14_bundle_schema_migrates_to_result_projection(tmp_path: Path) -> None:
     backend = _backend(tmp_path)
+    _seed(backend)
+    _create_bundle(backend)
     backend.close()
+    projected_at = _T0 + timedelta(minutes=5)
     with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute(
+            "UPDATE execution_bundles SET status = 'reviewed_unintegrated', "
+            "updated_at = ? WHERE id = 'B001'",
+            (projected_at.isoformat(),),
+        )
         conn.execute("ALTER TABLE execution_bundles DROP COLUMN last_result_at")
         conn.execute("PRAGMA user_version = 14")
         conn.commit()
@@ -1466,6 +1477,9 @@ def test_v14_bundle_schema_migrates_to_result_projection(tmp_path: Path) -> None
                 row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
             }
         assert "last_result_at" in columns
+        bundle = migrated.get_bundle("B001")
+        assert bundle is not None
+        assert bundle.last_result_at == projected_at
         assert migrated.get_schema_version() == SCHEMA_VERSION == 15
     finally:
         migrated.close()
