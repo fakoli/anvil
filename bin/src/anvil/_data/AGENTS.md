@@ -90,7 +90,7 @@ anvil apply T001           # apply the review verdict
 
 To keep the per-turn context lean, the MCP server exposes only the **24
 execution tools** by default — the turn-to-turn loop (next/claim/packet/submit/
-status/conflicts/deps). The **11 one-shot planning tools** (`init_project`,
+status/conflicts/deps plus coordinator-bundle operations). The **11 one-shot planning tools** (`init_project`,
 `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `apply_review_decision`, `edit_dependencies`, `find_decisions`,
 `describe_surface`, `create_bundle`) are **hidden by default** and re-appear when the server is
