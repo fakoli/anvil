@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from typer.testing import CliRunner
 
 from anvil.bundles.review import BundleReviewManager
@@ -352,6 +353,30 @@ def test_next_bundle_recommends_claimable_bundle(tmp_path) -> None:
     assert data["bundle"]["bundle_id"] == "B001"
     assert data["bundle"]["claimable"] is True
     assert data["bundle_refusals"] == []
+
+
+@pytest.mark.parametrize(
+    "filter_args",
+    (["--type", "bugfix"], ["--max-blast", "1"], ["--max-review-risk", "1"]),
+)
+def test_next_bundle_rejects_task_only_filters(tmp_path, filter_args) -> None:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    backend = _backend(state_dir)
+    try:
+        _seed(backend)
+    finally:
+        backend.close()
+
+    result = CliRunner().invoke(
+        app,
+        ["next", "--bundle", "--json", "--cwd", str(tmp_path), *filter_args],
+        env={"ANVIL_STATE_LAYOUT": "local"},
+    )
+
+    assert result.exit_code != 0
+    error = json.loads(result.output)["error"]
+    assert error["code"] == "invalid_bundle_filter"
 
 
 def test_scoped_status_keeps_cross_prd_bundle_conflicts(tmp_path) -> None:

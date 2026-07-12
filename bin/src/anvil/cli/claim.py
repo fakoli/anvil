@@ -896,6 +896,20 @@ def next(  # noqa: A001
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="next", json_output=json_output)
 
+    if bundle_mode and (
+        task_type is not None
+        or max_blast is not None
+        or max_review_risk is not None
+    ):
+        message = (
+            "--type, --max-blast, and --max-review-risk are task-only filters "
+            "and cannot be combined with --bundle."
+        )
+        if json_output:
+            fail("next", message, code="invalid_bundle_filter")
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=2)
+
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
