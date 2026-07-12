@@ -8,6 +8,7 @@ from anvil.clock import Clock
 from anvil.review.gates import BundleReviewGate, evaluate_bundle_reviews
 from anvil.state.backend import Backend, BackendError
 from anvil.state.models import BundleStatus, EventDraft, ReviewDecision
+from anvil.state.schema import SCHEMA_VERSION
 
 
 class BundleReviewError(Exception):
@@ -122,6 +123,7 @@ class BundleReviewManager:
                     target_id=bundle_id,
                     payload_json={
                         "bundle_id": bundle_id,
+                        "schema_version": SCHEMA_VERSION,
                         "creation_event_id": bundle.creation_event_id,
                         "bundle_claim_id": claim.id,
                         "from": bundle.status.value,

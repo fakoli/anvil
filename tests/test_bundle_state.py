@@ -48,10 +48,11 @@ def _event(
     target_kind: str,
     target_id: str,
     timestamp: datetime | None = None,
+    actor: str = "coordinator",
 ) -> EventDraft:
     return EventDraft(
         timestamp=timestamp or _T0,
-        actor="coordinator",
+        actor=actor,
         action=action,
         target_kind=target_kind,
         target_id=target_id,
@@ -160,6 +161,7 @@ def _bundle_payload(
 ) -> dict[str, Any]:
     return {
         "id": bundle_id,
+        "schema_version": SCHEMA_VERSION,
         "prd_id": "release",
         "task_ids": task_ids or ["release:T002", "release:T001"],
         "coordinator": "codex-main",
@@ -178,6 +180,13 @@ def _bundle_payload(
         "created_at": _T0.isoformat(),
         "updated_at": _T0.isoformat(),
     }
+
+
+def _bundle_model_payload(*, task_ids: list[str] | None = None) -> dict[str, Any]:
+    payload = _bundle_payload(task_ids=task_ids)
+    payload.pop("schema_version")
+    payload["creation_event_id"] = "E000001"
+    return payload
 
 
 def _claim_payload(claim_id: str, task_id: str) -> dict[str, Any]:
@@ -213,6 +222,27 @@ def _create_bundle(
     return event.id
 
 
+def _bundle_claim_payload(
+    backend: SqliteBackend, *, at: datetime = _T0
+) -> dict[str, Any]:
+    bundle = backend.get_bundle("B001")
+    assert bundle is not None
+    return {
+        "id": "BC001",
+        "bundle_id": "B001",
+        "creation_event_id": bundle.creation_event_id,
+        "claimed_by": "codex-main",
+        "expected_files": [],
+        "member_claims": [
+            {"id": f"BC001-{index}", "task_id": task_id}
+            for index, task_id in enumerate(bundle.task_ids, start=1)
+        ],
+        "created_at": at.isoformat(),
+        "lease_expires_at": (at + timedelta(hours=4)).isoformat(),
+        "last_heartbeat_at": at.isoformat(),
+    }
+
+
 def _event_count(root: Path) -> int:
     return len((root / "events.jsonl").read_text(encoding="utf-8").splitlines())
 
@@ -223,17 +253,60 @@ def _append_raw_event(root: Path, event: Event) -> None:
 
 
 def test_bundle_model_preserves_order_and_rejects_duplicate_members() -> None:
-    model = ExecutionBundle.model_validate(
-        {**_bundle_payload(), "creation_event_id": "E000001"}
-    )
+    model = ExecutionBundle.model_validate(_bundle_model_payload())
     assert model.task_ids == ["release:T002", "release:T001"]
     with pytest.raises(ValidationError, match="task_ids must be unique"):
         ExecutionBundle.model_validate(
-            {
-                **_bundle_payload(task_ids=["release:T001", "release:T001"]),
-                "creation_event_id": "E000001",
-            }
+            _bundle_model_payload(task_ids=["release:T001", "release:T001"])
         )
+
+
+def test_bundle_creation_times_are_bound_to_event_live_and_on_replay(
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay-future-created"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    future_payload: dict[str, Any]
+    try:
+        _seed(backend)
+        future = _T0 + timedelta(days=365)
+        future_payload = {
+            **_bundle_payload(),
+            "created_at": future.isoformat(),
+            "updated_at": future.isoformat(),
+        }
+        before = _event_count(tmp_path)
+        with pytest.raises(EventRejected, match="must match the event time"):
+            backend.append(
+                _event(
+                    "bundle.created",
+                    future_payload,
+                    target_kind="bundle",
+                    target_id="B001",
+                )
+            )
+        assert _event_count(tmp_path) == before
+    finally:
+        backend.close()
+    _append_raw_event(
+        tmp_path,
+        Event(
+            id=f"E{_event_count(tmp_path) + 1:06d}",
+            timestamp=_T0,
+            actor="coordinator",
+            action="bundle.created",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json=future_payload,
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001") is None
+    finally:
+        replay.close()
 
 
 @pytest.mark.parametrize(
@@ -252,7 +325,7 @@ def test_bundle_model_rejects_malformed_identity_and_chronology(
 ) -> None:
     with pytest.raises(ValidationError, match=message):
         ExecutionBundle.model_validate(
-            {**_bundle_payload(), **override, "creation_event_id": "E000001"}
+            {**_bundle_model_payload(), **override}
         )
 
 
@@ -429,6 +502,7 @@ def test_bundle_event_targets_are_bound_before_log(tmp_path: Path) -> None:
                 {
                     "bundle_id": "B001",
                     "creation_event_id": creation_event_id,
+                    "metadata_only": True,
                     "observation": {
                         "id": "wrong-target",
                         "task_ids": [],
@@ -494,18 +568,13 @@ def test_agent_observation_preserves_monotonic_bundle_chronology(
         later = _T0 + timedelta(hours=1)
         backend.append(
             _event(
-                "bundle.status_changed",
-                {
-                    "bundle_id": "B001",
-                    "creation_event_id": creation_event_id,
-                    "from": "planned",
-                    "to": "active",
-                    "changed_at": later.isoformat(),
-                    },
-                    target_kind="bundle",
-                    target_id="B001",
-                    timestamp=later,
-                )
+                "bundle.claimed",
+                _bundle_claim_payload(backend, at=later),
+                target_kind="bundle",
+                target_id="B001",
+                timestamp=later,
+                actor="codex-main",
+            )
         )
         backend.append(
             _event(
@@ -513,6 +582,7 @@ def test_agent_observation_preserves_monotonic_bundle_chronology(
                 {
                     "bundle_id": "B001",
                     "creation_event_id": creation_event_id,
+                    "metadata_only": True,
                     "observation": {
                         "id": "late-arrival",
                         "task_ids": [],
@@ -522,6 +592,7 @@ def test_agent_observation_preserves_monotonic_bundle_chronology(
                 },
                 target_kind="bundle",
                 target_id="B001",
+                actor="codex-main",
             )
         )
         bundle = backend.get_bundle("B001")
@@ -716,6 +787,7 @@ def test_agent_observation_is_metadata_and_status_transitions_independently(
                 {
                     "bundle_id": "B001",
                     "creation_event_id": creation_event_id,
+                    "metadata_only": True,
                     "observation": {
                         "id": "codex-subtask-1",
                         "handle": None,
@@ -725,25 +797,20 @@ def test_agent_observation_is_metadata_and_status_transitions_independently(
                         "observed_at": _T0.isoformat(),
                         "detail": "handle unavailable",
                     },
-                },
-                target_kind="bundle",
-                target_id="B001",
-            )
+                    },
+                    target_kind="bundle",
+                    target_id="B001",
+                    actor="codex-main",
+                )
         )
         assert backend.get_bundle("B001").status is BundleStatus.planned  # type: ignore[union-attr]
         backend.append(
             _event(
-                "bundle.status_changed",
-                {
-                    "bundle_id": "B001",
-                    "creation_event_id": creation_event_id,
-                    "from": "planned",
-                    "to": "active",
-                    "changed_at": _T0.isoformat(),
-                    "reason": "coordinator started",
-                },
+                "bundle.claimed",
+                _bundle_claim_payload(backend),
                 target_kind="bundle",
                 target_id="B001",
+                actor="codex-main",
             )
         )
         bundle = backend.get_bundle("B001")
@@ -1288,16 +1355,11 @@ def test_replay_ignores_stale_divergent_status_transition(tmp_path: Path) -> Non
         creation_event_id = _create_bundle(source)
         source.append(
             _event(
-                "bundle.status_changed",
-                {
-                    "bundle_id": "B001",
-                    "creation_event_id": creation_event_id,
-                    "from": "planned",
-                    "to": "active",
-                    "changed_at": _T0.isoformat(),
-                },
+                "bundle.claimed",
+                _bundle_claim_payload(source),
                 target_kind="bundle",
                 target_id="B001",
+                actor="codex-main",
             )
         )
     finally:
@@ -1317,10 +1379,11 @@ def test_replay_ignores_stale_divergent_status_transition(tmp_path: Path) -> Non
                 action="bundle.status_changed",
                 target_kind="bundle",
                 target_id="B001",
-                payload_json={
-                    "bundle_id": "B001",
-                    "creation_event_id": creation_event_id,
-                    "from": "active",
+                    payload_json={
+                        "bundle_id": "B001",
+                        "creation_event_id": creation_event_id,
+                        "bundle_claim_id": "BC001",
+                        "from": "active",
                     "to": target,
                     "changed_at": changed_at.isoformat(),
                 },
@@ -1449,6 +1512,54 @@ def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> No
             }
         assert "review_disposition_event_id" in bundle_columns
         assert "disposition_event_id" in review_columns
+        assert migrated.get_schema_version() == 15
+    finally:
+        migrated.close()
+
+
+def test_v12_review_schema_recovers_torn_table_rename(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    _seed(backend)
+    creation_event_id = _create_bundle(backend)
+    backend.close()
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_bundle_review_verdicts_round")
+        conn.execute("DROP TABLE bundle_review_verdicts")
+        conn.execute(
+            """CREATE TABLE bundle_review_verdicts_v12 (
+                id TEXT PRIMARY KEY,
+                bundle_id TEXT NOT NULL,
+                creation_event_id TEXT NOT NULL,
+                review_round INTEGER NOT NULL,
+                angle TEXT NOT NULL,
+                reviewed_by TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (bundle_id, creation_event_id, review_round, angle, reviewed_by)
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO bundle_review_verdicts_v12 VALUES "
+            "('BR-OLD', 'B001', ?, 1, 'security', 'reviewer', "
+            "'approve', NULL, ?)",
+            (creation_event_id, _T0.isoformat()),
+        )
+        conn.execute("PRAGMA user_version = 12")
+        conn.commit()
+
+    migrated = _backend(tmp_path)
+    try:
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            row = conn.execute(
+                "SELECT id, disposition_event_id FROM bundle_review_verdicts"
+            ).fetchone()
+            backup = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'bundle_review_verdicts_v12'"
+            ).fetchone()
+        assert row == ("BR-OLD", "legacy-unbound")
+        assert backup is None
         assert migrated.get_schema_version() == 15
     finally:
         migrated.close()

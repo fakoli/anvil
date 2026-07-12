@@ -5,6 +5,7 @@ from __future__ import annotations
 from anvil.clock import Clock
 from anvil.state.backend import Backend, BackendError
 from anvil.state.models import BundleCheckpoint, BundleStatus, EventDraft
+from anvil.state.schema import SCHEMA_VERSION
 
 
 class BundleDeliveryError(Exception):
@@ -118,6 +119,7 @@ class BundleDeliveryManager:
                     target_id=bundle_id,
                     payload_json={
                         "bundle_id": bundle_id,
+                        "schema_version": SCHEMA_VERSION,
                         "creation_event_id": bundle.creation_event_id,
                         "bundle_claim_id": (
                             claim.id

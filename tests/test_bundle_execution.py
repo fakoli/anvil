@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +18,7 @@ from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.state.backend import EventRejected
 from anvil.state.models import BundleStatus, Event, EventDraft, ReviewDecision
+from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
 
@@ -63,6 +65,19 @@ def _next_event_id(root: Path) -> str:
     return f"E{count + 1:06d}"
 
 
+def _mark_bundle_log_as_v12(root: Path) -> None:
+    """Remove version markers that did not exist in canonical v12 events."""
+    lines = []
+    for raw in (root / "events.jsonl").read_text(encoding="utf-8").splitlines():
+        event = json.loads(raw)
+        if event.get("action") in {"bundle.created", "bundle.status_changed"}:
+            event["payload_json"].pop("schema_version", None)
+        lines.append(json.dumps(event, separators=(",", ":")))
+    (root / "events.jsonl").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8", newline="\n"
+    )
+
+
 def _bundle_claim_payload(backend: SqliteBackend, claim_id: str) -> dict:
     bundle = backend.get_bundle("B001")
     assert bundle is not None
@@ -90,6 +105,7 @@ def _seed(
     required_evidence: list[str] | None = None,
     cyclic_dependency: bool = False,
     throughput_budget: dict | None = None,
+    review_policy: dict | None = None,
 ) -> str:
     backend.append(
         _event(
@@ -208,11 +224,12 @@ def _seed(
             "B001",
             {
                 "id": "B001",
+                "schema_version": SCHEMA_VERSION,
                 "prd_id": "release",
                 "task_ids": ["release:T001", "release:T002"],
                 "coordinator": "coordinator",
                 "status": "planned",
-                "review_policy": {},
+                "review_policy": review_policy or {},
                 "throughput_budget": throughput_budget or {},
                 "delegated_agents": [
                     {
@@ -240,8 +257,10 @@ def _manager(backend: SqliteBackend, root: Path) -> BundleManager:
     )
 
 
-def _implement_bundle(backend: SqliteBackend, root: Path) -> None:
-    _seed(backend)
+def _implement_bundle(
+    backend: SqliteBackend, root: Path, *, review_policy: dict | None = None
+) -> None:
+    _seed(backend, review_policy=review_policy)
     manager = _manager(backend, root)
     claimed = manager.claim("B001")
     for index, task_id in enumerate(("release:T001", "release:T002"), start=1):
@@ -303,6 +322,102 @@ def test_claim_creates_one_public_claim_and_ordered_member_authorizations(
         assert result.claim.member_claim_ids["release:T002"] in packet.markdown
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("target_status", ["active", "superseded"])
+def test_generic_status_event_cannot_bypass_dedicated_bundle_workflows(
+    tmp_path: Path, target_status: str
+) -> None:
+    replay_root = tmp_path / f"replay-forged-{target_status}"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        creation_event_id = _seed(backend)
+        before = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(EventRejected, match="illegal transition"):
+            backend.append(
+                EventDraft(
+                    timestamp=_NOW,
+                    actor="attacker",
+                    action="bundle.status_changed",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_id": "B001",
+                        "creation_event_id": creation_event_id,
+                        "from": "planned",
+                        "to": target_status,
+                        "changed_at": _NOW.isoformat(),
+                    },
+                )
+            )
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before
+        assert backend.get_bundle("B001").status is BundleStatus.planned  # type: ignore[union-attr]
+        assert backend.get_bundle_claim("B001") is None
+    finally:
+        backend.close()
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=_NOW,
+            actor="attacker",
+            action="bundle.status_changed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "bundle_id": "B001",
+                "creation_event_id": creation_event_id,
+                "from": "planned",
+                "to": target_status,
+                "changed_at": _NOW.isoformat(),
+            },
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").status is BundleStatus.planned  # type: ignore[union-attr]
+        assert replay.get_bundle_claim("B001") is None
+    finally:
+        replay.close()
+
+
+def test_replay_rejects_bundle_claim_by_actor_other_than_coordinator(
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay-attacker-claim"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        payload = _bundle_claim_payload(backend, "BC-ATTACKER")
+        payload["claimed_by"] = "attacker"
+    finally:
+        backend.close()
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=_NOW,
+            actor="attacker",
+            action="bundle.claimed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json=payload,
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").status is BundleStatus.planned  # type: ignore[union-attr]
+        assert replay.get_bundle_claim("B001") is None
+        assert all(
+            replay.get_task(task_id).status.value == "ready"  # type: ignore[union-attr]
+            for task_id in ("release:T001", "release:T002")
+        )
+    finally:
+        replay.close()
 
 
 @pytest.mark.parametrize(
@@ -1082,6 +1197,541 @@ def test_expired_coordinator_cannot_log_phantom_bundle_completion(
         assert backend.get_bundle("B001").status is BundleStatus.active  # type: ignore[union-attr]
     finally:
         backend.close()
+
+
+def test_legacy_v12_review_event_replays_as_unbound_history(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay-legacy-review"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+    finally:
+        backend.close()
+    _mark_bundle_log_as_v12(tmp_path)
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=_NOW,
+            actor="legacy-reviewer",
+            action="bundle.review_recorded",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "id": "BR-LEGACY",
+                "bundle_id": "B001",
+                "creation_event_id": bundle.creation_event_id,
+                "review_round": 1,
+                "angle": "correctness",
+                "reviewed_by": "legacy-reviewer",
+                "decision": "approve",
+                "created_at": _NOW.isoformat(),
+            },
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        reviews = replay.list_bundle_reviews("B001")
+        assert [(review.id, review.disposition_event_id) for review in reviews] == [
+            ("BR-LEGACY", "legacy-unbound")
+        ]
+    finally:
+        replay.close()
+
+
+def test_legacy_v12_review_quorum_replays_lifecycle_transition(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay-legacy-review-gate"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path, review_policy={"max_reviews": 5})
+        bundle = backend.get_bundle("B001")
+        claim = backend.get_bundle_claim("B001")
+        assert bundle is not None and claim is not None
+    finally:
+        backend.close()
+    _mark_bundle_log_as_v12(tmp_path)
+    for reviewer, angle in (
+        ("legacy-a", "correctness"),
+        ("legacy-b", "security"),
+        ("legacy-c", "integration"),
+    ):
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=_NOW,
+                actor=reviewer,
+                action="bundle.review_recorded",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "id": f"BR-{reviewer}",
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "review_round": 1,
+                    "angle": angle,
+                    "reviewed_by": reviewer,
+                    "decision": "approve",
+                    "created_at": _NOW.isoformat(),
+                },
+            ),
+        )
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=_NOW,
+            actor="coordinator",
+            action="bundle.status_changed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "bundle_id": "B001",
+                "creation_event_id": bundle.creation_event_id,
+                "bundle_claim_id": claim.id,
+                "from": "implemented_unreviewed",
+                "to": "reviewed_unintegrated",
+                "changed_at": _NOW.isoformat(),
+            },
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").status is BundleStatus.reviewed_unintegrated  # type: ignore[union-attr]
+        assert {
+            review.disposition_event_id
+            for review in replay.list_bundle_reviews("B001")
+        } == {"legacy-unbound"}
+    finally:
+        replay.close()
+
+
+def test_legacy_v12_blocking_rounds_replay_replan_transition(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay-legacy-review-replan"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        bundle = backend.get_bundle("B001")
+        claim = backend.get_bundle_claim("B001")
+        assert bundle is not None and claim is not None
+    finally:
+        backend.close()
+    _mark_bundle_log_as_v12(tmp_path)
+    for review_round in (1, 2):
+        for suffix, angle in (
+            ("a", "correctness"),
+            ("b", "security"),
+            ("c", "integration"),
+        ):
+            reviewer = f"legacy-{review_round}-{suffix}"
+            _append_raw(
+                tmp_path,
+                Event(
+                    id=_next_event_id(tmp_path),
+                    timestamp=_NOW,
+                    actor=reviewer,
+                    action="bundle.review_recorded",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "id": f"BR-{reviewer}",
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "review_round": review_round,
+                        "angle": angle,
+                        "reviewed_by": reviewer,
+                        "decision": (
+                            "needs_changes" if angle == "security" else "approve"
+                        ),
+                        "notes": "blocking" if angle == "security" else None,
+                        "created_at": _NOW.isoformat(),
+                    },
+                ),
+            )
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=_NOW,
+            actor="coordinator",
+            action="bundle.status_changed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "bundle_id": "B001",
+                "creation_event_id": bundle.creation_event_id,
+                "bundle_claim_id": claim.id,
+                "from": "implemented_unreviewed",
+                "to": "replan_required",
+                "changed_at": _NOW.isoformat(),
+            },
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").status is BundleStatus.replan_required  # type: ignore[union-attr]
+        assert len(replay.list_bundle_reviews("B001")) == 6
+    finally:
+        replay.close()
+
+
+def test_legacy_v12_agent_observation_preserves_projection_chronology(
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay-legacy-observation"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+    finally:
+        backend.close()
+    _mark_bundle_log_as_v12(tmp_path)
+    observed_at = _NOW + timedelta(hours=1)
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=observed_at,
+            actor="coordinator",
+            action="bundle.agent_observed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "bundle_id": "B001",
+                "creation_event_id": bundle.creation_event_id,
+                "observation": {
+                    "id": "legacy-worker",
+                    "task_ids": ["release:T001"],
+                    "status": "active",
+                    "observed_at": observed_at.isoformat(),
+                },
+            },
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        projected = replay.get_bundle("B001")
+        assert projected is not None
+        assert projected.updated_at == observed_at
+        assert any(agent.id == "legacy-worker" for agent in projected.delegated_agents)
+    finally:
+        replay.close()
+
+
+def test_legacy_observation_requires_coordinator_and_matching_time_on_replay(
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay-legacy-observation-authority"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        claim_payload = _bundle_claim_payload(backend, "BC-AFTER-OBS")
+    finally:
+        backend.close()
+    future = _NOW + timedelta(days=365)
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=future,
+            actor="untrusted-observer",
+            action="bundle.agent_observed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "bundle_id": "B001",
+                "creation_event_id": bundle.creation_event_id,
+                "observation": {
+                    "id": "untrusted-worker",
+                    "task_ids": ["release:T001"],
+                    "status": "active",
+                    "observed_at": _NOW.isoformat(),
+                },
+            },
+        ),
+    )
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=_NOW,
+            actor="coordinator",
+            action="bundle.claimed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json=claim_payload,
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").status is BundleStatus.active  # type: ignore[union-attr]
+        assert replay.get_bundle_claim("B001") is not None
+        assert all(
+            agent.id != "untrusted-worker"
+            for agent in replay.get_bundle("B001").delegated_agents  # type: ignore[union-attr]
+        )
+    finally:
+        replay.close()
+
+
+def test_backdated_bundle_review_is_rejected_live_and_on_replay(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay-backdated-review"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    backdated = _NOW - timedelta(days=1)
+    try:
+        _implement_bundle(backend, tmp_path)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        before = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(BundleReviewError, match="review predates bundle state"):
+            BundleReviewManager(
+                backend, FrozenClock(backdated), actor="backdated-reviewer"
+            ).record(
+                "B001",
+                review_round=1,
+                angle="correctness",
+                decision=ReviewDecision.approve,
+            )
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before
+    finally:
+        backend.close()
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=backdated,
+            actor="backdated-reviewer",
+            action="bundle.review_recorded",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "id": "BR-BACKDATED",
+                "bundle_id": "B001",
+                "creation_event_id": bundle.creation_event_id,
+                "disposition_event_id": bundle.review_disposition_event_id,
+                "review_round": 1,
+                "angle": "correctness",
+                "reviewed_by": "backdated-reviewer",
+                "decision": "approve",
+                "created_at": backdated.isoformat(),
+            },
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.list_bundle_reviews("B001") == []
+    finally:
+        replay.close()
+
+
+def test_expired_coordinator_cannot_log_progress(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        _manager(backend, tmp_path).claim("B001")
+        before = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(BundleError, match="coordinator lease has expired"):
+            BundleManager(
+                backend,
+                FrozenClock(_NOW + timedelta(hours=5)),
+                actor="coordinator",
+                project_root=tmp_path,
+            ).note_progress("B001", phase="after-expiry")
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before
+    finally:
+        backend.close()
+
+
+def test_backdated_claim_and_release_are_rejected_before_logging(
+    tmp_path: Path,
+) -> None:
+    replay_root = tmp_path / "replay-backdated-release"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        future = _NOW + timedelta(days=1)
+        backend.append(
+            EventDraft(
+                timestamp=future,
+                actor="coordinator",
+                action="bundle.checkpoint_recorded",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "checkpoint": {
+                        "commit_sha": "future-state",
+                        "recorded_at": future.isoformat(),
+                        "recorded_by": "coordinator",
+                    },
+                },
+            )
+        )
+        before_claim = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(BundleError, match="claim predates bundle state"):
+            _manager(backend, tmp_path).claim("B001")
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before_claim
+
+        claimed = BundleManager(
+            backend,
+            FrozenClock(future),
+            actor="coordinator",
+            project_root=tmp_path,
+        ).claim("B001")
+        before_release = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(EventRejected, match="release predates claim state"):
+            backend.append(
+                EventDraft(
+                    timestamp=_NOW,
+                    actor="coordinator",
+                    action="bundle.claim_released",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_claim_id": claimed.claim.id,
+                        "bundle_id": "B001",
+                        "released_by": "coordinator",
+                        "release_reason": "backdated",
+                    },
+                )
+            )
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before_release
+        assert backend.get_bundle("B001").status is BundleStatus.active  # type: ignore[union-attr]
+        assert backend.get_bundle_claim("B001").status.value == "active"  # type: ignore[union-attr]
+    finally:
+        backend.close()
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=_NOW,
+            actor="coordinator",
+            action="bundle.claim_released",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "bundle_claim_id": claimed.claim.id,
+                "bundle_id": "B001",
+                "released_by": "coordinator",
+                "release_reason": "raw-backdated",
+            },
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").status is BundleStatus.active  # type: ignore[union-attr]
+        assert replay.get_bundle_claim("B001").status.value == "active"  # type: ignore[union-attr]
+    finally:
+        replay.close()
+
+
+def test_agent_observation_metadata_cannot_block_claiming(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        future = _NOW + timedelta(days=365)
+        payload = {
+            "bundle_id": "B001",
+            "creation_event_id": bundle.creation_event_id,
+            "metadata_only": True,
+            "observation": {
+                "id": "future-worker",
+                "task_ids": [],
+                "status": "active",
+                "observed_at": future.isoformat(),
+            },
+        }
+        before = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(EventRejected, match="only the coordinator"):
+            backend.append(
+                EventDraft(
+                    timestamp=future,
+                    actor="untrusted-observer",
+                    action="bundle.agent_observed",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json=payload,
+                )
+            )
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before
+        backend.append(
+            EventDraft(
+                timestamp=future,
+                actor="coordinator",
+                action="bundle.agent_observed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json=payload,
+            )
+        )
+        assert backend.get_bundle("B001").updated_at == _NOW  # type: ignore[union-attr]
+        assert _manager(backend, tmp_path).claim("B001").bundle.status is BundleStatus.active
+    finally:
+        backend.close()
+
+
+def test_replay_ignores_agent_observation_for_non_member_task(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay-observation-non-member"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+    finally:
+        backend.close()
+    _append_raw(
+        tmp_path,
+        Event(
+            id=_next_event_id(tmp_path),
+            timestamp=_NOW,
+            actor="coordinator",
+            action="bundle.agent_observed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "bundle_id": "B001",
+                "creation_event_id": bundle.creation_event_id,
+                "observation": {
+                    "id": "wrong-member-worker",
+                    "task_ids": ["release:T999"],
+                    "status": "active",
+                    "observed_at": _NOW.isoformat(),
+                },
+            },
+        ),
+    )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        projected = replay.get_bundle("B001")
+        assert projected is not None
+        assert [agent.id for agent in projected.delegated_agents] == ["optional-worker"]
+    finally:
+        replay.close()
 
 
 def test_public_renewal_cannot_shorten_coordinator_or_child_leases(

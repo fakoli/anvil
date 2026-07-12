@@ -24,6 +24,7 @@ from anvil.state.models import (
     ExecutionBundle,
     TaskStatus,
 )
+from anvil.state.schema import SCHEMA_VERSION
 
 
 class BundleError(Exception):
@@ -415,6 +416,7 @@ class BundleManager:
                     target_id=bundle_id,
                     payload_json={
                         "bundle_id": bundle_id,
+                        "schema_version": SCHEMA_VERSION,
                         "creation_event_id": bundle.creation_event_id,
                         "bundle_claim_id": bundle_claim.id,
                         "from": bundle.status.value,

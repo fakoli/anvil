@@ -10,6 +10,7 @@ from anvil.state.models import (
     EventDraft,
     ExecutionBundle,
 )
+from anvil.state.schema import SCHEMA_VERSION
 
 
 class BundleCatalogError(Exception):
@@ -43,6 +44,7 @@ class BundleCatalog:
                     target_id=bundle_id,
                     payload_json={
                         "id": bundle_id,
+                        "schema_version": SCHEMA_VERSION,
                         "prd_id": prd_id,
                         "task_ids": task_ids,
                         "coordinator": coordinator,

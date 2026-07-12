@@ -338,6 +338,7 @@ class BundleCreatedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    schema_version: int | None = None
     prd_id: str
     task_ids: list[str]
     coordinator: str
@@ -376,6 +377,7 @@ class BundleStatusChangedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     bundle_id: str
+    schema_version: int | None = None
     creation_event_id: str
     bundle_claim_id: str | None = None
     from_status: BundleStatus = Field(alias="from")
@@ -399,6 +401,9 @@ class BundleAgentObservedPayload(BaseModel):
     bundle_id: str
     creation_event_id: str
     observation: DelegatedAgentObservation
+    # V12 events omitted this marker and advanced bundle.updated_at. Modern
+    # metadata-only events set it true so observations cannot gate lifecycle.
+    metadata_only: bool = False
 
 
 class BundleReviewRecordedPayload(BaseModel):
@@ -409,7 +414,9 @@ class BundleReviewRecordedPayload(BaseModel):
     id: str
     bundle_id: str
     creation_event_id: str
-    disposition_event_id: str
+    # Absent only in canonical v12 logs. Live v13+ appends reject None; replay
+    # maps it to the history-preserving ``legacy-unbound`` lineage.
+    disposition_event_id: str | None = None
     review_round: int = Field(ge=1)
     angle: str
     reviewed_by: str
@@ -421,7 +428,6 @@ class BundleReviewRecordedPayload(BaseModel):
         "id",
         "bundle_id",
         "creation_event_id",
-        "disposition_event_id",
         "angle",
         "reviewed_by",
     )
@@ -429,6 +435,13 @@ class BundleReviewRecordedPayload(BaseModel):
     def _validate_review_identity(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("bundle review identity fields must not be blank")
+        return value
+
+    @field_validator("disposition_event_id")
+    @classmethod
+    def _validate_optional_disposition(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("bundle review disposition identity must not be blank")
         return value
 
     @field_validator("created_at", mode="after")
@@ -439,7 +452,11 @@ class BundleReviewRecordedPayload(BaseModel):
         return value.astimezone(datetime.UTC)
 
     def to_model(self) -> BundleReviewVerdict:
-        return BundleReviewVerdict.model_validate(self.model_dump(mode="json"))
+        data = self.model_dump(mode="json")
+        data["disposition_event_id"] = (
+            self.disposition_event_id or "legacy-unbound"
+        )
+        return BundleReviewVerdict.model_validate(data)
 
 
 class BundlePlanAcknowledgedPayload(BaseModel):
