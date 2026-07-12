@@ -71,7 +71,7 @@ _COMMAND = "describe"
 #
 # Bumped to "2" when the ``mcp-config`` CLI command was added (a command added
 # to the surface is exactly the documented bump trigger).
-API_VERSION = "2"
+API_VERSION = "3"
 
 
 def describe(

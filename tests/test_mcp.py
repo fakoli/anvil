@@ -341,28 +341,32 @@ def _run(coro: Any) -> Any:
 
 
 # ===========================================================================
-# Test: list_tools — all 24 registered (full surface, planning gate off)
+# Test: list_tools — all 35 registered (full surface, planning gate off)
 # ===========================================================================
 
-# The 10 one-shot planning tools, tagged ``planning`` and hidden from the live
-# wire surface by default (L2). The remaining 14 are the always-on execution
+# The 11 one-shot planning tools, tagged ``planning`` and hidden from the live
+# wire surface by default (L2). The remaining 24 are the always-on execution
 # surface.
 _PLANNING_TOOLS = {
     "init_project", "parse_prd", "review_prd", "plan_tasks", "score_tasks",
     "review_tasks", "apply_review_decision", "edit_dependencies",
     "find_decisions", "describe_surface",
+    "create_bundle",
 }
 _EXECUTION_TOOLS = {
     "get_project_summary", "list_tasks", "get_task", "get_next_task",
     "claim_task", "release_task", "renew_claim", "generate_work_packet",
     "submit_progress", "submit_completion_evidence", "check_conflicts",
     "get_dependency_graph", "update_task_status", "get_project_status",
+    "list_bundles", "get_bundle", "claim_bundle", "generate_bundle_packet",
+    "submit_bundle_progress", "record_bundle_review", "finalize_bundle_review",
+    "checkpoint_bundle", "reconcile_bundle", "supersede_bundle",
 }
 _ALL_TOOLS = _PLANNING_TOOLS | _EXECUTION_TOOLS
 
 
 class TestListTools:
-    def test_list_tools_returns_all_twenty_four(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_list_tools_returns_all_thirty_five(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # The autouse _full_mcp_surface fixture guarantees the planning surface
         # is enabled, so the in-process client sees every registered tool.
         _init_state_dir(tmp_path)
@@ -375,7 +379,7 @@ class TestListTools:
 
         names = _run(run())
         assert _ALL_TOOLS <= names, f"Missing tools: {_ALL_TOOLS - names}"
-        assert len(_ALL_TOOLS) == 24
+        assert len(_ALL_TOOLS) == 35
 
 
 # ===========================================================================
@@ -406,7 +410,7 @@ class TestPlanningSurfaceGate:
         assert names.isdisjoint(_PLANNING_TOOLS), (
             f"Planning tools leaked into default surface: {names & _PLANNING_TOOLS}"
         )
-        assert len(names) == 14
+        assert len(names) == 24
 
     def test_env_flag_exposes_full_surface(self) -> None:
         from anvil.mcp_server import apply_surface_gate
@@ -415,7 +419,7 @@ class TestPlanningSurfaceGate:
         assert exposed is True
         names = self._wire_names()
         assert _ALL_TOOLS <= names
-        assert len(names & _ALL_TOOLS) == 24
+        assert len(names & _ALL_TOOLS) == 35
 
     @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on", "On"])
     def test_truthy_values_enable(self, val: str) -> None:
@@ -436,11 +440,11 @@ class TestPlanningSurfaceGate:
         # Disable twice, then enable, then disable — converges each time.
         apply_surface_gate(mcp, env={})
         apply_surface_gate(mcp, env={})
-        assert len(self._wire_names()) == 14
+        assert len(self._wire_names()) == 24
         apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
-        assert len(self._wire_names() & _ALL_TOOLS) == 24
+        assert len(self._wire_names() & _ALL_TOOLS) == 35
         apply_surface_gate(mcp, env={})
-        assert len(self._wire_names()) == 14
+        assert len(self._wire_names()) == 24
 
     def test_gated_planning_tool_is_uncallable_but_returns_when_enabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -460,7 +464,7 @@ class TestPlanningSurfaceGate:
         with pytest.raises(ToolError):
             _run(call_gated())
 
-        # Enabled: it returns the full 24-tool manifest (introspection is
+        # Enabled: it returns the full 35-tool manifest (introspection is
         # registry-based, so it reports the whole engine surface).
         apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
 
@@ -469,9 +473,9 @@ class TestPlanningSurfaceGate:
                 return _data(await c.call_tool("describe_surface", {}))
 
         manifest = _run(call_enabled())
-        assert manifest["mcp"]["count"] == 24
+        assert manifest["mcp"]["count"] == 35
 
-    def test_registry_still_reports_all_24_when_gated(self) -> None:
+    def test_registry_still_reports_all_35_when_gated(self) -> None:
         # describe/mcp_tool_names introspect the registry, NOT the wire surface,
         # so the documented "full engine surface" never shrinks under the gate.
         from anvil.cli.describe import mcp_tool_names
@@ -480,7 +484,198 @@ class TestPlanningSurfaceGate:
         apply_surface_gate(mcp, env={})
         names = set(mcp_tool_names())
         assert _ALL_TOOLS <= names
-        assert len(names) == 24
+        assert len(names) == 35
+
+
+class TestBundleTools:
+    def _seed(self, tmp_path: Path) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir, status="approved")
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", likely_files=["src/one.py"])
+        _add_task(state_dir, task_id="T002", likely_files=["src/two.py"])
+        _add_task(state_dir, task_id="T003", likely_files=["src/three.py"])
+
+    def test_create_read_claim_packet_and_progress(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+            async with Client(mcp) as client:
+                created = _data(
+                    await client.call_tool(
+                        "create_bundle",
+                        {
+                            "bundle_id": "B001",
+                            "prd_id": "default",
+                            "task_ids": ["T001", "T002"],
+                            "coordinator": "coordinator",
+                            "actor": "planner",
+                        },
+                    )
+                )
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B002",
+                        "prd_id": "default",
+                        "task_ids": ["T003"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                    },
+                )
+                listed = _data(await client.call_tool("list_bundles", {}))
+                fetched = _data(
+                    await client.call_tool("get_bundle", {"bundle_id": "B001"})
+                )
+                status = _data(await client.call_tool("get_project_status", {}))
+                checkpoint = _data(
+                    await client.call_tool(
+                        "checkpoint_bundle",
+                        {
+                            "bundle_id": "B001",
+                            "actor": "coordinator",
+                            "commit_sha": "abc123",
+                        },
+                    )
+                )
+                reconciled = _data(
+                    await client.call_tool(
+                        "reconcile_bundle",
+                        {
+                            "bundle_id": "B001",
+                            "actor": "coordinator",
+                            "commit_sha": "abc123",
+                        },
+                    )
+                )
+                superseded = _data(
+                    await client.call_tool(
+                        "supersede_bundle",
+                        {
+                            "bundle_id": "B002",
+                            "replacement_bundle_id": "B001",
+                            "actor": "coordinator",
+                        },
+                    )
+                )
+                claimed = _data(
+                    await client.call_tool(
+                        "claim_bundle",
+                        {"bundle_id": "B001", "actor": "coordinator"},
+                    )
+                )
+                packet = _data(
+                    await client.call_tool(
+                        "generate_bundle_packet",
+                        {
+                            "bundle_id": "B001",
+                            "actor": "coordinator",
+                            "format": "json",
+                        },
+                    )
+                )
+                progress = _data(
+                    await client.call_tool(
+                        "submit_bundle_progress",
+                        {
+                            "bundle_id": "B001",
+                            "actor": "coordinator",
+                            "phase": "implementing",
+                        },
+                    )
+                )
+                return (
+                    created,
+                    listed,
+                    fetched,
+                    status,
+                    checkpoint,
+                    claimed,
+                    (packet, progress, reconciled, superseded),
+                )
+
+        created, listed, fetched, status, checkpoint, claimed, tail = _run(run())
+        packet, progress, reconciled, superseded = tail
+        assert created["bundle"]["id"] == "B001"
+        assert [entry["id"] for entry in listed["bundles"]] == ["B001", "B002"]
+        assert fetched["claim"] is None
+        assert status["bundles"][0]["bundle_id"] == "B001"
+        assert checkpoint["checkpoint"]["commit_sha"] == "abc123"
+        assert reconciled["bundle"]["status"] == "planned"
+        assert superseded["bundle"]["superseded_by"] == "B001"
+        assert claimed["bundle"]["status"] == "active"
+        assert set(claimed["claim"]["member_claim_ids"]) == {"T001", "T002"}
+        assert packet["format"] == "json"
+        assert packet["content"]["bundle"]["id"] == "B001"
+        assert progress == {"recorded": True}
+
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("claim_bundle", {"bundle_id": "missing", "actor": "coordinator"}),
+            (
+                "generate_bundle_packet",
+                {"bundle_id": "missing", "actor": "coordinator"},
+            ),
+            (
+                "submit_bundle_progress",
+                {"bundle_id": "missing", "actor": "coordinator", "phase": "x"},
+            ),
+            (
+                "record_bundle_review",
+                {
+                    "bundle_id": "missing",
+                    "actor": "reviewer",
+                    "review_round": 1,
+                    "angle": "correctness",
+                    "decision": "approve",
+                },
+            ),
+            (
+                "finalize_bundle_review",
+                {"bundle_id": "missing", "actor": "coordinator"},
+            ),
+            (
+                "checkpoint_bundle",
+                {
+                    "bundle_id": "missing",
+                    "actor": "coordinator",
+                    "commit_sha": "abc123",
+                },
+            ),
+            (
+                "reconcile_bundle",
+                {"bundle_id": "missing", "actor": "coordinator"},
+            ),
+            (
+                "supersede_bundle",
+                {
+                    "bundle_id": "missing",
+                    "replacement_bundle_id": "also-missing",
+                    "actor": "coordinator",
+                },
+            ),
+        ],
+    )
+    def test_bundle_errors_have_matching_code_prefix(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(tool_name, arguments)
+
+        with pytest.raises(ToolError, match="bundle_error"):
+            _run(run())
 
 
 # ===========================================================================
