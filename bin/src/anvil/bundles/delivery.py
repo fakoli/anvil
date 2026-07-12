@@ -53,7 +53,10 @@ class BundleDeliveryManager:
             )
         except BackendError as exc:
             raise BundleDeliveryError(str(exc)) from exc
-        return checkpoint
+        stored = self._backend.get_bundle(bundle_id)
+        if stored is None or stored.checkpoint is None:  # pragma: no cover
+            raise BundleDeliveryError("Recorded checkpoint did not project.")
+        return stored.checkpoint
 
     def reconcile(
         self,

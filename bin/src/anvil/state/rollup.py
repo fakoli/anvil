@@ -100,9 +100,21 @@ def compute_bundle_rollup(
     reviews: list[BundleReviewVerdict],
     *,
     now: datetime.datetime,
+    result_times: dict[str, datetime.datetime] | None = None,
 ) -> list[BundleRollupEntry]:
     tasks_by_id = {task.id: task for task in tasks}
-    claims_by_bundle = {claim.bundle_id: claim for claim in bundle_claims}
+    claims_by_bundle: dict[str, BundleClaim] = {}
+    for claim in sorted(
+        bundle_claims,
+        key=lambda item: (
+            item.bundle_id,
+            item.status.value == "active",
+            item.created_at,
+            item.id,
+        ),
+    ):
+        claims_by_bundle[claim.bundle_id] = claim
+    result_times = result_times or {}
     entries: list[BundleRollupEntry] = []
     result_statuses = {
         "reviewed_unintegrated",
@@ -144,8 +156,28 @@ def compute_bundle_rollup(
             return value
 
         critical_depth = max((depth(task.id) for task in members), default=0)
+        completion_memo: dict[str, bool] = {}
+
+        def dependency_closed(
+            task_id: str,
+            *,
+            completion_memo: dict[str, bool] = completion_memo,
+            member_ids: set[str] = member_ids,
+            tasks_by_id: dict[str, Task] = tasks_by_id,
+        ) -> bool:
+            if task_id in completion_memo:
+                return completion_memo[task_id]
+            task = tasks_by_id[task_id]
+            complete = task.status.value in done_statuses and all(
+                dependency_closed(dep)
+                for dep in task.dependencies
+                if dep in member_ids
+            )
+            completion_memo[task_id] = complete
+            return complete
+
         completed_depth = max(
-            (depth(task.id) for task in members if task.status.value in done_statuses),
+            (depth(task.id) for task in members if dependency_closed(task.id)),
             default=0,
         )
         current_reviews = [
@@ -158,7 +190,11 @@ def compute_bundle_rollup(
         round_reviews = [
             review for review in current_reviews if review.review_round == latest_round
         ]
-        last_result = bundle.updated_at if bundle.status.value in result_statuses else None
+        last_result = (
+            result_times.get(bundle.id)
+            if bundle.status.value in result_statuses
+            else None
+        )
         checkpoint = (
             bundle.checkpoint.model_dump(mode="json")
             if bundle.checkpoint is not None

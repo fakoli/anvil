@@ -522,12 +522,31 @@ def status(
             for bundle in bundles
             for review in backend.list_bundle_reviews(bundle.id)
         ]
+        bundle_result_times: dict[str, datetime.datetime] = {}
+        for bundle in bundles:
+            latest_status = backend.latest_event_payload(
+                bundle.id, "bundle.status_changed"
+            )
+            if latest_status is None:
+                continue
+            payload, timestamp = latest_status
+            if payload.get("to") in {
+                "reviewed_unintegrated",
+                "integrated",
+                "merged",
+                "completed",
+            }:
+                parsed_time = datetime.datetime.fromisoformat(timestamp)
+                if parsed_time.tzinfo is None:
+                    parsed_time = parsed_time.replace(tzinfo=datetime.UTC)
+                bundle_result_times[bundle.id] = parsed_time
         bundle_rollup = compute_bundle_rollup(
             bundles,
             all_tasks,
             bundle_claims,
             bundle_reviews,
             now=_now,
+            result_times=bundle_result_times,
         )
     finally:
         backend.close()
@@ -664,6 +683,16 @@ def status(
             typer.echo(
                 f"  Claim: {bundle.coordinator_claim['id']} "
                 f"({bundle.coordinator_claim['status']})"
+            )
+        for agent in bundle.delegated_agents:
+            typer.echo(
+                f"  Agent: {agent['id']} status={agent['status']} "
+                f"handle={agent.get('handle') or '-'}"
+            )
+        if bundle.last_result_at is not None:
+            typer.echo(
+                f"  Last result: {bundle.last_result_at.isoformat()} "
+                f"elapsed={bundle.elapsed_since_result_seconds}s"
             )
         if bundle.checkpoint is not None:
             typer.echo(f"  Checkpoint: {bundle.checkpoint}")

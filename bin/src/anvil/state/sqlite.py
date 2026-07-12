@@ -4672,7 +4672,8 @@ class SqliteBackend:
                 "bundle.checkpoint_recorded: recorded_at must match event time."
             )
         row = conn.execute(
-            "SELECT creation_event_id, status, checkpoint FROM execution_bundles "
+            "SELECT creation_event_id, status, checkpoint, coordinator, updated_at "
+            "FROM execution_bundles "
             "WHERE id = ?",
             (payload.bundle_id,),
         ).fetchone()
@@ -4680,6 +4681,16 @@ class SqliteBackend:
             raise EventRejected("bundle.checkpoint_recorded: bundle generation not found.")
         if row[1] == BundleStatus.superseded.value:
             raise EventRejected("bundle.checkpoint_recorded: bundle is superseded.")
+        if row[3] != payload.checkpoint.recorded_by:
+            raise EventRejected(
+                "bundle.checkpoint_recorded: only the coordinator may checkpoint."
+            )
+        if datetime.datetime.fromisoformat(row[4]) > event.timestamp.astimezone(
+            datetime.UTC
+        ):
+            raise EventRejected(
+                "bundle.checkpoint_recorded: checkpoint predates bundle state."
+            )
         if row[2]:
             existing = json.loads(row[2])
             if (
@@ -4695,7 +4706,7 @@ class SqliteBackend:
         event: Event,
     ) -> None:
         row = conn.execute(
-            "SELECT creation_event_id, status, updated_at, checkpoint "
+            "SELECT creation_event_id, status, updated_at, checkpoint, coordinator "
             "FROM execution_bundles "
             "WHERE id = ?",
             (payload.bundle_id,),
@@ -4709,6 +4720,7 @@ class SqliteBackend:
             or row is None
             or row[0] != payload.creation_event_id
             or row[1] == BundleStatus.superseded.value
+            or row[4] != payload.checkpoint.recorded_by
             or datetime.datetime.fromisoformat(row[2]) > event_time
         ):
             return
@@ -4745,7 +4757,7 @@ class SqliteBackend:
         if payload.bundle_id == payload.replacement_bundle_id:
             raise EventRejected("bundle.superseded: replacement must be another bundle.")
         source = conn.execute(
-            "SELECT creation_event_id, prd_id, status, coordinator "
+            "SELECT creation_event_id, prd_id, status, coordinator, updated_at "
             "FROM execution_bundles WHERE id = ?",
             (payload.bundle_id,),
         ).fetchone()
@@ -4759,10 +4771,14 @@ class SqliteBackend:
             raise EventRejected("bundle.superseded: only the coordinator may supersede.")
         if source[2] in {status.value for status in TERMINAL_BUNDLE_STATUSES}:
             raise EventRejected("bundle.superseded: source is terminal.")
+        if datetime.datetime.fromisoformat(source[4]) > event.timestamp.astimezone(
+            datetime.UTC
+        ):
+            raise EventRejected("bundle.superseded: supersession predates source state.")
         if replacement is None or replacement[0] != source[1]:
             raise EventRejected("bundle.superseded: replacement must exist in the same PRD.")
-        if replacement[1] == BundleStatus.superseded.value:
-            raise EventRejected("bundle.superseded: replacement is superseded.")
+        if replacement[1] in {status.value for status in TERMINAL_BUNDLE_STATUSES}:
+            raise EventRejected("bundle.superseded: replacement is terminal.")
 
     @staticmethod
     def _write_bundle_superseded(
@@ -4771,7 +4787,8 @@ class SqliteBackend:
         event: Event,
     ) -> None:
         source = conn.execute(
-            "SELECT creation_event_id, prd_id, status, coordinator FROM execution_bundles "
+            "SELECT creation_event_id, prd_id, status, coordinator, updated_at "
+            "FROM execution_bundles "
             "WHERE id = ?",
             (payload.bundle_id,),
         ).fetchone()
@@ -4790,9 +4807,12 @@ class SqliteBackend:
             or source[0] != payload.creation_event_id
             or source[3] != payload.superseded_by_actor
             or source[2] in {status.value for status in TERMINAL_BUNDLE_STATUSES}
+            or datetime.datetime.fromisoformat(source[4]) > event_time
             or replacement is None
             or replacement[0] != source[1]
-            or replacement[1] == BundleStatus.superseded.value
+            or replacement[1] in {
+                status.value for status in TERMINAL_BUNDLE_STATUSES
+            }
         ):
             return
         active_claim = conn.execute(

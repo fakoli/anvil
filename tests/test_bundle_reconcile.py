@@ -4,12 +4,22 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from anvil.bundles.delivery import BundleDeliveryManager
+import pytest
+
+from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
 from anvil.bundles.review import BundleReviewManager
 from anvil.clock import FrozenClock
-from anvil.state.models import BundleStatus, ReviewDecision
+from anvil.state.backend import EventRejected
+from anvil.state.models import BundleStatus, Event, EventDraft, ReviewDecision
 from anvil.state.snapshot import serialize_state
-from tests.test_bundle_execution import _NOW, _backend, _event, _implement_bundle
+from tests.test_bundle_execution import (
+    _NOW,
+    _append_raw,
+    _backend,
+    _event,
+    _implement_bundle,
+    _next_event_id,
+)
 
 
 def test_reconcile_is_idempotent_and_does_not_apply_member_tasks(tmp_path) -> None:
@@ -104,6 +114,21 @@ def test_supersession_preserves_source_and_replays_replacement(tmp_path) -> None
                 },
             )
         )
+        with pytest.raises(BundleDeliveryError, match="predates"):
+            BundleDeliveryManager(
+                backend,
+                FrozenClock(_NOW - timedelta(days=1)),
+                actor="coordinator",
+            ).supersede("B001", replacement_bundle_id="B002")
+        conn = backend._require_conn()
+        conn.execute("UPDATE execution_bundles SET status = 'completed' WHERE id = 'B002'")
+        conn.commit()
+        with pytest.raises(BundleDeliveryError, match="replacement is terminal"):
+            BundleDeliveryManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).supersede("B001", replacement_bundle_id="B002")
+        conn.execute("UPDATE execution_bundles SET status = 'planned' WHERE id = 'B002'")
+        conn.commit()
         BundleDeliveryManager(
             backend, FrozenClock(_NOW), actor="coordinator"
         ).supersede("B001", replacement_bundle_id="B002")
@@ -116,5 +141,72 @@ def test_supersession_preserves_source_and_replays_replacement(tmp_path) -> None
     try:
         replay.replay_from_empty(str(tmp_path / "events.jsonl"))
         assert serialize_state(replay) == source
+    finally:
+        replay.close()
+
+
+def test_delivery_events_reject_forged_and_backdated_mutations(tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        from tests.test_bundle_execution import _seed
+
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        before = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(EventRejected, match="only the coordinator"):
+            backend.append(
+                EventDraft(
+                    timestamp=_NOW,
+                    actor="attacker",
+                    action="bundle.checkpoint_recorded",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "checkpoint": {
+                            "commit_sha": "attacker-sha",
+                            "recorded_at": _NOW.isoformat(),
+                            "recorded_by": "attacker",
+                        },
+                    },
+                )
+            )
+        with pytest.raises(BundleDeliveryError, match="predates"):
+            BundleDeliveryManager(
+                backend,
+                FrozenClock(_NOW - timedelta(minutes=1)),
+                actor="coordinator",
+            ).checkpoint("B001", commit_sha="old")
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=_NOW,
+                actor="attacker",
+                action="bundle.checkpoint_recorded",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "checkpoint": {
+                        "commit_sha": "attacker-sha",
+                        "recorded_at": _NOW.isoformat(),
+                        "recorded_by": "attacker",
+                    },
+                },
+            ),
+        )
+    finally:
+        backend.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").checkpoint is None  # type: ignore[union-attr]
     finally:
         replay.close()
