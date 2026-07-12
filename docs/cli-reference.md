@@ -2,9 +2,8 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 33 top-level commands plus 16
-> subcommands grouped under six sub-apps (`prd`, `review`, `hook`, `sync`,
-> `migrate`, `proof`) — 49 commands in total. The most-used lifecycle
+> Single-page reference for the `anvil` CLI: 66 executable leaf commands,
+> including the milestone bundle lifecycle. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
 > one-line entry each. For narrative context on common workflows, see
@@ -37,6 +36,7 @@
   - [`anvil release`](#release)
   - [`anvil renew`](#renew)
   - [`anvil packet`](#packet)
+- [Execution bundles](#execution-bundles)
 - Submit and apply
   - [`anvil submit`](#submit)
   - [`anvil apply`](#apply)
@@ -824,6 +824,104 @@ anvil packet T001 --format json
 **See also:** [`anvil claim`](#claim) (typically run before
 generating the packet); the rendered packet feeds directly into Claude Code,
 Cursor, or any MCP-aware agent.
+
+---
+
+## Execution bundles
+
+Bundle commands coordinate an ordered milestone through one coordinator claim, member
+evidence, a bounded multi-angle review, and delivery reconciliation. All accept `--json`
+and hidden `--cwd PATH`. Mutating commands accept `--actor`; when omitted, Anvil uses its
+normal actor resolution. Errors use the stable `bundle_error` code except an unready
+completion, which uses `bundle_not_ready`.
+
+### `anvil bundle create` { #bundle-create }
+
+`anvil bundle create B001 T001 T002 --prd release --coordinator lead` creates a planned
+bundle with ordered member tasks. Policy flags are `--max-tasks` (12),
+`--max-serial-stages` (6), `--max-reviews` (3), `--max-rereviews` (1), and repeatable
+`--required-angle`.
+
+### `anvil bundle show` { #bundle-show }
+
+`anvil bundle show B001` prints the bundle, coordinator claim, review count, checkpoint,
+and supersession state. JSON mode returns `bundle`, `claim`, and `reviews`.
+
+### `anvil bundle list` { #bundle-list }
+
+`anvil bundle list [--prd PRD_ID]` lists bundles in stable ID order, optionally filtered
+to one PRD.
+
+### `anvil bundle claim` { #bundle-claim }
+
+`anvil bundle claim B001` atomically creates the coordinator claim and member task
+authorizations. `--shared-tree` explicitly accepts a shared checkout; required worktree
+isolation otherwise directs callers to the top-level Git-aware bundle claim path.
+
+### `anvil bundle renew` { #bundle-renew }
+
+`anvil bundle renew B001` renews the active coordinator lease after stale-claim reaping.
+
+### `anvil bundle release` { #bundle-release }
+
+`anvil bundle release B001 [--reason TEXT]` releases the coordinator claim and returns its
+members to ready state after stale-claim reaping.
+
+### `anvil bundle packet` { #bundle-packet }
+
+`anvil bundle packet B001 [--format markdown|json]` renders the aggregate coordinator work
+packet.
+
+### `anvil bundle progress` { #bundle-progress }
+
+`anvil bundle progress B001 PHASE [--detail TEXT] [--member-task TASK_ID ...]` records an
+audited coordinator heartbeat for the active bundle.
+
+### `anvil bundle complete` { #bundle-complete }
+
+`anvil bundle complete B001` opens bundle review only when every member has completion
+evidence bound to its current member claim and all enforceable evidence claims pass. It is
+retry-safe. Failure returns `bundle_not_ready` with per-member blockers and does not append
+a progress event.
+
+### `anvil bundle status` { #bundle-status }
+
+`anvil bundle status [BUNDLE_ID]` reports claimability, rollups, refusal codes, and concrete
+remediation for one or all bundles.
+
+### `anvil bundle review` { #bundle-review }
+
+`anvil bundle review B001 --round 1 --angle security --decision approve` records one
+independent adversarial verdict. `--decision` accepts `approve`, `reject`, or
+`needs_changes`; `--notes` records reviewer context.
+
+### `anvil bundle finalize-review` { #bundle-finalize-review }
+
+`anvil bundle finalize-review B001` advances only after the configured number of unique
+reviewers and required angles pass with no blocking verdict.
+
+### `anvil bundle checkpoint` { #bundle-checkpoint }
+
+`anvil bundle checkpoint B001 [--commit SHA] [--pr-url URL]` records canonical delivery
+metadata; at least one delivery identifier is required.
+
+### `anvil bundle reconcile` { #bundle-reconcile }
+
+`anvil bundle reconcile B001 [--commit SHA] [--pr-url URL] [--merged]` idempotently
+reconciles checkpoint and integration state.
+
+### `anvil bundle supersede` { #bundle-supersede }
+
+`anvil bundle supersede B001 B002` marks `B001` superseded by replacement `B002` while
+retaining the original audit history.
+
+The normal lifecycle is:
+
+```text
+create -> claim -> packet/progress -> member submit -> complete
+       -> review (independent reviewers) -> finalize-review
+       -> checkpoint/reconcile
+```
 
 ---
 

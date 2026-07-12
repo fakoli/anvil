@@ -6,9 +6,9 @@ See the [glossary](../glossary.md).)
 
 1. **MCP** — register the `anvil` stdio server. It serves the 24 execution
    tools by default; set `ANVIL_MCP_PLANNING=1` in the server's env to expose
-   all 24 (adds the planning tools — `init_project`, `parse_prd`, `plan_tasks`,
+   all 35 (adds the planning tools — `init_project`, `parse_prd`, `plan_tasks`,
    `score_tasks`, `review_prd`, `review_tasks`, `apply_review_decision`,
-   `find_decisions`, `edit_dependencies`, `describe_surface`).
+   `find_decisions`, `edit_dependencies`, `describe_surface`, `create_bundle`).
 2. **CLI** — `anvil <command>` with `--json` for machine-readable output.
 
 `anvil install <harness>` wires this up for you, in two tiers:
