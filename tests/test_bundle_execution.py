@@ -10,12 +10,14 @@ import pytest
 from typer.testing import CliRunner
 
 from anvil.bundles.manager import BundleError, BundleManager
+from anvil.bundles.review import BundleReviewError, BundleReviewManager
 from anvil.claims.manager import ClaimError, ClaimManager
 from anvil.claims.stale import detect_and_release_stale
 from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.state.backend import EventRejected
-from anvil.state.models import BundleStatus, Event, EventDraft
+from anvil.state.models import BundleStatus, Event, EventDraft, ReviewDecision
+from anvil.state.snapshot import serialize_state
 from anvil.state.sqlite import SqliteBackend
 
 _NOW = datetime(2026, 7, 11, 18, 0, tzinfo=UTC)
@@ -232,6 +234,29 @@ def _manager(backend: SqliteBackend, root: Path) -> BundleManager:
     )
 
 
+def _implement_bundle(backend: SqliteBackend, root: Path) -> None:
+    _seed(backend)
+    manager = _manager(backend, root)
+    claimed = manager.claim("B001")
+    for index, task_id in enumerate(("release:T001", "release:T002"), start=1):
+        backend.append(
+            _event(
+                "evidence.submitted",
+                "task",
+                task_id,
+                {
+                    "task_id": task_id,
+                    "claim_id": claimed.claim.member_claim_ids[task_id],
+                    "submitted_by": "coordinator",
+                    "evidence_id": f"EV-REVIEW-{index}",
+                    "commands_run": [f"verify-{task_id}"],
+                    "files_changed": [f"src/{index}.py"],
+                },
+            )
+        )
+    assert manager.mark_implemented("B001").can_mark_implemented
+
+
 def test_claim_creates_one_public_claim_and_ordered_member_authorizations(
     tmp_path: Path,
 ) -> None:
@@ -361,6 +386,213 @@ def test_partial_evidence_reports_exact_unproven_members_and_agents_do_not_gate(
         )
     finally:
         backend.close()
+
+
+def test_three_independent_bundle_reviews_gate_transition_and_replay(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _implement_bundle(source, source_root)
+        for reviewer, angle in (
+            ("reviewer-a", "correctness"),
+            ("reviewer-b", "security"),
+            ("reviewer-c", "integration"),
+        ):
+            BundleReviewManager(
+                source, FrozenClock(_NOW), actor=reviewer
+            ).record(
+                "B001",
+                review_round=1,
+                angle=angle,
+                decision=ReviewDecision.approve,
+            )
+        gate = BundleReviewManager(
+            source, FrozenClock(_NOW), actor="coordinator"
+        ).finalize("B001")
+        assert gate.passed
+        assert source.get_bundle("B001").status is BundleStatus.reviewed_unintegrated  # type: ignore[union-attr]
+        assert len(source.list_bundle_reviews("B001")) == 3
+        source_snapshot = serialize_state(source)
+    finally:
+        source.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        assert replay.get_bundle("B001").status is BundleStatus.reviewed_unintegrated  # type: ignore[union-attr]
+        assert len(replay.list_bundle_reviews("B001")) == 3
+        assert serialize_state(replay) == source_snapshot
+    finally:
+        replay.close()
+
+
+def test_bundle_review_gate_rejects_self_review_duplicate_angles_and_forged_pass(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        before = len((tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines())
+        with pytest.raises(BundleReviewError, match="self-review"):
+            BundleReviewManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).record(
+                "B001",
+                review_round=1,
+                angle="correctness",
+                decision=ReviewDecision.approve,
+            )
+        assert len((tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()) == before
+        for reviewer in ("reviewer-a", "reviewer-b", "reviewer-c"):
+            BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
+                "B001",
+                review_round=1,
+                angle="correctness",
+                decision=ReviewDecision.approve,
+            )
+        gate = BundleReviewManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).gate("B001")
+        assert not gate.passed
+        assert gate.missing_reviewers == 2
+        with pytest.raises(BundleReviewError, match="prior round"):
+            BundleReviewManager(
+                backend, FrozenClock(_NOW), actor="reviewer-d"
+            ).record(
+                "B001",
+                review_round=2,
+                angle="security",
+                decision=ReviewDecision.approve,
+            )
+        with pytest.raises(BundleReviewError, match="remains incomplete"):
+            BundleReviewManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).finalize("B001")
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        with pytest.raises(EventRejected, match="review quorum is incomplete"):
+            backend.append(
+                _event(
+                    "bundle.status_changed",
+                    "bundle",
+                    "B001",
+                    {
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "bundle_claim_id": backend.get_bundle_claim("B001").id,  # type: ignore[union-attr]
+                        "from": "implemented_unreviewed",
+                        "to": "reviewed_unintegrated",
+                        "changed_at": _NOW.isoformat(),
+                    },
+                    actor="coordinator",
+                )
+            )
+    finally:
+        backend.close()
+
+
+def test_second_blocking_review_round_forces_replan(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        for review_round, prefix in ((1, "first"), (2, "second")):
+            for reviewer, angle in (
+                (f"{prefix}-a", "correctness"),
+                (f"{prefix}-b", "security"),
+                (f"{prefix}-c", "integration"),
+            ):
+                BundleReviewManager(
+                    backend, FrozenClock(_NOW), actor=reviewer
+                ).record(
+                    "B001",
+                    review_round=review_round,
+                    angle=angle,
+                    decision=(
+                        ReviewDecision.needs_changes
+                        if angle == "security"
+                        else ReviewDecision.approve
+                    ),
+                    notes="security blocker" if angle == "security" else None,
+                )
+            gate = BundleReviewManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).gate("B001")
+            assert gate.replan_required is (review_round == 2)
+        BundleReviewManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).finalize("B001")
+        assert backend.get_bundle("B001").status is BundleStatus.replan_required  # type: ignore[union-attr]
+    finally:
+        backend.close()
+
+
+def test_replay_ignores_coordinator_self_review_and_forged_gate_pass(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _implement_bundle(source, source_root)
+        bundle = source.get_bundle("B001")
+        claim = source.get_bundle_claim("B001")
+        assert bundle is not None and claim is not None
+        _append_raw(
+            source_root,
+            Event(
+                id=_next_event_id(source_root),
+                timestamp=_NOW,
+                actor="coordinator",
+                action="bundle.review_recorded",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "id": "BR-FORGED",
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "review_round": 1,
+                    "angle": "correctness",
+                    "reviewed_by": "coordinator",
+                    "decision": "approve",
+                    "created_at": _NOW.isoformat(),
+                },
+            ),
+        )
+        _append_raw(
+            source_root,
+            Event(
+                id=_next_event_id(source_root),
+                timestamp=_NOW,
+                actor="coordinator",
+                action="bundle.status_changed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "bundle_claim_id": claim.id,
+                    "from": "implemented_unreviewed",
+                    "to": "reviewed_unintegrated",
+                    "changed_at": _NOW.isoformat(),
+                },
+            ),
+        )
+    finally:
+        source.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        assert replay.list_bundle_reviews("B001") == []
+        assert replay.get_bundle("B001").status is BundleStatus.implemented_unreviewed  # type: ignore[union-attr]
+    finally:
+        replay.close()
 
 
 def test_union_file_conflict_refuses_whole_bundle(tmp_path: Path) -> None:

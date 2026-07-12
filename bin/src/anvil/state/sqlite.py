@@ -55,6 +55,8 @@ from anvil.state.models import (
     PRD,
     TERMINAL_BUNDLE_STATUSES,
     BundleClaim,
+    BundleReviewPolicy,
+    BundleReviewVerdict,
     BundleStatus,
     Claim,
     ClaimStatus,
@@ -79,7 +81,9 @@ from anvil.state.payloads import (
     BundleClaimRenewedPayload,
     BundleClaimStalePayload,
     BundleCreatedPayload,
+    BundlePlanAcknowledgedPayload,
     BundleProgressNotedPayload,
+    BundleReviewRecordedPayload,
     BundleStatusChangedPayload,
     ClaimCreatedPayload,
     ClaimReleasedPayload,
@@ -1211,6 +1215,15 @@ class SqliteBackend:
             ).fetchall()
         return [self._row_to_bundle_claim(row) for row in rows]
 
+    def list_bundle_reviews(self, bundle_id: str) -> list[BundleReviewVerdict]:
+        conn = self._require_conn()
+        rows = conn.execute(
+            "SELECT * FROM bundle_review_verdicts WHERE bundle_id = ? "
+            "ORDER BY review_round, angle, reviewed_by, id",
+            (bundle_id,),
+        ).fetchall()
+        return [BundleReviewVerdict.model_validate(dict(row)) for row in rows]
+
     def get_claim(self, claim_id: str) -> Claim | None:
         """Return the Claim with the given ID, or None if not found."""
         conn = self._require_conn()
@@ -2174,6 +2187,21 @@ class SqliteBackend:
             )""",
             "CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task "
             "ON execution_bundle_members (task_id)",
+            """CREATE TABLE IF NOT EXISTS bundle_review_verdicts (
+                id TEXT PRIMARY KEY,
+                bundle_id TEXT NOT NULL
+                    REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                creation_event_id TEXT NOT NULL,
+                review_round INTEGER NOT NULL CHECK (review_round >= 1),
+                angle TEXT NOT NULL,
+                reviewed_by TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (bundle_id, creation_event_id, review_round, angle, reviewed_by)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_bundle_review_verdicts_round "
+            "ON bundle_review_verdicts (bundle_id, creation_event_id, review_round)",
             """CREATE TABLE IF NOT EXISTS claim_replay_lineages (
                 claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE RESTRICT,
                 creation_fingerprint TEXT NOT NULL,
@@ -2873,6 +2901,16 @@ class SqliteBackend:
                 BundleAgentObservedPayload,
                 self._check_bundle_agent_observed,
                 self._write_bundle_agent_observed,
+            ),
+            "bundle.review_recorded": ActionSpec(
+                BundleReviewRecordedPayload,
+                self._check_bundle_review_recorded,
+                self._write_bundle_review_recorded,
+            ),
+            "bundle.plan_acknowledged": ActionSpec(
+                BundlePlanAcknowledgedPayload,
+                self._check_bundle_plan_acknowledged,
+                self._write_audit_only,
             ),
             "bundle.claimed": ActionSpec(
                 BundleClaimedPayload,
@@ -4024,8 +4062,88 @@ class SqliteBackend:
                         "bundle.status_changed: evidence is not bound to current "
                         f"member claims: {wrong_lineage}."
                     )
+            if to_status is BundleStatus.reviewed_unintegrated:
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may apply "
+                        "the bundle review gate."
+                    )
+                if not self._bundle_review_round_passes(
+                    conn, payload.bundle_id, payload.creation_event_id
+                ):
+                    raise EventRejected(
+                        "bundle.status_changed: adversarial review quorum is incomplete."
+                    )
         finally:
             conn.execute("COMMIT")
+
+    @staticmethod
+    def _bundle_review_round_passes(
+        conn: sqlite3.Connection, bundle_id: str, creation_event_id: str
+    ) -> bool:
+        bundle_row = conn.execute(
+            "SELECT coordinator, review_policy FROM execution_bundles "
+            "WHERE id = ? AND creation_event_id = ?",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if bundle_row is None:
+            return False
+        try:
+            policy = BundleReviewPolicy.model_validate(json.loads(bundle_row[1]))
+        except (TypeError, ValueError):
+            return False
+        round_row = conn.execute(
+            "SELECT MAX(review_round) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ?",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if round_row is None or round_row[0] is None:
+            return False
+        rows = conn.execute(
+            "SELECT angle, reviewed_by, decision FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? AND review_round = ?",
+            (bundle_id, creation_event_id, round_row[0]),
+        ).fetchall()
+        if any(row[2] != ReviewDecision.approve.value for row in rows):
+            return False
+        reviewers = {row[1] for row in rows}
+        angles = {row[0] for row in rows}
+        if policy.independent_reviewer_required and bundle_row[0] in reviewers:
+            return False
+        return (
+            len(reviewers) >= max(3, policy.max_reviews)
+            and len(angles) >= max(3, policy.max_reviews)
+            and set(policy.required_angles).issubset(angles)
+        )
+
+    @staticmethod
+    def _bundle_review_round_complete_with_blocker(
+        conn: sqlite3.Connection,
+        bundle_id: str,
+        creation_event_id: str,
+        review_round: int,
+        policy: BundleReviewPolicy,
+        coordinator: str,
+    ) -> bool:
+        rows = conn.execute(
+            "SELECT angle, reviewed_by, decision FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? AND review_round = ?",
+            (bundle_id, creation_event_id, review_round),
+        ).fetchall()
+        reviewers = {row[1] for row in rows}
+        angles = {row[0] for row in rows}
+        required = max(3, policy.max_reviews)
+        return (
+            coordinator not in reviewers
+            and len(reviewers) >= required
+            and len(angles) >= required
+            and set(policy.required_angles).issubset(angles)
+            and any(row[2] != ReviewDecision.approve.value for row in rows)
+        )
 
     @staticmethod
     def _write_bundle_status_changed(
@@ -4035,6 +4153,20 @@ class SqliteBackend:
     ) -> None:
         if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
             return
+        if payload.to_status is BundleStatus.reviewed_unintegrated:
+            coordinator = conn.execute(
+                "SELECT coordinator FROM execution_bundles WHERE id = ? "
+                "AND creation_event_id = ?",
+                (payload.bundle_id, payload.creation_event_id),
+            ).fetchone()
+            if (
+                coordinator is None
+                or event.actor != coordinator[0]
+                or not SqliteBackend._bundle_review_round_passes(
+                    conn, payload.bundle_id, payload.creation_event_id
+                )
+            ):
+                return
         active_claim = conn.execute(
             "SELECT id FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
             (payload.bundle_id,),
@@ -4137,6 +4269,180 @@ class SqliteBackend:
                 projected_updated_at.isoformat(),
                 payload.bundle_id,
                 payload.creation_event_id,
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_review_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleReviewRecordedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.review_recorded: event target mismatch.")
+        if event.actor != payload.reviewed_by:
+            raise EventRejected("bundle.review_recorded: event actor mismatch.")
+        if payload.created_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.review_recorded: created_at must match event time.")
+        row = conn.execute(
+            "SELECT creation_event_id, coordinator, status, review_policy "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if row is None or row[0] != payload.creation_event_id:
+            raise EventRejected("bundle.review_recorded: bundle generation not found.")
+        if row[2] != BundleStatus.implemented_unreviewed.value:
+            raise EventRejected(
+                "bundle.review_recorded: bundle must be implemented_unreviewed."
+            )
+        policy = BundleReviewPolicy.model_validate(json.loads(row[3]))
+        if policy.independent_reviewer_required and payload.reviewed_by == row[1]:
+            raise EventRejected("bundle.review_recorded: coordinator cannot self-review.")
+        if payload.review_round > policy.max_rereviews + 1:
+            raise EventRejected("bundle.review_recorded: re-review budget exhausted.")
+        if payload.decision is not ReviewDecision.approve and not (
+            payload.notes and payload.notes.strip()
+        ):
+            raise EventRejected("bundle.review_recorded: blocking verdict needs notes.")
+        existing_id = conn.execute(
+            "SELECT 1 FROM bundle_review_verdicts WHERE id = ?", (payload.id,)
+        ).fetchone()
+        if existing_id is not None:
+            raise EventRejected(f"bundle.review_recorded: id '{payload.id}' already exists.")
+        duplicate_reviewer = conn.execute(
+            "SELECT 1 FROM bundle_review_verdicts WHERE bundle_id = ? "
+            "AND creation_event_id = ? AND review_round = ? AND reviewed_by = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.review_round,
+                payload.reviewed_by,
+            ),
+        ).fetchone()
+        if duplicate_reviewer is not None:
+            raise EventRejected(
+                "bundle.review_recorded: reviewer already submitted this round."
+            )
+        max_round = conn.execute(
+            "SELECT COALESCE(MAX(review_round), 0) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ?",
+            (payload.bundle_id, payload.creation_event_id),
+        ).fetchone()[0]
+        if payload.review_round > max_round + 1:
+            raise EventRejected("bundle.review_recorded: review rounds must be contiguous.")
+        if payload.review_round == max_round + 1 and max_round > 0 and not (
+            SqliteBackend._bundle_review_round_complete_with_blocker(
+                conn,
+                payload.bundle_id,
+                payload.creation_event_id,
+                max_round,
+                policy,
+                row[1],
+            )
+        ):
+            raise EventRejected(
+                "bundle.review_recorded: prior round is not a complete blocking quorum."
+            )
+
+    @staticmethod
+    def _check_bundle_plan_acknowledged(
+        conn: sqlite3.Connection,
+        payload: BundlePlanAcknowledgedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "prd" or event.target_id != payload.prd_id:
+            raise EventRejected("bundle.plan_acknowledged: event target mismatch.")
+        if event.actor != payload.acknowledged_by:
+            raise EventRejected("bundle.plan_acknowledged: event actor mismatch.")
+        if payload.created_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected(
+                "bundle.plan_acknowledged: created_at must match event time."
+            )
+        if conn.execute(
+            "SELECT 1 FROM prds WHERE id = ?", (payload.prd_id,)
+        ).fetchone() is None:
+            raise EventRejected("bundle.plan_acknowledged: PRD not found.")
+
+    @staticmethod
+    def _write_bundle_review_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleReviewRecordedPayload,
+        event: Event,
+    ) -> None:
+        row = conn.execute(
+            "SELECT creation_event_id, coordinator, status, review_policy "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.reviewed_by
+            or payload.created_at != event.timestamp.astimezone(datetime.UTC)
+            or row is None
+            or row[0] != payload.creation_event_id
+            or row[2] != BundleStatus.implemented_unreviewed.value
+        ):
+            return
+        try:
+            policy = BundleReviewPolicy.model_validate(json.loads(row[3]))
+        except (TypeError, ValueError):
+            return
+        if (
+            (policy.independent_reviewer_required and payload.reviewed_by == row[1])
+            or payload.review_round > policy.max_rereviews + 1
+            or (
+                payload.decision is not ReviewDecision.approve
+                and not (payload.notes and payload.notes.strip())
+            )
+        ):
+            return
+        max_round = conn.execute(
+            "SELECT COALESCE(MAX(review_round), 0) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ?",
+            (payload.bundle_id, payload.creation_event_id),
+        ).fetchone()[0]
+        if payload.review_round > max_round + 1:
+            return
+        if payload.review_round == max_round + 1 and max_round > 0 and not (
+            SqliteBackend._bundle_review_round_complete_with_blocker(
+                conn,
+                payload.bundle_id,
+                payload.creation_event_id,
+                max_round,
+                policy,
+                row[1],
+            )
+        ):
+            return
+        duplicate = conn.execute(
+            "SELECT 1 FROM bundle_review_verdicts WHERE id = ? OR "
+            "(bundle_id = ? AND creation_event_id = ? AND review_round = ? "
+            "AND reviewed_by = ?)",
+            (
+                payload.id,
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.review_round,
+                payload.reviewed_by,
+            ),
+        ).fetchone()
+        if duplicate is not None:
+            return
+        conn.execute(
+            "INSERT INTO bundle_review_verdicts "
+            "(id, bundle_id, creation_event_id, review_round, angle, reviewed_by, "
+            "decision, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                payload.id,
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.review_round,
+                payload.angle.strip().lower(),
+                payload.reviewed_by,
+                payload.decision.value,
+                payload.notes,
+                payload.created_at.isoformat(),
             ),
         )
 

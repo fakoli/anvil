@@ -18,6 +18,8 @@ from pathlib import Path
 
 from anvil.state.models import (
     AssertionProof,
+    BundleReviewPolicy,
+    BundleReviewVerdict,
     CommandProof,
     DiffProof,
     Evidence,
@@ -35,7 +37,97 @@ __all__ = [
     "deferred_findings",
     "deferred_findings_for_files",
     "evidence_complete",
+    "BundleReviewGate",
+    "evaluate_bundle_reviews",
 ]
+
+
+@dataclass(frozen=True)
+class BundleReviewGate:
+    """Deterministic verdict for the latest bounded adversarial review round."""
+
+    passed: bool
+    review_round: int
+    reviews_used: int
+    rereviews_used: int
+    missing_angles: list[str] = field(default_factory=list)
+    missing_reviewers: int = 0
+    blocking_findings: list[str] = field(default_factory=list)
+    invalid_reviewers: list[str] = field(default_factory=list)
+    replan_required: bool = False
+
+
+def evaluate_bundle_reviews(
+    policy: BundleReviewPolicy,
+    verdicts: list[BundleReviewVerdict],
+    *,
+    coordinator: str,
+) -> BundleReviewGate:
+    """Evaluate the latest review round without allowing author self-review.
+
+    Only the latest round can clear the gate. A blocking verdict always fails;
+    when it survives the configured re-review budget the result explicitly
+    requires replanning instead of silently opening another review round.
+    """
+    review_round = max((verdict.review_round for verdict in verdicts), default=1)
+    current = [
+        verdict for verdict in verdicts if verdict.review_round == review_round
+    ]
+    invalid_reviewers = sorted(
+        {
+            verdict.reviewed_by
+            for verdict in current
+            if policy.independent_reviewer_required
+            and verdict.reviewed_by == coordinator
+        }
+    )
+    valid = [
+        verdict for verdict in current if verdict.reviewed_by not in invalid_reviewers
+    ]
+    reviewers = {verdict.reviewed_by for verdict in valid}
+    approved_angles = {
+        verdict.angle.strip().lower()
+        for verdict in valid
+        if verdict.decision is ReviewDecision.approve
+    }
+    all_angles = {verdict.angle.strip().lower() for verdict in valid}
+    missing_angles = sorted(set(policy.required_angles) - approved_angles)
+    blocking = [
+        f"{verdict.angle}: {verdict.notes or verdict.decision.value}"
+        for verdict in valid
+        if verdict.decision is not ReviewDecision.approve
+    ]
+    required_count = max(3, policy.max_reviews)
+    missing_reviewers = max(
+        required_count - min(len(reviewers), len(approved_angles)), 0
+    )
+    rereviews_used = max(review_round - 1, 0)
+    round_complete = (
+        len(reviewers) >= required_count
+        and len(all_angles) >= required_count
+        and set(policy.required_angles).issubset(all_angles)
+    )
+    passed = round_complete and not (
+        missing_angles
+        or missing_reviewers
+        or blocking
+        or invalid_reviewers
+    )
+    return BundleReviewGate(
+        passed=passed,
+        review_round=review_round,
+        reviews_used=len(valid),
+        rereviews_used=rereviews_used,
+        missing_angles=missing_angles,
+        missing_reviewers=missing_reviewers,
+        blocking_findings=blocking,
+        invalid_reviewers=invalid_reviewers,
+        replan_required=bool(
+            blocking
+            and round_complete
+            and rereviews_used >= policy.max_rereviews
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

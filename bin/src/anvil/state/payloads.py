@@ -27,11 +27,13 @@ from anvil.state.models import (
     DEFAULT_PRD_ID,
     BundleCheckpoint,
     BundleReviewPolicy,
+    BundleReviewVerdict,
     BundleStatus,
     BundleThroughputBudget,
     DelegatedAgentObservation,
     EvidenceCategory,
     ProofArtifact,
+    ReviewDecision,
 )
 
 
@@ -397,6 +399,64 @@ class BundleAgentObservedPayload(BaseModel):
     bundle_id: str
     creation_event_id: str
     observation: DelegatedAgentObservation
+
+
+class BundleReviewRecordedPayload(BaseModel):
+    """Canonical adversarial verdict recorded against one bundle generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    bundle_id: str
+    creation_event_id: str
+    review_round: int = Field(ge=1)
+    angle: str
+    reviewed_by: str
+    decision: ReviewDecision
+    notes: str | None = None
+    created_at: datetime.datetime
+
+    @field_validator("id", "bundle_id", "creation_event_id", "angle", "reviewed_by")
+    @classmethod
+    def _validate_review_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle review identity fields must not be blank")
+        return value
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _validate_review_time(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle review timestamp must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+    def to_model(self) -> BundleReviewVerdict:
+        return BundleReviewVerdict.model_validate(self.model_dump(mode="json"))
+
+
+class BundlePlanAcknowledgedPayload(BaseModel):
+    """Audited operator acceptance of an oversized proposed execution wave."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prd_id: str
+    breaches: list[str] = Field(min_length=1)
+    acknowledged_by: str
+    created_at: datetime.datetime
+
+    @field_validator("prd_id", "acknowledged_by")
+    @classmethod
+    def _validate_ack_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle plan acknowledgement identity must not be blank")
+        return value
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _validate_ack_time(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle plan acknowledgement time must be timezone-aware")
+        return value.astimezone(datetime.UTC)
 
 
 class BundleMemberClaimPayload(BaseModel):
@@ -1186,6 +1246,8 @@ __all__ = [
     "BundleCreatedPayload",
     "BundleMemberClaimPayload",
     "BundleProgressNotedPayload",
+    "BundlePlanAcknowledgedPayload",
+    "BundleReviewRecordedPayload",
     "BundleStatusChangedPayload",
     "ClaimCreatedPayload",
     "ClaimReleasedPayload",

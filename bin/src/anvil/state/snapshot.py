@@ -226,4 +226,19 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
                 claim.model_dump(mode="json")
                 for claim in sorted(bundle_claims, key=lambda claim: claim.id)
             ]
+        list_bundle_reviews = getattr(backend, "list_bundle_reviews", None)
+        bundle_reviews = (
+            [
+                review
+                for bundle in bundles
+                for review in list_bundle_reviews(bundle.id)
+            ]
+            if list_bundle_reviews is not None
+            else []
+        )
+        if bundle_reviews:
+            state["bundle_reviews"] = [
+                review.model_dump(mode="json")
+                for review in sorted(bundle_reviews, key=lambda review: review.id)
+            ]
     return state

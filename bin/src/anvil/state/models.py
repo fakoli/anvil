@@ -86,6 +86,7 @@ __all__ = [
     "BundleClaim",
     "Evidence",
     "BundleReviewPolicy",
+    "BundleReviewVerdict",
     "BundleThroughputBudget",
     "DelegatedAgentObservation",
     "BundleCheckpoint",
@@ -774,10 +775,59 @@ class BundleReviewPolicy(BaseModel):
 
     model_config = _MODEL_CONFIG
 
-    max_reviews: int = Field(default=1, ge=1)
+    # ge=1 preserves replay of the unreleased v11 draft shape; every review
+    # gate applies a hard minimum quorum of three regardless of this value.
+    max_reviews: int = Field(default=3, ge=1, le=20)
     max_rereviews: int = Field(default=1, ge=0)
     independent_reviewer_required: bool = True
-    required_angles: list[str] = Field(default_factory=list)
+    required_angles: list[str] = Field(
+        default_factory=lambda: ["correctness", "security", "integration"]
+    )
+
+    @field_validator("required_angles")
+    @classmethod
+    def _validate_review_angles(cls, value: list[str]) -> list[str]:
+        normalized = [angle.strip().lower() for angle in value]
+        if any(not angle for angle in normalized):
+            raise ValueError("bundle review angles must not be blank")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("bundle review angles must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def _reviews_cover_angles(self) -> BundleReviewPolicy:
+        if self.max_reviews < len(self.required_angles):
+            raise ValueError("max_reviews must cover every required review angle")
+        return self
+
+
+class BundleReviewVerdict(BaseModel):
+    """One independently authored adversarial verdict for a bundle review round."""
+
+    model_config = _MODEL_CONFIG
+
+    id: ReviewID
+    bundle_id: BundleID
+    creation_event_id: EventID
+    review_round: int = Field(ge=1)
+    angle: str
+    reviewed_by: str
+    decision: ReviewDecision
+    notes: str | None = None
+    created_at: datetime.datetime
+
+    @field_validator("angle", "reviewed_by")
+    @classmethod
+    def _validate_review_identity(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("bundle review angle and reviewer must not be blank")
+        return normalized
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _validate_review_time(cls, value: datetime.datetime) -> datetime.datetime:
+        return _require_utc(value, "created_at")
 
 
 class BundleThroughputBudget(BaseModel):

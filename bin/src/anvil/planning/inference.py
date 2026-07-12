@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 from anvil.state.models import ConflictGroup, Task
@@ -39,6 +40,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "InferenceResult",
+    "BundlePlanReport",
+    "BundleProposal",
+    "build_bundle_plan",
     "SubtaskProposal",
     "expand_task",
     "infer_all",
@@ -94,6 +98,188 @@ class InferenceResult(NamedTuple):
 
     tasks: list[Task]
     conflict_groups: list[ConflictGroup]
+
+
+@dataclass(frozen=True)
+class BundleProposal:
+    """One stable connected component proposed as a coordinator-owned bundle."""
+
+    id: str
+    task_ids: tuple[str, ...]
+    serial_depth: int
+    overlap_files: tuple[str, ...]
+    review_angles: tuple[str, ...]
+    expected_reviews: int
+    expected_checkpoints: int = 1
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class BundlePlanReport:
+    """Deterministic execution-cost report emitted before bundle execution."""
+
+    task_count: int
+    serial_depth: int
+    overlap_pair_count: int
+    overlap_files: tuple[str, ...]
+    proposed_bundles: tuple[BundleProposal, ...]
+    expected_review_count: int
+    high_risk_policies: tuple[str, ...]
+    expected_checkpoints: int
+    max_tasks: int
+    max_serial_stages: int
+    limit_breaches: tuple[str, ...]
+    acknowledgement_required: bool
+
+    def to_dict(self) -> dict[str, object]:
+        data = asdict(self)
+        data["proposed_bundles"] = [
+            proposal.to_dict() for proposal in self.proposed_bundles
+        ]
+        return data
+
+
+def _serial_depth(tasks: list[Task]) -> int:
+    by_id = {task.id: task for task in tasks}
+    visiting: set[str] = set()
+    memo: dict[str, int] = {}
+
+    def visit(task_id: str) -> int:
+        if task_id in memo:
+            return memo[task_id]
+        if task_id in visiting:
+            raise ValueError(f"bundle planning found a dependency cycle at '{task_id}'")
+        visiting.add(task_id)
+        depth = 1 + max(
+            (visit(dep) for dep in by_id[task_id].dependencies if dep in by_id),
+            default=0,
+        )
+        visiting.remove(task_id)
+        memo[task_id] = depth
+        return depth
+
+    return max((visit(task_id) for task_id in sorted(by_id)), default=0)
+
+
+def _risk_angles(tasks: list[Task]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    angles = {"correctness", "security", "integration"}
+    policies: set[str] = set()
+    joined_files = " ".join(path.lower() for task in tasks for path in task.likely_files)
+    classifications = {
+        "security": ("security", "auth", "crypto", "secret"),
+        "privacy": ("privacy", "pii", "personal_data"),
+        "topology": ("schema", "migration", "state/", "state\\"),
+        "transport": ("http", "network", "sync/", "sync\\", "mcp"),
+        "release": ("release", "packaging", "changelog"),
+        "public-api": ("cli/", "cli\\", "api", "__init__.py"),
+    }
+    for angle, markers in classifications.items():
+        if any(marker in joined_files for marker in markers):
+            angles.add(angle)
+            policies.add(angle)
+    if any(
+        (task.scores.blast_radius or 0) >= 4
+        or (task.scores.review_risk or 0) >= 4
+        for task in tasks
+    ):
+        angles.add("blast-radius")
+        policies.add("high-score")
+    return tuple(sorted(angles)), tuple(sorted(policies))
+
+
+def build_bundle_plan(
+    tasks: list[Task],
+    *,
+    max_tasks: int = 12,
+    max_serial_stages: int = 6,
+) -> BundlePlanReport:
+    """Propose stable graph/file components and quantify execution overhead."""
+    ordered = sorted(tasks, key=lambda task: task.id)
+    task_ids = {task.id for task in ordered}
+    adjacency: dict[str, set[str]] = {task.id: set() for task in ordered}
+    overlap_files: set[str] = set()
+    overlap_pair_count = 0
+    for task in ordered:
+        for dependency in task.dependencies:
+            if dependency in task_ids:
+                adjacency[task.id].add(dependency)
+                adjacency[dependency].add(task.id)
+    for index, left in enumerate(ordered):
+        left_files = set(left.likely_files)
+        for right in ordered[index + 1 :]:
+            overlap = left_files & set(right.likely_files)
+            if not overlap:
+                continue
+            overlap_pair_count += 1
+            overlap_files.update(overlap)
+            adjacency[left.id].add(right.id)
+            adjacency[right.id].add(left.id)
+
+    components: list[tuple[str, ...]] = []
+    remaining = set(task_ids)
+    while remaining:
+        seed = min(remaining)
+        stack = [seed]
+        component: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in component:
+                continue
+            component.add(current)
+            stack.extend(sorted(adjacency[current] - component, reverse=True))
+        remaining -= component
+        components.append(tuple(sorted(component)))
+    components.sort()
+
+    by_id = {task.id: task for task in ordered}
+    proposals: list[BundleProposal] = []
+    high_risk: set[str] = set()
+    for index, component in enumerate(components, start=1):
+        members = [by_id[task_id] for task_id in component]
+        member_files = [set(task.likely_files) for task in members]
+        component_overlap = {
+            path
+            for left_index, left in enumerate(member_files)
+            for right in member_files[left_index + 1 :]
+            for path in left & right
+        }
+        angles, policies = _risk_angles(members)
+        high_risk.update(policies)
+        proposals.append(
+            BundleProposal(
+                id=f"BP{index:03d}",
+                task_ids=component,
+                serial_depth=_serial_depth(members),
+                overlap_files=tuple(sorted(component_overlap)),
+                review_angles=angles,
+                expected_reviews=max(3, len(angles)),
+            )
+        )
+
+    serial_depth = _serial_depth(ordered)
+    breaches: list[str] = []
+    if len(ordered) > max_tasks:
+        breaches.append(f"task_count {len(ordered)} exceeds limit {max_tasks}")
+    if serial_depth > max_serial_stages:
+        breaches.append(
+            f"serial_depth {serial_depth} exceeds limit {max_serial_stages}"
+        )
+    return BundlePlanReport(
+        task_count=len(ordered),
+        serial_depth=serial_depth,
+        overlap_pair_count=overlap_pair_count,
+        overlap_files=tuple(sorted(overlap_files)),
+        proposed_bundles=tuple(proposals),
+        expected_review_count=sum(item.expected_reviews for item in proposals),
+        high_risk_policies=tuple(sorted(high_risk)),
+        expected_checkpoints=len(proposals),
+        max_tasks=max_tasks,
+        max_serial_stages=max_serial_stages,
+        limit_breaches=tuple(breaches),
+        acknowledgement_required=bool(breaches),
+    )
 
 
 # ---------------------------------------------------------------------------

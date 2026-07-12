@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from anvil.state.models import (
         PRD,
         BundleClaim,
+        BundleReviewVerdict,
         Claim,
         ConflictGroup,
         Event,
@@ -134,6 +135,10 @@ class Backend(Protocol):
 
     def list_bundle_claims(self, *, status: str | None = None) -> list[BundleClaim]:
         """Return coordinator bundle claims in stable ID order."""
+        ...
+
+    def list_bundle_reviews(self, bundle_id: str) -> list[BundleReviewVerdict]:
+        """Return adversarial verdicts for a bundle in deterministic order."""
         ...
 
     def get_feature(self, feature_id: str) -> Feature | None:

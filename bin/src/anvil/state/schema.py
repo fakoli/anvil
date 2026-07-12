@@ -223,6 +223,22 @@ CREATE TABLE IF NOT EXISTS execution_bundle_members (
 CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task
     ON execution_bundle_members (task_id);
 
+CREATE TABLE IF NOT EXISTS bundle_review_verdicts (
+    id                 TEXT PRIMARY KEY,
+    bundle_id          TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    creation_event_id  TEXT NOT NULL,
+    review_round       INTEGER NOT NULL CHECK (review_round >= 1),
+    angle              TEXT NOT NULL,
+    reviewed_by        TEXT NOT NULL,
+    decision           TEXT NOT NULL,
+    notes              TEXT,
+    created_at         TEXT NOT NULL,
+    UNIQUE (bundle_id, creation_event_id, review_round, angle, reviewed_by)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundle_review_verdicts_round
+    ON bundle_review_verdicts (bundle_id, creation_event_id, review_round);
+
 CREATE TABLE IF NOT EXISTS bundle_claims (
     id                 TEXT PRIMARY KEY,
     bundle_id          TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
