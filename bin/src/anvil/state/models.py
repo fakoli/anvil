@@ -965,6 +965,13 @@ class Claim(BaseModel):
     ) -> datetime.datetime:
         return _require_utc(v, "created_at / lease_expires_at / last_heartbeat_at")
 
+    @model_serializer(mode="wrap")
+    def _omit_empty_bundle_claim(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("bundle_claim_id") is None:
+            data.pop("bundle_claim_id", None)
+        return data
+
 
 class BundleClaim(BaseModel):
     """One public coordinator lease over an execution bundle.

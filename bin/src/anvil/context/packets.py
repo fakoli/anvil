@@ -145,6 +145,19 @@ def render_bundle_packet(
         raise ValueError("bundle packet members must match stored member order")
     if any(member.task.prd_id != bundle.prd_id for member in members):
         raise ValueError("bundle packet members must belong to the owning PRD")
+    for member in members:
+        if member.feature.id != member.task.feature_id:
+            raise ValueError("bundle packet feature does not own its task")
+        if [requirement.id for requirement in member.requirements] != list(
+            member.feature.requirements
+        ):
+            raise ValueError("bundle packet requirements must exactly match the feature")
+        if any(requirement.prd_id != bundle.prd_id for requirement in member.requirements):
+            raise ValueError("bundle packet requirement belongs to another PRD")
+        if [dependency.id for dependency in member.dependencies] != list(
+            member.task.dependencies
+        ):
+            raise ValueError("bundle packet dependencies must exactly match the task")
 
     member_ids = set(bundle.task_ids)
     likely_files: list[str] = []
@@ -226,9 +239,60 @@ def render_bundle_packet(
                     or ["- None declared."]
                 ),
                 "",
+                "Dependencies:",
+                *(
+                    [
+                        f"- {dependency.id}: {dependency.status.value}"
+                        for dependency in context.dependencies
+                    ]
+                    or ["- None declared."]
+                ),
+                "",
                 "Verification commands:",
                 *(
                     [f"- `{command}`" for command in task.verification.commands]
+                    or ["- None declared."]
+                ),
+                "",
+                "Manual verification:",
+                *(
+                    [f"- {step}" for step in task.verification.manual_steps]
+                    or ["- None declared."]
+                ),
+                "",
+                "Required evidence:",
+                *(
+                    [f"- {item}" for item in task.verification.required_evidence]
+                    or ["- None declared."]
+                ),
+                "",
+                "Required proofs:",
+                *(
+                    [
+                        f"- {proof.model_dump_json()}"
+                        for proof in task.verification.required_proofs
+                    ]
+                    or ["- None declared."]
+                ),
+                "",
+                "Artifact assertions:",
+                *(
+                    [
+                        f"- {assertion.model_dump_json()}"
+                        for assertion in task.verification.artifact_assertions
+                    ]
+                    or ["- None declared."]
+                ),
+                "",
+                "Likely files:",
+                *([f"- `{path}`" for path in task.likely_files] or ["- None declared."]),
+                "",
+                "Conflict groups:",
+                *([f"- {group}" for group in task.conflict_groups] or ["- None declared."]),
+                "",
+                "Implementation notes:",
+                *(
+                    [f"- {note}" for note in task.implementation_notes]
                     or ["- None declared."]
                 ),
                 "",

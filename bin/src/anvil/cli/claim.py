@@ -156,6 +156,20 @@ def claim(
                     fail("claim", f"bundle '{task_id}' not found.", code="not_found")
                 typer.echo(f"Error: bundle '{task_id}' not found.", err=True)
                 raise typer.Exit(code=1)
+            bundle_manager = BundleManager(
+                backend,
+                clock,
+                actor=resolved_actor,
+                project_root=resolved_cwd,
+                lease_minutes=lease_kwargs.get("default_lease_minutes", 240),
+            )
+            try:
+                bundle_manager.preflight(task_id)
+            except BundleError as exc:
+                if json_output:
+                    fail("claim", str(exc), code="bundle_claim_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
             if branch is not None:
                 branch_result = use_named_branch(
@@ -180,13 +194,6 @@ def claim(
                     worktree_path = wt_result.path
                 else:
                     warnings.append(f"worktree not created — {wt_result.reason}")
-            bundle_manager = BundleManager(
-                backend,
-                clock,
-                actor=resolved_actor,
-                project_root=resolved_cwd,
-                lease_minutes=lease_kwargs.get("default_lease_minutes", 240),
-            )
             try:
                 bundle_result = bundle_manager.claim(
                     task_id,
@@ -603,6 +610,34 @@ def release(
         clock = SystemClock()
         _reap_stale_claims(backend)
 
+        bundle_claim = next(
+            (claim for claim in backend.list_bundle_claims() if claim.id == claim_id),
+            None,
+        )
+        if bundle_claim is not None:
+            from anvil.bundles.manager import BundleError, BundleManager
+
+            try:
+                BundleManager(
+                    backend,
+                    clock,
+                    actor=resolved_actor,
+                    project_root=_resolve_project_dir(cwd),
+                ).release(bundle_claim.bundle_id, reason=reason)
+            except BundleError as exc:
+                if json_output:
+                    fail("release", str(exc), code="bundle_claim_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if json_output:
+                emit_success(
+                    "release",
+                    {"claim_id": claim_id, "released": True, "reason": reason},
+                )
+                return
+            typer.echo(f"Released bundle claim '{claim_id}'.")
+            return
+
         manager = ClaimManager(backend, clock, actor=resolved_actor)
         try:
             manager.release(claim_id, force=force, reason=reason)
@@ -684,6 +719,33 @@ def renew(
     try:
         clock = SystemClock()
         _reap_stale_claims(backend)
+
+        bundle_claim = next(
+            (claim for claim in backend.list_bundle_claims() if claim.id == claim_id),
+            None,
+        )
+        if bundle_claim is not None:
+            from anvil.bundles.manager import BundleError, BundleManager
+
+            try:
+                updated = BundleManager(
+                    backend,
+                    clock,
+                    actor=resolved_actor,
+                    project_root=_resolve_project_dir(cwd),
+                    lease_minutes=lease_kwargs.get("default_lease_minutes", 240),
+                ).renew(bundle_claim.bundle_id)
+            except BundleError as exc:
+                if json_output:
+                    fail("renew", str(exc), code="bundle_claim_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if json_output:
+                emit_success("renew", {"claim": dump_model(updated), "renewed": True})
+                return
+            typer.echo(f"Renewed bundle claim '{claim_id}'.")
+            typer.echo(f"  New lease until: {updated.lease_expires_at.isoformat()}")
+            return
 
         manager = ClaimManager(
             backend, clock, actor=resolved_actor, **lease_kwargs

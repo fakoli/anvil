@@ -14,7 +14,7 @@ from anvil.context.packets import (
     render_bundle_packet,
 )
 from anvil.naming import session_discriminator
-from anvil.review.gates import evaluate_claims
+from anvil.review.gates import evaluate_claims, evidence_complete
 from anvil.state.backend import Backend, BackendError
 from anvil.state.models import (
     BundleClaim,
@@ -71,29 +71,21 @@ class BundleManager:
         branch: str | None = None,
         worktree_path: str | None = None,
     ) -> BundleClaimResult:
-        bundle = self._backend.get_bundle(bundle_id)
-        if bundle is None:
-            raise BundleError(f"Bundle '{bundle_id}' not found.")
-        if bundle.coordinator != self._actor:
-            raise BundleError(
-                f"Bundle '{bundle_id}' coordinator is '{bundle.coordinator}', "
-                f"not '{self._actor}'."
-            )
-        tasks = []
-        for task_id in bundle.task_ids:
-            task = self._backend.get_task(task_id)
-            if task is None:
-                raise BundleError(f"Bundle member task '{task_id}' not found.")
-            tasks.append(task)
+        bundle = self.preflight(bundle_id)
+        tasks = [self._backend.get_task(task_id) for task_id in bundle.task_ids]
+        if any(task is None for task in tasks):  # pragma: no cover - preflight
+            raise BundleError("Bundle member disappeared after preflight.")
+        typed_tasks = [task for task in tasks if task is not None]
+
         expected_files: list[str] = []
-        for task in tasks:
+        for task in typed_tasks:
             for path in task.likely_files:
                 if path not in expected_files:
                     expected_files.append(path)
         now = self._clock.now()
         claim_id = self._id("BC")
         member_claims = [
-            {"id": self._id("C"), "task_id": task.id} for task in tasks
+            {"id": self._id("C"), "task_id": task.id} for task in typed_tasks
         ]
         draft = EventDraft(
             timestamp=now,
@@ -127,6 +119,63 @@ class BundleManager:
         if claimed_bundle is None or claim is None:  # pragma: no cover - invariant
             raise BundleError("Bundle claim committed without a readable projection.")
         return BundleClaimResult(bundle=claimed_bundle, claim=claim)
+
+    def preflight(self, bundle_id: str) -> ExecutionBundle:
+        """Read-only claimability check used before any Git side effect."""
+        bundle = self._backend.get_bundle(bundle_id)
+        if bundle is None:
+            raise BundleError(f"Bundle '{bundle_id}' not found.")
+        if bundle.coordinator != self._actor:
+            raise BundleError(
+                f"Bundle '{bundle_id}' coordinator is '{bundle.coordinator}', "
+                f"not '{self._actor}'."
+            )
+        if bundle.status is not BundleStatus.planned:
+            raise BundleError(
+                f"Bundle '{bundle_id}' status is '{bundle.status.value}', expected planned."
+            )
+        if self._backend.get_bundle_claim(bundle_id) is not None:
+            raise BundleError(f"Bundle '{bundle_id}' already has a coordinator claim.")
+        tasks = []
+        for task_id in bundle.task_ids:
+            task = self._backend.get_task(task_id)
+            if task is None:
+                raise BundleError(f"Bundle member task '{task_id}' not found.")
+            tasks.append(task)
+        members = set(bundle.task_ids)
+        for task in tasks:
+            if task.status is not TaskStatus.ready:
+                raise BundleError(f"Bundle member '{task.id}' is not ready.")
+            for dependency_id in task.dependencies:
+                if dependency_id in members:
+                    continue
+                dependency = self._backend.get_task(dependency_id)
+                if dependency is None or dependency.status is not TaskStatus.done:
+                    raise BundleError(
+                        "Bundle external dependencies are not done: "
+                        f"['{dependency_id}']."
+                    )
+        expected_files: list[str] = []
+        for task in tasks:
+            for path in task.likely_files:
+                if path not in expected_files:
+                    expected_files.append(path)
+        expected_set = set(expected_files)
+        bundle_groups = {group for task in tasks for group in task.conflict_groups}
+        for active in self._backend.list_active_claims():
+            active_task = self._backend.get_task(active.task_id)
+            if (
+                active.task_id in members
+                or expected_set.intersection(active.expected_files)
+                or (
+                    active_task is not None
+                    and bundle_groups.intersection(active_task.conflict_groups)
+                )
+            ):
+                raise BundleError(
+                    f"Bundle conflicts with active claims: ['{active.id}']."
+                )
+        return bundle
 
     def note_progress(
         self,
@@ -168,6 +217,9 @@ class BundleManager:
         bundle = self._backend.get_bundle(bundle_id)
         if bundle is None:
             raise BundleError(f"Bundle '{bundle_id}' not found.")
+        bundle_claim = self._backend.get_bundle_claim(bundle_id)
+        if bundle_claim is None:
+            raise BundleError(f"Bundle '{bundle_id}' has no coordinator claim.")
         blockers: dict[str, list[str]] = {}
         for task_id in bundle.task_ids:
             task = self._backend.get_task(task_id)
@@ -179,6 +231,14 @@ class BundleManager:
             if evidence is None:
                 reasons.append("completion evidence missing")
             else:
+                expected_claim = bundle_claim.member_claim_ids.get(task_id)
+                if evidence.claim_id != expected_claim:
+                    reasons.append(
+                        "evidence is not bound to the current bundle member claim"
+                    )
+                complete, missing = evidence_complete(task, evidence)
+                if not complete:
+                    reasons.extend(f"evidence missing: {item}" for item in missing)
                 verdict = evaluate_claims(
                     task, evidence, project_root=self._project_root
                 )
@@ -200,6 +260,60 @@ class BundleManager:
             unproven_members=blockers,
         )
 
+    def renew(self, bundle_id: str) -> BundleClaim:
+        claim = self._backend.get_bundle_claim(bundle_id)
+        if claim is None:
+            raise BundleError(f"Bundle '{bundle_id}' has no coordinator claim.")
+        now = self._clock.now()
+        expires = now + datetime.timedelta(minutes=self._lease_minutes)
+        try:
+            self._backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=self._actor,
+                    action="bundle.claim_renewed",
+                    target_kind="bundle",
+                    target_id=bundle_id,
+                    payload_json={
+                        "bundle_claim_id": claim.id,
+                        "bundle_id": bundle_id,
+                        "renewed_by": self._actor,
+                        "lease_expires_at": expires.isoformat(),
+                        "last_heartbeat_at": now.isoformat(),
+                    },
+                )
+            )
+        except BackendError as exc:
+            raise BundleError(str(exc)) from exc
+        renewed = self._backend.get_bundle_claim(bundle_id)
+        if renewed is None:  # pragma: no cover
+            raise BundleError("Renewed bundle claim disappeared.")
+        return renewed
+
+    def release(self, bundle_id: str, *, reason: str | None = None) -> None:
+        claim = self._backend.get_bundle_claim(bundle_id)
+        if claim is None:
+            raise BundleError(f"Bundle '{bundle_id}' has no coordinator claim.")
+        now = self._clock.now()
+        try:
+            self._backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=self._actor,
+                    action="bundle.claim_released",
+                    target_kind="bundle",
+                    target_id=bundle_id,
+                    payload_json={
+                        "bundle_claim_id": claim.id,
+                        "bundle_id": bundle_id,
+                        "released_by": self._actor,
+                        "release_reason": reason,
+                    },
+                )
+            )
+        except BackendError as exc:
+            raise BundleError(str(exc)) from exc
+
     def packet(self, bundle_id: str) -> BundleWorkPacket:
         bundle = self._backend.get_bundle(bundle_id)
         if bundle is None:
@@ -216,11 +330,25 @@ class BundleManager:
             feature = self._backend.get_feature(task.feature_id)
             if feature is None:
                 raise BundleError(f"Feature '{task.feature_id}' not found.")
-            dependencies = [
-                dependency
-                for dependency_id in task.dependencies
-                if (dependency := self._backend.get_task(dependency_id)) is not None
+            dependencies = []
+            for dependency_id in task.dependencies:
+                dependency = self._backend.get_task(dependency_id)
+                if dependency is None:
+                    raise BundleError(
+                        f"Task '{task.id}' references missing dependency "
+                        f"'{dependency_id}'."
+                    )
+                dependencies.append(dependency)
+            missing_requirements = [
+                requirement_id
+                for requirement_id in feature.requirements
+                if requirement_id not in requirements
             ]
+            if missing_requirements:
+                raise BundleError(
+                    f"Feature '{feature.id}' references missing requirements: "
+                    f"{missing_requirements}."
+                )
             contexts.append(
                 BundleMemberPacketContext(
                     task=task,
@@ -228,7 +356,6 @@ class BundleManager:
                     requirements=[
                         requirements[requirement_id]
                         for requirement_id in feature.requirements
-                        if requirement_id in requirements
                     ],
                     dependencies=dependencies,
                 )
@@ -244,6 +371,9 @@ class BundleManager:
         bundle = self._backend.get_bundle(bundle_id)
         if bundle is None:  # pragma: no cover - guarded by readiness
             raise BundleError(f"Bundle '{bundle_id}' not found.")
+        bundle_claim = self._backend.get_bundle_claim(bundle_id)
+        if bundle_claim is None:  # pragma: no cover - guarded by readiness
+            raise BundleError(f"Bundle '{bundle_id}' has no coordinator claim.")
         now = self._clock.now()
         try:
             self._backend.append(
@@ -256,6 +386,7 @@ class BundleManager:
                     payload_json={
                         "bundle_id": bundle_id,
                         "creation_event_id": bundle.creation_event_id,
+                        "bundle_claim_id": bundle_claim.id,
                         "from": bundle.status.value,
                         "to": BundleStatus.implemented_unreviewed.value,
                         "changed_at": now.isoformat(),

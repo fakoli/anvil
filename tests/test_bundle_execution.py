@@ -9,18 +9,28 @@ import pytest
 from typer.testing import CliRunner
 
 from anvil.bundles.manager import BundleError, BundleManager
+from anvil.claims.manager import ClaimError, ClaimManager
+from anvil.claims.stale import detect_and_release_stale
 from anvil.cli import app
 from anvil.clock import FrozenClock
-from anvil.state.models import BundleStatus, EventDraft
+from anvil.state.backend import EventRejected
+from anvil.state.models import BundleStatus, Event, EventDraft
 from anvil.state.sqlite import SqliteBackend
 
 _NOW = datetime(2026, 7, 11, 18, 0, tzinfo=UTC)
 
 
-def _event(action: str, target_kind: str, target_id: str, payload: dict) -> EventDraft:
+def _event(
+    action: str,
+    target_kind: str,
+    target_id: str,
+    payload: dict,
+    *,
+    actor: str = "seed",
+) -> EventDraft:
     return EventDraft(
         timestamp=_NOW,
-        actor="seed",
+        actor=actor,
         action=action,
         target_kind=target_kind,
         target_id=target_id,
@@ -40,11 +50,41 @@ def _backend(root: Path) -> SqliteBackend:
     return backend
 
 
+def _append_raw(root: Path, event: Event) -> None:
+    with (root / "events.jsonl").open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(event.model_dump_json() + "\n")
+
+
+def _next_event_id(root: Path) -> str:
+    count = len((root / "events.jsonl").read_text(encoding="utf-8").splitlines())
+    return f"E{count + 1:06d}"
+
+
+def _bundle_claim_payload(backend: SqliteBackend, claim_id: str) -> dict:
+    bundle = backend.get_bundle("B001")
+    assert bundle is not None
+    return {
+        "id": claim_id,
+        "bundle_id": "B001",
+        "creation_event_id": bundle.creation_event_id,
+        "claimed_by": "coordinator",
+        "expected_files": ["src/1.py", "src/shared.py", "src/2.py"],
+        "member_claims": [
+            {"id": f"{claim_id}-1", "task_id": "release:T001"},
+            {"id": f"{claim_id}-2", "task_id": "release:T002"},
+        ],
+        "created_at": _NOW.isoformat(),
+        "lease_expires_at": (_NOW + timedelta(hours=4)).isoformat(),
+        "last_heartbeat_at": _NOW.isoformat(),
+    }
+
+
 def _seed(
     backend: SqliteBackend,
     *,
     internal_dependency: bool = False,
     external_dependency_status: str | None = None,
+    required_evidence: list[str] | None = None,
 ) -> str:
     backend.append(
         _event(
@@ -137,7 +177,14 @@ def _seed(
                     "scores": {},
                     "acceptance_criteria": [f"{task_id} accepted"],
                     "implementation_notes": [],
-                    "verification": {"commands": [f"verify-{task_id}"]},
+                    "verification": {
+                        "commands": [f"verify-{task_id}"],
+                        "required_evidence": (
+                            required_evidence
+                            if task_id == "release:T001" and required_evidence
+                            else []
+                        ),
+                    },
                     "likely_files": [f"src/{task_id[-1]}.py", "src/shared.py"],
                     "parent_task_id": None,
                     "created_at": _NOW.isoformat(),
@@ -391,6 +438,298 @@ def test_bundle_claim_replays_byte_equivalently(tmp_path: Path) -> None:
         assert replay.list_claims() == source.list_claims()
     finally:
         source.close()
+        replay.close()
+
+
+def test_public_lease_renew_and_stale_reap_are_atomic(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        result = _manager(backend, tmp_path).claim("B001")
+        renewed_at = _NOW + timedelta(minutes=30)
+        renewed = BundleManager(
+            backend,
+            FrozenClock(renewed_at),
+            actor="coordinator",
+            project_root=tmp_path,
+        ).renew("B001")
+        children = [
+            backend.get_claim(claim_id)
+            for claim_id in renewed.member_claim_ids.values()
+        ]
+        assert all(
+            child is not None
+            and child.lease_expires_at == renewed.lease_expires_at
+            and child.last_heartbeat_at == renewed.last_heartbeat_at
+            for child in children
+        )
+
+        reaped = detect_and_release_stale(
+            backend, FrozenClock(_NOW + timedelta(hours=6))
+        )
+        assert reaped == [result.claim.id]
+        assert backend.get_bundle_claim("B001").status.value == "stale"  # type: ignore[union-attr]
+        assert backend.get_bundle("B001").status is BundleStatus.replan_required  # type: ignore[union-attr]
+        assert all(
+            backend.get_claim(claim_id).status.value == "stale"  # type: ignore[union-attr]
+            for claim_id in result.claim.member_claim_ids.values()
+        )
+        assert all(
+            backend.get_task(task_id).status.value == "ready"  # type: ignore[union-attr]
+            for task_id in ("release:T001", "release:T002")
+        )
+    finally:
+        backend.close()
+
+
+def test_same_coordinator_cannot_overlap_bundle_child_authorization(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        _manager(backend, tmp_path).claim("B001")
+        backend.append(
+            _event(
+                "task.created",
+                "task",
+                "release:T999",
+                {
+                    "id": "release:T999",
+                    "feature_id": "release:F001",
+                    "prd_id": "release",
+                    "title": "External",
+                    "description": "",
+                    "status": "ready",
+                    "priority": "high",
+                    "task_type": "feature",
+                    "dependencies": [],
+                    "conflict_groups": [],
+                    "scores": {},
+                    "acceptance_criteria": [],
+                    "implementation_notes": [],
+                    "verification": {"commands": ["verify"]},
+                    "likely_files": ["src/shared.py"],
+                    "parent_task_id": None,
+                    "created_at": _NOW.isoformat(),
+                    "updated_at": _NOW.isoformat(),
+                },
+            )
+        )
+        with pytest.raises(ClaimError, match="expected_files overlap"):
+            ClaimManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).claim("release:T999", expected_files=["src/shared.py"])
+    finally:
+        backend.close()
+
+
+def test_readiness_requires_declared_evidence_and_current_member_claim(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend, required_evidence=["screenshot"])
+        manager = _manager(backend, tmp_path)
+        result = manager.claim("B001")
+        for task_id, claim_id in result.claim.member_claim_ids.items():
+            backend.append(
+                _event(
+                    "evidence.submitted",
+                    "task",
+                    task_id,
+                    {
+                        "task_id": task_id,
+                        "claim_id": claim_id,
+                        "submitted_by": "coordinator",
+                        "evidence_id": f"EV-{task_id[-1]}",
+                        "commands_run": [f"verify-{task_id}"],
+                        "files_changed": [],
+                    },
+                )
+            )
+        readiness = manager.readiness("B001")
+        assert not readiness.can_mark_implemented
+        assert readiness.unproven_members["release:T001"] == [
+            "evidence missing: screenshot"
+        ]
+    finally:
+        backend.close()
+
+
+def test_packet_fails_closed_on_missing_canonical_requirement(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        backend._conn.execute(  # noqa: SLF001
+            "DELETE FROM requirements WHERE id = 'release:R001'"
+        )
+        with pytest.raises(BundleError, match="missing requirements"):
+            _manager(backend, tmp_path).packet("B001")
+    finally:
+        backend.close()
+
+
+def test_bundle_member_claim_id_collision_rejects_before_log(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        backend._conn.execute(  # noqa: SLF001
+            """INSERT INTO claims
+               (id, task_id, claimed_by, claim_type, status, expected_files,
+                created_at, lease_expires_at, last_heartbeat_at)
+               VALUES ('C-COLLIDE', 'release:T001', 'old', 'task', 'released',
+                       '[]', ?, ?, ?)""",
+            (
+                _NOW.isoformat(),
+                (_NOW + timedelta(hours=1)).isoformat(),
+                _NOW.isoformat(),
+            ),
+        )
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        before = (tmp_path / "events.jsonl").read_text(encoding="utf-8")
+        with pytest.raises(EventRejected, match="member claim ids already exist"):
+            backend.append(
+                _event(
+                    "bundle.claimed",
+                    "bundle",
+                    "B001",
+                    {
+                        "id": "BC-NEW",
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "claimed_by": "coordinator",
+                        "expected_files": [
+                            "src/1.py",
+                            "src/shared.py",
+                            "src/2.py",
+                        ],
+                        "member_claims": [
+                            {"id": "C-COLLIDE", "task_id": "release:T001"},
+                            {"id": "C-NEW", "task_id": "release:T002"},
+                        ],
+                        "created_at": _NOW.isoformat(),
+                        "lease_expires_at": (
+                            _NOW + timedelta(hours=4)
+                        ).isoformat(),
+                        "last_heartbeat_at": _NOW.isoformat(),
+                    },
+                    actor="coordinator",
+                )
+            )
+        assert (tmp_path / "events.jsonl").read_text(encoding="utf-8") == before
+    finally:
+        backend.close()
+
+
+def test_replay_fences_losing_bundle_claim_status_descendant(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source)
+        winner = _manager(source, source_root).claim("B001")
+        loser_payload = _bundle_claim_payload(source, "BC-LOSER")
+        _append_raw(
+            source_root,
+            Event(
+                id=_next_event_id(source_root),
+                timestamp=_NOW,
+                actor="coordinator",
+                action="bundle.claimed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json=loser_payload,
+            ),
+        )
+        _append_raw(
+            source_root,
+            Event(
+                id=_next_event_id(source_root),
+                timestamp=_NOW + timedelta(seconds=1),
+                actor="coordinator",
+                action="bundle.status_changed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": source.get_bundle("B001").creation_event_id,  # type: ignore[union-attr]
+                    "bundle_claim_id": "BC-LOSER",
+                    "from": "active",
+                    "to": "implemented_unreviewed",
+                    "changed_at": (_NOW + timedelta(seconds=1)).isoformat(),
+                },
+            ),
+        )
+    finally:
+        source.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        assert replay.get_bundle_claim("B001").id == winner.claim.id  # type: ignore[union-attr]
+        assert replay.get_bundle("B001").status is BundleStatus.active  # type: ignore[union-attr]
+    finally:
+        replay.close()
+
+
+@pytest.mark.parametrize("bundle_first", [False, True])
+def test_replay_aggregate_conflict_is_first_event_wins(
+    tmp_path: Path, bundle_first: bool
+) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source, external_dependency_status="done")
+        bundle_payload = _bundle_claim_payload(source, "BC-RACE")
+    finally:
+        source.close()
+    claim_payload = {
+        "id": "C-EXTERNAL-RACE",
+        "task_id": "release:T000",
+        "claimed_by": "other",
+        "claim_type": "task",
+        "status": "active",
+        "expected_files": ["src/shared.py"],
+        "created_at": _NOW.isoformat(),
+        "lease_expires_at": (_NOW + timedelta(hours=1)).isoformat(),
+        "last_heartbeat_at": _NOW.isoformat(),
+    }
+    actions = (
+        [("bundle.claimed", "bundle", "B001", "coordinator", bundle_payload),
+         ("claim.created", "claim", "C-EXTERNAL-RACE", "other", claim_payload)]
+        if bundle_first
+        else [("claim.created", "claim", "C-EXTERNAL-RACE", "other", claim_payload),
+              ("bundle.claimed", "bundle", "B001", "coordinator", bundle_payload)]
+    )
+    for offset, (action, kind, target, actor, payload) in enumerate(actions, start=1):
+        _append_raw(
+            source_root,
+            Event(
+                id=_next_event_id(source_root),
+                timestamp=_NOW + timedelta(seconds=offset),
+                actor=actor,
+                action=action,
+                target_kind=kind,
+                target_id=target,
+                payload_json=payload,
+            ),
+        )
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        if bundle_first:
+            assert replay.get_bundle_claim("B001") is not None
+            assert replay.get_claim("C-EXTERNAL-RACE") is None
+        else:
+            assert replay.get_claim("C-EXTERNAL-RACE") is not None
+            assert replay.get_bundle_claim("B001") is None
+    finally:
         replay.close()
 
 

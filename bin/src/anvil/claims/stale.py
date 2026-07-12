@@ -65,6 +65,10 @@ def detect_and_release_stale(
     reaped: list[str] = []
 
     for claim in active_claims:
+        if claim.bundle_claim_id is not None:
+            # Internal member authorizations share the public coordinator
+            # lease and must never be reaped independently.
+            continue
         if claim.status != ClaimStatus.active:
             # Defensive guard: list_active_claims() should only return active
             # claims, but we guard here for safety so future backend impls
@@ -104,6 +108,33 @@ def detect_and_release_stale(
                 "Failed to reap stale claim %r (task %r); skipping and continuing",
                 claim.id,
                 claim.task_id,
+            )
+
+    list_bundle_claims = getattr(backend, "list_bundle_claims", None)
+    bundle_claims = list_bundle_claims(status="active") if list_bundle_claims else []
+    for claim in bundle_claims:
+        if claim.lease_expires_at >= now:
+            continue
+        try:
+            backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=actor,
+                    action="bundle.claim_stale",
+                    target_kind="bundle",
+                    target_id=claim.bundle_id,
+                    payload_json={
+                        "bundle_claim_id": claim.id,
+                        "bundle_id": claim.bundle_id,
+                        "detected_at": now.isoformat(),
+                        "actor": actor,
+                    },
+                )
+            )
+            reaped.append(claim.id)
+        except Exception:
+            logger.exception(
+                "Failed to reap stale bundle claim %r; skipping", claim.id
             )
 
     return reaped

@@ -375,6 +375,7 @@ class BundleStatusChangedPayload(BaseModel):
 
     bundle_id: str
     creation_event_id: str
+    bundle_claim_id: str | None = None
     from_status: BundleStatus = Field(alias="from")
     to_status: BundleStatus = Field(alias="to")
     changed_at: datetime.datetime
@@ -412,10 +413,10 @@ class BundleClaimedPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str
-    bundle_id: str
-    creation_event_id: str
-    claimed_by: str
+    id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    creation_event_id: str = Field(min_length=1)
+    claimed_by: str = Field(min_length=1)
     branch: str | None = None
     worktree_path: str | None = None
     session_id: str | None = None
@@ -440,6 +441,15 @@ class BundleClaimedPayload(BaseModel):
         tasks = [member.task_id for member in self.member_claims]
         if len(ids) != len(set(ids)) or len(tasks) != len(set(tasks)):
             raise ValueError("bundle member claim ids and task ids must be unique")
+        pairs = zip(ids, tasks, strict=True)
+        if not all(member_id.strip() and task_id.strip() for member_id, task_id in pairs):
+            raise ValueError("bundle member claim ids and task ids must not be blank")
+        if not (
+            self.created_at <= self.last_heartbeat_at <= self.lease_expires_at
+        ):
+            raise ValueError(
+                "bundle claim timestamps require created_at <= heartbeat <= expiry"
+            )
         return self
 
 
@@ -451,8 +461,8 @@ class BundleProgressNotedPayload(BaseModel):
     bundle_id: str
     creation_event_id: str
     bundle_claim_id: str
-    actor: str
-    phase: str
+    actor: str = Field(min_length=1)
+    phase: str = Field(min_length=1)
     detail: str | None = None
     member_task_ids: list[str] = Field(default_factory=list)
     noted_at: datetime.datetime
@@ -463,6 +473,41 @@ class BundleProgressNotedPayload(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("noted_at must be timezone-aware")
         return value.astimezone(datetime.UTC)
+
+    @field_validator("member_task_ids")
+    @classmethod
+    def _validate_members_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("member_task_ids must be unique")
+        return value
+
+
+class BundleClaimRenewedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_claim_id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    renewed_by: str = Field(min_length=1)
+    lease_expires_at: datetime.datetime
+    last_heartbeat_at: datetime.datetime
+
+
+class BundleClaimReleasedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_claim_id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    released_by: str = Field(min_length=1)
+    release_reason: str | None = None
+
+
+class BundleClaimStalePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_claim_id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    detected_at: datetime.datetime
+    actor: str = Field(min_length=1)
 
 
 class ClaimCreatedPayload(BaseModel):
@@ -1083,6 +1128,9 @@ __all__ = [
     "ACTION_TO_PAYLOAD",
     "BundleAgentObservedPayload",
     "BundleClaimedPayload",
+    "BundleClaimReleasedPayload",
+    "BundleClaimRenewedPayload",
+    "BundleClaimStalePayload",
     "BundleCreatedPayload",
     "BundleMemberClaimPayload",
     "BundleProgressNotedPayload",
