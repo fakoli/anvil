@@ -76,6 +76,16 @@ class BundleReviewManager:
             raise BundleReviewError(f"Bundle '{bundle_id}' not found.")
         if self._actor != bundle.coordinator:
             raise BundleReviewError("Only the bundle coordinator may apply the gate.")
+        claim = self._backend.get_bundle_claim(bundle_id)
+        now = self._clock.now()
+        if (
+            claim is None
+            or claim.status.value != "active"
+            or claim.lease_expires_at < now
+        ):
+            raise BundleReviewError(
+                "An active coordinator claim is required to apply the review gate."
+            )
         gate = self.gate(bundle_id)
         if gate.passed:
             target = BundleStatus.reviewed_unintegrated
@@ -90,9 +100,6 @@ class BundleReviewManager:
                 f"missing_reviewers={gate.missing_reviewers}, "
                 f"blocking_findings={gate.blocking_findings}."
             )
-        claim = self._backend.get_bundle_claim(bundle_id)
-        claim_id = claim.id if claim is not None and claim.status.value == "active" else None
-        now = self._clock.now()
         try:
             self._backend.append(
                 EventDraft(
@@ -104,7 +111,7 @@ class BundleReviewManager:
                     payload_json={
                         "bundle_id": bundle_id,
                         "creation_event_id": bundle.creation_event_id,
-                        "bundle_claim_id": claim_id,
+                        "bundle_claim_id": claim.id,
                         "from": bundle.status.value,
                         "to": target.value,
                         "changed_at": now.isoformat(),

@@ -390,7 +390,20 @@ def plan(
     # project's llm_provider / llm_tier / bedrock_* / custom_* knobs apply
     # uniformly to both the --use-llm augmentation path and the no-tasks
     # backstop below.
-    config = _load_config_optional(state_dir)
+    config_path = state_dir / "config.yaml"
+    if propose_bundles and config_path.exists():
+        try:
+            from anvil.config import load_merged_config
+
+            config = load_merged_config(config_path)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            message = f"invalid bundle planning config: {exc}"
+            if json_output:
+                fail("plan", message, code="invalid_bundle_config")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from exc
+    else:
+        config = _load_config_optional(state_dir)
 
     provider = _resolve_llm_provider(use_llm, config, model=model)
     parsed = parse_prd(markdown, prd_id=parse_prd_id, provider=provider)
@@ -523,19 +536,29 @@ def plan(
             DEFAULT_BUNDLE_MAX_SERIAL_STAGES,
             DEFAULT_BUNDLE_MAX_TASKS,
         )
-        from anvil.planning.inference import build_bundle_plan, infer_dependencies
-
-        bundle_report = build_bundle_plan(
-            infer_dependencies(parsed.tasks),
-            max_tasks=(
-                config.bundle_max_tasks if config else DEFAULT_BUNDLE_MAX_TASKS
-            ),
-            max_serial_stages=(
-                config.bundle_max_serial_stages
-                if config
-                else DEFAULT_BUNDLE_MAX_SERIAL_STAGES
-            ),
+        from anvil.planning.inference import (
+            BundlePlanningError,
+            build_bundle_plan,
+            infer_dependencies,
         )
+
+        try:
+            bundle_report = build_bundle_plan(
+                infer_dependencies(parsed.tasks),
+                max_tasks=(
+                    config.bundle_max_tasks if config else DEFAULT_BUNDLE_MAX_TASKS
+                ),
+                max_serial_stages=(
+                    config.bundle_max_serial_stages
+                    if config
+                    else DEFAULT_BUNDLE_MAX_SERIAL_STAGES
+                ),
+            )
+        except BundlePlanningError as exc:
+            if json_output:
+                fail("plan", str(exc), code="invalid_bundle_graph")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         if bundle_report.limit_breaches and not acknowledge_bundle_limits:
             message = (
                 "Bundle execution wave exceeds configured throughput limits; "

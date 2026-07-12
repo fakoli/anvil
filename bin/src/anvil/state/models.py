@@ -775,14 +775,14 @@ class BundleReviewPolicy(BaseModel):
 
     model_config = _MODEL_CONFIG
 
-    # ge=1 preserves replay of the unreleased v11 draft shape; every review
-    # gate applies a hard minimum quorum of three regardless of this value.
-    max_reviews: int = Field(default=3, ge=1, le=20)
+    # The pre-T003 draft serialized 1/[] for these two fields. Preserve those
+    # defaults for replay equivalence; the gate applies a non-configurable
+    # minimum of three distinct reviewers/angles and treats max_reviews as a
+    # bounded per-round cap (also floored at three for legacy rows).
+    max_reviews: int = Field(default=1, ge=1, le=20)
     max_rereviews: int = Field(default=1, ge=0)
     independent_reviewer_required: bool = True
-    required_angles: list[str] = Field(
-        default_factory=lambda: ["correctness", "security", "integration"]
-    )
+    required_angles: list[str] = Field(default_factory=list)
 
     @field_validator("required_angles")
     @classmethod

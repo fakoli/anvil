@@ -448,6 +448,26 @@ def test_bundle_review_gate_rejects_self_review_duplicate_angles_and_forged_pass
                 decision=ReviewDecision.approve,
             )
         assert len((tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()) == before
+        bundle = backend.get_bundle("B001")
+        claim = backend.get_bundle_claim("B001")
+        assert bundle is not None and claim is not None
+        with pytest.raises(EventRejected, match="only the coordinator"):
+            backend.append(
+                _event(
+                    "bundle.status_changed",
+                    "bundle",
+                    "B001",
+                    {
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "bundle_claim_id": claim.id,
+                        "from": "implemented_unreviewed",
+                        "to": "replan_required",
+                        "changed_at": _NOW.isoformat(),
+                    },
+                    actor="attacker",
+                )
+            )
         for reviewer in ("reviewer-a", "reviewer-b", "reviewer-c"):
             BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
                 "B001",
@@ -460,6 +480,16 @@ def test_bundle_review_gate_rejects_self_review_duplicate_angles_and_forged_pass
         ).gate("B001")
         assert not gate.passed
         assert gate.missing_reviewers == 2
+        with pytest.raises(BundleReviewError, match="review cap reached"):
+            BundleReviewManager(
+                backend, FrozenClock(_NOW), actor="reviewer-late"
+            ).record(
+                "B001",
+                review_round=1,
+                angle="security",
+                decision=ReviewDecision.needs_changes,
+                notes="late poison",
+            )
         with pytest.raises(BundleReviewError, match="prior round"):
             BundleReviewManager(
                 backend, FrozenClock(_NOW), actor="reviewer-d"
@@ -492,6 +522,42 @@ def test_bundle_review_gate_rejects_self_review_duplicate_angles_and_forged_pass
                     actor="coordinator",
                 )
             )
+    finally:
+        backend.close()
+
+
+def test_bundle_review_finalization_requires_live_coordinator_lease(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        for reviewer, angle in (
+            ("reviewer-a", "correctness"),
+            ("reviewer-b", "security"),
+            ("reviewer-c", "integration"),
+        ):
+            BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
+                "B001",
+                review_round=1,
+                angle=angle,
+                decision=ReviewDecision.approve,
+            )
+        _manager(backend, tmp_path).release("B001", reason="coordinator stopped")
+        with pytest.raises(BundleReviewError, match="active coordinator claim"):
+            BundleReviewManager(
+                backend, FrozenClock(_NOW), actor="reviewer-d"
+            ).record(
+                "B001",
+                review_round=1,
+                angle="boundary",
+                decision=ReviewDecision.approve,
+            )
+        with pytest.raises(BundleReviewError, match="active coordinator claim"):
+            BundleReviewManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).finalize("B001")
+        assert backend.get_bundle("B001").status is BundleStatus.implemented_unreviewed  # type: ignore[union-attr]
     finally:
         backend.close()
 
@@ -562,6 +628,25 @@ def test_replay_ignores_coordinator_self_review_and_forged_gate_pass(
                     "reviewed_by": "coordinator",
                     "decision": "approve",
                     "created_at": _NOW.isoformat(),
+                },
+            ),
+        )
+        _append_raw(
+            source_root,
+            Event(
+                id=_next_event_id(source_root),
+                timestamp=_NOW,
+                actor="attacker",
+                action="bundle.status_changed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "bundle_claim_id": claim.id,
+                    "from": "implemented_unreviewed",
+                    "to": "replan_required",
+                    "changed_at": _NOW.isoformat(),
                 },
             ),
         )

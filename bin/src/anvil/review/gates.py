@@ -77,8 +77,7 @@ def evaluate_bundle_reviews(
         {
             verdict.reviewed_by
             for verdict in current
-            if policy.independent_reviewer_required
-            and verdict.reviewed_by == coordinator
+            if verdict.reviewed_by == coordinator
         }
     )
     valid = [
@@ -91,13 +90,19 @@ def evaluate_bundle_reviews(
         if verdict.decision is ReviewDecision.approve
     }
     all_angles = {verdict.angle.strip().lower() for verdict in valid}
-    missing_angles = sorted(set(policy.required_angles) - approved_angles)
+    required_angles = set(policy.required_angles) or {
+        "correctness",
+        "security",
+        "integration",
+    }
+    missing_angles = sorted(required_angles - approved_angles)
     blocking = [
         f"{verdict.angle}: {verdict.notes or verdict.decision.value}"
         for verdict in valid
         if verdict.decision is not ReviewDecision.approve
     ]
-    required_count = max(3, policy.max_reviews)
+    required_count = max(3, len(required_angles))
+    review_cap = max(3, policy.max_reviews)
     missing_reviewers = max(
         required_count - min(len(reviewers), len(approved_angles)), 0
     )
@@ -105,8 +110,12 @@ def evaluate_bundle_reviews(
     round_complete = (
         len(reviewers) >= required_count
         and len(all_angles) >= required_count
-        and set(policy.required_angles).issubset(all_angles)
+        and required_angles.issubset(all_angles)
     )
+    if len(current) > review_cap:
+        blocking.append(
+            f"review cap exceeded: {len(current)} verdicts > {review_cap}"
+        )
     passed = round_complete and not (
         missing_angles
         or missing_reviewers

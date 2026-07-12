@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 __all__ = [
     "InferenceResult",
     "BundlePlanReport",
+    "BundlePlanningError",
     "BundleProposal",
     "build_bundle_plan",
     "SubtaskProposal",
@@ -141,22 +142,30 @@ class BundlePlanReport:
         return data
 
 
+class BundlePlanningError(ValueError):
+    """The proposed execution graph cannot be costed safely."""
+
+
 def _serial_depth(tasks: list[Task]) -> int:
     by_id = {task.id: task for task in tasks}
-    visiting: set[str] = set()
+    visiting: list[str] = []
     memo: dict[str, int] = {}
 
     def visit(task_id: str) -> int:
         if task_id in memo:
             return memo[task_id]
         if task_id in visiting:
-            raise ValueError(f"bundle planning found a dependency cycle at '{task_id}'")
-        visiting.add(task_id)
+            start = visiting.index(task_id)
+            cycle = visiting[start:] + [task_id]
+            raise BundlePlanningError(
+                "bundle planning found a dependency cycle: " + " -> ".join(cycle)
+            )
+        visiting.append(task_id)
         depth = 1 + max(
             (visit(dep) for dep in by_id[task_id].dependencies if dep in by_id),
             default=0,
         )
-        visiting.remove(task_id)
+        visiting.pop()
         memo[task_id] = depth
         return depth
 
@@ -196,8 +205,31 @@ def build_bundle_plan(
     max_serial_stages: int = 6,
 ) -> BundlePlanReport:
     """Propose stable graph/file components and quantify execution overhead."""
+    for name, value in (
+        ("max_tasks", max_tasks),
+        ("max_serial_stages", max_serial_stages),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 500:
+            raise BundlePlanningError(f"{name} must be an integer in the range 1-500")
+    ids = [task.id for task in tasks]
+    duplicates = sorted({task_id for task_id in ids if ids.count(task_id) > 1})
+    if duplicates:
+        raise BundlePlanningError(f"bundle planning found duplicate task ids: {duplicates}")
     ordered = sorted(tasks, key=lambda task: task.id)
     task_ids = {task.id for task in ordered}
+    missing_dependencies = sorted(
+        {
+            dependency
+            for task in ordered
+            for dependency in task.dependencies
+            if dependency not in task_ids
+        }
+    )
+    if missing_dependencies:
+        raise BundlePlanningError(
+            "bundle planning found missing dependency nodes: "
+            f"{missing_dependencies}"
+        )
     adjacency: dict[str, set[str]] = {task.id: set() for task in ordered}
     overlap_files: set[str] = set()
     overlap_pair_count = 0

@@ -856,6 +856,40 @@ def test_replay_keeps_first_divergent_bundle_creation_atomically(
         replay.close()
 
 
+def test_empty_historical_review_policy_replays_without_default_drift(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    replay_root = tmp_path / "replay"
+    source_root.mkdir()
+    replay_root.mkdir()
+    source = _backend(source_root)
+    try:
+        _seed(source)
+        payload = _bundle_payload()
+        payload["review_policy"] = {}
+        source.append(
+            _event(
+                "bundle.created",
+                payload,
+                target_kind="bundle",
+                target_id="B001",
+            )
+        )
+        existing_snapshot = serialize_state(source)
+        policy = source.get_bundle("B001").review_policy  # type: ignore[union-attr]
+        assert policy.max_reviews == 1
+        assert policy.required_angles == []
+    finally:
+        source.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(source_root / "events.jsonl"))
+        assert serialize_state(replay) == existing_snapshot
+    finally:
+        replay.close()
+
+
 def test_replay_keeps_first_bundle_when_distinct_ids_compete_for_task(
     tmp_path: Path,
 ) -> None:
@@ -1276,7 +1310,7 @@ def test_replay_ignores_stale_divergent_status_transition(tmp_path: Path) -> Non
             Event(
                 id=f"E{next_id:06d}",
                 timestamp=changed_at,
-                actor=f"branch-{offset}",
+                    actor="codex-main" if offset == 1 else f"branch-{offset}",
                 action="bundle.status_changed",
                 target_kind="bundle",
                 target_id="B001",

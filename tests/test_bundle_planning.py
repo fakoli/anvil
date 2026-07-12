@@ -7,10 +7,11 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from anvil.cli import app
-from anvil.planning.inference import build_bundle_plan
+from anvil.planning.inference import BundlePlanningError, build_bundle_plan
 from anvil.review.gates import evaluate_bundle_reviews
 from anvil.state.models import (
     BundleReviewPolicy,
@@ -100,6 +101,23 @@ def test_bundle_plan_is_stable_and_reports_costs_risks_and_limits() -> None:
     )
 
 
+def test_bundle_plan_rejects_malformed_graphs_and_limits() -> None:
+    with pytest.raises(BundlePlanningError, match="duplicate task ids"):
+        build_bundle_plan([_task("T001", []), _task("T001", [])])
+    with pytest.raises(BundlePlanningError, match="missing dependency nodes"):
+        build_bundle_plan([_task("T001", [], dependencies=["T404"])])
+    with pytest.raises(BundlePlanningError, match="dependency cycle"):
+        build_bundle_plan(
+            [
+                _task("T001", [], dependencies=["T002"]),
+                _task("T002", [], dependencies=["T001"]),
+            ]
+        )
+    for limit in (0, -1, 501, True):
+        with pytest.raises(BundlePlanningError, match="range 1-500"):
+            build_bundle_plan([_task("T001", [])], max_tasks=limit)  # type: ignore[arg-type]
+
+
 def test_review_gate_requires_three_distinct_non_author_angles() -> None:
     policy = BundleReviewPolicy()
     verdicts = [
@@ -115,6 +133,14 @@ def test_review_gate_requires_three_distinct_non_author_angles() -> None:
     blocked = evaluate_bundle_reviews(policy, self_review, coordinator="author")
     assert not blocked.passed
     assert blocked.invalid_reviewers == ["author"]
+    disabled_flag = policy.model_copy(
+        update={"independent_reviewer_required": False}
+    )
+    still_blocked = evaluate_bundle_reviews(
+        disabled_flag, self_review, coordinator="author"
+    )
+    assert not still_blocked.passed
+    assert still_blocked.invalid_reviewers == ["author"]
 
 
 def test_blocker_requires_remediation_then_replan_when_rereview_is_exhausted() -> None:
@@ -205,6 +231,20 @@ Bundle planning fixture.
         assert refusal["error"]["code"] == "bundle_limits_exceeded"
         assert refusal["error"]["bundle_plan"]["task_count"] == 2
 
+        config.write_text(
+            config.read_text(encoding="utf-8")
+            + "\nbundle_max_serial_stages: 0\n",
+            encoding="utf-8",
+        )
+        malformed = runner.invoke(app, ["plan", "--bundles", "--json"])
+        assert malformed.exit_code == 1
+        assert json.loads(malformed.output)["error"]["code"] == "invalid_bundle_config"
+        config.write_text(
+            config.read_text(encoding="utf-8")
+            + "\nbundle_max_serial_stages: 6\n",
+            encoding="utf-8",
+        )
+
         accepted = runner.invoke(
             app,
             [
@@ -220,5 +260,57 @@ Bundle planning fixture.
         assert data["bundle_plan"]["proposed_bundles"][0]["id"] == "BP001"
         events = (tmp_path / ".anvil" / "events.jsonl").read_text(encoding="utf-8")
         assert '"action":"bundle.plan_acknowledged"' in events
+    finally:
+        os.chdir(original)
+
+
+def test_plan_bundle_cycle_returns_stable_json_error_without_writes(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    original = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        assert runner.invoke(app, ["init", "--name", "Cycle Plan"]).exit_code == 0
+        (tmp_path / ".anvil" / "prd.md").write_text(
+            """# Project: Cycle Plan
+
+## Summary
+Cycle fixture.
+## Goals
+- Refuse unsafe graphs.
+## Requirements
+- R001: Detect cycles.
+## Features
+### F001: Planner
+**Requirements:** R001
+## Tasks
+### T001: First
+**Feature:** F001
+**Dependencies:** T002
+**Likely files:** src/a.py
+**Acceptance criteria:**
+- First.
+**Verification:**
+- `pytest -q`
+### T002: Second
+**Feature:** F001
+**Dependencies:** T001
+**Likely files:** src/b.py
+**Acceptance criteria:**
+- Second.
+**Verification:**
+- `pytest -q`
+""",
+            encoding="utf-8",
+        )
+        assert runner.invoke(app, ["prd", "parse"]).exit_code == 0
+        before = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
+        result = runner.invoke(app, ["plan", "--bundles", "--json"])
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["error"]["code"] == "invalid_bundle_graph"
+        assert "T001 -> T002 -> T001" in payload["error"]["message"]
+        assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == before
     finally:
         os.chdir(original)
