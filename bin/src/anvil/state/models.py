@@ -910,6 +910,7 @@ class ExecutionBundle(BaseModel):
     coordinator: str
     status: BundleStatus = BundleStatus.planned
     review_disposition_event_id: EventID | None = None
+    superseded_by: BundleID | None = None
     branch: str | None = None
     worktree_path: str | None = None
     review_policy: BundleReviewPolicy = Field(default_factory=BundleReviewPolicy)
@@ -981,6 +982,8 @@ class ExecutionBundle(BaseModel):
         data = handler(self)
         if data.get("review_disposition_event_id") is None:
             data.pop("review_disposition_event_id", None)
+        if data.get("superseded_by") is None:
+            data.pop("superseded_by", None)
         return data
 
 

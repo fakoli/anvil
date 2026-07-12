@@ -26,12 +26,20 @@ The helper does NO I/O — callers fetch the entities and pass them in.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import datetime
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
-    from anvil.state.models import PRD, Claim, Task
+    from anvil.state.models import (
+        PRD,
+        BundleClaim,
+        BundleReviewVerdict,
+        Claim,
+        ExecutionBundle,
+        Task,
+    )
 
 # Every TaskStatus value, in declaration order, so the per-status counts dict is
 # deterministic and exhaustive regardless of which statuses are present.
@@ -61,6 +69,138 @@ class PrdRollupEntry(BaseModel):
     ready_task_count: int = 0
     active_claim_count: int = 0
     task_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class BundleRollupEntry(BaseModel):
+    """Compact integration-focused status for one execution bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    prd_id: str
+    status: str
+    coordinator: str
+    member_counts: dict[str, int]
+    coordinator_claim: dict[str, Any] | None = None
+    delegated_agents: list[dict[str, Any]] = Field(default_factory=list)
+    critical_path_stage: int = 0
+    critical_path_depth: int = 0
+    review_usage: dict[str, int] = Field(default_factory=dict)
+    last_result_at: datetime.datetime | None = None
+    elapsed_since_result_seconds: int | None = None
+    checkpoint: dict[str, Any] | None = None
+    checkpoint_warning: str | None = None
+    superseded_by: str | None = None
+
+
+def compute_bundle_rollup(
+    bundles: list[ExecutionBundle],
+    tasks: list[Task],
+    bundle_claims: list[BundleClaim],
+    reviews: list[BundleReviewVerdict],
+    *,
+    now: datetime.datetime,
+) -> list[BundleRollupEntry]:
+    tasks_by_id = {task.id: task for task in tasks}
+    claims_by_bundle = {claim.bundle_id: claim for claim in bundle_claims}
+    entries: list[BundleRollupEntry] = []
+    result_statuses = {
+        "reviewed_unintegrated",
+        "integrated",
+        "merged",
+        "completed",
+    }
+    done_statuses = {"accepted", "done"}
+    for bundle in sorted(bundles, key=lambda item: item.id):
+        members = [tasks_by_id[task_id] for task_id in bundle.task_ids if task_id in tasks_by_id]
+        counts: dict[str, int] = {}
+        for task in members:
+            counts[task.status.value] = counts.get(task.status.value, 0) + 1
+        member_ids = {task.id for task in members}
+        memo: dict[str, int] = {}
+
+        def depth(
+            task_id: str,
+            visiting: frozenset[str] = frozenset(),
+            *,
+            memo: dict[str, int] = memo,
+            member_ids: set[str] = member_ids,
+            tasks_by_id: dict[str, Task] = tasks_by_id,
+        ) -> int:
+            if task_id in memo:
+                return memo[task_id]
+            if task_id in visiting:
+                return 0
+            task = tasks_by_id[task_id]
+            value = 1 + max(
+                (
+                    depth(dep, visiting | {task_id})
+                    for dep in task.dependencies
+                    if dep in member_ids
+                ),
+                default=0,
+            )
+            memo[task_id] = value
+            return value
+
+        critical_depth = max((depth(task.id) for task in members), default=0)
+        completed_depth = max(
+            (depth(task.id) for task in members if task.status.value in done_statuses),
+            default=0,
+        )
+        current_reviews = [
+            review
+            for review in reviews
+            if review.bundle_id == bundle.id
+            and review.disposition_event_id == bundle.review_disposition_event_id
+        ]
+        latest_round = max((review.review_round for review in current_reviews), default=0)
+        round_reviews = [
+            review for review in current_reviews if review.review_round == latest_round
+        ]
+        last_result = bundle.updated_at if bundle.status.value in result_statuses else None
+        checkpoint = (
+            bundle.checkpoint.model_dump(mode="json")
+            if bundle.checkpoint is not None
+            else None
+        )
+        warning = None
+        if bundle.status.value in result_statuses and checkpoint is None:
+            warning = (
+                "Reviewed bundle has no delivery checkpoint; record a commit or PR."
+            )
+        claim = claims_by_bundle.get(bundle.id)
+        entries.append(
+            BundleRollupEntry(
+                bundle_id=bundle.id,
+                prd_id=bundle.prd_id,
+                status=bundle.status.value,
+                coordinator=bundle.coordinator,
+                member_counts=counts,
+                coordinator_claim=(claim.model_dump(mode="json") if claim else None),
+                delegated_agents=[
+                    observation.model_dump(mode="json")
+                    for observation in bundle.delegated_agents
+                ],
+                critical_path_stage=completed_depth,
+                critical_path_depth=critical_depth,
+                review_usage={
+                    "round": latest_round,
+                    "reviews": len(round_reviews),
+                    "rereviews": max(latest_round - 1, 0),
+                },
+                last_result_at=last_result,
+                elapsed_since_result_seconds=(
+                    int((now - last_result).total_seconds())
+                    if last_result is not None
+                    else None
+                ),
+                checkpoint=checkpoint,
+                checkpoint_warning=warning,
+                superseded_by=bundle.superseded_by,
+            )
+        )
+    return entries
 
 
 def _empty_counts() -> dict[str, int]:

@@ -1,0 +1,120 @@
+"""Integration-focused bundle status rollups."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+
+from typer.testing import CliRunner
+
+from anvil.cli import app
+from anvil.state.models import (
+    BundleCheckpoint,
+    BundleReviewVerdict,
+    BundleStatus,
+    ExecutionBundle,
+    ReviewDecision,
+    Task,
+    TaskPriority,
+    TaskStatus,
+)
+from anvil.state.rollup import compute_bundle_rollup
+from tests.test_bundle_execution import _backend, _implement_bundle
+
+_NOW = datetime(2026, 7, 12, 1, 0, tzinfo=UTC)
+
+
+def test_rollup_surfaces_critical_path_review_checkpoint_and_warning() -> None:
+    tasks = [
+        Task(
+            id="T001",
+            feature_id="F001",
+            title="First",
+            description="",
+            status=TaskStatus.done,
+            priority=TaskPriority.high,
+            created_at=_NOW,
+            updated_at=_NOW,
+        ),
+        Task(
+            id="T002",
+            feature_id="F001",
+            title="Second",
+            description="",
+            status=TaskStatus.needs_review,
+            priority=TaskPriority.high,
+            dependencies=["T001"],
+            created_at=_NOW,
+            updated_at=_NOW,
+        ),
+    ]
+    bundle = ExecutionBundle(
+        id="B001",
+        creation_event_id="E001",
+        review_disposition_event_id="E010",
+        prd_id="default",
+        task_ids=["T001", "T002"],
+        coordinator="coordinator",
+        status=BundleStatus.reviewed_unintegrated,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    reviews = [
+        BundleReviewVerdict(
+            id=f"BR{index}",
+            bundle_id="B001",
+            creation_event_id="E001",
+            disposition_event_id="E010",
+            review_round=1,
+            angle=angle,
+            reviewed_by=f"reviewer-{index}",
+            decision=ReviewDecision.approve,
+            created_at=_NOW,
+        )
+        for index, angle in enumerate(("correctness", "security", "integration"), 1)
+    ]
+    entry = compute_bundle_rollup(
+        [bundle], tasks, [], reviews, now=_NOW + timedelta(minutes=2)
+    )[0]
+    assert entry.critical_path_stage == 1
+    assert entry.critical_path_depth == 2
+    assert entry.review_usage == {"round": 1, "reviews": 3, "rereviews": 0}
+    assert entry.elapsed_since_result_seconds == 120
+    assert entry.checkpoint_warning is not None
+
+    checkpointed = bundle.model_copy(
+        update={
+            "checkpoint": BundleCheckpoint(
+                commit_sha="abc123",
+                recorded_at=_NOW,
+                recorded_by="coordinator",
+            )
+        }
+    )
+    assert compute_bundle_rollup(
+        [checkpointed], tasks, [], reviews, now=_NOW
+    )[0].checkpoint_warning is None
+
+
+def test_status_human_and_json_include_bundle_integration_rollup(tmp_path) -> None:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    backend = _backend(state_dir)
+    try:
+        _implement_bundle(backend, tmp_path)
+    finally:
+        backend.close()
+    runner = CliRunner()
+    env = {"ANVIL_STATE_LAYOUT": "local"}
+    json_result = runner.invoke(
+        app, ["status", "--json", "--cwd", str(tmp_path)], env=env
+    )
+    assert json_result.exit_code == 0, json_result.output
+    bundles = json.loads(json_result.output)["data"]["bundles"]
+    assert bundles[0]["bundle_id"] == "B001"
+    assert bundles[0]["status"] == "implemented_unreviewed"
+    assert bundles[0]["critical_path_depth"] == 1
+    human = runner.invoke(app, ["status", "--cwd", str(tmp_path)], env=env)
+    assert human.exit_code == 0, human.output
+    assert "Bundle B001 (implemented_unreviewed)" in human.output
+    assert "critical-path" in human.output

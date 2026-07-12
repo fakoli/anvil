@@ -467,6 +467,43 @@ class BundlePlanAcknowledgedPayload(BaseModel):
         return value.astimezone(datetime.UTC)
 
 
+class BundleCheckpointRecordedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    checkpoint: BundleCheckpoint
+
+
+class BundleSupersededPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    replacement_bundle_id: str
+    superseded_by_actor: str
+    superseded_at: datetime.datetime
+
+    @field_validator(
+        "bundle_id",
+        "creation_event_id",
+        "replacement_bundle_id",
+        "superseded_by_actor",
+    )
+    @classmethod
+    def _validate_supersession_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle supersession identity must not be blank")
+        return value
+
+    @field_validator("superseded_at", mode="after")
+    @classmethod
+    def _validate_superseded_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("superseded_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
 class BundleMemberClaimPayload(BaseModel):
     """One internal task authorization under a public bundle claim."""
 
@@ -1255,6 +1292,8 @@ __all__ = [
     "BundleMemberClaimPayload",
     "BundleProgressNotedPayload",
     "BundlePlanAcknowledgedPayload",
+    "BundleCheckpointRecordedPayload",
+    "BundleSupersededPayload",
     "BundleReviewRecordedPayload",
     "BundleStatusChangedPayload",
     "ClaimCreatedPayload",

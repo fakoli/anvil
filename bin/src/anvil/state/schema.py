@@ -69,11 +69,13 @@ Version history
   authorizations without changing standalone task claims.
 - v13: bundle review dispositions (issue #171) — review verdicts bind to the
   exact ``implemented_unreviewed`` transition that opened their review cycle.
+- v14: bundle delivery lineage (issue #171) — bundles record a named
+  superseding bundle while preserving the existing checkpoint JSON metadata.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 13
+SCHEMA_VERSION: int = 14
 
 
 def get_schema_version() -> int:
@@ -199,6 +201,7 @@ CREATE TABLE IF NOT EXISTS execution_bundles (
     coordinator        TEXT NOT NULL,
     status             TEXT NOT NULL DEFAULT 'planned',
     review_disposition_event_id TEXT,
+    superseded_by      TEXT REFERENCES execution_bundles(id) ON DELETE RESTRICT,
     branch             TEXT,
     worktree_path      TEXT,
     review_policy      TEXT NOT NULL DEFAULT '{}',

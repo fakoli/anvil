@@ -76,6 +76,7 @@ from anvil.state.models import (
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
     BundleAgentObservedPayload,
+    BundleCheckpointRecordedPayload,
     BundleClaimedPayload,
     BundleClaimReleasedPayload,
     BundleClaimRenewedPayload,
@@ -85,6 +86,7 @@ from anvil.state.payloads import (
     BundleProgressNotedPayload,
     BundleReviewRecordedPayload,
     BundleStatusChangedPayload,
+    BundleSupersededPayload,
     ClaimCreatedPayload,
     ClaimReleasedPayload,
     ClaimRenewedPayload,
@@ -2180,6 +2182,7 @@ class SqliteBackend:
                 coordinator TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'planned',
                 review_disposition_event_id TEXT,
+                superseded_by TEXT REFERENCES execution_bundles(id) ON DELETE RESTRICT,
                 branch TEXT,
                 worktree_path TEXT,
                 review_policy TEXT NOT NULL DEFAULT '{}',
@@ -2366,6 +2369,17 @@ class SqliteBackend:
                 (event_id, bundle_id),
             )
 
+    def _m_to_v14(self, conn: sqlite3.Connection) -> None:
+        """v13 -> v14: named, history-preserving bundle supersession."""
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+        }
+        if "superseded_by" not in columns:
+            conn.execute(
+                "ALTER TABLE execution_bundles ADD COLUMN superseded_by TEXT "
+                "REFERENCES execution_bundles(id) ON DELETE RESTRICT"
+            )
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -2378,6 +2392,7 @@ class SqliteBackend:
         (10, _m_to_v11),
         (11, _m_to_v12),
         (12, _m_to_v13),
+        (13, _m_to_v14),
     ]
 
     @staticmethod
@@ -2998,6 +3013,16 @@ class SqliteBackend:
                 BundlePlanAcknowledgedPayload,
                 self._check_bundle_plan_acknowledged,
                 self._write_audit_only,
+            ),
+            "bundle.checkpoint_recorded": ActionSpec(
+                BundleCheckpointRecordedPayload,
+                self._check_bundle_checkpoint_recorded,
+                self._write_bundle_checkpoint_recorded,
+            ),
+            "bundle.superseded": ActionSpec(
+                BundleSupersededPayload,
+                self._check_bundle_superseded,
+                self._write_bundle_superseded,
             ),
             "bundle.claimed": ActionSpec(
                 BundleClaimedPayload,
@@ -4193,6 +4218,19 @@ class SqliteBackend:
                         raise EventRejected(
                             "bundle.status_changed: review replan budget is not exhausted."
                         )
+            if to_status in {
+                BundleStatus.integrated,
+                BundleStatus.merged,
+                BundleStatus.completed,
+            }:
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may reconcile delivery."
+                    )
         finally:
             conn.execute("COMMIT")
 
@@ -4326,6 +4364,9 @@ class SqliteBackend:
         if payload.to_status in {
             BundleStatus.reviewed_unintegrated,
             BundleStatus.replan_required,
+            BundleStatus.integrated,
+            BundleStatus.merged,
+            BundleStatus.completed,
         }:
             coordinator = conn.execute(
                 "SELECT coordinator FROM execution_bundles WHERE id = ? "
@@ -4615,6 +4656,168 @@ class SqliteBackend:
             raise EventRejected(
                 "bundle.review_recorded: prior round is not a complete blocking quorum."
             )
+
+    @staticmethod
+    def _check_bundle_checkpoint_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleCheckpointRecordedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.checkpoint_recorded: event target mismatch.")
+        if event.actor != payload.checkpoint.recorded_by:
+            raise EventRejected("bundle.checkpoint_recorded: event actor mismatch.")
+        if payload.checkpoint.recorded_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected(
+                "bundle.checkpoint_recorded: recorded_at must match event time."
+            )
+        row = conn.execute(
+            "SELECT creation_event_id, status, checkpoint FROM execution_bundles "
+            "WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if row is None or row[0] != payload.creation_event_id:
+            raise EventRejected("bundle.checkpoint_recorded: bundle generation not found.")
+        if row[1] == BundleStatus.superseded.value:
+            raise EventRejected("bundle.checkpoint_recorded: bundle is superseded.")
+        if row[2]:
+            existing = json.loads(row[2])
+            if (
+                existing.get("commit_sha") == payload.checkpoint.commit_sha
+                and existing.get("pr_url") == payload.checkpoint.pr_url
+            ):
+                raise IdempotentNoOp("bundle checkpoint is already recorded")
+
+    @staticmethod
+    def _write_bundle_checkpoint_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleCheckpointRecordedPayload,
+        event: Event,
+    ) -> None:
+        row = conn.execute(
+            "SELECT creation_event_id, status, updated_at, checkpoint "
+            "FROM execution_bundles "
+            "WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.checkpoint.recorded_by
+            or payload.checkpoint.recorded_at != event_time
+            or row is None
+            or row[0] != payload.creation_event_id
+            or row[1] == BundleStatus.superseded.value
+            or datetime.datetime.fromisoformat(row[2]) > event_time
+        ):
+            return
+        if row[3]:
+            existing = json.loads(row[3])
+            if (
+                existing.get("commit_sha") == payload.checkpoint.commit_sha
+                and existing.get("pr_url") == payload.checkpoint.pr_url
+            ):
+                return
+        conn.execute(
+            "UPDATE execution_bundles SET checkpoint = ?, updated_at = ? "
+            "WHERE id = ? AND creation_event_id = ?",
+            (
+                json.dumps(payload.checkpoint.model_dump(mode="json"), sort_keys=True),
+                event_time.isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_superseded(
+        conn: sqlite3.Connection,
+        payload: BundleSupersededPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.superseded: event target mismatch.")
+        if event.actor != payload.superseded_by_actor:
+            raise EventRejected("bundle.superseded: event actor mismatch.")
+        if payload.superseded_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.superseded: superseded_at must match event time.")
+        if payload.bundle_id == payload.replacement_bundle_id:
+            raise EventRejected("bundle.superseded: replacement must be another bundle.")
+        source = conn.execute(
+            "SELECT creation_event_id, prd_id, status, coordinator "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        replacement = conn.execute(
+            "SELECT prd_id, status, superseded_by FROM execution_bundles WHERE id = ?",
+            (payload.replacement_bundle_id,),
+        ).fetchone()
+        if source is None or source[0] != payload.creation_event_id:
+            raise EventRejected("bundle.superseded: source generation not found.")
+        if source[3] != payload.superseded_by_actor:
+            raise EventRejected("bundle.superseded: only the coordinator may supersede.")
+        if source[2] in {status.value for status in TERMINAL_BUNDLE_STATUSES}:
+            raise EventRejected("bundle.superseded: source is terminal.")
+        if replacement is None or replacement[0] != source[1]:
+            raise EventRejected("bundle.superseded: replacement must exist in the same PRD.")
+        if replacement[1] == BundleStatus.superseded.value:
+            raise EventRejected("bundle.superseded: replacement is superseded.")
+
+    @staticmethod
+    def _write_bundle_superseded(
+        conn: sqlite3.Connection,
+        payload: BundleSupersededPayload,
+        event: Event,
+    ) -> None:
+        source = conn.execute(
+            "SELECT creation_event_id, prd_id, status, coordinator FROM execution_bundles "
+            "WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        replacement = conn.execute(
+            "SELECT prd_id, status FROM execution_bundles WHERE id = ?",
+            (payload.replacement_bundle_id,),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.superseded_by_actor
+            or payload.superseded_at != event_time
+            or payload.bundle_id == payload.replacement_bundle_id
+            or source is None
+            or source[0] != payload.creation_event_id
+            or source[3] != payload.superseded_by_actor
+            or source[2] in {status.value for status in TERMINAL_BUNDLE_STATUSES}
+            or replacement is None
+            or replacement[0] != source[1]
+            or replacement[1] == BundleStatus.superseded.value
+        ):
+            return
+        active_claim = conn.execute(
+            "SELECT id FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
+            (payload.bundle_id,),
+        ).fetchone()
+        if active_claim is not None:
+            SqliteBackend._write_bundle_claim_terminal(
+                conn,
+                bundle_claim_id=active_claim[0],
+                bundle_id=payload.bundle_id,
+                terminal_status="released",
+                timestamp=event_time.isoformat(),
+                reason=f"superseded by {payload.replacement_bundle_id}",
+            )
+        conn.execute(
+            "UPDATE execution_bundles SET status = 'superseded', superseded_by = ?, "
+            "updated_at = ? WHERE id = ? AND creation_event_id = ?",
+            (
+                payload.replacement_bundle_id,
+                event_time.isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+            ),
+        )
 
     @staticmethod
     def _check_bundle_plan_acknowledged(

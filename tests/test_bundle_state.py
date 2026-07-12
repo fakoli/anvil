@@ -1370,7 +1370,7 @@ def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: 
 
     migrated = _backend(tmp_path)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 13
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 14
         assert migrated.get_project().name == "Before migration"  # type: ignore[union-attr]
         tables = {
             row[0]
@@ -1446,7 +1446,7 @@ def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> No
             }
         assert "review_disposition_event_id" in bundle_columns
         assert "disposition_event_id" in review_columns
-        assert migrated.get_schema_version() == 13
+        assert migrated.get_schema_version() == 14
     finally:
         migrated.close()
 
