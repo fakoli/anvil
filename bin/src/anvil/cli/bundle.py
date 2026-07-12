@@ -18,9 +18,15 @@ from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
 bundle_app = typer.Typer(help="Create, inspect, review, and deliver execution bundles.")
 
 
-def _fail(command: str, message: str, json_output: bool) -> None:
+def _fail(
+    command: str,
+    message: str,
+    json_output: bool,
+    *,
+    code: str = "bundle_error",
+) -> None:
     if json_output:
-        fail(command, message, code="bundle_error")
+        fail(command, message, code=code)
     typer.echo(f"Error: {message}", err=True)
     raise typer.Exit(code=1)
 
@@ -184,6 +190,7 @@ def claim_bundle(
 
         cfg = _load_config_optional(state_dir)
         isolation = cfg.worktree_isolation if cfg is not None else "advisory"
+        warnings: list[str] = []
         if isolation == "require" and not shared_tree:
             _fail(
                 command,
@@ -191,6 +198,17 @@ def claim_bundle(
                 "--worktree`, or pass --shared-tree.",
                 json_output,
             )
+        if isolation == "advisory" and not shared_tree:
+            shared = [
+                claim
+                for claim in backend.list_active_claims()
+                if not claim.worktree_path
+            ]
+            if shared:
+                warnings.append(
+                    f"{len(shared)} active task claim(s) share this checkout; "
+                    "prefer the top-level CLI worktree claim path."
+                )
         result = _manager(backend, state_dir, resolve_actor(actor)).claim(bundle_id)
     except BundleError as exc:
         _fail(command, str(exc), json_output)
@@ -199,10 +217,72 @@ def claim_bundle(
     if json_output:
         emit_success(
             command,
-            {"bundle": dump_model(result.bundle), "claim": dump_model(result.claim)},
+            {
+                "bundle": dump_model(result.bundle),
+                "claim": dump_model(result.claim),
+                "warnings": warnings,
+            },
         )
         return
     typer.echo(f"Claimed bundle '{bundle_id}' with coordinator claim {result.claim.id}.")
+    for warning in warnings:
+        typer.echo(f"  Warning: {warning}")
+
+
+@bundle_app.command("renew")
+def renew_bundle(
+    bundle_id: str,
+    actor: str | None = typer.Option(None, "--actor"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Renew the coordinator lease when progress permits."""
+    from anvil.bundles.manager import BundleError
+
+    command = "bundle renew"
+    state_dir, backend = _state(cwd, command, json_output)
+    try:
+        claim = _manager(backend, state_dir, resolve_actor(actor)).renew(bundle_id)
+    except BundleError as exc:
+        _fail(command, str(exc), json_output)
+    finally:
+        backend.close()
+    if json_output:
+        emit_success(command, {"claim": dump_model(claim)})
+        return
+    typer.echo(f"Renewed bundle claim '{claim.id}' until {claim.lease_expires_at.isoformat()}.")
+
+
+@bundle_app.command("release")
+def release_bundle(
+    bundle_id: str,
+    reason: str | None = typer.Option(None, "--reason"),  # noqa: B008
+    actor: str | None = typer.Option(None, "--actor"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Release a coordinator claim and return its members to ready."""
+    from anvil.bundles.manager import BundleError
+
+    command = "bundle release"
+    state_dir, backend = _state(cwd, command, json_output)
+    try:
+        manager = _manager(backend, state_dir, resolve_actor(actor))
+        manager.release(bundle_id, reason=reason)
+        claim = backend.get_bundle_claim(bundle_id)
+        bundle = backend.get_bundle(bundle_id)
+    except BundleError as exc:
+        _fail(command, str(exc), json_output)
+    finally:
+        backend.close()
+    assert claim is not None and bundle is not None
+    if json_output:
+        emit_success(
+            command,
+            {"bundle": dump_model(bundle), "claim": dump_model(claim)},
+        )
+        return
+    typer.echo(f"Released bundle claim '{claim.id}' ({bundle.status.value}).")
 
 
 @bundle_app.command("packet")
@@ -265,6 +345,50 @@ def bundle_progress(
         emit_success(command, {"bundle_id": bundle_id, "phase": phase, "recorded": True})
         return
     typer.echo(f"Progress recorded for bundle '{bundle_id}': {phase}")
+
+
+@bundle_app.command("complete")
+def complete_bundle(
+    bundle_id: str,
+    actor: str | None = typer.Option(None, "--actor"),  # noqa: B008
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
+) -> None:
+    """Open bundle review after every member has completion evidence."""
+    from anvil.bundles.manager import BundleError
+
+    command = "bundle complete"
+    state_dir, backend = _state(cwd, command, json_output)
+    try:
+        readiness = _manager(
+            backend, state_dir, resolve_actor(actor)
+        ).mark_implemented(bundle_id)
+        if not readiness.can_mark_implemented:
+            _fail(
+                command,
+                json.dumps(readiness.unproven_members, sort_keys=True),
+                json_output,
+                code="bundle_not_ready",
+            )
+        bundle = backend.get_bundle(bundle_id)
+    except BundleError as exc:
+        _fail(command, str(exc), json_output)
+    finally:
+        backend.close()
+    assert bundle is not None
+    if json_output:
+        emit_success(
+            command,
+            {
+                "bundle": dump_model(bundle),
+                "readiness": {
+                    "can_mark_implemented": readiness.can_mark_implemented,
+                    "unproven_members": readiness.unproven_members,
+                },
+            },
+        )
+        return
+    typer.echo(f"Bundle '{bundle_id}' is implemented and awaiting review.")
 
 
 @bundle_app.command("status")

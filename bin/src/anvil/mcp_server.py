@@ -22,12 +22,6 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
-from anvil.state.models import (
-    BundleCheckpoint,
-    BundleClaim,
-    BundleReviewVerdict,
-    ExecutionBundle,
-)
 from anvil.state.rollup import BundleRollupEntry
 
 # ---------------------------------------------------------------------------
@@ -280,14 +274,97 @@ class ProgressResponse(BaseModel):
     recorded: bool
 
 
+class BundleReviewPolicyRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_reviews: int
+    max_rereviews: int
+    independent_reviewer_required: bool
+    required_angles: list[str]
+
+
+class BundleThroughputBudgetRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_tasks: int
+    max_serial_stages: int
+
+
+class BundleCheckpointRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commit_sha: str | None = None
+    pr_url: str | None = None
+    recorded_at: str
+    recorded_by: str
+
+
+class BundleRecord(BaseModel):
+    """Compact explicit wire schema for an execution bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    creation_event_id: str
+    prd_id: str
+    task_ids: list[str]
+    coordinator: str
+    status: str
+    review_disposition_event_id: str | None = None
+    superseded_by: str | None = None
+    last_result_at: str | None = None
+    branch: str | None = None
+    worktree_path: str | None = None
+    review_policy: BundleReviewPolicyRecord
+    throughput_budget: BundleThroughputBudgetRecord
+    delegated_agents: list[dict[str, Any]] = Field(default_factory=list)
+    checkpoint: BundleCheckpointRecord | None = None
+    created_at: str
+    updated_at: str
+
+
+class BundleClaimRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    bundle_id: str
+    claimed_by: str
+    status: str
+    branch: str | None = None
+    worktree_path: str | None = None
+    session_id: str | None = None
+    expected_files: list[str]
+    member_claim_ids: dict[str, str]
+    created_at: str
+    lease_expires_at: str
+    last_heartbeat_at: str
+    released_at: str | None = None
+    release_reason: str | None = None
+
+
+class BundleReviewVerdictRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    bundle_id: str
+    creation_event_id: str
+    disposition_event_id: str
+    review_round: int
+    angle: str
+    reviewed_by: str
+    decision: str
+    notes: str | None = None
+    created_at: str
+
+
 class BundleDetailResponse(BaseModel):
     """Typed bundle read response shared by bundle MCP operations."""
 
     model_config = ConfigDict(extra="forbid")
 
-    bundle: ExecutionBundle
-    claim: BundleClaim | None = None
-    reviews: list[BundleReviewVerdict] = Field(default_factory=list)
+    bundle: BundleRecord
+    claim: BundleClaimRecord | None = None
+    reviews: list[BundleReviewVerdictRecord] = Field(default_factory=list)
 
 
 class BundleListResponse(BaseModel):
@@ -295,7 +372,7 @@ class BundleListResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bundles: list[ExecutionBundle] = Field(default_factory=list)
+    bundles: list[BundleRecord] = Field(default_factory=list)
 
 
 class BundleClaimResponse(BaseModel):
@@ -303,8 +380,8 @@ class BundleClaimResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bundle: ExecutionBundle
-    claim: BundleClaim
+    bundle: BundleRecord
+    claim: BundleClaimRecord
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -329,7 +406,7 @@ class BundleReviewResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bundle: ExecutionBundle
+    bundle: BundleRecord
     gate: BundleReviewGateResponse
 
 
@@ -338,8 +415,19 @@ class BundleCheckpointResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bundle: ExecutionBundle
-    checkpoint: BundleCheckpoint
+    bundle: BundleRecord
+    checkpoint: BundleCheckpointRecord
+
+
+class BundleProgressResponse(BaseModel):
+    """Progress plus optional completion/readiness transition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle: BundleRecord
+    recorded: bool = True
+    can_mark_implemented: bool | None = None
+    unproven_members: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class NextReadyTask(BaseModel):
@@ -1134,8 +1222,7 @@ def release_task(
     actor: str,
     reason: str | None = None,
 ) -> ReleaseResponse:
-    """Release the active claim on task_id held by actor; returns the released
-    claim_id. Reaps stale claims first."""
+    """Release a task claim, or a coordinator bundle claim when task_id is a bundle ID."""
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -1144,6 +1231,20 @@ def release_task(
         from anvil.clock import SystemClock
 
         _reap_stale(backend)
+
+        if backend.get_bundle(task_id) is not None:
+            from anvil.bundles.manager import BundleError
+
+            claim = backend.get_bundle_claim(task_id)
+            if claim is None or claim.status.value != "active":
+                raise ToolError(f"No active bundle claim found for '{task_id}'.")
+            try:
+                _bundle_manager(backend, state_dir, actor).release(
+                    task_id, reason=reason
+                )
+            except BundleError as exc:
+                raise ToolError(f"bundle_error: {exc}") from exc
+            return ReleaseResponse(released=True, claim_id=claim.id)
 
         active_claim = _find_active_claim_for_task(backend, task_id)
         if active_claim is None:
@@ -1179,8 +1280,7 @@ def renew_claim(
     actor: str,
     extend_seconds: int = 900,
 ) -> RenewResponse:
-    """Extend the lease on the active claim for task_id by extend_seconds
-    (default 900 = 15 min). Reaps stale claims first."""
+    """Renew a task claim, or a coordinator bundle claim when task_id is a bundle ID."""
     actor = _require_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -1189,6 +1289,34 @@ def renew_claim(
         from anvil.clock import SystemClock
 
         _reap_stale(backend)
+
+        if backend.get_bundle(task_id) is not None:
+            from anvil.bundles.manager import BundleError
+
+            claim = backend.get_bundle_claim(task_id)
+            if claim is None or claim.status.value != "active":
+                raise ToolError(f"No active bundle claim found for '{task_id}'.")
+            try:
+                from anvil.clock import SystemClock
+
+                remaining_seconds = max(
+                    0.0,
+                    (claim.lease_expires_at - SystemClock().now()).total_seconds(),
+                )
+                updated = _bundle_manager(
+                    backend,
+                    state_dir,
+                    actor,
+                    lease_minutes=max(
+                        1.0, (remaining_seconds + extend_seconds) / 60.0
+                    ),
+                ).renew(task_id)
+            except BundleError as exc:
+                raise ToolError(f"bundle_error: {exc}") from exc
+            return RenewResponse(
+                lease_expires_at=updated.lease_expires_at.isoformat(),
+                renewed=updated.lease_expires_at != claim.lease_expires_at,
+            )
 
         active_claim = _find_active_claim_for_task(backend, task_id)
         if active_claim is None:
@@ -3510,6 +3638,22 @@ def _review_gate_response(gate: Any) -> BundleReviewGateResponse:
     return BundleReviewGateResponse.model_validate(gate.__dict__)
 
 
+def _bundle_record(bundle: Any) -> BundleRecord:
+    return BundleRecord.model_validate(bundle.model_dump(mode="json"))
+
+
+def _bundle_claim_record(claim: Any) -> BundleClaimRecord:
+    return BundleClaimRecord.model_validate(claim.model_dump(mode="json"))
+
+
+def _bundle_review_record(review: Any) -> BundleReviewVerdictRecord:
+    return BundleReviewVerdictRecord.model_validate(review.model_dump(mode="json"))
+
+
+def _bundle_checkpoint_record(checkpoint: Any) -> BundleCheckpointRecord:
+    return BundleCheckpointRecord.model_validate(checkpoint.model_dump(mode="json"))
+
+
 def _bundle_manager(backend: Any, state_dir: Path, actor: str, lease_minutes: float = 240):
     from anvil.bundles.manager import BundleManager
     from anvil.clock import SystemClock
@@ -3565,7 +3709,7 @@ def create_bundle(
             )
         except (BundleCatalogError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
-        return BundleDetailResponse(bundle=bundle)
+        return BundleDetailResponse(bundle=_bundle_record(bundle))
     finally:
         backend.close()
 
@@ -3577,7 +3721,12 @@ def list_bundles(
     """List execution bundles in stable ID order."""
     backend = _open_backend(_resolve_state_dir(cwd))
     try:
-        return BundleListResponse(bundles=backend.list_bundles(prd_id=prd_id))
+        return BundleListResponse(
+            bundles=[
+                _bundle_record(bundle)
+                for bundle in backend.list_bundles(prd_id=prd_id)
+            ]
+        )
     finally:
         backend.close()
 
@@ -3596,9 +3745,12 @@ def get_bundle(bundle_id: str, cwd: str | None = None) -> BundleDetailResponse:
             raise ToolError(f"bundle_error: {exc}") from exc
         claim = backend.get_bundle_claim(bundle_id)
         return BundleDetailResponse(
-            bundle=bundle,
-            claim=claim,
-            reviews=backend.list_bundle_reviews(bundle_id),
+            bundle=_bundle_record(bundle),
+            claim=_bundle_claim_record(claim) if claim else None,
+            reviews=[
+                _bundle_review_record(review)
+                for review in backend.list_bundle_reviews(bundle_id)
+            ],
         )
     finally:
         backend.close()
@@ -3647,7 +3799,9 @@ def claim_bundle(
         except (BundleError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         return BundleClaimResponse(
-            bundle=result.bundle, claim=result.claim, warnings=warnings
+            bundle=_bundle_record(result.bundle),
+            claim=_bundle_claim_record(result.claim),
+            warnings=warnings,
         )
     finally:
         backend.close()
@@ -3685,24 +3839,42 @@ def submit_bundle_progress(
     phase: str,
     detail: str | None = None,
     member_task_ids: list[str] | None = None,
+    complete: bool = False,
     cwd: str | None = None,
-) -> ProgressResponse:
-    """Record coordinator progress against the active bundle claim."""
+) -> BundleProgressResponse:
+    """Record progress; complete=true opens review after evidence is proven."""
     from anvil.bundles.manager import BundleError
 
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         try:
-            _bundle_manager(backend, state_dir, actor).note_progress(
+            manager = _bundle_manager(backend, state_dir, actor)
+            manager.note_progress(
                 bundle_id,
                 phase=phase,
                 detail=detail,
                 member_task_ids=member_task_ids,
             )
+            readiness = manager.mark_implemented(bundle_id) if complete else None
         except BundleError as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
-        return ProgressResponse(recorded=True)
+        if readiness is not None and not readiness.can_mark_implemented:
+            raise ToolError(
+                "bundle_not_ready: "
+                + json.dumps(readiness.unproven_members, sort_keys=True)
+            )
+        bundle = backend.get_bundle(bundle_id)
+        assert bundle is not None
+        return BundleProgressResponse(
+            bundle=_bundle_record(bundle),
+            can_mark_implemented=(
+                readiness.can_mark_implemented if readiness is not None else None
+            ),
+            unproven_members=(
+                readiness.unproven_members if readiness is not None else {}
+            ),
+        )
     finally:
         backend.close()
 
@@ -3739,7 +3911,7 @@ def record_bundle_review(
             raise ToolError(f"bundle_error: {exc}") from exc
         assert bundle is not None
         return BundleReviewResponse(
-            bundle=bundle, gate=_review_gate_response(gate)
+            bundle=_bundle_record(bundle), gate=_review_gate_response(gate)
         )
     finally:
         backend.close()
@@ -3764,7 +3936,7 @@ def finalize_bundle_review(
             raise ToolError(f"bundle_error: {exc}") from exc
         assert bundle is not None
         return BundleReviewResponse(
-            bundle=bundle, gate=_review_gate_response(gate)
+            bundle=_bundle_record(bundle), gate=_review_gate_response(gate)
         )
     finally:
         backend.close()
@@ -3793,7 +3965,8 @@ def checkpoint_bundle(
             raise ToolError(f"bundle_error: {exc}") from exc
         assert bundle is not None
         return BundleCheckpointResponse(
-            bundle=bundle, checkpoint=checkpoint
+            bundle=_bundle_record(bundle),
+            checkpoint=_bundle_checkpoint_record(checkpoint),
         )
     finally:
         backend.close()
@@ -3824,7 +3997,7 @@ def reconcile_bundle(
         except (BundleDeliveryError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         assert bundle is not None
-        return BundleDetailResponse(bundle=bundle)
+        return BundleDetailResponse(bundle=_bundle_record(bundle))
     finally:
         backend.close()
 
@@ -3850,7 +4023,7 @@ def supersede_bundle(
         except (BundleDeliveryError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         assert bundle is not None
-        return BundleDetailResponse(bundle=bundle)
+        return BundleDetailResponse(bundle=_bundle_record(bundle))
     finally:
         backend.close()
 

@@ -502,7 +502,7 @@ class TestBundleTools:
         self._seed(tmp_path)
         monkeypatch.chdir(tmp_path)
 
-        async def run() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+        async def run() -> tuple[Any, ...]:
             async with Client(mcp) as client:
                 created = _data(
                     await client.call_tool(
@@ -587,6 +587,63 @@ class TestBundleTools:
                         },
                     )
                 )
+                for task_id in ("T001", "T002"):
+                    await client.call_tool(
+                        "submit_completion_evidence",
+                        {
+                            "task_id": task_id,
+                            "actor": "coordinator",
+                            "commands_run": ["pytest -q"],
+                            "files_changed": [f"src/{task_id.lower()}.py"],
+                        },
+                    )
+                completed = _data(
+                    await client.call_tool(
+                        "submit_bundle_progress",
+                        {
+                            "bundle_id": "B001",
+                            "actor": "coordinator",
+                            "phase": "implemented",
+                            "complete": True,
+                        },
+                    )
+                )
+                reviews = []
+                for reviewer, angle in (
+                    ("reviewer-a", "correctness"),
+                    ("reviewer-b", "security"),
+                    ("reviewer-c", "integration"),
+                ):
+                    reviews.append(
+                        _data(
+                            await client.call_tool(
+                                "record_bundle_review",
+                                {
+                                    "bundle_id": "B001",
+                                    "actor": reviewer,
+                                    "review_round": 1,
+                                    "angle": angle,
+                                    "decision": "approve",
+                                },
+                            )
+                        )
+                    )
+                finalized = _data(
+                    await client.call_tool(
+                        "finalize_bundle_review",
+                        {"bundle_id": "B001", "actor": "coordinator"},
+                    )
+                )
+                reconciled = _data(
+                    await client.call_tool(
+                        "reconcile_bundle",
+                        {
+                            "bundle_id": "B001",
+                            "actor": "coordinator",
+                            "commit_sha": "abc123",
+                        },
+                    )
+                )
                 return (
                     created,
                     listed,
@@ -594,23 +651,98 @@ class TestBundleTools:
                     status,
                     checkpoint,
                     claimed,
-                    (packet, progress, reconciled, superseded),
+                    (
+                        packet,
+                        progress,
+                        completed,
+                        reviews,
+                        finalized,
+                        reconciled,
+                        superseded,
+                    ),
                 )
 
         created, listed, fetched, status, checkpoint, claimed, tail = _run(run())
-        packet, progress, reconciled, superseded = tail
+        packet, progress, completed, reviews, finalized, reconciled, superseded = tail
         assert created["bundle"]["id"] == "B001"
         assert [entry["id"] for entry in listed["bundles"]] == ["B001", "B002"]
         assert fetched["claim"] is None
         assert status["bundles"][0]["bundle_id"] == "B001"
         assert checkpoint["checkpoint"]["commit_sha"] == "abc123"
-        assert reconciled["bundle"]["status"] == "planned"
+        assert completed["bundle"]["status"] == "implemented_unreviewed"
+        assert reviews[-1]["gate"]["passed"] is True
+        assert finalized["bundle"]["status"] == "reviewed_unintegrated"
+        assert reconciled["bundle"]["status"] == "integrated"
         assert superseded["bundle"]["superseded_by"] == "B001"
         assert claimed["bundle"]["status"] == "active"
         assert set(claimed["claim"]["member_claim_ids"]) == {"T001", "T002"}
         assert packet["format"] == "json"
         assert packet["content"]["bundle"]["id"] == "B001"
-        assert progress == {"recorded": True}
+        assert progress["recorded"] is True
+        assert progress["bundle"]["status"] == "active"
+
+    def test_existing_renew_release_tools_dispatch_bundle_ids(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[Any, Any]:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                    },
+                )
+                await client.call_tool(
+                    "claim_bundle",
+                    {"bundle_id": "B001", "actor": "coordinator"},
+                )
+                await client.call_tool(
+                    "submit_bundle_progress",
+                    {
+                        "bundle_id": "B001",
+                        "actor": "coordinator",
+                        "phase": "working",
+                    },
+                )
+                renewed = _data(
+                    await client.call_tool(
+                        "renew_claim",
+                        {"task_id": "B001", "actor": "coordinator"},
+                    )
+                )
+                released = _data(
+                    await client.call_tool(
+                        "release_task",
+                        {
+                            "task_id": "B001",
+                            "actor": "coordinator",
+                            "reason": "handoff",
+                        },
+                    )
+                )
+                return renewed, released
+
+        renewed, released = _run(run())
+        assert renewed["renewed"] is True
+        assert released["released"] is True
+        assert released["claim_id"].startswith("BC")
+
+    def test_registered_bundle_output_schema_names_core_fields(self) -> None:
+        tools = _run(mcp.local_provider.list_tools())
+        schema = next(tool.output_schema for tool in tools if tool.name == "get_bundle")
+        bundle_schema = schema["properties"]["bundle"]
+        if "$ref" in bundle_schema:
+            bundle_schema = schema["$defs"][bundle_schema["$ref"].split("/")[-1]]
+        assert {"id", "status", "task_ids", "coordinator"} <= set(
+            bundle_schema["properties"]
+        )
 
     @pytest.mark.parametrize(
         ("tool_name", "arguments"),

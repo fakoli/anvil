@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
 
 from typer.testing import CliRunner
 
@@ -155,31 +154,55 @@ def test_bundle_delivery_errors_match_stable_json_code(tmp_path) -> None:
 
 
 def test_bundle_review_finalize_checkpoint_and_reconcile_json(tmp_path) -> None:
-    from tests.test_bundle_execution import (
-        _backend as execution_backend,
+    _seed_cli_project(tmp_path)
+    created = _invoke(
+        tmp_path,
+        [
+            "bundle",
+            "create",
+            "B001",
+            "release:T001",
+            "release:T002",
+            "--prd",
+            "release",
+            "--coordinator",
+            "coordinator",
+            "--actor",
+            "planner",
+            "--json",
+        ],
     )
-    from tests.test_bundle_execution import (
-        _implement_bundle,
+    assert created.exit_code == 0, created.output
+    claimed = _invoke(
+        tmp_path,
+        ["bundle", "claim", "B001", "--actor", "coordinator", "--json"],
     )
-
-    state_dir = tmp_path / ".anvil"
-    state_dir.mkdir()
-    backend = execution_backend(state_dir)
-    try:
-        _implement_bundle(backend, tmp_path)
-        lease_expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        conn = backend._require_conn()
-        conn.execute(
-            "UPDATE bundle_claims SET lease_expires_at = ? WHERE bundle_id = 'B001'",
-            (lease_expires,),
+    assert claimed.exit_code == 0, claimed.output
+    for task_id in ("release:T001", "release:T002"):
+        submitted = _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                "pytest -q",
+                "--files-changed",
+                f"src/{task_id[-1]}.py",
+                "--actor",
+                "coordinator",
+                "--json",
+            ],
         )
-        conn.execute(
-            "UPDATE claims SET lease_expires_at = ? WHERE bundle_claim_id IS NOT NULL",
-            (lease_expires,),
-        )
-        conn.commit()
-    finally:
-        backend.close()
+        assert submitted.exit_code == 0, submitted.output
+    completed = _invoke(
+        tmp_path,
+        ["bundle", "complete", "B001", "--actor", "coordinator", "--json"],
+    )
+    assert completed.exit_code == 0, completed.output
+    assert (
+        json.loads(completed.output)["data"]["bundle"]["status"]
+        == "implemented_unreviewed"
+    )
 
     for reviewer, angle in (
         ("reviewer-a", "correctness"),
