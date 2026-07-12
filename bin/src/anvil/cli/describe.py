@@ -71,7 +71,7 @@ _COMMAND = "describe"
 #
 # Bumped to "2" when the ``mcp-config`` CLI command was added (a command added
 # to the surface is exactly the documented bump trigger).
-API_VERSION = "2"
+API_VERSION = "3"
 
 
 def describe(
@@ -195,8 +195,8 @@ def mcp_tool_names() -> list[str]:
     list_tools()``) rather than the server-level ``mcp.list_tools()``: the local
     provider applies transforms but does NOT *filter* disabled components (it
     returns them flagged), whereas the server-level call filters them out. So the
-    local provider yields the complete 24-tool surface even when the L2 planning
-    gate has hidden the 10 planning tools from the per-turn wire
+    local provider yields the complete 35-tool surface even when the L2 planning
+    gate has hidden the 11 planning tools from the per-turn wire
     (``ANVIL_MCP_PLANNING`` unset). ``describe`` answers "what can this engine
     do", which never shrinks; the gate only changes what a default execution
     client is *served* on the wire.

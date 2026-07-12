@@ -21,11 +21,14 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from anvil.state.models import (
         PRD,
+        BundleClaim,
+        BundleReviewVerdict,
         Claim,
         ConflictGroup,
         Event,
         EventDraft,
         Evidence,
+        ExecutionBundle,
         Feature,
         Project,
         Requirement,
@@ -114,6 +117,30 @@ class Backend(Protocol):
 
     def get_claim(self, claim_id: str) -> Claim | None:
         """Return the Claim with the given ID, or None if not found."""
+        ...
+
+    def get_bundle(self, bundle_id: str) -> ExecutionBundle | None:
+        """Return the execution bundle with the given ID, or None."""
+        ...
+
+    def list_bundles(
+        self, *, prd_id: str | None = None, status: str | None = None
+    ) -> list[ExecutionBundle]:
+        """Return execution bundles in stable ID order, optionally filtered."""
+        ...
+
+    def get_bundle_claim(self, bundle_id: str) -> BundleClaim | None:
+        """Return the public coordinator claim for a bundle, if present."""
+        ...
+
+    def list_bundle_claims(self, *, status: str | None = None) -> list[BundleClaim]:
+        """Return coordinator bundle claims in stable ID order."""
+        ...
+
+    def list_bundle_reviews(
+        self, bundle_id: str, *, disposition_event_id: str | None = None
+    ) -> list[BundleReviewVerdict]:
+        """Return adversarial verdicts for a bundle in deterministic order."""
         ...
 
     def get_feature(self, feature_id: str) -> Feature | None:

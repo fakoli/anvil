@@ -37,6 +37,11 @@ def progress(
     detail: str | None = typer.Option(  # noqa: B008
         None, "--detail", help="Free-text elaboration for the phase."
     ),
+    bundle_mode: bool = typer.Option(  # noqa: B008
+        False,
+        "--bundle",
+        help="Record coordinator progress for an execution bundle.",
+    ),
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
@@ -71,6 +76,36 @@ def progress(
     try:
         from anvil.clock import SystemClock
         from anvil.state.models import EventDraft
+
+        if bundle_mode:
+            from anvil.bundles.manager import BundleError, BundleManager
+
+            try:
+                BundleManager(
+                    backend,
+                    SystemClock(),
+                    actor=resolved_actor,
+                    project_root=Path.cwd(),
+                ).note_progress(task_id, phase=phase, detail=detail)
+            except BundleError as exc:
+                if json_output:
+                    fail(_COMMAND, str(exc), code="bundle_progress_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if json_output:
+                emit_success(
+                    _COMMAND,
+                    {
+                        "bundle_id": task_id,
+                        "actor": resolved_actor,
+                        "phase": phase,
+                        "detail": detail,
+                        "recorded": True,
+                    },
+                )
+                return
+            typer.echo(f"Progress recorded for bundle '{task_id}': {phase}")
+            return
 
         task = backend.get_task(task_id)
         if task is None:

@@ -4,11 +4,11 @@ Anvil's engine does not depend on Claude Code. Any harness can drive the full
 loop through one of two surfaces. (New to terms like packet, claim, or lease?
 See the [glossary](../glossary.md).)
 
-1. **MCP** — register the `anvil` stdio server. It serves the 14 execution
+1. **MCP** — register the `anvil` stdio server. It serves the 24 execution
    tools by default; set `ANVIL_MCP_PLANNING=1` in the server's env to expose
-   all 24 (adds the planning tools — `init_project`, `parse_prd`, `plan_tasks`,
+   all 35 (adds the planning tools — `init_project`, `parse_prd`, `plan_tasks`,
    `score_tasks`, `review_prd`, `review_tasks`, `apply_review_decision`,
-   `find_decisions`, `edit_dependencies`, `describe_surface`).
+   `find_decisions`, `edit_dependencies`, `describe_surface`, `create_bundle`).
 2. **CLI** — `anvil <command>` with `--json` for machine-readable output.
 
 `anvil install <harness>` wires this up for you, in two tiers:
@@ -119,6 +119,18 @@ Every read command takes `--json`. `AGENTS.md` carries the full MCP-tool ⇄
 CLI-command table — codex gets it spliced in automatically; for any MCP-only
 harness, point the agent at the repo's `AGENTS.md` (or paste it where the harness
 reads instructions) to give it the same map.
+
+For a milestone that should land as one reviewed delivery, create and claim an execution
+bundle instead of handing each task off independently:
+
+```bash
+anvil bundle create B001 T001 T002 --prd release --coordinator lead --actor lead
+anvil bundle claim B001 --actor lead --shared-tree
+anvil bundle packet B001 --actor lead
+```
+
+The coordinator-only, bounded-delegation, recovery, and review flow is in
+[Coordinating a milestone bundle](coordinating-a-bundle.md).
 
 ## Claude Code
 

@@ -52,25 +52,32 @@ Version history
   the new columns) keep working unchanged — Phase 0 is purely additive at the
   write layer.
 - v8: v0.3 multi-PRD revisions (T023). ``prds`` gains ``revision`` — the per-PRD
+  monotonic revision counter (INTEGER NOT NULL DEFAULT 1) bumped by
+  ``prd.revised``. Purely additive: the v7->v8 migration ALTER-adds the column
+  with a DEFAULT, so every pre-existing v7 PRD row backfills to revision 1.
 - v9: evidence contracts (issue #153) — ``tasks.claims`` (named TaskClaims,
   default ``'[]'``) and ``evidence.category`` (default ``'completion'``).
 - v10: distinct-actor fail-fast (retro corpus, concurrency theme) —
   ``claims.session_id TEXT`` (nullable): the claiming loop's session
   discriminator, recorded independently of the actor string; NULL backfill
   means session-unknown and is skipped by the guard.
-  monotonic revision counter (INTEGER NOT NULL DEFAULT 1) bumped by
-  ``prd.revised``. Purely additive: the v7->v8 migration ALTER-adds the column
-  with a DEFAULT, so every pre-existing v7 PRD row backfills to revision 1.
-  This is a SEPARATE schema version (NOT folded into v7) because v7 already
-  shipped without ``revision``; a DB already stamped at v7 must re-enter the
-  migration ladder via the v8 bump to grow the column — modifying v7 in place
-  would leave those DBs missing the column (the version-equal early-return
-  skips the ladder).
+- v11: execution bundles (issue #171) — ``execution_bundles`` stores the
+  coordinator-owned lifecycle and policy metadata; ``execution_bundle_members``
+  stores ordered task membership with FK-protected history.
+- v12: coordinator bundle claims (issue #171) — ``bundle_claims`` stores one
+  public lease and ``claims.bundle_claim_id`` links internal member evidence
+  authorizations without changing standalone task claims.
+- v13: bundle review dispositions (issue #171) — review verdicts bind to the
+  exact ``implemented_unreviewed`` transition that opened their review cycle.
+- v14: bundle delivery lineage (issue #171) — bundles record a named
+  superseding bundle while preserving the existing checkpoint JSON metadata.
+- v15: authoritative bundle result time (issue #171) — the projection stores
+  the timestamp of the last applied reviewed/integrated/merged/completed result.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 10
+SCHEMA_VERSION: int = 15
 
 
 def get_schema_version() -> int:
@@ -189,6 +196,82 @@ CREATE INDEX IF NOT EXISTS idx_tasks_feature_status ON tasks (feature_id, status
 
 CREATE INDEX IF NOT EXISTS idx_tasks_prd_status ON tasks (prd_id, status);
 
+CREATE TABLE IF NOT EXISTS execution_bundles (
+    id                 TEXT PRIMARY KEY,
+    creation_event_id  TEXT NOT NULL UNIQUE,
+    prd_id             TEXT NOT NULL REFERENCES prds(id) ON DELETE RESTRICT,
+    coordinator        TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'planned',
+    review_disposition_event_id TEXT,
+    superseded_by      TEXT REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    last_result_at     TEXT,
+    branch             TEXT,
+    worktree_path      TEXT,
+    review_policy      TEXT NOT NULL DEFAULT '{}',
+    throughput_budget  TEXT NOT NULL DEFAULT '{}',
+    delegated_agents   TEXT NOT NULL DEFAULT '[]',
+    checkpoint         TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_bundles_status
+    ON execution_bundles (status);
+
+CREATE INDEX IF NOT EXISTS idx_execution_bundles_prd_status
+    ON execution_bundles (prd_id, status);
+
+CREATE TABLE IF NOT EXISTS execution_bundle_members (
+    bundle_id  TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    position   INTEGER NOT NULL CHECK (position >= 0),
+    PRIMARY KEY (bundle_id, task_id),
+    UNIQUE (bundle_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task
+    ON execution_bundle_members (task_id);
+
+CREATE TABLE IF NOT EXISTS bundle_review_verdicts (
+    id                 TEXT PRIMARY KEY,
+    bundle_id          TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    creation_event_id  TEXT NOT NULL,
+    disposition_event_id TEXT NOT NULL,
+    review_round       INTEGER NOT NULL CHECK (review_round >= 1),
+    angle              TEXT NOT NULL,
+    reviewed_by        TEXT NOT NULL,
+    decision           TEXT NOT NULL,
+    notes              TEXT,
+    created_at         TEXT NOT NULL,
+    UNIQUE (bundle_id, creation_event_id, disposition_event_id,
+            review_round, angle, reviewed_by)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundle_review_verdicts_round
+    ON bundle_review_verdicts
+       (bundle_id, creation_event_id, disposition_event_id, review_round);
+
+CREATE TABLE IF NOT EXISTS bundle_claims (
+    id                 TEXT PRIMARY KEY,
+    bundle_id          TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+    claimed_by         TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'active',
+    branch             TEXT,
+    worktree_path      TEXT,
+    session_id         TEXT,
+    expected_files     TEXT NOT NULL DEFAULT '[]',
+    member_claim_ids   TEXT NOT NULL DEFAULT '{}',
+    created_at         TEXT NOT NULL,
+    lease_expires_at   TEXT NOT NULL,
+    last_heartbeat_at  TEXT NOT NULL,
+    released_at        TEXT,
+    release_reason     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundle_claims_status ON bundle_claims (status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_claims_active_bundle
+    ON bundle_claims (bundle_id) WHERE status = 'active';
+
 CREATE TABLE IF NOT EXISTS claims (
     id                 TEXT PRIMARY KEY,
     task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
@@ -198,6 +281,7 @@ CREATE TABLE IF NOT EXISTS claims (
     branch             TEXT,
     worktree_path      TEXT,
     session_id         TEXT,
+    bundle_claim_id    TEXT REFERENCES bundle_claims(id) ON DELETE RESTRICT,
     expected_files     TEXT NOT NULL DEFAULT '[]',
     created_at         TEXT NOT NULL,
     lease_expires_at   TEXT NOT NULL,
@@ -207,6 +291,16 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 
 CREATE INDEX IF NOT EXISTS idx_claims_task_status ON claims (task_id, status);
+
+-- Internal replay quarantine for divergent branches that reused one claim ID
+-- for different immutable creation facts. Claim child events lack a creation
+-- lineage token in the legacy event contract, so quarantining descendants is
+-- the only deterministic fail-closed projection.
+CREATE TABLE IF NOT EXISTS claim_replay_lineages (
+    claim_id              TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE RESTRICT,
+    creation_fingerprint  TEXT NOT NULL,
+    collision_detected    INTEGER NOT NULL DEFAULT 0 CHECK (collision_detected IN (0, 1))
+);
 
 CREATE TABLE IF NOT EXISTS evidence (
     id                  TEXT PRIMARY KEY,
@@ -294,7 +388,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 7;
+PRAGMA user_version = 11;
 """
 
 

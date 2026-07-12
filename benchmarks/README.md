@@ -130,6 +130,66 @@ coercion. (The crash scenario still fast-forwards the lease by backdating
   complete), not an LLM's reasoning. That isolates the coordination mechanism, which is
   what the claim is about.
 
+## Coordinator policy comparison fixture
+
+The bundle workflow fixture is a separate, deterministic protocol for comparing two
+execution policies over the same accepted-task target:
+
+- `task_per_agent` — tasks are handed to independent workers;
+- `coordinator_first` — one coordinator owns the integrated bundle and may use bounded
+  delegates.
+
+Run it from the repository root:
+
+```bash
+uv run --project bin python benchmarks/bundle_workflow_fixture.py
+```
+
+The committed `fixtures/bundle_workflow.json` contains paired synthetic observations. The
+shared workload pins a task-graph hash, initial commit, ordered target task IDs, and
+acceptance commands. Each pair must have the same trial ID, integer seed, and opaque
+execution-profile ID; each arm carries a run ID and provenance reference. A completed arm
+must name the full ordered accepted-task target, a valid commit SHA, and a commit timestamp
+after its start.
+
+The fixture records coordinator and per-delegate tokens, review findings, re-reviews, wait
+time, and human interventions as exact nonnegative integers. The comparator rejects
+malformed containers, coerced strings/floats/bools, negative values, unknown tasks,
+duplicate or unpaired trials, identity mismatches, and unproven acceptance. It derives
+time-to-accepted-commit, total tokens, accepted tasks per 1,000 tokens, per-policy means,
+and signed `coordinator_first - task_per_agent` deltas. If either policy has an incomplete
+trial, time and efficiency comparisons are suppressed instead of treating missing
+acceptance as a fast result.
+
+Capture fields have one meaning across both arms:
+
+- `coordinator_tokens` and each `delegate_tokens` value are normalized model-usage totals:
+  input + output + reasoning tokens. Cached input is already a subset of input and is not
+  added again. Reviewer usage belongs to the coordinator unless the capture protocol
+  explicitly treats that reviewer as a delegate in both arms.
+- `review_findings` counts unique actionable finding IDs, not comments or repeated
+  mentions. `rereviews` counts distinct review rounds after round 1; three reviewers in
+  the same first round add zero re-reviews.
+- `wait_ms` is the union of wall-clock intervals in which the delivery could not proceed
+  because of a delegate, lease, review, CI, or human dependency. Overlapping waits count
+  once. `human_interventions` counts distinct human turns that provide clarification,
+  approval, conflict resolution, or recovery action.
+- Accepted-task efficiency is emitted only when every paired trial proves the full ordered
+  target, supplies one accepted commit SHA, and records every workload acceptance command
+  with exit code 0 tied to that SHA.
+
+This fixture is a contract test for the measurement pipeline, not a live model result. It
+uses no model or vendor names, emits no weighted score or winner, and must not be cited as
+evidence that one model family is intrinsically better. For an empirical run, preserve
+the same task graph, initial commit, acceptance commands, trial seeds, and execution
+profile across both policies; replace only the observation values, use
+`provenance.kind="raw_session_log"`, and retain the referenced logs.
+For raw provenance, the comparator resolves each unique reference beneath the fixture
+directory and verifies its SHA-256. It validates the structure and binding of command
+results but does not execute commands, inspect the Git object database, or recompute the
+task-graph hash; empirical claims must retain independently verifiable logs and repository
+state. The output's `verification_scope` makes this boundary explicit.
+
 ## Roadmap — `--live`
 
 `--live` is a phase-2 stub today. It will replace the simulated actor loop with real

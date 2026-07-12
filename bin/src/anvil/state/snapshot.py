@@ -88,7 +88,8 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
         Any object satisfying the read side of the Backend protocol. Only
         the ``get_project``, ``list_prds``, ``list_features``, ``list_tasks``,
         ``list_claims``, ``list_reviews``, ``list_evidence``,
-        ``list_requirements``, and ``list_sync_mappings`` methods are used.
+        ``list_requirements``, ``list_sync_mappings``, and ``list_bundles``
+        methods are used.
 
     Returns
     -------
@@ -98,7 +99,7 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
     """
     project = backend.get_project()
 
-    return {
+    state = {
         # Singleton: one-or-None, emitted directly (no list wrapper).
         "project": project.model_dump(mode="json") if project is not None else None,
         # T024: ALL PRDs, sorted by id, replacing the legacy singleton ``prd``.
@@ -146,7 +147,10 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
         # test depends on this so terminal claim states are part of the
         # compared snapshot.
         "claims": [
-            c.model_dump(mode="json")
+            c.model_dump(
+                mode="json",
+                exclude={"bundle_claim_id"} if c.bundle_claim_id is None else set(),
+            )
             for c in sorted(backend.list_claims(), key=lambda c: c.id)
         ],
         "reviews": [
@@ -203,3 +207,38 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
             )
         ],
     }
+
+    # Bundle state is a new canonical collection, but legacy no-bundle
+    # snapshots are a committed byte contract. Omit the key while empty (the
+    # same additive/omit-when-empty discipline used by Task.claims) and include
+    # the full sorted collection as soon as any bundle exists.
+    list_bundles = getattr(backend, "list_bundles", None)
+    bundles = list_bundles() if list_bundles is not None else []
+    if bundles:
+        state["bundles"] = [
+            bundle.model_dump(mode="json")
+            for bundle in sorted(bundles, key=lambda bundle: bundle.id)
+        ]
+        list_bundle_claims = getattr(backend, "list_bundle_claims", None)
+        bundle_claims = list_bundle_claims() if list_bundle_claims is not None else []
+        if bundle_claims:
+            state["bundle_claims"] = [
+                claim.model_dump(mode="json")
+                for claim in sorted(bundle_claims, key=lambda claim: claim.id)
+            ]
+        list_bundle_reviews = getattr(backend, "list_bundle_reviews", None)
+        bundle_reviews = (
+            [
+                review
+                for bundle in bundles
+                for review in list_bundle_reviews(bundle.id)
+            ]
+            if list_bundle_reviews is not None
+            else []
+        )
+        if bundle_reviews:
+            state["bundle_reviews"] = [
+                review.model_dump(mode="json")
+                for review in sorted(bundle_reviews, key=lambda review: review.id)
+            ]
+    return state

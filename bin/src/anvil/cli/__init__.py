@@ -10,6 +10,7 @@ import typer
 
 from anvil import __version__
 from anvil.cli.backup import backup, restore
+from anvil.cli.bundle import bundle_app
 from anvil.cli.claim import claim, next, release, renew
 from anvil.cli.claim_guard import claim_guard
 from anvil.cli.conflicts import conflicts
@@ -98,6 +99,7 @@ app.add_typer(hook_app, name="hook")
 app.add_typer(sync_app, name="sync")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(proof_app, name="proof")
+app.add_typer(bundle_app, name="bundle")
 
 # ---------------------------------------------------------------------------
 # --version callback

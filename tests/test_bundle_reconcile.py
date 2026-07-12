@@ -1,0 +1,623 @@
+"""Bundle checkpoint, reconciliation, supersession, and replay."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pytest
+
+from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
+from anvil.bundles.manager import BundleManager
+from anvil.bundles.review import BundleReviewManager
+from anvil.clock import FrozenClock
+from anvil.state.backend import EventRejected
+from anvil.state.models import BundleStatus, Event, EventDraft, ReviewDecision
+from anvil.state.schema import SCHEMA_VERSION
+from anvil.state.snapshot import serialize_state
+from tests.test_bundle_execution import (
+    _NOW,
+    _append_raw,
+    _backend,
+    _event,
+    _implement_bundle,
+    _manager,
+    _next_event_id,
+    _seed,
+)
+
+
+def test_reconcile_is_idempotent_and_does_not_apply_member_tasks(tmp_path) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        for reviewer, angle in (
+            ("reviewer-a", "correctness"),
+            ("reviewer-b", "security"),
+            ("reviewer-c", "integration"),
+        ):
+            BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
+                "B001",
+                review_round=1,
+                angle=angle,
+                decision=ReviewDecision.approve,
+            )
+        BundleReviewManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).finalize("B001")
+        delivery = BundleDeliveryManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        )
+        delivery.reconcile("B001", commit_sha="abc123")
+        first_count = len((tmp_path / "events.jsonl").read_text().splitlines())
+        BundleDeliveryManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=1)),
+            actor="coordinator",
+        ).reconcile("B001", commit_sha="abc123")
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == first_count
+        assert backend.get_bundle("B001").status is BundleStatus.integrated  # type: ignore[union-attr]
+        assert backend.get_bundle("B001").checkpoint.commit_sha == "abc123"  # type: ignore[union-attr]
+        assert all(
+            backend.get_task(task_id).status.value == "needs_review"  # type: ignore[union-attr]
+            for task_id in ("release:T001", "release:T002")
+        )
+    finally:
+        backend.close()
+
+
+def test_supersession_preserves_source_and_replays_replacement(tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        from tests.test_bundle_execution import _seed
+
+        _seed(backend)
+        backend.append(
+            _event(
+                "task.created",
+                "task",
+                "release:T003",
+                {
+                    "id": "release:T003",
+                    "feature_id": "release:F001",
+                    "prd_id": "release",
+                    "title": "Replacement member",
+                    "description": "",
+                    "status": "ready",
+                    "priority": "high",
+                    "task_type": "feature",
+                    "dependencies": [],
+                    "conflict_groups": [],
+                    "scores": {},
+                    "acceptance_criteria": ["Done"],
+                    "implementation_notes": [],
+                    "verification": {"commands": ["verify"]},
+                    "likely_files": ["src/3.py"],
+                    "parent_task_id": None,
+                    "created_at": _NOW.isoformat(),
+                    "updated_at": _NOW.isoformat(),
+                },
+            )
+        )
+        backend.append(
+            _event(
+                "bundle.created",
+                "bundle",
+                "B002",
+                {
+                    "id": "B002",
+                    "schema_version": SCHEMA_VERSION,
+                    "prd_id": "release",
+                    "task_ids": ["release:T003"],
+                    "coordinator": "coordinator",
+                    "status": "planned",
+                    "review_policy": {},
+                    "throughput_budget": {},
+                    "created_at": _NOW.isoformat(),
+                    "updated_at": _NOW.isoformat(),
+                },
+            )
+        )
+        source_claim = _manager(backend, tmp_path).claim("B001").claim
+        future = _NOW + timedelta(minutes=10)
+        backend.append(
+            EventDraft(
+                timestamp=future,
+                actor="seed",
+                action="task.created",
+                target_kind="task",
+                target_id="release:T004",
+                payload_json={
+                    "id": "release:T004",
+                    "feature_id": "release:F001",
+                    "prd_id": "release",
+                    "title": "Future replacement member",
+                    "description": "",
+                    "status": "ready",
+                    "priority": "high",
+                    "task_type": "feature",
+                    "dependencies": [],
+                    "conflict_groups": [],
+                    "scores": {},
+                    "acceptance_criteria": ["Done"],
+                    "implementation_notes": [],
+                    "verification": {"commands": ["verify"]},
+                    "likely_files": ["src/4.py"],
+                    "parent_task_id": None,
+                    "created_at": future.isoformat(),
+                    "updated_at": future.isoformat(),
+                },
+            )
+        )
+        backend.append(
+            EventDraft(
+                timestamp=future,
+                actor="seed",
+                action="bundle.created",
+                target_kind="bundle",
+                target_id="B003",
+                payload_json={
+                    "id": "B003",
+                    "schema_version": SCHEMA_VERSION,
+                    "prd_id": "release",
+                    "task_ids": ["release:T004"],
+                    "coordinator": "coordinator",
+                    "status": "planned",
+                    "review_policy": {},
+                    "throughput_budget": {},
+                    "created_at": future.isoformat(),
+                    "updated_at": future.isoformat(),
+                },
+            )
+        )
+        with pytest.raises(BundleDeliveryError, match="predates replacement state"):
+            BundleDeliveryManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).supersede("B001", replacement_bundle_id="B003")
+        source_bundle = backend.get_bundle("B001")
+        assert source_bundle is not None
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=_NOW,
+                actor="coordinator",
+                action="bundle.superseded",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": source_bundle.creation_event_id,
+                    "replacement_bundle_id": "B003",
+                    "superseded_by_actor": "coordinator",
+                    "superseded_at": _NOW.isoformat(),
+                },
+            ),
+        )
+        with pytest.raises(BundleDeliveryError, match="predates"):
+            BundleDeliveryManager(
+                backend,
+                FrozenClock(_NOW - timedelta(days=1)),
+                actor="coordinator",
+            ).supersede("B001", replacement_bundle_id="B002")
+        conn = backend._require_conn()
+        conn.execute("UPDATE execution_bundles SET status = 'completed' WHERE id = 'B002'")
+        conn.commit()
+        with pytest.raises(BundleDeliveryError, match="replacement is terminal"):
+            BundleDeliveryManager(
+                backend, FrozenClock(_NOW), actor="coordinator"
+            ).supersede("B001", replacement_bundle_id="B002")
+        conn.execute("UPDATE execution_bundles SET status = 'planned' WHERE id = 'B002'")
+        conn.commit()
+        BundleDeliveryManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).supersede("B001", replacement_bundle_id="B002")
+        assert backend.get_bundle("B001").status is BundleStatus.superseded  # type: ignore[union-attr]
+        assert backend.get_bundle("B001").superseded_by == "B002"  # type: ignore[union-attr]
+        assert backend.get_bundle_claim("B001").status.value == "released"  # type: ignore[union-attr]
+        assert all(
+            backend.get_claim(claim_id).status.value == "released"  # type: ignore[union-attr]
+            for claim_id in source_claim.member_claim_ids.values()
+        )
+        source = serialize_state(backend)
+    finally:
+        backend.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert serialize_state(replay) == source
+        assert replay.get_bundle("B003").status is BundleStatus.planned  # type: ignore[union-attr]
+    finally:
+        replay.close()
+
+
+def test_replanned_bundle_can_be_superseded_by_same_members_and_reclaimed(
+    tmp_path,
+) -> None:
+    replay_root = tmp_path / "replay-same-members"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        original_evidence = {
+            task_id: backend.get_latest_evidence(task_id).id  # type: ignore[union-attr]
+            for task_id in ("release:T001", "release:T002")
+        }
+        for review_round, prefix in ((1, "first"), (2, "second")):
+            for reviewer, angle in (
+                (f"{prefix}-a", "correctness"),
+                (f"{prefix}-b", "security"),
+                (f"{prefix}-c", "integration"),
+            ):
+                BundleReviewManager(
+                    backend, FrozenClock(_NOW), actor=reviewer
+                ).record(
+                    "B001",
+                    review_round=review_round,
+                    angle=angle,
+                    decision=(
+                        ReviewDecision.needs_changes
+                        if angle == "security"
+                        else ReviewDecision.approve
+                    ),
+                    notes="blocking rework" if angle == "security" else None,
+                )
+        BundleReviewManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).finalize("B001")
+        assert backend.get_bundle("B001").status is BundleStatus.replan_required  # type: ignore[union-attr]
+
+        replacement_at = _NOW + timedelta(minutes=1)
+        backend.append(
+            EventDraft(
+                timestamp=replacement_at,
+                actor="coordinator",
+                action="bundle.created",
+                target_kind="bundle",
+                target_id="B002",
+                payload_json={
+                    "id": "B002",
+                    "schema_version": SCHEMA_VERSION,
+                    "prd_id": "release",
+                    "task_ids": ["release:T001", "release:T002"],
+                    "coordinator": "coordinator",
+                    "status": "planned",
+                    "review_policy": {},
+                    "throughput_budget": {},
+                    "created_at": replacement_at.isoformat(),
+                    "updated_at": replacement_at.isoformat(),
+                },
+            )
+        )
+        before_resurrection = len(
+            (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        )
+        with pytest.raises(EventRejected, match="replacement bundle 'B002'"):
+            backend.append(
+                EventDraft(
+                    timestamp=_NOW + timedelta(minutes=1, seconds=1),
+                    actor="coordinator",
+                    action="bundle.status_changed",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_id": "B001",
+                        "creation_event_id": backend.get_bundle(
+                            "B001"
+                        ).creation_event_id,  # type: ignore[union-attr]
+                        "from": "replan_required",
+                        "to": "planned",
+                        "changed_at": (
+                            _NOW + timedelta(minutes=1, seconds=1)
+                        ).isoformat(),
+                    },
+                )
+            )
+        assert (
+            len((tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines())
+            == before_resurrection
+        )
+        BundleDeliveryManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=2)),
+            actor="coordinator",
+        ).supersede("B001", replacement_bundle_id="B002")
+        assert backend.get_bundle("B001").status is BundleStatus.superseded  # type: ignore[union-attr]
+        assert all(
+            backend.get_task(task_id).status.value == "ready"  # type: ignore[union-attr]
+            for task_id in original_evidence
+        )
+        assert {
+            task_id: backend.get_latest_evidence(task_id).id  # type: ignore[union-attr]
+            for task_id in original_evidence
+        } == original_evidence
+
+        replacement_manager = BundleManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=3)),
+            actor="coordinator",
+            project_root=tmp_path,
+        )
+        claimed = replacement_manager.claim("B002")
+        assert claimed.bundle.status is BundleStatus.active
+        source = serialize_state(backend)
+    finally:
+        backend.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert serialize_state(replay) == source
+    finally:
+        replay.close()
+
+
+def test_late_supersession_does_not_rewind_replacement_evidence(tmp_path) -> None:
+    replay_root = tmp_path / "replay-late-supersession"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        source_manager = _manager(backend, tmp_path)
+        source_manager.claim("B001")
+        source_manager.release("B001", reason="replace generation")
+        replacement_at = _NOW + timedelta(minutes=1)
+        backend.append(
+            EventDraft(
+                timestamp=replacement_at,
+                actor="coordinator",
+                action="bundle.created",
+                target_kind="bundle",
+                target_id="B002",
+                payload_json={
+                    "id": "B002",
+                    "schema_version": SCHEMA_VERSION,
+                    "prd_id": "release",
+                    "task_ids": ["release:T001", "release:T002"],
+                    "coordinator": "coordinator",
+                    "status": "planned",
+                    "review_policy": {},
+                    "throughput_budget": {},
+                    "created_at": replacement_at.isoformat(),
+                    "updated_at": replacement_at.isoformat(),
+                },
+            )
+        )
+        replacement_manager = BundleManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=2)),
+            actor="coordinator",
+            project_root=tmp_path,
+        )
+        claimed = replacement_manager.claim("B002")
+        for index, task_id in enumerate(("release:T001", "release:T002"), start=1):
+            evidence_at = _NOW + timedelta(minutes=2, seconds=index)
+            backend.append(
+                EventDraft(
+                    timestamp=evidence_at,
+                    actor="coordinator",
+                    action="evidence.submitted",
+                    target_kind="task",
+                    target_id=task_id,
+                    payload_json={
+                        "task_id": task_id,
+                        "claim_id": claimed.claim.member_claim_ids[task_id],
+                        "submitted_by": "coordinator",
+                        "evidence_id": f"EV-B2-{index}",
+                        "commands_run": [f"verify-{task_id}"],
+                        "files_changed": [f"src/{index}.py"],
+                    },
+                )
+            )
+        BundleManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=3)),
+            actor="coordinator",
+            project_root=tmp_path,
+        ).mark_implemented("B002")
+        BundleDeliveryManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=4)),
+            actor="coordinator",
+        ).supersede("B001", replacement_bundle_id="B002")
+        assert backend.get_bundle("B002").status is BundleStatus.implemented_unreviewed  # type: ignore[union-attr]
+        assert all(
+            backend.get_task(task_id).status.value == "needs_review"  # type: ignore[union-attr]
+            for task_id in ("release:T001", "release:T002")
+        )
+        assert [
+            backend.get_latest_evidence(task_id).id  # type: ignore[union-attr]
+            for task_id in ("release:T001", "release:T002")
+        ] == ["EV-B2-1", "EV-B2-2"]
+        source = serialize_state(backend)
+    finally:
+        backend.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert serialize_state(replay) == source
+    finally:
+        replay.close()
+
+
+def test_delivery_events_reject_forged_and_backdated_mutations(tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        from tests.test_bundle_execution import _seed
+
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        before = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(EventRejected, match="only the coordinator"):
+            backend.append(
+                EventDraft(
+                    timestamp=_NOW,
+                    actor="attacker",
+                    action="bundle.checkpoint_recorded",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "checkpoint": {
+                            "commit_sha": "attacker-sha",
+                            "recorded_at": _NOW.isoformat(),
+                            "recorded_by": "attacker",
+                        },
+                    },
+                )
+            )
+        with pytest.raises(BundleDeliveryError, match="predates"):
+            BundleDeliveryManager(
+                backend,
+                FrozenClock(_NOW - timedelta(minutes=1)),
+                actor="coordinator",
+            ).checkpoint("B001", commit_sha="old")
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=_NOW,
+                actor="attacker",
+                action="bundle.checkpoint_recorded",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "checkpoint": {
+                        "commit_sha": "attacker-sha",
+                        "recorded_at": _NOW.isoformat(),
+                        "recorded_by": "attacker",
+                    },
+                },
+            ),
+        )
+    finally:
+        backend.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").checkpoint is None  # type: ignore[union-attr]
+    finally:
+        replay.close()
+
+
+def test_replay_result_time_ignores_forged_status_event(tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _implement_bundle(backend, tmp_path)
+        for reviewer, angle in (
+            ("reviewer-a", "correctness"),
+            ("reviewer-b", "security"),
+            ("reviewer-c", "integration"),
+        ):
+            BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
+                "B001",
+                review_round=1,
+                angle=angle,
+                decision=ReviewDecision.approve,
+            )
+        BundleReviewManager(
+            backend, FrozenClock(_NOW), actor="coordinator"
+        ).finalize("B001")
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        assert bundle.last_result_at == _NOW
+        forged_at = _NOW + timedelta(hours=1)
+        with pytest.raises(EventRejected, match="changed_at must match event time"):
+            backend.append(
+                EventDraft(
+                    timestamp=forged_at,
+                    actor="coordinator",
+                    action="bundle.status_changed",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "from": "reviewed_unintegrated",
+                        "to": "integrated",
+                        "changed_at": (forged_at + timedelta(days=1)).isoformat(),
+                    },
+                )
+            )
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=forged_at,
+                actor="attacker",
+                action="bundle.status_changed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "from": "reviewed_unintegrated",
+                    "to": "integrated",
+                    "changed_at": forged_at.isoformat(),
+                },
+            ),
+        )
+    finally:
+        backend.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        replayed = replay.get_bundle("B001")
+        assert replayed is not None
+        assert replayed.status is BundleStatus.reviewed_unintegrated
+        assert replayed.last_result_at == _NOW
+    finally:
+        replay.close()
+
+
+def test_replay_rejects_illegal_bundle_status_transition(tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        from tests.test_bundle_execution import _seed
+
+        _seed(backend)
+        bundle = backend.get_bundle("B001")
+        assert bundle is not None
+        _append_raw(
+            tmp_path,
+            Event(
+                id=_next_event_id(tmp_path),
+                timestamp=_NOW,
+                actor="coordinator",
+                action="bundle.status_changed",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_id": "B001",
+                    "creation_event_id": bundle.creation_event_id,
+                    "from": "planned",
+                    "to": "completed",
+                    "changed_at": _NOW.isoformat(),
+                },
+            ),
+        )
+    finally:
+        backend.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        replayed = replay.get_bundle("B001")
+        assert replayed is not None
+        assert replayed.status is BundleStatus.planned
+        assert replayed.last_result_at is None
+    finally:
+        replay.close()

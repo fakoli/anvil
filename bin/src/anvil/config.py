@@ -48,6 +48,8 @@ DEFAULT_FAST_LANE_BLAST_RADIUS_MAX: Final[int] = 2
 # additionally requires the fast-lane gate and BOTH confirmation flags).
 DEFAULT_REVIEW_TIER_MAX_MIN: Final[int] = 4
 DEFAULT_REVIEW_TIER_LIGHT_RISK_MAX: Final[int] = 2
+DEFAULT_BUNDLE_MAX_TASKS: Final[int] = 12
+DEFAULT_BUNDLE_MAX_SERIAL_STAGES: Final[int] = 6
 
 
 @dataclass(frozen=True)
@@ -188,6 +190,11 @@ class Config:
     accept_rate_floor: float = 0.80
     needs_review_cap: int = 10
     accept_rate_window_days: float = 7.0
+
+    # Issue #171 — coordinator-first execution-wave limits. These are only
+    # consulted by explicit bundle planning; legacy task planning is unchanged.
+    bundle_max_tasks: int = DEFAULT_BUNDLE_MAX_TASKS
+    bundle_max_serial_stages: int = DEFAULT_BUNDLE_MAX_SERIAL_STAGES
 
     git_ops_mode: Literal["auto", "record_only", "off"] = "auto"
 
@@ -669,6 +676,16 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         data.get("auto_expand_threshold", DEFAULT_AUTO_EXPAND_THRESHOLD),
         resolved,
     )
+    bundle_max_tasks = _validate_bundle_limit(
+        data.get("bundle_max_tasks", DEFAULT_BUNDLE_MAX_TASKS),
+        "bundle_max_tasks",
+        resolved,
+    )
+    bundle_max_serial_stages = _validate_bundle_limit(
+        data.get("bundle_max_serial_stages", DEFAULT_BUNDLE_MAX_SERIAL_STAGES),
+        "bundle_max_serial_stages",
+        resolved,
+    )
 
     # T020 — fast-lane score ceilings. Absent keys → the renderer's built-in
     # defaults, so a pre-T020 config keeps its exact prior packet routing.
@@ -804,6 +821,8 @@ def _build_config(data: dict[str, object], resolved: Path) -> Config:
         accept_rate_window_days=float(
             str(data.get("accept_rate_window_days", 7))
         ),
+        bundle_max_tasks=bundle_max_tasks,
+        bundle_max_serial_stages=bundle_max_serial_stages,
         git_ops_mode=git_ops_mode,  # type: ignore[arg-type]
         durability=durability,  # type: ignore[arg-type]
         branch_prefix=branch_prefix,
@@ -956,6 +975,20 @@ def _validate_literal(
             f"Allowed values: {allowed}."
         )
     return s
+
+
+def _validate_bundle_limit(value: object, name: str, config_path: Path) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer ({config_path}).")
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a positive integer, got {value!r} ({config_path})."
+        ) from exc
+    if not 1 <= parsed <= 500:
+        raise ValueError(f"{name} must be in the range 1-500 ({config_path}).")
+    return parsed
 
 
 def _validate_auto_expand_threshold(value: object, config_path: Path) -> int:
@@ -1165,6 +1198,12 @@ max_claim_age_multiplier: 4
 accept_rate_floor: 0.80
 needs_review_cap: 10
 accept_rate_window_days: 7
+
+# Coordinator-first bundle planning limits (issue #171). `anvil plan --bundles`
+# refuses an oversized execution wave unless the operator explicitly records
+# acknowledgement with `--acknowledge-bundle-limits` or replans the graph.
+bundle_max_tasks: 12
+bundle_max_serial_stages: 6
 
 # ---------------------------------------------------------------------------
 # Git operations  (auto | record_only | off)

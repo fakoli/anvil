@@ -183,18 +183,40 @@ def test_every_mcp_tool_listed_in_mcp_doc() -> None:
 
 
 def test_mcp_doc_tool_count_matches_registrations() -> None:
-    """The '24 tools' / '24-tool' headline counts in docs/mcp.md must equal
-    the number of @mcp.tool-registered functions."""
+    """Registered/default/planning MCP counts must match the live source split."""
     doc_path = _docs() / "mcp.md"
     text = _read(doc_path)
     actual_count = len(_mcp_tool_names())
-    matches = {int(n) for n in re.findall(r"\b(\d+)[\s-]tools?\b", text)}
-    assert matches, "docs/mcp.md has no 'N tool(s)' headline count to check"
-    assert matches == {actual_count}, (
-        f"docs/mcp.md cites tool counts {sorted(matches)} but "
-        f"mcp_server.py registers {actual_count} @mcp.tool functions. "
-        "Update the doc's headline count(s)."
+    source = _read(_repo_root() / "bin" / "src" / "anvil" / "mcp_server.py")
+    planning_count = len(
+        re.findall(r"@mcp\.tool\(tags=\{PLANNING_TAG\}\)", source)
     )
+    execution_count = actual_count - planning_count
+
+    registered = re.search(r"server has (\d+)\s+registered tools", text)
+    execution = re.search(r"exposes only the \*\*(\d+) execution", text)
+    planning = re.search(r"other \*\*(\d+) planning tools", text)
+    assert registered and execution and planning, "MCP count headlines are missing"
+    assert int(registered.group(1)) == actual_count
+    assert int(execution.group(1)) == execution_count
+    assert int(planning.group(1)) == planning_count
+
+
+def test_bundle_workflow_guide_covers_required_recovery_paths() -> None:
+    text = _read(_docs() / "how-to" / "coordinating-a-bundle.md").lower()
+    required_topics = {
+        "coordinator-only workflow",
+        "bounded delegation",
+        "delegate stalls",
+        "replan_required",
+        "checkpoint",
+        "supersession",
+        "reconciliation",
+        "adopting existing tasks without losing history",
+        "model-neutral comparison protocol",
+    }
+    missing = sorted(topic for topic in required_topics if topic not in text)
+    assert not missing, f"bundle workflow guide is missing topics: {missing}"
 
 
 # --- 4. Hooks roster ---------------------------------------------------------

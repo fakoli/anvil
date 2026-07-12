@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,11 @@ from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
 
 def claim(
     task_id: str = typer.Argument(..., help="Task ID to claim (e.g. T001)."),  # noqa: B008
+    bundle_mode: bool = typer.Option(  # noqa: B008
+        False,
+        "--bundle",
+        help="Claim TASK_ID as an execution bundle using one coordinator lease.",
+    ),
     worktree: bool = typer.Option(  # noqa: B008
         False,
         "--worktree",
@@ -141,6 +147,113 @@ def claim(
         manager = ClaimManager(
             backend, clock, actor=resolved_actor, **lease_kwargs
         )
+
+        if bundle_mode:
+            from anvil.bundles.manager import BundleError, BundleManager
+
+            execution_bundle = backend.get_bundle(task_id)
+            if execution_bundle is None:
+                if json_output:
+                    fail("claim", f"bundle '{task_id}' not found.", code="not_found")
+                typer.echo(f"Error: bundle '{task_id}' not found.", err=True)
+                raise typer.Exit(code=1)
+            bundle_manager = BundleManager(
+                backend,
+                clock,
+                actor=resolved_actor,
+                project_root=resolved_cwd,
+                lease_minutes=lease_kwargs.get("default_lease_minutes", 240),
+            )
+            try:
+                bundle_manager.preflight(task_id)
+            except BundleError as exc:
+                if json_output:
+                    fail("claim", str(exc), code="bundle_claim_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            from anvil.naming import safe_path_component
+
+            branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
+            isolation = cfg.worktree_isolation if cfg is not None else "advisory"
+            if isolation == "require" and not shared_tree:
+                worktree = True
+            recorded_branch = branch or (
+                f"{branch_prefix}/{safe_path_component(task_id).lower()}-bundle"[:80]
+            )
+            worktree_path = (
+                str(
+                    resolved_cwd.parent
+                    / f"wt-{safe_path_component(task_id).lower()}"
+                )
+                if worktree
+                else None
+            )
+            # Reserve state before external Git mutation. This closes the
+            # preflight->append race: once this succeeds, competing claims see
+            # the internal member authorizations and lose cleanly.
+            try:
+                bundle_result = bundle_manager.claim(
+                    task_id,
+                    branch=recorded_branch,
+                    worktree_path=worktree_path,
+                )
+            except BundleError as exc:
+                if json_output:
+                    fail("claim", str(exc), code="bundle_claim_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            branch_result = use_named_branch(
+                recorded_branch, cwd=resolved_cwd, checkout=not worktree
+            )
+            if not branch_result.created or branch_result.branch is None:
+                bundle_manager.release(task_id, reason="git branch creation failed")
+                message = f"git branch not created — {branch_result.reason}"
+                if json_output:
+                    fail("claim", message, code="git_branch_failed")
+                typer.echo(f"Error: {message}", err=True)
+                raise typer.Exit(code=1)
+            if worktree:
+                wt_result = create_worktree_for_task(
+                    task_id, branch_result.branch, cwd=resolved_cwd
+                )
+                if not wt_result.created:
+                    bundle_manager.release(task_id, reason="git worktree creation failed")
+                    # A freshly-created, unchecked branch is safe to remove as
+                    # compensation; an existing branch is never deleted.
+                    if branch_result.reason is None:
+                        import subprocess
+
+                        subprocess.run(
+                            ["git", "branch", "-D", branch_result.branch],
+                            cwd=str(resolved_cwd),
+                            capture_output=True,
+                            timeout=10,
+                            check=False,
+                        )
+                    message = f"worktree not created — {wt_result.reason}"
+                    if json_output:
+                        fail("claim", message, code="git_worktree_failed")
+                    typer.echo(f"Error: {message}", err=True)
+                    raise typer.Exit(code=1)
+            if json_output:
+                emit_success(
+                    "claim",
+                    {
+                        "bundle": dump_model(bundle_result.bundle),
+                        "claim": dump_model(bundle_result.claim),
+                        "branch": recorded_branch,
+                        "worktree": worktree_path,
+                        "warnings": warnings,
+                    },
+                )
+                return
+            typer.echo(
+                f"Claimed bundle '{task_id}' as '{resolved_actor}' with "
+                f"coordinator claim {bundle_result.claim.id}."
+            )
+            typer.echo(f"  Branch: {recorded_branch or '—'}")
+            typer.echo(f"  Worktree: {worktree_path or '—'}")
+            return
 
         # Gate: task must exist.
         task = backend.get_task(task_id)
@@ -527,6 +640,34 @@ def release(
         clock = SystemClock()
         _reap_stale_claims(backend)
 
+        bundle_claim = builtins.next(
+            (claim for claim in backend.list_bundle_claims() if claim.id == claim_id),
+            None,
+        )
+        if bundle_claim is not None:
+            from anvil.bundles.manager import BundleError, BundleManager
+
+            try:
+                BundleManager(
+                    backend,
+                    clock,
+                    actor=resolved_actor,
+                    project_root=_resolve_project_dir(cwd),
+                ).release(bundle_claim.bundle_id, force=force, reason=reason)
+            except BundleError as exc:
+                if json_output:
+                    fail("release", str(exc), code="bundle_claim_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if json_output:
+                emit_success(
+                    "release",
+                    {"claim_id": claim_id, "released": True, "reason": reason},
+                )
+                return
+            typer.echo(f"Released bundle claim '{claim_id}'.")
+            return
+
         manager = ClaimManager(backend, clock, actor=resolved_actor)
         try:
             manager.release(claim_id, force=force, reason=reason)
@@ -609,6 +750,33 @@ def renew(
         clock = SystemClock()
         _reap_stale_claims(backend)
 
+        bundle_claim = builtins.next(
+            (claim for claim in backend.list_bundle_claims() if claim.id == claim_id),
+            None,
+        )
+        if bundle_claim is not None:
+            from anvil.bundles.manager import BundleError, BundleManager
+
+            try:
+                updated = BundleManager(
+                    backend,
+                    clock,
+                    actor=resolved_actor,
+                    project_root=_resolve_project_dir(cwd),
+                    lease_minutes=lease_kwargs.get("default_lease_minutes", 240),
+                ).renew(bundle_claim.bundle_id)
+            except BundleError as exc:
+                if json_output:
+                    fail("renew", str(exc), code="bundle_claim_error")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            if json_output:
+                emit_success("renew", {"claim": dump_model(updated), "renewed": True})
+                return
+            typer.echo(f"Renewed bundle claim '{claim_id}'.")
+            typer.echo(f"  New lease until: {updated.lease_expires_at.isoformat()}")
+            return
+
         manager = ClaimManager(
             backend, clock, actor=resolved_actor, **lease_kwargs
         )
@@ -652,6 +820,11 @@ def next(  # noqa: A001
         None,
         "--actor",
         help="Actor identity; defaults to $USER or 'agent'.",
+    ),
+    bundle_mode: bool = typer.Option(  # noqa: B008
+        False,
+        "--bundle",
+        help="Recommend a claimable execution bundle and explain bundle refusals.",
     ),
     task_type: str | None = typer.Option(  # noqa: B008
         None,
@@ -723,6 +896,20 @@ def next(  # noqa: A001
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="next", json_output=json_output)
 
+    if bundle_mode and (
+        task_type is not None
+        or max_blast is not None
+        or max_review_risk is not None
+    ):
+        message = (
+            "--type, --max-blast, and --max-review-risk are task-only filters "
+            "and cannot be combined with --bundle."
+        )
+        if json_output:
+            fail("next", message, code="invalid_bundle_filter")
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=2)
+
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
@@ -735,6 +922,68 @@ def next(  # noqa: A001
         # stays byte-identical to pre-T019. Collapse the default sentinel ('prd')
         # so `--prd prd` narrows to the stored prd_id='default' partition.
         scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd)) if prd else None
+        if bundle_mode:
+            from anvil.state.rollup import compute_bundle_rollup
+
+            bundles = backend.list_bundles(prd_id=scoped_prd_id)
+            bundle_ids = {bundle.id for bundle in bundles}
+            rollups = compute_bundle_rollup(
+                bundles,
+                backend.list_tasks(),
+                [
+                    claim
+                    for claim in backend.list_bundle_claims()
+                    if claim.bundle_id in bundle_ids
+                ],
+                [
+                    review
+                    for bundle in bundles
+                    for review in backend.list_bundle_reviews(bundle.id)
+                ],
+                backend.list_active_claims(),
+                now=clock.now(),
+                actor=resolved_actor,
+            )
+            selected = builtins.next(
+                (entry for entry in rollups if entry.claimable), None
+            )
+            if quiet:
+                raise typer.Exit(0 if selected is not None else 3)
+            if json_output:
+                emit_success(
+                    "next",
+                    {
+                        "bundle": dump_model(selected) if selected else None,
+                        "bundle_refusals": [
+                            dump_model(entry) for entry in rollups if not entry.claimable
+                        ],
+                        "withheld_reason": None if selected else "bundle_refused",
+                    },
+                )
+                return
+            if selected is not None:
+                typer.echo(f"Next recommended bundle: {selected.bundle_id}")
+                typer.echo(f"  Coordinator: {selected.coordinator}")
+                typer.echo(
+                    "  Throughput: "
+                    f"tasks={selected.throughput['tasks']}/"
+                    f"{selected.throughput['max_tasks']} serial-stages="
+                    f"{selected.throughput['serial_stages']}/"
+                    f"{selected.throughput['max_serial_stages']}"
+                )
+                typer.echo("")
+                typer.echo(
+                    f"Run `anvil claim --bundle {selected.bundle_id}` to acquire the lease."
+                )
+                return
+            typer.echo("No claimable execution bundles available.")
+            for entry in rollups:
+                for refusal in entry.refusals:
+                    typer.echo(
+                        f"  {entry.bundle_id} [{refusal['code']}]: "
+                        f"{refusal['detail']} Remediation: {refusal['remediation']}"
+                    )
+            return
         scoped_ready_tasks = (
             backend.list_tasks(
                 status="ready", task_type=task_type, prd_id=scoped_prd_id

@@ -2,9 +2,8 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 33 top-level commands plus 16
-> subcommands grouped under six sub-apps (`prd`, `review`, `hook`, `sync`,
-> `migrate`, `proof`) — 49 commands in total. The most-used lifecycle
+> Single-page reference for the `anvil` CLI: 66 executable leaf commands,
+> including the milestone bundle lifecycle. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
 > one-line entry each. For narrative context on common workflows, see
@@ -37,6 +36,7 @@
   - [`anvil release`](#release)
   - [`anvil renew`](#renew)
   - [`anvil packet`](#packet)
+- [Execution bundles](#execution-bundles)
 - Submit and apply
   - [`anvil submit`](#submit)
   - [`anvil apply`](#apply)
@@ -827,6 +827,115 @@ Cursor, or any MCP-aware agent.
 
 ---
 
+## Execution bundles
+
+Bundle commands coordinate an ordered milestone through one coordinator claim, member
+evidence, a bounded multi-angle review, and delivery reconciliation. All accept `--json`
+and hidden `--cwd PATH`. Mutating commands accept `--actor`; when omitted, Anvil uses its
+normal actor resolution. Errors use the stable `bundle_error` code except an unready
+completion, which uses `bundle_not_ready`.
+
+### `anvil bundle create` { #bundle-create }
+
+`anvil bundle create B001 T001 T002 --prd release --coordinator lead` creates a planned
+bundle with ordered member tasks. Policy flags are `--max-tasks` (12),
+`--max-serial-stages` (6), `--max-reviews` (3), `--max-rereviews` (1), and repeatable
+`--required-angle`.
+
+### `anvil bundle show` { #bundle-show }
+
+`anvil bundle show B001` prints the bundle, coordinator claim, review count, checkpoint,
+and supersession state. JSON mode returns `bundle`, `claim`, and `reviews`.
+
+### `anvil bundle list` { #bundle-list }
+
+`anvil bundle list [--prd PRD_ID]` lists bundles in stable ID order, optionally filtered
+to one PRD.
+
+### `anvil bundle claim` { #bundle-claim }
+
+`anvil bundle claim B001` atomically creates the coordinator claim and member task
+authorizations. `--shared-tree` explicitly accepts a shared checkout; required worktree
+isolation otherwise directs callers to the top-level Git-aware bundle claim path.
+
+### `anvil bundle renew` { #bundle-renew }
+
+`anvil bundle renew B001` renews the active coordinator lease after stale-claim reaping.
+
+### `anvil bundle release` { #bundle-release }
+
+While a bundle is `active`, `anvil bundle release B001 [--reason TEXT]` releases the
+coordinator claim and marks the bundle `replan_required`. Only members with active
+authorizations return to `ready`; already-submitted members remain `needs_review`.
+Releasing after completion does not reset the review-state bundle or its submitted
+members, and the public surface cannot reacquire that coordinator claim. Release is not
+pause/resume; see the recovery guide below.
+
+### `anvil bundle packet` { #bundle-packet }
+
+`anvil bundle packet B001 [--format markdown|json]` renders the aggregate coordinator work
+packet.
+
+### `anvil bundle progress` { #bundle-progress }
+
+`anvil bundle progress B001 PHASE [--detail TEXT] [--member-task TASK_ID ...]` records an
+audited coordinator heartbeat for the active bundle.
+
+### `anvil bundle complete` { #bundle-complete }
+
+`anvil bundle complete B001` opens bundle review only when every member has completion
+evidence bound to its current member claim and all enforceable evidence claims pass. It is
+retry-safe. Failure returns `bundle_not_ready` with per-member blockers and does not append
+a progress event.
+
+### `anvil bundle status` { #bundle-status }
+
+`anvil bundle status [BUNDLE_ID]` reports claimability, rollups, refusal codes, and concrete
+remediation for one or all bundles.
+
+### `anvil bundle review` { #bundle-review }
+
+`anvil bundle review B001 --round 1 --angle security --decision approve` records one
+independent adversarial verdict. `--decision` accepts `approve`, `reject`, or
+`needs_changes`; `--notes` records reviewer context.
+
+### `anvil bundle finalize-review` { #bundle-finalize-review }
+
+`anvil bundle finalize-review B001` advances only after the configured number of unique
+reviewers and required angles pass with no blocking verdict.
+
+### `anvil bundle checkpoint` { #bundle-checkpoint }
+
+`anvil bundle checkpoint B001 [--commit SHA] [--pr-url URL]` records canonical delivery
+metadata; at least one delivery identifier is required.
+
+### `anvil bundle reconcile` { #bundle-reconcile }
+
+`anvil bundle reconcile B001 [--commit SHA] [--pr-url URL] [--merged]` idempotently
+reconciles checkpoint and integration state. At least one of `--commit` or `--pr-url` is
+required; `--merged` alone is not a delivery reference.
+
+### `anvil bundle supersede` { #bundle-supersede }
+
+`anvil bundle supersede B001 --replacement B002` marks `B001` superseded by replacement `B002` while
+retaining the original audit history. A replacement created after the source reaches
+`replan_required` may retain the same members; supersession reopens shared
+`needs_review` tasks to `ready` while preserving their prior evidence.
+
+The normal lifecycle is:
+
+```text
+create -> claim -> packet/progress -> member submit -> complete
+       -> review (independent reviewers) -> finalize-review
+       -> checkpoint/reconcile
+```
+
+See [Coordinating a milestone bundle](how-to/coordinating-a-bundle.md) for runnable
+coordinator-only and bounded-delegation flows, replan recovery, adoption, and delivery
+semantics.
+
+---
+
 ## Submit and apply
 
 ### `anvil submit` { #submit }
@@ -1158,7 +1267,7 @@ GitHub-specific alias.
 **Synopsis:** Print the paste-ready MCP server config block for a target MCP
 client, with the `anvil` server pointed at this checkout's `bin/anvil-mcp` by
 **absolute path** (not `${CLAUDE_PLUGIN_ROOT}`), so any MCP-capable harness gets
-the full 24-tool surface. Read-only and project-free (mirrors `anvil describe`):
+the full 35-tool surface. Read-only and project-free (mirrors `anvil describe`):
 it never opens a backend, runs from any directory, and only *prints* config — it
 never mutates the client's own settings file. In text mode the config goes to
 stdout (paste-clean) and a one-line `# paste into <file>` hint goes to stderr.

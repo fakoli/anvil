@@ -50,7 +50,7 @@ fact-check the claims before updating here.
 | Surface | anvil status | Notes |
 | --- | --- | --- |
 | **Plugin / marketplace** | ✅ shipped | `codex plugin marketplace add fakoli/anvil` pulls the **repo root** as the plugin |
-| **MCP server** | ✅ shipped | `codex mcp add anvil -- uv run --quiet --project …/bin python -m anvil.mcp_server` (24 tools); never via config edit |
+| **MCP server** | ✅ shipped | `codex mcp add anvil -- uv run --quiet --project …/bin python -m anvil.mcp_server` (35 tools); never via config edit |
 | **Skills** (`openai.yaml`) | ✅ this PR (B41) | 8 skills now named in the picker/Plugins panel |
 | **Hooks** | ✅ free via root plugin | root `hooks/hooks.json` uses shell-free `uv run --quiet … anvil.cli hook dispatch …` commands |
 | **Automations** | ✅ shipped, PAUSED | `anvil install codex --automations`; never auto-activated |
@@ -149,7 +149,7 @@ Status legend: **✓ verified** (on-disk or CLI) · **▲ needs live smoke test*
 - **What:** `codex mcp add NAME -- CMD ARGS…` (stdio) or `--url URL` (HTTP); `codex mcp list|get|remove|login|logout`.
   Stored as `[mcp_servers.<NAME>]` in `config.toml` — stdio keys `command/args/env/cwd/startup_timeout_sec`;
   HTTP keys `url/bearer_token_env_var/http_headers`. ✓
-- **anvil:** native, stable — `codex mcp add anvil -- uv run --quiet --project …/bin python -m anvil.mcp_server` (24 tools). The MCP
+- **anvil:** native, stable — `codex mcp add anvil -- uv run --quiet --project …/bin python -m anvil.mcp_server` (35 tools). The MCP
   is wired **out-of-band** from the plugin (not via the manifest's mcpServers). ✓
 - **Source:** `codex mcp --help`; `~/.codex/config.toml` `[mcp_servers.*]`; <https://developers.openai.com/codex/mcp>.
 

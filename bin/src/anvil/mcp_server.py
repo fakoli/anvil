@@ -22,6 +22,8 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
+from anvil.state.rollup import BundleRollupEntry
+
 # ---------------------------------------------------------------------------
 # FastMCP instance
 # ---------------------------------------------------------------------------
@@ -32,37 +34,38 @@ mcp: FastMCP = FastMCP("anvil")
 # Planning vs execution surface split (audit item L2)
 # ---------------------------------------------------------------------------
 #
-# The 24 tools fall into two groups:
+# The 35 tools fall into two groups:
 #
-#   EXECUTION (14) — the turn-to-turn loop an agent runs while doing work:
+#   EXECUTION (24) — the turn-to-turn loop an agent runs while doing work:
 #       get_next_task, claim_task, release_task, renew_claim, submit_progress,
 #       submit_completion_evidence, update_task_status, get_task,
 #       get_project_status, get_project_summary, list_tasks, check_conflicts,
 #       generate_work_packet, get_dependency_graph
+#       plus 10 coordinator-bundle execution/read tools
 #
-#   PLANNING (10) — one-shot bootstrap/plan/review operations run rarely (often
+#   PLANNING (11) — one-shot bootstrap/plan/review operations run rarely (often
 #       once per project), tagged ``planning`` below:
 #       init_project, parse_prd, review_prd, plan_tasks, score_tasks,
 #       review_tasks, apply_review_decision, edit_dependencies, find_decisions,
-#       describe_surface
+#       describe_surface, create_bundle
 #
 # Every planning tool carries the ``planning`` tag. The live stdio server hides
 # the planning surface BY DEFAULT (``apply_surface_gate`` at startup) so a steady-
 # state execution client never pays the ~1.2k-token planning schema cost on every
-# turn. Setting ``ANVIL_MCP_PLANNING`` (truthy) keeps all 24 tools on the wire —
+# turn. Setting ``ANVIL_MCP_PLANNING`` (truthy) keeps all 35 tools on the wire —
 # use it for the planning phase, or run a second server entry with the flag set.
 #
 # IMPORTANT: the gate is applied ONLY when the live server starts (see
 # ``apply_surface_gate``), never at import time. So ``from anvil.mcp_server import
-# mcp`` still sees all 24 registered tools, and every introspection surface that
+# mcp`` still sees all 35 registered tools, and every introspection surface that
 # reports "what the engine can do" — ``describe_surface``, ``anvil describe``,
 # ``mcp_tool_names()``, the ``--help`` tool list, the Docker catalog smoke test —
 # is unchanged. Only the per-turn wire surface of the *default* execution server
-# shrinks. No tool is removed; all 24 remain reachable.
+# shrinks. No tool is removed; all 35 remain reachable.
 
 PLANNING_TAG = "planning"
 
-# Env flag that opts a live server back into the full 24-tool surface.
+# Env flag that opts a live server back into the full 35-tool surface.
 _PLANNING_ENV = "ANVIL_MCP_PLANNING"
 
 
@@ -70,7 +73,7 @@ def _planning_surface_enabled(env: dict[str, str] | None = None) -> bool:
     """Return True when the planning surface should be exposed on the wire.
 
     Resolves from the ``ANVIL_MCP_PLANNING`` env var. Truthy values
-    (``1``/``true``/``yes``/``on``, case-insensitive) enable the full 24-tool
+    (``1``/``true``/``yes``/``on``, case-insensitive) enable the full 35-tool
     surface; anything else (incl. unset) yields the lean execution-only default.
     """
     import os
@@ -170,6 +173,33 @@ def _prd_status_entries(
     return entries
 
 
+def _bundle_status_entries(
+    backend: Any, tasks: Any, active_claims: Any
+) -> list[BundleRollupEntry]:
+    """Return the same bundle rollup used by CLI ``status --json``."""
+    from anvil.clock import SystemClock
+    from anvil.state.rollup import compute_bundle_rollup
+
+    bundles = backend.list_bundles()
+    bundle_ids = {bundle.id for bundle in bundles}
+    bundle_claims = [
+        claim for claim in backend.list_bundle_claims() if claim.bundle_id in bundle_ids
+    ]
+    reviews = [
+        review
+        for bundle in bundles
+        for review in backend.list_bundle_reviews(bundle.id)
+    ]
+    return compute_bundle_rollup(
+        bundles,
+        tasks,
+        bundle_claims,
+        reviews,
+        active_claims,
+        now=SystemClock().now(),
+    )
+
+
 class ProjectSummary(BaseModel):
     """Summary of project state returned by get_project_summary."""
 
@@ -185,6 +215,7 @@ class ProjectSummary(BaseModel):
     ready_task_count: int
     # T020: additive per-PRD rollup. Flat fields above remain the PROJECT TOTAL.
     prds: list[PrdStatusEntry] = Field(default_factory=list)
+    bundles: list[BundleRollupEntry] = Field(default_factory=list)
 
 
 class ClaimResponse(BaseModel):
@@ -241,6 +272,174 @@ class ProgressResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     recorded: bool
+
+
+class BundleReviewPolicyRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_reviews: int
+    max_rereviews: int
+    independent_reviewer_required: bool
+    required_angles: list[str]
+
+
+class BundleThroughputBudgetRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_tasks: int
+    max_serial_stages: int
+
+
+class BundleCheckpointRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commit_sha: str | None = None
+    pr_url: str | None = None
+    recorded_at: str
+    recorded_by: str
+
+
+class DelegatedAgentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    handle: str | None = None
+    runtime: str | None = None
+    task_ids: list[str] = Field(default_factory=list)
+    status: str
+    observed_at: str
+    detail: str | None = None
+
+
+class BundleRecord(BaseModel):
+    """Compact explicit wire schema for an execution bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    creation_event_id: str
+    prd_id: str
+    task_ids: list[str]
+    coordinator: str
+    status: str
+    review_disposition_event_id: str | None = None
+    superseded_by: str | None = None
+    last_result_at: str | None = None
+    branch: str | None = None
+    worktree_path: str | None = None
+    review_policy: BundleReviewPolicyRecord
+    throughput_budget: BundleThroughputBudgetRecord
+    delegated_agents: list[DelegatedAgentRecord] = Field(default_factory=list)
+    checkpoint: BundleCheckpointRecord | None = None
+    created_at: str
+    updated_at: str
+
+
+class BundleClaimRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    bundle_id: str
+    claimed_by: str
+    status: str
+    branch: str | None = None
+    worktree_path: str | None = None
+    session_id: str | None = None
+    expected_files: list[str]
+    member_claim_ids: dict[str, str]
+    created_at: str
+    lease_expires_at: str
+    last_heartbeat_at: str
+    released_at: str | None = None
+    release_reason: str | None = None
+
+
+class BundleReviewVerdictRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    bundle_id: str
+    creation_event_id: str
+    disposition_event_id: str
+    review_round: int
+    angle: str
+    reviewed_by: str
+    decision: str
+    notes: str | None = None
+    created_at: str
+
+
+class BundleDetailResponse(BaseModel):
+    """Typed bundle read response shared by bundle MCP operations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle: BundleRecord
+    claim: BundleClaimRecord | None = None
+    reviews: list[BundleReviewVerdictRecord] = Field(default_factory=list)
+
+
+class BundleListResponse(BaseModel):
+    """Stable list envelope for bundle discovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundles: list[BundleRecord] = Field(default_factory=list)
+
+
+class BundleClaimResponse(BaseModel):
+    """Coordinator claim plus canonical projected bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle: BundleRecord
+    claim: BundleClaimRecord
+    warnings: list[str] = Field(default_factory=list)
+
+
+class BundleReviewGateResponse(BaseModel):
+    """Typed bounded-review gate result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    passed: bool
+    review_round: int
+    reviews_used: int
+    rereviews_used: int
+    missing_angles: list[str] = Field(default_factory=list)
+    missing_reviewers: int = 0
+    blocking_findings: list[str] = Field(default_factory=list)
+    invalid_reviewers: list[str] = Field(default_factory=list)
+    replan_required: bool = False
+
+
+class BundleReviewResponse(BaseModel):
+    """Canonical bundle plus deterministic bounded-review gate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle: BundleRecord
+    gate: BundleReviewGateResponse
+
+
+class BundleCheckpointResponse(BaseModel):
+    """Canonical checkpoint and bundle projection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle: BundleRecord
+    checkpoint: BundleCheckpointRecord
+
+
+class BundleProgressResponse(BaseModel):
+    """Progress plus optional completion/readiness transition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle: BundleRecord
+    recorded: bool = True
+    can_mark_implemented: bool | None = None
+    unproven_members: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class NextReadyTask(BaseModel):
@@ -700,6 +899,7 @@ def get_project_summary() -> ProjectSummary:
             ready_task_count=ready_count,
             # T020: per-PRD rollup; flat fields above stay the project total.
             prds=_prd_status_entries(prds, all_tasks, active_claims),
+            bundles=_bundle_status_entries(backend, all_tasks, active_claims),
         )
     finally:
         backend.close()
@@ -1033,17 +1233,32 @@ def release_task(
     task_id: str,
     actor: str,
     reason: str | None = None,
+    target_kind: Literal["task", "bundle"] = "task",
+    cwd: str | None = None,
 ) -> ReleaseResponse:
-    """Release the active claim on task_id held by actor; returns the released
-    claim_id. Reaps stale claims first."""
+    """Release a task claim, or an explicit target_kind=bundle coordinator claim."""
     actor = _require_actor(actor)
-    state_dir = _resolve_state_dir()
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
         from anvil.clock import SystemClock
 
         _reap_stale(backend)
+
+        if target_kind == "bundle":
+            from anvil.bundles.manager import BundleError
+
+            claim = backend.get_bundle_claim(task_id)
+            if claim is None or claim.status.value != "active":
+                raise ToolError(f"No active bundle claim found for '{task_id}'.")
+            try:
+                _bundle_manager(backend, state_dir, actor, cwd=cwd).release(
+                    task_id, reason=reason
+                )
+            except BundleError as exc:
+                raise ToolError(f"bundle_error: {exc}") from exc
+            return ReleaseResponse(released=True, claim_id=claim.id)
 
         active_claim = _find_active_claim_for_task(backend, task_id)
         if active_claim is None:
@@ -1078,17 +1293,47 @@ def renew_claim(
     task_id: str,
     actor: str,
     extend_seconds: int = 900,
+    target_kind: Literal["task", "bundle"] = "task",
+    cwd: str | None = None,
 ) -> RenewResponse:
-    """Extend the lease on the active claim for task_id by extend_seconds
-    (default 900 = 15 min). Reaps stale claims first."""
+    """Renew a task claim, or an explicit target_kind=bundle coordinator claim."""
     actor = _require_actor(actor)
-    state_dir = _resolve_state_dir()
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
         from anvil.clock import SystemClock
 
         _reap_stale(backend)
+
+        if target_kind == "bundle":
+            from anvil.bundles.manager import BundleError
+
+            claim = backend.get_bundle_claim(task_id)
+            if claim is None or claim.status.value != "active":
+                raise ToolError(f"No active bundle claim found for '{task_id}'.")
+            try:
+                from anvil.clock import SystemClock
+
+                remaining_seconds = max(
+                    0.0,
+                    (claim.lease_expires_at - SystemClock().now()).total_seconds(),
+                )
+                updated = _bundle_manager(
+                    backend,
+                    state_dir,
+                    actor,
+                    lease_minutes=max(
+                        1.0, (remaining_seconds + extend_seconds) / 60.0
+                    ),
+                    cwd=cwd,
+                ).renew(task_id)
+            except BundleError as exc:
+                raise ToolError(f"bundle_error: {exc}") from exc
+            return RenewResponse(
+                lease_expires_at=updated.lease_expires_at.isoformat(),
+                renewed=updated.lease_expires_at != claim.lease_expires_at,
+            )
 
         active_claim = _find_active_claim_for_task(backend, task_id)
         if active_claim is None:
@@ -1839,6 +2084,7 @@ class ProjectStatusResponse(BaseModel):
     active_claim_count: int
     # T020: additive per-PRD rollup. Flat fields above remain the PROJECT TOTAL.
     prds: list[PrdStatusEntry] = Field(default_factory=list)
+    bundles: list[BundleRollupEntry] = Field(default_factory=list)
 
 
 @mcp.tool
@@ -1898,6 +2144,7 @@ def get_project_status(cwd: str | None = None) -> ProjectStatusResponse:
             active_claim_count=len(active_claims),
             # T020: per-PRD rollup; flat fields above stay the project total.
             prds=_prd_status_entries(prds, all_tasks, active_claims),
+            bundles=_bundle_status_entries(backend, all_tasks, active_claims),
         )
     finally:
         backend.close()
@@ -3400,7 +3647,426 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
 
 
 # ---------------------------------------------------------------------------
-# Tool 23: describe_surface (self-describing command surface — T012)
+# Bundle execution and planning contract (issue #171)
+# ---------------------------------------------------------------------------
+
+
+def _review_gate_response(gate: Any) -> BundleReviewGateResponse:
+    return BundleReviewGateResponse.model_validate(gate.__dict__)
+
+
+def _bundle_record(bundle: Any) -> BundleRecord:
+    return BundleRecord.model_validate(bundle.model_dump(mode="json"))
+
+
+def _bundle_claim_record(claim: Any) -> BundleClaimRecord:
+    return BundleClaimRecord.model_validate(claim.model_dump(mode="json"))
+
+
+def _bundle_review_record(review: Any) -> BundleReviewVerdictRecord:
+    return BundleReviewVerdictRecord.model_validate(review.model_dump(mode="json"))
+
+
+def _bundle_checkpoint_record(checkpoint: Any) -> BundleCheckpointRecord:
+    return BundleCheckpointRecord.model_validate(checkpoint.model_dump(mode="json"))
+
+
+def _bundle_manager(
+    backend: Any,
+    state_dir: Path,
+    actor: str,
+    lease_minutes: float = 240,
+    cwd: str | None = None,
+):
+    from anvil.bundles.manager import BundleManager
+    from anvil.cli._helpers import _resolve_project_root
+    from anvil.clock import SystemClock
+
+    return BundleManager(
+        backend,
+        SystemClock(),
+        actor=_require_actor(actor),
+        project_root=_resolve_project_root(Path(cwd) if cwd else None),
+        lease_minutes=lease_minutes,
+    )
+
+
+@mcp.tool(tags={PLANNING_TAG})
+def create_bundle(
+    bundle_id: str,
+    prd_id: str,
+    task_ids: list[str],
+    coordinator: str,
+    actor: str,
+    max_tasks: int = 12,
+    max_serial_stages: int = 6,
+    max_reviews: int = 3,
+    max_rereviews: int = 1,
+    required_angles: list[str] | None = None,
+    cwd: str | None = None,
+) -> BundleDetailResponse:
+    """Create one planned bundle. Planning-gated; ordered task_ids are preserved."""
+    from anvil.bundles.catalog import BundleCatalog, BundleCatalogError
+    from anvil.clock import SystemClock
+    from anvil.state.models import BundleReviewPolicy, BundleThroughputBudget
+
+    state_dir = _resolve_state_dir(cwd)
+    backend = _open_backend(state_dir)
+    try:
+        try:
+            bundle = BundleCatalog(
+                backend, SystemClock(), actor=_require_actor(actor)
+            ).create(
+                bundle_id,
+                prd_id=prd_id,
+                task_ids=task_ids,
+                coordinator=_require_actor(coordinator),
+                review_policy=BundleReviewPolicy(
+                    max_reviews=max_reviews,
+                    max_rereviews=max_rereviews,
+                    required_angles=required_angles or [],
+                ),
+                throughput_budget=BundleThroughputBudget(
+                    max_tasks=max_tasks,
+                    max_serial_stages=max_serial_stages,
+                ),
+            )
+        except (BundleCatalogError, ValueError) as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        return BundleDetailResponse(bundle=_bundle_record(bundle))
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def list_bundles(
+    prd_id: str | None = None, cwd: str | None = None
+) -> BundleListResponse:
+    """List execution bundles in stable ID order."""
+    backend = _open_backend(_resolve_state_dir(cwd))
+    try:
+        return BundleListResponse(
+            bundles=[
+                _bundle_record(bundle)
+                for bundle in backend.list_bundles(prd_id=prd_id)
+            ]
+        )
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def get_bundle(bundle_id: str, cwd: str | None = None) -> BundleDetailResponse:
+    """Read one bundle with its coordinator claim and review history."""
+    from anvil.bundles.catalog import BundleCatalog, BundleCatalogError
+    from anvil.clock import SystemClock
+
+    backend = _open_backend(_resolve_state_dir(cwd))
+    try:
+        try:
+            bundle = BundleCatalog(backend, SystemClock(), actor="reader").get(bundle_id)
+        except BundleCatalogError as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        claim = backend.get_bundle_claim(bundle_id)
+        return BundleDetailResponse(
+            bundle=_bundle_record(bundle),
+            claim=_bundle_claim_record(claim) if claim else None,
+            reviews=[
+                _bundle_review_record(review)
+                for review in backend.list_bundle_reviews(bundle_id)
+            ],
+        )
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def claim_bundle(
+    bundle_id: str,
+    actor: str,
+    lease_minutes: float = 240,
+    shared_tree: bool = False,
+    cwd: str | None = None,
+) -> BundleClaimResponse:
+    """Atomically claim a bundle and create internal member authorizations."""
+    from anvil.bundles.manager import BundleError
+
+    state_dir = _resolve_state_dir(cwd)
+    backend = _open_backend(state_dir)
+    try:
+        _reap_stale(backend)
+        from anvil.cli._helpers import _load_config_optional
+
+        cfg = _load_config_optional(state_dir)
+        isolation = cfg.worktree_isolation if cfg is not None else "advisory"
+        warnings: list[str] = []
+        if not shared_tree and isolation == "require":
+            raise ToolError(
+                "bundle_error: worktree_isolation: require; claim through "
+                "`anvil claim --bundle --worktree`, or pass shared_tree=true."
+            )
+        if not shared_tree and isolation == "advisory":
+            shared = [
+                claim
+                for claim in backend.list_active_claims()
+                if not claim.worktree_path
+            ]
+            if shared:
+                warnings.append(
+                    f"{len(shared)} active task claim(s) share this checkout; "
+                    "prefer the CLI worktree claim path."
+                )
+        try:
+            result = _bundle_manager(
+                backend,
+                state_dir,
+                actor,
+                lease_minutes=lease_minutes,
+                cwd=cwd,
+            ).claim(bundle_id)
+        except (BundleError, ValueError) as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        return BundleClaimResponse(
+            bundle=_bundle_record(result.bundle),
+            claim=_bundle_claim_record(result.claim),
+            warnings=warnings,
+        )
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def generate_bundle_packet(
+    bundle_id: str,
+    actor: str,
+    format: Literal["markdown", "json"] = "markdown",
+    cwd: str | None = None,
+) -> WorkPacketResponse:
+    """Render the coordinator packet for an execution bundle."""
+    from anvil.bundles.manager import BundleError
+
+    state_dir = _resolve_state_dir(cwd)
+    backend = _open_backend(state_dir)
+    try:
+        try:
+            packet = _bundle_manager(backend, state_dir, actor, cwd=cwd).packet(
+                bundle_id
+            )
+        except BundleError as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        return WorkPacketResponse(
+            format=format,
+            content=packet.markdown if format == "markdown" else packet.json_data,
+        )
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def submit_bundle_progress(
+    bundle_id: str,
+    actor: str,
+    phase: str,
+    detail: str | None = None,
+    member_task_ids: list[str] | None = None,
+    complete: bool = False,
+    cwd: str | None = None,
+) -> BundleProgressResponse:
+    """Record progress; complete=true opens review after evidence is proven."""
+    from anvil.bundles.manager import BundleError
+
+    state_dir = _resolve_state_dir(cwd)
+    backend = _open_backend(state_dir)
+    try:
+        try:
+            manager = _bundle_manager(backend, state_dir, actor, cwd=cwd)
+            if complete:
+                # Completion is a retry-safe gate, not a progress mutation.
+                # Do not append progress before proving readiness: a failed
+                # completion must leave history unchanged, and an identical
+                # retry after success must remain idempotent like CLI complete.
+                readiness = manager.mark_implemented(bundle_id)
+            else:
+                manager.note_progress(
+                    bundle_id,
+                    phase=phase,
+                    detail=detail,
+                    member_task_ids=member_task_ids,
+                )
+                readiness = None
+        except BundleError as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        if readiness is not None and not readiness.can_mark_implemented:
+            raise ToolError(
+                "bundle_not_ready: "
+                + json.dumps(readiness.unproven_members, sort_keys=True)
+            )
+        bundle = backend.get_bundle(bundle_id)
+        assert bundle is not None
+        return BundleProgressResponse(
+            bundle=_bundle_record(bundle),
+            can_mark_implemented=(
+                readiness.can_mark_implemented if readiness is not None else None
+            ),
+            unproven_members=(
+                readiness.unproven_members if readiness is not None else {}
+            ),
+        )
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def record_bundle_review(
+    bundle_id: str,
+    actor: str,
+    review_round: int,
+    angle: str,
+    decision: Literal["approve", "reject", "needs_changes"],
+    notes: str | None = None,
+    cwd: str | None = None,
+) -> BundleReviewResponse:
+    """Record one independent review verdict and return the current gate."""
+    from anvil.bundles.review import BundleReviewError, BundleReviewManager
+    from anvil.clock import SystemClock
+    from anvil.state.models import ReviewDecision
+
+    backend = _open_backend(_resolve_state_dir(cwd))
+    try:
+        try:
+            gate = BundleReviewManager(
+                backend, SystemClock(), actor=_require_actor(actor)
+            ).record(
+                bundle_id,
+                review_round=review_round,
+                angle=angle,
+                decision=ReviewDecision(decision),
+                notes=notes,
+            )
+            bundle = backend.get_bundle(bundle_id)
+        except (BundleReviewError, ValueError) as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        assert bundle is not None
+        return BundleReviewResponse(
+            bundle=_bundle_record(bundle), gate=_review_gate_response(gate)
+        )
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def finalize_bundle_review(
+    bundle_id: str, actor: str, cwd: str | None = None
+) -> BundleReviewResponse:
+    """Apply a completed bounded review gate as the coordinator."""
+    from anvil.bundles.review import BundleReviewError, BundleReviewManager
+    from anvil.clock import SystemClock
+
+    backend = _open_backend(_resolve_state_dir(cwd))
+    try:
+        try:
+            gate = BundleReviewManager(
+                backend, SystemClock(), actor=_require_actor(actor)
+            ).finalize(bundle_id)
+            bundle = backend.get_bundle(bundle_id)
+        except BundleReviewError as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        assert bundle is not None
+        return BundleReviewResponse(
+            bundle=_bundle_record(bundle), gate=_review_gate_response(gate)
+        )
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def checkpoint_bundle(
+    bundle_id: str,
+    actor: str,
+    commit_sha: str | None = None,
+    pr_url: str | None = None,
+    cwd: str | None = None,
+) -> BundleCheckpointResponse:
+    """Record canonical commit or PR delivery metadata."""
+    from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
+    from anvil.clock import SystemClock
+
+    backend = _open_backend(_resolve_state_dir(cwd))
+    try:
+        try:
+            checkpoint = BundleDeliveryManager(
+                backend, SystemClock(), actor=_require_actor(actor)
+            ).checkpoint(bundle_id, commit_sha=commit_sha, pr_url=pr_url)
+            bundle = backend.get_bundle(bundle_id)
+        except (BundleDeliveryError, ValueError) as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        assert bundle is not None
+        return BundleCheckpointResponse(
+            bundle=_bundle_record(bundle),
+            checkpoint=_bundle_checkpoint_record(checkpoint),
+        )
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def reconcile_bundle(
+    bundle_id: str,
+    actor: str,
+    commit_sha: str | None = None,
+    pr_url: str | None = None,
+    merged: bool = False,
+    cwd: str | None = None,
+) -> BundleDetailResponse:
+    """Idempotently reconcile checkpoint and integration delivery state."""
+    from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
+    from anvil.clock import SystemClock
+
+    backend = _open_backend(_resolve_state_dir(cwd))
+    try:
+        try:
+            BundleDeliveryManager(
+                backend, SystemClock(), actor=_require_actor(actor)
+            ).reconcile(
+                bundle_id, commit_sha=commit_sha, pr_url=pr_url, merged=merged
+            )
+            bundle = backend.get_bundle(bundle_id)
+        except (BundleDeliveryError, ValueError) as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        assert bundle is not None
+        return BundleDetailResponse(bundle=_bundle_record(bundle))
+    finally:
+        backend.close()
+
+
+@mcp.tool
+def supersede_bundle(
+    bundle_id: str,
+    replacement_bundle_id: str,
+    actor: str,
+    cwd: str | None = None,
+) -> BundleDetailResponse:
+    """Supersede a bundle with a named replacement while retaining history."""
+    from anvil.bundles.delivery import BundleDeliveryError, BundleDeliveryManager
+    from anvil.clock import SystemClock
+
+    backend = _open_backend(_resolve_state_dir(cwd))
+    try:
+        try:
+            BundleDeliveryManager(
+                backend, SystemClock(), actor=_require_actor(actor)
+            ).supersede(bundle_id, replacement_bundle_id=replacement_bundle_id)
+            bundle = backend.get_bundle(bundle_id)
+        except (BundleDeliveryError, ValueError) as exc:
+            raise ToolError(f"bundle_error: {exc}") from exc
+        assert bundle is not None
+        return BundleDetailResponse(bundle=_bundle_record(bundle))
+    finally:
+        backend.close()
+
+
+# ---------------------------------------------------------------------------
+# describe_surface (self-describing command surface — T012)
 # ---------------------------------------------------------------------------
 
 
@@ -3457,13 +4123,13 @@ def _help_text() -> str:
         "                     host project here, e.g. -v \"$PWD:/project\" -e",
         "                     ANVIL_ROOT=/project.",
         "  ANVIL_MCP_PLANNING  When truthy (1/true/yes/on), the live server",
-        "                     exposes the full 24-tool surface. By DEFAULT the 10",
+        "                     exposes the full 35-tool surface. By DEFAULT the 11",
         "                     one-shot planning tools (init_project, parse_prd,",
         "                     review_prd, plan_tasks, score_tasks, review_tasks,",
         "                     apply_review_decision, edit_dependencies,",
-        "                     find_decisions, describe_surface) are hidden from the",
+        "                     find_decisions, describe_surface, create_bundle) are hidden from the",
         "                     per-turn wire surface to cut always-on context; the",
-        "                     14 execution tools remain. All 24 are always",
+        "                     24 execution tools remain. All 35 are always",
         "                     registered (this list reflects the full surface).",
         "",
         f"Registered tools ({len(tools)}):",
@@ -3505,13 +4171,13 @@ def main(argv: list[str] | None = None) -> int:
     # L2: hide the one-shot planning tool surface on the live wire UNLESS the
     # operator opts back in via ANVIL_MCP_PLANNING. This shrinks the always-on
     # per-turn cost for the common execution client without removing any tool —
-    # all 24 stay registered (introspection/--help/describe unchanged) and the
-    # planning 10 return the moment the flag is set. Applied here, not at import,
+    # all 35 stay registered (introspection/--help/describe unchanged) and the
+    # planning 11 return the moment the flag is set. Applied here, not at import,
     # so only the live server's wire surface is affected.
     if not apply_surface_gate(mcp):
         print(
             "anvil-mcp: planning tools hidden (execution surface only). "
-            f"Set {_PLANNING_ENV}=1 to expose the full 24-tool surface for "
+            f"Set {_PLANNING_ENV}=1 to expose the full 35-tool surface for "
             "planning.",
             file=sys.stderr,
         )

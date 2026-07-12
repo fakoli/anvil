@@ -21,6 +21,73 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v6      | Typed proofs (SL-3 / B48) | `evidence` adds `proofs TEXT NOT NULL DEFAULT '[]'` — a JSON array of typed `ProofArtifact`s (CommandProof / DiffProof / LinkProof / AssertionProof). The DEFAULT backfills every existing row to "no typed proofs" (the pre-v6 meaning). Additive: legacy string evidence fields stay.      |
 | v7      | Multi-PRD persistence (v0.3 / T002) | `prds` becomes a multi-row table keyed on a single-column `id` PRIMARY KEY (not composite) and gains `title`/`target_version`/`target_tag`/`is_default`/`created_at`/`updated_at`, with a partial unique index enforcing at most one default PRD; `requirements`/`features`/`tasks` each gain a `prd_id` partition column (DEFAULT `'default'`); `requirements` also gains nullable `revision_introduced`/`revision_superseded` lineage columns; `sync_mappings` gains `prd_id`/`entity_kind` columns. The v6→v7 migration rebuilds `prds` (SQLite can't ALTER a PRIMARY KEY) and ALTER-backfills every other column via its DEFAULT, so existing rows adopt the default PRD with zero data loss.      |
 | v8      | Multi-PRD revisions (v0.3 / T023) | `prds` adds `revision INTEGER NOT NULL DEFAULT 1` — the per-PRD monotonic revision counter bumped by `prd.revised`. Purely additive: the DEFAULT backfills every pre-existing v7 PRD row to revision 1. A separate version from v7 (not folded in) because v7 already shipped without it; a DB already stamped v7 must re-enter the migration ladder via the v8 bump to grow the column.      |
+| v9      | Evidence contracts (issue #153) | `tasks` adds `claims`; `evidence` adds `category`. Additive defaults preserve pre-contract behavior. |
+| v10     | Distinct-actor concurrency guard | `claims` adds nullable `session_id`; historical claims remain session-unknown. |
+| v11     | Execution bundles (issue #171) | Adds `execution_bundles`, FK-protected position-ordered `execution_bundle_members`, and internal `claim_replay_lineages` fencing for divergent legacy claim IDs. Bundle policy and optional agent observations are JSON columns; existing task/claim/evidence rows are unchanged. |
+| v12     | Bundle coordinator claims (issue #171) | Adds one public `bundle_claims` lease per execution bundle and nullable `claims.bundle_claim_id` links for atomic internal member evidence authorizations. Existing task claims remain unlinked and unchanged. |
+| v13     | Bundle review dispositions (issue #171) | Binds every adversarial verdict to the exact `implemented_unreviewed` transition that opened its review cycle, preventing an older quorum from satisfying later rework. |
+| v14     | Bundle delivery lineage (issue #171) | Adds a named `superseded_by` bundle reference while retaining checkpoint and reconciliation history. |
+| v15     | Bundle result projection (issue #171) | Adds authoritative `last_result_at` timing for applied reviewed/integrated/merged/completed transitions. |
+
+## Execution bundles — v0-v10 → v11 auto-upgrade
+
+The v11 migration is additive. It creates three new tables and three indexes; it
+does not rewrite existing entities:
+
+- `execution_bundles` stores coordinator-owned lifecycle, review policy,
+  throughput budget, optional agent observations, and delivery metadata.
+- `execution_bundle_members` stores ordered task membership with `RESTRICT`
+  foreign keys so task or bundle history cannot be deleted underneath an audit
+  record.
+- `claim_replay_lineages` fingerprints immutable claim-creation facts and
+  fail-closes descendants when merged legacy events reuse one claim ID for
+  divergent creations that cannot identify a unique lineage.
+
+Current DDL runs before the ordered migration ladder, and the v10→v11 ladder
+step repeats the table/index creation idempotently. The schema version is
+stamped 11 only after the complete transaction succeeds. A failure rolls back
+without changing `PRAGMA user_version`; reopening retries safely. Replaying an
+older `events.jsonl` produces no bundle rows and preserves the legacy snapshot
+shape.
+
+## Bundle coordinator claims — v11 → v12 auto-upgrade
+
+The v12 migration creates `bundle_claims` and adds nullable
+`claims.bundle_claim_id`. A bundle claim is the single public coordinator lease;
+the linked task claims are internal authorizations that preserve the existing
+task-scoped evidence and disposition contract. The nullable link leaves every
+pre-v12 task claim byte-compatible in legacy snapshots.
+
+Existing tasks do not need conversion before bundle adoption. Bundle creation adds ordered
+membership without rewriting task IDs, dependencies, claims, or evidence. Historical
+evidence remains auditable, while a newly claimed bundle requires fresh evidence bound to
+its new member authorizations. Follow the guarded adoption sequence in
+[Coordinating a milestone bundle](how-to/coordinating-a-bundle.md#adopting-existing-tasks-without-losing-history).
+When a bundle reaches `replan_required`, a replacement generation may retain the same task
+IDs; supersession preserves old evidence, reopens shared review-state members, and gives
+the replacement fresh claim/evidence lineage.
+
+## Bundle review dispositions — v12 → v13 auto-upgrade
+
+The v13 migration adds `execution_bundles.review_disposition_event_id` and
+rebuilds `bundle_review_verdicts` with an explicit disposition-event lineage.
+Historical verdicts are retained as `legacy-unbound`; they remain auditable but
+cannot silently satisfy a newly opened needs-review disposition.
+
+## Bundle delivery lineage — v13 → v14 auto-upgrade
+
+The v14 migration adds nullable `execution_bundles.superseded_by`. Existing
+bundles remain unsuperseded; new supersession events preserve both source and
+replacement bundle rows and all task evidence.
+
+## Bundle result projection — v14 → v15 auto-upgrade
+
+The v15 migration adds nullable `execution_bundles.last_result_at`. New applied
+reviewed, integrated, merged, and completed transitions update it atomically
+with bundle status. For an existing bundle already in one of those states, the
+migration uses the projection's `updated_at` as a conservative baseline; it
+does not derive timing from raw audit-log events that may have been replay
+no-ops. Future result transitions replace that baseline with their exact time.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 

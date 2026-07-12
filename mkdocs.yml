@@ -112,11 +112,12 @@ nav:
   - How-to guides:
       - Claiming & shipping a task: how-to/claiming-and-shipping-a-task.md
       - Driving the anvil loop: how-to/drive-the-anvil-loop.md
+      - Coordinating a milestone bundle: how-to/coordinating-a-bundle.md
       - Using anvil on any harness: how-to/using-anvil-on-any-harness.md
       - Syncing with GitHub: how-to/syncing-with-github.md
   - Reference:
       - CLI: cli-reference.md
-      - MCP server (24 tools): mcp.md
+      - MCP server (35 tools): mcp.md
       - Agents: agents-reference.md
       - Skills: skills-reference.md
       - Hooks: hooks-reference.md

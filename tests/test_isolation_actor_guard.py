@@ -14,7 +14,6 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -293,7 +292,8 @@ class TestSchemaV10:
 
     def test_v9_db_migrates_additively(self, tmp_path: Path) -> None:
         # Simulate a v9 claims table (no session_id) and run initialize():
-        # the ladder must add the column and stamp user_version 10.
+        # the ladder must add the column and continue through the current v15
+        # execution-bundle result-projection schema.
         db_path = tmp_path / "state.db"
         events_path = tmp_path / "events.jsonl"
         events_path.touch()
@@ -310,7 +310,7 @@ class TestSchemaV10:
         try:
             with sqlite3.connect(db_path) as conn:
                 v = conn.execute("PRAGMA user_version").fetchone()[0]
-            assert v == 10
+            assert v == 15
         finally:
             b2.close()
 

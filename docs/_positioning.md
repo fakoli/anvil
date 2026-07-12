@@ -24,7 +24,7 @@ sessions. Project leads can audit what was claimed, reviewed, and completed.
 2. **Explicit claim / lock / lease model.** A `Claim` row with an expiry timestamp and heartbeat; stale leases are detected and released on every CLI or MCP call, not assignment-by-label.
 3. **LLM-optimized work packets.** `anvil packet T012` renders the exact intent, acceptance criteria, scope, and non-goals an agent needs, not an entire issue thread the agent must summarize.
 4. **Six-dimension task scoring.** Complexity, parallelizability, context load, blast radius, review risk, and agent suitability drive routing and expand recommendations, not single-axis story points.
-5. **Runtime-neutral CLI + MCP.** The state engine is not coupled to any one agent runtime; the FastMCP stdio server exposes 24 registered tools (14 on the wire by default; 10 planning tools behind `ANVIL_MCP_PLANNING=1`) to any MCP-compatible client.
+5. **Runtime-neutral CLI + MCP.** The state engine is not coupled to any one agent runtime; the FastMCP stdio server exposes 35 registered tools (24 on the wire by default; 11 planning tools behind `ANVIL_MCP_PLANNING=1`) to any MCP-compatible client.
 
 ## Terraform analogy
 
@@ -53,7 +53,7 @@ every row.
 ## MCP vs plugin
 
 **(Q)** MCP exposes capabilities; plugins encode operating discipline. The
-MCP server ships 24 tools (`claim_task`, `submit_completion_evidence`,
+MCP server ships 35 tools (`claim_task`, `submit_completion_evidence`,
 `generate_work_packet`, …) any agent can call, but a tool does not decide *when*
 to claim, *which* specialist should execute, *what* evidence is required, or
 *how* the critic gate runs. That behaviour lives in skills, subagents, and

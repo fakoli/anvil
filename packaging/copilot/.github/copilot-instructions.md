@@ -12,7 +12,7 @@ equivalent surfaces:
 
 - **CLI** — `anvil <command>` (single mutator, no harness dependency; on PATH
   after `uv tool install anvil-state`).
-- **MCP** — `anvil-mcp` (FastMCP stdio; 14 execution tools by default, all 24
+- **MCP** — `anvil-mcp` (FastMCP stdio; 24 execution tools by default, all 35
   with `ANVIL_MCP_PLANNING=1`). Run `anvil mcp-config <your-client>` to print
   client-specific config.
 
@@ -68,24 +68,50 @@ anvil apply T001           # apply the review verdict
 | Dependency graph | `get_dependency_graph` | `anvil graph` |
 | Edit dependencies | `edit_dependencies` | `anvil deps --add/--remove` |
 | Describe surface | `describe_surface` | `anvil describe` |
+| Create bundle | `create_bundle` | `anvil bundle create` |
+| List bundles | `list_bundles` | `anvil bundle list` |
+| Show bundle | `get_bundle` | `anvil bundle show <id>` |
+| Bundle rollup/status | `get_project_status` | `anvil bundle status [id]` |
+| Claim bundle | `claim_bundle` | `anvil bundle claim <id>` |
+| Renew bundle lease | `renew_claim` with `target_kind="bundle"` | `anvil bundle renew <id>` |
+| Release bundle lease | `release_task` with `target_kind="bundle"` | `anvil bundle release <id>` |
+| Bundle work packet | `generate_bundle_packet` | `anvil bundle packet <id>` |
+| Bundle progress/completion | `submit_bundle_progress` | `anvil bundle progress` / `anvil bundle complete` |
+| Record bundle review | `record_bundle_review` | `anvil bundle review <id>` |
+| Finalize bundle review | `finalize_bundle_review` | `anvil bundle finalize-review <id>` |
+| Checkpoint bundle delivery | `checkpoint_bundle` | `anvil bundle checkpoint <id>` |
+| Reconcile bundle delivery | `reconcile_bundle` | `anvil bundle reconcile <id>` |
+| Supersede bundle | `supersede_bundle` | `anvil bundle supersede <id> --replacement <id>` |
+
+For execution bundles, one coordinator owns the bundle and all member-state mutations.
+Delegates return bounded work to that coordinator; they do not independently claim bundle
+members. A released or stale bundle enters `replan_required`, not a resumable paused state.
+See `docs/how-to/coordinating-a-bundle.md` for the complete recovery and review flow.
 
 (Exact tool names mirror `bin/src/anvil/mcp_server.py`; CLI commands mirror
 `bin/src/anvil/cli/__init__.py`. Run `anvil describe --json` for the live list.)
 
 ### Execution vs planning surface (MCP)
 
-To keep the per-turn context lean, the MCP server exposes only the **14
+To keep the per-turn context lean, the MCP server exposes only the **24
 execution tools** by default — the turn-to-turn loop (next/claim/packet/submit/
-status/conflicts/deps). The **10 one-shot planning tools** (`init_project`,
+status/conflicts/deps plus coordinator-bundle operations). The **11 one-shot planning tools** (`init_project`,
 `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `apply_review_decision`, `edit_dependencies`, `find_decisions`,
-`describe_surface`) are **hidden by default** and re-appear when the server is
+`describe_surface`, `create_bundle`) are **hidden by default** and re-appear when the server is
 started with **`ANVIL_MCP_PLANNING=1`** (or `true`/`yes`/`on`). Nothing is
 removed — every capability stays reachable via the CLI command in the same row,
-and the full 24-tool surface returns the moment the env flag is set. Use it for
-the planning phase; the steady-state execution loop needs none of the 10.
+and the full 35-tool surface returns the moment the env flag is set. Use it for
+the planning phase; the steady-state execution loop needs none of the 11.
 
 ## Notes
+- Review disposition policy: before presenting any Anvil task in
+  `needs_review` for acceptance, run at least three independent adversarial
+  reviews with distinct angles. Treat any unresolved blocking finding as a
+  failed gate; fix it and repeat the affected reviews. Record the reviewers,
+  angles, verdicts, and supporting commands in the task or PR evidence. This
+  review gate is automatic for every task, but it does not replace the human
+  confirmation required before the immutable `anvil apply --approve` event.
 - Claude Code and Codex can run Anvil's non-blocking
   SessionStart/PreToolUse/PostToolUse **hooks** from `hooks/hooks.json`; the
   manifest uses a shell-free `uv run --quiet ... anvil.cli hook dispatch ...`

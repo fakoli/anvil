@@ -47,8 +47,10 @@ __all__ = [
     "ReviewID",
     "EventID",
     "PRDID",
+    "BundleID",
     # Constants
     "DEFAULT_PRD_ID",
+    "TERMINAL_BUNDLE_STATUSES",
     # Enums
     "PRDStatus",
     "FeatureStatus",
@@ -57,6 +59,8 @@ __all__ = [
     "TaskType",
     "ClaimType",
     "ClaimStatus",
+    "BundleStatus",
+    "DelegatedAgentStatus",
     "ReviewTargetKind",
     "ReviewDecision",
     "ExternalSystem",
@@ -79,7 +83,14 @@ __all__ = [
     "Feature",
     "Task",
     "Claim",
+    "BundleClaim",
     "Evidence",
+    "BundleReviewPolicy",
+    "BundleReviewVerdict",
+    "BundleThroughputBudget",
+    "DelegatedAgentObservation",
+    "BundleCheckpoint",
+    "ExecutionBundle",
     "EventRange",
     "AcceptanceProof",
     "Decision",
@@ -105,6 +116,7 @@ EventID: TypeAlias = str  # monotonic E000001 (local) or hash-chained E-3f9a2c4d
 # PRD identity: 'default' for the implicit/migrated PRD, human-chosen
 # (e.g. 'v0.2') for named PRDs.
 PRDID: TypeAlias = str
+BundleID: TypeAlias = str
 
 # The single default PRD that owns all rows on a pre-multi-PRD (migrated) DB.
 DEFAULT_PRD_ID = "default"
@@ -206,6 +218,35 @@ class ClaimStatus(enum.StrEnum):
     released = "released"
     stale = "stale"
     force_released = "force_released"
+
+
+class BundleStatus(enum.StrEnum):
+    """Coordinator-level delivery state; member Task state remains authoritative."""
+
+    planned = "planned"
+    active = "active"
+    implemented_unreviewed = "implemented_unreviewed"
+    reviewed_unintegrated = "reviewed_unintegrated"
+    integrated = "integrated"
+    merged = "merged"
+    replan_required = "replan_required"
+    completed = "completed"
+    superseded = "superseded"
+
+
+TERMINAL_BUNDLE_STATUSES: frozenset[BundleStatus] = frozenset(
+    {BundleStatus.merged, BundleStatus.completed, BundleStatus.superseded}
+)
+
+
+class DelegatedAgentStatus(enum.StrEnum):
+    """Observed harness handle state; informational and never a lifecycle gate."""
+
+    active = "active"
+    completed = "completed"
+    stale = "stale"
+    closed = "closed"
+    missing = "missing"
 
 
 class ReviewTargetKind(enum.StrEnum):
@@ -729,6 +770,233 @@ class Task(BaseModel):
         return _require_utc(v, "created_at / updated_at")
 
 
+class BundleReviewPolicy(BaseModel):
+    """Bounded independent-review policy stored with an execution bundle."""
+
+    model_config = _MODEL_CONFIG
+
+    # The pre-T003 draft serialized 1/[] for these two fields. Preserve those
+    # defaults for replay equivalence; the gate applies a non-configurable
+    # minimum of three distinct reviewers/angles and treats max_reviews as a
+    # bounded per-round cap (also floored at three for legacy rows).
+    max_reviews: int = Field(default=1, ge=1, le=20)
+    max_rereviews: int = Field(default=1, ge=0)
+    independent_reviewer_required: bool = True
+    required_angles: list[str] = Field(default_factory=list)
+
+    @field_validator("required_angles")
+    @classmethod
+    def _validate_review_angles(cls, value: list[str]) -> list[str]:
+        normalized = [angle.strip().lower() for angle in value]
+        if any(not angle for angle in normalized):
+            raise ValueError("bundle review angles must not be blank")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("bundle review angles must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def _reviews_cover_angles(self) -> BundleReviewPolicy:
+        if self.max_reviews < len(self.required_angles):
+            raise ValueError("max_reviews must cover every required review angle")
+        return self
+
+
+class BundleReviewVerdict(BaseModel):
+    """One independently authored adversarial verdict for a bundle review round."""
+
+    model_config = _MODEL_CONFIG
+
+    id: ReviewID
+    bundle_id: BundleID
+    creation_event_id: EventID
+    disposition_event_id: EventID
+    review_round: int = Field(ge=1)
+    angle: str
+    reviewed_by: str
+    decision: ReviewDecision
+    notes: str | None = None
+    created_at: datetime.datetime
+
+    @field_validator("angle", "reviewed_by")
+    @classmethod
+    def _validate_review_identity(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("bundle review angle and reviewer must not be blank")
+        return normalized
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _validate_review_time(cls, value: datetime.datetime) -> datetime.datetime:
+        return _require_utc(value, "created_at")
+
+
+class BundleThroughputBudget(BaseModel):
+    """Planning limits captured at bundle creation for an auditable decision."""
+
+    model_config = _MODEL_CONFIG
+
+    # 500 keeps every membership query below SQLite's conservative variable
+    # ceiling even after status parameters are added. It is an escape hatch
+    # above the normal threshold, not permission for an unbounded SQL request.
+    max_tasks: int = Field(default=12, ge=1, le=500)
+    max_serial_stages: int = Field(default=6, ge=1, le=500)
+
+
+class DelegatedAgentObservation(BaseModel):
+    """One optional harness-handle observation; never controls bundle state."""
+
+    model_config = _MODEL_CONFIG
+
+    id: str
+    handle: str | None = None
+    runtime: str | None = None
+    task_ids: list[TaskID] = Field(default_factory=list)
+    status: DelegatedAgentStatus
+    observed_at: datetime.datetime
+    detail: str | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("delegated agent observation id must not be empty")
+        return v
+
+    @field_validator("task_ids")
+    @classmethod
+    def _validate_task_ids(cls, v: list[TaskID]) -> list[TaskID]:
+        if len(v) != len(set(v)):
+            raise ValueError("delegated agent observation task_ids must be unique")
+        return v
+
+    @field_validator("observed_at", mode="after")
+    @classmethod
+    def _validate_observed_at(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "observed_at")
+
+
+class BundleCheckpoint(BaseModel):
+    """Optional delivery reference; metadata only, never task evidence."""
+
+    model_config = _MODEL_CONFIG
+
+    commit_sha: str | None = None
+    pr_url: str | None = None
+    recorded_at: datetime.datetime
+    recorded_by: str
+
+    @field_validator("recorded_at", mode="after")
+    @classmethod
+    def _validate_recorded_at(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "recorded_at")
+
+    @model_validator(mode="after")
+    def _requires_reference(self) -> BundleCheckpoint:
+        if not self.commit_sha and not self.pr_url:
+            raise ValueError("bundle checkpoint requires commit_sha or pr_url")
+        return self
+
+
+class ExecutionBundle(BaseModel):
+    """Coordinator-owned execution unit over ordered, independently-audited tasks."""
+
+    model_config = _MODEL_CONFIG
+
+    id: BundleID
+    creation_event_id: EventID
+    prd_id: PRDID
+    task_ids: list[TaskID]
+    coordinator: str
+    status: BundleStatus = BundleStatus.planned
+    review_disposition_event_id: EventID | None = None
+    superseded_by: BundleID | None = None
+    last_result_at: datetime.datetime | None = None
+    branch: str | None = None
+    worktree_path: str | None = None
+    review_policy: BundleReviewPolicy = Field(default_factory=BundleReviewPolicy)
+    throughput_budget: BundleThroughputBudget = Field(
+        default_factory=BundleThroughputBudget
+    )
+    delegated_agents: list[DelegatedAgentObservation] = Field(default_factory=list)
+    checkpoint: BundleCheckpoint | None = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+    @field_validator("id", "coordinator")
+    @classmethod
+    def _validate_required_identity(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("execution bundle id and coordinator must not be empty")
+        return v
+
+    @field_validator("task_ids")
+    @classmethod
+    def _validate_task_ids(cls, v: list[TaskID]) -> list[TaskID]:
+        if not v:
+            raise ValueError("execution bundle requires at least one task")
+        if len(v) != len(set(v)):
+            raise ValueError("execution bundle task_ids must be unique")
+        return v
+
+    @field_validator("delegated_agents")
+    @classmethod
+    def _validate_observation_ids(
+        cls, v: list[DelegatedAgentObservation]
+    ) -> list[DelegatedAgentObservation]:
+        ids = [observation.id for observation in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("delegated agent observation ids must be unique")
+        return v
+
+    @field_validator("created_at", "updated_at", mode="after")
+    @classmethod
+    def _validate_bundle_utc(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "created_at / updated_at")
+
+    @field_validator("last_result_at", mode="after")
+    @classmethod
+    def _validate_last_result_at(
+        cls, value: datetime.datetime | None
+    ) -> datetime.datetime | None:
+        return _require_utc(value, "last_result_at") if value is not None else None
+
+    @model_validator(mode="after")
+    def _validate_members_fit_budget(self) -> ExecutionBundle:
+        if self.updated_at < self.created_at:
+            raise ValueError("execution bundle updated_at must not precede created_at")
+        if len(self.task_ids) > self.throughput_budget.max_tasks:
+            raise ValueError(
+                f"execution bundle has {len(self.task_ids)} tasks but its "
+                f"throughput budget permits {self.throughput_budget.max_tasks}"
+            )
+        members = set(self.task_ids)
+        outside = sorted(
+            {
+                task_id
+                for observation in self.delegated_agents
+                for task_id in observation.task_ids
+                if task_id not in members
+            }
+        )
+        if outside:
+            raise ValueError(
+                f"delegated agent observations reference non-member tasks: {outside}"
+            )
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_review_disposition(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("review_disposition_event_id") is None:
+            data.pop("review_disposition_event_id", None)
+        if data.get("superseded_by") is None:
+            data.pop("superseded_by", None)
+        if data.get("last_result_at") is None:
+            data.pop("last_result_at", None)
+        return data
+
+
 class Claim(BaseModel):
     """An exclusive lease that an agent holds on a Task while working on it."""
 
@@ -742,6 +1010,9 @@ class Claim(BaseModel):
     branch: str | None = None
     worktree_path: str | None = None
     expected_files: list[str] = Field(default_factory=list)
+    # Internal authorization created atomically under one public bundle claim.
+    # None preserves the legacy standalone-task claim shape.
+    bundle_claim_id: str | None = None
     # The claiming loop's session discriminator (ANVIL_SESSION_ID /
     # CLAUDE_CODE_SESSION_ID), recorded INDEPENDENTLY of the actor string so
     # two loops sharing a pinned ANVIL_ACTOR are still distinguishable — the
@@ -765,6 +1036,51 @@ class Claim(BaseModel):
         cls, v: datetime.datetime
     ) -> datetime.datetime:
         return _require_utc(v, "created_at / lease_expires_at / last_heartbeat_at")
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_bundle_claim(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("bundle_claim_id") is None:
+            data.pop("bundle_claim_id", None)
+        return data
+
+
+class BundleClaim(BaseModel):
+    """One public coordinator lease over an execution bundle.
+
+    ``member_claim_ids`` are internal task authorizations used only to preserve
+    the existing task-scoped evidence and disposition contract.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    id: ClaimID
+    bundle_id: BundleID
+    claimed_by: str
+    status: ClaimStatus = ClaimStatus.active
+    branch: str | None = None
+    worktree_path: str | None = None
+    session_id: str | None = None
+    expected_files: list[str] = Field(default_factory=list)
+    member_claim_ids: dict[TaskID, ClaimID]
+    created_at: datetime.datetime
+    lease_expires_at: datetime.datetime
+    last_heartbeat_at: datetime.datetime
+    released_at: datetime.datetime | None = None
+    release_reason: str | None = None
+
+    @field_validator("created_at", "lease_expires_at", "last_heartbeat_at")
+    @classmethod
+    def _validate_required_utc(cls, v: datetime.datetime) -> datetime.datetime:
+        return _require_utc(v, "bundle claim timestamps")
+
+    @model_validator(mode="after")
+    def _validate_member_claims(self) -> BundleClaim:
+        if not self.member_claim_ids:
+            raise ValueError("bundle claim requires member claim authorizations")
+        if len(set(self.member_claim_ids.values())) != len(self.member_claim_ids):
+            raise ValueError("bundle member claim ids must be unique")
+        return self
 
     @field_validator("released_at", mode="after")
     @classmethod

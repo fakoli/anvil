@@ -2,7 +2,7 @@
 
 Anvil's MCP server is harness-neutral, but every MCP client wants the config in a
 slightly different envelope. This command prints the ready-to-paste block for a
-target client so any MCP-capable harness gets the full 24-tool surface. The server
+target client so any MCP-capable harness gets the full 35-tool surface. The server
 command adapts to the install method (see ``_server_spec``): from a source checkout
 or plugin bundle it points at that tree's bin/anvil-mcp by absolute path; from an
 installed package (uv tool/pipx/pip) it emits the ``anvil-mcp`` console script on

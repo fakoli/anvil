@@ -35,6 +35,11 @@ renumber (`R003`, `R004`) instead.
 **Reference**: the canonical data model and CLI command set are defined in
 [`docs/specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
 
+Execution bundles are a post-plan coordination choice, not PRD syntax. Author stable task
+IDs, dependencies, acceptance criteria, and verification here; after tasks are approved
+and ready, group eligible tasks with `anvil bundle create`. See
+[Coordinating a milestone bundle](how-to/coordinating-a-bundle.md#adopting-existing-tasks-without-losing-history).
+
 ---
 
 ## Quick-Start Example

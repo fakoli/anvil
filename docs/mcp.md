@@ -5,14 +5,13 @@
 ## What it does
 
 Agents need to read and write canonical project state without each one shelling out to the
-CLI per operation and without fighting over the same SQLite rows. The MCP server has 24
-registered tools (14 on the wire by default — see
+CLI per operation and without fighting over the same SQLite rows. The MCP server has 35
+registered tools (24 on the wire by default — see
 [Tool surface gating](#tool-surface-gating)) over stdio so that any MCP-compatible
 runtime — Claude Code, Codex, Cursor, OpenHands,
 Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
 apply workflow as first-class tool calls. Read-only tools return structured Pydantic
-objects; mutating tools run stale-claim reaping before writing, so the state the agent sees
-is always fresh.
+objects; lease-sensitive claim, renew, and release tools reap stale claims before writing.
 
 The toolset is organized by lifecycle phase:
 
@@ -24,6 +23,9 @@ The toolset is organized by lifecycle phase:
 - **Claiming & execution** (`claim_task`, `release_task`, `renew_claim`,
   `generate_work_packet`, `submit_progress`, `submit_completion_evidence`,
   `update_task_status`)
+- **Execution bundles** (`create_bundle`, `list_bundles`, `get_bundle`, `claim_bundle`,
+  `generate_bundle_packet`, `submit_bundle_progress`, `record_bundle_review`,
+  `finalize_bundle_review`, `checkpoint_bundle`, `reconcile_bundle`, `supersede_bundle`)
 - **Review gate** (`apply_review_decision`)
 - **Decision resolution** (`find_decisions`)
 - **Introspection** (`describe_surface`)
@@ -38,25 +40,28 @@ the MCP surface stays git-free. Git side-effects remain CLI-only.
 
 ## Tool surface gating
 
-All 24 tools are registered, but the live stdio server exposes only the **14 execution
+All 35 tools are registered, but the live stdio server exposes only the **24 execution
 tools** on the wire by default — the turn-to-turn loop an agent runs while doing work:
 
 `get_next_task`, `claim_task`, `release_task`, `renew_claim`, `submit_progress`,
 `submit_completion_evidence`, `update_task_status`, `get_task`, `get_project_status`,
 `get_project_summary`, `list_tasks`, `check_conflicts`, `generate_work_packet`,
-`get_dependency_graph`
+`get_dependency_graph`, `list_bundles`, `get_bundle`, `claim_bundle`,
+`generate_bundle_packet`, `submit_bundle_progress`, `record_bundle_review`,
+`finalize_bundle_review`, `checkpoint_bundle`, `reconcile_bundle`, `supersede_bundle`
 
-The other **10 planning tools** are hidden by default so steady-state execution clients
+The other **11 planning tools** are hidden by default so steady-state execution clients
 never pay their schema cost on every turn:
 
 `init_project`, `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
-`apply_review_decision`, `edit_dependencies`, `find_decisions`, `describe_surface`
+`apply_review_decision`, `edit_dependencies`, `find_decisions`, `describe_surface`,
+`create_bundle`
 
 Set `ANVIL_MCP_PLANNING=1` (any of `1`/`true`/`yes`/`on`) in the server's environment to
-keep all 24 tools on the wire — use it for the planning phase, or run a second server
+keep all 35 tools on the wire — use it for the planning phase, or run a second server
 entry with the flag set. No tool is removed by the gate: introspection surfaces
 (`anvil describe`, the `--help` tool list, the Docker catalog smoke test) always report
-all 24.
+all 35.
 
 ---
 
@@ -390,11 +395,12 @@ to dispatch in parallel this wave.
 
 ### Mutating tools
 
-Every mutating tool runs `detect_and_release_stale` at the top of its call. This is
-automatic — agents do not need to trigger reaping manually. See
-[Stale-claim reaping](#stale-claim-reaping) for details. The one exception is
-`edit_dependencies` below, which only rewrites dependency lists and does not touch claim
-state, so it skips reaping.
+`claim_task`, `claim_bundle`, `release_task`, `renew_claim`, `submit_progress`,
+`submit_completion_evidence`, `update_task_status`, and `get_project_summary` run
+`detect_and_release_stale` at the top of their call. This is automatic on those paths.
+Other mutators validate their own lifecycle preconditions but do not promise a global
+stale-claim sweep. See
+[Stale-claim reaping](#stale-claim-reaping) for details.
 
 ---
 
@@ -515,6 +521,12 @@ holds it). Stale-claim reaping runs first.
 | `task_id` | `string`        | yes      |         |
 | `actor`   | `string`        | yes      |         |
 | `reason`  | `string \| null` | no      | `null`  |
+| `target_kind` | `"task" \| "bundle"` | no | `"task"` |
+| `cwd` | `string \| null` | no | `Path.cwd()` |
+
+For a coordinator bundle claim, pass the bundle ID in `task_id` and explicitly set
+`target_kind="bundle"`. The explicit discriminator prevents a same-named task from being
+released accidentally.
 
 **Output**
 
@@ -549,9 +561,14 @@ be active at the point of the call.
 | `task_id`        | `string` | yes      |         |
 | `actor`          | `string` | yes      |         |
 | `extend_seconds` | `int`    | no       | `900`   |
+| `target_kind`    | `"task" \| "bundle"` | no | `"task"` |
+| `cwd`            | `string \| null` | no | `Path.cwd()` |
 
-`extend_seconds` is converted to minutes (floor, minimum 1). The default extends by 15
-minutes from the time of the call.
+`extend_seconds` is converted to minutes (floor, minimum 1). For task claims, the default
+extends by 15 minutes from the time of the call. For bundle claims it adds that interval to
+the later of the current lease expiry or the current time.
+For a coordinator bundle lease, pass the bundle ID as `task_id` and set
+`target_kind="bundle"`.
 
 **Output**
 
@@ -712,6 +729,93 @@ Stale-claim reaping runs first.
 **When to call**: when a planner agent marks reviewed tasks as `ready` before a work wave,
 or when a sentinel marks an `in_progress` task as `blocked` after discovering a dependency
 that cannot be resolved yet.
+
+---
+
+### Execution bundle tools
+
+These tools coordinate a milestone-sized bundle through one coordinator claim and one
+bounded review gate. Every tool accepts optional `cwd`; mutators also require `actor`.
+`create_bundle` is planning-gated, while the remaining bundle tools are on the default
+execution surface. Bundle lease renewal and release reuse `renew_claim` and `release_task`
+with `target_kind="bundle"`; the default remains `target_kind="task"` so colliding task and
+bundle IDs are unambiguous.
+
+### `create_bundle`
+
+Creates a planned bundle. Required inputs are `bundle_id`, `prd_id`, ordered `task_ids`,
+`coordinator`, and `actor`. Optional policy inputs are `max_tasks` (12),
+`max_serial_stages` (6), `max_reviews` (3), `max_rereviews` (1), and
+`required_angles`. Returns `BundleDetailResponse`. Member tasks must exist in the named
+PRD and satisfy the bundle's dependency and throughput constraints.
+
+### `list_bundles`
+
+Lists bundles in stable ID order. Optional `prd_id` filters the result. Returns
+`BundleListResponse` with compact, explicitly typed bundle records.
+
+### `get_bundle`
+
+Reads one bundle by `bundle_id`, including its coordinator claim and recorded review
+verdicts. Returns `BundleDetailResponse` and fails with `bundle_error` when absent.
+
+### `claim_bundle`
+
+Atomically claims a planned bundle and creates member task authorizations. Inputs are
+`bundle_id`, `actor`, optional `lease_minutes` (240), and optional `shared_tree` (false).
+Returns the bundle, coordinator claim, and isolation warnings. Under required worktree
+isolation, callers must use the Git-aware CLI claim path or explicitly opt into a shared
+tree.
+
+### `generate_bundle_packet`
+
+Renders the aggregate coordinator packet for `bundle_id`. Inputs are `actor` and optional
+`format` (`markdown` or `json`). Returns `WorkPacketResponse`.
+
+### `submit_bundle_progress`
+
+Records coordinator progress with `bundle_id`, `actor`, and `phase`; optional inputs are
+`detail` and `member_task_ids`. Set `complete=true` only after every member has acceptable
+completion evidence. Completion is retry-safe and does not append a progress event when
+readiness fails. Returns the bundle plus readiness fields; an unready bundle fails with
+`bundle_not_ready` and per-member blockers.
+
+### `record_bundle_review`
+
+Records one independent verdict. Inputs are `bundle_id`, `actor`, `review_round`, `angle`,
+`decision` (`approve`, `reject`, or `needs_changes`), and optional `notes`. Returns the
+bundle and current gate. Duplicate reviewers and invalid rounds fail closed.
+
+### `finalize_bundle_review`
+
+Finalizes a passed bounded review gate for `bundle_id` as `actor`. Returns the bundle and
+gate; missing angles, insufficient independent approvals, or blocking verdicts fail with
+`bundle_error`.
+
+### `checkpoint_bundle`
+
+Records delivery metadata for a bundle. The recommended sequence checkpoints after review,
+but the operation itself validates only the bundle and delivery reference. Inputs are
+`bundle_id`, `actor`, and at least one of `commit_sha` or `pr_url`. Returns
+`BundleCheckpointResponse`.
+
+### `reconcile_bundle`
+
+Idempotently reconciles delivery state from `commit_sha` or `pr_url`, plus optional
+`merged`, for `bundle_id`. At least one delivery reference is required; `merged` alone is
+not sufficient. Returns `BundleDetailResponse`; a proven integration advances the bundle
+without duplicating prior checkpoint events.
+
+### `supersede_bundle`
+
+Marks `bundle_id` superseded by `replacement_bundle_id` while retaining its audit history.
+Requires `actor` and returns `BundleDetailResponse`. A replacement created after the
+source reaches `replan_required` may retain the same member task IDs; supersession reopens
+shared review-state tasks for fresh replacement evidence without deleting prior evidence.
+
+See [Coordinating a milestone bundle](how-to/coordinating-a-bundle.md) for ownership,
+bounded delegation, stalled-worker recovery, review rework, adoption, supersession, and
+delivery examples.
 
 ---
 
@@ -1183,7 +1287,7 @@ describe` uses — the CLI and MCP surfaces can never disagree — so it never n
 to be initialized. This tool is planning-gated (hidden from the wire unless
 `ANVIL_MCP_PLANNING=1`; see [Tool surface gating](#tool-surface-gating)), but the
 introspection surfaces themselves (`anvil describe`, the `--help` tool list, the Docker
-catalog smoke test) always report the full 24-tool surface regardless of the gate.
+catalog smoke test) always report the full 35-tool surface regardless of the gate.
 
 **Inputs**
 
@@ -1193,17 +1297,17 @@ None.
 
 ```json
 {
-  "api_version": "2",
-  "engine_version": "0.4.0",
-  "schema_version": 9,
+  "api_version": "3",
+  "engine_version": "0.5.0",
+  "schema_version": 15,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "..."],
-    "count": 49
+    "count": 66
   },
   "mcp": {
     "tools": ["claim_task", "..."],
-    "count": 24
+    "count": 35
   }
 }
 ```
@@ -1250,19 +1354,20 @@ before deciding whether to retry, release, or escalate.
 
 ## Stale-claim reaping
 
-Every mutating tool (`claim_task`, `release_task`, `renew_claim`, `submit_progress`,
-`submit_completion_evidence`, `update_task_status`) and `get_project_summary` call
-`detect_and_release_stale` before performing their operation. This is automatic — agents do
-not need to trigger reaping manually.
+`claim_task`, `claim_bundle`, `release_task`, `renew_claim`, `submit_progress`,
+`submit_completion_evidence`, `update_task_status`, and `get_project_summary` call
+`detect_and_release_stale` before performing their operation. Other tools, including
+`get_next_task`, do not promise reaping.
 
 Reaping scans all active claims, identifies those whose `lease_expires_at` timestamp has
 passed, marks them stale, and returns the associated tasks to the `ready` pool. If the
 reaper itself throws an exception, the error is swallowed and the main operation proceeds
 (best-effort, never blocking).
 
-The practical consequence: an agent that calls `get_next_task` will never receive a task
-whose claim expired seconds ago — the expired claim is cleared in the same call before the
-candidate set is built.
+For an MCP-only queue loop, call `get_project_summary` before `get_next_task` when lease
+expiry may have occurred. The summary call performs the best-effort reap; the subsequent
+candidate lookup sees the refreshed state. Do not rely on `get_next_task` alone to clear an
+expired claim.
 
 ---
 

@@ -25,6 +25,7 @@ try:
     import msvcrt  # Windows byte-range file locking (locking)
 except ImportError:  # POSIX: msvcrt is Windows-only.
     msvcrt = None  # type: ignore[assignment]
+import datetime
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel
 
+from anvil.bundles.eligibility import analyze_bundle_graph
 from anvil.state.backend import (
     BackendError,  # noqa: F401
     EventRejected,
@@ -52,11 +54,17 @@ from anvil.state.hashing import hash_event_id
 from anvil.state.models import (
     DEFAULT_PRD_ID,
     PRD,
+    TERMINAL_BUNDLE_STATUSES,
+    BundleClaim,
+    BundleReviewPolicy,
+    BundleReviewVerdict,
+    BundleStatus,
     Claim,
     ClaimStatus,
     ConflictGroup,
     Event,
     EventDraft,
+    ExecutionBundle,
     Feature,
     Project,
     Requirement,
@@ -68,6 +76,18 @@ from anvil.state.models import (
 )
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
+    BundleAgentObservedPayload,
+    BundleCheckpointRecordedPayload,
+    BundleClaimedPayload,
+    BundleClaimReleasedPayload,
+    BundleClaimRenewedPayload,
+    BundleClaimStalePayload,
+    BundleCreatedPayload,
+    BundlePlanAcknowledgedPayload,
+    BundleProgressNotedPayload,
+    BundleReviewRecordedPayload,
+    BundleStatusChangedPayload,
+    BundleSupersededPayload,
     ClaimCreatedPayload,
     ClaimReleasedPayload,
     ClaimRenewedPayload,
@@ -111,6 +131,41 @@ logger = logging.getLogger(__name__)
 _TASK_OUTCOME_TO_REVIEW_DECISION: dict[str, str] = {
     "accepted": ReviewDecision.approve,
     "rejected": ReviewDecision.needs_changes,
+}
+
+_BUNDLE_TRANSITIONS: dict[BundleStatus, frozenset[BundleStatus]] = {
+    # Activation and supersession are projected only by their dedicated
+    # bundle.claimed and bundle.superseded events.
+    BundleStatus.planned: frozenset({BundleStatus.replan_required}),
+    BundleStatus.active: frozenset(
+        {
+            BundleStatus.implemented_unreviewed,
+            BundleStatus.replan_required,
+        }
+    ),
+    BundleStatus.implemented_unreviewed: frozenset(
+        {
+            BundleStatus.active,
+            BundleStatus.reviewed_unintegrated,
+            BundleStatus.replan_required,
+        }
+    ),
+    BundleStatus.reviewed_unintegrated: frozenset(
+        {
+            BundleStatus.active,
+            BundleStatus.integrated,
+            BundleStatus.replan_required,
+        }
+    ),
+    BundleStatus.integrated: frozenset(
+        {BundleStatus.merged, BundleStatus.completed, BundleStatus.replan_required}
+    ),
+    BundleStatus.merged: frozenset({BundleStatus.completed}),
+    BundleStatus.replan_required: frozenset(
+        {BundleStatus.planned, BundleStatus.active}
+    ),
+    BundleStatus.completed: frozenset(),
+    BundleStatus.superseded: frozenset(),
 }
 
 
@@ -1113,6 +1168,74 @@ class SqliteBackend:
         rows = conn.execute(f"SELECT * FROM tasks {where}", params).fetchall()
         return [self._row_to_task(row, conn) for row in rows]
 
+    def get_bundle(self, bundle_id: str) -> ExecutionBundle | None:
+        """Return one execution bundle with ordered membership, or None."""
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT * FROM execution_bundles WHERE id = ?", (bundle_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_bundle(row, conn)
+
+    def list_bundles(
+        self, *, prd_id: str | None = None, status: str | None = None
+    ) -> list[ExecutionBundle]:
+        """Return execution bundles in deterministic ID order."""
+        conn = self._require_conn()
+        clauses: list[str] = []
+        params: list[str] = []
+        if prd_id is not None:
+            clauses.append("prd_id = ?")
+            params.append(prd_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = conn.execute(
+            f"SELECT * FROM execution_bundles {where}ORDER BY id", params
+        ).fetchall()
+        return [self._row_to_bundle(row, conn) for row in rows]
+
+    def get_bundle_claim(self, bundle_id: str) -> BundleClaim | None:
+        """Return the public coordinator claim for a bundle, if present."""
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT * FROM bundle_claims WHERE bundle_id = ? "
+            "ORDER BY (status = 'active') DESC, created_at DESC, id DESC LIMIT 1",
+            (bundle_id,),
+        ).fetchone()
+        return self._row_to_bundle_claim(row) if row is not None else None
+
+    def list_bundle_claims(self, *, status: str | None = None) -> list[BundleClaim]:
+        conn = self._require_conn()
+        if status is None:
+            rows = conn.execute("SELECT * FROM bundle_claims ORDER BY id").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM bundle_claims WHERE status = ? ORDER BY id", (status,)
+            ).fetchall()
+        return [self._row_to_bundle_claim(row) for row in rows]
+
+    def list_bundle_reviews(
+        self, bundle_id: str, *, disposition_event_id: str | None = None
+    ) -> list[BundleReviewVerdict]:
+        conn = self._require_conn()
+        if disposition_event_id is None:
+            rows = conn.execute(
+                "SELECT * FROM bundle_review_verdicts WHERE bundle_id = ? "
+                "ORDER BY disposition_event_id, review_round, angle, reviewed_by, id",
+                (bundle_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM bundle_review_verdicts WHERE bundle_id = ? "
+                "AND disposition_event_id = ? "
+                "ORDER BY review_round, angle, reviewed_by, id",
+                (bundle_id, disposition_event_id),
+            ).fetchall()
+        return [BundleReviewVerdict.model_validate(dict(row)) for row in rows]
+
     def get_claim(self, claim_id: str) -> Claim | None:
         """Return the Claim with the given ID, or None if not found."""
         conn = self._require_conn()
@@ -1652,7 +1775,11 @@ class SqliteBackend:
                     # propagates on every DB, incl. fresh/current (review FIX 4).
                     after = msg.partition("no such column:")[2].strip().split()
                     missing_col = after[0] if after else ""
-                    if is_index and missing_col in ("prd_id", "is_default"):
+                    if is_index and missing_col in (
+                        "prd_id",
+                        "is_default",
+                        "disposition_event_id",
+                    ):
                         continue
                     raise
             conn.execute("COMMIT")
@@ -2039,6 +2166,256 @@ class SqliteBackend:
             if "duplicate column" not in str(exc).lower():
                 raise
 
+    def _m_to_v11(self, conn: sqlite3.Connection) -> None:
+        """v10 -> v11: first-class execution bundle persistence.
+
+        The current DDL runs before the migration ladder, so these statements
+        are intentionally idempotent. Keeping the ladder step is load-bearing:
+        it is what permits a genuine v10 database to be stamped v11 only after
+        every bundle table and index exists.
+        """
+        statements = (
+            """CREATE TABLE IF NOT EXISTS execution_bundles (
+                id TEXT PRIMARY KEY,
+                creation_event_id TEXT NOT NULL UNIQUE,
+                prd_id TEXT NOT NULL REFERENCES prds(id) ON DELETE RESTRICT,
+                coordinator TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'planned',
+                review_disposition_event_id TEXT,
+                superseded_by TEXT REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                last_result_at TEXT,
+                branch TEXT,
+                worktree_path TEXT,
+                review_policy TEXT NOT NULL DEFAULT '{}',
+                throughput_budget TEXT NOT NULL DEFAULT '{}',
+                delegated_agents TEXT NOT NULL DEFAULT '[]',
+                checkpoint TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_execution_bundles_status "
+            "ON execution_bundles (status)",
+            "CREATE INDEX IF NOT EXISTS idx_execution_bundles_prd_status "
+            "ON execution_bundles (prd_id, status)",
+            """CREATE TABLE IF NOT EXISTS execution_bundle_members (
+                bundle_id TEXT NOT NULL REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+                position INTEGER NOT NULL CHECK (position >= 0),
+                PRIMARY KEY (bundle_id, task_id),
+                UNIQUE (bundle_id, position)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_execution_bundle_members_task "
+            "ON execution_bundle_members (task_id)",
+            """CREATE TABLE IF NOT EXISTS bundle_review_verdicts (
+                id TEXT PRIMARY KEY,
+                bundle_id TEXT NOT NULL
+                    REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                creation_event_id TEXT NOT NULL,
+                disposition_event_id TEXT NOT NULL,
+                review_round INTEGER NOT NULL CHECK (review_round >= 1),
+                angle TEXT NOT NULL,
+                reviewed_by TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (bundle_id, creation_event_id, disposition_event_id,
+                        review_round, angle, reviewed_by)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_bundle_review_verdicts_round "
+            "ON bundle_review_verdicts "
+            "(bundle_id, creation_event_id, disposition_event_id, review_round)",
+            """CREATE TABLE IF NOT EXISTS claim_replay_lineages (
+                claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE RESTRICT,
+                creation_fingerprint TEXT NOT NULL,
+                collision_detected INTEGER NOT NULL DEFAULT 0
+                    CHECK (collision_detected IN (0, 1))
+            )""",
+        )
+        for ddl in statements:
+            conn.execute(ddl)
+
+        # Genuine v10 projections already contain claims. Seed their immutable
+        # creation fingerprint from the earliest stored creation event before
+        # forward catch-up can encounter a divergent duplicate. If historical
+        # event data is unavailable or malformed, use an explicit unknown
+        # sentinel: any future claim.created payload will differ and therefore
+        # fail closed by marking the lineage collided.
+        claim_rows = conn.execute("SELECT id FROM claims ORDER BY id").fetchall()
+        for claim_row in claim_rows:
+            claim_id = claim_row[0]
+            event_row = conn.execute(
+                "SELECT payload_json FROM events "
+                "WHERE action = 'claim.created' AND target_kind = 'claim' "
+                "AND target_id = ? ORDER BY rowid LIMIT 1",
+                (claim_id,),
+            ).fetchone()
+            fingerprint = f"legacy-unknown:{claim_id}"
+            if event_row is not None:
+                try:
+                    creation_payload = ClaimCreatedPayload.model_validate(
+                        json.loads(event_row[0])
+                    )
+                    fingerprint = self._claim_creation_fingerprint(creation_payload)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            conn.execute(
+                "INSERT OR IGNORE INTO claim_replay_lineages "
+                "(claim_id, creation_fingerprint) VALUES (?, ?)",
+                (claim_id, fingerprint),
+            )
+
+    def _m_to_v12(self, conn: sqlite3.Connection) -> None:
+        """v11 -> v12: coordinator bundle claims and member authorizations."""
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS bundle_claims (
+                id TEXT PRIMARY KEY,
+                bundle_id TEXT NOT NULL
+                    REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                claimed_by TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                branch TEXT,
+                worktree_path TEXT,
+                session_id TEXT,
+                expected_files TEXT NOT NULL DEFAULT '[]',
+                member_claim_ids TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL,
+                last_heartbeat_at TEXT NOT NULL,
+                released_at TEXT,
+                release_reason TEXT
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bundle_claims_status "
+            "ON bundle_claims (status)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_claims_active_bundle "
+            "ON bundle_claims (bundle_id) WHERE status = 'active'"
+        )
+        try:
+            conn.execute(
+                "ALTER TABLE claims ADD COLUMN bundle_claim_id TEXT "
+                "REFERENCES bundle_claims(id) ON DELETE RESTRICT"
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+
+    def _m_to_v13(self, conn: sqlite3.Connection) -> None:
+        """v12 -> v13: bind reviews to one implemented disposition event."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._m_to_v13_body(conn)
+        except BaseException:
+            self._safe_rollback(conn)
+            raise
+        conn.execute("COMMIT")
+
+    def _m_to_v13_body(self, conn: sqlite3.Connection) -> None:
+        """Run the v13 table rebuild atomically and recover an old torn rename."""
+        bundle_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+        }
+        if "review_disposition_event_id" not in bundle_columns:
+            conn.execute(
+                "ALTER TABLE execution_bundles "
+                "ADD COLUMN review_disposition_event_id TEXT"
+            )
+
+        backup_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'bundle_review_verdicts_v12'"
+        ).fetchone() is not None
+        review_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(bundle_review_verdicts)")
+        }
+        if review_columns and "disposition_event_id" not in review_columns:
+            conn.execute("ALTER TABLE bundle_review_verdicts RENAME TO bundle_review_verdicts_v12")
+            backup_exists = True
+            review_columns = set()
+        if not review_columns:
+            conn.execute(
+                """CREATE TABLE bundle_review_verdicts (
+                    id TEXT PRIMARY KEY,
+                    bundle_id TEXT NOT NULL
+                        REFERENCES execution_bundles(id) ON DELETE RESTRICT,
+                    creation_event_id TEXT NOT NULL,
+                    disposition_event_id TEXT NOT NULL,
+                    review_round INTEGER NOT NULL CHECK (review_round >= 1),
+                    angle TEXT NOT NULL,
+                    reviewed_by TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (bundle_id, creation_event_id, disposition_event_id,
+                            review_round, angle, reviewed_by)
+                )"""
+            )
+        if backup_exists:
+            conn.execute(
+                "INSERT OR IGNORE INTO bundle_review_verdicts "
+                "(id, bundle_id, creation_event_id, disposition_event_id, "
+                "review_round, angle, reviewed_by, decision, notes, created_at) "
+                "SELECT id, bundle_id, creation_event_id, 'legacy-unbound', "
+                "review_round, angle, reviewed_by, decision, notes, created_at "
+                "FROM bundle_review_verdicts_v12"
+            )
+            conn.execute("DROP TABLE bundle_review_verdicts_v12")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bundle_review_verdicts_round "
+            "ON bundle_review_verdicts "
+            "(bundle_id, creation_event_id, disposition_event_id, review_round)"
+        )
+
+        latest_by_bundle: dict[str, str] = {}
+        rows = conn.execute(
+            "SELECT id, target_id, payload_json FROM events "
+            "WHERE action = 'bundle.status_changed' AND target_kind = 'bundle' "
+            "ORDER BY rowid"
+        ).fetchall()
+        for event_id, bundle_id, payload_json in rows:
+            try:
+                payload = json.loads(payload_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if payload.get("to") == BundleStatus.implemented_unreviewed.value:
+                latest_by_bundle[bundle_id] = event_id
+        for bundle_id, event_id in latest_by_bundle.items():
+            conn.execute(
+                "UPDATE execution_bundles SET review_disposition_event_id = ? "
+                "WHERE id = ?",
+                (event_id, bundle_id),
+            )
+
+    def _m_to_v14(self, conn: sqlite3.Connection) -> None:
+        """v13 -> v14: named, history-preserving bundle supersession."""
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+        }
+        if "superseded_by" not in columns:
+            conn.execute(
+                "ALTER TABLE execution_bundles ADD COLUMN superseded_by TEXT "
+                "REFERENCES execution_bundles(id) ON DELETE RESTRICT"
+            )
+
+    def _m_to_v15(self, conn: sqlite3.Connection) -> None:
+        """v14 -> v15: authoritative applied lifecycle-result timestamp."""
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(execution_bundles)")
+        }
+        if "last_result_at" not in columns:
+            conn.execute("ALTER TABLE execution_bundles ADD COLUMN last_result_at TEXT")
+        # v14 did not retain the exact result transition separately. Use the
+        # projection's own last-applied mutation time as a conservative
+        # baseline; never inspect raw event payloads, which may include replay
+        # no-ops. New v15 transitions record the exact result time.
+        conn.execute(
+            "UPDATE execution_bundles SET last_result_at = updated_at "
+            "WHERE last_result_at IS NULL AND status IN "
+            "('reviewed_unintegrated', 'integrated', 'merged', 'completed')"
+        )
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -2048,6 +2425,11 @@ class SqliteBackend:
         (7, _m_to_v8),
         (8, _m_to_v9),
         (9, _m_to_v10),
+        (10, _m_to_v11),
+        (11, _m_to_v12),
+        (12, _m_to_v13),
+        (13, _m_to_v14),
+        (14, _m_to_v15),
     ]
 
     @staticmethod
@@ -2643,6 +3025,66 @@ class SqliteBackend:
                 ConflictGroupUpsertedPayload,
                 self._check_conflict_group_upserted,
                 self._write_conflict_group_upserted,
+            ),
+            "bundle.created": ActionSpec(
+                BundleCreatedPayload,
+                self._check_bundle_created,
+                self._write_bundle_created,
+            ),
+            "bundle.status_changed": ActionSpec(
+                BundleStatusChangedPayload,
+                self._check_bundle_status_changed,
+                self._write_bundle_status_changed,
+            ),
+            "bundle.agent_observed": ActionSpec(
+                BundleAgentObservedPayload,
+                self._check_bundle_agent_observed,
+                self._write_bundle_agent_observed,
+            ),
+            "bundle.review_recorded": ActionSpec(
+                BundleReviewRecordedPayload,
+                self._check_bundle_review_recorded,
+                self._write_bundle_review_recorded,
+            ),
+            "bundle.plan_acknowledged": ActionSpec(
+                BundlePlanAcknowledgedPayload,
+                self._check_bundle_plan_acknowledged,
+                self._write_audit_only,
+            ),
+            "bundle.checkpoint_recorded": ActionSpec(
+                BundleCheckpointRecordedPayload,
+                self._check_bundle_checkpoint_recorded,
+                self._write_bundle_checkpoint_recorded,
+            ),
+            "bundle.superseded": ActionSpec(
+                BundleSupersededPayload,
+                self._check_bundle_superseded,
+                self._write_bundle_superseded,
+            ),
+            "bundle.claimed": ActionSpec(
+                BundleClaimedPayload,
+                self._check_bundle_claimed,
+                self._write_bundle_claimed,
+            ),
+            "bundle.progress_noted": ActionSpec(
+                BundleProgressNotedPayload,
+                self._check_bundle_progress_noted,
+                self._write_audit_only,
+            ),
+            "bundle.claim_renewed": ActionSpec(
+                BundleClaimRenewedPayload,
+                self._check_bundle_claim_renewed,
+                self._write_bundle_claim_renewed,
+            ),
+            "bundle.claim_released": ActionSpec(
+                BundleClaimReleasedPayload,
+                self._check_bundle_claim_released,
+                self._write_bundle_claim_released,
+            ),
+            "bundle.claim_stale": ActionSpec(
+                BundleClaimStalePayload,
+                self._check_bundle_claim_stale,
+                self._write_bundle_claim_stale,
             ),
             # Phase 8: pull-applies-remote — local Task gets title/desc/status
             # rewritten from the remote payload after a non-conflict pull.
@@ -3478,6 +3920,2222 @@ class SqliteBackend:
         )
 
     @staticmethod
+    def _event_schema_version(
+        conn: sqlite3.Connection, event_id: str | None
+    ) -> int | None:
+        if event_id is None:
+            return None
+        row = conn.execute(
+            "SELECT payload_json FROM events WHERE id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row[0]).get("schema_version")
+            return int(value) if value is not None else None
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _bundle_generation_is_legacy(
+        conn: sqlite3.Connection, creation_event_id: str
+    ) -> bool:
+        version = SqliteBackend._event_schema_version(conn, creation_event_id)
+        return version is None or version < 13
+
+    @staticmethod
+    def _bundle_disposition_is_legacy(
+        conn: sqlite3.Connection, bundle_id: str, creation_event_id: str
+    ) -> bool:
+        row = conn.execute(
+            "SELECT review_disposition_event_id FROM execution_bundles "
+            "WHERE id = ? AND creation_event_id = ?",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return False
+        return SqliteBackend._event_schema_version(conn, row[0]) is None
+
+    def _check_bundle_created(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleCreatedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate complete bundle membership against a fresh WAL snapshot."""
+        if event.target_kind != "bundle" or event.target_id != payload.id:
+            raise EventRejected(
+                "bundle.created: event target must be bundle "
+                f"'{payload.id}', got {event.target_kind} '{event.target_id}'."
+            )
+        if payload.schema_version != SCHEMA_VERSION:
+            raise EventRejected(
+                f"bundle.created: schema_version must be {SCHEMA_VERSION}."
+            )
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if payload.created_at != event_time or payload.updated_at != event_time:
+            raise EventRejected(
+                "bundle.created: creation and update times must match the event time."
+            )
+        try:
+            bundle_data = payload.model_dump(mode="json")
+            bundle_data.pop("schema_version", None)
+            # The log authority assigns the real creation_event_id only after
+            # this pre-log check succeeds. A placeholder completes the state
+            # model for relational validation without trusting caller input.
+            bundle_data["creation_event_id"] = "E000000"
+            bundle = ExecutionBundle.model_validate(bundle_data)
+        except Exception as exc:
+            raise EventRejected(f"bundle.created: invalid bundle payload: {exc}") from exc
+        if bundle.status is not BundleStatus.planned:
+            raise EventRejected("bundle.created: initial status must be 'planned'.")
+
+        # Mirror claim.created's fresh-snapshot discipline. A competing claim or
+        # bundle append may have committed after an earlier read on this WAL
+        # connection; BEGIN IMMEDIATE refreshes the snapshot under the append
+        # flock before any canonical log line is written.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._validate_bundle_created_locked(conn, bundle)
+        finally:
+            conn.execute("COMMIT")
+
+    @staticmethod
+    def _validate_bundle_created_locked(
+        conn: sqlite3.Connection, bundle: ExecutionBundle
+    ) -> None:
+        if conn.execute(
+            "SELECT 1 FROM execution_bundles WHERE id = ?", (bundle.id,)
+        ).fetchone():
+            raise EventRejected(f"bundle.created: bundle '{bundle.id}' already exists.")
+
+        if conn.execute(
+            "SELECT 1 FROM prds WHERE id = ?", (bundle.prd_id,)
+        ).fetchone() is None:
+            raise EventRejected(
+                f"bundle.created: owning PRD '{bundle.prd_id}' not found."
+            )
+
+        placeholders = ",".join("?" for _ in bundle.task_ids)
+        task_rows = conn.execute(
+            f"SELECT id, prd_id FROM tasks WHERE id IN ({placeholders})",
+            tuple(bundle.task_ids),
+        ).fetchall()
+        tasks_by_id = {row[0]: row[1] for row in task_rows}
+        missing = [task_id for task_id in bundle.task_ids if task_id not in tasks_by_id]
+        if missing:
+            raise EventRejected(f"bundle.created: member tasks not found: {missing}.")
+        cross_prd = [
+            task_id
+            for task_id in bundle.task_ids
+            if tasks_by_id[task_id] != bundle.prd_id
+        ]
+        if cross_prd:
+            raise EventRejected(
+                f"bundle.created: member tasks belong to another PRD: {cross_prd}."
+            )
+
+        terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
+        terminal_placeholders = ",".join("?" for _ in terminal)
+        membership_rows = conn.execute(
+            f"""SELECT m.task_id, b.id
+                  FROM execution_bundle_members m
+                  JOIN execution_bundles b ON b.id = m.bundle_id
+                 WHERE m.task_id IN ({placeholders})
+                   AND b.status NOT IN ({terminal_placeholders})
+                   AND b.status != 'replan_required'
+                 ORDER BY m.task_id, b.id""",
+            tuple(bundle.task_ids) + terminal,
+        ).fetchall()
+        if membership_rows:
+            conflicts = [(row[0], row[1]) for row in membership_rows]
+            raise EventRejected(
+                f"bundle.created: member tasks already belong to active bundles: {conflicts}."
+            )
+
+        claim_rows = conn.execute(
+            f"SELECT task_id, id, claimed_by FROM claims "
+            f"WHERE status = 'active' AND task_id IN ({placeholders}) "
+            "ORDER BY task_id, id",
+            tuple(bundle.task_ids),
+        ).fetchall()
+        if claim_rows:
+            claims = [(row[0], row[1], row[2]) for row in claim_rows]
+            raise EventRejected(
+                f"bundle.created: member tasks have incompatible active claims: {claims}."
+            )
+
+    @staticmethod
+    def _write_bundle_created(
+        conn: sqlite3.Connection,
+        payload: BundleCreatedPayload,
+        event: Event,
+    ) -> None:
+        """Persist the complete creation fact and ordered membership."""
+        if event.target_kind != "bundle" or event.target_id != payload.id:
+            return
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if payload.created_at != event_time or payload.updated_at != event_time:
+            return
+        bundle_data = payload.model_dump(mode="json")
+        bundle_data.pop("schema_version", None)
+        bundle_data["creation_event_id"] = event.id
+        bundle = ExecutionBundle.model_validate(bundle_data)
+        # Git-backed histories may contain two independently valid creations
+        # for the same stable id. Replay is write-only, so converge by keeping
+        # the first HLC-ordered creation as one atomic fact. Never combine the
+        # first row with later membership, which would synthesize a bundle that
+        # appeared in neither branch.
+        if conn.execute(
+            "SELECT 1 FROM execution_bundles WHERE id = ?", (bundle.id,)
+        ).fetchone():
+            return
+        placeholders = ",".join("?" for _ in bundle.task_ids)
+        terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
+        terminal_placeholders = ",".join("?" for _ in terminal)
+        existing_membership = conn.execute(
+            f"""SELECT 1
+                  FROM execution_bundle_members m
+                  JOIN execution_bundles b ON b.id = m.bundle_id
+                 WHERE m.task_id IN ({placeholders})
+                   AND b.status NOT IN ({terminal_placeholders})
+                   AND b.status != 'replan_required'
+                 LIMIT 1""",
+            tuple(bundle.task_ids) + terminal,
+        ).fetchone()
+        if existing_membership is not None:
+            # Two git branches can independently create different bundle IDs
+            # around the same task. The ordered replay winner owns the complete
+            # membership fact; skip the loser atomically rather than projecting
+            # two active bundles that live append would have refused.
+            return
+        if conn.execute(
+            f"SELECT 1 FROM claims WHERE status = 'active' "
+            f"AND task_id IN ({placeholders}) LIMIT 1",
+            tuple(bundle.task_ids),
+        ).fetchone():
+            # Claim/bundle exclusion is symmetric under replay: whichever fact
+            # wins event ordering owns the task, matching both live checks.
+            return
+        data = bundle.model_dump(mode="json")
+        conn.execute(
+            """INSERT INTO execution_bundles
+                   (id, creation_event_id, prd_id, coordinator, status, branch, worktree_path,
+                    review_policy, throughput_budget, delegated_agents,
+                    checkpoint, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                bundle.id,
+                bundle.creation_event_id,
+                bundle.prd_id,
+                bundle.coordinator,
+                bundle.status.value,
+                bundle.branch,
+                bundle.worktree_path,
+                json.dumps(data["review_policy"], sort_keys=True),
+                json.dumps(data["throughput_budget"], sort_keys=True),
+                json.dumps(data["delegated_agents"], sort_keys=True),
+                json.dumps(data["checkpoint"], sort_keys=True)
+                if data["checkpoint"] is not None
+                else None,
+                bundle.created_at.isoformat(),
+                bundle.updated_at.isoformat(),
+            ),
+        )
+        for position, task_id in enumerate(bundle.task_ids):
+            conn.execute(
+                "INSERT INTO execution_bundle_members "
+                "(bundle_id, task_id, position) VALUES (?, ?, ?)",
+                (bundle.id, task_id, position),
+            )
+
+    def _check_bundle_status_changed(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleStatusChangedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Reject stale or illegal bundle lifecycle transitions before logging."""
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected(
+                "bundle.status_changed: event target must be bundle "
+                f"'{payload.bundle_id}', got {event.target_kind} '{event.target_id}'."
+            )
+        if payload.changed_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected(
+                "bundle.status_changed: changed_at must match event time."
+            )
+        try:
+            from_status = BundleStatus(payload.from_status)
+            to_status = BundleStatus(payload.to_status)
+        except ValueError as exc:
+            raise EventRejected(f"bundle.status_changed: invalid status: {exc}") from exc
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT status, creation_event_id, updated_at "
+                "FROM execution_bundles WHERE id = ?",
+                (payload.bundle_id,),
+            ).fetchone()
+            if row is None:
+                raise EventRejected(
+                    f"bundle.status_changed: bundle '{payload.bundle_id}' not found."
+                )
+            actual = BundleStatus(row[0])
+            if row[1] != payload.creation_event_id:
+                raise EventRejected(
+                    f"bundle.status_changed: creation event does not match "
+                    f"bundle '{payload.bundle_id}'."
+                )
+            current_updated_at = datetime.datetime.fromisoformat(row[2])
+            if payload.changed_at < current_updated_at:
+                raise EventRejected(
+                    f"bundle.status_changed: changed_at for '{payload.bundle_id}' "
+                    "must not precede its current updated_at."
+                )
+            if actual is to_status:
+                raise IdempotentNoOp(
+                    f"bundle '{payload.bundle_id}' is already '{to_status.value}'"
+                )
+            if actual is not from_status:
+                raise EventRejected(
+                    f"bundle.status_changed: stale transition for '{payload.bundle_id}': "
+                    f"expected '{from_status.value}', found '{actual.value}'."
+                )
+            if to_status not in _BUNDLE_TRANSITIONS[actual]:
+                raise EventRejected(
+                    f"bundle.status_changed: illegal transition "
+                    f"'{actual.value}' -> '{to_status.value}'."
+                )
+            active_bundle_claim = conn.execute(
+                "SELECT id, member_claim_ids, lease_expires_at FROM bundle_claims "
+                "WHERE bundle_id = ? AND status = 'active'",
+                (payload.bundle_id,),
+            ).fetchone()
+            if to_status is BundleStatus.planned:
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may reopen a plan."
+                    )
+                overlap = conn.execute(
+                    """SELECT b.id, m.task_id
+                         FROM execution_bundle_members source
+                         JOIN execution_bundle_members m
+                           ON m.task_id = source.task_id
+                          AND m.bundle_id != source.bundle_id
+                         JOIN execution_bundles b ON b.id = m.bundle_id
+                        WHERE source.bundle_id = ?
+                          AND b.status NOT IN ('completed', 'superseded')
+                        ORDER BY b.id, m.task_id
+                        LIMIT 1""",
+                    (payload.bundle_id,),
+                ).fetchone()
+                if overlap is not None:
+                    raise EventRejected(
+                        "bundle.status_changed: cannot reopen while replacement "
+                        f"bundle '{overlap[0]}' owns member '{overlap[1]}'."
+                    )
+            if to_status is BundleStatus.active:
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may resume a bundle."
+                    )
+                if active_bundle_claim is None or datetime.datetime.fromisoformat(
+                    active_bundle_claim[2]
+                ) < event.timestamp.astimezone(datetime.UTC):
+                    raise EventRejected(
+                        "bundle.status_changed: active coordinator claim required."
+                    )
+            if active_bundle_claim is not None and (
+                payload.bundle_claim_id != active_bundle_claim[0]
+            ):
+                raise EventRejected(
+                    "bundle.status_changed: coordinator claim lineage does not match."
+                )
+            if to_status is BundleStatus.implemented_unreviewed:
+                if active_bundle_claim is None:
+                    raise EventRejected(
+                        "bundle.status_changed: active coordinator claim not found."
+                    )
+                if datetime.datetime.fromisoformat(
+                    active_bundle_claim[2]
+                ) < event.timestamp.astimezone(datetime.UTC):
+                    raise EventRejected(
+                        "bundle.status_changed: coordinator lease has expired."
+                    )
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may mark "
+                        "a bundle implemented."
+                    )
+                incomplete = conn.execute(
+                    """SELECT m.task_id
+                         FROM execution_bundle_members m
+                         JOIN tasks t ON t.id = m.task_id
+                        WHERE m.bundle_id = ?
+                          AND (
+                            t.status NOT IN ('needs_review', 'accepted', 'done')
+                            OR NOT EXISTS (
+                                SELECT 1 FROM evidence e
+                                 WHERE e.task_id = m.task_id
+                                   AND e.category IN ('completion', 'promotion_quality')
+                            )
+                          )
+                        ORDER BY m.position""",
+                    (payload.bundle_id,),
+                ).fetchall()
+                if incomplete:
+                    raise EventRejected(
+                        "bundle.status_changed: member completion evidence is "
+                        f"incomplete: {[row[0] for row in incomplete]}."
+                    )
+                member_claim_ids = json.loads(active_bundle_claim[1])
+                wrong_lineage: list[str] = []
+                for task_id, expected_claim_id in member_claim_ids.items():
+                    evidence_row = conn.execute(
+                        "SELECT claim_id FROM evidence WHERE task_id = ? "
+                        "ORDER BY submitted_at DESC, id DESC LIMIT 1",
+                        (task_id,),
+                    ).fetchone()
+                    if evidence_row is None or evidence_row[0] != expected_claim_id:
+                        wrong_lineage.append(task_id)
+                if wrong_lineage:
+                    raise EventRejected(
+                        "bundle.status_changed: evidence is not bound to current "
+                        f"member claims: {wrong_lineage}."
+                    )
+            if to_status is BundleStatus.reviewed_unintegrated:
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may apply "
+                        "the bundle review gate."
+                    )
+                if active_bundle_claim is None or datetime.datetime.fromisoformat(
+                    active_bundle_claim[2]
+                ) < event.timestamp.astimezone(datetime.UTC):
+                    raise EventRejected(
+                        "bundle.status_changed: active coordinator claim required."
+                    )
+                if not self._bundle_review_round_passes(
+                    conn, payload.bundle_id, payload.creation_event_id
+                ):
+                    raise EventRejected(
+                        "bundle.status_changed: adversarial review quorum is incomplete."
+                    )
+            if to_status is BundleStatus.replan_required:
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may require replan."
+                    )
+                if from_status is BundleStatus.implemented_unreviewed:
+                    if active_bundle_claim is None or datetime.datetime.fromisoformat(
+                        active_bundle_claim[2]
+                    ) < event.timestamp.astimezone(datetime.UTC):
+                        raise EventRejected(
+                            "bundle.status_changed: active coordinator claim required."
+                        )
+                    if not self._bundle_review_requires_replan(
+                        conn, payload.bundle_id, payload.creation_event_id
+                    ):
+                        raise EventRejected(
+                            "bundle.status_changed: review replan budget is not exhausted."
+                        )
+            if to_status in {
+                BundleStatus.integrated,
+                BundleStatus.merged,
+                BundleStatus.completed,
+            }:
+                coordinator = conn.execute(
+                    "SELECT coordinator FROM execution_bundles WHERE id = ?",
+                    (payload.bundle_id,),
+                ).fetchone()[0]
+                if event.actor != coordinator:
+                    raise EventRejected(
+                        "bundle.status_changed: only the coordinator may reconcile delivery."
+                    )
+        finally:
+            conn.execute("COMMIT")
+
+    @staticmethod
+    def _bundle_review_round_passes(
+        conn: sqlite3.Connection, bundle_id: str, creation_event_id: str
+    ) -> bool:
+        bundle_row = conn.execute(
+            "SELECT coordinator, review_policy, review_disposition_event_id "
+            "FROM execution_bundles "
+            "WHERE id = ? AND creation_event_id = ?",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if bundle_row is None or bundle_row[2] is None:
+            return False
+        try:
+            policy = BundleReviewPolicy.model_validate(json.loads(bundle_row[1]))
+        except (TypeError, ValueError):
+            return False
+        round_row = conn.execute(
+            "SELECT MAX(review_round) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ?",
+            (bundle_id, creation_event_id, bundle_row[2]),
+        ).fetchone()
+        if round_row is None or round_row[0] is None:
+            return False
+        rows = conn.execute(
+            "SELECT angle, reviewed_by, decision FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ? AND review_round = ?",
+            (bundle_id, creation_event_id, bundle_row[2], round_row[0]),
+        ).fetchall()
+        if any(row[2] != ReviewDecision.approve.value for row in rows):
+            return False
+        reviewers = {row[1] for row in rows}
+        angles = {row[0] for row in rows}
+        required_angles = set(policy.required_angles) or {
+            "correctness",
+            "security",
+            "integration",
+        }
+        if bundle_row[0] in reviewers:
+            return False
+        return (
+            len(rows) <= max(3, policy.max_reviews)
+            and len(reviewers) >= max(3, len(required_angles))
+            and len(angles) >= max(3, len(required_angles))
+            and required_angles.issubset(angles)
+        )
+
+    @staticmethod
+    def _legacy_bundle_review_round_passes(
+        conn: sqlite3.Connection, bundle_id: str, creation_event_id: str
+    ) -> bool:
+        """Evaluate a v12 unbound review round under the v12 gate contract."""
+        if not SqliteBackend._bundle_generation_is_legacy(
+            conn, creation_event_id
+        ) or not SqliteBackend._bundle_disposition_is_legacy(
+            conn, bundle_id, creation_event_id
+        ):
+            return False
+        bundle_row = conn.execute(
+            "SELECT coordinator, review_policy FROM execution_bundles "
+            "WHERE id = ? AND creation_event_id = ?",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if bundle_row is None:
+            return False
+        try:
+            policy = BundleReviewPolicy.model_validate(json.loads(bundle_row[1]))
+        except (TypeError, ValueError):
+            return False
+        round_row = conn.execute(
+            "SELECT MAX(review_round) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = 'legacy-unbound'",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if round_row is None or round_row[0] is None:
+            return False
+        rows = conn.execute(
+            "SELECT angle, reviewed_by, decision FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = 'legacy-unbound' AND review_round = ?",
+            (bundle_id, creation_event_id, round_row[0]),
+        ).fetchall()
+        if any(row[2] != ReviewDecision.approve.value for row in rows):
+            return False
+        reviewers = {row[1] for row in rows}
+        angles = {row[0] for row in rows}
+        required_angles = set(policy.required_angles) or {
+            "correctness",
+            "security",
+            "integration",
+        }
+        if bundle_row[0] in reviewers:
+            return False
+        return (
+            len(rows) <= max(3, policy.max_reviews)
+            and len(reviewers) >= max(3, len(required_angles))
+            and len(angles) >= max(3, len(required_angles))
+            and required_angles.issubset(angles)
+        )
+
+    @staticmethod
+    def _legacy_bundle_review_requires_replan(
+        conn: sqlite3.Connection, bundle_id: str, creation_event_id: str
+    ) -> bool:
+        if not SqliteBackend._bundle_generation_is_legacy(
+            conn, creation_event_id
+        ) or not SqliteBackend._bundle_disposition_is_legacy(
+            conn, bundle_id, creation_event_id
+        ):
+            return False
+        row = conn.execute(
+            "SELECT coordinator, review_policy FROM execution_bundles "
+            "WHERE id = ? AND creation_event_id = ?",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            policy = BundleReviewPolicy.model_validate(json.loads(row[1]))
+        except (TypeError, ValueError):
+            return False
+        round_row = conn.execute(
+            "SELECT MAX(review_round) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = 'legacy-unbound'",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if round_row is None or round_row[0] is None:
+            return False
+        review_round = int(round_row[0])
+        return (
+            review_round - 1 >= policy.max_rereviews
+            and SqliteBackend._bundle_review_round_complete_with_blocker(
+                conn,
+                bundle_id,
+                creation_event_id,
+                "legacy-unbound",
+                review_round,
+                policy,
+                row[0],
+            )
+        )
+
+    @staticmethod
+    def _bundle_review_round_complete_with_blocker(
+        conn: sqlite3.Connection,
+        bundle_id: str,
+        creation_event_id: str,
+        disposition_event_id: str,
+        review_round: int,
+        policy: BundleReviewPolicy,
+        coordinator: str,
+    ) -> bool:
+        rows = conn.execute(
+            "SELECT angle, reviewed_by, decision FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ? AND review_round = ?",
+            (bundle_id, creation_event_id, disposition_event_id, review_round),
+        ).fetchall()
+        reviewers = {row[1] for row in rows}
+        angles = {row[0] for row in rows}
+        required_angles = set(policy.required_angles) or {
+            "correctness",
+            "security",
+            "integration",
+        }
+        required = max(3, len(required_angles))
+        return (
+            coordinator not in reviewers
+            and len(rows) <= max(3, policy.max_reviews)
+            and len(reviewers) >= required
+            and len(angles) >= required
+            and required_angles.issubset(angles)
+            and any(row[2] != ReviewDecision.approve.value for row in rows)
+        )
+
+    @staticmethod
+    def _bundle_review_requires_replan(
+        conn: sqlite3.Connection, bundle_id: str, creation_event_id: str
+    ) -> bool:
+        row = conn.execute(
+            "SELECT coordinator, review_policy, review_disposition_event_id "
+            "FROM execution_bundles "
+            "WHERE id = ? AND creation_event_id = ?",
+            (bundle_id, creation_event_id),
+        ).fetchone()
+        if row is None or row[2] is None:
+            return False
+        try:
+            policy = BundleReviewPolicy.model_validate(json.loads(row[1]))
+        except (TypeError, ValueError):
+            return False
+        round_row = conn.execute(
+            "SELECT MAX(review_round) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ?",
+            (bundle_id, creation_event_id, row[2]),
+        ).fetchone()
+        if round_row is None or round_row[0] is None:
+            return False
+        review_round = int(round_row[0])
+        return (
+            review_round - 1 >= policy.max_rereviews
+            and SqliteBackend._bundle_review_round_complete_with_blocker(
+                conn,
+                bundle_id,
+                creation_event_id,
+                row[2],
+                review_round,
+                policy,
+                row[0],
+            )
+        )
+
+    @staticmethod
+    def _write_bundle_status_changed(
+        conn: sqlite3.Connection,
+        payload: BundleStatusChangedPayload,
+        event: Event,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            return
+        if payload.changed_at != event.timestamp.astimezone(datetime.UTC):
+            return
+        if payload.to_status not in _BUNDLE_TRANSITIONS.get(
+            payload.from_status, frozenset()
+        ):
+            return
+        if payload.to_status is BundleStatus.planned:
+            coordinator = conn.execute(
+                "SELECT coordinator FROM execution_bundles WHERE id = ? "
+                "AND creation_event_id = ?",
+                (payload.bundle_id, payload.creation_event_id),
+            ).fetchone()
+            if coordinator is None or event.actor != coordinator[0]:
+                return
+            if conn.execute(
+                """SELECT 1
+                     FROM execution_bundle_members source
+                     JOIN execution_bundle_members other
+                       ON other.task_id = source.task_id
+                      AND other.bundle_id != source.bundle_id
+                     JOIN execution_bundles b ON b.id = other.bundle_id
+                    WHERE source.bundle_id = ?
+                      AND b.status NOT IN ('completed', 'superseded')
+                    LIMIT 1""",
+                (payload.bundle_id,),
+            ).fetchone():
+                return
+        if payload.to_status in {
+            BundleStatus.reviewed_unintegrated,
+            BundleStatus.replan_required,
+            BundleStatus.integrated,
+            BundleStatus.merged,
+            BundleStatus.completed,
+        }:
+            coordinator = conn.execute(
+                "SELECT coordinator FROM execution_bundles WHERE id = ? "
+                "AND creation_event_id = ?",
+                (payload.bundle_id, payload.creation_event_id),
+            ).fetchone()
+            if coordinator is None or event.actor != coordinator[0]:
+                return
+            if (
+                payload.to_status is BundleStatus.reviewed_unintegrated
+                and not SqliteBackend._bundle_review_round_passes(
+                    conn, payload.bundle_id, payload.creation_event_id
+                )
+                and not SqliteBackend._legacy_bundle_review_round_passes(
+                    conn, payload.bundle_id, payload.creation_event_id
+                )
+            ):
+                return
+            if (
+                payload.to_status is BundleStatus.replan_required
+                and payload.from_status is BundleStatus.implemented_unreviewed
+                and not SqliteBackend._bundle_review_requires_replan(
+                    conn, payload.bundle_id, payload.creation_event_id
+                )
+                and not SqliteBackend._legacy_bundle_review_requires_replan(
+                    conn, payload.bundle_id, payload.creation_event_id
+                )
+            ):
+                return
+        active_claim = conn.execute(
+            "SELECT id, lease_expires_at, member_claim_ids FROM bundle_claims "
+            "WHERE bundle_id = ? AND status = 'active'",
+            (payload.bundle_id,),
+        ).fetchone()
+        if payload.to_status is BundleStatus.active:
+            coordinator = conn.execute(
+                "SELECT coordinator FROM execution_bundles WHERE id = ? "
+                "AND creation_event_id = ?",
+                (payload.bundle_id, payload.creation_event_id),
+            ).fetchone()
+            if (
+                coordinator is None
+                or event.actor != coordinator[0]
+                or active_claim is None
+                or datetime.datetime.fromisoformat(active_claim[1])
+                < event.timestamp.astimezone(datetime.UTC)
+            ):
+                return
+        if payload.to_status in {
+            BundleStatus.reviewed_unintegrated,
+            BundleStatus.replan_required,
+        } and payload.from_status is BundleStatus.implemented_unreviewed:
+            if active_claim is None or datetime.datetime.fromisoformat(
+                active_claim[1]
+            ) < event.timestamp.astimezone(datetime.UTC):
+                return
+        if payload.to_status is BundleStatus.implemented_unreviewed:
+            coordinator = conn.execute(
+                "SELECT coordinator FROM execution_bundles WHERE id = ? "
+                "AND creation_event_id = ?",
+                (payload.bundle_id, payload.creation_event_id),
+            ).fetchone()
+            if (
+                coordinator is None
+                or event.actor != coordinator[0]
+                or active_claim is None
+                or datetime.datetime.fromisoformat(active_claim[1])
+                < event.timestamp.astimezone(datetime.UTC)
+            ):
+                return
+            incomplete = conn.execute(
+                """SELECT m.task_id
+                     FROM execution_bundle_members m
+                     JOIN tasks t ON t.id = m.task_id
+                    WHERE m.bundle_id = ?
+                      AND (
+                        t.status NOT IN ('needs_review', 'accepted', 'done')
+                        OR NOT EXISTS (
+                            SELECT 1 FROM evidence e
+                             WHERE e.task_id = m.task_id
+                               AND e.category IN ('completion', 'promotion_quality')
+                        )
+                      )""",
+                (payload.bundle_id,),
+            ).fetchall()
+            if incomplete:
+                return
+            for task_id, expected_claim_id in json.loads(active_claim[2]).items():
+                evidence_row = conn.execute(
+                    "SELECT claim_id FROM evidence WHERE task_id = ? "
+                    "ORDER BY submitted_at DESC, id DESC LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if evidence_row is None or evidence_row[0] != expected_claim_id:
+                    return
+        if active_claim is not None and payload.bundle_claim_id != active_claim[0]:
+            return
+        disposition_event_id = (
+            event.id
+            if payload.to_status is BundleStatus.implemented_unreviewed
+            else None
+        )
+        last_result_at = (
+            payload.changed_at.isoformat()
+            if payload.to_status
+            in {
+                BundleStatus.reviewed_unintegrated,
+                BundleStatus.integrated,
+                BundleStatus.merged,
+                BundleStatus.completed,
+            }
+            else None
+        )
+        conn.execute(
+            "UPDATE execution_bundles SET status = ?, updated_at = ?, "
+            "review_disposition_event_id = COALESCE(?, review_disposition_event_id), "
+            "last_result_at = COALESCE(?, last_result_at) "
+            "WHERE id = ? AND creation_event_id = ? AND status = ? "
+            "AND updated_at <= ?",
+            (
+                payload.to_status,
+                payload.changed_at.isoformat(),
+                disposition_event_id,
+                last_result_at,
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.from_status,
+                payload.changed_at.isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_agent_observed(
+        conn: sqlite3.Connection,
+        payload: BundleAgentObservedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate observation ownership only; handle state never gates lifecycle."""
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected(
+                "bundle.agent_observed: event target must be bundle "
+                f"'{payload.bundle_id}', got {event.target_kind} '{event.target_id}'."
+            )
+        if not payload.metadata_only:
+            raise EventRejected(
+                "bundle.agent_observed: metadata_only=true is required for live append."
+            )
+        if payload.observation.observed_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected(
+                "bundle.agent_observed: observed_at must match event time."
+            )
+        row = conn.execute(
+            "SELECT creation_event_id, coordinator FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if row is None:
+            raise EventRejected(
+                f"bundle.agent_observed: bundle '{payload.bundle_id}' not found."
+            )
+        if row[0] != payload.creation_event_id:
+            raise EventRejected(
+                f"bundle.agent_observed: creation event does not match "
+                f"bundle '{payload.bundle_id}'."
+            )
+        if row[1] != event.actor:
+            raise EventRejected(
+                "bundle.agent_observed: only the coordinator may record observations."
+            )
+        member_rows = conn.execute(
+            "SELECT task_id FROM execution_bundle_members WHERE bundle_id = ?",
+            (payload.bundle_id,),
+        ).fetchall()
+        members = {row[0] for row in member_rows}
+        outside = [task_id for task_id in payload.observation.task_ids if task_id not in members]
+        if outside:
+            raise EventRejected(
+                f"bundle.agent_observed: observation references non-member tasks: {outside}."
+            )
+
+    @staticmethod
+    def _write_bundle_agent_observed(
+        conn: sqlite3.Connection,
+        payload: BundleAgentObservedPayload,
+        event: Event,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            return
+        row = conn.execute(
+            "SELECT delegated_agents, coordinator, updated_at FROM execution_bundles "
+            "WHERE id = ? AND creation_event_id = ?",
+            (payload.bundle_id, payload.creation_event_id),
+        ).fetchone()
+        if row is None:
+            return
+        legacy_generation = SqliteBackend._bundle_generation_is_legacy(
+            conn, payload.creation_event_id
+        )
+        if not payload.metadata_only and not legacy_generation:
+            return
+        if payload.metadata_only and (
+            row[1] != event.actor
+            or payload.observation.observed_at
+            != event.timestamp.astimezone(datetime.UTC)
+        ):
+            return
+        members = {
+            member[0]
+            for member in conn.execute(
+                "SELECT task_id FROM execution_bundle_members WHERE bundle_id = ?",
+                (payload.bundle_id,),
+            ).fetchall()
+        }
+        if any(task_id not in members for task_id in payload.observation.task_ids):
+            return
+        observations = json.loads(row[0] or "[]") if row is not None else []
+        new_observation = payload.observation.model_dump(mode="json")
+        previous = next(
+            (
+                item
+                for item in observations
+                if item.get("id") == payload.observation.id
+            ),
+            None,
+        )
+        if previous is not None:
+            previous_observed_at = datetime.datetime.fromisoformat(
+                previous["observed_at"]
+            )
+            if previous_observed_at >= payload.observation.observed_at:
+                return
+        observations = [
+            item for item in observations if item.get("id") != payload.observation.id
+        ]
+        observations.append(new_observation)
+        observations.sort(key=lambda item: item["id"])
+        projected_updated_at = datetime.datetime.fromisoformat(row[2])
+        if not payload.metadata_only:
+            projected_updated_at = max(projected_updated_at, event.timestamp)
+        conn.execute(
+            "UPDATE execution_bundles SET delegated_agents = ?, updated_at = ? "
+            "WHERE id = ? AND creation_event_id = ?",
+            (
+                json.dumps(observations, sort_keys=True),
+                projected_updated_at.isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_review_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleReviewRecordedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.review_recorded: event target mismatch.")
+        if event.actor != payload.reviewed_by:
+            raise EventRejected("bundle.review_recorded: event actor mismatch.")
+        if payload.created_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.review_recorded: created_at must match event time.")
+        if payload.disposition_event_id is None:
+            raise EventRejected(
+                "bundle.review_recorded: disposition_event_id is required for live append."
+            )
+        row = conn.execute(
+            "SELECT creation_event_id, coordinator, status, review_policy, "
+            "review_disposition_event_id, updated_at "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if row is None or row[0] != payload.creation_event_id:
+            raise EventRejected("bundle.review_recorded: bundle generation not found.")
+        if row[4] != payload.disposition_event_id:
+            raise EventRejected("bundle.review_recorded: stale review disposition.")
+        if row[2] != BundleStatus.implemented_unreviewed.value:
+            raise EventRejected(
+                "bundle.review_recorded: bundle must be implemented_unreviewed."
+            )
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if datetime.datetime.fromisoformat(row[5]) > event_time:
+            raise EventRejected("bundle.review_recorded: review predates bundle state.")
+        policy = BundleReviewPolicy.model_validate(json.loads(row[3]))
+        if payload.reviewed_by == row[1]:
+            raise EventRejected("bundle.review_recorded: coordinator cannot self-review.")
+        active_claim = conn.execute(
+            "SELECT lease_expires_at, created_at, last_heartbeat_at "
+            "FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
+            (payload.bundle_id,),
+        ).fetchone()
+        if (
+            active_claim is None
+            or datetime.datetime.fromisoformat(active_claim[0]) < event_time
+            or max(
+                datetime.datetime.fromisoformat(active_claim[1]),
+                datetime.datetime.fromisoformat(active_claim[2]),
+            )
+            > event_time
+        ):
+            raise EventRejected(
+                "bundle.review_recorded: active coordinator claim required."
+            )
+        if payload.review_round > policy.max_rereviews + 1:
+            raise EventRejected("bundle.review_recorded: re-review budget exhausted.")
+        if payload.decision is not ReviewDecision.approve and not (
+            payload.notes and payload.notes.strip()
+        ):
+            raise EventRejected("bundle.review_recorded: blocking verdict needs notes.")
+        existing_id = conn.execute(
+            "SELECT 1 FROM bundle_review_verdicts WHERE id = ?", (payload.id,)
+        ).fetchone()
+        if existing_id is not None:
+            raise EventRejected(f"bundle.review_recorded: id '{payload.id}' already exists.")
+        duplicate_reviewer = conn.execute(
+            "SELECT 1 FROM bundle_review_verdicts WHERE bundle_id = ? "
+            "AND creation_event_id = ? AND disposition_event_id = ? "
+            "AND review_round = ? AND reviewed_by = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.disposition_event_id,
+                payload.review_round,
+                payload.reviewed_by,
+            ),
+        ).fetchone()
+        if duplicate_reviewer is not None:
+            raise EventRejected(
+                "bundle.review_recorded: reviewer already submitted this round."
+            )
+        round_count = conn.execute(
+            "SELECT COUNT(*) FROM bundle_review_verdicts WHERE bundle_id = ? "
+            "AND creation_event_id = ? AND disposition_event_id = ? "
+            "AND review_round = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.disposition_event_id,
+                payload.review_round,
+            ),
+        ).fetchone()[0]
+        if round_count >= max(3, policy.max_reviews):
+            raise EventRejected("bundle.review_recorded: review cap reached.")
+        max_round = conn.execute(
+            "SELECT COALESCE(MAX(review_round), 0) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.disposition_event_id,
+            ),
+        ).fetchone()[0]
+        if payload.review_round > max_round + 1:
+            raise EventRejected("bundle.review_recorded: review rounds must be contiguous.")
+        if payload.review_round == max_round + 1 and max_round > 0 and not (
+            SqliteBackend._bundle_review_round_complete_with_blocker(
+                conn,
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.disposition_event_id,
+                max_round,
+                policy,
+                row[1],
+            )
+        ):
+            raise EventRejected(
+                "bundle.review_recorded: prior round is not a complete blocking quorum."
+            )
+
+    @staticmethod
+    def _check_bundle_checkpoint_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleCheckpointRecordedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.checkpoint_recorded: event target mismatch.")
+        if event.actor != payload.checkpoint.recorded_by:
+            raise EventRejected("bundle.checkpoint_recorded: event actor mismatch.")
+        if payload.checkpoint.recorded_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected(
+                "bundle.checkpoint_recorded: recorded_at must match event time."
+            )
+        row = conn.execute(
+            "SELECT creation_event_id, status, checkpoint, coordinator, updated_at "
+            "FROM execution_bundles "
+            "WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if row is None or row[0] != payload.creation_event_id:
+            raise EventRejected("bundle.checkpoint_recorded: bundle generation not found.")
+        if row[1] == BundleStatus.superseded.value:
+            raise EventRejected("bundle.checkpoint_recorded: bundle is superseded.")
+        if row[3] != payload.checkpoint.recorded_by:
+            raise EventRejected(
+                "bundle.checkpoint_recorded: only the coordinator may checkpoint."
+            )
+        if datetime.datetime.fromisoformat(row[4]) > event.timestamp.astimezone(
+            datetime.UTC
+        ):
+            raise EventRejected(
+                "bundle.checkpoint_recorded: checkpoint predates bundle state."
+            )
+        if row[2]:
+            existing = json.loads(row[2])
+            if (
+                existing.get("commit_sha") == payload.checkpoint.commit_sha
+                and existing.get("pr_url") == payload.checkpoint.pr_url
+            ):
+                raise IdempotentNoOp("bundle checkpoint is already recorded")
+
+    @staticmethod
+    def _write_bundle_checkpoint_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleCheckpointRecordedPayload,
+        event: Event,
+    ) -> None:
+        row = conn.execute(
+            "SELECT creation_event_id, status, updated_at, checkpoint, coordinator "
+            "FROM execution_bundles "
+            "WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.checkpoint.recorded_by
+            or payload.checkpoint.recorded_at != event_time
+            or row is None
+            or row[0] != payload.creation_event_id
+            or row[1] == BundleStatus.superseded.value
+            or row[4] != payload.checkpoint.recorded_by
+            or datetime.datetime.fromisoformat(row[2]) > event_time
+        ):
+            return
+        if row[3]:
+            existing = json.loads(row[3])
+            if (
+                existing.get("commit_sha") == payload.checkpoint.commit_sha
+                and existing.get("pr_url") == payload.checkpoint.pr_url
+            ):
+                return
+        conn.execute(
+            "UPDATE execution_bundles SET checkpoint = ?, updated_at = ? "
+            "WHERE id = ? AND creation_event_id = ?",
+            (
+                json.dumps(payload.checkpoint.model_dump(mode="json"), sort_keys=True),
+                event_time.isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_superseded(
+        conn: sqlite3.Connection,
+        payload: BundleSupersededPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.superseded: event target mismatch.")
+        if event.actor != payload.superseded_by_actor:
+            raise EventRejected("bundle.superseded: event actor mismatch.")
+        if payload.superseded_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.superseded: superseded_at must match event time.")
+        if payload.bundle_id == payload.replacement_bundle_id:
+            raise EventRejected("bundle.superseded: replacement must be another bundle.")
+        source = conn.execute(
+            "SELECT creation_event_id, prd_id, status, coordinator, updated_at "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        replacement = conn.execute(
+            "SELECT prd_id, status, superseded_by, created_at, updated_at "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.replacement_bundle_id,),
+        ).fetchone()
+        if source is None or source[0] != payload.creation_event_id:
+            raise EventRejected("bundle.superseded: source generation not found.")
+        if source[3] != payload.superseded_by_actor:
+            raise EventRejected("bundle.superseded: only the coordinator may supersede.")
+        if source[2] in {status.value for status in TERMINAL_BUNDLE_STATUSES}:
+            raise EventRejected("bundle.superseded: source is terminal.")
+        if datetime.datetime.fromisoformat(source[4]) > event.timestamp.astimezone(
+            datetime.UTC
+        ):
+            raise EventRejected("bundle.superseded: supersession predates source state.")
+        if replacement is None or replacement[0] != source[1]:
+            raise EventRejected("bundle.superseded: replacement must exist in the same PRD.")
+        if replacement[1] in {status.value for status in TERMINAL_BUNDLE_STATUSES}:
+            raise EventRejected("bundle.superseded: replacement is terminal.")
+        if max(
+            datetime.datetime.fromisoformat(replacement[3]),
+            datetime.datetime.fromisoformat(replacement[4]),
+        ) > event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.superseded: supersession predates replacement state.")
+
+    @staticmethod
+    def _write_bundle_superseded(
+        conn: sqlite3.Connection,
+        payload: BundleSupersededPayload,
+        event: Event,
+    ) -> None:
+        source = conn.execute(
+            "SELECT creation_event_id, prd_id, status, coordinator, updated_at "
+            "FROM execution_bundles "
+            "WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        replacement = conn.execute(
+            "SELECT prd_id, status, created_at, updated_at "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.replacement_bundle_id,),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.superseded_by_actor
+            or payload.superseded_at != event_time
+            or payload.bundle_id == payload.replacement_bundle_id
+            or source is None
+            or source[0] != payload.creation_event_id
+            or source[3] != payload.superseded_by_actor
+            or source[2] in {status.value for status in TERMINAL_BUNDLE_STATUSES}
+            or datetime.datetime.fromisoformat(source[4]) > event_time
+            or replacement is None
+            or replacement[0] != source[1]
+            or replacement[1] in {
+                status.value for status in TERMINAL_BUNDLE_STATUSES
+            }
+            or max(
+                datetime.datetime.fromisoformat(replacement[2]),
+                datetime.datetime.fromisoformat(replacement[3]),
+            )
+            > event_time
+        ):
+            return
+        active_claim = conn.execute(
+            "SELECT id FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
+            (payload.bundle_id,),
+        ).fetchone()
+        if active_claim is not None:
+            SqliteBackend._write_bundle_claim_terminal(
+                conn,
+                bundle_claim_id=active_claim[0],
+                bundle_id=payload.bundle_id,
+                terminal_status="released",
+                timestamp=event_time.isoformat(),
+                reason=f"superseded by {payload.replacement_bundle_id}",
+            )
+        # Reopen only when the latest evidence belongs to the source
+        # generation. A replacement may already have submitted newer evidence
+        # before the redirect is recorded; never rewind that replacement state.
+        conn.execute(
+            """UPDATE tasks SET status = 'ready', updated_at = ?
+                 WHERE status = 'needs_review'
+                   AND id IN (
+                       SELECT source.task_id
+                         FROM execution_bundle_members source
+                         JOIN execution_bundle_members replacement
+                           ON replacement.task_id = source.task_id
+                        WHERE source.bundle_id = ?
+                          AND replacement.bundle_id = ?
+                   )
+                   AND (
+                       SELECT c.bundle_claim_id
+                         FROM evidence e
+                         JOIN claims c ON c.id = e.claim_id
+                        WHERE e.task_id = tasks.id
+                        ORDER BY e.submitted_at DESC, e.id DESC
+                        LIMIT 1
+                   ) IN (
+                       SELECT id FROM bundle_claims WHERE bundle_id = ?
+                   )""",
+            (
+                event_time.isoformat(),
+                payload.bundle_id,
+                payload.replacement_bundle_id,
+                payload.bundle_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE execution_bundles SET status = 'superseded', superseded_by = ?, "
+            "updated_at = ? WHERE id = ? AND creation_event_id = ?",
+            (
+                payload.replacement_bundle_id,
+                event_time.isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_plan_acknowledged(
+        conn: sqlite3.Connection,
+        payload: BundlePlanAcknowledgedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "prd" or event.target_id != payload.prd_id:
+            raise EventRejected("bundle.plan_acknowledged: event target mismatch.")
+        if event.actor != payload.acknowledged_by:
+            raise EventRejected("bundle.plan_acknowledged: event actor mismatch.")
+        if payload.created_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected(
+                "bundle.plan_acknowledged: created_at must match event time."
+            )
+        if conn.execute(
+            "SELECT 1 FROM prds WHERE id = ?", (payload.prd_id,)
+        ).fetchone() is None:
+            raise EventRejected("bundle.plan_acknowledged: PRD not found.")
+
+    @staticmethod
+    def _write_legacy_bundle_review_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleReviewRecordedPayload,
+        event: Event,
+    ) -> None:
+        """Project a canonical v12 verdict under the exact v12 acceptance rules."""
+        if not SqliteBackend._bundle_generation_is_legacy(
+            conn, payload.creation_event_id
+        ):
+            return
+        row = conn.execute(
+            "SELECT creation_event_id, coordinator, status, review_policy "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.reviewed_by
+            or payload.created_at != event.timestamp.astimezone(datetime.UTC)
+            or row is None
+            or row[0] != payload.creation_event_id
+            or row[2] != BundleStatus.implemented_unreviewed.value
+        ):
+            return
+        try:
+            policy = BundleReviewPolicy.model_validate(json.loads(row[3]))
+        except (TypeError, ValueError):
+            return
+        if (
+            payload.reviewed_by == row[1]
+            or payload.review_round > policy.max_rereviews + 1
+            or (
+                payload.decision is not ReviewDecision.approve
+                and not (payload.notes and payload.notes.strip())
+            )
+        ):
+            return
+        active_claim = conn.execute(
+            "SELECT lease_expires_at FROM bundle_claims WHERE bundle_id = ? "
+            "AND status = 'active'",
+            (payload.bundle_id,),
+        ).fetchone()
+        if active_claim is None or datetime.datetime.fromisoformat(
+            active_claim[0]
+        ) < event.timestamp.astimezone(datetime.UTC):
+            return
+        max_round = conn.execute(
+            "SELECT COALESCE(MAX(review_round), 0) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = 'legacy-unbound'",
+            (payload.bundle_id, payload.creation_event_id),
+        ).fetchone()[0]
+        if payload.review_round > max_round + 1:
+            return
+        if payload.review_round == max_round + 1 and max_round > 0 and not (
+            SqliteBackend._bundle_review_round_complete_with_blocker(
+                conn,
+                payload.bundle_id,
+                payload.creation_event_id,
+                "legacy-unbound",
+                max_round,
+                policy,
+                row[1],
+            )
+        ):
+            return
+        duplicate = conn.execute(
+            "SELECT 1 FROM bundle_review_verdicts WHERE id = ? OR "
+            "(bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = 'legacy-unbound' "
+            "AND review_round = ? AND reviewed_by = ?)",
+            (
+                payload.id,
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.review_round,
+                payload.reviewed_by,
+            ),
+        ).fetchone()
+        if duplicate is not None:
+            return
+        round_count = conn.execute(
+            "SELECT COUNT(*) FROM bundle_review_verdicts WHERE bundle_id = ? "
+            "AND creation_event_id = ? AND disposition_event_id = 'legacy-unbound' "
+            "AND review_round = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.review_round,
+            ),
+        ).fetchone()[0]
+        if round_count >= max(3, policy.max_reviews):
+            return
+        conn.execute(
+            "INSERT INTO bundle_review_verdicts "
+            "(id, bundle_id, creation_event_id, disposition_event_id, "
+            "review_round, angle, reviewed_by, decision, notes, created_at) "
+            "VALUES (?, ?, ?, 'legacy-unbound', ?, ?, ?, ?, ?, ?)",
+            (
+                payload.id,
+                payload.bundle_id,
+                payload.creation_event_id,
+                payload.review_round,
+                payload.angle.strip().lower(),
+                payload.reviewed_by,
+                payload.decision.value,
+                payload.notes,
+                payload.created_at.isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _write_bundle_review_recorded(
+        conn: sqlite3.Connection,
+        payload: BundleReviewRecordedPayload,
+        event: Event,
+    ) -> None:
+        if payload.disposition_event_id is None:
+            SqliteBackend._write_legacy_bundle_review_recorded(conn, payload, event)
+            return
+        row = conn.execute(
+            "SELECT creation_event_id, coordinator, status, review_policy, "
+            "review_disposition_event_id, updated_at "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        disposition_event_id = payload.disposition_event_id or "legacy-unbound"
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.reviewed_by
+            or payload.created_at != event_time
+            or row is None
+            or row[0] != payload.creation_event_id
+            or (
+                payload.disposition_event_id is not None
+                and row[4] != payload.disposition_event_id
+            )
+            or row[2] != BundleStatus.implemented_unreviewed.value
+            or datetime.datetime.fromisoformat(row[5]) > event_time
+        ):
+            return
+        try:
+            policy = BundleReviewPolicy.model_validate(json.loads(row[3]))
+        except (TypeError, ValueError):
+            return
+        if (
+            payload.reviewed_by == row[1]
+            or payload.review_round > policy.max_rereviews + 1
+            or (
+                payload.decision is not ReviewDecision.approve
+                and not (payload.notes and payload.notes.strip())
+            )
+        ):
+            return
+        active_claim = conn.execute(
+            "SELECT lease_expires_at, created_at, last_heartbeat_at "
+            "FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
+            (payload.bundle_id,),
+        ).fetchone()
+        if (
+            active_claim is None
+            or datetime.datetime.fromisoformat(active_claim[0]) < event_time
+            or max(
+                datetime.datetime.fromisoformat(active_claim[1]),
+                datetime.datetime.fromisoformat(active_claim[2]),
+            )
+            > event_time
+        ):
+            return
+        max_round = conn.execute(
+            "SELECT COALESCE(MAX(review_round), 0) FROM bundle_review_verdicts "
+            "WHERE bundle_id = ? AND creation_event_id = ? "
+            "AND disposition_event_id = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                disposition_event_id,
+            ),
+        ).fetchone()[0]
+        if payload.review_round > max_round + 1:
+            return
+        if payload.review_round == max_round + 1 and max_round > 0 and not (
+            SqliteBackend._bundle_review_round_complete_with_blocker(
+                conn,
+                payload.bundle_id,
+                payload.creation_event_id,
+                disposition_event_id,
+                max_round,
+                policy,
+                row[1],
+            )
+        ):
+            return
+        duplicate = conn.execute(
+            "SELECT 1 FROM bundle_review_verdicts WHERE id = ? OR "
+            "(bundle_id = ? AND creation_event_id = ? AND disposition_event_id = ? "
+            "AND review_round = ? "
+            "AND reviewed_by = ?)",
+            (
+                payload.id,
+                payload.bundle_id,
+                payload.creation_event_id,
+                disposition_event_id,
+                payload.review_round,
+                payload.reviewed_by,
+            ),
+        ).fetchone()
+        if duplicate is not None:
+            return
+        round_count = conn.execute(
+            "SELECT COUNT(*) FROM bundle_review_verdicts WHERE bundle_id = ? "
+            "AND creation_event_id = ? AND disposition_event_id = ? "
+            "AND review_round = ?",
+            (
+                payload.bundle_id,
+                payload.creation_event_id,
+                disposition_event_id,
+                payload.review_round,
+            ),
+        ).fetchone()[0]
+        if round_count >= max(3, policy.max_reviews):
+            return
+        conn.execute(
+            "INSERT INTO bundle_review_verdicts "
+            "(id, bundle_id, creation_event_id, disposition_event_id, "
+            "review_round, angle, reviewed_by, decision, notes, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                payload.id,
+                payload.bundle_id,
+                payload.creation_event_id,
+                disposition_event_id,
+                payload.review_round,
+                payload.angle.strip().lower(),
+                payload.reviewed_by,
+                payload.decision.value,
+                payload.notes,
+                payload.created_at.isoformat(),
+            ),
+        )
+
+    def _check_bundle_claimed(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleClaimedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate the complete coordinator reservation on a fresh snapshot."""
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected(
+                f"bundle.claimed: event target must be bundle '{payload.bundle_id}'."
+            )
+        if event.actor != payload.claimed_by:
+            raise EventRejected("bundle.claimed: event actor must be the coordinator.")
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if payload.created_at != event_time or payload.last_heartbeat_at != event_time:
+            raise EventRejected(
+                "bundle.claimed: creation and heartbeat must match the event timestamp."
+            )
+        if payload.lease_expires_at <= event_time:
+            raise EventRejected("bundle.claimed: lease must expire in the future.")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT creation_event_id, coordinator, status, throughput_budget, "
+                "created_at, updated_at "
+                "FROM execution_bundles WHERE id = ?",
+                (payload.bundle_id,),
+            ).fetchone()
+            if row is None:
+                raise EventRejected(
+                    f"bundle.claimed: bundle '{payload.bundle_id}' not found."
+                )
+            if row[0] != payload.creation_event_id:
+                raise EventRejected("bundle.claimed: creation event does not match.")
+            if row[1] != payload.claimed_by:
+                raise EventRejected(
+                    f"bundle.claimed: coordinator is '{row[1]}', not "
+                    f"'{payload.claimed_by}'."
+                )
+            if row[2] != BundleStatus.planned.value:
+                raise EventRejected(
+                    f"bundle.claimed: bundle status is '{row[2]}', expected 'planned'."
+                )
+            if max(
+                datetime.datetime.fromisoformat(row[4]),
+                datetime.datetime.fromisoformat(row[5]),
+            ) > event_time:
+                raise EventRejected("bundle.claimed: claim predates bundle state.")
+            if conn.execute(
+                "SELECT 1 FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
+                (payload.bundle_id,),
+            ).fetchone():
+                raise EventRejected("bundle.claimed: bundle already has a claim.")
+            if conn.execute(
+                "SELECT 1 FROM bundle_claims WHERE id = ?", (payload.id,)
+            ).fetchone():
+                raise EventRejected(
+                    f"bundle.claimed: claim id '{payload.id}' already exists."
+                )
+            member_claim_ids = [member.id for member in payload.member_claims]
+            claim_placeholders = ",".join("?" for _ in member_claim_ids)
+            collided_ids = [
+                row[0]
+                for row in conn.execute(
+                    f"SELECT id FROM claims WHERE id IN ({claim_placeholders})",
+                    tuple(member_claim_ids),
+                ).fetchall()
+            ]
+            if collided_ids:
+                raise EventRejected(
+                    f"bundle.claimed: member claim ids already exist: {collided_ids}."
+                )
+
+            member_rows = conn.execute(
+                "SELECT m.task_id, t.status, t.dependencies, t.likely_files, "
+                "t.conflict_groups FROM execution_bundle_members m "
+                "JOIN tasks t ON t.id = m.task_id WHERE m.bundle_id = ? "
+                "ORDER BY m.position",
+                (payload.bundle_id,),
+            ).fetchall()
+            member_ids = [member[0] for member in member_rows]
+            supplied_ids = [member.task_id for member in payload.member_claims]
+            if supplied_ids != member_ids:
+                raise EventRejected(
+                    "bundle.claimed: member claims must match stored member order."
+                )
+            not_ready = [row[0] for row in member_rows if row[1] != "ready"]
+            if not_ready:
+                raise EventRejected(
+                    f"bundle.claimed: member tasks are not ready: {not_ready}."
+                )
+            graph = analyze_bundle_graph(
+                member_ids,
+                {member[0]: json.loads(member[2] or "[]") for member in member_rows},
+            )
+            if graph.dependency_cycle:
+                raise EventRejected(
+                    "bundle.claimed: member dependency cycle: "
+                    + " -> ".join(graph.dependency_cycle)
+                    + "."
+                )
+            throughput_budget = json.loads(row[3] or "{}")
+            max_tasks = int(throughput_budget.get("max_tasks", 12))
+            if len(member_ids) > max_tasks:
+                raise EventRejected(
+                    f"bundle.claimed: {len(member_ids)} members exceed "
+                    f"max_tasks {max_tasks}."
+                )
+            max_serial_stages = int(throughput_budget.get("max_serial_stages", 6))
+            if graph.critical_path_depth > max_serial_stages:
+                raise EventRejected(
+                    f"bundle.claimed: critical path {graph.critical_path_depth} "
+                    f"exceeds max_serial_stages {max_serial_stages}."
+                )
+
+            members = set(member_ids)
+            external_dependencies: list[str] = []
+            expected_files: list[str] = []
+            bundle_groups: set[str] = set()
+            for member in member_rows:
+                for dependency in json.loads(member[2] or "[]"):
+                    if dependency not in members and dependency not in external_dependencies:
+                        external_dependencies.append(dependency)
+                for file_path in json.loads(member[3] or "[]"):
+                    if file_path not in expected_files:
+                        expected_files.append(file_path)
+                bundle_groups.update(json.loads(member[4] or "[]"))
+            if payload.expected_files != expected_files:
+                raise EventRejected(
+                    "bundle.claimed: expected_files must equal the ordered member union."
+                )
+            if external_dependencies:
+                placeholders = ",".join("?" for _ in external_dependencies)
+                dep_rows = conn.execute(
+                    f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+                    tuple(external_dependencies),
+                ).fetchall()
+                dep_status = {dep[0]: dep[1] for dep in dep_rows}
+                blocked = [
+                    dep for dep in external_dependencies if dep_status.get(dep) != "done"
+                ]
+                if blocked:
+                    raise EventRejected(
+                        f"bundle.claimed: external dependencies are not done: {blocked}."
+                    )
+
+            active_rows = conn.execute(
+                "SELECT c.id, c.task_id, c.expected_files, t.conflict_groups "
+                "FROM claims c JOIN tasks t ON t.id = c.task_id "
+                "WHERE c.status = 'active' ORDER BY c.id"
+            ).fetchall()
+            conflicts: list[str] = []
+            expected_set = set(expected_files)
+            for active in active_rows:
+                overlap = sorted(expected_set & set(json.loads(active[2] or "[]")))
+                group_overlap = sorted(
+                    bundle_groups & set(json.loads(active[3] or "[]"))
+                )
+                if active[1] in members or overlap or group_overlap:
+                    conflicts.append(active[0])
+            if conflicts:
+                raise EventRejected(
+                    f"bundle.claimed: conflicts with active claims: {conflicts}."
+                )
+        finally:
+            conn.execute("COMMIT")
+
+    def _write_bundle_claimed(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleClaimedPayload,
+        event: Event,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            return
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.actor != payload.claimed_by
+            or payload.created_at != event_time
+            or payload.last_heartbeat_at != event_time
+            or payload.lease_expires_at <= event_time
+        ):
+            return
+        bundle_row = conn.execute(
+            "SELECT status, creation_event_id, throughput_budget, coordinator, "
+            "created_at, updated_at "
+            "FROM execution_bundles WHERE id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if (
+            bundle_row is None
+            or bundle_row[0] != "planned"
+            or bundle_row[1] != payload.creation_event_id
+            or bundle_row[3] != payload.claimed_by
+            or datetime.datetime.fromisoformat(bundle_row[4]) > event_time
+            or datetime.datetime.fromisoformat(bundle_row[5]) > event_time
+            or conn.execute(
+                "SELECT 1 FROM bundle_claims WHERE bundle_id = ? AND status = 'active'",
+                (payload.bundle_id,),
+            ).fetchone()
+        ):
+            return
+        member_ids = [member.task_id for member in payload.member_claims]
+        placeholders = ",".join("?" for _ in member_ids)
+        if conn.execute(
+            "SELECT 1 FROM bundle_claims WHERE id = ?", (payload.id,)
+        ).fetchone():
+            return
+        child_ids = [member.id for member in payload.member_claims]
+        child_placeholders = ",".join("?" for _ in child_ids)
+        if conn.execute(
+            f"SELECT 1 FROM claims WHERE id IN ({child_placeholders}) LIMIT 1",
+            tuple(child_ids),
+        ).fetchone():
+            return
+        replay_members = conn.execute(
+            "SELECT m.task_id, t.status, t.dependencies, t.likely_files, "
+            "t.conflict_groups FROM execution_bundle_members m "
+            "JOIN tasks t ON t.id = m.task_id WHERE m.bundle_id = ? "
+            "ORDER BY m.position",
+            (payload.bundle_id,),
+        ).fetchall()
+        if [row[0] for row in replay_members] != member_ids:
+            return
+        graph = analyze_bundle_graph(
+            member_ids,
+            {row[0]: json.loads(row[2] or "[]") for row in replay_members},
+        )
+        throughput_budget = json.loads(bundle_row[2] or "{}")
+        if (
+            len(member_ids) > int(throughput_budget.get("max_tasks", 12))
+            or graph.dependency_cycle
+            or graph.critical_path_depth
+            > int(throughput_budget.get("max_serial_stages", 6))
+        ):
+            return
+        expected_files: list[str] = []
+        external_dependencies: list[str] = []
+        bundle_groups: set[str] = set()
+        member_set = set(member_ids)
+        for replay_member in replay_members:
+            for dependency in json.loads(replay_member[2] or "[]"):
+                if dependency not in member_set and dependency not in external_dependencies:
+                    external_dependencies.append(dependency)
+            for path in json.loads(replay_member[3] or "[]"):
+                if path not in expected_files:
+                    expected_files.append(path)
+            bundle_groups.update(json.loads(replay_member[4] or "[]"))
+        if expected_files != payload.expected_files:
+            return
+        if external_dependencies:
+            dep_placeholders = ",".join("?" for _ in external_dependencies)
+            dep_rows = conn.execute(
+                f"SELECT id, status FROM tasks WHERE id IN ({dep_placeholders})",
+                tuple(external_dependencies),
+            ).fetchall()
+            dep_status = {row[0]: row[1] for row in dep_rows}
+            if any(dep_status.get(dep) != "done" for dep in external_dependencies):
+                return
+        expected_set = set(expected_files)
+        for active in conn.execute(
+            "SELECT c.task_id, c.expected_files, t.conflict_groups "
+            "FROM claims c JOIN tasks t ON t.id = c.task_id "
+            "WHERE c.status = 'active' ORDER BY c.id"
+        ).fetchall():
+            if (
+                active[0] in member_set
+                or expected_set.intersection(json.loads(active[1] or "[]"))
+                or bundle_groups.intersection(json.loads(active[2] or "[]"))
+            ):
+                return
+        if conn.execute(
+            f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) "
+            "AND status != 'ready' LIMIT 1",
+            tuple(member_ids),
+        ).fetchone() or conn.execute(
+            f"SELECT 1 FROM claims WHERE task_id IN ({placeholders}) "
+            "AND status = 'active' LIMIT 1",
+            tuple(member_ids),
+        ).fetchone():
+            return
+        member_claim_ids = {
+            member.task_id: member.id for member in payload.member_claims
+        }
+        conn.execute(
+            """INSERT INTO bundle_claims
+               (id, bundle_id, claimed_by, status, branch, worktree_path,
+                session_id, expected_files, member_claim_ids, created_at,
+                lease_expires_at, last_heartbeat_at, released_at, release_reason)
+               VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+            (
+                payload.id,
+                payload.bundle_id,
+                payload.claimed_by,
+                payload.branch,
+                payload.worktree_path,
+                payload.session_id,
+                json.dumps(payload.expected_files),
+                json.dumps(member_claim_ids, sort_keys=True),
+                payload.created_at.isoformat(),
+                payload.lease_expires_at.isoformat(),
+                payload.last_heartbeat_at.isoformat(),
+            ),
+        )
+        member_rows = conn.execute(
+            "SELECT m.task_id, t.likely_files FROM execution_bundle_members m "
+            "JOIN tasks t ON t.id = m.task_id WHERE m.bundle_id = ? "
+            "ORDER BY m.position",
+            (payload.bundle_id,),
+        ).fetchall()
+        claims_by_task = {member.task_id: member.id for member in payload.member_claims}
+        for task_id, likely_files_json in member_rows:
+            claim_id = claims_by_task[task_id]
+            conn.execute(
+                """INSERT INTO claims
+                   (id, task_id, claimed_by, claim_type, status, branch,
+                    worktree_path, session_id, bundle_claim_id, expected_files,
+                    created_at, lease_expires_at, last_heartbeat_at,
+                    released_at, release_reason)
+                   VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+                (
+                    claim_id,
+                    task_id,
+                    payload.claimed_by,
+                    payload.branch,
+                    payload.worktree_path,
+                    payload.session_id,
+                    payload.id,
+                    likely_files_json or "[]",
+                    payload.created_at.isoformat(),
+                    payload.lease_expires_at.isoformat(),
+                    payload.last_heartbeat_at.isoformat(),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO claim_replay_lineages "
+                "(claim_id, creation_fingerprint) VALUES (?, ?)",
+                (claim_id, f"bundle-child:{payload.id}:{task_id}"),
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'claimed', updated_at = ? "
+                "WHERE id = ? AND status = 'ready'",
+                (event.timestamp.astimezone(datetime.UTC).isoformat(), task_id),
+            )
+        conn.execute(
+            "UPDATE execution_bundles SET status = 'active', branch = ?, "
+            "worktree_path = ?, updated_at = ? WHERE id = ? "
+            "AND creation_event_id = ? AND status = 'planned'",
+            (
+                payload.branch,
+                payload.worktree_path,
+                event.timestamp.astimezone(datetime.UTC).isoformat(),
+                payload.bundle_id,
+                payload.creation_event_id,
+            ),
+        )
+
+    @staticmethod
+    def _check_bundle_progress_noted(
+        conn: sqlite3.Connection,
+        payload: BundleProgressNotedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.progress_noted: event target mismatch.")
+        if event.actor != payload.actor:
+            raise EventRejected("bundle.progress_noted: event actor mismatch.")
+        if payload.noted_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.progress_noted: noted_at must match event time.")
+        row = conn.execute(
+            "SELECT b.creation_event_id, b.status, c.id, c.claimed_by, c.status, "
+            "c.lease_expires_at "
+            "FROM execution_bundles b JOIN bundle_claims c ON c.bundle_id = b.id "
+            "WHERE b.id = ?",
+            (payload.bundle_id,),
+        ).fetchone()
+        if row is None:
+            raise EventRejected("bundle.progress_noted: active claim not found.")
+        if (
+            row[0] != payload.creation_event_id
+            or row[1] != "active"
+            or row[2] != payload.bundle_claim_id
+            or row[3] != payload.actor
+            or row[4] != "active"
+        ):
+            raise EventRejected("bundle.progress_noted: coordinator claim mismatch.")
+        if datetime.datetime.fromisoformat(row[5]) < event.timestamp.astimezone(
+            datetime.UTC
+        ):
+            raise EventRejected("bundle.progress_noted: coordinator lease has expired.")
+        members = {
+            member[0]
+            for member in conn.execute(
+                "SELECT task_id FROM execution_bundle_members WHERE bundle_id = ?",
+                (payload.bundle_id,),
+            ).fetchall()
+        }
+        outside = [task for task in payload.member_task_ids if task not in members]
+        if outside:
+            raise EventRejected(
+                f"bundle.progress_noted: non-member tasks referenced: {outside}."
+            )
+
+    @staticmethod
+    def _bundle_claim_lifecycle_row(
+        conn: sqlite3.Connection, bundle_claim_id: str, bundle_id: str
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT claimed_by, status, lease_expires_at, last_heartbeat_at "
+            "FROM bundle_claims WHERE id = ? AND bundle_id = ?",
+            (bundle_claim_id, bundle_id),
+        ).fetchone()
+
+    def _check_bundle_claim_renewed(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleClaimRenewedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.claim_renewed: event target mismatch.")
+        if event.actor != payload.renewed_by:
+            raise EventRejected("bundle.claim_renewed: event actor mismatch.")
+        row = self._bundle_claim_lifecycle_row(
+            conn, payload.bundle_claim_id, payload.bundle_id
+        )
+        if row is None or row[1] != "active":
+            raise EventRejected("bundle.claim_renewed: active claim not found.")
+        if row[0] != payload.renewed_by:
+            raise EventRejected("bundle.claim_renewed: only the coordinator may renew.")
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if payload.last_heartbeat_at != event_time:
+            raise EventRejected("bundle.claim_renewed: heartbeat must match event time.")
+        if datetime.datetime.fromisoformat(row[2]) < event_time:
+            raise EventRejected("bundle.claim_renewed: claim lease has expired.")
+        if datetime.datetime.fromisoformat(row[3]) >= event_time:
+            raise EventRejected("bundle.claim_renewed: heartbeat must move forward.")
+        if payload.lease_expires_at <= datetime.datetime.fromisoformat(row[2]):
+            raise EventRejected("bundle.claim_renewed: new expiry must extend the lease.")
+        if payload.lease_expires_at <= payload.last_heartbeat_at:
+            raise EventRejected("bundle.claim_renewed: expiry must follow heartbeat.")
+
+    @staticmethod
+    def _write_bundle_claim_renewed(
+        conn: sqlite3.Connection,
+        payload: BundleClaimRenewedPayload,
+        event: Event,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            return
+        row = conn.execute(
+            "SELECT claimed_by, lease_expires_at, last_heartbeat_at FROM bundle_claims "
+            "WHERE id = ? AND bundle_id = ? AND status = 'active'",
+            (payload.bundle_claim_id, payload.bundle_id),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            row is None
+            or event.actor != payload.renewed_by
+            or row[0] != payload.renewed_by
+            or payload.last_heartbeat_at != event_time
+            or datetime.datetime.fromisoformat(row[1]) < event_time
+            or datetime.datetime.fromisoformat(row[2]) >= event_time
+            or payload.lease_expires_at <= event_time
+            or payload.lease_expires_at <= datetime.datetime.fromisoformat(row[1])
+        ):
+            return
+        cursor = conn.execute(
+            "UPDATE bundle_claims SET lease_expires_at = ?, last_heartbeat_at = ? "
+            "WHERE id = ? AND bundle_id = ? AND status = 'active'",
+            (
+                payload.lease_expires_at.isoformat(),
+                payload.last_heartbeat_at.isoformat(),
+                payload.bundle_claim_id,
+                payload.bundle_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return
+        conn.execute(
+            "UPDATE claims SET lease_expires_at = ?, last_heartbeat_at = ? "
+            "WHERE bundle_claim_id = ? AND status = 'active'",
+            (
+                payload.lease_expires_at.isoformat(),
+                payload.last_heartbeat_at.isoformat(),
+                payload.bundle_claim_id,
+            ),
+        )
+
+    def _check_bundle_claim_released(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleClaimReleasedPayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.claim_released: event target mismatch.")
+        if event.actor != payload.released_by:
+            raise EventRejected("bundle.claim_released: event actor mismatch.")
+        row = conn.execute(
+            "SELECT c.claimed_by, c.status, c.created_at, c.last_heartbeat_at, "
+            "b.updated_at FROM bundle_claims c "
+            "JOIN execution_bundles b ON b.id = c.bundle_id "
+            "WHERE c.id = ? AND c.bundle_id = ?",
+            (payload.bundle_claim_id, payload.bundle_id),
+        ).fetchone()
+        if row is None or row[1] != "active":
+            raise EventRejected("bundle.claim_released: active claim not found.")
+        if not payload.force and row[0] != payload.released_by:
+            raise EventRejected("bundle.claim_released: only the coordinator may release.")
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if max(
+            datetime.datetime.fromisoformat(row[2]),
+            datetime.datetime.fromisoformat(row[3]),
+            datetime.datetime.fromisoformat(row[4]),
+        ) > event_time:
+            raise EventRejected("bundle.claim_released: release predates claim state.")
+
+    @staticmethod
+    def _write_bundle_claim_released(
+        conn: sqlite3.Connection,
+        payload: BundleClaimReleasedPayload,
+        event: Event,
+    ) -> None:
+        row = conn.execute(
+            "SELECT c.claimed_by, c.created_at, c.last_heartbeat_at, b.updated_at "
+            "FROM bundle_claims c JOIN execution_bundles b ON b.id = c.bundle_id "
+            "WHERE c.id = ? AND c.bundle_id = ? AND c.status = 'active'",
+            (payload.bundle_claim_id, payload.bundle_id),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.released_by
+            or row is None
+            or (not payload.force and row[0] != payload.released_by)
+            or max(
+                datetime.datetime.fromisoformat(row[1]),
+                datetime.datetime.fromisoformat(row[2]),
+                datetime.datetime.fromisoformat(row[3]),
+            )
+            > event_time
+        ):
+            return
+        SqliteBackend._write_bundle_claim_terminal(
+            conn,
+            bundle_claim_id=payload.bundle_claim_id,
+            bundle_id=payload.bundle_id,
+            terminal_status="force_released" if payload.force else "released",
+            timestamp=event_time.isoformat(),
+            reason=payload.release_reason,
+        )
+
+    def _check_bundle_claim_stale(
+        self,
+        conn: sqlite3.Connection,
+        payload: BundleClaimStalePayload,
+        event: EventDraft,
+    ) -> None:
+        if event.target_kind != "bundle" or event.target_id != payload.bundle_id:
+            raise EventRejected("bundle.claim_stale: event target mismatch.")
+        if event.actor != payload.actor:
+            raise EventRejected("bundle.claim_stale: event actor mismatch.")
+        if payload.detected_at != event.timestamp.astimezone(datetime.UTC):
+            raise EventRejected("bundle.claim_stale: detected_at must match event time.")
+        row = self._bundle_claim_lifecycle_row(
+            conn, payload.bundle_claim_id, payload.bundle_id
+        )
+        if row is None or row[1] != "active":
+            raise EventRejected("bundle.claim_stale: active claim not found.")
+        if datetime.datetime.fromisoformat(row[2]) >= payload.detected_at:
+            raise EventRejected("bundle.claim_stale: lease has not expired.")
+
+    @staticmethod
+    def _write_bundle_claim_stale(
+        conn: sqlite3.Connection,
+        payload: BundleClaimStalePayload,
+        event: Event,
+    ) -> None:
+        row = conn.execute(
+            "SELECT lease_expires_at FROM bundle_claims WHERE id = ? "
+            "AND bundle_id = ? AND status = 'active'",
+            (payload.bundle_claim_id, payload.bundle_id),
+        ).fetchone()
+        event_time = event.timestamp.astimezone(datetime.UTC)
+        if (
+            event.target_kind != "bundle"
+            or event.target_id != payload.bundle_id
+            or event.actor != payload.actor
+            or payload.detected_at != event_time
+            or row is None
+            or datetime.datetime.fromisoformat(row[0]) >= event_time
+        ):
+            return
+        SqliteBackend._write_bundle_claim_terminal(
+            conn,
+            bundle_claim_id=payload.bundle_claim_id,
+            bundle_id=payload.bundle_id,
+            terminal_status="stale",
+            timestamp=event_time.isoformat(),
+            reason="lease_expired",
+        )
+
+    @staticmethod
+    def _write_bundle_claim_terminal(
+        conn: sqlite3.Connection,
+        *,
+        bundle_claim_id: str,
+        bundle_id: str,
+        terminal_status: str,
+        timestamp: str,
+        reason: str | None,
+    ) -> None:
+        active_tasks = [
+            row[0]
+            for row in conn.execute(
+                "SELECT task_id FROM claims WHERE bundle_claim_id = ? "
+                "AND status = 'active' ORDER BY task_id",
+                (bundle_claim_id,),
+            ).fetchall()
+        ]
+        conn.execute(
+            "UPDATE bundle_claims SET status = ?, released_at = ?, "
+            "release_reason = ? WHERE id = ? AND bundle_id = ? AND status = 'active'",
+            (terminal_status, timestamp, reason, bundle_claim_id, bundle_id),
+        )
+        conn.execute(
+            "UPDATE claims SET status = ?, released_at = ?, release_reason = ? "
+            "WHERE bundle_claim_id = ? AND status = 'active'",
+            (terminal_status, timestamp, reason, bundle_claim_id),
+        )
+        for task_id in active_tasks:
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', updated_at = ? WHERE id = ? "
+                "AND status IN ('claimed', 'in_progress', 'blocked')",
+                (timestamp, task_id),
+            )
+        conn.execute(
+            "UPDATE execution_bundles SET status = 'replan_required', updated_at = ? "
+            "WHERE id = ? AND status = 'active'",
+            (timestamp, bundle_id),
+        )
+
+    @staticmethod
     def _normalize_task_payload(task_dict: dict[str, Any]) -> dict[str, Any]:
         """Coerce a minimal Task payload's None scores/verification to ``{}``.
 
@@ -3527,7 +6185,6 @@ class SqliteBackend:
         The payload was already validated by ``_check_task_created``; the
         ``model_validate`` here is an infallible rebuild.
         """
-        _ = event
         task_dict = self._normalize_task_payload(payload.model_dump(mode="json"))
         task = Task.model_validate(task_dict)
         self._insert_task_row(conn, task)
@@ -3801,11 +6458,16 @@ class SqliteBackend:
         evidence_count = conn.execute(
             "SELECT COUNT(*) FROM evidence WHERE task_id = ?", (task_id,)
         ).fetchone()[0]
-        if claim_count or evidence_count:
+        bundle_count = conn.execute(
+            "SELECT COUNT(*) FROM execution_bundle_members WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+        if claim_count or evidence_count or bundle_count:
             raise EventRejected(
                 f"task.deleted: cannot delete task '{task_id}' — it has "
                 f"{claim_count} claim row(s) and {evidence_count} evidence "
-                "row(s) that are FK-protected by schema. The audit history "
+                f"row(s), plus {bundle_count} bundle membership row(s), that "
+                "are FK-protected by schema. The audit history "
                 "intentionally outlives the task. Re-add the task to "
                 "prd.md if you want to preserve a working entry, or "
                 "accept that the orphan is conceptually dropped but its "
@@ -3999,6 +6661,34 @@ class SqliteBackend:
     # Phase 4 handlers — claim lifecycle
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _claim_creation_fingerprint(payload: ClaimCreatedPayload) -> str:
+        """Return a canonical identity for one immutable claim creation fact."""
+        return json.dumps(
+            payload.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _claim_replay_collision(conn: sqlite3.Connection, claim_id: str) -> bool:
+        row = conn.execute(
+            "SELECT collision_detected FROM claim_replay_lineages "
+            "WHERE claim_id = ?",
+            (claim_id,),
+        ).fetchone()
+        return row is not None and bool(row[0])
+
+    @classmethod
+    def _reject_claim_replay_collision(
+        cls, conn: sqlite3.Connection, claim_id: str, action: str
+    ) -> None:
+        if cls._claim_replay_collision(conn, claim_id):
+            raise EventRejected(
+                f"{action}: claim '{claim_id}' has divergent creation lineages; "
+                "descendant events are quarantined."
+            )
+
     def _check_claim_created(
         self,
         conn: sqlite3.Connection,
@@ -4034,7 +6724,11 @@ class SqliteBackend:
         defaults to False, but replay applies via ``_write_*`` only and never
         runs this check, so the default is irrelevant on the replay path.
         """
-        _ = event
+        if event.target_kind != "claim" or event.target_id != payload.id:
+            raise EventRejected(
+                "claim.created: event target must be claim "
+                f"'{payload.id}', got {event.target_kind} '{event.target_id}'."
+            )
         # WAL snapshot freshness (TOCTOU correctness). This check runs in the
         # append() validation phase, and the connection is in autocommit mode.
         # Earlier reads in THIS same claim command (get_task / get_prd /
@@ -4084,6 +6778,25 @@ class SqliteBackend:
                 f"'{payload.task_id}'. Expected status 'ready', got "
                 f"'{actual_status}'. Another claim may have already acquired "
                 "this task."
+            )
+
+        terminal = tuple(status.value for status in TERMINAL_BUNDLE_STATUSES)
+        placeholders = ",".join("?" for _ in terminal)
+        active_bundle = conn.execute(
+            f"""SELECT b.id
+                  FROM execution_bundle_members m
+                  JOIN execution_bundles b ON b.id = m.bundle_id
+                 WHERE m.task_id = ?
+                   AND b.status NOT IN ({placeholders})
+                 ORDER BY b.id
+                 LIMIT 1""",
+            (payload.task_id,) + terminal,
+        ).fetchone()
+        if active_bundle is not None:
+            raise EventRejected(
+                f"claim.created: task '{payload.task_id}' belongs to active "
+                f"execution bundle '{active_bundle[0]}'. Use the bundle "
+                "coordinator claim flow instead of an independent task claim."
             )
 
         # Replay / idempotent re-apply: if THIS claim id is already present we
@@ -4143,7 +6856,7 @@ class SqliteBackend:
             return
 
         rows = conn.execute(
-            "SELECT id, claimed_by, task_id, expected_files "
+            "SELECT id, claimed_by, task_id, expected_files, bundle_claim_id "
             "FROM claims WHERE status = 'active'"
         ).fetchall()
 
@@ -4155,7 +6868,8 @@ class SqliteBackend:
             # like the pre-claim check in ClaimManager.check_conflicts.
             if other_task_id == payload.task_id:
                 continue
-            if other_actor == payload.claimed_by:
+            other_bundle_claim_id = row[4]
+            if other_actor == payload.claimed_by and other_bundle_claim_id is None:
                 continue
             try:
                 other_files = set(json.loads(row[3] or "[]"))
@@ -4164,7 +6878,7 @@ class SqliteBackend:
             overlap = sorted(new_files & {str(f) for f in other_files})
             if not overlap:
                 continue
-            if payload.force:
+            if payload.force and other_bundle_claim_id is None:
                 logger.warning(
                     "Forced claim %r on task %r: in-transaction file overlap "
                     "with active claim %r by %r (files: %r) — overridden.",
@@ -4294,7 +7008,89 @@ class SqliteBackend:
         branch: str | None = payload.branch
         worktree_path: str | None = payload.worktree_path
         expected_files = payload.expected_files
-        timestamp: str = event.timestamp.isoformat()
+        timestamp: str = event.timestamp.astimezone(datetime.UTC).isoformat()
+
+        if event.target_kind != "claim" or event.target_id != claim_id:
+            return
+
+        # A claim ID identifies one immutable creation fact. Merged branches
+        # can independently reuse an ID for different tasks; the first
+        # HLC-ordered fact wins, and a losing duplicate must have no projection
+        # side effects on either its task or a competing bundle.
+        existing_claim = conn.execute(
+            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if existing_claim is not None:
+            fingerprint = self._claim_creation_fingerprint(payload)
+            lineage = conn.execute(
+                "SELECT creation_fingerprint FROM claim_replay_lineages "
+                "WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
+            if lineage is None:
+                conn.execute(
+                    "INSERT INTO claim_replay_lineages "
+                    "(claim_id, creation_fingerprint) VALUES (?, ?)",
+                    (claim_id, fingerprint),
+                )
+            elif lineage[0] != fingerprint:
+                conn.execute(
+                    "UPDATE claim_replay_lineages SET collision_detected = 1 "
+                    "WHERE claim_id = ?",
+                    (claim_id,),
+                )
+            return
+
+        # Replay is write-only. Preserve first-writer exclusion when a prior
+        # standalone or internal bundle authorization already owns this task;
+        # losing claim descendants fail closed because their claim row is absent.
+        if conn.execute(
+            "SELECT 1 FROM claims WHERE task_id = ? AND status = 'active' "
+            "AND bundle_claim_id IS NOT NULL LIMIT 1",
+            (task_id,),
+        ).fetchone():
+            return
+        incoming_files = set(payload.expected_files or [])
+        task_group_row = conn.execute(
+            "SELECT conflict_groups FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        incoming_groups = set(
+            json.loads(task_group_row[0] or "[]") if task_group_row else []
+        )
+        for bundle_child in conn.execute(
+            "SELECT c.expected_files, t.conflict_groups FROM claims c "
+            "JOIN tasks t ON t.id = c.task_id WHERE c.status = 'active' "
+            "AND c.bundle_claim_id IS NOT NULL"
+        ).fetchall():
+            if incoming_files.intersection(json.loads(bundle_child[0] or "[]")):
+                return
+            if incoming_groups.intersection(json.loads(bundle_child[1] or "[]")):
+                return
+
+        terminal = tuple(bundle_status.value for bundle_status in TERMINAL_BUNDLE_STATUSES)
+        terminal_placeholders = ",".join("?" for _ in terminal)
+        # Git branches can independently create a bundle and claim one of its
+        # tasks. The claim may already have evidence/review descendants, so
+        # dropping it would poison replay on those FKs. Deterministically let
+        # the complete claim lineage win in merged history: retire competing
+        # bundles, then project the claim normally. Live append still rejects
+        # this ordering in _validate_claim_created_locked.
+        conn.execute(
+            f"""UPDATE execution_bundles
+                   SET status = 'superseded',
+                       updated_at = CASE
+                           WHEN updated_at < ? THEN ?
+                           ELSE updated_at
+                       END
+                 WHERE id IN (
+                    SELECT b.id
+                      FROM execution_bundle_members m
+                      JOIN execution_bundles b ON b.id = m.bundle_id
+                     WHERE m.task_id = ?
+                       AND b.status NOT IN ({terminal_placeholders})
+                 )""",
+            (timestamp, timestamp, task_id) + terminal,
+        )
 
         # INSERT OR IGNORE: idempotent on replay — duplicate claim.created events
         # (after crash mid-transaction) do not produce duplicate rows.
@@ -4321,6 +7117,11 @@ class SqliteBackend:
                 lease_expires_at,
                 last_heartbeat_at,
             ),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO claim_replay_lineages "
+            "(claim_id, creation_fingerprint) VALUES (?, ?)",
+            (claim_id, self._claim_creation_fingerprint(payload)),
         )
 
         # Side-effect: transition the task status from 'ready' → 'claimed'.
@@ -4368,11 +7169,17 @@ class SqliteBackend:
         """
         _ = event
         claim_id: str = payload.claim_id
+        self._reject_claim_replay_collision(conn, claim_id, "claim.released")
         row = conn.execute(
-            "SELECT status FROM claims WHERE id = ?", (claim_id,)
+            "SELECT status, bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if row is None:
             raise EventRejected(f"claim.released: claim '{claim_id}' not found.")
+        if row[1] is not None:
+            raise EventRejected(
+                "claim.released: bundle member authorizations are managed by "
+                "their coordinator claim."
+            )
         current_status = row[0]
         if payload.force:
             guard_matches = current_status not in ("released", "force_released")
@@ -4407,6 +7214,13 @@ class SqliteBackend:
         advanced).
         """
         claim_id: str = payload.claim_id
+        child_row = conn.execute(
+            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if child_row is not None and child_row[0] is not None:
+            return
+        if self._claim_replay_collision(conn, claim_id):
+            return
         release_reason: str | None = payload.release_reason
         force: bool = payload.force
         timestamp: str = event.timestamp.isoformat()
@@ -4462,11 +7276,16 @@ class SqliteBackend:
         """
         _ = event
         claim_id: str = payload.claim_id
+        self._reject_claim_replay_collision(conn, claim_id, "claim.renewed")
         row = conn.execute(
-            "SELECT status FROM claims WHERE id = ?", (claim_id,)
+            "SELECT status, bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if row is None:
             raise EventRejected(f"claim.renewed: claim '{claim_id}' not found.")
+        if row[1] is not None:
+            raise EventRejected(
+                "claim.renewed: renew the public bundle coordinator claim instead."
+            )
         actual_status = row[0]
         if actual_status != "active":
             raise EventRejected(
@@ -4495,8 +7314,15 @@ class SqliteBackend:
         The event-level timestamp is not used here — the renewed lease timestamps
         come from the payload itself.
         """
-        _ = event
         claim_id: str = payload.claim_id
+        child_row = conn.execute(
+            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if child_row is not None and child_row[0] is not None:
+            return
+        if self._claim_replay_collision(conn, claim_id):
+            return
+        _ = event
         lease_expires_at: str = payload.lease_expires_at
         last_heartbeat_at: str = payload.last_heartbeat_at
 
@@ -4527,11 +7353,16 @@ class SqliteBackend:
         """
         _ = event
         claim_id: str = payload.claim_id
+        self._reject_claim_replay_collision(conn, claim_id, "claim.stale")
         row = conn.execute(
-            "SELECT status FROM claims WHERE id = ?", (claim_id,)
+            "SELECT status, bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if row is None:
             raise EventRejected(f"claim.stale: claim '{claim_id}' not found.")
+        if row[1] is not None:
+            raise EventRejected(
+                "claim.stale: reap the public bundle coordinator claim instead."
+            )
         current_status = row[0]
         if current_status != "active":
             raise _idempotent_no_op(
@@ -4563,6 +7394,13 @@ class SqliteBackend:
         UPDATE is a no-op — that is intentional and not an error.
         """
         claim_id: str = payload.claim_id
+        child_row = conn.execute(
+            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if child_row is not None and child_row[0] is not None:
+            return
+        if self._claim_replay_collision(conn, claim_id):
+            return
         timestamp: str = event.timestamp.isoformat()
 
         conn.execute(
@@ -4638,6 +7476,30 @@ class SqliteBackend:
         evidence_id: str = payload.evidence_id
         task_id: str = payload.task_id
 
+        claim_row = conn.execute(
+            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if claim_row is None:
+            raise EventRejected(
+                f"evidence.submitted: claim '{claim_id}' not found."
+            )
+        if claim_row[0] != task_id:
+            raise EventRejected(
+                f"evidence.submitted: claim '{claim_id}' belongs to task "
+                f"'{claim_row[0]}', not '{task_id}'."
+            )
+        active_bundle_child = conn.execute(
+            "SELECT id FROM claims WHERE task_id = ? AND status = 'active' "
+            "AND bundle_claim_id IS NOT NULL",
+            (task_id,),
+        ).fetchone()
+        if active_bundle_child is not None and active_bundle_child[0] != claim_id:
+            raise EventRejected(
+                "evidence.submitted: task is owned by a bundle member claim; "
+                f"expected '{active_bundle_child[0]}'."
+            )
+        self._reject_claim_replay_collision(conn, claim_id, "evidence.submitted")
+
         # CL-8 idempotency guard: a second submit under a DIFFERENT evidence_id
         # is a double-submit; the old handler emitted a warn line and returned.
         existing_row = conn.execute(
@@ -4709,6 +7571,15 @@ class SqliteBackend:
         """
         task_id: str = payload.task_id
         claim_id: str = payload.claim_id
+        claim_row = conn.execute(
+            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if (
+            claim_row is None
+            or claim_row[0] != task_id
+            or self._claim_replay_collision(conn, claim_id)
+        ):
+            return
         submitted_by: str = payload.submitted_by
         evidence_id: str = payload.evidence_id
         commands_run: list[Any] = payload.commands_run
@@ -5368,6 +8239,34 @@ class SqliteBackend:
             if isinstance(d.get(col), str):
                 d[col] = json.loads(d[col])
         return Task.model_validate(d)
+
+    @staticmethod
+    def _row_to_bundle(row: Any, conn: sqlite3.Connection) -> ExecutionBundle:
+        """Deserialise a bundle row plus normalized, position-ordered members."""
+        d = dict(row)
+        member_rows = conn.execute(
+            "SELECT task_id FROM execution_bundle_members "
+            "WHERE bundle_id = ? ORDER BY position",
+            (d["id"],),
+        ).fetchall()
+        d["task_ids"] = [member[0] for member in member_rows]
+        for column in (
+            "review_policy",
+            "throughput_budget",
+            "delegated_agents",
+            "checkpoint",
+        ):
+            if isinstance(d.get(column), str):
+                d[column] = json.loads(d[column])
+        return ExecutionBundle.model_validate(d)
+
+    @staticmethod
+    def _row_to_bundle_claim(row: Any) -> BundleClaim:
+        d = dict(row)
+        for column in ("expected_files", "member_claim_ids"):
+            if isinstance(d.get(column), str):
+                d[column] = json.loads(d[column])
+        return BundleClaim.model_validate(d)
 
     def _row_to_claim(self, row: Any) -> Claim:
         """Deserialise a claims row into a Claim model instance."""

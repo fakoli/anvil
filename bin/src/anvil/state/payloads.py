@@ -18,11 +18,23 @@ Constraining them here would duplicate that validation.
 
 from __future__ import annotations
 
+import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from anvil.state.models import DEFAULT_PRD_ID, EvidenceCategory, ProofArtifact
+from anvil.state.models import (
+    DEFAULT_PRD_ID,
+    BundleCheckpoint,
+    BundleReviewPolicy,
+    BundleReviewVerdict,
+    BundleStatus,
+    BundleThroughputBudget,
+    DelegatedAgentObservation,
+    EvidenceCategory,
+    ProofArtifact,
+    ReviewDecision,
+)
 
 
 class ProjectCreatedPayload(BaseModel):
@@ -320,6 +332,358 @@ class ConflictGroupUpsertedPayload(BaseModel):
     reason: str = ""
 
 
+class BundleCreatedPayload(BaseModel):
+    """Complete canonical fact for ``bundle.created`` replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    schema_version: int | None = None
+    prd_id: str
+    task_ids: list[str]
+    coordinator: str
+    status: BundleStatus = BundleStatus.planned
+    branch: str | None = None
+    worktree_path: str | None = None
+    review_policy: BundleReviewPolicy = Field(default_factory=BundleReviewPolicy)
+    throughput_budget: BundleThroughputBudget = Field(
+        default_factory=BundleThroughputBudget
+    )
+    delegated_agents: list[DelegatedAgentObservation] = Field(default_factory=list)
+    checkpoint: BundleCheckpoint | None = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+    @field_validator("created_at", "updated_at", mode="after")
+    @classmethod
+    def _validate_utc(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle timestamps must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+    @field_validator("task_ids")
+    @classmethod
+    def _validate_members(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("bundle requires at least one task")
+        if len(value) != len(set(value)):
+            raise ValueError("bundle task_ids must be unique")
+        return value
+
+
+class BundleStatusChangedPayload(BaseModel):
+    """Payload for an explicit coordinator-level lifecycle transition."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    bundle_id: str
+    schema_version: int | None = None
+    creation_event_id: str
+    bundle_claim_id: str | None = None
+    from_status: BundleStatus = Field(alias="from")
+    to_status: BundleStatus = Field(alias="to")
+    changed_at: datetime.datetime
+    reason: str | None = None
+
+    @field_validator("changed_at", mode="after")
+    @classmethod
+    def _validate_changed_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("changed_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
+class BundleAgentObservedPayload(BaseModel):
+    """Payload for optional delegated-agent metadata; never a lifecycle gate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    observation: DelegatedAgentObservation
+    # V12 events omitted this marker and advanced bundle.updated_at. Modern
+    # metadata-only events set it true so observations cannot gate lifecycle.
+    metadata_only: bool = False
+
+
+class BundleReviewRecordedPayload(BaseModel):
+    """Canonical adversarial verdict recorded against one bundle generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    bundle_id: str
+    creation_event_id: str
+    # Absent only in canonical v12 logs. Live v13+ appends reject None; replay
+    # maps it to the history-preserving ``legacy-unbound`` lineage.
+    disposition_event_id: str | None = None
+    review_round: int = Field(ge=1)
+    angle: str
+    reviewed_by: str
+    decision: ReviewDecision
+    notes: str | None = None
+    created_at: datetime.datetime
+
+    @field_validator(
+        "id",
+        "bundle_id",
+        "creation_event_id",
+        "angle",
+        "reviewed_by",
+    )
+    @classmethod
+    def _validate_review_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle review identity fields must not be blank")
+        return value
+
+    @field_validator("disposition_event_id")
+    @classmethod
+    def _validate_optional_disposition(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("bundle review disposition identity must not be blank")
+        return value
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _validate_review_time(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle review timestamp must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+    def to_model(self) -> BundleReviewVerdict:
+        data = self.model_dump(mode="json")
+        data["disposition_event_id"] = (
+            self.disposition_event_id or "legacy-unbound"
+        )
+        return BundleReviewVerdict.model_validate(data)
+
+
+class BundlePlanAcknowledgedPayload(BaseModel):
+    """Audited operator acceptance of an oversized proposed execution wave."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prd_id: str
+    breaches: list[str] = Field(min_length=1)
+    acknowledged_by: str
+    created_at: datetime.datetime
+
+    @field_validator("prd_id", "acknowledged_by")
+    @classmethod
+    def _validate_ack_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle plan acknowledgement identity must not be blank")
+        return value
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def _validate_ack_time(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle plan acknowledgement time must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
+class BundleCheckpointRecordedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    checkpoint: BundleCheckpoint
+
+
+class BundleSupersededPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    replacement_bundle_id: str
+    superseded_by_actor: str
+    superseded_at: datetime.datetime
+
+    @field_validator(
+        "bundle_id",
+        "creation_event_id",
+        "replacement_bundle_id",
+        "superseded_by_actor",
+    )
+    @classmethod
+    def _validate_supersession_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle supersession identity must not be blank")
+        return value
+
+    @field_validator("superseded_at", mode="after")
+    @classmethod
+    def _validate_superseded_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("superseded_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
+class BundleMemberClaimPayload(BaseModel):
+    """One internal task authorization under a public bundle claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    task_id: str
+
+
+class BundleClaimedPayload(BaseModel):
+    """Atomic coordinator claim plus all member evidence authorizations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    creation_event_id: str = Field(min_length=1)
+    claimed_by: str = Field(min_length=1)
+    branch: str | None = None
+    worktree_path: str | None = None
+    session_id: str | None = None
+    expected_files: list[str] = Field(default_factory=list)
+    member_claims: list[BundleMemberClaimPayload]
+    created_at: datetime.datetime
+    lease_expires_at: datetime.datetime
+    last_heartbeat_at: datetime.datetime
+
+    @field_validator("id", "bundle_id", "creation_event_id", "claimed_by")
+    @classmethod
+    def _validate_nonblank_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle claim identity fields must not be blank")
+        return value
+
+    @field_validator("created_at", "lease_expires_at", "last_heartbeat_at")
+    @classmethod
+    def _validate_timestamps(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle claim timestamps must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+    @model_validator(mode="after")
+    def _validate_member_claims(self) -> BundleClaimedPayload:
+        if not self.member_claims:
+            raise ValueError("bundle claim requires member claims")
+        ids = [member.id for member in self.member_claims]
+        tasks = [member.task_id for member in self.member_claims]
+        if len(ids) != len(set(ids)) or len(tasks) != len(set(tasks)):
+            raise ValueError("bundle member claim ids and task ids must be unique")
+        pairs = zip(ids, tasks, strict=True)
+        if not all(member_id.strip() and task_id.strip() for member_id, task_id in pairs):
+            raise ValueError("bundle member claim ids and task ids must not be blank")
+        if not (
+            self.created_at <= self.last_heartbeat_at <= self.lease_expires_at
+        ):
+            raise ValueError(
+                "bundle claim timestamps require created_at <= heartbeat <= expiry"
+            )
+        return self
+
+
+class BundleProgressNotedPayload(BaseModel):
+    """Audit-only coordinator progress for an active bundle claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str
+    creation_event_id: str
+    bundle_claim_id: str
+    actor: str = Field(min_length=1)
+    phase: str = Field(min_length=1)
+    detail: str | None = None
+    member_task_ids: list[str] = Field(default_factory=list)
+    noted_at: datetime.datetime
+
+    @field_validator(
+        "bundle_id", "creation_event_id", "bundle_claim_id", "actor", "phase"
+    )
+    @classmethod
+    def _validate_nonblank_progress(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle progress identity and phase must not be blank")
+        return value
+
+    @field_validator("noted_at")
+    @classmethod
+    def _validate_noted_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("noted_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+    @field_validator("member_task_ids")
+    @classmethod
+    def _validate_members_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("member_task_ids must be unique")
+        return value
+
+
+class BundleClaimRenewedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_claim_id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    renewed_by: str = Field(min_length=1)
+    lease_expires_at: datetime.datetime
+    last_heartbeat_at: datetime.datetime
+
+    @field_validator("bundle_claim_id", "bundle_id", "renewed_by")
+    @classmethod
+    def _validate_nonblank_renewal(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle renewal identity must not be blank")
+        return value
+
+    @field_validator("lease_expires_at", "last_heartbeat_at")
+    @classmethod
+    def _validate_renewed_times(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("bundle renewal timestamps must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
+class BundleClaimReleasedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_claim_id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    released_by: str = Field(min_length=1)
+    release_reason: str | None = None
+    force: bool = False
+
+    @field_validator("bundle_claim_id", "bundle_id", "released_by")
+    @classmethod
+    def _validate_nonblank_release(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle release identity must not be blank")
+        return value
+
+
+class BundleClaimStalePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_claim_id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    detected_at: datetime.datetime
+    actor: str = Field(min_length=1)
+
+    @field_validator("bundle_claim_id", "bundle_id", "actor")
+    @classmethod
+    def _validate_nonblank_stale(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bundle stale identity must not be blank")
+        return value
+
+    @field_validator("detected_at")
+    @classmethod
+    def _validate_detected_at(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("detected_at must be timezone-aware")
+        return value.astimezone(datetime.UTC)
+
+
 class ClaimCreatedPayload(BaseModel):
     """Payload for 'claim.created'."""
 
@@ -327,6 +691,7 @@ class ClaimCreatedPayload(BaseModel):
 
     id: str
     task_id: str
+    bundle_claim_id: str | None = None
     claimed_by: str
     claim_type: str
     status: str
@@ -935,6 +1300,19 @@ ACTION_TO_PAYLOAD: dict[str, type[BaseModel]] = {
 
 __all__ = [
     "ACTION_TO_PAYLOAD",
+    "BundleAgentObservedPayload",
+    "BundleClaimedPayload",
+    "BundleClaimReleasedPayload",
+    "BundleClaimRenewedPayload",
+    "BundleClaimStalePayload",
+    "BundleCreatedPayload",
+    "BundleMemberClaimPayload",
+    "BundleProgressNotedPayload",
+    "BundlePlanAcknowledgedPayload",
+    "BundleCheckpointRecordedPayload",
+    "BundleSupersededPayload",
+    "BundleReviewRecordedPayload",
+    "BundleStatusChangedPayload",
     "ClaimCreatedPayload",
     "ClaimReleasedPayload",
     "ClaimRenewedPayload",

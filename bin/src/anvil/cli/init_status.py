@@ -23,7 +23,7 @@ from anvil.cli._helpers import (
     resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
-from anvil.state.rollup import compute_prd_rollup
+from anvil.state.rollup import compute_bundle_rollup, compute_prd_rollup
 
 if TYPE_CHECKING:
     from anvil.state.sqlite import SqliteBackend
@@ -454,11 +454,13 @@ def status(
             if status_prd
             else None
         )
+        project_active_claims = backend.list_active_claims()
+        project_tasks = backend.list_tasks()
         if scoped_prd_id is None:
             prd_model = backend.get_prd()
             prds = backend.list_prds()
-            all_tasks = backend.list_tasks()
-            active_claims = backend.list_active_claims()
+            all_tasks = project_tasks
+            active_claims = project_active_claims
         else:
             prd_model = backend.get_prd(scoped_prd_id)
             prds = [prd_model] if prd_model is not None else []
@@ -466,7 +468,7 @@ def status(
             scoped_task_ids = {task.id for task in all_tasks}
             active_claims = [
                 claim
-                for claim in backend.list_active_claims()
+                for claim in project_active_claims
                 if claim.task_id in scoped_task_ids
             ]
 
@@ -510,6 +512,26 @@ def status(
                     ),
                 }
             )
+        bundles = backend.list_bundles(prd_id=scoped_prd_id)
+        bundle_ids = {bundle.id for bundle in bundles}
+        bundle_claims = [
+            claim
+            for claim in backend.list_bundle_claims()
+            if claim.bundle_id in bundle_ids
+        ]
+        bundle_reviews = [
+            review
+            for bundle in bundles
+            for review in backend.list_bundle_reviews(bundle.id)
+        ]
+        bundle_rollup = compute_bundle_rollup(
+            bundles,
+            project_tasks,
+            bundle_claims,
+            bundle_reviews,
+            project_active_claims,
+            now=_now,
+        )
     finally:
         backend.close()
 
@@ -557,6 +579,11 @@ def status(
                 # plus the version stamped on this DB for drift detection.
                 "schema_version": schema_version,
                 "db_schema_version": db_schema_version,
+                **(
+                    {"bundles": [dump_model(entry) for entry in bundle_rollup]}
+                    if bundle_rollup
+                    else {}
+                ),
             },
         )
         return
@@ -621,6 +648,56 @@ def status(
             f"{entry.task_counts.get('done', 0)} done)"
         )
         typer.echo(f"  Active claims: {entry.active_claim_count}")
+
+    for bundle in bundle_rollup:
+        typer.echo("")
+        typer.echo(
+            f"Bundle {bundle.bundle_id} ({bundle.status}) coordinator={bundle.coordinator}"
+        )
+        typer.echo(
+            f"  Members: {bundle.member_counts}; critical-path "
+            f"{bundle.critical_path_stage}/{bundle.critical_path_depth}"
+        )
+        typer.echo(
+            f"  Review: round={bundle.review_usage.get('round', 0)} "
+            f"reviews={bundle.review_usage.get('reviews', 0)} "
+            f"rereviews={bundle.review_usage.get('rereviews', 0)}"
+        )
+        if bundle.coordinator_claim is not None:
+            typer.echo(
+                f"  Claim: {bundle.coordinator_claim['id']} "
+                f"({bundle.coordinator_claim['status']})"
+            )
+        for agent in bundle.delegated_agents:
+            typer.echo(
+                f"  Agent: {agent['id']} status={agent['status']} "
+                f"handle={agent.get('handle') or '-'}"
+            )
+        if bundle.last_result_at is not None:
+            typer.echo(
+                f"  Last result: {bundle.last_result_at.isoformat()} "
+                f"elapsed={bundle.elapsed_since_result_seconds}s"
+            )
+        if bundle.checkpoint is not None:
+            typer.echo(f"  Checkpoint: {bundle.checkpoint}")
+        if bundle.checkpoint_warning:
+            typer.echo(f"  Warning: {bundle.checkpoint_warning}")
+        if bundle.superseded_by:
+            typer.echo(f"  Superseded by: {bundle.superseded_by}")
+        typer.echo(
+            "  Throughput: "
+            f"tasks={bundle.throughput.get('tasks', 0)}/"
+            f"{bundle.throughput.get('max_tasks', 0)} serial-stages="
+            f"{bundle.throughput.get('serial_stages', 0)}/"
+            f"{bundle.throughput.get('max_serial_stages', 0)}"
+        )
+        if bundle.claimable:
+            typer.echo("  Claimability: ready (`anvil next --bundle`)")
+        for refusal in bundle.refusals:
+            typer.echo(
+                f"  Refusal [{refusal['code']}]: {refusal['detail']} "
+                f"Remediation: {refusal['remediation']}"
+            )
 
     typer.echo("")
     typer.echo("PROJECT TOTAL")

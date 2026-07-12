@@ -26,6 +26,7 @@ from anvil.cli._helpers import (
     canonical_prd_id,
     display_path,
     prd_source_path,
+    resolve_actor,
     resolve_prd_id,
 )
 from anvil.cli._json import (
@@ -34,6 +35,7 @@ from anvil.cli._json import (
     dump_models,
     emit_success,
     fail,
+    fail_with,
 )
 from anvil.state.backend import EventRejected
 from anvil.state.models import TERMINAL_TASK_STATUSES
@@ -41,7 +43,7 @@ from anvil.state.rollup import PrdRollupEntry, compute_prd_rollup
 
 if TYPE_CHECKING:
     from anvil.config import Config
-    from anvil.planning.inference import SubtaskProposal
+    from anvil.planning.inference import BundlePlanReport, SubtaskProposal
     from anvil.planning.llm import LLMProvider
     from anvil.planning.scoring import ExpansionCandidate
 
@@ -193,6 +195,38 @@ review_app = typer.Typer(
 )
 
 
+def _render_bundle_plan(report: BundlePlanReport) -> None:
+    typer.echo(
+        f"  tasks={report.task_count} serial_depth={report.serial_depth} "
+        f"overlap_pairs={report.overlap_pair_count}"
+    )
+    typer.echo(
+        f"  proposed_bundles={len(report.proposed_bundles)} "
+        f"expected_reviews={report.expected_review_count} "
+        f"expected_checkpoints={report.expected_checkpoints}"
+    )
+    typer.echo(
+        "  overlap_files="
+        + (", ".join(report.overlap_files) if report.overlap_files else "none")
+    )
+    typer.echo(
+        "  high_risk_policies="
+        + (
+            ", ".join(report.high_risk_policies)
+            if report.high_risk_policies
+            else "none"
+        )
+    )
+    for proposal in report.proposed_bundles:
+        typer.echo(
+            f"  - {proposal.id}: tasks={','.join(proposal.task_ids)} "
+            f"depth={proposal.serial_depth} reviews={proposal.expected_reviews} "
+            f"angles={','.join(proposal.review_angles)} checkpoint=1"
+        )
+    for breach in report.limit_breaches:
+        typer.echo(f"  LIMIT: {breach}")
+
+
 # ---------------------------------------------------------------------------
 # plan subcommand
 # ---------------------------------------------------------------------------
@@ -260,6 +294,22 @@ def plan(
             "loudly so the user can release/complete them first. With "
             "this flag, the audit trail (events + evidence + reviews) is "
             "preserved but the task row itself is deleted. Use with care."
+        ),
+    ),
+    propose_bundles: bool = typer.Option(  # noqa: B008
+        False,
+        "--bundles",
+        help=(
+            "Report deterministic coordinator bundle proposals, review cost, "
+            "checkpoints, and throughput-limit breaches."
+        ),
+    ),
+    acknowledge_bundle_limits: bool = typer.Option(  # noqa: B008
+        False,
+        "--acknowledge-bundle-limits",
+        help=(
+            "Audit explicit acceptance of an oversized bundle wave. Has no "
+            "effect unless --bundles reports a configured limit breach."
         ),
     ),
     json_output: bool = JSON_OPTION,
@@ -340,7 +390,20 @@ def plan(
     # project's llm_provider / llm_tier / bedrock_* / custom_* knobs apply
     # uniformly to both the --use-llm augmentation path and the no-tasks
     # backstop below.
-    config = _load_config_optional(state_dir)
+    config_path = state_dir / "config.yaml"
+    if propose_bundles and config_path.exists():
+        try:
+            from anvil.config import load_merged_config
+
+            config = load_merged_config(config_path)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            message = f"invalid bundle planning config: {exc}"
+            if json_output:
+                fail("plan", message, code="invalid_bundle_config")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from exc
+    else:
+        config = _load_config_optional(state_dir)
 
     provider = _resolve_llm_provider(use_llm, config, model=model)
     parsed = parse_prd(markdown, prd_id=parse_prd_id, provider=provider)
@@ -467,6 +530,57 @@ def plan(
         llm_generated_count = len(parsed.tasks)
         llm_tier_used = gen_result.provider_used
 
+    bundle_report = None
+    if propose_bundles:
+        from anvil.config import (
+            DEFAULT_BUNDLE_MAX_SERIAL_STAGES,
+            DEFAULT_BUNDLE_MAX_TASKS,
+        )
+        from anvil.planning.inference import (
+            BundlePlanningError,
+            build_bundle_plan,
+        )
+
+        try:
+            bundle_report = build_bundle_plan(
+                parsed.tasks,
+                max_tasks=(
+                    config.bundle_max_tasks if config else DEFAULT_BUNDLE_MAX_TASKS
+                ),
+                max_serial_stages=(
+                    config.bundle_max_serial_stages
+                    if config
+                    else DEFAULT_BUNDLE_MAX_SERIAL_STAGES
+                ),
+            )
+        except BundlePlanningError as exc:
+            if json_output:
+                fail("plan", str(exc), code="invalid_bundle_graph")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if bundle_report.limit_breaches and not acknowledge_bundle_limits:
+            message = (
+                "Bundle execution wave exceeds configured throughput limits; "
+                "replan the graph or pass --acknowledge-bundle-limits."
+            )
+            if json_output:
+                fail_with(
+                    "plan",
+                    message,
+                    code="bundle_limits_exceeded",
+                    extra={"bundle_plan": bundle_report.to_dict()},
+                )
+            typer.echo("Bundle planning report:")
+            _render_bundle_plan(bundle_report)
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1)
+    elif acknowledge_bundle_limits:
+        message = "--acknowledge-bundle-limits requires --bundles."
+        if json_output:
+            fail("plan", message, code="bad_request")
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=1)
+
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
@@ -496,6 +610,29 @@ def plan(
         # all scope to this partition; conflict-group inference (below) does
         # NOT — it spans every PRD so cross-PRD file overlaps are detected.
         scope_prd_id = parsed.prd.id
+
+        if (
+            bundle_report is not None
+            and bundle_report.limit_breaches
+            and acknowledge_bundle_limits
+        ):
+            now = clock.now()
+            acknowledged_by = resolve_actor(None)
+            backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=acknowledged_by,
+                    action="bundle.plan_acknowledged",
+                    target_kind="prd",
+                    target_id=scope_prd_id,
+                    payload_json={
+                        "prd_id": scope_prd_id,
+                        "breaches": list(bundle_report.limit_breaches),
+                        "acknowledged_by": acknowledged_by,
+                        "created_at": now.isoformat(),
+                    },
+                )
+            )
 
         # Scope orphan classification to THIS PRD: tasks/features in OTHER
         # PRDs must never be pruned just because they are absent from this
@@ -762,6 +899,17 @@ def plan(
                     "pruned_task_ids": list(deleted_task_ids),
                     "pruned_feature_ids": list(deleted_feature_ids),
                     "warnings": plan_warnings,
+                    **(
+                        {
+                            "bundle_plan": bundle_report.to_dict(),
+                            "bundle_limits_acknowledged": bool(
+                                bundle_report.limit_breaches
+                                and acknowledge_bundle_limits
+                            ),
+                        }
+                        if bundle_report is not None
+                        else {}
+                    ),
                 },
             )
             return
@@ -799,6 +947,11 @@ def plan(
             typer.echo(
                 f"Detected {len(inference_result.conflict_groups)} conflict group(s)."
             )
+        if bundle_report is not None:
+            typer.echo("\nBundle planning report:")
+            _render_bundle_plan(bundle_report)
+            if bundle_report.limit_breaches and acknowledge_bundle_limits:
+                typer.echo("Throughput-limit acknowledgement recorded.")
         if deleted_task_ids or deleted_feature_ids:
             # Surface the prune outcome explicitly — the user removed these
             # entities from prd.md and should know the state.db is now in
