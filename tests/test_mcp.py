@@ -655,6 +655,20 @@ class TestBundleTools:
                         },
                     )
                 )
+                terminal = _data(
+                    await client.call_tool(
+                        "reconcile_bundle",
+                        {
+                            "bundle_id": "B001",
+                            "actor": "coordinator",
+                            "commit_sha": "abc123",
+                            "merged": True,
+                        },
+                    )
+                )
+                terminal_status = _data(
+                    await client.call_tool("get_project_status", {})
+                )
                 return (
                     created,
                     listed,
@@ -670,6 +684,8 @@ class TestBundleTools:
                         reviews,
                         finalized,
                         reconciled,
+                        terminal,
+                        terminal_status,
                         superseded,
                     ),
                 )
@@ -683,6 +699,8 @@ class TestBundleTools:
             reviews,
             finalized,
             reconciled,
+            terminal,
+            terminal_status,
             superseded,
         ) = tail
         assert created["bundle"]["id"] == "B001"
@@ -695,6 +713,18 @@ class TestBundleTools:
         assert reviews[-1]["gate"]["passed"] is True
         assert finalized["bundle"]["status"] == "reviewed_unintegrated"
         assert reconciled["bundle"]["status"] == "integrated"
+        assert terminal["bundle"]["status"] == "merged"
+        assert terminal_status["active_claim_count"] == 0
+        terminal_rollup = next(
+            entry
+            for entry in terminal_status["bundles"]
+            if entry["bundle_id"] == "B001"
+        )
+        assert terminal_rollup["status"] == "merged"
+        assert terminal_rollup["coordinator_claim"]["status"] == "released"
+        assert "already_claimed" not in {
+            refusal["code"] for refusal in terminal_rollup["refusals"]
+        }
         assert superseded["bundle"]["superseded_by"] == "B001"
         assert claimed["bundle"]["status"] == "active"
         assert set(claimed["claim"]["member_claim_ids"]) == {"T001", "T002"}
