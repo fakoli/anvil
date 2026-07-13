@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from anvil.clock import Clock
 from anvil.state.backend import Backend, BackendError
-from anvil.state.models import BundleCheckpoint, BundleStatus, EventDraft
+from anvil.state.models import (
+    TERMINAL_BUNDLE_STATUSES,
+    BundleCheckpoint,
+    BundleStatus,
+    EventDraft,
+)
 from anvil.state.schema import SCHEMA_VERSION
 
 
@@ -76,6 +81,11 @@ class BundleDeliveryManager:
             assert bundle is not None
         if merged and bundle.status is BundleStatus.integrated:
             self._transition(bundle_id, BundleStatus.merged, "merged delivery reconciled")
+        if merged:
+            bundle = self._backend.get_bundle(bundle_id)
+            assert bundle is not None
+            if bundle.status in {BundleStatus.merged, BundleStatus.completed}:
+                self._release_legacy_terminal_claim(bundle_id)
 
     def supersede(self, bundle_id: str, *, replacement_bundle_id: str) -> None:
         bundle = self._backend.get_bundle(bundle_id)
@@ -96,6 +106,38 @@ class BundleDeliveryManager:
                         "replacement_bundle_id": replacement_bundle_id,
                         "superseded_by_actor": self._actor,
                         "superseded_at": now.isoformat(),
+                    },
+                )
+            )
+        except BackendError as exc:
+            raise BundleDeliveryError(str(exc)) from exc
+
+    def _release_legacy_terminal_claim(self, bundle_id: str) -> None:
+        """Repair a pre-fix terminal-plus-active-claim projection once.
+
+        Fresh terminal transitions release their claim inside the
+        ``bundle.status_changed`` projector.  This separate event is only for
+        databases that already projected the v0.5.0 inconsistent state before
+        that atomic behavior existed.
+        """
+        claim = self._backend.get_bundle_claim(bundle_id)
+        if claim is None or claim.status.value != "active":
+            return
+        now = self._clock.now()
+        try:
+            self._backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=self._actor,
+                    action="bundle.claim_released",
+                    target_kind="bundle",
+                    target_id=bundle_id,
+                    payload_json={
+                        "bundle_claim_id": claim.id,
+                        "bundle_id": bundle_id,
+                        "released_by": self._actor,
+                        "release_reason": "terminal reconciliation repair",
+                        "force": False,
                     },
                 )
             )
@@ -126,6 +168,7 @@ class BundleDeliveryManager:
                             if claim is not None and claim.status.value == "active"
                             else None
                         ),
+                        "release_claim": target in TERMINAL_BUNDLE_STATUSES,
                         "from": bundle.status.value,
                         "to": target.value,
                         "changed_at": now.isoformat(),

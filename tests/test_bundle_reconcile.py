@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import pytest
@@ -14,6 +16,7 @@ from anvil.state.backend import EventRejected
 from anvil.state.models import BundleStatus, Event, EventDraft, ReviewDecision
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.snapshot import serialize_state
+from anvil.state.sqlite import SqliteBackend
 from tests.test_bundle_execution import (
     _NOW,
     _append_raw,
@@ -26,43 +29,331 @@ from tests.test_bundle_execution import (
 )
 
 
-def test_reconcile_is_idempotent_and_does_not_apply_member_tasks(tmp_path) -> None:
+def _integrate_bundle(backend, root) -> None:
+    _implement_bundle(backend, root)
+    for reviewer, angle in (
+        ("reviewer-a", "correctness"),
+        ("reviewer-b", "security"),
+        ("reviewer-c", "integration"),
+    ):
+        BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
+            "B001",
+            review_round=1,
+            angle=angle,
+            decision=ReviewDecision.approve,
+        )
+    BundleReviewManager(backend, FrozenClock(_NOW), actor="coordinator").finalize(
+        "B001"
+    )
+    BundleDeliveryManager(
+        backend, FrozenClock(_NOW), actor="coordinator"
+    ).reconcile("B001", commit_sha="abc123")
+    assert backend.get_bundle("B001").status is BundleStatus.integrated  # type: ignore[union-attr]
+
+
+def _project_legacy_terminal_event(backend, root, status: BundleStatus) -> Event:
+    bundle = backend.get_bundle("B001")
+    claim = backend.get_bundle_claim("B001")
+    assert bundle is not None
+    assert claim is not None and claim.status.value == "active"
+    changed_at = _NOW + timedelta(minutes=1)
+    event = Event(
+        id=_next_event_id(root),
+        timestamp=changed_at,
+        actor="coordinator",
+        action="bundle.status_changed",
+        target_kind="bundle",
+        target_id="B001",
+        payload_json={
+            "bundle_id": "B001",
+            "schema_version": SCHEMA_VERSION,
+            "creation_event_id": bundle.creation_event_id,
+            "bundle_claim_id": claim.id,
+            "from": "integrated",
+            "to": status.value,
+            "changed_at": changed_at.isoformat(),
+        },
+    )
+    _append_raw(root, event)
+    backend._apply_write_only(backend._require_conn(), event)  # noqa: SLF001
+    return event
+
+
+def test_reconcile_merged_releases_claim_idempotently_and_replays(tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
     backend = _backend(tmp_path)
     try:
-        _implement_bundle(backend, tmp_path)
-        for reviewer, angle in (
-            ("reviewer-a", "correctness"),
-            ("reviewer-b", "security"),
-            ("reviewer-c", "integration"),
-        ):
-            BundleReviewManager(backend, FrozenClock(_NOW), actor=reviewer).record(
-                "B001",
-                review_round=1,
-                angle=angle,
-                decision=ReviewDecision.approve,
+        _integrate_bundle(backend, tmp_path)
+        bundle = backend.get_bundle("B001")
+        active_claim = backend.get_bundle_claim("B001")
+        assert bundle is not None
+        assert active_claim is not None
+        before_rejected = len((tmp_path / "events.jsonl").read_text().splitlines())
+        with pytest.raises(EventRejected, match="must release"):
+            backend.append(
+                EventDraft(
+                    timestamp=_NOW,
+                    actor="coordinator",
+                    action="bundle.status_changed",
+                    target_kind="bundle",
+                    target_id="B001",
+                    payload_json={
+                        "bundle_id": "B001",
+                        "creation_event_id": bundle.creation_event_id,
+                        "bundle_claim_id": active_claim.id,
+                        "from": "integrated",
+                        "to": "merged",
+                        "changed_at": _NOW.isoformat(),
+                    },
+                )
             )
-        BundleReviewManager(
-            backend, FrozenClock(_NOW), actor="coordinator"
-        ).finalize("B001")
+        assert (
+            len((tmp_path / "events.jsonl").read_text().splitlines())
+            == before_rejected
+        )
         delivery = BundleDeliveryManager(
             backend, FrozenClock(_NOW), actor="coordinator"
         )
-        delivery.reconcile("B001", commit_sha="abc123")
+        delivery.reconcile("B001", commit_sha="abc123", merged=True)
         first_count = len((tmp_path / "events.jsonl").read_text().splitlines())
         BundleDeliveryManager(
             backend,
             FrozenClock(_NOW + timedelta(minutes=1)),
             actor="coordinator",
-        ).reconcile("B001", commit_sha="abc123")
+        ).reconcile("B001", commit_sha="abc123", merged=True)
         assert len((tmp_path / "events.jsonl").read_text().splitlines()) == first_count
-        assert backend.get_bundle("B001").status is BundleStatus.integrated  # type: ignore[union-attr]
+        assert backend.get_bundle("B001").status is BundleStatus.merged  # type: ignore[union-attr]
         assert backend.get_bundle("B001").checkpoint.commit_sha == "abc123"  # type: ignore[union-attr]
+        claim = backend.get_bundle_claim("B001")
+        assert claim is not None
+        assert claim.status.value == "released"
+        assert claim.released_at == _NOW
+        assert backend.list_active_claims() == []
         assert all(
             backend.get_task(task_id).status.value == "needs_review"  # type: ignore[union-attr]
             for task_id in ("release:T001", "release:T002")
         )
+        source = serialize_state(backend)
     finally:
         backend.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert serialize_state(replay) == source
+        assert replay.get_bundle_claim("B001").status.value == "released"  # type: ignore[union-attr]
+    finally:
+        replay.close()
+
+
+def test_interrupted_merged_projection_rolls_back_then_catches_up(
+    tmp_path, monkeypatch
+) -> None:
+    backend = _backend(tmp_path)
+    _integrate_bundle(backend, tmp_path)
+    original = SqliteBackend._write_bundle_claim_terminal
+
+    def fail_after_claim_release(*args, **kwargs) -> None:
+        original(*args, **kwargs)
+        raise RuntimeError("injected failure after terminal claim release")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            SqliteBackend,
+            "_write_bundle_claim_terminal",
+            staticmethod(fail_after_claim_release),
+        )
+        with pytest.raises(BundleDeliveryError, match="Transaction aborted"):
+            BundleDeliveryManager(
+                backend,
+                FrozenClock(_NOW + timedelta(minutes=1)),
+                actor="coordinator",
+            ).reconcile("B001", commit_sha="abc123", merged=True)
+        assert backend.get_bundle("B001").status is BundleStatus.integrated  # type: ignore[union-attr]
+        assert backend.get_bundle_claim("B001").status.value == "active"  # type: ignore[union-attr]
+    backend.close()
+
+    healed = _backend(tmp_path)
+    try:
+        assert healed.get_bundle("B001").status is BundleStatus.merged  # type: ignore[union-attr]
+        assert healed.get_bundle_claim("B001").status.value == "released"  # type: ignore[union-attr]
+    finally:
+        healed.close()
+
+
+@pytest.mark.parametrize("terminal_status", [BundleStatus.merged, BundleStatus.completed])
+def test_reconcile_repairs_legacy_terminal_claim_once_and_replays(
+    tmp_path, terminal_status
+) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _integrate_bundle(backend, tmp_path)
+        _project_legacy_terminal_event(backend, tmp_path, terminal_status)
+        assert backend.get_bundle_claim("B001").status.value == "active"  # type: ignore[union-attr]
+        repair = BundleDeliveryManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=2)),
+            actor="coordinator",
+        )
+        repair.reconcile("B001", commit_sha="abc123", merged=True)
+        first_count = len((tmp_path / "events.jsonl").read_text().splitlines())
+        repair.reconcile("B001", commit_sha="abc123", merged=True)
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == first_count
+        assert backend.get_bundle("B001").status is terminal_status  # type: ignore[union-attr]
+        claim = backend.get_bundle_claim("B001")
+        assert claim is not None
+        assert claim.status.value == "released"
+        assert claim.released_at == _NOW + timedelta(minutes=2)
+        assert claim.release_reason == "terminal reconciliation repair"
+        source = serialize_state(backend)
+    finally:
+        backend.close()
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert serialize_state(replay) == source
+    finally:
+        replay.close()
+
+
+def test_replay_preserves_explicit_release_metadata_after_legacy_merge(
+    tmp_path,
+) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    released_at = _NOW + timedelta(minutes=3)
+    release_reason = "operator confirmed delivery"
+    try:
+        _integrate_bundle(backend, tmp_path)
+        _project_legacy_terminal_event(backend, tmp_path, BundleStatus.merged)
+        claim = backend.get_bundle_claim("B001")
+        assert claim is not None and claim.status.value == "active"
+        backend.append(
+            EventDraft(
+                timestamp=released_at,
+                actor="coordinator",
+                action="bundle.claim_released",
+                target_kind="bundle",
+                target_id="B001",
+                payload_json={
+                    "bundle_claim_id": claim.id,
+                    "bundle_id": "B001",
+                    "released_by": "coordinator",
+                    "release_reason": release_reason,
+                },
+            )
+        )
+        released = backend.get_bundle_claim("B001")
+        assert released is not None
+        assert released.status.value == "released"
+        assert released.released_at == released_at
+        assert released.release_reason == release_reason
+        source = serialize_state(backend)
+    finally:
+        backend.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert serialize_state(replay) == source
+        released = replay.get_bundle_claim("B001")
+        assert released is not None
+        assert released.released_at == released_at
+        assert released.release_reason == release_reason
+    finally:
+        replay.close()
+
+
+def test_concurrent_legacy_repairs_are_idempotent(tmp_path) -> None:
+    primary = _backend(tmp_path)
+    _integrate_bundle(primary, tmp_path)
+    _project_legacy_terminal_event(primary, tmp_path, BundleStatus.merged)
+    secondary = _backend(tmp_path)
+    barrier = threading.Barrier(2)
+
+    def synchronize_claim_read(backend):
+        original = backend.get_bundle_claim
+
+        def read(bundle_id):
+            claim = original(bundle_id)
+            if claim is not None and claim.status.value == "active":
+                barrier.wait(timeout=5)
+            return claim
+
+        backend.get_bundle_claim = read
+
+    synchronize_claim_read(primary)
+    synchronize_claim_read(secondary)
+    before = len((tmp_path / "events.jsonl").read_text().splitlines())
+
+    def reconcile(backend) -> None:
+        BundleDeliveryManager(
+            backend,
+            FrozenClock(_NOW + timedelta(minutes=2)),
+            actor="coordinator",
+        ).reconcile("B001", commit_sha="abc123", merged=True)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(reconcile, (primary, secondary)))
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before + 1
+        assert primary.get_bundle_claim("B001").status.value == "released"  # type: ignore[union-attr]
+    finally:
+        secondary.close()
+        primary.close()
+
+
+def test_nonterminal_claim_release_intent_fails_closed_live_and_replay(
+    tmp_path,
+) -> None:
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    backend = _backend(tmp_path)
+    try:
+        _integrate_bundle(backend, tmp_path)
+        claimed = backend.get_bundle_claim("B001")
+        bundle = backend.get_bundle("B001")
+        assert claimed is not None
+        assert bundle is not None
+        before = len((tmp_path / "events.jsonl").read_text().splitlines())
+        draft = EventDraft(
+            timestamp=_NOW,
+            actor="coordinator",
+            action="bundle.status_changed",
+            target_kind="bundle",
+            target_id="B001",
+            payload_json={
+                "bundle_id": "B001",
+                "schema_version": SCHEMA_VERSION,
+                "creation_event_id": bundle.creation_event_id,
+                "bundle_claim_id": claimed.id,
+                "release_claim": True,
+                "from": "integrated",
+                "to": "replan_required",
+                "changed_at": _NOW.isoformat(),
+            },
+        )
+        with pytest.raises(EventRejected, match="requires a terminal status"):
+            backend.append(draft)
+        assert len((tmp_path / "events.jsonl").read_text().splitlines()) == before
+        forged = Event(
+            id=_next_event_id(tmp_path),
+            **draft.model_dump(),
+        )
+        _append_raw(tmp_path, forged)
+    finally:
+        backend.close()
+
+    replay = _backend(replay_root)
+    try:
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        assert replay.get_bundle("B001").status is BundleStatus.integrated  # type: ignore[union-attr]
+        assert replay.get_bundle_claim("B001").status.value == "active"  # type: ignore[union-attr]
+    finally:
+        replay.close()
 
 
 def test_supersession_preserves_source_and_replays_replacement(tmp_path) -> None:

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from typer.testing import CliRunner
 
+from anvil.bundles.delivery import BundleDeliveryManager
 from anvil.bundles.review import BundleReviewManager
 from anvil.cli import app
 from anvil.clock import FrozenClock
@@ -309,6 +310,18 @@ def test_rollup_explains_all_bundle_refusal_classes() -> None:
     assert "review_budget_exhausted" not in {
         refusal["code"] for refusal in generic.refusals
     }
+    superseded_claim = BundleClaim(
+        id="BCS",
+        bundle_id="B001",
+        claimed_by="coordinator",
+        status="released",
+        member_claim_ids={"T001": "C001", "T002": "C002"},
+        created_at=_NOW - timedelta(hours=1),
+        lease_expires_at=_NOW,
+        last_heartbeat_at=_NOW - timedelta(hours=1),
+        released_at=_NOW,
+        release_reason="superseded by B002",
+    )
     superseded = compute_bundle_rollup(
         [
             bundle.model_copy(
@@ -316,12 +329,17 @@ def test_rollup_explains_all_bundle_refusal_classes() -> None:
             )
         ],
         tasks,
-        [],
+        [superseded_claim],
         [],
         now=_NOW,
     )[0]
     assert superseded.refusals[-1]["code"] == "superseded"
     assert "B002" in superseded.refusals[-1]["remediation"]
+    assert superseded.coordinator_claim is not None
+    assert superseded.coordinator_claim["status"] == "released"
+    assert "already_claimed" not in {
+        refusal["code"] for refusal in superseded.refusals
+    }
 
 
 def test_next_bundle_recommends_claimable_bundle(tmp_path) -> None:
@@ -450,6 +468,9 @@ def test_status_human_and_json_include_bundle_integration_rollup(tmp_path) -> No
         BundleReviewManager(
             backend, FrozenClock(_EXEC_NOW), actor="coordinator"
         ).finalize("B001")
+        BundleDeliveryManager(
+            backend, FrozenClock(_EXEC_NOW), actor="coordinator"
+        ).reconcile("B001", commit_sha="abc123", merged=True)
     finally:
         backend.close()
     runner = CliRunner()
@@ -459,12 +480,19 @@ def test_status_human_and_json_include_bundle_integration_rollup(tmp_path) -> No
     )
     assert json_result.exit_code == 0, json_result.output
     bundles = json.loads(json_result.output)["data"]["bundles"]
+    status_data = json.loads(json_result.output)["data"]
+    assert status_data["active_claims"] == 0
+    assert status_data["claims"] == []
     assert bundles[0]["bundle_id"] == "B001"
-    assert bundles[0]["status"] == "reviewed_unintegrated"
+    assert bundles[0]["status"] == "merged"
+    assert bundles[0]["coordinator_claim"]["status"] == "released"
+    assert "already_claimed" not in {
+        refusal["code"] for refusal in bundles[0]["refusals"]
+    }
     assert bundles[0]["critical_path_depth"] == 1
     human = runner.invoke(app, ["status", "--cwd", str(tmp_path)], env=env)
     assert human.exit_code == 0, human.output
-    assert "Bundle B001 (reviewed_unintegrated)" in human.output
+    assert "Bundle B001 (merged)" in human.output
     assert "critical-path" in human.output
     assert "optional-worker" in human.output
     assert "Last result:" in human.output
