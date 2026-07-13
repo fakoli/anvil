@@ -380,6 +380,9 @@ class BundleStatusChangedPayload(BaseModel):
     schema_version: int | None = None
     creation_event_id: str
     bundle_claim_id: str | None = None
+    # Old status events intentionally default false so replay preserves their
+    # original projection. New terminal transitions opt in to atomic release.
+    release_claim: bool = False
     from_status: BundleStatus = Field(alias="from")
     to_status: BundleStatus = Field(alias="to")
     changed_at: datetime.datetime

@@ -4170,6 +4170,10 @@ class SqliteBackend:
             to_status = BundleStatus(payload.to_status)
         except ValueError as exc:
             raise EventRejected(f"bundle.status_changed: invalid status: {exc}") from exc
+        if payload.release_claim and to_status not in TERMINAL_BUNDLE_STATUSES:
+            raise EventRejected(
+                "bundle.status_changed: claim release requires a terminal status."
+            )
         conn.execute("BEGIN IMMEDIATE")
         try:
             row = conn.execute(
@@ -4212,6 +4216,15 @@ class SqliteBackend:
                 "WHERE bundle_id = ? AND status = 'active'",
                 (payload.bundle_id,),
             ).fetchone()
+            if (
+                to_status in TERMINAL_BUNDLE_STATUSES
+                and active_bundle_claim is not None
+                and not payload.release_claim
+            ):
+                raise EventRejected(
+                    "bundle.status_changed: terminal transition must release the "
+                    "active coordinator claim."
+                )
             if to_status is BundleStatus.planned:
                 coordinator = conn.execute(
                     "SELECT coordinator FROM execution_bundles WHERE id = ?",
@@ -4606,6 +4619,8 @@ class SqliteBackend:
             payload.from_status, frozenset()
         ):
             return
+        if payload.release_claim and payload.to_status not in TERMINAL_BUNDLE_STATUSES:
+            return
         if payload.to_status is BundleStatus.planned:
             coordinator = conn.execute(
                 "SELECT coordinator FROM execution_bundles WHERE id = ? "
@@ -4746,7 +4761,7 @@ class SqliteBackend:
             }
             else None
         )
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE execution_bundles SET status = ?, updated_at = ?, "
             "review_disposition_event_id = COALESCE(?, review_disposition_event_id), "
             "last_result_at = COALESCE(?, last_result_at) "
@@ -4763,6 +4778,17 @@ class SqliteBackend:
                 payload.changed_at.isoformat(),
             ),
         )
+        if cursor.rowcount != 1:
+            return
+        if payload.release_claim and active_claim is not None:
+            SqliteBackend._write_bundle_claim_terminal(
+                conn,
+                bundle_claim_id=active_claim[0],
+                bundle_id=payload.bundle_id,
+                terminal_status="released",
+                timestamp=payload.changed_at.isoformat(),
+                reason=f"bundle reached {payload.to_status.value}",
+            )
 
     @staticmethod
     def _check_bundle_agent_observed(
@@ -5997,10 +6023,12 @@ class SqliteBackend:
             "WHERE c.id = ? AND c.bundle_id = ?",
             (payload.bundle_claim_id, payload.bundle_id),
         ).fetchone()
-        if row is None or row[1] != "active":
+        if row is None:
             raise EventRejected("bundle.claim_released: active claim not found.")
         if not payload.force and row[0] != payload.released_by:
             raise EventRejected("bundle.claim_released: only the coordinator may release.")
+        if row[1] != "active":
+            raise IdempotentNoOp("bundle coordinator claim is already terminal")
         event_time = event.timestamp.astimezone(datetime.UTC)
         if max(
             datetime.datetime.fromisoformat(row[2]),
