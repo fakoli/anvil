@@ -57,6 +57,11 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
+- **Terminal bundle reconciliation now releases coordinator ownership (#173).**
+  Reconciling a bundle as merged atomically closes its coordinator and member claims,
+  so status views no longer report a terminal bundle with an active nested claim or an
+  `already_claimed` refusal. Retrying reconciliation also repairs affected pre-fix
+  terminal state once, without changing the terminal delivery result.
 - `scripts/release.py` printed a `✎` glyph that crashes cp1252 Windows
   consoles (the encoding-gotcha class the repo purged from host output);
   now ASCII.

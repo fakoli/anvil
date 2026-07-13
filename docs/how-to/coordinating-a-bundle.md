@@ -134,9 +134,13 @@ anvil bundle reconcile B001 --commit "$COMMIT_SHA" --pr-url "$PR_URL" --actor le
 anvil bundle reconcile B001 --commit "$COMMIT_SHA" --pr-url "$PR_URL" --merged --actor lead
 ```
 
-Reconciliation advances `reviewed_unintegrated → integrated → merged`. It is safe to retry
-with the same references. The public surface does not infer a delivery reference and does
-not expose a separate `merged → completed` command.
+Reconciliation advances `reviewed_unintegrated → integrated → merged`. The terminal
+transition releases the coordinator lease and its member authorizations in the same
+operation, so a merged bundle no longer retains active ownership. It is safe to retry with
+the same references. On state created before this correction, retrying reconciliation for
+an already-merged bundle performs a one-time release of any coordinator claim left active;
+later retries make no further changes. The public surface does not infer a delivery
+reference and does not expose a separate `merged → completed` command.
 
 ## Adopting existing tasks without losing history
 
