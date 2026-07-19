@@ -1521,6 +1521,128 @@ class TestHandlePrdParsed:
         finally:
             b.close()
 
+    def test_prd_assumptions_persist_and_replay_without_changing_old_payloads(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        events_path = str(tmp_path / "events.jsonl")
+        try:
+            _setup_project(b)
+            payload = _make_prd_parsed_payload()
+            payload["assumptions"] = [
+                {
+                    "id": "A001",
+                    "statement": "Use the existing local store first.",
+                    "rationale": "It is reversible while the integration is validated.",
+                    "requirement_ids": ["R001"],
+                }
+            ]
+            b.append(_make_event("prd.parsed", payload))
+
+            prd = b.get_prd()
+            assert prd is not None
+            assert prd.assumptions[0].requirement_ids == ["R001"]
+
+            b.replay_from_empty(events_path)
+            replayed = b.get_prd()
+            assert replayed is not None
+            assert replayed.assumptions[0].statement == (
+                "Use the existing local store first."
+            )
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize(
+        ("assumption", "error"),
+        [
+            (
+                {
+                    "id": "untracked",
+                    "statement": "A valid-looking premise.",
+                    "rationale": "It must still be auditable.",
+                    "requirement_ids": ["R001"],
+                },
+                "stable A### format",
+            ),
+            (
+                {
+                    "id": "A001",
+                    "statement": "   ",
+                    "rationale": "It must still be auditable.",
+                    "requirement_ids": ["R001"],
+                },
+                "must not be blank",
+            ),
+            (
+                {
+                    "id": "A001",
+                    "statement": "A valid-looking premise.",
+                    "rationale": "   ",
+                    "requirement_ids": ["R001"],
+                },
+                "must not be blank",
+            ),
+        ],
+    )
+    def test_prd_parsed_rejects_assumptions_that_bypass_markdown_contract(
+        self, tmp_path: Path, assumption: dict[str, Any], error: str
+    ) -> None:
+        """Event payloads must preserve the same typed contract as the parser."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            payload = _make_prd_parsed_payload()
+            payload["assumptions"] = [assumption]
+
+            with pytest.raises(EventRejected, match=error):
+                b.append(_make_event("prd.parsed", payload))
+
+            assert b.get_prd() is None
+        finally:
+            b.close()
+
+    def test_prd_parsed_canonicalizes_assumption_id_from_event_payload(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            payload = _make_prd_parsed_payload()
+            payload["assumptions"] = [
+                {
+                    "id": " a001 ",
+                    "statement": "  Use the existing local store first.  ",
+                    "rationale": "  It is reversible while the integration is validated.  ",
+                    "requirement_ids": ["R001"],
+                }
+            ]
+            b.append(_make_event("prd.parsed", payload))
+
+            prd = b.get_prd()
+            assert prd is not None
+            assert prd.assumptions[0].id == "A001"
+            assert prd.assumptions[0].statement == "Use the existing local store first."
+
+            events = _read_jsonl(str(tmp_path / "events.jsonl"))
+            recorded = next(event for event in events if event["action"] == "prd.parsed")
+            assert recorded["payload_json"]["assumptions"] == [
+                {
+                    "id": "A001",
+                    "statement": "Use the existing local store first.",
+                    "rationale": "It is reversible while the integration is validated.",
+                    "requirement_ids": ["R001"],
+                }
+            ]
+
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            stored = json.loads(
+                conn.execute("SELECT assumptions FROM prds").fetchone()[0]
+            )
+            conn.close()
+            assert stored == recorded["payload_json"]["assumptions"]
+        finally:
+            b.close()
+
     def test_handle_prd_parsed_payload_validation_missing_project_id(
         self, tmp_path: Path
     ) -> None:
@@ -1620,6 +1742,7 @@ def _make_prd_revised_payload(
     added: list[dict[str, Any]] | None = None,
     superseded: list[dict[str, Any]] | None = None,
     unchanged: list[dict[str, Any]] | None = None,
+    assumptions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "project_id": "proj-1",
@@ -1632,6 +1755,7 @@ def _make_prd_revised_payload(
         "acceptance_criteria": [],
         "risks": [],
         "open_questions": [],
+        "assumptions": assumptions or [],
         "requirements_added": added or [],
         "requirements_superseded": superseded or [],
         "requirements_unchanged": unchanged or [],
@@ -1698,6 +1822,62 @@ class TestHandlePrdRevised:
             lineage = _requirements_lineage(str(tmp_path / "state.db"))
             assert lineage["R002"] == (None, 2)
             assert lineage["R001"] == (None, None)
+        finally:
+            b.close()
+
+    def test_revision_replaces_typed_assumptions(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2,
+                    unchanged=[_req("R001", "v1 one"), _req("R002", "v1 two")],
+                    assumptions=[
+                        {
+                            "id": "A002",
+                            "statement": "Use a bounded default.",
+                            "rationale": "It remains reversible in this revision.",
+                            "requirement_ids": ["R002"],
+                        }
+                    ],
+                ),
+            )
+            prd = b.get_prd()
+            assert prd is not None
+            assert prd.revision == 2
+            assert [assumption.id for assumption in prd.assumptions] == ["A002"]
+        finally:
+            b.close()
+
+    def test_assumption_only_revision_demotes_approved_prd(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            _apply(b, "prd.reviewed", {"project_id": "proj-1", "reviewer": "alice"})
+            _apply(b, "prd.approved", {"project_id": "proj-1", "approver": "bob"})
+
+            _apply(
+                b,
+                "prd.revised",
+                _make_prd_revised_payload(
+                    revision=2,
+                    status="approved",
+                    unchanged=[_req("R001", "v1 one"), _req("R002", "v1 two")],
+                    assumptions=[
+                        {
+                            "id": "A001",
+                            "statement": "Use the reversible local default.",
+                            "rationale": "It keeps external authority out of scope.",
+                            "requirement_ids": ["R001"],
+                        }
+                    ],
+                ),
+            )
+
+            assert b.get_prd().status == "draft"
         finally:
             b.close()
 
@@ -5515,15 +5695,16 @@ class TestSchemaVersionPhase8:
     TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_fifteen(self) -> None:
-        """The coordinator-bundle result projection ships at SCHEMA_VERSION == 15
+    def test_schema_version_is_sixteen(self) -> None:
+        """Typed PRD assumptions ship at SCHEMA_VERSION == 16
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
         v11 = execution bundles + ordered membership, issue #171;
         v12 = coordinator bundle claims; v13 = review dispositions;
-        v14 = delivery lineage; v15 = authoritative result time, issue #171)."""
-        assert SCHEMA_VERSION == 15
+        v14 = delivery lineage; v15 = authoritative result time, issue #171;
+        v16 = typed PRD assumptions)."""
+        assert SCHEMA_VERSION == 16
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -7959,7 +8140,7 @@ class TestV8ToV9Migration:
 
         b = _make_backend(tmp_path)  # initialize() runs the ladder
         try:
-            assert b.get_schema_version() == 15
+            assert b.get_schema_version() == 16
             task = b.get_task("T001")
             assert task is not None
             assert task.claims == []  # row preserved, backfilled to "no claims"
@@ -8138,7 +8319,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 15
+            assert b.get_schema_version() == SCHEMA_VERSION == 16
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.

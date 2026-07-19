@@ -143,7 +143,7 @@ class TestEntryPointFlags:
     def test_planning_env_keeps_full_surface_on_startup(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # With ANVIL_MCP_PLANNING set, the live server keeps all 35 tools.
+        # With ANVIL_MCP_PLANNING set, the live server keeps all 36 tools.
         import asyncio
 
         import anvil.mcp_server as srv
@@ -154,7 +154,7 @@ class TestEntryPointFlags:
         assert rc == 0
         names = {t.name for t in asyncio.run(srv.mcp.list_tools())}
         assert "plan_tasks" in names
-        assert len(names) == 35
+        assert len(names) == 36
 
 
 # ---------------------------------------------------------------------------

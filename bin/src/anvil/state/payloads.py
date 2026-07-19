@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from anvil.state.models import (
     DEFAULT_PRD_ID,
+    MAX_PRD_ASSUMPTIONS,
     BundleCheckpoint,
     BundleReviewPolicy,
     BundleReviewVerdict,
@@ -32,6 +33,7 @@ from anvil.state.models import (
     BundleThroughputBudget,
     DelegatedAgentObservation,
     EvidenceCategory,
+    PRDAssumption,
     ProofArtifact,
     ReviewDecision,
 )
@@ -81,6 +83,12 @@ class PrdParsedPayload(BaseModel):
     acceptance_criteria: list[Any] = []
     risks: list[Any] = []
     open_questions: list[Any] = []
+    # Added in schema v16.  The default preserves the meaning of every older
+    # event log, which simply did not have a typed assumptions section.
+    assumptions: list[PRDAssumption] = Field(
+        default_factory=list,
+        max_length=MAX_PRD_ASSUMPTIONS,
+    )
 
 
 class PrdRevisedPayload(BaseModel):
@@ -96,10 +104,10 @@ class PrdRevisedPayload(BaseModel):
       revision (the handler marks ``revision_superseded`` on the prior rows).
     - ``requirements_unchanged`` — requirements carried forward verbatim.
 
-    The diff is the source of truth for the status-demotion rule: a revision
-    that supersedes/removes any requirement demotes an approved PRD back to
-    ``draft``; a pure-additive revision (empty ``requirements_superseded``)
-    keeps the current status.
+    The diff plus the typed assumptions are the source of truth for the
+    status-demotion rule: a revision that supersedes/removes any requirement or
+    changes an assumption demotes an approved PRD back to ``draft``. A
+    pure-additive revision with unchanged assumptions keeps the current status.
 
     ``extra='forbid'`` rejects unknown keys at dispatch. The ``list[Any]``
     requirement-diff fields hold raw requirement dicts that the handler
@@ -132,6 +140,10 @@ class PrdRevisedPayload(BaseModel):
     acceptance_criteria: list[Any] = []
     risks: list[Any] = []
     open_questions: list[Any] = []
+    assumptions: list[PRDAssumption] = Field(
+        default_factory=list,
+        max_length=MAX_PRD_ASSUMPTIONS,
+    )
     # Self-describing requirement diff (raw dicts; handler validates each).
     requirements_added: list[Any] = []
     requirements_superseded: list[Any] = []

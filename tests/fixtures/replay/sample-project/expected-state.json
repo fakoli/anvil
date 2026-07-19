@@ -70,6 +70,7 @@
       "acceptance_criteria": [
         "Golden snapshot matches."
       ],
+      "assumptions": [],
       "goals": [
         "Ship SL-1."
       ],

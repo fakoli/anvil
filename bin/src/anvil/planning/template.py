@@ -31,6 +31,12 @@ Expected PRD structure (must match docs/prd-template.md):
     ## Open Questions     (optional)
     - <question>
 
+    ## Assumptions        (optional)
+
+    ### A001: <bounded statement>
+    **Rationale:** <why this is a safe working premise>
+    **Requirements:** R001, R002   (optional; absent means global)
+
     ## Features           (optional)
 
     ### F001: <Title>
@@ -62,9 +68,15 @@ import yaml
 
 from anvil.state.models import (
     DEFAULT_PRD_ID,
+    MAX_PRD_ASSUMPTION_ID_LENGTH,
+    MAX_PRD_ASSUMPTION_RATIONALE_LENGTH,
+    MAX_PRD_ASSUMPTION_REQUIREMENTS,
+    MAX_PRD_ASSUMPTION_STATEMENT_LENGTH,
+    MAX_PRD_ASSUMPTIONS,
     PRD,
     ArtifactAssertion,
     Feature,
+    PRDAssumption,
     ProofKind,
     ProofRequirement,
     Requirement,
@@ -183,6 +195,10 @@ _BULLET_RE = re.compile(r"^-\s+(.*)")
 _REQ_ID_RE = re.compile(r"^(R\d+)\s*:?\s*(.*)", re.IGNORECASE)
 _FEAT_ID_RE = re.compile(r"^(F\d{3,})", re.IGNORECASE)
 _TASK_ID_RE = re.compile(r"^(T\d{3,})", re.IGNORECASE)
+_ASSUMPTION_ID_RE = re.compile(
+    r"^(A[0-9]{3,31})(?=\s|:|$)\s*:?\s*(.*)$",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Structured acceptance grammar (EARS / Gherkin) — T028
@@ -630,6 +646,232 @@ def _parse_h3_blocks(
         blocks.append((current_start, current_heading, current_lines))
 
     return blocks
+
+
+def _parse_assumptions(
+    body: list[str],
+    start_line: int,
+    known_req_ids: set[str],
+    errors: list[ParseError],
+    prd_id: str,
+) -> list[PRDAssumption]:
+    """Parse the optional, typed ``## Assumptions`` section.
+
+    Assumptions are intentionally small PRD records, not a second spec format:
+    a stable ``A###`` id, a statement, a rationale, and optional requirement
+    references. Unreferenced assumptions are global by design.
+    """
+    assumptions: list[PRDAssumption] = []
+    if not _has_meaningful_content(body):
+        return assumptions
+
+    blocks = _parse_h3_blocks(body, start_line)
+    if not blocks:
+        errors.append(
+            ParseError(
+                section="## Assumptions",
+                line=start_line,
+                message=(
+                    "Assumptions must use '### A001: statement' blocks with a "
+                    "'**Rationale:**' field."
+                ),
+            )
+        )
+        return assumptions
+    if len(blocks) > MAX_PRD_ASSUMPTIONS:
+        errors.append(
+            ParseError(
+                section="## Assumptions",
+                line=start_line,
+                message=(
+                    f"Assumptions are limited to {MAX_PRD_ASSUMPTIONS} records; "
+                    f"found {len(blocks)}."
+                ),
+            )
+        )
+        return assumptions
+
+    for line, heading, block in blocks:
+        match = _ASSUMPTION_ID_RE.match(heading)
+        if match is None:
+            errors.append(
+                ParseError(
+                    section="## Assumptions",
+                    line=line,
+                    message=(
+                        f"Assumption heading '{heading}' must start with a "
+                        f"stable A### id no longer than "
+                        f"{MAX_PRD_ASSUMPTION_ID_LENGTH} characters "
+                        "(for example, '### A001: ...')."
+                    ),
+                )
+            )
+            continue
+        assumption_id, statement = match.group(1).upper(), match.group(2).strip()
+        if not statement:
+            errors.append(
+                ParseError(
+                    section="## Assumptions",
+                    line=line,
+                    message=f"Assumption '{assumption_id}' has an empty statement.",
+                )
+            )
+            continue
+        if len(statement) > MAX_PRD_ASSUMPTION_STATEMENT_LENGTH:
+            errors.append(
+                ParseError(
+                    section="## Assumptions",
+                    line=line,
+                    message=(
+                        f"Assumption '{assumption_id}' statement exceeds "
+                        f"{MAX_PRD_ASSUMPTION_STATEMENT_LENGTH} characters."
+                    ),
+                )
+            )
+            continue
+
+        rationale = ""
+        requirement_ids: list[str] = []
+        requirements_field_seen = False
+        invalid_field = False
+        seen_fields: set[str] = set()
+        for raw in block:
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            field = _FIELD_RE.match(stripped)
+            if field is None:
+                errors.append(
+                    ParseError(
+                        section="## Assumptions",
+                        line=line,
+                        message=(
+                            f"Assumption '{assumption_id}' has unlabelled content: "
+                            f"'{stripped}'. Use typed fields only."
+                        ),
+                    )
+                )
+                invalid_field = True
+                continue
+            name = field.group(1).strip().lower().rstrip(":")
+            value = field.group(2).strip()
+            canonical_name = (
+                "requirements"
+                if name in {"requirements", "requirement references"}
+                else name
+            )
+            if canonical_name in seen_fields:
+                errors.append(
+                    ParseError(
+                        section="## Assumptions",
+                        line=line,
+                        message=(
+                            f"Assumption '{assumption_id}' repeats the "
+                            f"'**{field.group(1).strip()}**' field."
+                        ),
+                    )
+                )
+                invalid_field = True
+                continue
+            seen_fields.add(canonical_name)
+            if name == "rationale":
+                rationale = value
+            elif name in {"requirements", "requirement references"}:
+                requirements_field_seen = True
+                requirement_ids = [
+                    _normalize_id(
+                        _strip_prd_prefix(token.strip(), prd_id).upper(), prd_id
+                    )
+                    for token in value.split(",")
+                    if token.strip()
+                ]
+            else:
+                errors.append(
+                    ParseError(
+                        section="## Assumptions",
+                        line=line,
+                        message=(
+                            f"Assumption '{assumption_id}' has unknown field "
+                            f"'**{field.group(1).strip()}**'. Use '**Rationale:**' "
+                            "and optional '**Requirements:**'."
+                        ),
+                    )
+                )
+                invalid_field = True
+
+        if invalid_field:
+            continue
+        if requirements_field_seen and not requirement_ids:
+            errors.append(
+                ParseError(
+                    section="## Assumptions",
+                    line=line,
+                    message=(
+                        f"Assumption '{assumption_id}' has an empty "
+                        "'**Requirements:**' field; omit the field for a global "
+                        "assumption."
+                    ),
+                )
+            )
+            continue
+
+        if not rationale:
+            errors.append(
+                ParseError(
+                    section="## Assumptions",
+                    line=line,
+                    message=f"Assumption '{assumption_id}' needs a '**Rationale:**' field.",
+                )
+            )
+            continue
+        if len(rationale) > MAX_PRD_ASSUMPTION_RATIONALE_LENGTH:
+            errors.append(
+                ParseError(
+                    section="## Assumptions",
+                    line=line,
+                    message=(
+                        f"Assumption '{assumption_id}' rationale exceeds "
+                        f"{MAX_PRD_ASSUMPTION_RATIONALE_LENGTH} characters."
+                    ),
+                )
+            )
+            continue
+        if len(requirement_ids) > MAX_PRD_ASSUMPTION_REQUIREMENTS:
+            errors.append(
+                ParseError(
+                    section="## Assumptions",
+                    line=line,
+                    message=(
+                        f"Assumption '{assumption_id}' references more than "
+                        f"{MAX_PRD_ASSUMPTION_REQUIREMENTS} requirements."
+                    ),
+                )
+            )
+            continue
+        unknown = sorted(set(requirement_ids) - known_req_ids)
+        if unknown:
+            errors.append(
+                ParseError(
+                    section="## Assumptions",
+                    line=line,
+                    message=(
+                        f"Assumption '{assumption_id}' references unknown "
+                        f"requirement(s): {', '.join(unknown)}."
+                    ),
+                )
+            )
+            continue
+        assumptions.append(
+            PRDAssumption(
+                id=assumption_id,
+                statement=statement,
+                rationale=rationale,
+                requirement_ids=requirement_ids,
+            )
+        )
+
+    _flag_duplicate_ids(assumptions, "assumption", errors)
+    return assumptions
 
 
 def _parse_features(
@@ -1439,6 +1681,7 @@ def parse_acceptance_grammar(criteria: list[str]) -> list[AcceptanceClause]:
         m_kw = _GHERKIN_KEYWORD_RE.match(text)
         if m_kw and m_kw.group(1).lower() in ("given", "when"):
             block: list[str] = [text]
+            seen_then = False
             j = i + 1
             while j < n:
                 nxt = criteria[j].strip()
@@ -1446,8 +1689,14 @@ def parse_acceptance_grammar(criteria: list[str]) -> list[AcceptanceClause]:
                     j += 1
                     continue
                 nm = _GHERKIN_KEYWORD_RE.match(nxt)
-                if nm and nm.group(1).lower() in ("given", "when", "then", "and", "but"):
+                next_keyword = nm.group(1).lower() if nm else None
+                if next_keyword in ("given", "when") and seen_then:
+                    break
+                if next_keyword == "given":
+                    break
+                if next_keyword in ("when", "then", "and", "but"):
                     block.append(nxt)
+                    seen_then = seen_then or next_keyword == "then"
                     j += 1
                     continue
                 break
@@ -1637,6 +1886,18 @@ def parse_prd(
     if oq_block is not None:
         open_questions = _extract_bullet_list(oq_block[1])
 
+    # --- Optional: ## Assumptions ---------------------------------------
+    assumptions: list[PRDAssumption] = []
+    assumptions_block = sections.get("assumptions")
+    if assumptions_block is not None:
+        assumptions = _parse_assumptions(
+            assumptions_block[1],
+            assumptions_block[0],
+            known_req_ids,
+            errors,
+            prd_id,
+        )
+
     # --- Optional: Release marker ---------------------------------------
     # A "**Release:**" line (in ## Summary) or a dedicated "## Release" section
     # round-trips into PRD.target_version / PRD.target_tag; absent => None/None.
@@ -1654,6 +1915,7 @@ def parse_prd(
         acceptance_criteria=acceptance_criteria,
         risks=risks,
         open_questions=open_questions,
+        assumptions=assumptions,
     )
 
     # --- Optional: ## Features ------------------------------------------

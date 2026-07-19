@@ -23,11 +23,13 @@ if TYPE_CHECKING:
     from anvil.config import Config
     from anvil.review.gates import DeferredFinding
     from anvil.state.models import (
+        PRD,
         BundleClaim,
         Claim,
         Decision,
         ExecutionBundle,
         Feature,
+        PRDAssumption,
         Requirement,
         Task,
     )
@@ -42,6 +44,7 @@ __all__ = [
     "fast_lane_packet",
     "is_lightweight",
     "render_packet",
+    "relevant_assumptions",
     "render_bundle_packet",
 ]
 
@@ -124,6 +127,7 @@ class BundleMemberPacketContext:
     feature: Feature
     requirements: list[Requirement]
     dependencies: list[Task]
+    assumptions: list[PRDAssumption]
 
 
 @dataclass(frozen=True)
@@ -154,6 +158,13 @@ def render_bundle_packet(
             raise ValueError("bundle packet requirements must exactly match the feature")
         if any(requirement.prd_id != bundle.prd_id for requirement in member.requirements):
             raise ValueError("bundle packet requirement belongs to another PRD")
+        feature_requirement_ids = set(member.feature.requirements)
+        if any(
+            assumption.requirement_ids
+            and not feature_requirement_ids.intersection(assumption.requirement_ids)
+            for assumption in member.assumptions
+        ):
+            raise ValueError("bundle packet assumptions must be global or feature-relevant")
         if [dependency.id for dependency in member.dependencies] != list(
             member.task.dependencies
         ):
@@ -212,6 +223,10 @@ def render_bundle_packet(
                     dependency.model_dump(mode="json")
                     for dependency in context.dependencies
                 ],
+                "assumptions": [
+                    assumption.model_dump(mode="json")
+                    for assumption in context.assumptions
+                ],
                 "member_claim_id": child_claim_id,
             }
         )
@@ -228,6 +243,17 @@ def render_bundle_packet(
                         for requirement in context.requirements
                     ]
                     or ["- None linked."]
+                ),
+                "",
+                "Active PRD assumptions:",
+                *(
+                    [
+                        f"- {assumption.id}: {assumption.statement} "
+                        f"(rationale: {assumption.rationale}; requirements: "
+                        f"{', '.join(assumption.requirement_ids) or 'global'})"
+                        for assumption in context.assumptions
+                    ]
+                    or ["- None relevant."]
                 ),
                 "",
                 "Acceptance criteria:",
@@ -471,6 +497,7 @@ def _render_markdown(
     dependencies_open: list[Task],
     related_decisions: list[Decision],
     active_claim: Claim | None,
+    assumptions: list[PRDAssumption] | None = None,
     lightweight: bool,
     review_tier: str,
     deferred_findings: list[DeferredFinding] | None = None,
@@ -549,6 +576,22 @@ def _render_markdown(
         lines.append("")
         for dec in related_decisions:
             lines.append(f"- {dec.id}: {dec.title} — {dec.decision}")
+        lines.append("")
+
+    # --- PRD assumptions ---
+    if assumptions:
+        lines.append("## Active PRD assumptions")
+        lines.append("")
+        for assumption in assumptions:
+            scope = (
+                f" affects {', '.join(assumption.requirement_ids)}"
+                if assumption.requirement_ids
+                else " global"
+            )
+            lines.append(
+                f"- **{assumption.id}** ({scope.strip()}) — "
+                f"{assumption.statement} _Rationale: {assumption.rationale}_"
+            )
         lines.append("")
 
     # --- Prior unresolved review findings (T017) ---
@@ -648,6 +691,7 @@ def _render_json(
     dependencies_open: list[Task],
     related_decisions: list[Decision],
     active_claim: Claim | None,
+    assumptions: list[PRDAssumption],
     lightweight: bool,
     review_tier: str,
     deferred_findings: list[DeferredFinding] | None = None,
@@ -721,6 +765,7 @@ def _render_json(
         "dependencies_open": deps_open_data,
         "decisions": decisions_data,
         "active_claim": claim_data,
+        "assumptions": [json.loads(a.model_dump_json()) for a in assumptions],
         "deferred_findings": deferred_findings_data,
         "required_evidence": rendered_required_evidence,
         "update_protocol": update_protocol,
@@ -734,6 +779,26 @@ def _render_json(
 # ---------------------------------------------------------------------------
 
 
+def relevant_assumptions(
+    prd: PRD | None,
+    feature: Feature | None,
+) -> list[PRDAssumption]:
+    """Return global plus feature-relevant PRD assumptions in source order.
+
+    A task inherits its feature's requirement references. This deliberately
+    avoids showing an execution agent premises for unrelated product areas.
+    """
+    if prd is None:
+        return []
+    feature_requirements = set(feature.requirements) if feature is not None else set()
+    return [
+        assumption
+        for assumption in prd.assumptions
+        if not assumption.requirement_ids
+        or bool(feature_requirements.intersection(assumption.requirement_ids))
+    ]
+
+
 def render_packet(
     task: Task,
     *,
@@ -742,6 +807,7 @@ def render_packet(
     dependencies_open: list[Task] | None = None,
     related_decisions: list[Decision] | None = None,
     active_claim: Claim | None = None,
+    assumptions: list[PRDAssumption] | None = None,
     lightweight: bool | None = None,
     review_tier: Literal["light", "standard", "max"] | None = None,
     deferred_findings: list[DeferredFinding] | None = None,
@@ -817,6 +883,7 @@ def render_packet(
     resolved_deps_open: list[Task] = dependencies_open or []
     resolved_decisions: list[Decision] = related_decisions or []
     resolved_findings: list[DeferredFinding] = deferred_findings or []
+    resolved_assumptions: list[PRDAssumption] = assumptions or []
     resolved_lightweight: bool = (
         is_lightweight(task) if lightweight is None else lightweight
     )
@@ -836,6 +903,7 @@ def render_packet(
         dependencies_open=resolved_deps_open,
         related_decisions=resolved_decisions,
         active_claim=active_claim,
+        assumptions=resolved_assumptions,
         lightweight=resolved_lightweight,
         review_tier=resolved_review_tier,
         deferred_findings=resolved_findings,
@@ -848,6 +916,7 @@ def render_packet(
         dependencies_open=resolved_deps_open,
         related_decisions=resolved_decisions,
         active_claim=active_claim,
+        assumptions=resolved_assumptions,
         lightweight=resolved_lightweight,
         review_tier=resolved_review_tier,
         deferred_findings=resolved_findings,
@@ -871,6 +940,7 @@ def fast_lane_packet(
     dependencies_open: list[Task] | None = None,
     related_decisions: list[Decision] | None = None,
     active_claim: Claim | None = None,
+    assumptions: list[PRDAssumption] | None = None,
     deferred_findings: list[DeferredFinding] | None = None,
 ) -> WorkPacket:
     """Render a work packet, routing the fast-lane from *config* thresholds.
@@ -909,6 +979,7 @@ def fast_lane_packet(
         dependencies_open=dependencies_open,
         related_decisions=related_decisions,
         active_claim=active_claim,
+        assumptions=assumptions,
         lightweight=lightweight,
         review_tier=derive_review_tier(task, config=config),
         deferred_findings=deferred_findings,

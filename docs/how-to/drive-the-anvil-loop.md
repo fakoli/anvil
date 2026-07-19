@@ -19,6 +19,7 @@ Get a queue of `ready` tasks before any loop runs:
 ```bash
 anvil init                 # one-time: create .anvil/ state
 anvil prd parse            # PRD markdown -> features + tasks
+anvil prd assess           # optional advisory behavior/testability feedback
 anvil plan                 # generate the task graph (deps, conflict groups)
 anvil score                # score each task on the six dimensions
 ```

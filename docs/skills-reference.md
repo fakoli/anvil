@@ -86,7 +86,10 @@ commands, [`mcp.md`](mcp.md) for the equivalent MCP read-only tools.
 
 **Purpose:** Turn a rough idea into a structured PRD draft via one-question-
 at-a-time Q&A, then write the result to `.anvil/prd.md` so
-`anvil prd parse` can consume it.
+`anvil prd parse` can consume it. When the user opts into challenge mode, the
+skill runs the advisory readiness assessment and asks only the highest-value
+missing question at a time. An explicitly autonomous run instead records
+bounded, reversible defaults as typed assumptions and continues.
 
 **When to use:**
 
@@ -96,6 +99,10 @@ at-a-time Q&A, then write the result to `.anvil/prd.md` so
   to write the template by hand.
 - A rough scope was discussed in chat and now needs to be captured as a
   structured document.
+- The user wants to be challenged on intended behavior, observable outcomes,
+  boundaries, or how the work will be verified before design begins.
+- The user wants the rest of the workflow to proceed autonomously while every
+  inferred premise remains visible and reviewable.
 
 **Source:** `skills/start-prd/SKILL.md`
 
@@ -108,10 +115,11 @@ the canonical PRD template structure.
 
 **Trigger:** `/anvil:prd`
 
-**Purpose:** Author, parse, and review the project PRD. The PRD is the
+**Purpose:** Author, parse, assess, and review the project PRD. The PRD is the
 single source of truth for every `Requirement`, `Feature`, and `Task` row
-in `state.db`. Nothing can be claimed until this document exists, parses
-cleanly, and clears the review gate.
+in `state.db`. `anvil prd assess` adds deterministic, advisory feedback and
+never changes the existing review gate; nothing can be claimed until the PRD
+exists, parses cleanly, and clears that gate.
 
 **When to use:**
 
@@ -119,6 +127,10 @@ cleanly, and clears the review gate.
 - Revising the PRD after stakeholder feedback changes scope or acceptance criteria.
 - Recovering after a scope change mid-project — re-anchor what the work is
   before resuming claims.
+- Opting into challenge mode to tighten user behavior, outcomes, failure or
+  boundary cases, acceptance scenarios, and task verification.
+- Continuing autonomously with bounded assumptions documented in the PRD
+  instead of silently filling gaps.
 - Before any invocation of `/anvil:plan` — planning reads from a
   parsed PRD; authoring must come first.
 

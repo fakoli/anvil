@@ -20,6 +20,7 @@ from anvil.context.packets import (
     WorkPacket,
     fast_lane_packet,
     is_lightweight,
+    relevant_assumptions,
     render_packet,
 )
 from anvil.state.models import (
@@ -29,6 +30,8 @@ from anvil.state.models import (
     Decision,
     Feature,
     FeatureStatus,
+    PRD,
+    PRDAssumption,
     Score,
     Task,
     TaskPriority,
@@ -142,6 +145,44 @@ def _make_claim(
 # ===========================================================================
 # TestRenderPacket
 # ===========================================================================
+
+
+def test_relevant_assumptions_include_global_and_feature_scope_only() -> None:
+    feature = _make_feature()
+    prd = PRD(
+        summary="",
+        assumptions=[
+            PRDAssumption(
+                id="A001",
+                statement="Global premise.",
+                rationale="Applies across the release.",
+            ),
+            PRDAssumption(
+                id="A002",
+                statement="Auth premise.",
+                rationale="Applies to auth.",
+                requirement_ids=["R001"],
+            ),
+            PRDAssumption(
+                id="A003",
+                statement="Unrelated premise.",
+                rationale="Applies elsewhere.",
+                requirement_ids=["R999"],
+            ),
+        ],
+    )
+
+    assumptions = relevant_assumptions(prd, feature)
+    packet = render_packet(_make_task(), feature=feature, assumptions=assumptions)
+
+    assert [assumption.id for assumption in assumptions] == ["A001", "A002"]
+    assert "Active PRD assumptions" in packet.markdown
+    assert "A001" in packet.markdown and "A002" in packet.markdown
+    assert "A003" not in packet.markdown
+    assert [item["id"] for item in packet.json_data["assumptions"]] == [
+        "A001",
+        "A002",
+    ]
 
 
 class TestRenderPacket:

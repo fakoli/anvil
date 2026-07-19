@@ -73,11 +73,13 @@ Version history
   superseding bundle while preserving the existing checkpoint JSON metadata.
 - v15: authoritative bundle result time (issue #171) — the projection stores
   the timestamp of the last applied reviewed/integrated/merged/completed result.
+- v16: typed PRD assumptions — canonical bounded assumptions are persisted on
+  PRD projections and replay safely from old event logs that omit the field.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 15
+SCHEMA_VERSION: int = 16
 
 
 def get_schema_version() -> int:
@@ -129,6 +131,7 @@ CREATE TABLE IF NOT EXISTS prds (
     acceptance_criteria         TEXT NOT NULL DEFAULT '[]',
     risks                       TEXT NOT NULL DEFAULT '[]',
     open_questions              TEXT NOT NULL DEFAULT '[]',
+    assumptions                 TEXT NOT NULL DEFAULT '[]',
     last_reviewed_at            TEXT,
     last_reviewed_by            TEXT,
     target_version              TEXT,
@@ -388,7 +391,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 11;
+PRAGMA user_version = 16;
 """
 
 

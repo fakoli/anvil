@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """anvil release helper — bump the version in lockstep across every pinned file.
 
-A version bump touches three core files (enforced by tests/test_version_sync.py),
+A version bump touches four core files (enforced by tests/test_version_sync.py),
 five per-harness packaging manifests (tests/test_install_manifests.py), the
 CHANGELOG, and the user-facing version/schema examples in the docs — and it is
 easy to miss one by hand. This script does all of it from one command, so a
@@ -24,6 +24,7 @@ What it edits (relative to the repo root):
         .claude-plugin/plugin.json
         bin/pyproject.toml
         bin/src/anvil/__init__.py
+        bin/uv.lock
     packaging manifests (version-locked to anvil.__version__):
         packaging/codex/.codex-plugin/plugin.json
         packaging/codex/.agents/plugins/marketplace.json
@@ -157,6 +158,12 @@ def run(spec: str, date: str, dry_run: bool, verify: bool) -> int:
     ed.sub(".claude-plugin/plugin.json", rf'("version":\s*"){old_q}(")', rf"\g<1>{new}\g<2>")
     ed.sub("bin/pyproject.toml", rf'(^version\s*=\s*"){old_q}(")', rf"\g<1>{new}\g<2>", count=1)
     ed.sub("bin/src/anvil/__init__.py", rf'(__version__\s*=\s*"){old_q}(")', rf"\g<1>{new}\g<2>")
+    ed.sub(
+        "bin/uv.lock",
+        rf'(\[\[package\]\]\nname = "anvil-state"\nversion = "){old_q}(")',
+        rf"\g<1>{new}\g<2>",
+        count=1,
+    )
     for rel in MANIFESTS:
         ed.sub(rel, rf'("version":\s*"){old_q}(")', rf"\g<1>{new}\g<2>")
 

@@ -12,7 +12,7 @@ equivalent surfaces:
 
 - **CLI** — `anvil <command>` (single mutator, no harness dependency; on PATH
   after `uv tool install anvil-state`).
-- **MCP** — `anvil-mcp` (FastMCP stdio; 24 execution tools by default, all 35
+- **MCP** — `anvil-mcp` (FastMCP stdio; 24 execution tools by default, all 36
   with `ANVIL_MCP_PLANNING=1`). Run `anvil mcp-config <your-client>` to print
   client-specific config.
 
@@ -48,6 +48,7 @@ anvil apply T001           # apply the review verdict
 | Project status | `get_project_status` | `anvil status` |
 | Project summary | `get_project_summary` | `anvil status --json` |
 | Parse PRD | `parse_prd` | `anvil prd parse` |
+| Assess PRD readiness | `assess_prd` | `anvil prd assess` |
 | Review PRD | `review_prd` | `anvil prd review …` |
 | Plan tasks | `plan_tasks` | `anvil plan` |
 | Score tasks | `score_tasks` | `anvil score` |
@@ -95,14 +96,14 @@ See `docs/how-to/coordinating-a-bundle.md` for the complete recovery and review 
 
 To keep the per-turn context lean, the MCP server exposes only the **24
 execution tools** by default — the turn-to-turn loop (next/claim/packet/submit/
-status/conflicts/deps plus coordinator-bundle operations). The **11 one-shot planning tools** (`init_project`,
-`parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
+status/conflicts/deps plus coordinator-bundle operations). The **12 one-shot planning tools** (`init_project`,
+`parse_prd`, `assess_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `apply_review_decision`, `edit_dependencies`, `find_decisions`,
 `describe_surface`, `create_bundle`) are **hidden by default** and re-appear when the server is
 started with **`ANVIL_MCP_PLANNING=1`** (or `true`/`yes`/`on`). Nothing is
 removed — every capability stays reachable via the CLI command in the same row,
-and the full 35-tool surface returns the moment the env flag is set. Use it for
-the planning phase; the steady-state execution loop needs none of the 11.
+and the full 36-tool surface returns the moment the env flag is set. Use it for
+the planning phase; the steady-state execution loop needs none of the 12.
 
 ## Notes
 - Review disposition policy: before presenting any Anvil task in

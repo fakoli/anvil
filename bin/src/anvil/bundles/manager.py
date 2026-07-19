@@ -12,6 +12,7 @@ from anvil.clock import Clock
 from anvil.context.packets import (
     BundleMemberPacketContext,
     BundleWorkPacket,
+    relevant_assumptions,
     render_bundle_packet,
 )
 from anvil.naming import session_discriminator
@@ -349,6 +350,9 @@ class BundleManager:
         bundle = self._backend.get_bundle(bundle_id)
         if bundle is None:
             raise BundleError(f"Bundle '{bundle_id}' not found.")
+        prd = self._backend.get_prd(bundle.prd_id)
+        if prd is None:
+            raise BundleError(f"Bundle '{bundle_id}' references missing PRD '{bundle.prd_id}'.")
         requirements = {
             requirement.id: requirement
             for requirement in self._backend.list_requirements(prd_id=bundle.prd_id)
@@ -389,6 +393,7 @@ class BundleManager:
                         for requirement_id in feature.requirements
                     ],
                     dependencies=dependencies,
+                    assumptions=relevant_assumptions(prd, feature),
                 )
             )
         return render_bundle_packet(

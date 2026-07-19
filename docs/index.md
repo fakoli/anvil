@@ -45,7 +45,7 @@ PRD, plan, claim, evidence, done — in about five minutes.
 ## Reference
 
 The [CLI reference](cli-reference.md) covers every command and exit code;
-the [MCP reference](mcp.md) documents all 35 tools (24 on the wire by
+the [MCP reference](mcp.md) documents all 36 tools (24 on the wire by
 default — see its tool-surface gating section). The
 [architecture guide](architecture.md) maps the layers; the
 [design doc](design.md) records the trade-offs.

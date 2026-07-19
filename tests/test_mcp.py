@@ -341,14 +341,14 @@ def _run(coro: Any) -> Any:
 
 
 # ===========================================================================
-# Test: list_tools — all 35 registered (full surface, planning gate off)
+# Test: list_tools — all 36 registered (full surface, planning gate off)
 # ===========================================================================
 
-# The 11 one-shot planning tools, tagged ``planning`` and hidden from the live
+# The 12 one-shot planning tools, tagged ``planning`` and hidden from the live
 # wire surface by default (L2). The remaining 24 are the always-on execution
 # surface.
 _PLANNING_TOOLS = {
-    "init_project", "parse_prd", "review_prd", "plan_tasks", "score_tasks",
+    "init_project", "parse_prd", "assess_prd", "review_prd", "plan_tasks", "score_tasks",
     "review_tasks", "apply_review_decision", "edit_dependencies",
     "find_decisions", "describe_surface",
     "create_bundle",
@@ -366,7 +366,7 @@ _ALL_TOOLS = _PLANNING_TOOLS | _EXECUTION_TOOLS
 
 
 class TestListTools:
-    def test_list_tools_returns_all_thirty_five(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_list_tools_returns_all_thirty_six(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # The autouse _full_mcp_surface fixture guarantees the planning surface
         # is enabled, so the in-process client sees every registered tool.
         _init_state_dir(tmp_path)
@@ -379,7 +379,7 @@ class TestListTools:
 
         names = _run(run())
         assert _ALL_TOOLS <= names, f"Missing tools: {_ALL_TOOLS - names}"
-        assert len(_ALL_TOOLS) == 35
+        assert len(_ALL_TOOLS) == 36
 
 
 # ===========================================================================
@@ -419,7 +419,7 @@ class TestPlanningSurfaceGate:
         assert exposed is True
         names = self._wire_names()
         assert _ALL_TOOLS <= names
-        assert len(names & _ALL_TOOLS) == 35
+        assert len(names & _ALL_TOOLS) == 36
 
     @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on", "On"])
     def test_truthy_values_enable(self, val: str) -> None:
@@ -442,7 +442,7 @@ class TestPlanningSurfaceGate:
         apply_surface_gate(mcp, env={})
         assert len(self._wire_names()) == 24
         apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
-        assert len(self._wire_names() & _ALL_TOOLS) == 35
+        assert len(self._wire_names() & _ALL_TOOLS) == 36
         apply_surface_gate(mcp, env={})
         assert len(self._wire_names()) == 24
 
@@ -464,7 +464,7 @@ class TestPlanningSurfaceGate:
         with pytest.raises(ToolError):
             _run(call_gated())
 
-        # Enabled: it returns the full 35-tool manifest (introspection is
+        # Enabled: it returns the full 36-tool manifest (introspection is
         # registry-based, so it reports the whole engine surface).
         apply_surface_gate(mcp, env={"ANVIL_MCP_PLANNING": "1"})
 
@@ -473,9 +473,9 @@ class TestPlanningSurfaceGate:
                 return _data(await c.call_tool("describe_surface", {}))
 
         manifest = _run(call_enabled())
-        assert manifest["mcp"]["count"] == 35
+        assert manifest["mcp"]["count"] == 36
 
-    def test_registry_still_reports_all_35_when_gated(self) -> None:
+    def test_registry_still_reports_all_36_when_gated(self) -> None:
         # describe/mcp_tool_names introspect the registry, NOT the wire surface,
         # so the documented "full engine surface" never shrinks under the gate.
         from anvil.cli.describe import mcp_tool_names
@@ -484,7 +484,7 @@ class TestPlanningSurfaceGate:
         apply_surface_gate(mcp, env={})
         names = set(mcp_tool_names())
         assert _ALL_TOOLS <= names
-        assert len(names) == 35
+        assert len(names) == 36
 
 
 class TestBundleTools:
@@ -3206,6 +3206,7 @@ class TestParsePrd:
         finally:
             b.close()
 
+
     def test_error_when_no_prd_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3439,7 +3440,105 @@ class TestParsePrd:
 
 
 # ===========================================================================
-# Tool 17: review_prd
+# Tool 17: assess_prd
+# ===========================================================================
+
+
+class TestAssessPrd:
+    def test_assess_requires_an_initialized_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Match the CLI and other read-only planning tools' state boundary."""
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("assess_prd", {})
+
+        with pytest.raises(ToolError, match="not initialized|init_project"):
+            _run(run())
+
+    def test_assess_is_read_only_and_returns_structured_advisories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        before = (state_dir / "events.jsonl").read_text(encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("assess_prd", {}))
+
+        response = _run(run())
+
+        assert response["advisory"] is True
+        assert response["count"] == len(response["findings"])
+        assert response["findings"]
+        finding = response["findings"][0]
+        assert {"id", "location", "message", "challenge_question"} <= set(finding)
+        assert (state_dir / "events.jsonl").read_text(encoding="utf-8") == before
+
+    @pytest.mark.parametrize(
+        ("content", "error"),
+        [
+            (b"# Project: Incomplete", "parse failed"),
+            (b"\xff\xfe\x00", "Cannot read"),
+        ],
+    )
+    def test_assess_rejects_malformed_or_non_utf8_prds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        content: bytes,
+        error: str,
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        (state_dir / "prd.md").write_bytes(content)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("assess_prd", {})
+
+        with pytest.raises(ToolError, match=error):
+            _run(run())
+
+    def test_named_prd_assessment_matches_cli_contract(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import os
+
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        state_dir = _init_state_dir(tmp_path)
+        named_dir = state_dir / "prds"
+        named_dir.mkdir()
+        (named_dir / "v0.2.md").write_text(_MINIMAL_PRD, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        cli_result = CliRunner().invoke(
+            app,
+            ["prd", "assess", "--prd", "v0.2", "--json"],
+            catch_exceptions=False,
+        )
+        assert cli_result.exit_code == 0, cli_result.output
+        cli_data = json.loads(cli_result.output)["data"]
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("assess_prd", {"prd_id": "v0.2"}))
+
+        mcp_data = _run(run())
+        assert set(mcp_data) == {"prd_source", "findings", "count", "advisory"}
+        assert mcp_data == cli_data
+        assert os.path.basename(mcp_data["prd_source"]) == "v0.2.md"
+
+
+# ===========================================================================
+# Tool 18: review_prd
 # ===========================================================================
 
 

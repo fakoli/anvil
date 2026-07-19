@@ -150,6 +150,20 @@ class TestAcceptanceGrammarGherkin:
         assert "lease is granted" in c.clauses["when"]
         assert c.clauses["then"] == "the other stays in the ready queue"
 
+    def test_multiline_gherkin_stops_before_a_new_when_after_then(self) -> None:
+        clauses = parse_acceptance_grammar(
+            [
+                "Given a draft exists",
+                "When an editor publishes it",
+                "Then its status is displayed",
+                "When a report is missing, the system shall return not found",
+            ]
+        )
+
+        assert [clause.kind for clause in clauses] == ["gherkin", "ears"]
+        assert clauses[0].clauses["then"] == "its status is displayed"
+        assert clauses[1].clauses["then"] == "return not found"
+
     def test_acceptance_grammar_gherkin_skips_scenario_noise(self) -> None:
         clauses = parse_acceptance_grammar(
             [

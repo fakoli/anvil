@@ -25,7 +25,7 @@ from anvil.state.models import EventDraft
 
 prd_app = typer.Typer(
     name="prd",
-    help="PRD lifecycle commands: parse, review, approve.",
+    help="PRD lifecycle commands: parse, assess, review, approve.",
     no_args_is_help=True,
 )
 
@@ -151,6 +151,7 @@ def prd_parse(
                 "acceptance_criteria": result.prd.acceptance_criteria,
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
+                "assumptions": [a.model_dump() for a in result.prd.assumptions],
             }
 
             # Named PRD: stamp the partition so the backend writes ONLY this PRD's
@@ -266,6 +267,7 @@ def prd_parse(
                 "acceptance_criteria": result.prd.acceptance_criteria,
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
+                "assumptions": [a.model_dump() for a in result.prd.assumptions],
                 "requirements_added": requirements_added,
                 "requirements_superseded": requirements_superseded,
                 "requirements_unchanged": requirements_unchanged,
@@ -300,6 +302,106 @@ def prd_parse(
         f"{len(result.tasks)} tasks."
     )
     typer.echo(f"PRD source: {prd_display}")
+
+
+@prd_app.command("assess")
+def prd_assess(
+    file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--file",
+        help="Path to PRD markdown. Defaults to the selected PRD source.",
+    ),
+    prd: str | None = typer.Option(  # noqa: B008
+        None,
+        "--prd",
+        help="Named PRD to assess. Omit for the default PRD.",
+    ),
+    json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the current working directory.",
+        hidden=True,
+    ),
+) -> None:
+    """Report deterministic, advisory behaviour-readiness findings.
+
+    This command only reads and parses the PRD. It never emits an event or
+    changes approval, planning, claim, or autonomous-execution behaviour.
+    """
+    from anvil.planning.behavioral_readiness import (
+        assess_behavioral_readiness,
+        findings_as_dicts,
+    )
+    from anvil.planning.template import parse_prd
+
+    command = "prd assess"
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command=command, json_output=json_output)
+    parse_prd_id = prd if prd else "prd"
+    if file is not None:
+        prd_path = file
+        if not prd_path.is_absolute():
+            base = cwd.resolve() if cwd is not None else Path.cwd().resolve()
+            prd_path = (base / prd_path).resolve()
+    else:
+        prd_path = prd_source_path(state_dir, parse_prd_id)
+    if not prd_path.exists():
+        message = (
+            f"PRD file not found at {display_path(prd_path)}. "
+            "Author your PRD there or pass --file PATH."
+        )
+        if json_output:
+            fail(command, message, code="not_found")
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=1)
+    try:
+        markdown = prd_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        if json_output:
+            fail(command, f"cannot read {prd_path}: {exc}", code="io_error")
+        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    result = parse_prd(markdown, prd_id=parse_prd_id)
+    if result.errors:
+        message = f"PRD parse failed with {len(result.errors)} error(s): " + "; ".join(
+            f"[{error.section}:{error.line}] {error.message}" for error in result.errors
+        )
+        if json_output:
+            fail(command, message, code="parse_error")
+        for error in result.errors:
+            typer.echo(
+                f"  Parse error [{error.section}:{error.line}]: {error.message}",
+                err=True,
+            )
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=1)
+
+    findings = assess_behavioral_readiness(result)
+    if json_output:
+        emit_success(
+            command,
+            {
+                "prd_source": str(prd_path),
+                "findings": findings_as_dicts(findings),
+                "count": len(findings),
+                "advisory": True,
+            },
+        )
+        return
+
+    typer.echo(f"PRD source: {display_path(prd_path)}")
+    if not findings:
+        typer.echo("No behavioural-readiness findings. This remains an advisory check.")
+        return
+    typer.echo(f"{len(findings)} advisory behavioural-readiness finding(s):")
+    for finding in findings:
+        typer.echo("")
+        typer.echo(f"  [{finding.id}] {finding.severity} - {finding.category}")
+        typer.echo(f"    location:  {finding.location}")
+        typer.echo(f"    finding:  {finding.message}")
+        typer.echo(f"    challenge: {finding.challenge_question}")
 
 
 @prd_app.command("review")

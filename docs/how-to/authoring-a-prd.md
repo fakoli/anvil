@@ -69,12 +69,35 @@ sections in this order:
 | `## Acceptance Criteria` | no     | `PRD.acceptance_criteria` (list) |
 | `## Risks`             | no       | `PRD.risks` (list)         |
 | `## Open Questions`    | no       | `PRD.open_questions` (list) |
+| `## Assumptions`       | no       | Typed `PRD.assumptions` records: stable ID, statement, rationale, optional requirement references |
 | `## Features`          | no       | `Feature` rows (F001, F002, …) |
 | `## Tasks`             | no       | `Task` rows (T001, T002, …) |
 
 A missing required section produces a `ParseError` and the existing `state.db` is
 preserved untouched. A missing optional section silently defaults to an empty list and
 parsing continues.
+
+## Behaviour-first readiness (advisory)
+
+Run `anvil prd assess` after drafting to get a deterministic, read-only view of
+whether the PRD makes the intended user behaviour testable before design starts.
+It reports location-aware suggestions for missing user context, outcomes, scope
+or risk boundaries, observable acceptance criteria, failure behaviour, and task
+verification. EARS and Gherkin-shaped criteria are recognised as useful input;
+free-form criteria remain valid and receive guidance rather than rejection.
+
+The assessment does not change the lifecycle: it never blocks parse, review,
+approval, planning, or claims. With `--json`, it emits the normal Anvil envelope
+for scripts and agents. See the [PRD template](../prd-template.md#assumptions)
+for the typed assumptions format that carries documented autonomous defaults
+into planner context and affected work packets.
+
+Typed assumption IDs are bounded to 32 ASCII characters. Assumptions are
+bounded to 100 records per PRD, 500 characters per
+statement, 1,000 characters per rationale, and 100 requirement references per
+record. Revising an assumption returns an approved PRD to `draft` for review.
+They are separate from `anvil assumptions`, the read-only command that ranks
+requirement uncertainty.
 
 **Provide IDs explicitly.** Auto-assigned IDs shift when you insert a new bullet above
 an existing one, breaking every cross-reference. Write `- R001: ...` not just `- ...`.

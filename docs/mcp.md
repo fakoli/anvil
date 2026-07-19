@@ -5,7 +5,7 @@
 ## What it does
 
 Agents need to read and write canonical project state without each one shelling out to the
-CLI per operation and without fighting over the same SQLite rows. The MCP server has 35
+CLI per operation and without fighting over the same SQLite rows. The MCP server has 36
 registered tools (24 on the wire by default — see
 [Tool surface gating](#tool-surface-gating)) over stdio so that any MCP-compatible
 runtime — Claude Code, Codex, Cursor, OpenHands,
@@ -16,7 +16,7 @@ objects; lease-sensitive claim, renew, and release tools reap stale claims befor
 The toolset is organized by lifecycle phase:
 
 - **Bootstrap & status** (`init_project`, `get_project_status`, `get_project_summary`)
-- **PRD lifecycle** (`parse_prd`, `review_prd`)
+- **PRD lifecycle** (`parse_prd`, `assess_prd`, `review_prd`)
 - **Planning & scoring** (`plan_tasks`, `score_tasks`, `review_tasks`)
 - **Task inspection** (`list_tasks`, `get_task`, `get_next_task`, `get_dependency_graph`,
   `check_conflicts`, `edit_dependencies`)
@@ -30,8 +30,8 @@ The toolset is organized by lifecycle phase:
 - **Decision resolution** (`find_decisions`)
 - **Introspection** (`describe_surface`)
 
-The eight workflow tools — `init_project`, `get_project_status`,
-`parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
+The nine workflow tools — `init_project`, `get_project_status`,
+`parse_prd`, `assess_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `apply_review_decision` — deliberately omit git operations (branch / worktree creation),
 matching `claim_task`'s long-standing behavior: remote agents may have no git access, so
 the MCP surface stays git-free. Git side-effects remain CLI-only.
@@ -40,7 +40,7 @@ the MCP surface stays git-free. Git side-effects remain CLI-only.
 
 ## Tool surface gating
 
-All 35 tools are registered, but the live stdio server exposes only the **24 execution
+All 36 tools are registered, but the live stdio server exposes only the **24 execution
 tools** on the wire by default — the turn-to-turn loop an agent runs while doing work:
 
 `get_next_task`, `claim_task`, `release_task`, `renew_claim`, `submit_progress`,
@@ -50,18 +50,18 @@ tools** on the wire by default — the turn-to-turn loop an agent runs while doi
 `generate_bundle_packet`, `submit_bundle_progress`, `record_bundle_review`,
 `finalize_bundle_review`, `checkpoint_bundle`, `reconcile_bundle`, `supersede_bundle`
 
-The other **11 planning tools** are hidden by default so steady-state execution clients
+The other **12 planning tools** are hidden by default so steady-state execution clients
 never pay their schema cost on every turn:
 
-`init_project`, `parse_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
+`init_project`, `parse_prd`, `assess_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
 `apply_review_decision`, `edit_dependencies`, `find_decisions`, `describe_surface`,
 `create_bundle`
 
 Set `ANVIL_MCP_PLANNING=1` (any of `1`/`true`/`yes`/`on`) in the server's environment to
-keep all 35 tools on the wire — use it for the planning phase, or run a second server
+keep all 36 tools on the wire — use it for the planning phase, or run a second server
 entry with the flag set. No tool is removed by the gate: introspection surfaces
 (`anvil describe`, the `--help` tool list, the Docker catalog smoke test) always report
-all 35.
+all 36.
 
 ---
 
@@ -950,6 +950,50 @@ before applying); the caller should fix the PRD and re-call.
 
 ---
 
+### `assess_prd`
+
+Requires an initialized Anvil project, then reads and parses the selected PRD
+and returns deterministic, location-aware
+behavioural-readiness findings. The tool is read-only and advisory: it emits no
+event and cannot block parse, review, approval, planning, claims, or an
+explicitly autonomous run. It mirrors `anvil prd assess` and recognises
+EARS/Gherkin-shaped acceptance criteria as an input without requiring either
+grammar.
+
+**Inputs**
+
+| Parameter | Type | Required | Default |
+|-----------|------|----------|---------|
+| `file` | `string \| null` | no | selected PRD source |
+| `prd_id` | `string \| null` | no | default PRD |
+| `cwd` | `string \| null` | no | `Path.cwd()` |
+
+**Output**
+
+```json
+{
+  "prd_source": "/abs/path/.anvil/prd.md",
+  "advisory": true,
+  "count": 1,
+  "findings": [{
+    "id": "BR-001",
+    "category": "user_context",
+    "severity": "warning",
+    "location": "## Summary",
+    "message": "The summary does not name the person or role whose behaviour should change.",
+    "challenge_question": "Who is the primary user or operator, and what situation are they in?"
+  }]
+}
+```
+
+Malformed or non-UTF-8 PRDs raise `ToolError`, matching the CLI's failed
+assessment contract, and produce no findings. A caller that has explicitly
+opted into challenge mode can ask one suggested question at a time; otherwise
+it can simply report or ignore these advisory findings. Relative `file` paths
+resolve against `cwd` on both the CLI and MCP surfaces.
+
+---
+
 ### `review_prd`
 
 Transitions the PRD: `draft → reviewed` (default) or `reviewed → approved` (when
@@ -1287,7 +1331,7 @@ describe` uses — the CLI and MCP surfaces can never disagree — so it never n
 to be initialized. This tool is planning-gated (hidden from the wire unless
 `ANVIL_MCP_PLANNING=1`; see [Tool surface gating](#tool-surface-gating)), but the
 introspection surfaces themselves (`anvil describe`, the `--help` tool list, the Docker
-catalog smoke test) always report the full 35-tool surface regardless of the gate.
+catalog smoke test) always report the full 36-tool surface regardless of the gate.
 
 **Inputs**
 
@@ -1297,17 +1341,17 @@ None.
 
 ```json
 {
-  "api_version": "3",
-  "engine_version": "0.5.0",
-  "schema_version": 15,
+  "api_version": "4",
+  "engine_version": "0.6.0",
+  "schema_version": 16,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "..."],
-    "count": 66
+    "count": 67
   },
   "mcp": {
     "tools": ["claim_task", "..."],
-    "count": 35
+    "count": 36
   }
 }
 ```

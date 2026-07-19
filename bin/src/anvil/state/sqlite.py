@@ -34,7 +34,7 @@ import sqlite3
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -66,6 +66,7 @@ from anvil.state.models import (
     EventDraft,
     ExecutionBundle,
     Feature,
+    PRDAssumption,
     Project,
     Requirement,
     Review,
@@ -578,6 +579,22 @@ class SqliteBackend:
                 self._append_audit_line("idempotent_no_op", draft, reason)
                 return None
 
+            # Persist the canonical typed assumption records in new PRD events.
+            # Older logs that omitted the additive field retain their original
+            # shape and continue to replay as an empty assumption list.
+            materialized_draft = draft
+            if isinstance(typed_payload, (PrdParsedPayload, PrdRevisedPayload)) and (
+                "assumptions" in draft.payload_json
+            ):
+                canonical_payload = dict(draft.payload_json)
+                canonical_payload["assumptions"] = [
+                    assumption.model_dump(mode="json")
+                    for assumption in typed_payload.assumptions
+                ]
+                materialized_draft = draft.model_copy(
+                    update={"payload_json": canonical_payload}
+                )
+
             # ---- Phase 2: id assignment ----
             if self._events_storage == "git":
                 # Git mode (v1.22.0): hash-chained id + Lamport counter. The
@@ -593,18 +610,18 @@ class SqliteBackend:
                 parent_event_id, tail_lamport = self._scan_tail_envelope()
                 event_id = hash_event_id(
                     parent_event_id=parent_event_id,
-                    action=draft.action,
-                    target_kind=draft.target_kind,
-                    target_id=draft.target_id,
-                    payload=draft.payload_json,
-                    actor=draft.actor,
-                    ts=draft.timestamp.isoformat(),
+                    action=materialized_draft.action,
+                    target_kind=materialized_draft.target_kind,
+                    target_id=materialized_draft.target_id,
+                    payload=materialized_draft.payload_json,
+                    actor=materialized_draft.actor,
+                    ts=materialized_draft.timestamp.isoformat(),
                 )
                 event = Event(
                     id=event_id,
                     parent_event_id=parent_event_id,
                     lamport=max(self._max_lamport, tail_lamport) + 1,
-                    **draft.model_dump(),
+                    **materialized_draft.model_dump(),
                 )
             else:
                 # Local mode (log-owned counter). We are inside the flock, so
@@ -624,7 +641,7 @@ class SqliteBackend:
                 self._next_seq = max(self._next_seq, self._scan_tail_id())
                 self._next_seq += 1
                 event_id = f"E{self._next_seq:06d}"
-                event = Event(id=event_id, **draft.model_dump())
+                event = Event(id=event_id, **materialized_draft.model_dump())
 
             # ---- Phase 3: log-first append ----
             event_line = self._serialize_event_line(event)
@@ -2416,6 +2433,14 @@ class SqliteBackend:
             "('reviewed_unintegrated', 'integrated', 'merged', 'completed')"
         )
 
+    def _m_to_v16(self, conn: sqlite3.Connection) -> None:
+        """v15 -> v16: persist typed PRD assumptions as canonical JSON."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(prds)")}
+        if "assumptions" not in columns:
+            conn.execute(
+                "ALTER TABLE prds ADD COLUMN assumptions TEXT NOT NULL DEFAULT '[]'"
+            )
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -2430,6 +2455,7 @@ class SqliteBackend:
         (12, _m_to_v13),
         (13, _m_to_v14),
         (14, _m_to_v15),
+        (15, _m_to_v16),
     ]
 
     @staticmethod
@@ -3243,13 +3269,54 @@ class SqliteBackend:
         TransactionAborted`` on an invalid Requirement); now rejects up front.
         """
         _ = (conn, event)
-        for req_data in payload.requirements:
+        requirements = self._validate_requirement_payloads(
+            payload.requirements,
+            action="prd.parsed",
+        )
+        self._validate_prd_assumptions(
+            payload.assumptions,
+            {requirement.id for requirement in requirements},
+            action="prd.parsed",
+        )
+
+    @staticmethod
+    def _validate_requirement_payloads(
+        raw_requirements: Iterable[Any],
+        *,
+        action: str,
+    ) -> list[Requirement]:
+        """Validate requirement payloads once and retain canonical models."""
+        requirements: list[Requirement] = []
+        for req_data in raw_requirements:
             try:
-                Requirement.model_validate(req_data)
+                requirements.append(Requirement.model_validate(req_data))
             except Exception as exc:
                 raise EventRejected(
-                    f"prd.parsed: invalid Requirement in payload: {exc}"
+                    f"{action}: invalid Requirement in payload: {exc}"
                 ) from exc
+        return requirements
+
+    @staticmethod
+    def _validate_prd_assumptions(
+        assumptions: list[PRDAssumption],
+        requirement_ids: set[str],
+        *,
+        action: str,
+    ) -> None:
+        """Validate typed assumptions without changing legacy event semantics."""
+        seen: set[str] = set()
+        for assumption in assumptions:
+            if assumption.id in seen:
+                raise EventRejected(
+                    f"{action}: duplicate assumption id {assumption.id!r}"
+                )
+            seen.add(assumption.id)
+            unknown = sorted(set(assumption.requirement_ids) - requirement_ids)
+            if unknown:
+                raise EventRejected(
+                    f"{action}: assumption {assumption.id!r} references unknown "
+                    f"requirement(s): {', '.join(unknown)}"
+                )
 
     def _write_prd_parsed(
         self,
@@ -3291,6 +3358,10 @@ class SqliteBackend:
         acceptance_criteria = payload.acceptance_criteria
         risks = payload.risks
         open_questions = payload.open_questions
+        assumptions = [
+            assumption.model_dump(mode="json")
+            for assumption in payload.assumptions
+        ]
 
         # The payload-level prd_id is the authoritative partition this parse
         # writes into (DEFAULT_PRD_ID='default' for a pre-v7 replay or a
@@ -3326,11 +3397,12 @@ class SqliteBackend:
             INSERT INTO prds
                 (id, project_id, title, status, summary, goals, non_goals,
                  requirements, acceptance_criteria, risks, open_questions,
+                 assumptions,
                  last_reviewed_at, last_reviewed_by,
                  target_version, target_tag,
                  is_default, created_at, updated_at)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
                 title = excluded.title,
@@ -3342,6 +3414,7 @@ class SqliteBackend:
                 acceptance_criteria = excluded.acceptance_criteria,
                 risks = excluded.risks,
                 open_questions = excluded.open_questions,
+                assumptions = excluded.assumptions,
                 last_reviewed_at = excluded.last_reviewed_at,
                 last_reviewed_by = excluded.last_reviewed_by,
                 target_version = excluded.target_version,
@@ -3360,6 +3433,7 @@ class SqliteBackend:
                 json.dumps(acceptance_criteria),
                 json.dumps(risks),
                 json.dumps(open_questions),
+                json.dumps(assumptions),
                 payload.target_version,
                 payload.target_tag,
                 1 if payload.is_default else 0,
@@ -3447,17 +3521,27 @@ class SqliteBackend:
                 f"prd.revised: revision {payload.revision} is not current+1 "
                 f"(current revision is {current}, expected {current + 1})"
             )
-        for req_data in (
-            *payload.requirements_added,
-            *payload.requirements_superseded,
-            *payload.requirements_unchanged,
-        ):
-            try:
-                Requirement.model_validate(req_data)
-            except Exception as exc:
-                raise EventRejected(
-                    f"prd.revised: invalid Requirement in payload: {exc}"
-                ) from exc
+        requirements_added = self._validate_requirement_payloads(
+            payload.requirements_added,
+            action="prd.revised",
+        )
+        requirements_superseded = self._validate_requirement_payloads(
+            payload.requirements_superseded,
+            action="prd.revised",
+        )
+        requirements_unchanged = self._validate_requirement_payloads(
+            payload.requirements_unchanged,
+            action="prd.revised",
+        )
+        revised_requirement_ids = {
+            requirement.id
+            for requirement in (*requirements_added, *requirements_unchanged)
+        }
+        self._validate_prd_assumptions(
+            payload.assumptions,
+            revised_requirement_ids,
+            action="prd.revised",
+        )
 
         # Snapshot this PRD's partition: which ids exist at all, and which are
         # currently live. The diff is validated against these so the write path
@@ -3476,23 +3560,23 @@ class SqliteBackend:
                 (payload.prd_id,),
             ).fetchall()
         }
-        for req_data in payload.requirements_superseded:
-            rid = Requirement.model_validate(req_data).id
+        for requirement in requirements_superseded:
+            rid = requirement.id
             if rid not in live_ids:
                 raise EventRejected(
                     f"prd.revised: cannot supersede requirement {rid!r} — it is "
                     "not currently live in this PRD (missing or already "
                     "superseded)"
                 )
-        for req_data in payload.requirements_unchanged:
-            rid = Requirement.model_validate(req_data).id
+        for requirement in requirements_unchanged:
+            rid = requirement.id
             if rid not in live_ids:
                 raise EventRejected(
                     f"prd.revised: requirements_unchanged names {rid!r}, which is "
                     "not currently live in this PRD — cannot carry it forward"
                 )
-        for req_data in payload.requirements_added:
-            rid = Requirement.model_validate(req_data).id
+        for requirement in requirements_added:
+            rid = requirement.id
             if rid in all_ids:
                 raise EventRejected(
                     f"prd.revised: cannot add requirement {rid!r} — that id "
@@ -3530,11 +3614,9 @@ class SqliteBackend:
           untouched. This lets a revision edit a requirement it is carrying
           forward; without it the field is dead and the edit is silently lost.
         - Status-demotion rule: a revision that supersedes/removes any
-          requirement demotes an approved PRD back to ``draft``. The superseded
-          list is validated up front to contain only currently-live ids, so a
-          non-empty list always corresponds to a REAL row change — the demotion
-          can never fire on a no-op diff. A pure-additive revision (empty
-          ``requirements_superseded``) keeps the payload's status.
+          requirement or changes a recorded assumption demotes an approved PRD
+          back to ``draft``. Assumption changes alter the reviewed product
+          contract even when the requirement diff is otherwise empty.
 
         The whole body runs inside a SAVEPOINT so a failure mid-revision leaves
         no partial state within the outer transaction.
@@ -3552,14 +3634,23 @@ class SqliteBackend:
             Requirement.model_validate(r) for r in payload.requirements_unchanged
         ]
 
-        # Status-demotion rule: superseding/removing any requirement is a
-        # material change, so an approved PRD drops back to draft. The superseded
-        # list is validated to contain only currently-live ids (see
-        # _check_prd_revised), so a non-empty list is always a real change — the
-        # demotion never fires on a no-op diff. A pure additive revision keeps
-        # the payload's declared status.
+        current_assumptions_row = conn.execute(
+            "SELECT assumptions FROM prds WHERE id = ?",
+            (prd_id,),
+        ).fetchone()
+        current_assumptions = (
+            json.loads(current_assumptions_row[0])
+            if current_assumptions_row is not None
+            else []
+        )
+        revised_assumptions = [
+            assumption.model_dump(mode="json") for assumption in payload.assumptions
+        ]
+
+        # Superseding/removing a requirement or changing an assumption is a
+        # material product-contract change, so an approved PRD drops to draft.
         status = payload.status
-        if superseded_objects:
+        if superseded_objects or revised_assumptions != current_assumptions:
             status = "draft"
 
         now = event.timestamp.isoformat()
@@ -3582,6 +3673,7 @@ class SqliteBackend:
                        acceptance_criteria = ?,
                        risks = ?,
                        open_questions = ?,
+                       assumptions = ?,
                        target_version = ?,
                        target_tag = ?,
                        revision = ?,
@@ -3598,6 +3690,7 @@ class SqliteBackend:
                     json.dumps(payload.acceptance_criteria),
                     json.dumps(payload.risks),
                     json.dumps(payload.open_questions),
+                    json.dumps(revised_assumptions),
                     payload.target_version,
                     payload.target_tag,
                     new_revision,
@@ -8407,6 +8500,7 @@ class SqliteBackend:
             "acceptance_criteria",
             "risks",
             "open_questions",
+            "assumptions",
         ):
             if isinstance(d.get(col), str):
                 d[col] = json.loads(d[col])

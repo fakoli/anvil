@@ -1,6 +1,6 @@
 # anvil architecture
 
-> Condensed reference for the current **v0.5.0** standalone state. For the original v0
+> Condensed reference for the current **v0.6.0** standalone state. For the original v0
 > vision and aspirational items, see
 > [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md).
 > For what is planned but not yet shipped, see
@@ -40,6 +40,27 @@ The full positioning (the five differentiators and the Terraform analogy) is mai
 in [`_positioning.md`](_positioning.md); this document does not duplicate
 that material.
 
+### Behaviour-first PRD readiness
+
+The PRD is an executable contract across five layers: **PRD intent → user
+behaviour → technical design → task proof → outcome evidence**. Its optional
+`## Assumptions` section stores typed records (`A###` ID, statement, rationale,
+and optional requirement references) in the canonical PRD projection. Parse and
+revision events carry those records, SQLite persists them as JSON, and missing
+fields default safely for old event logs.
+
+`anvil prd assess` and the planning-tagged `assess_prd` MCP tool run a pure,
+deterministic, read-only assessment over the parsed PRD. Findings include a
+source location, explanation, and challenge question. They are advisory:
+neither surface changes parsing, status gates, claims, approval, or evidence.
+The parser’s optional EARS/Gherkin recognition informs the assessment; it does
+not introduce a required grammar.
+
+The planner receives all active assumptions. Packet generation then filters
+them to global assumptions plus those whose requirement references intersect
+the task’s feature, keeping autonomous defaults visible to implementation and
+review without leaking unrelated product context.
+
 ---
 
 ## Component layers
@@ -51,7 +72,7 @@ graph TD
 
     subgraph Entry["Entry surfaces"]
         CLI["CLI<br/>anvil &lt;cmd&gt;"]
-        MCP["MCP server<br/>FastMCP stdio<br/>35 tools (24 on default surface)"]
+        MCP["MCP server<br/>FastMCP stdio<br/>36 tools (24 on default surface)"]
         Hooks["Hooks<br/>SessionStart / PreToolUse / PostToolUse"]
     end
 
@@ -120,15 +141,15 @@ Source: [`assets/diagrams/component.mmd`](https://github.com/fakoli/anvil/blob/m
 |---|---|---|
 | Plugin manifest | Discoverability, version, keywords | [`.claude-plugin/plugin.json`](https://github.com/fakoli/anvil/blob/main/.claude-plugin/plugin.json) |
 | CLI | Pure state operations — CRUD, scoring, packet generation, sync. No workflow choreography. | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
-| MCP server | Runtime-neutral capability surface — 35 registered stdio tools; the default execution surface serves 24 on the wire, and the 11 planning-tagged tools require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
+| MCP server | Runtime-neutral capability surface — 36 registered stdio tools; the default execution surface serves 24 on the wire, and the 12 planning-tagged tools (including `assess_prd`) require `ANVIL_MCP_PLANNING=1` | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
 | Hooks | Non-blocking enforcement the model would otherwise forget | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json), [`hooks/*.sh`](https://github.com/fakoli/anvil/tree/main/hooks) |
 | Skills | Workflow choreography — one-question-at-a-time, propose approaches, gate transitions | [`skills/*/SKILL.md`](https://github.com/fakoli/anvil/tree/main/skills) |
 | Plugin agents | Specialist roles owned by this plugin | [`agents/*.md`](https://github.com/fakoli/anvil/tree/main/agents) |
 | Backend protocol | The seam between state-engine logic and storage; SqliteBackend is the only impl that ships | [`bin/src/anvil/state/backend.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/backend.py), [`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py) |
 | Transitions | Pure state machine — no I/O, no DB, no side-effects beyond `model_copy()` | [`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py) |
 | Claims manager | Atomic lease + heartbeat; stale detection on every operation | [`bin/src/anvil/claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py), [`bin/src/anvil/claims/stale.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py) |
-| Planning engine | Template-first PRD parser; optional LLM augmentation; deterministic six-dim scorer | [`bin/src/anvil/planning/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/planning) |
-| Context engine | Renders work packets (markdown + JSON) from canonical state | [`bin/src/anvil/context/packets.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) |
+| Planning engine | Template-first PRD parser; deterministic behavioural-readiness assessor; optional LLM task generation; deterministic six-dim scorer | [`bin/src/anvil/planning/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/planning) |
+| Context engine | Renders work packets (markdown + JSON) from canonical state, including relevant typed PRD assumptions | [`bin/src/anvil/context/packets.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/context/packets.py) |
 | Review engine | Pure transition-gate functions (readiness, evidence) | [`bin/src/anvil/review/gates.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/review/gates.py) |
 | Git ops | Auto-create `agent/<task>-<slug>` branch on `claim`; optional worktree | [`bin/src/anvil/git_ops/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/git_ops) |
 | Sync engine | Bidirectional GitHub Issues projection via the `SyncProvider` Protocol | [`bin/src/anvil/sync/`](https://github.com/fakoli/anvil/tree/main/bin/src/anvil/sync) |
@@ -425,7 +446,7 @@ Full reference is available at
 in [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py):
 
 - Lifecycle setup and inspection: `init`, `status`, `describe`, `doctor`
-- PRD authoring: `prd parse`, `prd review` (sub-app)
+- PRD authoring: `prd parse`, `prd assess`, `prd review` (sub-app)
 - Planning: `plan`, `score`, `assumptions`, `expand`, `deps`, `review tasks` (sub-app)
 - Listing / inspecting: `list`, `show`, `scan`, `drift`, `graph`, `conflicts`
 - Claiming: `claim`, `release`, `renew`, `next`, `claim-guard`
@@ -437,13 +458,13 @@ in [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/b
 - Hooks: `hook ...` (sub-app — called by `hooks/*.sh`)
 - Sync: `sync ...` (sub-app — `sync github`, `sync github --health`, ...)
 
-### MCP tools (35)
+### MCP tools (36)
 
 Full reference is at [`docs/mcp.md`](mcp.md). Source:
 [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py).
 
-All 35 tools are registered, but the default execution surface serves 24
-on the wire; the 11 planning-tagged tools (`parse_prd`, `plan_tasks`,
+All 36 tools are registered, but the default execution surface serves 24
+on the wire; the 12 planning-tagged tools (`parse_prd`, `assess_prd`, `plan_tasks`,
 `score_tasks`, ...) require `ANVIL_MCP_PLANNING=1` (`mcp_server.py`
 tag-disables them at startup).
 
@@ -529,7 +550,7 @@ points at a file you can grep.
 | Layer | File(s) |
 |---|---|
 | Entry: CLI assembly | [`bin/src/anvil/cli/__init__.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/__init__.py) |
-| Entry: MCP server (35 tools) | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
+| Entry: MCP server (36 tools) | [`bin/src/anvil/mcp_server.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/mcp_server.py) |
 | Entry: hooks manifest | [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) |
 | Type system | [`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py) |
 | Transitions (pure) | [`bin/src/anvil/state/transitions.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/transitions.py) |
@@ -596,7 +617,7 @@ and welder-effort estimates.
 
 - [`_positioning.md`](_positioning.md) — differentiators and the Terraform analogy (internal positioning reference)
 - [`specs/2026-05-24-anvil-v0.md`](specs/2026-05-24-anvil-v0.md) — the original 358-line v0 build spec (this document is its condensed shipped sibling)
-- [`mcp.md`](mcp.md) — full 35-tool MCP reference with error envelope contract
+- [`mcp.md`](mcp.md) — full 36-tool MCP reference with error envelope contract
 - [`github-sync.md`](github-sync.md) — bidirectional GitHub Issues sync reference
 - [`sync-providers.md`](sync-providers.md) — contributor guide for new sync providers
 - [`prd-template.md`](prd-template.md) — PRD authoring schema and worked example

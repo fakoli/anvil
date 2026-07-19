@@ -97,6 +97,15 @@ without installing a full-featured transformation pipeline.
 - Should we support stdin as an input source (`-` as filename)?
 - Is a `--in-place` flag (rename original to `.json.bak`) worth adding in v1?
 
+## Assumptions
+
+### A001: Converted files remain local to the machine that invokes the CLI.
+
+**Rationale:** A local-only first release keeps the privacy model and failure modes
+bounded; remote storage can be introduced as a separately reviewed capability.
+
+**Requirements:** R001, R002, R003
+
 ## Features
 
 ### F001: Single-file conversion
@@ -348,6 +357,39 @@ items here does not block parsing or approval — they are informational.
 - Should stdin be supported as an input source?
 - Is an --in-place flag worth adding in v1?
 ```
+
+---
+
+### `## Assumptions`
+
+An optional, typed record of a bounded working premise. Each item has a stable
+`A###` ID, a statement, a rationale, and optional requirement references. A
+missing `**Requirements:**` field makes the assumption global; otherwise it is
+included only in the planning context and work packets for features that touch
+one of those requirements. Assumptions are context, not acceptance evidence.
+
+```markdown
+## Assumptions
+
+### A001: First-release report visibility is private by default.
+
+**Rationale:** Private-by-default is reversible and avoids a public-data rollout
+decision before the product team explicitly makes one.
+
+**Requirements:** R001, R003
+```
+
+The parser rejects malformed assumption blocks, duplicate IDs, a missing
+rationale, and references to unknown requirements. It does not infer
+assumptions: autonomous workflow discipline records any bounded inference here
+before planning continues. Assumption IDs are limited to 32 ASCII characters.
+A PRD may contain at most 100 assumptions; each
+statement is limited to 500 characters, each rationale to 1,000 characters,
+and each assumption to 100 requirement references. Changing an assumption in a
+revision returns an approved PRD to `draft` so the changed contract is reviewed.
+
+These typed `A###` records are distinct from the read-only `anvil assumptions`
+command, which ranks requirement uncertainty and does not write PRD state.
 
 ---
 
