@@ -1436,7 +1436,7 @@ def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: 
 
     migrated = _backend(tmp_path)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 15
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 16
         assert migrated.get_project().name == "Before migration"  # type: ignore[union-attr]
         tables = {
             row[0]
@@ -1512,7 +1512,7 @@ def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> No
             }
         assert "review_disposition_event_id" in bundle_columns
         assert "disposition_event_id" in review_columns
-        assert migrated.get_schema_version() == 15
+        assert migrated.get_schema_version() == 16
     finally:
         migrated.close()
 
@@ -1560,7 +1560,7 @@ def test_v12_review_schema_recovers_torn_table_rename(tmp_path: Path) -> None:
             ).fetchone()
         assert row == ("BR-OLD", "legacy-unbound")
         assert backup is None
-        assert migrated.get_schema_version() == 15
+        assert migrated.get_schema_version() == 16
     finally:
         migrated.close()
 
@@ -1591,7 +1591,7 @@ def test_v14_bundle_schema_migrates_to_result_projection(tmp_path: Path) -> None
         bundle = migrated.get_bundle("B001")
         assert bundle is not None
         assert bundle.last_result_at == projected_at
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 15
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 16
     finally:
         migrated.close()
 

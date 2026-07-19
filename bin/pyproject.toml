@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anvil-state"
-version = "0.5.0"
+version = "0.6.0"
 description = "Local-first project state engine: turn rough ideas and PRDs into reviewed, lockable, evidence-backed work packets that humans and AI agents can coordinate on without conflicts."
 # Build-root-local README. `../README.md` escaped the bin/ build root and broke
 # `uv build` (sdist->wheel: "Readme file does not exist: ../README.md"). This is

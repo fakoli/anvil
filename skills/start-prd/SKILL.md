@@ -134,6 +134,22 @@ Compose a draft that matches the structure in `docs/prd-template.md` (relative t
 
 Add a `## Features` section only when the user named distinct groupings. Add a `## Tasks` section only when the user asked for hand-authored tasks; otherwise let `anvil plan` generate them later.
 
+### Step 2a — Optional behaviour-first challenge mode
+
+Do **not** add another interview by default. If the user explicitly asks to be
+challenged (for example, “challenge this PRD” or “use challenge mode”), run
+`anvil prd assess` after the draft is written and parsed. Ask only the
+highest-value advisory question, one at a time. For each answer, let the user
+clarify the PRD, explicitly defer it, or accept a documented `## Assumptions`
+entry with a stable `A###` ID, rationale, and affected requirements.
+
+If the user explicitly asks to continue autonomously, do not ask assessment
+follow-ups. Record only bounded, reversible inferences in `## Assumptions`,
+re-parse and re-assess, then report remaining advisories before continuing.
+Stop instead when an inference needs external authority, conflicts with declared
+scope/non-goals, or has no bounded safe default. This does not change the
+separate human approval step.
+
 **Show the draft to the user before writing.** Present the full proposed `prd.md` content inline (or as a fenced markdown block) and ask:
 
 > Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to the workspace (the per-PRD path under the `.anvil` directory `anvil status` echoes — `prd.md` for the default PRD, `prds/<prd_id>.md` for a named release PRD).

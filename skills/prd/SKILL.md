@@ -84,6 +84,8 @@ Optional sections that should be present in any non-trivial PRD:
 - `## Features` — logical groupings of related tasks
 - `## Tasks` — hand-authored tasks with `**Acceptance criteria:**` and `**Verification:**` fields
 - `## Risks`, `## Open Questions` — informs the planner's scoring
+- `## Assumptions` — stable, bounded premises with a rationale and optional
+  requirement references; global when no requirements are listed
 
 #### Co-authoring with the user
 
@@ -142,6 +144,22 @@ On `proceed without`, continue to Step 3 — Open Questions are informational an
 On `show me the list`, surface a compact one-line-per-item view, then re-ask the same question.
 
 The soft gate by design — `find-decisions` non-empty does NOT block review. The agent's job is to surface the choice, not to force resolution.
+
+**Optional challenge mode.** Keep the standard experience unchanged unless the
+user explicitly asks to be challenged. In that mode, run `anvil prd assess`
+(or planning MCP `assess_prd`) after the draft parses, present the highest-value
+advisory finding, and ask its suggested question one at a time. The user may
+clarify, defer, or accept a documented `## Assumptions` entry. Findings never
+block review or approval.
+
+**Explicit autonomous continuation.** When the user says to continue the
+workflow autonomously, do not turn assessable gaps into follow-up questions.
+Infer only a bounded, reversible default supported by the PRD and repository;
+write it as an `A###` assumption with rationale and requirement references,
+then re-parse and re-assess before planning. Continue while reporting remaining
+advisories. Stop for new external authority, a conflict with scope/non-goals,
+or no bounded safe default. The user must still explicitly authorize approval,
+merge, publishing, and other existing authority boundaries.
 
 ---
 

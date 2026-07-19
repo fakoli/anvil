@@ -40,7 +40,7 @@ The install registers five hooks, wires the MCP server, and makes the five plugi
 
 ```bash
 anvil --version
-# → anvil 0.5.0 (schema 9)
+# → anvil 0.6.0 (schema 16)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
@@ -142,6 +142,8 @@ anvil prd parse
 # → Parsed 3 requirements, 1 features, 1 tasks.
 # → PRD source: ~/.anvil/workspaces/my-project-183a2542/.anvil/prd.md
 
+anvil prd assess            # optional, advisory, and read-only
+
 anvil prd review            # draft → reviewed
 # → PRD reviewed by 'human'.
 # → Run `anvil prd review --approve` to approve.
@@ -150,7 +152,14 @@ anvil prd review --approve  # reviewed → approved
 # → PRD approved by 'human'.
 ```
 
-The two-step gate is deliberate. `prd review` records that a human has read the PRD; `prd review --approve` unlocks task claiming. The claims manager refuses to claim any task while the PRD is in `draft` or `reviewed` status — only `approved` (or explicitly `reviewed` for the readiness gate) lets work begin.
+The assessment highlights missing user context, outcomes, observable behavior,
+boundaries, acceptance scenarios, and verification with a suggested challenge
+question. Its findings are advisory: they do not alter parsing, approval, or
+claiming. The two-step review gate remains deliberate. `prd review` records
+that a human has read the PRD; `prd review --approve` unlocks task claiming.
+The claims manager refuses to claim any task while the PRD is in `draft` or
+`reviewed` status — only `approved` (or explicitly `reviewed` for the readiness
+gate) lets work begin.
 
 ## Step 5 — Generate and score tasks
 

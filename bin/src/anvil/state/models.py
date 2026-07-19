@@ -78,6 +78,7 @@ __all__ = [
     "ProofArtifact",
     "ProofRequirement",
     "Project",
+    "PRDAssumption",
     "PRD",
     "Requirement",
     "Feature",
@@ -624,6 +625,51 @@ class Project(BaseModel):
         return _require_utc(v, "created_at / updated_at")
 
 
+MAX_PRD_ASSUMPTIONS = 100
+MAX_PRD_ASSUMPTION_ID_LENGTH = 32
+MAX_PRD_ASSUMPTION_STATEMENT_LENGTH = 500
+MAX_PRD_ASSUMPTION_RATIONALE_LENGTH = 1_000
+MAX_PRD_ASSUMPTION_REQUIREMENTS = 100
+
+
+class PRDAssumption(BaseModel):
+    """A bounded, reviewable premise used while planning a PRD.
+
+    Assumptions deliberately live on the PRD rather than on a task: they are
+    product context, not implementation evidence.  An empty
+    ``requirement_ids`` list denotes a global assumption; a populated list
+    scopes it to the requirements it affects.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    id: str = Field(max_length=MAX_PRD_ASSUMPTION_ID_LENGTH)
+    statement: str = Field(max_length=MAX_PRD_ASSUMPTION_STATEMENT_LENGTH)
+    rationale: str = Field(max_length=MAX_PRD_ASSUMPTION_RATIONALE_LENGTH)
+    requirement_ids: list[RequirementID] = Field(
+        default_factory=list,
+        max_length=MAX_PRD_ASSUMPTION_REQUIREMENTS,
+    )
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        """Canonicalize and validate the stable identifier in every input path."""
+        normalized = value.strip().upper()
+        if not re.fullmatch(r"A[0-9]{3,31}", normalized):
+            raise ValueError("PRD assumption id must use the stable A### format")
+        return normalized
+
+    @field_validator("statement", "rationale")
+    @classmethod
+    def _validate_required_text(cls, value: str) -> str:
+        """Reject blank canonical records even when they bypass Markdown parsing."""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("PRD assumption statement and rationale must not be blank")
+        return normalized
+
+
 class PRD(BaseModel):
     """Product Requirements Document — the gate that controls task claimability."""
 
@@ -656,6 +702,10 @@ class PRD(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
+    assumptions: list[PRDAssumption] = Field(
+        default_factory=list,
+        max_length=MAX_PRD_ASSUMPTIONS,
+    )
     last_reviewed_at: datetime.datetime | None = None
     last_reviewed_by: str | None = None
     created_at: datetime.datetime | None = Field(default=None, exclude=True)

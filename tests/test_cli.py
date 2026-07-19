@@ -974,6 +974,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
+        assert API_VERSION == "4"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["schema_version"] == get_schema_version()
@@ -2319,6 +2320,74 @@ class TestAnvilPrdEnvCli:
             {t["id"] for t in via_env["data"]["tasks"]}
             == {t["id"] for t in explicit["data"]["tasks"]}
         )
+
+
+# ---------------------------------------------------------------------------
+# prd assess command
+# ---------------------------------------------------------------------------
+
+
+class TestPrdAssess:
+    def test_human_and_json_output_are_advisory_and_read_only(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        state_dir = tmp_path / ".anvil"
+        before = (state_dir / "events.jsonl").read_text(encoding="utf-8")
+
+        human = _invoke_cmd(tmp_path, ["prd", "assess"])
+        json_result = _invoke_cmd(tmp_path, ["prd", "assess", "--json"])
+
+        assert human.exit_code == 0
+        assert "advisory behavioural-readiness" in human.output
+        assert json_result.exit_code == 0
+        payload = json.loads(json_result.output)
+        assert payload["ok"] is True
+        assert payload["command"] == "prd assess"
+        assert payload["data"]["advisory"] is True
+        assert payload["data"]["count"] == len(payload["data"]["findings"])
+        assert (state_dir / "events.jsonl").read_text(encoding="utf-8") == before
+
+    def test_relative_file_resolves_against_explicit_cwd(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        specs = tmp_path / "specs"
+        specs.mkdir()
+        (specs / "prd.md").write_text(_MINIMAL_PRD_CONTENT, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "prd",
+                "assess",
+                "--file",
+                "specs/prd.md",
+                "--cwd",
+                str(tmp_path),
+                "--json",
+            ],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0, result.output
+        source = Path(json.loads(result.output)["data"]["prd_source"])
+        assert source == (specs / "prd.md").resolve()
+
+    @pytest.mark.parametrize(
+        ("content", "code"),
+        [
+            (b"# Project: Incomplete", "parse_error"),
+            (b"\xff\xfe\x00", "io_error"),
+        ],
+    )
+    def test_json_rejects_malformed_or_non_utf8_prds(
+        self, tmp_path: Path, content: bytes, code: str
+    ) -> None:
+        _do_init(tmp_path)
+        (tmp_path / ".anvil" / "prd.md").write_bytes(content)
+
+        result = _invoke_cmd(tmp_path, ["prd", "assess", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"]["code"] == code
 
 
 # ---------------------------------------------------------------------------

@@ -569,6 +569,15 @@ def _build_user_prompt(
         for oq in prd.open_questions:
             parts.append(f"- {oq}")
         parts.append("")
+    if prd.assumptions:
+        parts.append("## Active assumptions (honor these bounded premises when deriving tasks)\n")
+        for assumption in prd.assumptions:
+            scope = ", ".join(assumption.requirement_ids) or "global"
+            parts.append(
+                f"- {assumption.id} [{scope}]: {assumption.statement} "
+                f"(rationale: {assumption.rationale})"
+            )
+        parts.append("")
 
     # Existing tasks — incremental planning case.
     if existing_tasks:

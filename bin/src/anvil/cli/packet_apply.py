@@ -484,6 +484,11 @@ def packet(
 
         # Fetch the parent feature via the Backend protocol.
         feature = backend.get_feature(task.feature_id)
+        from anvil.context.packets import relevant_assumptions
+
+        task_assumptions = relevant_assumptions(
+            backend.get_prd_for_task(task), feature
+        )
 
         # Split dependencies into completed and open.
         from anvil.state.models import Task
@@ -538,6 +543,7 @@ def packet(
                 dependencies_open=dependencies_open,
                 related_decisions=None,  # Phase 6+ wiring
                 active_claim=active_claim,
+                assumptions=task_assumptions,
                 deferred_findings=deferred,
             )
         else:
@@ -548,6 +554,7 @@ def packet(
                 dependencies_open=dependencies_open,
                 related_decisions=None,  # Phase 6+ wiring
                 active_claim=active_claim,
+                assumptions=task_assumptions,
                 deferred_findings=deferred,
             )
     finally:

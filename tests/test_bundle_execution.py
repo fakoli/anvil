@@ -143,11 +143,39 @@ def _seed(
                         "text": "Ship coherently.",
                         "source_paragraph": None,
                         "derived": False,
+                    },
+                    {
+                        "id": "release:R002",
+                        "prd_id": "release",
+                        "prd_section": "Requirements",
+                        "text": "Remain outside this bundle feature.",
+                        "source_paragraph": None,
+                        "derived": False,
                     }
                 ],
                 "acceptance_criteria": [],
                 "risks": [],
                 "open_questions": [],
+                "assumptions": [
+                    {
+                        "id": "A001",
+                        "statement": "Use the existing repository conventions.",
+                        "rationale": "This is the bounded global default.",
+                        "requirement_ids": [],
+                    },
+                    {
+                        "id": "A002",
+                        "statement": "Keep the release flow local.",
+                        "rationale": "The relevant requirement needs no network.",
+                        "requirement_ids": ["release:R001"],
+                    },
+                    {
+                        "id": "A003",
+                        "statement": "A sibling feature uses a remote service.",
+                        "rationale": "It applies only outside this bundle.",
+                        "requirement_ids": ["release:R002"],
+                    },
+                ],
             },
         )
     )
@@ -312,6 +340,14 @@ def test_claim_creates_one_public_claim_and_ordered_member_authorizations(
             "release:T002",
         ]
         assert "release:R001: Ship coherently." in packet.markdown
+        assert "Active PRD assumptions:" in packet.markdown
+        assert "A001: Use the existing repository conventions." in packet.markdown
+        assert "A002: Keep the release flow local." in packet.markdown
+        assert "A003" not in packet.markdown
+        assert [
+            assumption["id"]
+            for assumption in packet.json_data["members"][0]["assumptions"]
+        ] == ["A001", "A002"]
         assert packet.json_data["aggregate"]["shared_file_overlaps"] == [
             {
                 "path": "src/shared.py",

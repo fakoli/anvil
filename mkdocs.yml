@@ -117,7 +117,7 @@ nav:
       - Syncing with GitHub: how-to/syncing-with-github.md
   - Reference:
       - CLI: cli-reference.md
-      - MCP server (35 tools): mcp.md
+      - MCP server (36 tools): mcp.md
       - Agents: agents-reference.md
       - Skills: skills-reference.md
       - Hooks: hooks-reference.md
@@ -153,6 +153,7 @@ nav:
           - Workflow adapter (SL-7): specs/2026-06-19-sl7-workflow-adapter.md
           - Multi-PRD revisable: specs/2026-06-22-multi-prd-revisable.md
       - Decisions:
+          - Behavior-first PRD readiness: decisions/2026-07-19-behavioral-readiness.md
           - WF-3 workflow format: decisions/wf3-format.md
       - Quality & evidence:
           - Live sync tests: live-tests.md

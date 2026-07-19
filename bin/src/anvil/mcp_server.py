@@ -34,7 +34,7 @@ mcp: FastMCP = FastMCP("anvil")
 # Planning vs execution surface split (audit item L2)
 # ---------------------------------------------------------------------------
 #
-# The 35 tools fall into two groups:
+# The 36 tools fall into two groups:
 #
 #   EXECUTION (24) — the turn-to-turn loop an agent runs while doing work:
 #       get_next_task, claim_task, release_task, renew_claim, submit_progress,
@@ -43,29 +43,29 @@ mcp: FastMCP = FastMCP("anvil")
 #       generate_work_packet, get_dependency_graph
 #       plus 10 coordinator-bundle execution/read tools
 #
-#   PLANNING (11) — one-shot bootstrap/plan/review operations run rarely (often
+#   PLANNING (12) — one-shot bootstrap/plan/review operations run rarely (often
 #       once per project), tagged ``planning`` below:
-#       init_project, parse_prd, review_prd, plan_tasks, score_tasks,
+#       init_project, parse_prd, assess_prd, review_prd, plan_tasks, score_tasks,
 #       review_tasks, apply_review_decision, edit_dependencies, find_decisions,
 #       describe_surface, create_bundle
 #
 # Every planning tool carries the ``planning`` tag. The live stdio server hides
 # the planning surface BY DEFAULT (``apply_surface_gate`` at startup) so a steady-
 # state execution client never pays the ~1.2k-token planning schema cost on every
-# turn. Setting ``ANVIL_MCP_PLANNING`` (truthy) keeps all 35 tools on the wire —
+# turn. Setting ``ANVIL_MCP_PLANNING`` (truthy) keeps all 36 tools on the wire —
 # use it for the planning phase, or run a second server entry with the flag set.
 #
 # IMPORTANT: the gate is applied ONLY when the live server starts (see
 # ``apply_surface_gate``), never at import time. So ``from anvil.mcp_server import
-# mcp`` still sees all 35 registered tools, and every introspection surface that
+# mcp`` still sees all 36 registered tools, and every introspection surface that
 # reports "what the engine can do" — ``describe_surface``, ``anvil describe``,
 # ``mcp_tool_names()``, the ``--help`` tool list, the Docker catalog smoke test —
 # is unchanged. Only the per-turn wire surface of the *default* execution server
-# shrinks. No tool is removed; all 35 remain reachable.
+# shrinks. No tool is removed; all 36 remain reachable.
 
 PLANNING_TAG = "planning"
 
-# Env flag that opts a live server back into the full 35-tool surface.
+# Env flag that opts a live server back into the full 36-tool surface.
 _PLANNING_ENV = "ANVIL_MCP_PLANNING"
 
 
@@ -73,7 +73,7 @@ def _planning_surface_enabled(env: dict[str, str] | None = None) -> bool:
     """Return True when the planning surface should be exposed on the wire.
 
     Resolves from the ``ANVIL_MCP_PLANNING`` env var. Truthy values
-    (``1``/``true``/``yes``/``on``, case-insensitive) enable the full 35-tool
+    (``1``/``true``/``yes``/``on``, case-insensitive) enable the full 36-tool
     surface; anything else (incl. unset) yields the lean execution-only default.
     """
     import os
@@ -1382,7 +1382,11 @@ def generate_work_packet(
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
-        from anvil.context.packets import fast_lane_packet, render_packet
+        from anvil.context.packets import (
+            fast_lane_packet,
+            relevant_assumptions,
+            render_packet,
+        )
         from anvil.state.models import Task
 
         task = backend.get_task(task_id)
@@ -1390,6 +1394,9 @@ def generate_work_packet(
             raise ToolError(f"Task '{task_id}' not found.")
 
         feature = backend.get_feature(task.feature_id)
+        task_assumptions = relevant_assumptions(
+            backend.get_prd_for_task(task), feature
+        )
 
         dependencies_completed: list[Task] = []
         dependencies_open: list[Task] = []
@@ -1434,6 +1441,7 @@ def generate_work_packet(
                 dependencies_open=dependencies_open,
                 related_decisions=None,
                 active_claim=active_claim,
+                assumptions=task_assumptions,
                 deferred_findings=deferred,
             )
         else:
@@ -1444,6 +1452,7 @@ def generate_work_packet(
                 dependencies_open=dependencies_open,
                 related_decisions=None,
                 active_claim=active_claim,
+                assumptions=task_assumptions,
                 deferred_findings=deferred,
             )
 
@@ -2178,6 +2187,98 @@ class ParsePrdResponse(BaseModel):
     prd_path: str
 
 
+class BehavioralFindingResponse(BaseModel):
+    """One deterministic, advisory behavioural-readiness finding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    category: str
+    severity: str
+    location: str
+    message: str
+    challenge_question: str
+
+
+class AssessPrdResponse(BaseModel):
+    """Read-only PRD behavioural-readiness assessment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prd_source: str
+    findings: list[BehavioralFindingResponse] = Field(default_factory=list)
+    count: int
+    advisory: bool = True
+
+
+@mcp.tool(tags={PLANNING_TAG})
+def assess_prd(
+    file: str | None = None,
+    prd_id: str | None = None,
+    cwd: str | None = None,
+) -> AssessPrdResponse:
+    """Assess a PRD for behaviour-first readiness without mutating state.
+
+    The output is advisory and deterministic: it reports explainable gaps and
+    a focused challenge question, but never blocks parse, review, approval,
+    planning, claiming, or autonomous execution.
+    """
+    from anvil.cli._helpers import display_path, prd_source_path
+    from anvil.planning.behavioral_readiness import assess_behavioral_readiness
+    from anvil.planning.template import parse_prd as _parse_prd_impl
+
+    state_dir = _resolve_state_dir(cwd)
+    if not state_dir.exists():
+        raise ToolError(
+            f"anvil not initialized in {state_dir.parent}. "
+            "Call init_project first.",
+        )
+    parse_prd_id = prd_id.strip() if (prd_id and prd_id.strip()) else "prd"
+    if file is not None:
+        prd_path = Path(file)
+        if not prd_path.is_absolute():
+            base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+            prd_path = (base / prd_path).resolve()
+    else:
+        prd_path = prd_source_path(state_dir, parse_prd_id)
+    if not prd_path.exists():
+        raise ToolError(
+            f"PRD file not found at {display_path(prd_path)}. "
+            "Author your PRD there or pass file= an explicit path."
+        )
+    try:
+        markdown = prd_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc) or exc.__class__.__name__
+        raise ToolError(f"Cannot read {display_path(prd_path)}: {reason}") from exc
+
+    result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
+    if result.errors:
+        details = "; ".join(
+            f"[{error.section}:{error.line}] {error.message}"
+            for error in result.errors
+        )
+        raise ToolError(
+            f"PRD parse failed with {len(result.errors)} error(s): {details}"
+        )
+    findings = assess_behavioral_readiness(result)
+    return AssessPrdResponse(
+        prd_source=str(prd_path),
+        findings=[
+            BehavioralFindingResponse(
+                id=finding.id,
+                category=finding.category,
+                severity=finding.severity,
+                location=finding.location,
+                message=finding.message,
+                challenge_question=finding.challenge_question,
+            )
+            for finding in findings
+        ],
+        count=len(findings),
+    )
+
+
 @mcp.tool(tags={PLANNING_TAG})
 def parse_prd(
     file: str | None = None,
@@ -2301,6 +2402,7 @@ def parse_prd(
                 "acceptance_criteria": result.prd.acceptance_criteria,
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
+                "assumptions": [a.model_dump() for a in result.prd.assumptions],
             }
 
             # Named PRD: stamp the partition so the handler writes ONLY this PRD's
@@ -2390,6 +2492,7 @@ def parse_prd(
                 "acceptance_criteria": result.prd.acceptance_criteria,
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
+                "assumptions": [a.model_dump() for a in result.prd.assumptions],
                 "requirements_added": requirements_added,
                 "requirements_superseded": requirements_superseded,
                 "requirements_unchanged": requirements_unchanged,
@@ -4123,13 +4226,13 @@ def _help_text() -> str:
         "                     host project here, e.g. -v \"$PWD:/project\" -e",
         "                     ANVIL_ROOT=/project.",
         "  ANVIL_MCP_PLANNING  When truthy (1/true/yes/on), the live server",
-        "                     exposes the full 35-tool surface. By DEFAULT the 11",
-        "                     one-shot planning tools (init_project, parse_prd,",
+        "                     exposes the full 36-tool surface. By DEFAULT the 12",
+        "                     one-shot planning tools (init_project, parse_prd, assess_prd,",
         "                     review_prd, plan_tasks, score_tasks, review_tasks,",
         "                     apply_review_decision, edit_dependencies,",
         "                     find_decisions, describe_surface, create_bundle) are hidden from the",
         "                     per-turn wire surface to cut always-on context; the",
-        "                     24 execution tools remain. All 35 are always",
+        "                     24 execution tools remain. All 36 are always",
         "                     registered (this list reflects the full surface).",
         "",
         f"Registered tools ({len(tools)}):",
@@ -4171,13 +4274,13 @@ def main(argv: list[str] | None = None) -> int:
     # L2: hide the one-shot planning tool surface on the live wire UNLESS the
     # operator opts back in via ANVIL_MCP_PLANNING. This shrinks the always-on
     # per-turn cost for the common execution client without removing any tool —
-    # all 35 stay registered (introspection/--help/describe unchanged) and the
-    # planning 11 return the moment the flag is set. Applied here, not at import,
+    # all 36 stay registered (introspection/--help/describe unchanged) and the
+    # planning 12 return the moment the flag is set. Applied here, not at import,
     # so only the live server's wire surface is affected.
     if not apply_surface_gate(mcp):
         print(
             "anvil-mcp: planning tools hidden (execution surface only). "
-            f"Set {_PLANNING_ENV}=1 to expose the full 35-tool surface for "
+            f"Set {_PLANNING_ENV}=1 to expose the full 36-tool surface for "
             "planning.",
             file=sys.stderr,
         )

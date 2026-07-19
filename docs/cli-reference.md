@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 66 executable leaf commands,
+> Single-page reference for the `anvil` CLI: 67 executable leaf commands,
 > including the milestone bundle lifecycle. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
@@ -22,6 +22,7 @@
   - [`anvil scan`](#scan)
 - PRD authoring
   - [`anvil prd parse`](#prd-parse)
+  - [`anvil prd assess`](#prd-assess)
   - [`anvil prd review`](#prd-review)
 - Planning
   - [`anvil plan`](#plan)
@@ -138,7 +139,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.5.0 (schema 9)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.0 (schema 16)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -272,7 +273,8 @@ project.
 **Synopsis:** Parse `.anvil/prd.md` (or `--file PATH`) and store the
 result as a `prd.parsed` event. Calls the template parser, validates the
 required sections, and persists the full PRD payload (summary, goals,
-non-goals, requirements, acceptance criteria, risks, open questions).
+non-goals, requirements, acceptance criteria, risks, open questions, and typed
+assumptions).
 
 **Flags:**
 
@@ -297,6 +299,31 @@ anvil prd parse --file ./drafts/v2-prd.md
 **See also:** [`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md);
 [`docs/prd-template.md`](prd-template.md) for the required section structure;
 [`anvil prd review`](#prd-review) for the next step.
+
+### `anvil prd assess` { #prd-assess }
+
+**Synopsis:** Read and parse a PRD, then report deterministic,
+location-aware behavioural-readiness findings. It is advisory and read-only:
+it does not write events or block parsing, review, approval, planning, claims,
+or autonomous execution.
+
+**Flags:**
+
+- `--file PATH` *(optional)* — PRD markdown to assess.
+- `--prd ID` *(optional)* — named PRD source to assess; omit for the default.
+- `--json` *(optional)* — emit the standard Anvil JSON envelope with ordered
+  finding records and challenge questions.
+- `--cwd PATH` *(hidden)* — project directory.
+
+**Example:**
+
+```bash
+anvil prd assess
+anvil prd assess --prd v0.2 --json
+```
+
+**See also:** [`anvil prd parse`](#prd-parse) and
+[`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md#behaviour-first-readiness-advisory).
 
 ### `anvil prd review` { #prd-review }
 
@@ -1266,8 +1293,10 @@ GitHub-specific alias.
 
 **Synopsis:** Print the paste-ready MCP server config block for a target MCP
 client, with the `anvil` server pointed at this checkout's `bin/anvil-mcp` by
-**absolute path** (not `${CLAUDE_PLUGIN_ROOT}`), so any MCP-capable harness gets
-the full 35-tool surface. Read-only and project-free (mirrors `anvil describe`):
+**absolute path** (not `${CLAUDE_PLUGIN_ROOT}`). Generated config exposes the
+lean 24-tool execution surface by default. Add `ANVIL_MCP_PLANNING=1` to the
+emitted server environment when the client needs all 36 tools. The command is
+read-only and project-free (mirrors `anvil describe`):
 it never opens a backend, runs from any directory, and only *prints* config — it
 never mutates the client's own settings file. In text mode the config goes to
 stdout (paste-clean) and a one-line `# paste into <file>` hint goes to stderr.
@@ -1454,7 +1483,8 @@ flag list; full prose treatment may follow in a later pass.
 - `anvil assumptions` — Rank PRD requirements by
   `blast_radius x uncertainty` so the riskiest, least-certain requirements
   surface before planning (`--limit`/`-n`, `--json`); advisory only, never
-  mutates state.
+  mutates state. This is a requirement-uncertainty report, distinct from the
+  typed `A###` records authored under a PRD's `## Assumptions` section.
 - `anvil deps` — Apply a batch of dependency-edge edits (`--add`/`--remove
   SOURCE:TARGET`, repeatable) atomically, rejecting the whole batch on any
   cycle, unknown task, or self-loop.

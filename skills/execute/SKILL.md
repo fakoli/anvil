@@ -54,6 +54,13 @@ anvil packet T012
 
 The CLI echoes where it wrote the file (`Wrote packet to <path>`). That path lives under the active state layout (the HOME workspace by default, e.g. `~/.anvil/workspaces/<key>/.anvil/packets/T012.md`), not necessarily in-repo. The packet holds the full operating context for this task: goal, acceptance criteria, likely files in scope, constraints, verification commands, and the update protocol. It is a derived view regenerated from canonical state, so it reflects the current snapshot, not a cached copy.
 
+When present, read the packet’s **Active PRD assumptions** section as a
+declared constraint. An explicit autonomous delegation permits work within
+those bounded premises; it does not permit inventing new scope, obtaining
+external authority, or bypassing approval/evidence gates. If execution exposes
+an unstated premise with no bounded safe default, release the claim and surface
+it rather than silently broadening the work.
+
 Read the packet immediately after fetching it. The acceptance criteria in the packet are the contract that `submit` validates against. Skipping the packet and working from memory or from `show TASK_ID` output risks submitting evidence that misses a required item.
 
 To get the JSON form instead (useful when another tool or agent consumes the packet programmatically):

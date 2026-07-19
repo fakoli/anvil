@@ -28,6 +28,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v13     | Bundle review dispositions (issue #171) | Binds every adversarial verdict to the exact `implemented_unreviewed` transition that opened its review cycle, preventing an older quorum from satisfying later rework. |
 | v14     | Bundle delivery lineage (issue #171) | Adds a named `superseded_by` bundle reference while retaining checkpoint and reconciliation history. |
 | v15     | Bundle result projection (issue #171) | Adds authoritative `last_result_at` timing for applied reviewed/integrated/merged/completed transitions. |
+| v16     | Behavior-first PRD readiness | `prds` adds `assumptions TEXT NOT NULL DEFAULT '[]'`, storing typed, stable PRD assumptions alongside the canonical PRD state. The additive default preserves the prior meaning for every existing PRD: no recorded assumptions. |
 
 ## Execution bundles — v0-v10 → v11 auto-upgrade
 
@@ -88,6 +89,14 @@ with bundle status. For an existing bundle already in one of those states, the
 migration uses the projection's `updated_at` as a conservative baseline; it
 does not derive timing from raw audit-log events that may have been replay
 no-ops. Future result transitions replace that baseline with their exact time.
+
+## Behavior-first PRD readiness — v15 → v16 auto-upgrade
+
+The v16 migration adds `prds.assumptions TEXT NOT NULL DEFAULT '[]'`. It is an
+additive JSON projection of the typed assumptions captured in newer
+`prd.parsed` and `prd.revised` events. Older event payloads omit this optional
+field and are interpreted as `[]`, so replay preserves their historical
+meaning without rewriting the audit log.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 

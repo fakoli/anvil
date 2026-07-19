@@ -6,14 +6,27 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-19
+
 ### Added
 
+- **Behavior-first PRD readiness and bounded autonomous assumptions.** PRDs can
+  now carry typed `## Assumptions` records with stable IDs, rationales, and
+  optional requirement references. The deterministic, read-only
+  `anvil prd assess` command and planning-gated `assess_prd` MCP tool report
+  explainable, location-aware gaps in user context, outcomes, observable
+  behavior, boundaries, acceptance scenarios, and task verification without
+  changing lifecycle gates. Opt-in challenge mode asks one high-value question
+  at a time; explicitly autonomous runs may document only bounded, reversible
+  defaults and continue. Relevant assumptions propagate into planning context
+  and work packets, with replay-safe schema v16 persistence for old event logs.
+  The additive CLI/MCP surface advances the capability contract to API v4.
 - **Coordinator-first execution bundles (issue #171)** — ordered, same-PRD task bundles
   with one coordinator lease, atomic member authorizations, aggregate packets and status,
   evidence-bound completion, bounded independent review rounds, delivery checkpoints,
   idempotent reconciliation, and history-preserving supersession. The complete lifecycle
-  is exposed through deterministic CLI and typed MCP contracts (API v3; 24 execution tools
-  by default, 35 with planning enabled). Existing task graphs adopt bundles additively;
+  is exposed through deterministic CLI and typed MCP contracts (API v4; 24 execution tools
+  by default, 36 with planning enabled). Existing task graphs adopt bundles additively;
   task IDs, dependencies, claims, evidence, and replay history remain canonical. A new
   coordinator workflow guide covers bounded delegation, stalled-worker recovery, replan,
   migration, and delivery semantics. Replanned bundles can create a same-member replacement

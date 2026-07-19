@@ -23,6 +23,7 @@ _PINNED = [
     ".claude-plugin/plugin.json",
     "bin/pyproject.toml",
     "bin/src/anvil/__init__.py",
+    "bin/uv.lock",
     "packaging/codex/.codex-plugin/plugin.json",
     "packaging/codex/.agents/plugins/marketplace.json",
     "packaging/gemini/gemini-extension.json",

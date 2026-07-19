@@ -135,9 +135,44 @@ Submitting evidence is more work than typing "done." That extra step is intentio
 
 ---
 
+## Why behavioural readiness is advisory and deterministic
+
+**Choice:** a PRD may be assessed for the user behaviour, outcome, boundaries,
+acceptance scenarios, and verification it makes explicit. The assessment is a
+pure deterministic read of parsed PRD data: it returns explainable findings
+and a suggested challenge question, but it never becomes a lifecycle gate.
+
+### Why
+
+A technical specification can be internally coherent and still test the wrong
+thing. Making the intended user behaviour visible before design gives the task
+planner and reviewer a better target for acceptance criteria and evidence.
+However, a heuristic cannot know a product decision better than its author, so
+it should invite a useful conversation rather than reject a valid PRD.
+
+### Boundaries
+
+The engine owns typed, replayable assumptions and their propagation to planning
+context and relevant work packets. Skills own the interaction: standard flows
+remain unchanged, challenge mode asks one high-value question at a time, and an
+explicit autonomous run records only bounded, reversible assumptions before
+continuing. No assessment result changes approval, evidence, publish, merge, or
+external-authority policy.
+
+### Rejected alternatives
+
+- **Mandatory interview gates.** They would turn a drafting aid into a blocker
+  and remove the deliberately supported autonomous path.
+- **LLM-only assessment.** It is harder to audit, less repeatable, and cannot
+  be safely used as the foundation for event-backed state.
+- **A second spec format.** PRD markdown remains the front door; structured
+  assumptions strengthen it without splitting source-of-truth ownership.
+
+---
+
 ## Why MCP + CLI both
 
-**Choice:** every state operation has two front doors. A Typer CLI for humans and shell scripts (`anvil claim T012`), and a FastMCP stdio server exposing 35 tools for agents (`claim_task(task_id="T012", actor="claude-session-abc")`). Both delegate to the same `state/` engine; neither owns workflow logic.
+**Choice:** every state operation has two front doors. A Typer CLI for humans and shell scripts (`anvil claim T012`), and a FastMCP stdio server exposing 36 tools for agents (`claim_task(task_id="T012", actor="claude-session-abc")`). Both delegate to the same `state/` engine; neither owns workflow logic.
 
 ### Rejected alternatives
 
