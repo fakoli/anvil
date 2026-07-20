@@ -14,13 +14,6 @@ import pytest
 from anvil.clock import FrozenClock
 
 
-def pytest_configure(config: pytest.Config) -> None:
-    """Register markers when pytest selects the repository root as rootdir."""
-    config.addinivalue_line(
-        "markers", "slow: Git-heavy tests with substantial repository setup cost"
-    )
-
-
 @pytest.fixture(autouse=True)
 def _local_state_layout(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
