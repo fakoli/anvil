@@ -27,6 +27,8 @@ from anvil.git_ops.worktree import (
     create_worktree_for_task,
 )
 
+pytestmark = pytest.mark.slow
+
 # ---------------------------------------------------------------------------
 # Git repo fixture
 # ---------------------------------------------------------------------------
