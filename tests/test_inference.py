@@ -95,6 +95,80 @@ class TestInferDependencies:
         # T002 is the broader task, should NOT depend on T001
         assert "T001" not in t002.dependencies
 
+    def test_explicit_inverse_edge_wins_over_inference(self) -> None:
+        """An inferred inverse edge is skipped instead of cycling explicit intent."""
+        tasks = [
+            _make_task("T001", ["src/a.py"]),
+            _make_task(
+                "T002",
+                ["src/a.py", "src/b.py"],
+                dependencies=["T001"],
+            ),
+        ]
+
+        result = infer_dependencies(tasks)
+        by_id = {task.id: task for task in result}
+
+        assert by_id["T001"].dependencies == []
+        assert by_id["T002"].dependencies == ["T001"]
+
+    def test_transitive_explicit_path_blocks_inferred_cycle(self) -> None:
+        """A candidate is skipped when its prerequisite reaches it transitively."""
+        tasks = [
+            _make_task("T001", ["src/a.py"]),
+            _make_task("T002", ["src/middle.py"], dependencies=["T001"]),
+            _make_task(
+                "T003",
+                ["src/a.py", "src/b.py"],
+                dependencies=["T002"],
+            ),
+        ]
+
+        result = infer_dependencies(tasks)
+        by_id = {task.id: task for task in result}
+
+        assert by_id["T001"].dependencies == []
+        assert by_id["T002"].dependencies == ["T001"]
+        assert by_id["T003"].dependencies == ["T002"]
+
+    def test_guard_considers_previously_accepted_inferred_edges(self) -> None:
+        """Earlier safe inference participates in later reachability checks."""
+        tasks = [
+            _make_task("T001", ["src/a.py"]),
+            _make_task(
+                "T002",
+                ["src/a.py", "src/b.py", "src/c.py"],
+                dependencies=["T001"],
+            ),
+            _make_task("T003", ["src/a.py", "src/b.py"]),
+        ]
+
+        result = infer_dependencies(tasks)
+        by_id = {task.id: task for task in result}
+
+        assert by_id["T001"].dependencies == ["T003"]
+        assert by_id["T002"].dependencies == ["T001"]
+        assert by_id["T003"].dependencies == []
+
+    def test_cycle_guard_is_deterministic_for_reordered_input(self) -> None:
+        """Reordering equivalent input cannot change accepted inferred edges."""
+        tasks = [
+            _make_task("T001", ["src/a.py"]),
+            _make_task(
+                "T002",
+                ["src/a.py", "src/b.py", "src/c.py"],
+                dependencies=["T001"],
+            ),
+            _make_task("T003", ["src/a.py", "src/b.py"]),
+        ]
+
+        forward = {task.id: task.dependencies for task in infer_dependencies(tasks)}
+        reverse = {
+            task.id: task.dependencies for task in infer_dependencies(list(reversed(tasks)))
+        }
+
+        assert forward == reverse
+
     def test_empty_files_not_a_subset(self) -> None:
         """Task with empty likely_files does not create dependency edges."""
         tasks = [

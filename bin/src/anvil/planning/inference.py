@@ -375,6 +375,29 @@ def _files_set(task: Task) -> frozenset[str]:
     return frozenset(task.likely_files)
 
 
+def _would_create_dependency_cycle(
+    dependencies: dict[str, set[str]], task_id: str, dependency_id: str
+) -> bool:
+    """Return whether adding ``task_id -> dependency_id`` closes a cycle.
+
+    Dependency edges point from a task to its prerequisites.  The candidate
+    edge is unsafe exactly when the proposed prerequisite already reaches the
+    task through explicit or previously accepted inferred edges.
+    """
+    pending = [dependency_id]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == task_id:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        if current in dependencies:
+            pending.extend(dependencies[current])
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
@@ -414,7 +437,9 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
     # Collect dependency edges: new_deps[task_id] = set of dependency IDs.
     new_deps: dict[str, set[str]] = {t.id: set(t.dependencies) for t in tasks}
 
-    task_ids = [t.id for t in tasks]
+    # Stable ordering makes the chosen safe subset deterministic even when the
+    # caller supplies the same tasks in a different order.
+    task_ids = sorted(file_sets)
     for id_a in task_ids:
         set_a = file_sets[id_a]
         if not set_a:
@@ -427,7 +452,8 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
             # Strict subset: A ⊂ B means A ⊆ B and A ≠ B.
             if set_a < set_b:
                 # A specialises B → A depends on B.
-                new_deps[id_a].add(id_b)
+                if not _would_create_dependency_cycle(new_deps, id_a, id_b):
+                    new_deps[id_a].add(id_b)
 
     # Build the output list, replacing only tasks whose dependency set changed.
     updated: list[Task] = []
