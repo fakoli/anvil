@@ -3,7 +3,7 @@ knobs. The SAME scenario runs through both coordination arms.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .engine import TaskSpec
 

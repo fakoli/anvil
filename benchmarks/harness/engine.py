@@ -11,9 +11,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
+from datetime import UTC
 from functools import lru_cache
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -249,8 +250,8 @@ def expire_claims_for(proj: Project, task_id: str) -> int:
     through the real engine.
     """
     import sqlite3
-    from datetime import datetime, timedelta, timezone
-    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    from datetime import datetime, timedelta
+    past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     db = proj.root / ".anvil" / "state.db"
     con = sqlite3.connect(str(db))
     try:

@@ -11,9 +11,9 @@ import threading
 import time
 from pathlib import Path
 
-from . import engine, metrics as M
-from .coordinators import (AnvilCoordinator, MarkdownCoordinator, WorkLog,
-                           do_work)
+from . import engine
+from . import metrics as M
+from .coordinators import AnvilCoordinator, MarkdownCoordinator, WorkLog, do_work
 from .engine import setup_project
 from .scenarios import Scenario, all_scenarios
 

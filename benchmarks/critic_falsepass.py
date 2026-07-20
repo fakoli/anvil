@@ -39,9 +39,9 @@ import argparse
 import enum
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 CORPUS_DIR = Path(__file__).resolve().parent / "critic_corpus"
 
