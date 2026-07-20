@@ -123,7 +123,6 @@ def test_restore_rebuilds_state_db(tmp_path: Path) -> None:
     import tempfile
 
     from anvil.cli.backup import _replay_into
-    from anvil.config import read_events_storage
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl") as tmp_f:
         tmp_events = tmp_f.name
