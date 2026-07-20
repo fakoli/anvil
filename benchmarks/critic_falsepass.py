@@ -277,7 +277,8 @@ def run(backend: Backend, backend_name: str, cases: list[Case]) -> Report:
 def render_text(report: Report) -> str:
     lines = [
         f"Critic false-pass harness — backend: {report.backend}",
-        f"  corpus: {report.n_bad} bad, {report.n_good} good ({report.n_bad + report.n_good} total)",
+        f"  corpus: {report.n_bad} bad, {report.n_good} good "
+        f"({report.n_bad + report.n_good} total)",
         "",
         f"  {'case':<22} {'label':<6} {'defect_class':<20} {'verdict':<7} flag",
         f"  {'-' * 22} {'-' * 6} {'-' * 20} {'-' * 7} ----",

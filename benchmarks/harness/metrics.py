@@ -25,7 +25,8 @@ def compute(scenario, rows, completions, statuses, coord_name, crash_recovered=N
     """Return a flat metric dict for one trial.
 
     rows: list[(ts, actor, task, kind, target)] from the WorkLog
-    completions: list[{task, actor, gamed, evidence_valid}]  (evidence_valid None == no evidence concept)
+    completions: list[{task, actor, gamed, evidence_valid}]
+        (evidence_valid None means no evidence concept)
     statuses: task_id -> canonical status (fakoli) or {} (markdown)
     """
     # write rows carry an interval "t0:t1" in the extra column

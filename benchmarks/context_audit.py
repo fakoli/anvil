@@ -460,8 +460,8 @@ def main() -> int:
         "ondemand_total": ondemand_total,
         "ondemand_by_category": {c.name: c.tokens for c in ondemand},
         "top_contributors": [
-            {"label": l, "category": c.split(" (")[0], "tokens": t}
-            for c, l, t in all_always_items[:10]
+            {"label": label, "category": category.split(" (")[0], "tokens": tokens}
+            for category, label, tokens in all_always_items[:10]
         ],
     }
     print()
