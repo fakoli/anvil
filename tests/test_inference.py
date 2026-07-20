@@ -8,7 +8,11 @@ All tests follow the pure-function contract:
 from __future__ import annotations
 
 import datetime
+import time
 
+import pytest
+
+from anvil.planning import inference as inference_module
 from anvil.planning.inference import (
     InferenceResult,
     infer_all,
@@ -168,6 +172,47 @@ class TestInferDependencies:
         }
 
         assert forward == reverse
+
+    def test_dense_nested_plan_has_quadratically_bounded_closure_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dense plans close each reachable pair once, never DFS per candidate."""
+        task_count = 300
+        tasks = [
+            _make_task(
+                f"T{index:03}",
+                [f"src/file-{file_index:03}.py" for file_index in range(index + 1)],
+            )
+            for index in range(task_count)
+        ]
+        trackers: list[inference_module._DependencyReachability] = []
+        reachability_type = inference_module._DependencyReachability
+
+        class _TrackingReachability(reachability_type):
+            def __init__(self, dependencies: dict[str, set[str]]) -> None:
+                super().__init__(dependencies)
+                trackers.append(self)
+
+        monkeypatch.setattr(
+            inference_module, "_DependencyReachability", _TrackingReachability
+        )
+
+        started = time.perf_counter()
+        result = infer_dependencies(tasks)
+        elapsed = time.perf_counter() - started
+
+        candidate_count = task_count * (task_count - 1) // 2
+        tracker = trackers[0]
+        assert sum(len(task.dependencies) for task in result) == candidate_count
+        assert tracker.cycle_checks == candidate_count
+        assert tracker.closure_row_updates <= candidate_count
+        assert tracker.closure_pair_updates <= candidate_count
+        print(  # noqa: T201 - diagnostic only; elapsed time is not an assertion
+            "dense inference diagnostics: "
+            f"tasks={task_count} candidates={candidate_count} "
+            f"row_updates={tracker.closure_row_updates} "
+            f"pair_updates={tracker.closure_pair_updates} elapsed={elapsed:.3f}s"
+        )
 
     def test_empty_files_not_a_subset(self) -> None:
         """Task with empty likely_files does not create dependency edges."""
