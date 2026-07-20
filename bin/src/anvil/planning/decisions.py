@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -46,7 +46,7 @@ __all__ = [
 ]
 
 
-class DecisionKind(str, Enum):
+class DecisionKind(StrEnum):
     """Three categories of unresolved PRD items the resolver can drive Q&A on."""
 
     needs_decision = "needs_decision"

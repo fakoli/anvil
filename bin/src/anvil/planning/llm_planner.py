@@ -565,7 +565,10 @@ def _build_user_prompt(
             parts.append(f"- {risk}")
         parts.append("")
     if prd.open_questions:
-        parts.append("## Open Questions (planner should NOT propose tasks for these unresolved items)\n")
+        parts.append(
+            "## Open Questions "
+            "(planner should NOT propose tasks for these unresolved items)\n"
+        )
         for oq in prd.open_questions:
             parts.append(f"- {oq}")
         parts.append("")
@@ -581,7 +584,10 @@ def _build_user_prompt(
 
     # Existing tasks — incremental planning case.
     if existing_tasks:
-        parts.append("## Existing tasks (do NOT re-propose; pick up IDs from the next available number)\n")
+        parts.append(
+            "## Existing tasks "
+            "(do NOT re-propose; pick up IDs from the next available number)\n"
+        )
         for task in existing_tasks:
             parts.append(f"- {task.id}: {task.title} (Feature: {task.feature_id})")
         parts.append("")
