@@ -28,6 +28,14 @@ from anvil.state.models import (
 _FROZEN = FrozenClock(datetime.datetime(2026, 5, 26, 12, 0, tzinfo=datetime.UTC))
 
 
+def test_decision_kind_preserves_legacy_string_formatting() -> None:
+    kind = DecisionKind.needs_decision
+
+    assert str(kind) == "DecisionKind.needs_decision"
+    assert f"{kind}" == "DecisionKind.needs_decision"
+    assert format(kind) == "DecisionKind.needs_decision"
+
+
 # ---------------------------------------------------------------------------
 # needs_decision (inline [NEEDS DECISION] markers)
 # ---------------------------------------------------------------------------
