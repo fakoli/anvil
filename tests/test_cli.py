@@ -1313,8 +1313,9 @@ class TestPrdParseNamed:
 
         result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
         assert result.exit_code == 0, f"named parse failed: {result.output}"
-        # Source line points at the prds/ subdir, not the bare prd.md.
-        assert "prds/v0.2.md" in result.output
+        # Source output carries only the stable PRD identity, never a path.
+        assert "PRD source: v0.2" in result.output
+        assert "prds/" not in result.output
 
         payload = _prd_parsed_payload(tmp_path)
         assert payload.get("prd_id") == "v0.2"
@@ -1351,9 +1352,8 @@ class TestPrdParseNamed:
 
         result = _invoke_cmd(tmp_path, ["prd", "parse"])
         assert result.exit_code == 0, f"prd parse failed: {result.output}"
-        # The default source is the bare prd.md (no prds/ subdir).
-        assert "prd.md" in result.output
-        assert "prds/" not in result.output
+        assert "PRD source: default" in result.output
+        assert ".md" not in result.output
 
         payload = _prd_parsed_payload(tmp_path)
         # Omitted entirely so the event matches the pre-multi-PRD golden.
@@ -1391,11 +1391,10 @@ class TestPrdParseNamed:
         # ...and the named partition holds only its own (prefixed) rows.
         assert named_reqs == ["v0.2:R001", "v0.2:R002"]
 
-    def test_missing_named_prd_source_exits_1_with_path(
+    def test_missing_named_prd_source_exits_1_with_identity(
         self, tmp_path: Path
     ) -> None:
-        """A missing .anvil/prds/<id>.md exits 1 with an actionable message
-        naming the exact path the author must create."""
+        """A missing named source reports its stable ID without a path."""
         _do_init(tmp_path)
         # Do NOT create prds/nope.md.
         result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "nope"])
@@ -1403,13 +1402,14 @@ class TestPrdParseNamed:
         combined = result.output + (
             result.stderr if hasattr(result, "stderr") and result.stderr else ""
         )
-        assert "prds/nope.md" in combined
+        assert ": nope" in combined
+        assert ".md" not in combined
         assert "not found" in combined.lower()
 
-    def test_unreadable_named_prd_source_uses_forward_slash_path(
+    def test_unreadable_named_prd_source_reports_only_identity(
         self, tmp_path: Path
     ) -> None:
-        """Read failures should not leak a raw Windows path from OSError text."""
+        """Read failures do not disclose either Windows or POSIX paths."""
         _do_init(tmp_path)
         blocked = tmp_path / ".anvil" / "prds" / "blocked.md"
         blocked.mkdir(parents=True)
@@ -1419,9 +1419,9 @@ class TestPrdParseNamed:
         combined = result.output + (
             result.stderr if hasattr(result, "stderr") and result.stderr else ""
         )
-        assert "prds/blocked.md" in combined
-        assert "prds\\blocked.md" not in combined
-        assert "cannot read" in combined.lower()
+        assert ": blocked" in combined
+        assert ".md" not in combined
+        assert "regular contained file" in combined.lower()
 
     @pytest.mark.parametrize("sentinel", ["default", "prd"])
     def test_reserved_sentinel_prd_flag_creates_visible_default(
@@ -1443,8 +1443,8 @@ class TestPrdParseNamed:
 
         result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", sentinel])
         assert result.exit_code == 0, f"sentinel parse failed: {result.output}"
-        # Resolves to the bare prd.md, not a prds/ subdir.
-        assert "prds/" not in result.output
+        assert "PRD source: default" in result.output
+        assert ".md" not in result.output
 
         # The sentinel must take the no-stamp (default) branch, so the event
         # omits prd_id/is_default exactly like a no-flag parse.
@@ -1490,8 +1490,8 @@ class TestPrdParseNamed:
             tmp_path, ["prd", "parse", "--file", str(custom), "--prd", "v0.2"]
         )
         assert result.exit_code == 0, f"--file --prd failed: {result.output}"
-        # The source line points at the --file path, not prds/v0.2.md.
-        assert "external_prd.md" in result.output
+        assert "PRD source: custom" in result.output
+        assert "external_prd.md" not in result.output
 
         # Event is stamped into the v0.2 partition despite the --file source.
         payload = _prd_parsed_payload(tmp_path)
@@ -2345,6 +2345,8 @@ class TestPrdAssess:
         assert payload["command"] == "prd assess"
         assert payload["data"]["advisory"] is True
         assert payload["data"]["count"] == len(payload["data"]["findings"])
+        assert payload["data"]["prd_source"] == "default"
+        assert str(state_dir) not in human.output
         assert (state_dir / "events.jsonl").read_text(encoding="utf-8") == before
 
     def test_relative_file_resolves_against_explicit_cwd(self, tmp_path: Path) -> None:
@@ -2368,14 +2370,15 @@ class TestPrdAssess:
         )
 
         assert result.exit_code == 0, result.output
-        source = Path(json.loads(result.output)["data"]["prd_source"])
-        assert source == (specs / "prd.md").resolve()
+        payload = json.loads(result.output)
+        assert payload["data"]["prd_source"] == "custom"
+        assert str((specs / "prd.md").resolve()) not in result.output
 
     @pytest.mark.parametrize(
         ("content", "code"),
         [
             (b"# Project: Incomplete", "parse_error"),
-            (b"\xff\xfe\x00", "io_error"),
+            (b"\xff\xfe\x00", "source_invalid_utf8"),
         ],
     )
     def test_json_rejects_malformed_or_non_utf8_prds(
@@ -2388,6 +2391,15 @@ class TestPrdAssess:
 
         assert result.exit_code == 1
         assert json.loads(result.output)["error"]["code"] == code
+
+    def test_explicit_empty_prd_id_is_not_treated_as_default(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+
+        result = _invoke_cmd(tmp_path, ["prd", "assess", "--prd", "", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"]["code"] == "invalid_prd_id"
 
 
 # ---------------------------------------------------------------------------

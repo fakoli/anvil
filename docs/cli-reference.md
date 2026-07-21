@@ -385,8 +385,8 @@ tasks that have already advanced past `drafted`.
   augmentation and the no-tasks backstop. For agent-sdk a CLI name like
   `sonnet`/`opus` or a full id; for anthropic/bedrock a model id; for custom
   the route name your endpoint serves.
-- `--prd TEXT` *(optional)* — named PRD to plan (multi-PRD). Reads
-  `.anvil/prds/<id>.md` and scopes feature/task creation, orphan-prune,
+- `--prd TEXT` *(optional)* — named PRD to plan (multi-PRD). Reads its portable
+  source under `.anvil/prds/` and scopes feature/task creation, orphan-prune,
   dependency inference, and `proposed` → `drafted` promotion to that PRD's
   partition (conflict-group inference still spans all PRDs). Omit for the
   default PRD (`.anvil/prd.md`).

@@ -6,10 +6,14 @@ common dependency, not a consumer. Circular imports are impossible by design.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,7 +39,6 @@ _PRDS_DIR_NAME = "prds"
 # bounded ``limit + 1`` probe so an over-limit source is refused before
 # unbounded allocation growth or UTF-8 decoding.
 MAX_PRD_SOURCE_BYTES_V1 = 2_097_152
-_PRD_ID_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$")
 _WINDOWS_RESERVED_PRD_STEMS = {
     "AUX",
     "CLOCK$",
@@ -53,6 +56,8 @@ _WINDOWS_RESERVED_PRD_STEMS = {
 # every single-PRD caller passes) map to the bare ``.anvil/prd.md`` source so
 # the default PRD keeps its pre-multi-PRD on-disk location.
 _DEFAULT_PRD_IDS = ("default", "prd")
+_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+_STAT_SUPPORTS_DIR_FD = os.stat in os.supports_dir_fd
 
 _ACTOR_FALLBACK = "agent"
 
@@ -295,21 +300,60 @@ def canonical_prd_id(prd_id: str) -> str:
 def validate_prd_id(prd_id: str) -> str:
     """Return a plain canonical source identifier or refuse before path use.
 
-    The closed ASCII shape is shared with the public Version 1 read contract.
-    In particular, path separators, drive/URI colons, NUL/control characters,
-    absolute/traversal spellings, and leading/trailing punctuation never reach
-    filesystem interpolation.
+    The public Version 1 scoped-reference DTO is the single acceptance
+    authority.  Filesystem-specific restrictions must be handled by the
+    reversible storage mapping, never by silently narrowing this wire ID set.
     """
     if not isinstance(prd_id, str):
         raise PrdSourceIngestError("invalid_prd_id", "PRD id is invalid")
     plain_prd_id = str.__str__(prd_id)
-    windows_stem = plain_prd_id.partition(".")[0].upper()
+    from anvil.read_contracts import PrdScopedRefV1
+
+    try:
+        validated_id = PrdScopedRefV1(prd_id=plain_prd_id).prd_id
+    except ValueError as exc:
+        raise PrdSourceIngestError("invalid_prd_id", "PRD id is invalid") from exc
+    return validated_id
+
+
+def prd_source_filename(prd_id: str) -> str:
+    """Map one accepted PRD ID to a portable, collision-free filename."""
+    validated_id = validate_prd_id(prd_id)
+    windows_stem = validated_id.partition(".")[0].upper()
     if (
-        not _PRD_ID_PATTERN.fullmatch(plain_prd_id)
-        or windows_stem in _WINDOWS_RESERVED_PRD_STEMS
+        windows_stem in _WINDOWS_RESERVED_PRD_STEMS
+        or validated_id != validated_id.lower()
     ):
+        # Base32 is reversible, case-insensitive-filesystem safe, and keeps the
+        # longest accepted 128-byte ID below Windows' 255-character component
+        # ceiling.  Hex would expand that valid wire ID beyond the ceiling.
+        encoded_id = base64.b32encode(validated_id.encode("ascii")).decode("ascii")
+        encoded_id = encoded_id.rstrip("=")
+        return f"_anvil-prd-{encoded_id}.md"
+    return f"{validated_id}.md"
+
+
+def prd_id_from_source_filename(filename: str) -> str:
+    """Reverse :func:`prd_source_filename` without accepting aliases."""
+    prefix = "_anvil-prd-"
+    suffix = ".md"
+    if filename.startswith(prefix) and filename.endswith(suffix):
+        encoded_id = filename[len(prefix) : -len(suffix)]
+        try:
+            padding = "=" * (-len(encoded_id) % 8)
+            prd_id = base64.b32decode(encoded_id + padding).decode("ascii")
+        except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+            raise PrdSourceIngestError("invalid_prd_id", "PRD id is invalid") from exc
+        validated_id = validate_prd_id(prd_id)
+        if prd_source_filename(validated_id) != filename:
+            raise PrdSourceIngestError("invalid_prd_id", "PRD id is invalid")
+        return validated_id
+    if not filename.endswith(suffix):
         raise PrdSourceIngestError("invalid_prd_id", "PRD id is invalid")
-    return plain_prd_id
+    validated_id = validate_prd_id(filename[: -len(suffix)])
+    if prd_source_filename(validated_id) != filename:
+        raise PrdSourceIngestError("invalid_prd_id", "PRD id is invalid")
+    return validated_id
 
 # T005/B07: env override pointing at the PROJECT ROOT (the directory that
 # *contains* .anvil/). Resolution precedence — applied identically by
@@ -561,60 +605,340 @@ def prd_source_path(state_dir: Path, prd_id: str) -> Path:
     """Return the on-disk markdown source for a PRD partition (T016).
 
     The default PRD keeps its pre-multi-PRD location ``<state_dir>/prd.md``;
-    every named PRD lives under a ``prds/`` collection as
-    ``<state_dir>/prds/<prd_id>.md``. Both the stored model id (``'default'``)
-    and the parse-time sentinel (``'prd'``) resolve to the bare ``prd.md`` so
-    callers can pass either without special-casing.
+    every named PRD lives under a ``prds/`` collection. Most names retain the
+    legacy ``<prd_id>.md`` spelling; Windows-reserved stems and IDs containing
+    uppercase characters use a reversible, length-bounded Base32 filename.
+    Encoding uppercase IDs preserves distinct wire identities such as ``A``
+    and ``a`` on case-insensitive filesystems. Both the stored model id
+    (``'default'``) and the parse-time sentinel (``'prd'``) resolve to the bare
+    ``prd.md`` so callers can pass either without special-casing.
 
     Args:
         state_dir: Absolute path to the ``.anvil/`` directory.
         prd_id: The PRD partition id. ``'default'``/``'prd'`` → ``prd.md``;
-            any other id → ``prds/<prd_id>.md``.
+            any other id → its portable filename under ``prds/``.
 
     Returns:
         Absolute Path to the PRD's markdown source.
     """
     validated_id = validate_prd_id(prd_id)
     if validated_id in _DEFAULT_PRD_IDS:
-        source_root = state_dir
-        candidate = state_dir / _PRD_FILENAME
-    else:
-        source_root = state_dir / _PRDS_DIR_NAME
-        candidate = source_root / f"{validated_id}.md"
+        return state_dir / _PRD_FILENAME
+    return state_dir / _PRDS_DIR_NAME / prd_source_filename(validated_id)
 
-    # Resolve only after the identifier is proven non-path-shaped.  This
-    # follows any existing parent/file symlinks for a containment comparison,
-    # but does not open or read the target.  Return the logical candidate so
-    # existing portable display behavior remains unchanged.
+
+def _open_verified_prd_source(
+    source_path: Path,
+    *,
+    containment_root: Path | None,
+    required_parent: Path | None,
+) -> tuple[int, os.stat_result]:
+    """Open once, then bind the handle to a regular contained source."""
+    if (containment_root is None) != (required_parent is None):
+        raise ValueError("containment_root and required_parent must be provided together")
+
+    if containment_root is not None and required_parent is not None:
+        if (
+            os.name != "nt"
+            and hasattr(os, "O_DIRECTORY")
+            and _OPEN_SUPPORTS_DIR_FD
+            and _STAT_SUPPORTS_DIR_FD
+        ):
+            return _open_contained_prd_source_posix(
+                source_path,
+                containment_root=containment_root,
+                required_parent=required_parent,
+            )
+        if os.name != "nt":
+            raise PrdSourceIngestError(
+                "source_unavailable",
+                "platform cannot securely open a contained PRD source",
+            )
+
+    descriptor, opened = _open_prd_source_path(source_path)
+    if containment_root is None or required_parent is None:
+        return descriptor, opened
+
     try:
-        resolved_state_dir = state_dir.resolve(strict=False)
-        resolved_root = source_root.resolve(strict=False)
-        resolved_candidate = candidate.resolve(strict=False)
+        resolved_root = containment_root.resolve(strict=True)
+        relative_parent = required_parent.relative_to(containment_root)
+        expected_source = resolved_root / relative_parent / source_path.name
+        opened_source = _windows_final_path_for_descriptor(descriptor)
+        if os.path.normcase(os.path.normpath(str(opened_source.parent))) != os.path.normcase(
+            os.path.normpath(str(expected_source.parent))
+        ):
+            raise PrdSourceIngestError(
+                "source_outside_prd_directory",
+                "PRD source escapes its contained source directory",
+            )
+        if opened_source.name != expected_source.name:
+            raise PrdSourceIngestError(
+                "source_case_alias",
+                "PRD source spelling aliases another wire identity",
+            )
+        return descriptor, opened
+    except PrdSourceIngestError:
+        os.close(descriptor)
+        raise
+    except (OSError, ValueError) as exc:
+        os.close(descriptor)
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "cannot verify PRD source containment",
+        ) from exc
+
+
+def _prd_source_open_flags() -> int:
+    flags = os.O_RDONLY
+    for flag_name in ("O_BINARY", "O_CLOEXEC", "O_NOINHERIT", "O_NONBLOCK", "O_NOFOLLOW"):
+        flags |= getattr(os, flag_name, 0)
+    return flags
+
+
+def _refuse_non_regular_source(source_stat: os.stat_result) -> None:
+    if stat.S_ISREG(source_stat.st_mode):
+        return
+    code = (
+        "source_outside_prd_directory"
+        if stat.S_ISLNK(source_stat.st_mode)
+        else "source_not_regular"
+    )
+    raise PrdSourceIngestError(code, "PRD source is not a regular contained file")
+
+
+def _open_prd_source_path(source_path: Path) -> tuple[int, os.stat_result]:
+    """Open an explicit source and bind the descriptor to its current path."""
+    try:
+        before_open = os.stat(source_path, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise PrdSourceIngestError(
+            "source_not_found",
+            "PRD source not found",
+        ) from exc
     except OSError as exc:
         raise PrdSourceIngestError(
             "source_unavailable",
-            "PRD source is unavailable or unreadable",
+            "cannot inspect PRD source",
         ) from exc
-    expected_root = (
-        resolved_state_dir
-        if validated_id in _DEFAULT_PRD_IDS
-        else resolved_state_dir / _PRDS_DIR_NAME
-    )
-    if (
-        resolved_root != expected_root
-        or not resolved_candidate.is_relative_to(resolved_root)
-    ):
+    _refuse_non_regular_source(before_open)
+    try:
+        descriptor = os.open(source_path, _prd_source_open_flags())
+    except FileNotFoundError as exc:
         raise PrdSourceIngestError(
-            "source_outside_prd_directory",
-            "PRD source escapes its contained source directory",
+            "source_not_found",
+            "PRD source not found",
+        ) from exc
+    except OSError as exc:
+        code = (
+            "source_outside_prd_directory"
+            if exc.errno == errno.ELOOP
+            else "source_unavailable"
         )
-    return candidate
+        raise PrdSourceIngestError(code, "cannot open verified PRD source") from exc
+
+    try:
+        opened = os.fstat(descriptor)
+        after_open = os.stat(source_path, follow_symlinks=False)
+        _refuse_non_regular_source(opened)
+        _refuse_non_regular_source(after_open)
+        if not os.path.samestat(opened, after_open):
+            raise PrdSourceIngestError(
+                "source_changed",
+                "PRD source changed during verified open",
+            )
+        return descriptor, opened
+    except PrdSourceIngestError:
+        os.close(descriptor)
+        raise
+    except (OSError, ValueError) as exc:
+        os.close(descriptor)
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "cannot verify PRD source",
+        ) from exc
+
+
+def _open_contained_prd_source_posix(
+    source_path: Path,
+    *,
+    containment_root: Path,
+    required_parent: Path,
+) -> tuple[int, os.stat_result]:
+    """Open a managed source relative to pinned directory descriptors."""
+    root_descriptor = -1
+    parent_descriptor = -1
+    descriptor = -1
+    try:
+        relative_parent = required_parent.relative_to(containment_root)
+        if len(relative_parent.parts) > 1:
+            raise ValueError("managed PRD source parent must be direct")
+        resolved_root = containment_root.resolve(strict=True)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        for flag_name in ("O_CLOEXEC", "O_NOFOLLOW"):
+            directory_flags |= getattr(os, flag_name, 0)
+        root_descriptor = os.open(resolved_root, directory_flags)
+        parent_descriptor = root_descriptor
+        if relative_parent.parts:
+            parent_descriptor = os.open(
+                relative_parent.parts[0],
+                directory_flags,
+                dir_fd=root_descriptor,
+            )
+
+        before_open = os.stat(
+            source_path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _refuse_non_regular_source(before_open)
+        descriptor = os.open(
+            source_path.name,
+            _prd_source_open_flags(),
+            dir_fd=parent_descriptor,
+        )
+        opened = os.fstat(descriptor)
+        after_open = os.stat(
+            source_path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _refuse_non_regular_source(opened)
+        _refuse_non_regular_source(after_open)
+        if not os.path.samestat(opened, after_open):
+            raise PrdSourceIngestError(
+                "source_changed",
+                "PRD source changed during verified open",
+            )
+        result = descriptor, opened
+        descriptor = -1
+        return result
+    except FileNotFoundError as exc:
+        raise PrdSourceIngestError("source_not_found", "PRD source not found") from exc
+    except PrdSourceIngestError:
+        raise
+    except OSError as exc:
+        code = (
+            "source_outside_prd_directory"
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}
+            else "source_unavailable"
+        )
+        raise PrdSourceIngestError(code, "cannot open contained PRD source") from exc
+    except ValueError as exc:
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "cannot verify PRD source containment",
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0 and parent_descriptor != root_descriptor:
+            os.close(parent_descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+
+
+def _windows_final_path_for_descriptor(descriptor: int) -> Path:
+    """Return the authoritative final path for an already-open Windows handle."""
+    if os.name != "nt":
+        raise OSError("Windows handle path resolution is unavailable")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    get_final_path = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
+    get_final_path.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    get_final_path.restype = wintypes.DWORD
+    handle = wintypes.HANDLE(msvcrt.get_osfhandle(descriptor))
+    buffer_size = 512
+    while True:
+        buffer = ctypes.create_unicode_buffer(buffer_size)
+        length = get_final_path(handle, buffer, buffer_size, 0)
+        if length == 0:
+            raise OSError(ctypes.get_last_error(), "cannot resolve open file handle")
+        if length < buffer_size:
+            final_path = buffer.value
+            break
+        buffer_size = length + 1
+    if final_path.startswith("\\\\?\\UNC\\"):
+        final_path = "\\\\" + final_path[8:]
+    elif final_path.startswith("\\\\?\\"):
+        final_path = final_path[4:]
+    return Path(final_path)
+
+
+def _lock_prd_source_descriptor(descriptor: int, *, byte_count: int) -> None:
+    """Hold a best available non-blocking read-stability lock until close."""
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class Overlapped(ctypes.Structure):
+            _fields_ = [
+                ("Internal", ctypes.c_size_t),
+                ("InternalHigh", ctypes.c_size_t),
+                ("Offset", wintypes.DWORD),
+                ("OffsetHigh", wintypes.DWORD),
+                ("hEvent", wintypes.HANDLE),
+            ]
+
+        lock_file = ctypes.WinDLL("kernel32", use_last_error=True).LockFileEx
+        lock_file.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(Overlapped),
+        ]
+        lock_file.restype = wintypes.BOOL
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(descriptor))
+        overlapped = Overlapped()
+        lock_fail_immediately = 0x00000001
+        locked = lock_file(
+            handle,
+            lock_fail_immediately,
+            0,
+            byte_count & 0xFFFFFFFF,
+            byte_count >> 32,
+            ctypes.byref(overlapped),
+        )
+        if not locked:
+            error_code = ctypes.get_last_error()
+            raise PrdSourceIngestError(
+                "source_busy",
+                "PRD source cannot be locked for a stable read",
+            ) from OSError(error_code, "cannot acquire shared source lock")
+    elif os.name == "posix":
+        import fcntl
+
+        try:
+            # Windows typeshed omits these POSIX-only attributes even though
+            # this runtime branch is unreachable there.
+            flock = getattr(fcntl, "flock")  # noqa: B009
+            shared_nonblocking = getattr(fcntl, "LOCK_SH") | getattr(  # noqa: B009
+                fcntl,
+                "LOCK_NB",  # noqa: B009
+            )
+            flock(descriptor, shared_nonblocking)
+        except OSError as exc:
+            raise PrdSourceIngestError(
+                "source_busy",
+                "PRD source cannot be locked for a stable read",
+            ) from exc
 
 
 def ingest_prd_source(
     source_path: Path,
     *,
     max_bytes: int = MAX_PRD_SOURCE_BYTES_V1,
+    containment_root: Path | None = None,
+    required_parent: Path | None = None,
 ) -> IngestedPrdSource:
     """Read, bound, hash, and strict-decode one exact PRD source.
 
@@ -630,19 +954,36 @@ def ingest_prd_source(
     ):
         raise ValueError("PRD source byte limit must be within the Version 1 ceiling")
 
+    descriptor, opened = _open_verified_prd_source(
+        source_path,
+        containment_root=containment_root,
+        required_parent=required_parent,
+    )
     try:
-        with source_path.open("rb") as stream:
+        _lock_prd_source_descriptor(descriptor, byte_count=max_bytes + 1)
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
             source_bytes = stream.read(max_bytes + 1)
-    except FileNotFoundError as exc:
-        raise PrdSourceIngestError(
-            "source_not_found",
-            "PRD source not found",
-        ) from exc
+            after_read = os.fstat(stream.fileno())
     except OSError as exc:
         raise PrdSourceIngestError(
             "source_unavailable",
             "cannot read PRD source",
         ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    if (
+        not os.path.samestat(opened, after_read)
+        or opened.st_size != after_read.st_size
+        or opened.st_mtime_ns != after_read.st_mtime_ns
+        or opened.st_ctime_ns != after_read.st_ctime_ns
+    ):
+        raise PrdSourceIngestError(
+            "source_changed",
+            "PRD source changed during bounded read",
+        )
 
     if len(source_bytes) > max_bytes:
         raise PrdSourceIngestError(
@@ -663,6 +1004,110 @@ def ingest_prd_source(
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
         source_size_bytes=len(source_bytes),
     )
+
+
+def ingest_prd_source_for_id(
+    state_dir: Path,
+    prd_id: str,
+    *,
+    max_bytes: int = MAX_PRD_SOURCE_BYTES_V1,
+) -> IngestedPrdSource:
+    """Resolve and atomically ingest one contained default or named source."""
+    validated_id = validate_prd_id(prd_id)
+    source_path = prd_source_path(state_dir, validated_id)
+    required_parent = (
+        state_dir
+        if validated_id in _DEFAULT_PRD_IDS
+        else state_dir / _PRDS_DIR_NAME
+    )
+    portable_path = source_path
+    legacy_path: Path | None = None
+    if validated_id not in _DEFAULT_PRD_IDS:
+        legacy_path = required_parent / f"{validated_id}.md"
+        if legacy_path != source_path:
+            try:
+                canonical_present = os.path.lexists(source_path)
+                legacy_present = False
+                if required_parent.exists():
+                    collection_before = os.stat(
+                        required_parent,
+                        follow_symlinks=False,
+                    )
+                    if not stat.S_ISDIR(collection_before.st_mode):
+                        raise PrdSourceIngestError(
+                            "source_outside_prd_directory",
+                            "PRD source collection is not a contained directory",
+                        )
+                    with os.scandir(required_parent) as entries:
+                        legacy_present = any(
+                            entry.name == legacy_path.name for entry in entries
+                        )
+                    collection_after = os.stat(
+                        required_parent,
+                        follow_symlinks=False,
+                    )
+                    if not os.path.samestat(collection_before, collection_after):
+                        raise PrdSourceIngestError(
+                            "source_changed",
+                            "PRD source collection changed during inspection",
+                        )
+            except PrdSourceIngestError:
+                raise
+            except OSError as exc:
+                raise PrdSourceIngestError(
+                    "source_unavailable",
+                    "cannot inspect PRD source collection",
+                ) from exc
+            if canonical_present and legacy_present:
+                raise PrdSourceIngestError(
+                    "source_ambiguous",
+                    "both portable and legacy PRD sources exist",
+                )
+            if legacy_present:
+                if os.name == "nt":
+                    raise PrdSourceIngestError(
+                        "legacy_source_migration_required",
+                        "legacy PRD source requires portable filename migration",
+                    )
+                source_path = legacy_path
+    if os.name == "nt" and required_parent.exists():
+        with os.scandir(required_parent) as entries:
+            case_alias = any(
+                entry.name.casefold() == source_path.name.casefold()
+                and entry.name != source_path.name
+                for entry in entries
+            )
+        if case_alias:
+            raise PrdSourceIngestError(
+                "source_case_alias",
+                "PRD source spelling aliases another wire identity",
+            )
+    ingested = ingest_prd_source(
+        source_path,
+        max_bytes=max_bytes,
+        containment_root=state_dir,
+        required_parent=required_parent,
+    )
+    if legacy_path is not None and legacy_path != portable_path:
+        try:
+            portable_present = os.path.lexists(portable_path)
+            legacy_present = False
+            if required_parent.exists():
+                with os.scandir(required_parent) as entries:
+                    legacy_present = any(
+                        entry.name == legacy_path.name for entry in entries
+                    )
+        except OSError as exc:
+            raise PrdSourceIngestError(
+                "source_unavailable",
+                "cannot recheck PRD source collection",
+            ) from exc
+        if portable_present and legacy_present:
+            raise PrdSourceIngestError(
+                "source_ambiguous",
+                "both portable and legacy PRD sources exist",
+            )
+    return ingested
 
 
 def display_path(path: Path) -> str:

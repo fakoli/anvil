@@ -74,8 +74,8 @@ to `.anvil/packets/<task-id>.md` (or `.json` with `--format json`). See
 
 ### PRD
 
-The markdown source of truth — `prd.md` for the default PRD, or
-`prds/<prd_id>.md` for a named release — that `anvil prd parse` reads
+The markdown source of truth — `prd.md` for the default PRD, or a portable
+source under `prds/` for a named release — that `anvil prd parse` reads
 deterministically (no LLM) into `Requirement`, `Feature`, and `Task` rows.
 A project can hold one `default` PRD plus multiple named release PRDs,
 all persisted in the same `state.db` / `events.jsonl`. See

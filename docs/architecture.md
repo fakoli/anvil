@@ -378,15 +378,15 @@ assignment to the backend's `apply_event` method.
 ├── events.jsonl        # append-only audit / event log for ALL PRDs (replay source)
 ├── prd.md              # the default PRD source (edited by hand; `prd parse`)
 ├── prds/               # named release-scoped PRD sources
-│   ├── v0.2.md         #   .anvil/prds/<prd_id>.md — one file per named PRD
+│   ├── v0.2.md         #   portable source filename — one per named PRD
 │   └── v0.3.md
 └── packets/            # generated work packets (per-task markdown / json)
 ```
 
 One state.db and one events.jsonl hold **every** PRD's rows, partitioned by
 `prd_id`; there is no per-PRD database. The default PRD keeps its source at the
-bare `.anvil/prd.md`; each named release PRD has a markdown source at
-`.anvil/prds/<prd_id>.md` (resolved by `prd_source_path()` —
+bare `.anvil/prd.md`; each named release PRD has a portable markdown source
+under `.anvil/prds/` (resolved by `prd_source_path()` —
 [`cli/_helpers.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/_helpers.py)). Re-parsing one PRD
 replaces only that PRD's rows and leaves the others untouched.
 

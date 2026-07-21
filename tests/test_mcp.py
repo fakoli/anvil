@@ -3528,6 +3528,8 @@ class TestParsePrd:
         assert resp["task_count"] == 2
         assert resp["errors"] == []
         assert resp["prd_status"] == "draft"
+        assert resp["prd_path"] == "default"
+        assert str(state_dir) not in json.dumps(resp)
         # Verify the PRD was actually persisted.
         from anvil.clock import SystemClock
         from anvil.state.sqlite import SqliteBackend
@@ -3555,10 +3557,13 @@ class TestParsePrd:
             async with Client(mcp) as c:
                 await c.call_tool("parse_prd", {})
 
-        with pytest.raises(ToolError, match="PRD file not found|prd.md"):
+        with pytest.raises(ToolError) as excinfo:
             _run(run())
+        assert "default" in str(excinfo.value)
+        assert str(tmp_path) not in str(excinfo.value)
+        assert ".md" not in str(excinfo.value)
 
-    def test_error_when_named_prd_file_missing_uses_forward_slash_path(
+    def test_error_when_named_prd_file_missing_uses_stable_identity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _init_state_dir(tmp_path)
@@ -3571,10 +3576,11 @@ class TestParsePrd:
         with pytest.raises(ToolError) as excinfo:
             _run(run())
         message = str(excinfo.value)
-        assert "prds/nope.md" in message
-        assert "prds\\nope.md" not in message
+        assert "nope" in message
+        assert str(tmp_path) not in message
+        assert ".md" not in message
 
-    def test_error_when_named_prd_file_unreadable_uses_forward_slash_path(
+    def test_error_when_named_prd_file_unreadable_uses_stable_identity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_dir = _init_state_dir(tmp_path)
@@ -3589,9 +3595,93 @@ class TestParsePrd:
         with pytest.raises(ToolError) as excinfo:
             _run(run())
         message = str(excinfo.value)
-        assert "prds/blocked.md" in message
-        assert "prds\\blocked.md" not in message
-        assert "cannot read" in message.lower()
+        assert "blocked" in message
+        assert str(tmp_path) not in message
+        assert ".md" not in message
+        assert "regular contained file" in message.lower()
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            (b"\xff\xfe\x00", "valid UTF-8"),
+            (b"x" * (2_097_152 + 1), "byte limit"),
+        ],
+        ids=["invalid-utf8", "source-limit"],
+    )
+    def test_ingest_refusal_occurs_before_backend_open_or_state_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        content: bytes,
+        expected: str,
+    ) -> None:
+        import anvil.mcp_server as mcp_server
+
+        state_dir = _init_state_dir(tmp_path)
+        (state_dir / "prd.md").write_bytes(content)
+        before = (state_dir / "events.jsonl").read_bytes()
+        backend_opens: list[bool] = []
+
+        def fail_backend(*args: object, **kwargs: object) -> None:
+            backend_opens.append(True)
+            raise AssertionError("ingest refusal must precede backend open")
+
+        monkeypatch.setattr(mcp_server, "_open_backend", fail_backend)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        with pytest.raises(ToolError, match=expected):
+            _run(run())
+        assert backend_opens == []
+        assert (state_dir / "events.jsonl").read_bytes() == before
+
+    @pytest.mark.parametrize("invalid_prd_id", ["../escape", ""])
+    def test_invalid_partition_refuses_before_explicit_file_access(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        invalid_prd_id: str,
+    ) -> None:
+        _init_state_dir(tmp_path)
+        missing_secret = tmp_path / "outside-secret.md"
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "parse_prd",
+                    {"prd_id": invalid_prd_id, "file": str(missing_secret)},
+                )
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        message = str(excinfo.value)
+        assert "PRD id is invalid" in message
+        assert str(missing_secret) not in message
+        assert "not found" not in message.lower()
+
+    def test_windows_reserved_wire_id_uses_encoded_source_and_stable_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.cli._helpers import prd_source_path
+
+        state_dir = _init_state_dir(tmp_path)
+        source_path = prd_source_path(state_dir, "CON")
+        source_path.parent.mkdir()
+        source_path.write_text(_MINIMAL_PRD, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {"prd_id": "CON"}))
+
+        response = _run(run())
+        assert response["errors"] == []
+        assert response["prd_path"] == "CON"
+        assert source_path.name not in json.dumps(response)
 
     def test_prd_id_scopes_to_named_partition(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3619,6 +3709,8 @@ class TestParsePrd:
         default_resp, named_resp = _run(run())
         assert named_resp["errors"] == []
         assert named_resp["requirement_count"] == 2
+        assert default_resp["prd_path"] == "default"
+        assert named_resp["prd_path"] == "v0.2"
 
         from anvil.clock import SystemClock
         from anvil.state.sqlite import SqliteBackend
@@ -3821,7 +3913,7 @@ class TestAssessPrd:
         ("content", "error"),
         [
             (b"# Project: Incomplete", "parse failed"),
-            (b"\xff\xfe\x00", "Cannot read"),
+            (b"\xff\xfe\x00", "Cannot ingest"),
         ],
     )
     def test_assess_rejects_malformed_or_non_utf8_prds(
@@ -3845,8 +3937,6 @@ class TestAssessPrd:
     def test_named_prd_assessment_matches_cli_contract(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import os
-
         from typer.testing import CliRunner
 
         from anvil.cli import app
@@ -3872,7 +3962,8 @@ class TestAssessPrd:
         mcp_data = _run(run())
         assert set(mcp_data) == {"prd_source", "findings", "count", "advisory"}
         assert mcp_data == cli_data
-        assert os.path.basename(mcp_data["prd_source"]) == "v0.2.md"
+        assert mcp_data["prd_source"] == "v0.2"
+        assert str(state_dir) not in json.dumps(mcp_data)
 
 
 # ===========================================================================

@@ -947,6 +947,7 @@ Mirrors `anvil prd parse`.
 | Parameter | Type             | Required | Default                          |
 |-----------|------------------|----------|----------------------------------|
 | `file`    | `string \| null` | no       | `<cwd>/.anvil/prd.md`     |
+| `prd_id`  | `string \| null` | no       | default PRD               |
 | `cwd`     | `string \| null` | no       | `Path.cwd()`                     |
 
 **Output**
@@ -958,7 +959,7 @@ Mirrors `anvil prd parse`.
   "feature_count": 1,
   "task_count": 2,
   "errors": [],
-  "prd_path": "/abs/path/.anvil/prd.md"
+  "prd_path": "default"
 }
 ```
 
@@ -968,8 +969,12 @@ before applying); the caller should fix the PRD and re-call.
 **Failure modes**
 
 - `ToolError` — project not initialized.
-- `ToolError` — PRD file not found at the resolved path.
-- `ToolError` — PRD file unreadable.
+- `ToolError` — selected PRD source missing or not a verified regular file.
+- `ToolError` — selected PRD source exceeds the byte ceiling or is not UTF-8.
+
+`prd_path` is retained as a compatibility field name, but its value is the
+stable source identity (`default`, a named PRD id, or `custom`), never a
+filesystem path.
 
 **When to call**: right after the user (or another agent) writes `prd.md`.
 
@@ -997,7 +1002,7 @@ grammar.
 
 ```json
 {
-  "prd_source": "/abs/path/.anvil/prd.md",
+  "prd_source": "default",
   "advisory": true,
   "count": 1,
   "findings": [{
@@ -1086,7 +1091,7 @@ If any orphan has advanced past `ready` status (claimed, in progress, needs revi
 the tool raises `ToolError` rather than silently discarding claim/evidence history — pass
 `prune_force=true` to delete them anyway (the audit trail is preserved either way).
 
-`prd_id`: PRD partition to plan (multi-PRD). A non-default id reads `.anvil/prds/<id>.md`,
+`prd_id`: PRD partition to plan (multi-PRD). A non-default id reads its portable source under `.anvil/prds/`,
 scopes orphan-prune to that partition, and stamps the partition into every feature/task
 event. `null` (or `"default"` / `"prd"`) keeps the bare `.anvil/prd.md` source and the
 default partition.

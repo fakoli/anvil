@@ -16,13 +16,16 @@ import json
 import sys
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 from anvil.state.rollup import BundleRollupEntry
+
+if TYPE_CHECKING:
+    from anvil.cli._helpers import IngestedPrdSource
 
 # ---------------------------------------------------------------------------
 # FastMCP instance
@@ -2252,6 +2255,46 @@ class AssessPrdResponse(BaseModel):
     advisory: bool = True
 
 
+def _ingest_planning_prd_source(
+    *,
+    state_dir: Path,
+    prd_id: str | None,
+    file: str | None,
+    cwd: str | None,
+) -> tuple[str, str, IngestedPrdSource]:
+    """Return validated partition, stable identity, and bounded markdown.
+
+    Both MCP planning readers use the same opened-handle primitive as the CLI.
+    Operational failures are path-safe and occur before any backend is opened.
+    """
+    from anvil.cli._helpers import (
+        PrdSourceIngestError,
+        canonical_prd_id,
+        ingest_prd_source,
+        ingest_prd_source_for_id,
+        validate_prd_id,
+    )
+
+    source_identity: str | None = None
+    try:
+        parse_prd_id = validate_prd_id(prd_id if prd_id is not None else "prd")
+        if file is not None:
+            source_identity = "custom"
+            source_path = Path(file)
+            if not source_path.is_absolute():
+                base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+                source_path = base / source_path
+            source = ingest_prd_source(source_path)
+        else:
+            source_identity = canonical_prd_id(parse_prd_id)
+            source = ingest_prd_source_for_id(state_dir, parse_prd_id)
+    except PrdSourceIngestError as exc:
+        suffix = f": {source_identity}" if source_identity is not None else ""
+        raise ToolError(f"Cannot ingest PRD source{suffix}: {exc.message}") from exc
+    assert source_identity is not None
+    return parse_prd_id, source_identity, source
+
+
 @mcp.tool(tags={PLANNING_TAG})
 def assess_prd(
     file: str | None = None,
@@ -2264,7 +2307,6 @@ def assess_prd(
     a focused challenge question, but never blocks parse, review, approval,
     planning, claiming, or autonomous execution.
     """
-    from anvil.cli._helpers import display_path, prd_source_path
     from anvil.planning.behavioral_readiness import assess_behavioral_readiness
     from anvil.planning.template import parse_prd as _parse_prd_impl
 
@@ -2274,24 +2316,13 @@ def assess_prd(
             f"anvil not initialized in {state_dir.parent}. "
             "Call init_project first.",
         )
-    parse_prd_id = prd_id.strip() if (prd_id and prd_id.strip()) else "prd"
-    if file is not None:
-        prd_path = Path(file)
-        if not prd_path.is_absolute():
-            base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
-            prd_path = (base / prd_path).resolve()
-    else:
-        prd_path = prd_source_path(state_dir, parse_prd_id)
-    if not prd_path.exists():
-        raise ToolError(
-            f"PRD file not found at {display_path(prd_path)}. "
-            "Author your PRD there or pass file= an explicit path."
-        )
-    try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        reason = getattr(exc, "strerror", None) or str(exc) or exc.__class__.__name__
-        raise ToolError(f"Cannot read {display_path(prd_path)}: {reason}") from exc
+    parse_prd_id, source_identity, source = _ingest_planning_prd_source(
+        state_dir=state_dir,
+        prd_id=prd_id,
+        file=file,
+        cwd=cwd,
+    )
+    markdown = source.markdown
 
     result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
     if result.errors:
@@ -2304,7 +2335,7 @@ def assess_prd(
         )
     findings = assess_behavioral_readiness(result)
     return AssessPrdResponse(
-        prd_source=str(prd_path),
+        prd_source=source_identity,
         findings=[
             BehavioralFindingResponse(
                 id=finding.id,
@@ -2332,18 +2363,18 @@ def parse_prd(
     operational failures (missing/unreadable file, project not initialized).
 
     Args:
-        file: PRD path (absolute or cwd-relative). Defaults to .anvil/prd.md
-            (or .anvil/prds/<prd_id>.md when prd_id names a non-default PRD).
+        file: PRD path (absolute or cwd-relative). Defaults to the selected
+            PRD's portable managed source.
         prd_id: PRD partition to parse (multi-PRD, T019). Mirrors the CLI
-            ``--prd`` flag: a non-default id reads ``.anvil/prds/<id>.md`` and
-            stamps the partition into the prd.parsed event so only that PRD's
+            ``--prd`` flag: a non-default id reads its portable collection
+            source and stamps the partition into the prd.parsed event so only that PRD's
             rows are (re)written. ``None`` / 'default' / 'prd' keep the bare
             ``.anvil/prd.md`` source + default partition, byte-identical to the
             pre-multi-PRD event. Ignored for the source path when ``file`` is
             given (but still honoured for the partition).
         cwd:  Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _DEFAULT_PRD_IDS, display_path, prd_source_path
+    from anvil.cli._helpers import _DEFAULT_PRD_IDS
     from anvil.clock import SystemClock
     from anvil.planning.template import parse_prd as _parse_prd_impl
     from anvil.state.models import EventDraft
@@ -2358,28 +2389,13 @@ def parse_prd(
     # T019: the parse-time prd_id controls id shape AND the partition the event
     # writes into — mirrors cli/prd.py. None collapses to the 'prd' sentinel
     # (the default PRD); an explicit non-default id scopes the parse.
-    parse_prd_id = prd_id.strip() if (prd_id and prd_id.strip()) else "prd"
-
-    if file is not None:
-        prd_path = Path(file)
-        if not prd_path.is_absolute():
-            base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
-            prd_path = (base / prd_path).resolve()
-    else:
-        prd_path = prd_source_path(state_dir, parse_prd_id)
-    prd_display = display_path(prd_path)
-
-    if not prd_path.exists():
-        raise ToolError(
-            f"PRD file not found at {prd_display}. "
-            "Author your PRD there or pass file= an explicit path.",
-        )
-
-    try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        reason = exc.strerror or exc.__class__.__name__
-        raise ToolError(f"Cannot read {prd_display}: {reason}") from exc
+    parse_prd_id, source_identity, source = _ingest_planning_prd_source(
+        state_dir=state_dir,
+        prd_id=prd_id,
+        file=file,
+        cwd=cwd,
+    )
+    markdown = source.markdown
 
     result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
 
@@ -2398,7 +2414,7 @@ def parse_prd(
             feature_count=len(result.features),
             task_count=len(result.tasks),
             errors=errors_out,
-            prd_path=str(prd_path),
+            prd_path=source_identity,
         )
 
     backend = _open_backend(state_dir)
@@ -2571,7 +2587,7 @@ def parse_prd(
         feature_count=len(result.features),
         task_count=len(result.tasks),
         errors=errors_out,
-        prd_path=str(prd_path),
+        prd_path=source_identity,
     )
 
 
@@ -2752,7 +2768,7 @@ def plan_tasks(
             ``ready`` (default False raises ToolError so claim/evidence
             history is not lost silently).
         prd_id: PRD partition to plan (multi-PRD, T019). Mirrors the CLI
-            ``plan --prd``: a non-default id reads ``.anvil/prds/<id>.md``,
+            ``plan --prd``: a non-default id reads its portable collection source,
             scopes orphan-prune to that partition, and stamps the partition into
             every feature/task event. ``None`` / 'default' / 'prd' keep the bare
             ``.anvil/prd.md`` source + default partition, byte-identical to the

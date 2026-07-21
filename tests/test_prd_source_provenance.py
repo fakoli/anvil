@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
-from unittest.mock import MagicMock, mock_open
+from typing import Any, BinaryIO
 
 import pytest
 import typer
 
+import anvil.cli._helpers as helpers_module
 import anvil.cli.prd as prd_module
 from anvil.cli._helpers import (
     MAX_PRD_SOURCE_BYTES_V1,
     IngestedPrdSource,
     PrdSourceIngestError,
     ingest_prd_source,
+    ingest_prd_source_for_id,
+    prd_id_from_source_filename,
+    prd_source_filename,
     prd_source_path,
     validate_prd_id,
 )
+from anvil.read_contracts import PrdScopedRefV1
 
 
 @pytest.mark.parametrize(
@@ -48,16 +54,46 @@ def test_ingest_preserves_exact_utf8_bytes_and_returns_no_path(
     assert "path" not in IngestedPrdSource.__slots__
 
 
-def test_ingest_limit_uses_one_bounded_limit_plus_one_probe() -> None:
-    source_path = MagicMock(spec=Path)
-    opener = mock_open(read_data=b"12345678")
-    source_path.open = opener
+def test_ingest_limit_uses_one_bounded_limit_plus_one_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.md"
+    source_path.write_bytes(b"12345678")
+    read_sizes: list[int] = []
+    real_fdopen = os.fdopen
+
+    class TrackingStream:
+        def __init__(self, descriptor: int, mode: str, *, closefd: bool) -> None:
+            self.stream: BinaryIO = real_fdopen(descriptor, mode, closefd=closefd)
+
+        def __enter__(self) -> TrackingStream:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.stream.close()
+
+        def read(self, size: int) -> bytes:
+            read_sizes.append(size)
+            return self.stream.read(size)
+
+        def fileno(self) -> int:
+            return self.stream.fileno()
+
+    def tracking_fdopen(
+        descriptor: int,
+        mode: str,
+        *,
+        closefd: bool,
+    ) -> TrackingStream:
+        return TrackingStream(descriptor, mode, closefd=closefd)
+
+    monkeypatch.setattr(helpers_module.os, "fdopen", tracking_fdopen)
 
     ingested = ingest_prd_source(source_path, max_bytes=8)
 
     assert ingested.source_bytes == b"12345678"
-    opener.assert_called_once_with("rb")
-    opener().read.assert_called_once_with(9)
+    assert read_sizes == [9]
 
 
 def test_ingest_limit_refuses_exact_overrun_before_utf8_decode(tmp_path: Path) -> None:
@@ -69,6 +105,17 @@ def test_ingest_limit_refuses_exact_overrun_before_utf8_decode(tmp_path: Path) -
 
     assert refusal.value.code == "source_limit_exceeded"
     assert str(source_path) not in str(refusal.value)
+
+
+def test_ingest_limit_accepts_n_and_refuses_n_plus_one(tmp_path: Path) -> None:
+    source_path = tmp_path / "boundary.md"
+    source_path.write_bytes(b"12345678")
+    assert ingest_prd_source(source_path, max_bytes=8).source_size_bytes == 8
+
+    source_path.write_bytes(b"123456789")
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source(source_path, max_bytes=8)
+    assert refusal.value.code == "source_limit_exceeded"
 
 
 @pytest.mark.parametrize("max_bytes", [0, -1, True, MAX_PRD_SOURCE_BYTES_V1 + 1])
@@ -97,6 +144,17 @@ def test_ingest_utf8_refusal_is_typed_bounded_and_path_safe(tmp_path: Path) -> N
     assert str(source_path) not in diagnostic
 
 
+def test_ingest_utf8_preserves_nul_bytes_without_an_unstated_restriction(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "nul.md"
+    source_bytes = b"before\x00after"
+    source_path.write_bytes(source_bytes)
+    ingested = ingest_prd_source(source_path)
+    assert ingested.source_bytes == source_bytes
+    assert ingested.markdown.encode("utf-8") == source_bytes
+
+
 @pytest.mark.parametrize(
     "prd_id",
     [
@@ -114,10 +172,6 @@ def test_ingest_utf8_refusal_is_typed_bounded_and_path_safe(tmp_path: Path) -> N
         "trailing ",
         "-leading",
         "trailing-",
-        "CON",
-        "nul.release",
-        "Com1",
-        "LPT9.notes",
     ],
 )
 def test_identity_refuses_path_shaped_prd_ids_before_resolution(prd_id: str) -> None:
@@ -129,12 +183,159 @@ def test_identity_refuses_path_shaped_prd_ids_before_resolution(prd_id: str) -> 
 
 @pytest.mark.parametrize(
     "prd_id",
-    ["default", "prd", "v0.2", "release_2026-07", "A", "a" * 128],
+    [
+        "default",
+        "prd",
+        "v0.2",
+        "release_2026-07",
+        "A",
+        "a" * 128,
+        "CON",
+        "nul.release",
+        "Com1",
+        "LPT9.notes",
+    ],
 )
 def test_identity_accepts_closed_canonical_prd_ids(prd_id: str) -> None:
     validated = validate_prd_id(prd_id)
     assert validated == prd_id
     assert type(validated) is str
+    assert PrdScopedRefV1(prd_id=prd_id).prd_id == prd_id
+
+
+@pytest.mark.parametrize("prd_id", ["CON", "nul.release", "Com1", "LPT9.notes"])
+def test_identity_maps_windows_aliases_reversibly_without_narrowing_v1(
+    tmp_path: Path,
+    prd_id: str,
+) -> None:
+    filename = prd_source_filename(prd_id)
+    assert filename.startswith("_anvil-prd-")
+    assert prd_id_from_source_filename(filename) == prd_id
+    assert prd_source_path(tmp_path / ".anvil", prd_id).name == filename
+    assert PrdScopedRefV1(prd_id=prd_id).prd_id == prd_id
+
+
+def test_identity_long_windows_alias_mapping_fits_component_ceiling() -> None:
+    prd_id = "CON." + ("a" * 124)
+    filename = prd_source_filename(prd_id)
+    assert len(prd_id.encode("ascii")) == 128
+    assert len(filename) <= 255
+    assert prd_id_from_source_filename(filename) == prd_id
+
+
+def test_identity_case_distinct_ids_have_distinct_portable_filenames() -> None:
+    uppercase_filename = prd_source_filename("A")
+    lowercase_filename = prd_source_filename("a")
+    assert uppercase_filename.casefold() != lowercase_filename.casefold()
+    assert prd_id_from_source_filename(uppercase_filename) == "A"
+    assert prd_id_from_source_filename(lowercase_filename) == "a"
+
+
+def test_identity_legacy_uppercase_source_remains_readable(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".anvil"
+    legacy_source = state_dir / "prds" / "Release.md"
+    legacy_source.parent.mkdir(parents=True)
+    legacy_source.write_bytes(b"# Legacy\r\n")
+
+    if os.name == "nt":
+        with pytest.raises(PrdSourceIngestError) as refusal:
+            ingest_prd_source_for_id(state_dir, "Release")
+        assert refusal.value.code == "legacy_source_migration_required"
+    else:
+        ingested = ingest_prd_source_for_id(state_dir, "Release")
+        assert ingested.source_bytes == b"# Legacy\r\n"
+
+
+def test_identity_portable_and_legacy_sources_refuse_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    portable_source = prd_source_path(state_dir, "Release")
+    portable_source.parent.mkdir(parents=True)
+    portable_source.write_bytes(b"portable")
+    (portable_source.parent / "Release.md").write_bytes(b"legacy")
+
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source_for_id(state_dir, "Release")
+
+    assert refusal.value.code == "source_ambiguous"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows legacy sources require migration")
+def test_identity_legacy_selection_rechecks_late_portable_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    legacy_source = state_dir / "prds" / "Release.md"
+    legacy_source.parent.mkdir(parents=True)
+    legacy_source.write_bytes(b"legacy")
+    portable_source = prd_source_path(state_dir, "Release")
+    real_lexists = os.path.lexists
+    first_portable_probe = True
+
+    def racing_lexists(path: os.PathLike[str]) -> bool:
+        nonlocal first_portable_probe
+        if Path(path) == portable_source and first_portable_probe:
+            first_portable_probe = False
+            portable_source.write_bytes(b"portable")
+            return False
+        return real_lexists(path)
+
+    monkeypatch.setattr(helpers_module.os.path, "lexists", racing_lexists)
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source_for_id(state_dir, "Release")
+
+    assert refusal.value.code == "source_ambiguous"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires case-insensitive Windows paths")
+def test_identity_windows_legacy_case_aliases_fail_closed(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".anvil"
+    legacy_source = state_dir / "prds" / "A.md"
+    legacy_source.parent.mkdir(parents=True)
+    legacy_source.write_bytes(b"legacy-uppercase")
+
+    with pytest.raises(PrdSourceIngestError) as uppercase_refusal:
+        ingest_prd_source_for_id(state_dir, "A")
+    with pytest.raises(PrdSourceIngestError) as lowercase_refusal:
+        ingest_prd_source_for_id(state_dir, "a")
+
+    assert uppercase_refusal.value.code == "legacy_source_migration_required"
+    assert lowercase_refusal.value.code == "source_case_alias"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires case-insensitive Windows paths")
+def test_identity_windows_case_alias_swap_before_open_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    source_root = state_dir / "prds"
+    source_root.mkdir(parents=True)
+    real_ingest = helpers_module.ingest_prd_source
+
+    def racing_ingest(source_path: Path, **kwargs: Any) -> IngestedPrdSource:
+        (source_root / "A.md").write_bytes(b"uppercase-alias")
+        return real_ingest(source_path, **kwargs)
+
+    monkeypatch.setattr(helpers_module, "ingest_prd_source", racing_ingest)
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source_for_id(state_dir, "a")
+
+    assert refusal.value.code == "source_case_alias"
+
+
+def test_identity_encoded_windows_alias_source_ingests_normally(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".anvil"
+    source_path = prd_source_path(state_dir, "CON")
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"# Safe alias\r\n")
+
+    ingested = ingest_prd_source_for_id(state_dir, "CON")
+
+    assert ingested.source_bytes == b"# Safe alias\r\n"
+    assert prd_id_from_source_filename(source_path.name) == "CON"
 
 
 def test_identity_refuses_named_source_symlink_escape(tmp_path: Path) -> None:
@@ -150,7 +351,7 @@ def test_identity_refuses_named_source_symlink_escape(tmp_path: Path) -> None:
         pytest.skip(f"symlink creation unavailable: {exc.__class__.__name__}")
 
     with pytest.raises(PrdSourceIngestError) as refusal:
-        prd_source_path(state_dir, "release")
+        ingest_prd_source_for_id(state_dir, "release")
 
     assert refusal.value.code == "source_outside_prd_directory"
     assert str(outside) not in str(refusal.value)
@@ -169,10 +370,266 @@ def test_identity_refuses_named_source_directory_symlink_escape(tmp_path: Path) 
         pytest.skip(f"symlink creation unavailable: {exc.__class__.__name__}")
 
     with pytest.raises(PrdSourceIngestError) as refusal:
-        prd_source_path(state_dir, "release")
+        ingest_prd_source_for_id(state_dir, "release")
 
     assert refusal.value.code == "source_outside_prd_directory"
     assert str(outside) not in str(refusal.value)
+
+
+def test_ingest_refuses_file_swap_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.md"
+    source_path.write_bytes(b"contained")
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"outside-secret")
+    real_open = os.open
+    phases: list[str] = []
+
+    def swapped_open(path: os.PathLike[str], flags: int) -> int:
+        phases.append("open-outside")
+        return real_open(outside, flags)
+
+    def fail_read(*args: object, **kwargs: object) -> None:
+        phases.append("read")
+        raise AssertionError("mismatched handle must refuse before reading")
+
+    monkeypatch.setattr(helpers_module.os, "open", swapped_open)
+    monkeypatch.setattr(helpers_module.os, "fdopen", fail_read)
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source(source_path)
+
+    assert refusal.value.code == "source_changed"
+    assert phases == ["open-outside"]
+    assert "outside-secret" not in str(refusal.value)
+
+
+def test_ingest_refuses_file_swap_to_outside_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.md"
+    source_path.write_bytes(b"contained")
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"outside-secret")
+    real_open = os.open
+
+    try:
+        probe = tmp_path / "symlink-probe.md"
+        probe.symlink_to(outside)
+        probe.unlink()
+    except OSError as exc:
+        pytest.skip(f"file symlink unavailable: {exc.__class__.__name__}")
+
+    def swapped_open(path: os.PathLike[str], flags: int) -> int:
+        source_path.unlink()
+        source_path.symlink_to(outside)
+        return real_open(path, flags)
+
+    monkeypatch.setattr(helpers_module.os, "open", swapped_open)
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source(source_path)
+
+    assert refusal.value.code in {
+        "source_changed",
+        "source_outside_prd_directory",
+    }
+    assert "outside-secret" not in str(refusal.value)
+
+
+def test_identity_refuses_parent_swap_to_outside_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    source_root = state_dir / "prds"
+    source_root.mkdir(parents=True)
+    source_path = source_root / "release.md"
+    source_path.write_bytes(b"contained")
+    outside_root = tmp_path / "outside-prds"
+    outside_root.mkdir()
+    (outside_root / "release.md").write_bytes(b"outside-secret")
+    backup_root = state_dir / "prds-original"
+    real_open = os.open
+
+    try:
+        probe = tmp_path / "symlink-probe"
+        probe.symlink_to(outside_root, target_is_directory=True)
+        probe.unlink()
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc.__class__.__name__}")
+
+    def swapped_parent_open(
+        path: os.PathLike[str],
+        flags: int,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if Path(path).name != "release.md":
+            if dir_fd is None:
+                return real_open(path, flags)
+            return real_open(path, flags, dir_fd=dir_fd)
+        source_root.rename(backup_root)
+        source_root.symlink_to(outside_root, target_is_directory=True)
+        if dir_fd is None:
+            return real_open(path, flags)
+        return real_open(path, flags, dir_fd=dir_fd)
+
+    monkeypatch.setattr(helpers_module.os, "open", swapped_parent_open)
+    try:
+        ingested = ingest_prd_source_for_id(state_dir, "release")
+    except PrdSourceIngestError as refusal:
+        assert refusal.code == "source_outside_prd_directory"
+        assert "outside-secret" not in str(refusal)
+    else:
+        assert ingested.source_bytes == b"contained"
+
+
+def test_identity_parent_swap_back_cannot_launder_outside_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    source_root = state_dir / "prds"
+    source_root.mkdir(parents=True)
+    (source_root / "release.md").write_bytes(b"contained")
+    outside_root = tmp_path / "outside-prds"
+    outside_root.mkdir()
+    outside_source = outside_root / "release.md"
+    outside_source.write_bytes(b"outside-secret")
+    backup_root = state_dir / "prds-original"
+    real_open = os.open
+
+    try:
+        probe = tmp_path / "symlink-probe"
+        probe.symlink_to(outside_root, target_is_directory=True)
+        probe.unlink()
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc.__class__.__name__}")
+
+    def swapped_then_restored_open(
+        path: os.PathLike[str],
+        flags: int,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if Path(path).name != "release.md":
+            if dir_fd is None:
+                return real_open(path, flags)
+            return real_open(path, flags, dir_fd=dir_fd)
+        source_root.rename(backup_root)
+        source_root.symlink_to(outside_root, target_is_directory=True)
+        descriptor = real_open(outside_source, flags)
+        source_root.unlink()
+        backup_root.rename(source_root)
+        return descriptor
+
+    monkeypatch.setattr(helpers_module.os, "open", swapped_then_restored_open)
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source_for_id(state_dir, "release")
+
+    assert refusal.value.code in {"source_changed", "source_outside_prd_directory"}
+    assert "outside-secret" not in str(refusal.value)
+
+
+def test_ingest_same_size_mtime_restored_mutation_never_passes_as_stable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.md"
+    original = b"original"
+    replacement = b"replaced"
+    source_path.write_bytes(original)
+    initial_stat = source_path.stat()
+    real_fdopen = os.fdopen
+    mutation_blocked: list[bool] = []
+
+    class MutatingStream:
+        def __init__(self, descriptor: int, mode: str, *, closefd: bool) -> None:
+            self.stream: BinaryIO = real_fdopen(descriptor, mode, closefd=closefd)
+
+        def __enter__(self) -> MutatingStream:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.stream.close()
+
+        def read(self, size: int) -> bytes:
+            source_bytes = self.stream.read(size)
+            try:
+                source_path.write_bytes(replacement)
+                os.utime(
+                    source_path,
+                    ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns),
+                )
+            except OSError:
+                mutation_blocked.append(True)
+            return source_bytes
+
+        def fileno(self) -> int:
+            return self.stream.fileno()
+
+    monkeypatch.setattr(
+        helpers_module.os,
+        "fdopen",
+        lambda descriptor, mode, *, closefd: MutatingStream(
+            descriptor,
+            mode,
+            closefd=closefd,
+        ),
+    )
+
+    try:
+        ingested = ingest_prd_source(source_path)
+    except PrdSourceIngestError as refusal:
+        assert refusal.code == "source_changed"
+    else:
+        assert mutation_blocked == [True]
+        assert ingested.source_bytes == original
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows shared-lock behavior")
+def test_ingest_windows_shared_lock_allows_parallel_readers(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.md"
+    source_path.write_bytes(b"parallel readers")
+    descriptor, _opened = helpers_module._open_verified_prd_source(
+        source_path,
+        containment_root=None,
+        required_parent=None,
+    )
+    try:
+        helpers_module._lock_prd_source_descriptor(
+            descriptor,
+            byte_count=MAX_PRD_SOURCE_BYTES_V1 + 1,
+        )
+        ingested = ingest_prd_source(source_path)
+    finally:
+        os.close(descriptor)
+
+    assert ingested.source_bytes == b"parallel readers"
+
+
+def test_ingest_refuses_fifo_before_open_or_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("POSIX FIFO creation unavailable")
+    source_path = tmp_path / "source.md"
+    os.mkfifo(source_path)
+    phases: list[str] = []
+
+    def fail_open(*args: object, **kwargs: object) -> int:
+        phases.append("open")
+        raise AssertionError("FIFO must refuse before potentially blocking open")
+
+    monkeypatch.setattr(helpers_module.os, "open", fail_open)
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source(source_path)
+
+    assert refusal.value.code == "source_not_regular"
+    assert phases == []
 
 
 @pytest.mark.parametrize(
@@ -212,9 +669,11 @@ def test_prd_parse_utf8_and_limit_refuse_before_backend_mutation(
     assert refusal.value.code == expected_code
 
 
+@pytest.mark.parametrize("invalid_prd_id", ["../escape", ""])
 def test_prd_parse_identity_refuses_before_file_access_or_backend_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    invalid_prd_id: str,
 ) -> None:
     monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
     (tmp_path / ".anvil").mkdir()
@@ -233,8 +692,27 @@ def test_prd_parse_identity_refuses_before_file_access_or_backend_mutation(
     with pytest.raises(typer.Exit):
         prd_module.prd_parse(
             file=tmp_path / "arbitrary.md",
-            prd="../escape",
+            prd=invalid_prd_id,
             cwd=tmp_path,
         )
 
     assert phases == []
+
+
+def test_prd_parse_relative_file_uses_explicit_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
+    (tmp_path / ".anvil").mkdir()
+    observed: list[Path] = []
+
+    def capture_source(source_path: Path) -> IngestedPrdSource:
+        observed.append(source_path)
+        raise PrdSourceIngestError("source_not_found", "PRD source not found")
+
+    monkeypatch.setattr(prd_module, "ingest_prd_source", capture_source)
+    with pytest.raises(typer.Exit):
+        prd_module.prd_parse(file=Path("relative.md"), prd=None, cwd=tmp_path)
+
+    assert observed == [tmp_path.resolve() / "relative.md"]

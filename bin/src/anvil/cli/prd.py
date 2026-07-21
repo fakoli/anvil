@@ -16,9 +16,8 @@ from anvil.cli._helpers import (
     _require_state_dir,
     _resolve_state_dir,
     canonical_prd_id,
-    display_path,
     ingest_prd_source,
-    prd_source_path,
+    ingest_prd_source_for_id,
     resolve_prd_id,
     validate_prd_id,
 )
@@ -46,9 +45,9 @@ def prd_parse(
         None,
         "--prd",
         help=(
-            "Named PRD to parse (multi-PRD). Reads .anvil/prds/<id>.md and "
-            "scopes the parse to that PRD partition. Omit for the default "
-            "PRD (.anvil/prd.md). Ignored when --file is given."
+            "Named PRD to parse (multi-PRD). Reads its portable source in the "
+            "PRD collection and scopes the parse to that partition. Omit for "
+            "the default PRD. Ignored when --file is given."
         ),
     ),
     cwd: Path | None = typer.Option(  # noqa: B008
@@ -60,8 +59,8 @@ def prd_parse(
 ) -> None:
     """Parse a PRD and store the result as a prd.parsed event.
 
-    Reads .anvil/prd.md (or --file PATH, or .anvil/prds/<id>.md via --prd),
-    calls the template parser, emits a prd.parsed event with the full PRD +
+    Reads the default source (or --file PATH, or a named portable source via
+    --prd), calls the template parser, emits a prd.parsed event with the full PRD +
     requirements payload. With --prd the event carries that prd_id so the
     backend writes only that PRD's partition, leaving other PRDs untouched.
 
@@ -79,24 +78,23 @@ def prd_parse(
     # sentinel) keeps bare ids and the default partition, byte-identical to
     # the pre-multi-PRD behaviour. ``--file`` always reads the given path but
     # still honours ``--prd`` for the partition.
-    source_label: str | None = None
+    source_identity: str | None = None
     try:
-        parse_prd_id = validate_prd_id(prd if prd else "prd")
+        parse_prd_id = validate_prd_id(prd if prd is not None else "prd")
         if file is not None:
+            source_identity = "custom"
             prd_path = file
+            if not prd_path.is_absolute():
+                base = cwd.resolve() if cwd is not None else Path.cwd().resolve()
+                prd_path = base / prd_path
+            source = ingest_prd_source(prd_path)
         else:
-            prd_path = prd_source_path(state_dir, parse_prd_id)
-            source_label = (
-                _PRD_FILENAME
-                if parse_prd_id in _DEFAULT_PRD_IDS
-                else f"prds/{parse_prd_id}.md"
-            )
-        source = ingest_prd_source(prd_path)
+            source_identity = canonical_prd_id(parse_prd_id)
+            source = ingest_prd_source_for_id(state_dir, parse_prd_id)
     except PrdSourceIngestError as exc:
-        suffix = f": {source_label}" if source_label is not None else ""
+        suffix = f": {source_identity}" if source_identity is not None else ""
         typer.echo(f"Error: {exc.message}{suffix}", err=True)
         raise typer.Exit(code=1) from exc
-    prd_display = display_path(prd_path)
     markdown = source.markdown
 
     result = parse_prd(markdown, prd_id=parse_prd_id)
@@ -302,7 +300,7 @@ def prd_parse(
         f"{len(result.features)} features, "
         f"{len(result.tasks)} tasks."
     )
-    typer.echo(f"PRD source: {prd_display}")
+    typer.echo(f"PRD source: {source_identity}")
 
 
 @prd_app.command("assess")
@@ -339,30 +337,26 @@ def prd_assess(
     command = "prd assess"
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command=command, json_output=json_output)
-    parse_prd_id = prd if prd else "prd"
-    if file is not None:
-        prd_path = file
-        if not prd_path.is_absolute():
-            base = cwd.resolve() if cwd is not None else Path.cwd().resolve()
-            prd_path = (base / prd_path).resolve()
-    else:
-        prd_path = prd_source_path(state_dir, parse_prd_id)
-    if not prd_path.exists():
-        message = (
-            f"PRD file not found at {display_path(prd_path)}. "
-            "Author your PRD there or pass --file PATH."
-        )
-        if json_output:
-            fail(command, message, code="not_found")
-        typer.echo(f"Error: {message}", err=True)
-        raise typer.Exit(code=1)
+    source_identity: str | None = None
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        parse_prd_id = validate_prd_id(prd if prd is not None else "prd")
+        if file is not None:
+            source_identity = "custom"
+            prd_path = file
+            if not prd_path.is_absolute():
+                base = cwd.resolve() if cwd is not None else Path.cwd().resolve()
+                prd_path = base / prd_path
+            source = ingest_prd_source(prd_path)
+        else:
+            source_identity = canonical_prd_id(parse_prd_id)
+            source = ingest_prd_source_for_id(state_dir, parse_prd_id)
+    except PrdSourceIngestError as exc:
+        message = f"{exc.message}: {source_identity}" if source_identity else exc.message
         if json_output:
-            fail(command, f"cannot read {prd_path}: {exc}", code="io_error")
-        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+            fail(command, message, code=exc.code)
+        typer.echo(f"Error: {message}", err=True)
         raise typer.Exit(code=1) from exc
+    markdown = source.markdown
 
     result = parse_prd(markdown, prd_id=parse_prd_id)
     if result.errors:
@@ -384,7 +378,7 @@ def prd_assess(
         emit_success(
             command,
             {
-                "prd_source": str(prd_path),
+                "prd_source": source_identity,
                 "findings": findings_as_dicts(findings),
                 "count": len(findings),
                 "advisory": True,
@@ -392,7 +386,7 @@ def prd_assess(
         )
         return
 
-    typer.echo(f"PRD source: {display_path(prd_path)}")
+    typer.echo(f"PRD source: {source_identity}")
     if not findings:
         typer.echo("No behavioural-readiness findings. This remains an advisory check.")
         return
