@@ -36,6 +36,7 @@ from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.planning._plan_helpers import BatchDepPlan, emit_batch_dep_events
 from anvil.planning.llm import LLMResponse
+from anvil.state.backend import EventRejected
 from anvil.state.models import Task
 
 runner = CliRunner()
@@ -624,6 +625,49 @@ class TestBatchDepsApply:
         assert _deps_of(tmp_path, "T002") == ["T001"]
         # Seeded as 'ready'; the dependency edit must leave status untouched.
         assert _status_of(tmp_path, "T002") == "ready"
+
+    @pytest.mark.parametrize("json_output", [True, False])
+    def test_batch_deps_translates_backend_rejection(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        json_output: bool,
+    ) -> None:
+        """A backend refusal is stable on both CLI output surfaces."""
+        import anvil.planning._plan_helpers as plan_helpers
+
+        marker = "SYNTHETIC_BACKEND_VALIDATION_DETAIL"
+
+        def reject_emit(*args: Any, **kwargs: Any) -> list[str]:
+            _ = (args, kwargs)
+            raise EventRejected(marker)
+
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        monkeypatch.setattr(plan_helpers, "emit_batch_dep_events", reject_emit)
+        args = ["deps", "--add", "T002:T001"]
+        if json_output:
+            args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == 1
+        assert marker not in result.output
+        assert _deps_of(tmp_path, "T002") == []
+        if json_output:
+            envelope = json.loads(result.output)
+            assert envelope == {
+                "ok": False,
+                "command": "deps",
+                "error": {
+                    "code": "event_rejected",
+                    "message": "dependency update was rejected by state validation.",
+                },
+            }
+            assert len(result.output.encode("utf-8")) <= 4096
+        else:
+            assert result.output.strip() == (
+                "Error: dependency update was rejected by state validation."
+            )
 
     def test_batch_deps_mixed_add_and_remove(self, tmp_path: Path) -> None:
         """A single batch can both add and remove edges."""

@@ -2178,10 +2178,14 @@ def deps(
     With ``--json`` emits ``{"ok": true, "command": "deps", "data":
     {"changed": [...], "added": [["S","T"], ...], "removed": [...]}}``. A
     rejected batch yields ``{"ok": false, ... "error": {"code": "cycle" |
-    "unknown_task" | "self_loop" | "bad_request", ...}}`` and exit 1.
+    "unknown_task" | "self_loop" | "bad_request" | "event_rejected", ...}}``
+    and exit 1. ``event_rejected`` uses fixed prose rather than exposing
+    backend validation details.
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
+        DEPENDENCY_EVENT_REJECTED_CODE,
+        DEPENDENCY_EVENT_REJECTED_MESSAGE,
         BatchDepError,
         emit_batch_dep_events,
         parse_dep_edge,
@@ -2227,9 +2231,25 @@ def deps(
             typer.echo(f"Error: {exc.message}", err=True)
             raise typer.Exit(code=1) from exc
 
-        changed = emit_batch_dep_events(
-            backend, tasks_by_id, batch_plan, actor=actor, clock=clock
-        )
+        event_rejected = False
+        try:
+            changed = emit_batch_dep_events(
+                backend, tasks_by_id, batch_plan, actor=actor, clock=clock
+            )
+        except EventRejected:
+            # Leave the exception context before emitting either CLI surface;
+            # the backend reason may contain implementation details even though
+            # neither user-facing message does.
+            event_rejected = True
+        if event_rejected:
+            if json_output:
+                fail(
+                    "deps",
+                    DEPENDENCY_EVENT_REJECTED_MESSAGE,
+                    code=DEPENDENCY_EVENT_REJECTED_CODE,
+                )
+            typer.echo(f"Error: {DEPENDENCY_EVENT_REJECTED_MESSAGE}", err=True)
+            raise typer.Exit(code=1)
     finally:
         backend.close()
 

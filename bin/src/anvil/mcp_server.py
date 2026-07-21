@@ -1815,11 +1815,13 @@ def edit_dependencies(
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
+        DEPENDENCY_EVENT_REJECTED_MESSAGE,
         BatchDepError,
         DepEdge,
         emit_batch_dep_events,
         plan_batch_dep_edits,
     )
+    from anvil.state.backend import EventRejected
 
     add = add or []
     remove = remove or []
@@ -1854,9 +1856,12 @@ def edit_dependencies(
         except BatchDepError as exc:
             raise ToolError(exc.message) from exc
 
-        changed = emit_batch_dep_events(
-            backend, tasks_by_id, batch_plan, actor=actor, clock=clock
-        )
+        try:
+            changed = emit_batch_dep_events(
+                backend, tasks_by_id, batch_plan, actor=actor, clock=clock
+            )
+        except EventRejected:
+            raise ToolError(DEPENDENCY_EVENT_REJECTED_MESSAGE) from None
         return EditDependenciesResponse(
             changed=changed,
             added=[list(e) for e in batch_plan.added],

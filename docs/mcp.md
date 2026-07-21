@@ -420,6 +420,9 @@ committed; persistence is not yet whole-batch atomic. Task status is preserved b
 upsert deliberately omits `status` from its write, so a claimed or in-progress task's
 dependency list can be edited without regressing its status. True persistence atomicity
 requires the planned single batch event with prior-dependency/graph-cursor revalidation.
+If an individual backend append is rejected, MCP returns the fixed ToolError
+`dependency update was rejected by state validation.`; the CLI returns the same message
+with JSON error code `event_rejected`. Backend validation details are not exposed.
 
 **Inputs**
 

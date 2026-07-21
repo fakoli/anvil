@@ -31,6 +31,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from anvil.mcp_server import mcp
+from anvil.state.backend import EventRejected
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -2572,6 +2573,41 @@ class TestEditDependencies:
         with pytest.raises(ToolError):
             _run(run())
         # The valid edge in the rejected batch must NOT have applied.
+        assert _deps_of(state_dir, "T002") == []
+
+    def test_backend_rejection_is_stable_tool_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MCP matches the CLI message without exposing backend details."""
+        import anvil.planning._plan_helpers as plan_helpers
+
+        marker = "SYNTHETIC_BACKEND_VALIDATION_DETAIL"
+
+        def reject_emit(*args: Any, **kwargs: Any) -> list[str]:
+            _ = (args, kwargs)
+            raise EventRejected(marker)
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_task(state_dir, task_id="T002", status="ready")
+        monkeypatch.setattr(plan_helpers, "emit_batch_dep_events", reject_emit)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "edit_dependencies",
+                    {"actor": "agent-x", "add": [["T002", "T001"]]},
+                )
+
+        with pytest.raises(
+            ToolError,
+            match=r"^dependency update was rejected by state validation\.$",
+        ) as raised:
+            _run(run())
+
+        assert marker not in str(raised.value)
         assert _deps_of(state_dir, "T002") == []
 
 

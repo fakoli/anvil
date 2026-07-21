@@ -256,6 +256,11 @@ def emit_prune_events(
 # event whose write handler revalidates the prior dependencies/graph cursor and
 # applies every task update in one SQLite transaction.
 
+DEPENDENCY_EVENT_REJECTED_CODE = "event_rejected"
+DEPENDENCY_EVENT_REJECTED_MESSAGE = (
+    "dependency update was rejected by state validation."
+)
+
 
 @dataclass(frozen=True)
 class DepEdge:

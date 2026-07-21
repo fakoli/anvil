@@ -10890,6 +10890,103 @@ class TestDecideApplyContract:
             b.close()
 
     @pytest.mark.parametrize(
+        "malformation",
+        [
+            "dependencies_shape",
+            "dependencies_item",
+            "verification_commands",
+            "acceptance_criteria",
+            "huge_list",
+        ],
+    )
+    def test_task_created_recovery_malformed_payload_uses_one_bounded_refusal(
+        self, tmp_path: Path, malformation: str
+    ) -> None:
+        """Every malformed recovery candidate is fingerprinted before audit."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        audit_path = tmp_path / "audit.jsonl"
+        payload_marker = f"SYNTHETIC_{malformation.upper()}_PAYLOAD"
+        actor_marker = "SYNTHETIC_ACTOR_MARKER"
+        target_marker = "SYNTHETIC_TARGET_MARKER"
+        try:
+            _setup_project(b)
+            feature_id = "named:F001"
+            task_id = "named:T001"
+            b.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": "named"},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            b.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": "named",
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = b.get_task(task_id)
+            assert task is not None
+            payload = task.model_copy(update={"updated_at": _T1}).model_dump(
+                mode="json"
+            )
+            if malformation == "dependencies_shape":
+                payload["dependencies"] = {"secret": payload_marker}
+            elif malformation == "dependencies_item":
+                payload["dependencies"] = [{"secret": payload_marker}]
+            elif malformation == "verification_commands":
+                payload["verification"] = {
+                    "commands": [{"secret": payload_marker}],
+                    "manual_steps": [],
+                    "required_evidence": [],
+                }
+            elif malformation == "acceptance_criteria":
+                payload["acceptance_criteria"] = [{"secret": payload_marker}]
+            else:
+                payload["acceptance_criteria"] = [
+                    {"secret": payload_marker} for _ in range(5_000)
+                ]
+
+            draft = EventDraft(
+                timestamp=_T1,
+                actor=actor_marker + ("a" * 100_000),
+                action="task.created",
+                target_kind="task",
+                target_id=(
+                    target_marker + ("t" * 100_000)
+                    if malformation == "dependencies_shape"
+                    else task_id
+                ),
+                payload_json=payload,
+            )
+            events_before = events_path.read_bytes()
+
+            with pytest.raises(EventRejected) as raised:
+                b.append(draft)
+
+            error = str(raised.value)
+            assert error.startswith("task.created ownership recovery refused:")
+            assert "code=invalid_task_payload" in error
+            assert len(error.encode("utf-8")) <= 4096
+            for marker in (payload_marker, actor_marker, target_marker):
+                assert marker not in error
+            assert events_path.read_bytes() == events_before
+
+            audit_line = audit_path.read_bytes().splitlines(keepends=True)[-1]
+            assert len(audit_line) <= 4096
+            for marker in (payload_marker, actor_marker, target_marker):
+                assert marker.encode() not in audit_line
+            audit = json.loads(audit_line)
+            assert audit["actor"].startswith("<redacted")
+            assert audit["target_id"].startswith("<redacted")
+            assert audit["reason"] == error
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize(
         ("task_id", "feature_id"),
         [
             ("T001", "named:F001"),
