@@ -236,7 +236,7 @@ def emit_prune_events(
 # Batch dependency-edit primitive (backlog T022/F007)
 # ---------------------------------------------------------------------------
 #
-# A single atomic, cycle-detecting primitive shared by the CLI ``deps`` command
+# A single cycle-detecting primitive shared by the CLI ``deps`` command
 # and the MCP ``edit_dependencies`` tool. The contract:
 #
 #   * Edges are ``(source, target)`` pairs meaning *source depends on target*
@@ -248,12 +248,13 @@ def emit_prune_events(
 #     IDs, self-loops, and any edit that would introduce a dependency *cycle*
 #     reject the entire batch with NO partial application.
 #
-# Atomicity note: the SQLite backend commits one event per ``append`` call, so
-# there is no multi-event SQL transaction. Atomicity is therefore enforced at
-# *this* layer — ``plan_batch_dep_edits`` does all validation up front and
-# raises ``BatchDepError`` before a single event is emitted, so a rejected
-# batch never mutates state. Only after planning succeeds does the caller emit
-# the (already-validated) per-task upserts.
+# Atomicity boundary: ``plan_batch_dep_edits`` validates the entire requested
+# graph before mutation, so a validation rejection never partially applies.
+# The SQLite backend still commits one event per ``append`` call, however, so a
+# failure while emitting an already-validated multi-task plan can leave earlier
+# task upserts committed. True whole-batch atomicity requires a single batch
+# event whose write handler revalidates the prior dependencies/graph cursor and
+# applies every task update in one SQLite transaction.
 
 
 @dataclass(frozen=True)
@@ -483,6 +484,10 @@ def emit_batch_dep_events(
         task = tasks_by_id[task_id]
         now = clock.now()
         task_data = task.model_dump(mode="json")
+        # Task.prd_id is intentionally excluded from model_dump() so legacy API
+        # snapshots stay byte-identical. Event payloads are different: prd_id is
+        # ownership-critical and must be carried explicitly for named PRDs.
+        task_data["prd_id"] = task.prd_id
         task_data["dependencies"] = list(new_deps)
         task_data["updated_at"] = now.isoformat()
         draft = EventDraft(

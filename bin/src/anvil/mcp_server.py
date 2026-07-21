@@ -1804,12 +1804,14 @@ def edit_dependencies(
     add: list[list[str]] | None = None,
     remove: list[list[str]] | None = None,
 ) -> EditDependenciesResponse:
-    """Apply a batch of dependency edits atomically, rejecting cycles.
+    """Apply dependency edits after whole-batch validation.
 
     ``add`` / ``remove`` are ``[source, target]`` pairs meaning *source depends
     on target*. The whole batch is validated up front: any unknown task,
-    self-dependency, or cycle rejects the ENTIRE batch (ToolError) with no
-    partial apply. Task status is preserved.
+    self-dependency, or cycle rejects the ENTIRE batch (ToolError) before any
+    mutation. Changed tasks are then emitted as separate backend appends, so a
+    later append failure can leave earlier changes committed. Task status is
+    preserved.
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (

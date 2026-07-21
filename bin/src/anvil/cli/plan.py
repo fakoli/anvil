@@ -2164,14 +2164,16 @@ def deps(
         hidden=True,
     ),
 ) -> None:
-    """Apply a batch of dependency edge edits atomically, rejecting cycles.
+    """Apply dependency edge edits after whole-batch validation.
 
     Accepts multiple ``--add`` and ``--remove`` edges (each ``SOURCE:TARGET``,
-    meaning *source depends on target*) and applies them as ONE transaction:
-    the whole batch is validated up front — unknown tasks, self-dependencies,
+    meaning *source depends on target*). The whole batch is validated up front —
+    unknown tasks, self-dependencies,
     and any edit that would introduce a dependency cycle reject the entire batch
-    with NO partial application. On success one ``task.created`` upsert is
-    emitted per task whose dependency set changed (status is preserved).
+    with NO mutation. On success one ``task.created`` upsert is emitted per task
+    whose dependency set changed (status is preserved). Those upserts are
+    separate backend appends, so a post-validation append failure can leave
+    earlier changed tasks committed.
 
     With ``--json`` emits ``{"ok": true, "command": "deps", "data":
     {"changed": [...], "added": [["S","T"], ...], "removed": [...]}}``. A

@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,10 @@ import pytest
 from typer.testing import CliRunner
 
 from anvil.cli import app
+from anvil.clock import FrozenClock
+from anvil.planning._plan_helpers import BatchDepPlan, emit_batch_dep_events
 from anvil.planning.llm import LLMResponse
+from anvil.state.models import Task
 
 runner = CliRunner()
 
@@ -546,9 +550,47 @@ def _status_of(tmp_path: Path, task_id: str) -> str:
 
 
 class TestBatchDepsApply:
-    """A batch of edges applies atomically (T022 acceptance: 10 edges at once)."""
+    """A validated request can apply many dependency edges in one invocation."""
 
-    def test_batch_deps_applies_ten_edges_atomically(self, tmp_path: Path) -> None:
+    def test_named_prd_is_explicit_in_dependency_upsert_payload(self) -> None:
+        """Dependency upserts preserve named-PRD ownership in the event log."""
+        now = datetime(2026, 7, 21, tzinfo=UTC)
+        task = Task(
+            id="named:T002",
+            feature_id="named:F001",
+            prd_id="named",
+            title="Named task",
+            description="desc",
+            dependencies=[],
+            created_at=now,
+            updated_at=now,
+        )
+
+        class CaptureBackend:
+            def __init__(self) -> None:
+                self.drafts: list[Any] = []
+
+            def append(self, draft: Any) -> None:
+                self.drafts.append(draft)
+
+        backend = CaptureBackend()
+        changed = emit_batch_dep_events(
+            backend,  # type: ignore[arg-type]
+            {task.id: task},
+            BatchDepPlan(
+                new_dependencies={task.id: ["named:T001"]},
+                added=[(task.id, "named:T001")],
+                removed=[],
+            ),
+            actor="test",
+            clock=FrozenClock(now),
+        )
+
+        assert changed == [task.id]
+        assert backend.drafts[0].payload_json["prd_id"] == "named"
+        assert backend.drafts[0].payload_json["dependencies"] == ["named:T001"]
+
+    def test_batch_deps_applies_ten_validated_edges(self, tmp_path: Path) -> None:
         """Ten add-edges across many tasks land in a single `deps` invocation."""
         # 11 independent tasks, no starting deps.
         ids = [f"T0{n:02d}" for n in range(1, 12)]

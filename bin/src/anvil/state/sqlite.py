@@ -6256,20 +6256,129 @@ class SqliteBackend:
             (timestamp, bundle_id),
         )
 
-    @staticmethod
-    def _normalize_task_payload(task_dict: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_task_payload(
+        self,
+        conn: sqlite3.Connection,
+        task_dict: dict[str, Any],
+        event: EventDraft | Event,
+    ) -> dict[str, Any]:
         """Coerce a minimal Task payload's None scores/verification to ``{}``.
 
         Task.scores / Task.verification are required submodels; the payload
         allows None so MCP / hand-rolled callers can send a minimal task without
-        preloading sentinels. Pure dict munging — shared by the check and write
-        phases so both validate / build the identical normalized shape.
+        preloading sentinels.
+
+        A narrowly bounded compatibility repair also handles the historical
+        dependency-upsert bug where ``Task.model_dump()`` omitted ``prd_id``.
+        Recovery is allowed only for a full-shape, dependency-only ``task.created``
+        upsert of an already-existing named task whose task and feature IDs both
+        carry the owning PRD prefix. Explicit ``prd_id`` values are never
+        rewritten. The same helper runs in append preflight and replay/write so
+        ownership checks cannot diverge across those paths.
         """
         task_dict = dict(task_dict)
         if task_dict.get("scores") is None:
             task_dict["scores"] = {}
         if task_dict.get("verification") is None:
             task_dict["verification"] = {}
+
+        feature_id = task_dict.get("feature_id")
+        task_id = task_dict.get("id")
+        if not isinstance(feature_id, str) or not isinstance(task_id, str):
+            return task_dict
+
+        feature_row = conn.execute(
+            "SELECT prd_id FROM features WHERE id = ?", (feature_id,)
+        ).fetchone()
+        if feature_row is None:
+            return task_dict
+
+        owner_prd_id = str(feature_row[0])
+        payload_prd_id = task_dict.get("prd_id", DEFAULT_PRD_ID)
+        if payload_prd_id == owner_prd_id:
+            return task_dict
+
+        def reject(reason: str) -> None:
+            raise EventRejected(
+                f"task.created: task {task_id!r} cannot use owning feature "
+                f"{feature_id!r} prd_id={owner_prd_id!r}: {reason}"
+            )
+
+        # Never reinterpret an explicit partition value, including an explicit
+        # 'default'. Only the exact historical omission is compatibility-safe.
+        if "prd_id" in event.payload_json:
+            reject(f"explicit prd_id={payload_prd_id!r} does not match")
+        if payload_prd_id != DEFAULT_PRD_ID or owner_prd_id == DEFAULT_PRD_ID:
+            reject(f"prd_id={payload_prd_id!r} does not match")
+
+        legacy_base_keys = {
+            "id",
+            "feature_id",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "task_type",
+            "dependencies",
+            "conflict_groups",
+            "scores",
+            "acceptance_criteria",
+            "implementation_notes",
+            "verification",
+            "likely_files",
+            "parent_task_id",
+            "created_at",
+            "updated_at",
+        }
+        raw_keys = set(event.payload_json)
+        if raw_keys not in (legacy_base_keys, legacy_base_keys | {"claims"}):
+            reject("missing-prd compatibility schema is not an allowed dependency upsert")
+        if (
+            event.action != "task.created"
+            or event.target_kind != "task"
+            or event.target_id != task_id
+        ):
+            reject("event identity does not match the task payload")
+
+        prefix = f"{owner_prd_id}:"
+        if not (
+            task_id.startswith(prefix)
+            and task_id != prefix
+            and feature_id.startswith(prefix)
+            and feature_id != prefix
+        ):
+            reject("task and feature IDs are not both canonically owner-scoped")
+
+        existing_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if existing_row is None:
+            reject("missing-prd compatibility never creates a new task")
+        existing_task = self._row_to_task(existing_row, conn)
+        if (
+            existing_task.prd_id != owner_prd_id
+            or existing_task.feature_id != feature_id
+        ):
+            reject("existing task identity does not match the owning feature")
+
+        recovered = dict(task_dict)
+        recovered["prd_id"] = owner_prd_id
+        try:
+            incoming_task = Task.model_validate(recovered)
+        except Exception as exc:
+            raise EventRejected(
+                f"task.created: invalid recoverable Task payload: {exc}"
+            ) from exc
+
+        existing_data = existing_task.model_dump(mode="json")
+        incoming_data = incoming_task.model_dump(mode="json")
+        for mutable_key in ("dependencies", "updated_at"):
+            existing_data.pop(mutable_key, None)
+            incoming_data.pop(mutable_key, None)
+        if incoming_data != existing_data:
+            reject("missing-prd event is not a dependency-only upsert")
+
+        task_dict["prd_id"] = owner_prd_id
         return task_dict
 
     def _check_task_created(
@@ -6283,8 +6392,9 @@ class SqliteBackend:
         Was a validation guard inside the old handler (``raise
         TransactionAborted`` on an invalid Task); now rejects up front.
         """
-        _ = (conn, event)
-        task_dict = self._normalize_task_payload(payload.model_dump(mode="json"))
+        task_dict = self._normalize_task_payload(
+            conn, payload.model_dump(mode="json"), event
+        )
         try:
             Task.model_validate(task_dict)
         except Exception as exc:
@@ -6306,7 +6416,9 @@ class SqliteBackend:
         The payload was already validated by ``_check_task_created``; the
         ``model_validate`` here is an infallible rebuild.
         """
-        task_dict = self._normalize_task_payload(payload.model_dump(mode="json"))
+        task_dict = self._normalize_task_payload(
+            conn, payload.model_dump(mode="json"), event
+        )
         task = Task.model_validate(task_dict)
         self._insert_task_row(conn, task)
 

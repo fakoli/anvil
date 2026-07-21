@@ -10664,6 +10664,210 @@ class TestDecideApplyContract:
         finally:
             b.close()
 
+    def test_task_created_forward_catch_up_recovers_missing_prd_dependency_upsert(
+        self, tmp_path: Path
+    ) -> None:
+        """A log-ahead named-task dep upsert from the buggy emitter heals once."""
+        events_path = tmp_path / "events.jsonl"
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            feature_id = "named:F001"
+            task_id = "named:T001"
+            b.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": "named"},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            b.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": "named",
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = b.get_task(task_id)
+            assert task is not None
+            # Reproduce the old deps emitter exactly: full Task model_dump with
+            # dependencies/updated_at changed and ownership accidentally absent.
+            payload = task.model_copy(
+                update={"dependencies": ["named:T000"], "updated_at": _T1}
+            ).model_dump(mode="json")
+            assert "prd_id" not in payload
+        finally:
+            b.close()
+
+        poisoned = Event(
+            id="E000005",
+            timestamp=_T1,
+            actor="old-deps-emitter",
+            action="task.created",
+            target_kind="task",
+            target_id=task_id,
+            payload_json=payload,
+        )
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                poisoned.model_dump_json(exclude={"parent_event_id", "lamport"})
+                + "\n"
+            )
+
+        healed = SqliteBackend(
+            db_path=str(tmp_path / "state.db"),
+            events_path=str(events_path),
+            clock=_make_clock(_T1),
+        )
+        try:
+            healed.initialize()
+            task = healed.get_task(task_id)
+            assert task is not None
+            assert task.prd_id == "named"
+            assert task.feature_id == feature_id
+            assert task.dependencies == ["named:T000"]
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            try:
+                assert conn.execute(
+                    "SELECT MAX(id) FROM events"
+                ).fetchone() == ("E000005",)
+            finally:
+                conn.close()
+        finally:
+            healed.close()
+
+    @pytest.mark.parametrize("explicit_prd", ["default", "other"])
+    def test_task_created_never_rewrites_explicit_prd_mismatch(
+        self, tmp_path: Path, explicit_prd: str
+    ) -> None:
+        """Even explicit 'default' is a mismatch, not a legacy omission."""
+        b = _make_backend(tmp_path)
+        events_path = str(tmp_path / "events.jsonl")
+        try:
+            _setup_project(b)
+            feature_id = "named:F001"
+            task_id = "named:T001"
+            b.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": "named"},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            b.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": "named",
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = b.get_task(task_id)
+            assert task is not None
+            payload = task.model_copy(
+                update={"dependencies": ["named:T000"], "updated_at": _T1}
+            ).model_dump(mode="json")
+            payload["prd_id"] = explicit_prd
+            before = len(_read_jsonl(events_path))
+
+            with pytest.raises(EventRejected, match="explicit prd_id"):
+                b.append(_make_event(
+                    "task.created", payload, target_kind="task", target_id=task_id
+                ))
+
+            assert len(_read_jsonl(events_path)) == before
+            assert b.get_task(task_id).dependencies == []  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize(
+        ("task_id", "feature_id"),
+        [
+            ("T001", "named:F001"),
+            ("named:T001", "F001"),
+            ("spoof:T001", "named:F001"),
+        ],
+    )
+    def test_task_created_missing_prd_refuses_unscoped_or_spoofed_ids(
+        self, tmp_path: Path, task_id: str, feature_id: str
+    ) -> None:
+        """Compatibility recovery requires both IDs to carry the exact owner."""
+        b = _make_backend(tmp_path)
+        events_path = str(tmp_path / "events.jsonl")
+        try:
+            _setup_project(b)
+            b.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": "named"},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            b.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": "named",
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = b.get_task(task_id)
+            assert task is not None
+            payload = task.model_copy(update={"updated_at": _T1}).model_dump(mode="json")
+            before = len(_read_jsonl(events_path))
+
+            with pytest.raises(EventRejected, match="canonically owner-scoped"):
+                b.append(_make_event(
+                    "task.created", payload, target_kind="task", target_id=task_id
+                ))
+
+            assert len(_read_jsonl(events_path)) == before
+        finally:
+            b.close()
+
+    def test_task_created_missing_prd_refuses_non_dependency_change(
+        self, tmp_path: Path
+    ) -> None:
+        """The compatibility path cannot smuggle arbitrary task updates."""
+        b = _make_backend(tmp_path)
+        events_path = str(tmp_path / "events.jsonl")
+        try:
+            _setup_project(b)
+            feature_id = "named:F001"
+            task_id = "named:T001"
+            b.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": "named"},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            b.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": "named",
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = b.get_task(task_id)
+            assert task is not None
+            payload = task.model_copy(
+                update={"title": "spoofed", "updated_at": _T1}
+            ).model_dump(mode="json")
+            before = len(_read_jsonl(events_path))
+
+            with pytest.raises(EventRejected, match="not a dependency-only upsert"):
+                b.append(_make_event(
+                    "task.created", payload, target_kind="task", target_id=task_id
+                ))
+
+            assert len(_read_jsonl(events_path)) == before
+            assert b.get_task(task_id).title == "Test Task"  # type: ignore[union-attr]
+        finally:
+            b.close()
+
     # ------------------------------------------------------------------
     # task.scored
     # ------------------------------------------------------------------
