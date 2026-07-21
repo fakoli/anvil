@@ -21,6 +21,7 @@ import errno
 import os
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -54,8 +55,11 @@ _PRD_FILENAME = "prd.md"
 _SOURCE_MISSING = object()
 _SCAN_RECOVERY_DIRECTORY = "recovery"
 _SCAN_RECOVERY_PREFIX = "scan-"
+_SCAN_RETIRED_PREFIX = ".retired-scan-"
 _SCAN_ARTIFACT_NAMES = ("scan.db", _PRD_FILENAME)
 _SCAN_KEEP_MARKER = b"state-bound\n"
+_ABSENT_MARKER = b"absent\n"
+_COPY_BUFFER_SIZE = 1024 * 1024
 
 
 def _canonical_requirement_index(identifier: str) -> str | None:
@@ -719,7 +723,7 @@ def _is_scan_recovery_token(token: str) -> bool:
 def _write_durable_marker(path: Path) -> None:
     """Create and flush a fixed recovery marker before artifact mutation."""
     with path.open("xb") as marker:
-        marker.write(b"absent\n")
+        marker.write(_ABSENT_MARKER)
         marker.flush()
         os.fsync(marker.fileno())
 
@@ -744,21 +748,210 @@ def _mark_scan_artifact_state_bound(
         os.fsync(handle.fileno())
 
 
+def _fsync_directory(path: Path) -> None:
+    """Flush directory entries where the host exposes directory descriptors."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _path_lstat(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _is_reparse_or_symlink(metadata: os.stat_result) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def _require_safe_directory(path: Path) -> None:
+    metadata = _path_lstat(path)
+    if (
+        metadata is None
+        or _is_reparse_or_symlink(metadata)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise OSError("unsafe recovery directory")
+
+
+def _require_safe_regular(path: Path, *, allow_missing: bool = False) -> bool:
+    metadata = _path_lstat(path)
+    if metadata is None:
+        if allow_missing:
+            return False
+        raise OSError("missing recovery file")
+    if _is_reparse_or_symlink(metadata) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError("unsafe recovery file")
+    return True
+
+
+def _require_direct_child(path: Path, parent: Path) -> None:
+    if Path(os.path.abspath(path.parent)) != Path(os.path.abspath(parent)):
+        raise OSError("recovery path escaped containment")
+
+
+def _files_match(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_handle, right.open("rb") as right_handle:
+        while True:
+            left_chunk = left_handle.read(_COPY_BUFFER_SIZE)
+            right_chunk = right_handle.read(_COPY_BUFFER_SIZE)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
+def _copy_regular_exclusive(source: Path, destination: Path) -> None:
+    """Copy one regular file to a newly-created no-follow destination."""
+    binary_flag = getattr(os, "O_BINARY", 0)
+    source_flags = os.O_RDONLY | binary_flag | getattr(os, "O_NOFOLLOW", 0)
+    destination_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | binary_flag
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    source_descriptor = os.open(source, source_flags)
+    try:
+        source_metadata = os.fstat(source_descriptor)
+        if _is_reparse_or_symlink(source_metadata) or not stat.S_ISREG(
+            source_metadata.st_mode
+        ):
+            raise OSError("unsafe copy source")
+        destination_descriptor = os.open(
+            destination,
+            destination_flags,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        try:
+            destination_metadata = os.fstat(destination_descriptor)
+            if _is_reparse_or_symlink(
+                destination_metadata
+            ) or not stat.S_ISREG(destination_metadata.st_mode):
+                raise OSError("unsafe copy destination")
+            while True:
+                chunk = os.read(source_descriptor, _COPY_BUFFER_SIZE)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_descriptor, view)
+                    view = view[written:]
+            os.fsync(destination_descriptor)
+        finally:
+            os.close(destination_descriptor)
+    finally:
+        os.close(source_descriptor)
+
+
+def _allowed_recovery_names() -> set[str]:
+    return {
+        f"{artifact_name}.{suffix}"
+        for artifact_name in _SCAN_ARTIFACT_NAMES
+        for suffix in ("backup", "absent", "restore", "state-bound")
+    }
+
+
+def _validate_recovery_root(
+    recovery_root: Path,
+    *,
+    require_complete: bool,
+) -> None:
+    _require_safe_directory(recovery_root)
+    allowed_names = _allowed_recovery_names()
+    for entry in recovery_root.iterdir():
+        _require_direct_child(entry, recovery_root)
+        if entry.name not in allowed_names:
+            raise OSError("unexpected recovery entry")
+        _require_safe_regular(entry)
+
+    if not require_complete:
+        return
+    for artifact_name in _SCAN_ARTIFACT_NAMES:
+        backup = recovery_root / f"{artifact_name}.backup"
+        absent = recovery_root / f"{artifact_name}.absent"
+        state_bound = recovery_root / f"{artifact_name}.state-bound"
+        has_backup = _require_safe_regular(backup, allow_missing=True)
+        has_absent = _require_safe_regular(absent, allow_missing=True)
+        if has_backup == has_absent:
+            raise OSError("invalid recovery record")
+        if has_absent and absent.read_bytes() != _ABSENT_MARKER:
+            raise OSError("invalid recovery marker")
+        if _require_safe_regular(state_bound, allow_missing=True) and (
+            state_bound.read_bytes() != _SCAN_KEEP_MARKER
+        ):
+            raise OSError("invalid state-bound recovery marker")
+
+
+def _preflight_scan_recovery(state_dir: Path, recovery_root: Path) -> None:
+    _require_safe_directory(state_dir)
+    _require_direct_child(recovery_root, state_dir / _SCAN_RECOVERY_DIRECTORY)
+    _validate_recovery_root(recovery_root, require_complete=True)
+    for artifact_name in _SCAN_ARTIFACT_NAMES:
+        artifact = state_dir / artifact_name
+        _require_direct_child(artifact, state_dir)
+        _require_safe_regular(artifact, allow_missing=True)
+
+
+def _verify_restored_scan_artifacts(
+    state_dir: Path,
+    recovery_root: Path,
+) -> bool:
+    try:
+        _preflight_scan_recovery(state_dir, recovery_root)
+        for artifact_name in _SCAN_ARTIFACT_NAMES:
+            artifact = state_dir / artifact_name
+            backup = recovery_root / f"{artifact_name}.backup"
+            absent = recovery_root / f"{artifact_name}.absent"
+            state_bound = recovery_root / f"{artifact_name}.state-bound"
+            if _path_lstat(state_bound) is not None:
+                _require_safe_regular(artifact)
+            elif _path_lstat(absent) is not None:
+                if _path_lstat(artifact) is not None:
+                    return False
+            elif not _files_match(artifact, backup):
+                return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _create_scan_recovery(state_dir: Path) -> tuple[str, Path]:
     """Persist pre-mutation backups and return their opaque recovery token."""
     recovery_parent = state_dir / _SCAN_RECOVERY_DIRECTORY
     try:
-        recovery_parent.mkdir(exist_ok=True)
+        _require_safe_directory(state_dir)
+        _require_direct_child(recovery_parent, state_dir)
+        for artifact_name in _SCAN_ARTIFACT_NAMES:
+            artifact = state_dir / artifact_name
+            _require_direct_child(artifact, state_dir)
+            _require_safe_regular(artifact, allow_missing=True)
+
+        if _path_lstat(recovery_parent) is None:
+            recovery_parent.mkdir()
+            _fsync_directory(state_dir)
+        _require_safe_directory(recovery_parent)
     except Exception:
         raise ScanArtifactError() from None
-    if recovery_parent.is_symlink():
-        raise ScanArtifactError()
 
     for _attempt in range(16):
         token = _new_scan_recovery_token()
         recovery_root = recovery_parent / token
+        _require_direct_child(recovery_root, recovery_parent)
         try:
             recovery_root.mkdir()
+            _fsync_directory(recovery_parent)
         except FileExistsError:
             continue
         except Exception:
@@ -766,19 +959,26 @@ def _create_scan_recovery(state_dir: Path) -> tuple[str, Path]:
         try:
             for artifact_name in _SCAN_ARTIFACT_NAMES:
                 artifact = state_dir / artifact_name
-                if artifact.exists():
+                if _require_safe_regular(artifact, allow_missing=True):
                     backup = recovery_root / f"{artifact_name}.backup"
-                    shutil.copy2(artifact, backup)
-                    _fsync_file(backup)
+                    _require_direct_child(backup, recovery_root)
+                    _copy_regular_exclusive(artifact, backup)
+                    _require_safe_regular(backup)
+                    if not _files_match(artifact, backup):
+                        raise OSError("backup verification failed")
                 else:
-                    _write_durable_marker(
-                        recovery_root / f"{artifact_name}.absent"
-                    )
+                    marker = recovery_root / f"{artifact_name}.absent"
+                    _require_direct_child(marker, recovery_root)
+                    _write_durable_marker(marker)
+                    _require_safe_regular(marker)
+            _fsync_directory(recovery_root)
+            _validate_recovery_root(recovery_root, require_complete=True)
             return token, recovery_root
         except Exception:
-            try:
-                shutil.rmtree(recovery_root)
-            except Exception:
+            if not _retire_scan_recovery(
+                recovery_root,
+                require_complete=False,
+            ):
                 raise ScanRecoveryError(token) from None
             raise ScanArtifactError() from None
     raise ScanArtifactError()
@@ -790,44 +990,105 @@ def _restore_scan_artifact(
     artifact_name: str,
 ) -> None:
     """Restore one artifact while retaining its durable source backup."""
+    if artifact_name not in _SCAN_ARTIFACT_NAMES:
+        raise OSError("artifact is not allowlisted")
     artifact = state_dir / artifact_name
     backup = recovery_root / f"{artifact_name}.backup"
     absent = recovery_root / f"{artifact_name}.absent"
     state_bound = recovery_root / f"{artifact_name}.state-bound"
-    if state_bound.exists():
+    _require_direct_child(artifact, state_dir)
+    _require_direct_child(backup, recovery_root)
+    _require_direct_child(absent, recovery_root)
+    _require_direct_child(state_bound, recovery_root)
+    has_backup = _require_safe_regular(backup, allow_missing=True)
+    has_absent = _require_safe_regular(absent, allow_missing=True)
+    has_state_bound = _require_safe_regular(state_bound, allow_missing=True)
+    if has_state_bound:
         if state_bound.read_bytes() != _SCAN_KEEP_MARKER:
             raise OSError("invalid state-bound recovery marker")
+        _require_safe_regular(artifact)
         return
-    if backup.exists() == absent.exists():
+    if has_backup == has_absent:
         raise OSError("invalid recovery record")
-    if absent.exists():
+    _require_safe_regular(artifact, allow_missing=True)
+    if has_absent:
+        if absent.read_bytes() != _ABSENT_MARKER:
+            raise OSError("invalid recovery marker")
         artifact.unlink(missing_ok=True)
+        _fsync_directory(state_dir)
+        if _path_lstat(artifact) is not None:
+            raise OSError("absence restoration failed")
         return
     staging = recovery_root / f"{artifact_name}.restore"
-    shutil.copy2(backup, staging)
-    _fsync_file(staging)
+    _require_direct_child(staging, recovery_root)
+    if _require_safe_regular(staging, allow_missing=True):
+        staging.unlink()
+    _copy_regular_exclusive(backup, staging)
+    _require_safe_regular(staging)
+    if not _files_match(backup, staging):
+        raise OSError("staging verification failed")
     staging.replace(artifact)
+    _fsync_directory(state_dir)
+    _require_safe_regular(artifact)
+    if not _files_match(backup, artifact):
+        raise OSError("artifact verification failed")
 
 
-def _retire_scan_recovery(recovery_root: Path) -> bool:
+def _retire_scan_recovery(
+    recovery_root: Path,
+    *,
+    require_complete: bool = True,
+) -> bool:
     """Atomically make a completed recovery inactive, then remove it."""
-    completed = recovery_root.with_name(f".completed-{recovery_root.name}")
     try:
+        _require_direct_child(recovery_root, recovery_root.parent)
+        _validate_recovery_root(
+            recovery_root,
+            require_complete=require_complete,
+        )
+        token = recovery_root.name
+        if not _is_scan_recovery_token(token):
+            raise OSError("invalid recovery token")
+        completed = recovery_root.with_name(
+            f"{_SCAN_RETIRED_PREFIX}{token.removeprefix(_SCAN_RECOVERY_PREFIX)}"
+        )
+        _require_direct_child(completed, recovery_root.parent)
+        if _path_lstat(completed) is not None:
+            raise OSError("retirement target exists")
         recovery_root.replace(completed)
+        _fsync_directory(recovery_root.parent)
+        _validate_recovery_root(
+            completed,
+            require_complete=require_complete,
+        )
     except Exception:
         return False
     try:
         shutil.rmtree(completed)
+        _fsync_directory(completed.parent)
     except Exception:
-        # The leading-dot completed name is deliberately outside the active
-        # ``scan-*`` namespace. Cleanup can be retried by maintenance without
-        # risking a rollback of committed artifacts.
-        pass
-    return True
+        return False
+    return _path_lstat(completed) is None
+
+
+def _resume_retired_scan_recovery(recovery_root: Path) -> bool:
+    """Finish safe deletion of an already retired recovery record."""
+    try:
+        _require_direct_child(recovery_root, recovery_root.parent)
+        _validate_recovery_root(recovery_root, require_complete=False)
+        shutil.rmtree(recovery_root)
+        _fsync_directory(recovery_root.parent)
+    except Exception:
+        return False
+    return _path_lstat(recovery_root) is None
 
 
 def _restore_scan_recovery(state_dir: Path, recovery_root: Path) -> bool:
     """Best-effort every artifact; return true only after full restoration."""
+    try:
+        _preflight_scan_recovery(state_dir, recovery_root)
+    except (OSError, ValueError):
+        return False
     failures = False
     for artifact_name in _SCAN_ARTIFACT_NAMES:
         try:
@@ -836,24 +1097,62 @@ def _restore_scan_recovery(state_dir: Path, recovery_root: Path) -> bool:
             failures = True
     if failures:
         return False
+    if not _verify_restored_scan_artifacts(state_dir, recovery_root):
+        return False
     return _retire_scan_recovery(recovery_root)
 
 
 def _resume_scan_recovery(state_dir: Path) -> None:
     """Finish any durable rollback before reading or mutating scan artifacts."""
     recovery_parent = state_dir / _SCAN_RECOVERY_DIRECTORY
-    if not recovery_parent.is_dir():
+    if _path_lstat(recovery_parent) is None:
         return
-    for recovery_root in sorted(recovery_parent.glob(f"{_SCAN_RECOVERY_PREFIX}*")):
-        if (
-            not recovery_root.is_dir()
-            or recovery_root.is_symlink()
-            or not _is_scan_recovery_token(recovery_root.name)
-        ):
+    try:
+        _require_safe_directory(state_dir)
+        _require_direct_child(recovery_parent, state_dir)
+        _require_safe_directory(recovery_parent)
+        entries = sorted(recovery_parent.iterdir(), key=lambda path: path.name)
+    except Exception:
+        raise ScanArtifactError() from None
+    active_records: list[Path] = []
+    retired_records: list[Path] = []
+    for recovery_root in entries:
+        name = recovery_root.name
+        if name.startswith(_SCAN_RECOVERY_PREFIX):
+            if not _is_scan_recovery_token(name):
+                raise ScanArtifactError()
+            try:
+                _preflight_scan_recovery(state_dir, recovery_root)
+            except (OSError, ValueError):
+                raise ScanRecoveryError(name) from None
+            active_records.append(recovery_root)
             continue
-        token = recovery_root.name
-        if not _restore_scan_recovery(state_dir, recovery_root):
+        if name.startswith(_SCAN_RETIRED_PREFIX):
+            suffix = name.removeprefix(_SCAN_RETIRED_PREFIX)
+            token = f"{_SCAN_RECOVERY_PREFIX}{suffix}"
+            if not _is_scan_recovery_token(token):
+                raise ScanArtifactError()
+            try:
+                _validate_recovery_root(
+                    recovery_root,
+                    require_complete=False,
+                )
+            except (OSError, ValueError):
+                raise ScanRecoveryError(token) from None
+            retired_records.append(recovery_root)
+    if len(active_records) > 1:
+        raise ScanArtifactError()
+    for retired_root in retired_records:
+        token = (
+            f"{_SCAN_RECOVERY_PREFIX}"
+            f"{retired_root.name.removeprefix(_SCAN_RETIRED_PREFIX)}"
+        )
+        if not _resume_retired_scan_recovery(retired_root):
             raise ScanRecoveryError(token)
+    if active_records:
+        recovery_root = active_records[0]
+        if not _restore_scan_recovery(state_dir, recovery_root):
+            raise ScanRecoveryError(recovery_root.name)
 
 
 def scan(

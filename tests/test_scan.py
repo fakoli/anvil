@@ -646,6 +646,172 @@ class TestScanCommand:
         else:
             assert retry_data["seeded"] is None
 
+    def test_plain_rescan_write_failure_restores_scan_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_model = importlib.import_module("anvil.scan.model")
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        first = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert first.exit_code == 0, first.output
+        state_dir = tmp_path / ".anvil"
+        artifacts_before = {
+            name: (state_dir / name).read_bytes()
+            for name in ("scan.db", "prd.md")
+        }
+        (tmp_path / "README.md").write_text("# Changed\n", encoding="utf-8")
+        original_save = scan_model.save_model
+
+        def fail_after_save(*args: object, **kwargs: object) -> None:
+            original_save(*args, **kwargs)
+            raise OSError("injected ordinary rescan failure")
+
+        monkeypatch.setattr(scan_model, "save_model", fail_after_save)
+        failed = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+
+        assert failed.exit_code == 1
+        assert json.loads(failed.output)["error"]["code"] == "scan_artifact_error"
+        assert "injected" not in failed.output
+        assert {
+            name: (state_dir / name).read_bytes()
+            for name in ("scan.db", "prd.md")
+        } == artifacts_before
+
+    @pytest.mark.parametrize("unsafe_target", ["state-artifact", "recovery-parent"])
+    def test_recovery_refuses_non_regular_paths_before_mutation(
+        self,
+        tmp_path: Path,
+        unsafe_target: str,
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        if unsafe_target == "state-artifact":
+            (state_dir / "prd.md").unlink()
+            (state_dir / "prd.md").mkdir()
+        else:
+            (state_dir / "recovery").write_bytes(b"not-a-directory")
+
+        with pytest.raises(scan_module.ScanArtifactError):
+            scan_module._create_scan_recovery(state_dir)
+
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        if unsafe_target == "state-artifact":
+            assert (state_dir / "prd.md").is_dir()
+        else:
+            assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+            assert (state_dir / "recovery").read_bytes() == b"not-a-directory"
+
+    def test_recovery_refuses_symlink_backup_without_touching_target(
+        self, tmp_path: Path
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        token, recovery_root = scan_module._create_scan_recovery(state_dir)
+        external = tmp_path / "external-secret"
+        external.write_bytes(b"do-not-touch")
+        backup = recovery_root / "prd.md.backup"
+        backup.unlink()
+        try:
+            backup.symlink_to(external)
+        except OSError:
+            pytest.skip("symlink creation is unavailable on this host")
+
+        with pytest.raises(scan_module.ScanRecoveryError) as raised:
+            scan_module._resume_scan_recovery(state_dir)
+
+        assert raised.value.token == token
+        assert external.read_bytes() == b"do-not-touch"
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
+    def test_backup_creation_failure_is_bounded_and_leaves_no_active_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        original_copy = scan_module._copy_regular_exclusive
+
+        def fail_prd_copy(source: Path, destination: Path) -> None:
+            if source.name == "prd.md":
+                raise OSError("injected backup failure")
+            original_copy(source, destination)
+
+        monkeypatch.setattr(
+            scan_module, "_copy_regular_exclusive", fail_prd_copy
+        )
+        with pytest.raises(scan_module.ScanArtifactError) as raised:
+            scan_module._create_scan_recovery(state_dir)
+
+        assert "injected" not in str(raised.value)
+        recovery_parent = state_dir / "recovery"
+        assert not list(recovery_parent.iterdir())
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
+    def test_failed_restore_verification_retains_record_for_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        _, recovery_root = scan_module._create_scan_recovery(state_dir)
+        (state_dir / "scan.db").write_bytes(b"scan-after")
+        (state_dir / "prd.md").write_bytes(b"prd-after")
+
+        monkeypatch.setattr(
+            scan_module,
+            "_verify_restored_scan_artifacts",
+            lambda *_args: False,
+        )
+        assert not scan_module._restore_scan_recovery(state_dir, recovery_root)
+        assert recovery_root.is_dir()
+
+        monkeypatch.undo()
+        assert scan_module._restore_scan_recovery(state_dir, recovery_root)
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+        assert not recovery_root.exists()
+
+    def test_retirement_cleanup_failure_retries_without_reactivation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        _, recovery_root = scan_module._create_scan_recovery(state_dir)
+        original_rmtree = scan_module.shutil.rmtree
+
+        def fail_retired_cleanup(path: Path) -> None:
+            if path.name.startswith(".retired-scan-"):
+                raise OSError("injected retirement failure")
+            original_rmtree(path)
+
+        monkeypatch.setattr(scan_module.shutil, "rmtree", fail_retired_cleanup)
+        assert not scan_module._retire_scan_recovery(recovery_root)
+        retired = list((state_dir / "recovery").glob(".retired-scan-*"))
+        assert len(retired) == 1
+        assert not recovery_root.exists()
+
+        monkeypatch.undo()
+        scan_module._resume_scan_recovery(state_dir)
+        assert not retired[0].exists()
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
     def test_first_scan_seeds_prd_tasks_and_codebase_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
