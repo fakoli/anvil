@@ -31,7 +31,9 @@ import json
 import posixpath
 import re
 import sys
+import unicodedata
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
 from anvil.state.models import ConflictGroup, Task
@@ -217,11 +219,46 @@ def _canonical_project_path(path: object) -> str:
     return normalized
 
 
+@lru_cache(maxsize=4096)
+def _windows_ordinal_case_character(character: str) -> str:
+    """Return a conservative one-code-point Win32 ordinal case identity.
+
+    Win32 ordinal ignore-case comparison uses an uppercase table rather than
+    linguistic folding.  Python's full-string mappings can expand one code
+    point into several (for example, ``ß`` into ``SS``) or apply compatibility
+    mappings that Windows keeps distinct.  Coordinate only reciprocal ``Lu`` /
+    ``Ll`` pairs whose upper and lower mappings each remain one code point.
+    """
+    category = unicodedata.category(character)
+    if category == "Ll":
+        uppercase = character.upper()
+        if (
+            len(uppercase) == 1
+            and unicodedata.category(uppercase) == "Lu"
+            and uppercase.lower() == character
+        ):
+            return uppercase
+    elif category == "Lu":
+        lowercase = character.lower()
+        if (
+            len(lowercase) == 1
+            and unicodedata.category(lowercase) == "Ll"
+            and lowercase.upper() == character
+        ):
+            return character
+    return character
+
+
+def _windows_ordinal_case_key(path: str) -> str:
+    """Return a length-preserving case-insensitive comparison key."""
+    return "".join(_windows_ordinal_case_character(character) for character in path)
+
+
 def _canonical_file_scope(task: Task) -> tuple[frozenset[str], dict[str, str]]:
-    """Return case-insensitive comparison keys and their authored spellings."""
+    """Return Windows-compatible comparison keys and authored spellings."""
     display_paths: dict[str, str] = {}
     for path in task.likely_files:
-        comparison_key = _canonical_project_path(path).casefold()
+        comparison_key = _windows_ordinal_case_key(_canonical_project_path(path))
         display_paths.setdefault(comparison_key, path)
     return frozenset(display_paths), display_paths
 

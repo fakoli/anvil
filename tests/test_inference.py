@@ -269,6 +269,93 @@ class TestInferDependencies:
         assert [task.model_dump(mode="python") for task in tasks] == before
 
     @pytest.mark.parametrize(
+        "first_spelling,second_spelling",
+        [
+            ("Widget", "widget"),
+            ("Éclair", "éclair"),
+            ("Σigma", "σigma"),
+        ],
+    )
+    def test_one_to_one_case_variants_coordinate_across_all_entrypoints(
+        self,
+        first_spelling: str,
+        second_spelling: str,
+    ) -> None:
+        dependency_tasks = [
+            _make_task("T001", [f"src/{first_spelling}.py"]),
+            _make_task(
+                "T002",
+                [f"src/{second_spelling}.py", "src/other.py"],
+            ),
+        ]
+        conflict_tasks = [
+            _make_task(
+                "T001",
+                [f"src/{first_spelling}.py", "src/one.py"],
+            ),
+            _make_task(
+                "T002",
+                [f"src/{second_spelling}.py", "src/two.py"],
+            ),
+        ]
+        bundle_tasks = [
+            _make_task("T001", [f"src/{first_spelling}.py"]),
+            _make_task("T002", [f"src/{second_spelling}.py"]),
+        ]
+        all_tasks = dependency_tasks + conflict_tasks + bundle_tasks
+        before = [task.model_dump(mode="python") for task in all_tasks]
+
+        dependencies = infer_dependencies(dependency_tasks)
+        conflict_results, conflict_groups = infer_conflict_groups(conflict_tasks)
+        combined = infer_all(conflict_tasks)
+        bundle = build_bundle_plan(bundle_tasks)
+
+        assert dependencies[0].dependencies == ["T002"]
+        assert [group.id for group in conflict_groups] == ["CG-T001-T002"]
+        assert [group.id for group in combined.conflict_groups] == ["CG-T001-T002"]
+        assert f"src/{first_spelling}.py" in conflict_groups[0].reason
+        assert conflict_results[0].likely_files[0] == f"src/{first_spelling}.py"
+        assert bundle.overlap_files == (f"src/{first_spelling}.py",)
+        assert [task.model_dump(mode="python") for task in all_tasks] == before
+
+    @pytest.mark.parametrize(
+        "first_spelling,second_spelling",
+        [
+            ("straße", "strasse"),
+            ("Σ", "ς"),
+            ("ẞ", "ß"),
+            ("I", "ı"),
+            ("K", "K"),
+        ],
+    )
+    def test_expanding_or_compatibility_case_pairs_remain_distinct(
+        self,
+        first_spelling: str,
+        second_spelling: str,
+    ) -> None:
+        tasks = [
+            _make_task("T001", [f"src/{first_spelling}.py"]),
+            _make_task("T002", [f"src/{second_spelling}.py"]),
+        ]
+        before = [task.model_dump(mode="python") for task in tasks]
+
+        dependencies = infer_dependencies(tasks)
+        conflict_results, conflict_groups = infer_conflict_groups(tasks)
+        combined = infer_all(tasks)
+        bundle = build_bundle_plan(tasks)
+
+        assert all(not task.dependencies for task in dependencies)
+        assert conflict_groups == []
+        assert all(not task.conflict_groups for task in conflict_results)
+        assert combined.conflict_groups == []
+        assert bundle.overlap_pair_count == 0
+        assert [proposal.task_ids for proposal in bundle.proposed_bundles] == [
+            ("T001",),
+            ("T002",),
+        ]
+        assert [task.model_dump(mode="python") for task in tasks] == before
+
+    @pytest.mark.parametrize(
         "portable_path",
         [
             "./src\\module.py",
