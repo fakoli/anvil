@@ -30,8 +30,9 @@ EVENT_HASH_ID_PREFIX = "E-"
 MAX_CANONICAL_JSON_DEPTH = 128
 MAX_CANONICAL_JSON_NODES = 100_000
 MAX_CANONICAL_JSON_BYTES = 16_777_216
+MAX_CANONICAL_JSON_RESPONSE_BYTES = 16_842_752
 MAX_CANONICAL_JSON_STRING_BYTES = 16_777_216
-MAX_CANONICAL_JSON_NODE_HARD_LIMIT = MAX_CANONICAL_JSON_BYTES
+MAX_CANONICAL_JSON_NODE_HARD_LIMIT = MAX_CANONICAL_JSON_RESPONSE_BYTES
 MAX_CANONICAL_JSON_INTEGER = (2**63) - 1
 
 
@@ -156,7 +157,7 @@ def canonical_node_budget_for_bytes(max_bytes: int) -> int:
     Snapshot contracts use this derived ceiling instead of the generic hostile-
     input default, so the implementation has no unpublished structural limit.
     """
-    if not 1 <= max_bytes <= MAX_CANONICAL_JSON_BYTES:
+    if not 1 <= max_bytes <= MAX_CANONICAL_JSON_RESPONSE_BYTES:
         raise ValueError("canonical JSON byte ceiling is outside the supported range")
     return max_bytes
 
@@ -438,9 +439,9 @@ def _validate_canonical_limits(
 ) -> None:
     if not 1 <= max_nodes <= MAX_CANONICAL_JSON_NODE_HARD_LIMIT:
         raise ValueError("canonical JSON node ceiling is outside the supported range")
-    if not 1 <= max_bytes <= MAX_CANONICAL_JSON_BYTES:
+    if not 1 <= max_bytes <= MAX_CANONICAL_JSON_RESPONSE_BYTES:
         raise ValueError("canonical JSON byte ceiling is outside the supported range")
-    if not 1 <= max_string_bytes <= max_bytes:
+    if not 1 <= max_string_bytes <= min(max_bytes, MAX_CANONICAL_JSON_STRING_BYTES):
         raise ValueError("canonical JSON string ceiling is outside the supported range")
 
 

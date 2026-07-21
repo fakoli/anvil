@@ -9,8 +9,10 @@ from types import MappingProxyType
 import pytest
 from pydantic import ValidationError
 
+import anvil.read_contracts as read_contracts_module
 from anvil.read_contracts import (
     PROVIDER_LIMITS_V1,
+    WIRE_INT64_MAX,
     EventCursorV1,
     FeatureRecordV1,
     FeatureScopedRefV1,
@@ -28,6 +30,7 @@ from anvil.read_contracts import (
     lowered_limits,
     snapshot_canonical_bytes,
     snapshot_digest,
+    snapshot_response_canonical_bytes,
     validate_snapshot_limits,
 )
 from anvil.state.hashing import (
@@ -134,6 +137,19 @@ def _count_json_nodes(value: object) -> int:
     return 1
 
 
+def _response_document(
+    payload: ProjectSnapshotPayloadV1,
+    cursor: EventCursorV1,
+    limits: ProviderReadLimitsV1,
+) -> dict[str, object]:
+    return {
+        "payload": payload.model_dump(mode="json"),
+        "event_cursor": cursor.model_dump(mode="json"),
+        "applied_limits": limits.model_dump(mode="json"),
+        "snapshot_digest": snapshot_digest(payload),
+    }
+
+
 def test_models_forbid_unknown_wire_fields_at_every_level() -> None:
     data = _snapshot().model_dump(mode="json")
     data["unexpected"] = True
@@ -188,6 +204,108 @@ def test_current_and_legacy_provenance_are_explicit_and_consistent() -> None:
     invalid_legacy["source_sha256"] = _A_SHA
     with pytest.raises(ValidationError, match="cannot fabricate"):
         PrdRecordV1.model_validate(invalid_legacy)
+
+
+def test_all_public_integer_payload_fields_accept_signed_int64_maximum() -> None:
+    prd_data = _prd("default").model_dump()
+    prd_data.update(
+        revision=WIRE_INT64_MAX,
+        source_size_bytes=WIRE_INT64_MAX,
+    )
+    assert PrdRecordV1.model_validate(prd_data).revision == WIRE_INT64_MAX
+
+    counts = VerificationCountsV1(
+        commands=WIRE_INT64_MAX,
+        manual_steps=WIRE_INT64_MAX,
+        required_evidence=WIRE_INT64_MAX,
+        typed_proofs=WIRE_INT64_MAX,
+    )
+    assert counts.typed_proofs == WIRE_INT64_MAX
+
+    cursor = EventCursorV1(
+        event_count=WIRE_INT64_MAX,
+        event_frontier_sha256=_A_SHA,
+    )
+    assert cursor.event_count == WIRE_INT64_MAX
+
+    error = ReadErrorV1(
+        code=ReadErrorCode.limit_exceeded,
+        field="tasks",
+        actual=WIRE_INT64_MAX,
+        limit=WIRE_INT64_MAX,
+    )
+    assert error.actual == WIRE_INT64_MAX
+
+
+@pytest.mark.parametrize(
+    ("model", "field", "base"),
+    [
+        (PrdRecordV1, "revision", _prd("default").model_dump()),
+        (PrdRecordV1, "source_size_bytes", _prd("default").model_dump()),
+        (
+            VerificationCountsV1,
+            "commands",
+            {
+                "commands": 0,
+                "manual_steps": 0,
+                "required_evidence": 0,
+                "typed_proofs": 0,
+            },
+        ),
+        (
+            VerificationCountsV1,
+            "manual_steps",
+            {
+                "commands": 0,
+                "manual_steps": 0,
+                "required_evidence": 0,
+                "typed_proofs": 0,
+            },
+        ),
+        (
+            VerificationCountsV1,
+            "required_evidence",
+            {
+                "commands": 0,
+                "manual_steps": 0,
+                "required_evidence": 0,
+                "typed_proofs": 0,
+            },
+        ),
+        (
+            VerificationCountsV1,
+            "typed_proofs",
+            {
+                "commands": 0,
+                "manual_steps": 0,
+                "required_evidence": 0,
+                "typed_proofs": 0,
+            },
+        ),
+        (
+            EventCursorV1,
+            "event_count",
+            {"event_count": 0, "event_frontier_sha256": _A_SHA},
+        ),
+        (
+            ReadErrorV1,
+            "actual",
+            {"code": ReadErrorCode.limit_exceeded, "field": "tasks"},
+        ),
+        (
+            ReadErrorV1,
+            "limit",
+            {"code": ReadErrorCode.limit_exceeded, "field": "tasks"},
+        ),
+    ],
+)
+def test_all_public_integer_payload_fields_reject_above_signed_int64(
+    model: type[object],
+    field: str,
+    base: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({**base, field: WIRE_INT64_MAX + 1})  # type: ignore[attr-defined]
 
 
 def test_valid_cross_prd_dependency_is_explicit_and_serializable() -> None:
@@ -459,6 +577,73 @@ def test_cursor_and_lowered_limits_are_excluded_from_snapshot_digest() -> None:
         )
 
 
+def test_payload_and_complete_response_have_separate_serialized_ceilings() -> None:
+    assert PROVIDER_LIMITS_V1.max_response_bytes > (
+        PROVIDER_LIMITS_V1.max_snapshot_bytes
+    )
+    serialized_limits = PROVIDER_LIMITS_V1.model_dump(mode="json")
+    assert serialized_limits["max_snapshot_bytes"] == 16_777_216
+    assert serialized_limits["max_response_bytes"] == 16_842_752
+
+    payload = _snapshot()
+    response = ProjectSnapshotDataV1(
+        payload=payload,
+        event_cursor=EventCursorV1(
+            event_count=1,
+            event_frontier_sha256=_A_SHA,
+        ),
+        applied_limits=PROVIDER_LIMITS_V1,
+        snapshot_digest=snapshot_digest(payload),
+    )
+    assert len(snapshot_response_canonical_bytes(response)) > len(
+        snapshot_canonical_bytes(payload)
+    )
+
+
+def test_complete_response_ceiling_has_exact_lowered_boundary() -> None:
+    payload = _snapshot()
+    cursor = EventCursorV1(event_count=1, event_frontier_sha256=_A_SHA)
+    ceiling = PROVIDER_LIMITS_V1.max_response_bytes
+
+    # The applied ceiling is itself serialized, so converge on the stable
+    # exact size for this fixture before exercising N and N-1.
+    for _ in range(4):
+        candidate_limits = lowered_limits({"max_response_bytes": ceiling})
+        document = _response_document(payload, cursor, candidate_limits)
+        exact_size = len(
+            canonical_json_bytes(
+                document,
+                max_nodes=canonical_node_budget_for_bytes(
+                    PROVIDER_LIMITS_V1.max_response_bytes
+                ),
+                max_bytes=PROVIDER_LIMITS_V1.max_response_bytes,
+                max_string_bytes=PROVIDER_LIMITS_V1.max_string_bytes,
+            )
+        )
+        if exact_size == ceiling:
+            break
+        ceiling = exact_size
+    assert exact_size == ceiling
+
+    exact_limits = lowered_limits({"max_response_bytes": ceiling})
+    exact = ProjectSnapshotDataV1(
+        payload=payload,
+        event_cursor=cursor,
+        applied_limits=exact_limits,
+        snapshot_digest=snapshot_digest(payload),
+    )
+    assert len(snapshot_response_canonical_bytes(exact)) == ceiling
+
+    too_small = lowered_limits({"max_response_bytes": ceiling - 1})
+    with pytest.raises(ValidationError, match="response byte size exceeds"):
+        ProjectSnapshotDataV1(
+            payload=payload,
+            event_cursor=cursor,
+            applied_limits=too_small,
+            snapshot_digest=snapshot_digest(payload),
+        )
+
+
 def test_hash_domains_must_be_ascii_and_nul_terminated() -> None:
     assert len(domain_separated_sha256(b"contract.v1\0", {"a": 1})) == 64
     with pytest.raises(ValueError, match="terminating NUL"):
@@ -495,7 +680,7 @@ def test_lowered_entity_and_string_limits_refuse_atomically() -> None:
         validate_snapshot_limits(snapshot, lowered_limits({"max_tasks": 1}))
     with pytest.raises(ValueError, match="string byte size"):
         validate_snapshot_limits(snapshot, lowered_limits({"max_string_bytes": 2}))
-    with pytest.raises(ValueError, match="snapshot byte size"):
+    with pytest.raises(ValueError, match=r"snapshot (minimum )?byte size"):
         validate_snapshot_limits(snapshot, lowered_limits({"max_snapshot_bytes": 10}))
 
 
@@ -532,6 +717,48 @@ def test_public_count_gates_precede_hierarchy_graph_work() -> None:
     with pytest.raises(ValueError, match="PRD count exceeds") as raw_entities:
         snapshot_digest(raw)
     assert "node_limit_exceeded" not in str(raw_entities.value)
+
+
+def test_aggregate_lower_bound_precedes_dump_sets_and_cycle_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependency_ref = TaskScopedRefV1(prd_id="default", task_id="T001")
+    maximum_dependencies = (dependency_ref,) * (
+        PROVIDER_LIMITS_V1.max_dependencies_per_task
+    )
+    maximum_task = _task(
+        "default",
+        "T002",
+        dependencies=maximum_dependencies,
+        acceptance=(),
+    )
+    maximum_tasks = (maximum_task,) * PROVIDER_LIMITS_V1.max_tasks
+    snapshot = ProjectSnapshotPayloadV1.model_construct(
+        project=ProjectRecordV1(project_id="anvil", name="Anvil"),
+        prds=(_prd("default"),),
+        features=(_feature("default"),),
+        tasks=maximum_tasks,
+    )
+
+    phases: list[str] = []
+
+    def fail_dump(*args: object, **kwargs: object) -> object:
+        phases.append("model_dump")
+        raise AssertionError("model_dump must not run for an impossible aggregate")
+
+    def fail_hierarchy(*args: object, **kwargs: object) -> None:
+        phases.append("hierarchy")
+        raise AssertionError("hierarchy sets must not be built")
+
+    monkeypatch.setattr(ProjectSnapshotPayloadV1, "model_dump", fail_dump)
+    monkeypatch.setattr(read_contracts_module, "_validate_hierarchy", fail_hierarchy)
+
+    with pytest.raises(ValueError, match="snapshot minimum byte size"):
+        read_contracts_module._validate_snapshot_shape_limits(
+            snapshot,
+            PROVIDER_LIMITS_V1,
+        )
+    assert phases == []
 
 
 def test_public_string_gate_precedes_hierarchy_graph_work() -> None:

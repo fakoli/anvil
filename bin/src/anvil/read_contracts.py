@@ -17,6 +17,7 @@ from typing import Any, Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from anvil.state.hashing import (
+    MAX_CANONICAL_JSON_RESPONSE_BYTES,
     CanonicalJsonRefusal,
     CanonicalJsonRefusalCode,
     canonical_json_bytes,
@@ -28,6 +29,7 @@ PROJECT_SNAPSHOT_OPERATION_ID = "state.project.snapshot"
 PROJECT_SNAPSHOT_OPERATION_VERSION = 1
 PROJECT_SNAPSHOT_SCHEMA_ID = "anvil.state.project-snapshot.v1"
 PROJECT_SNAPSHOT_DIGEST_DOMAIN = b"anvil.project-snapshot.v1\0"
+WIRE_INT64_MAX = (2**63) - 1
 
 PRD_CONTENT_OPERATION_ID = "state.prd.content"
 PRD_CONTENT_OPERATION_VERSION = 1
@@ -144,8 +146,8 @@ class ReadErrorV1(BaseModel):
     code: ReadErrorCode
     message: ReadErrorMessageV1
     field: ReadErrorFieldV1 | None = None
-    actual: int | None = Field(default=None, ge=0, le=(2**63) - 1)
-    limit: int | None = Field(default=None, ge=0, le=(2**63) - 1)
+    actual: int | None = Field(default=None, ge=0, le=WIRE_INT64_MAX)
+    limit: int | None = Field(default=None, ge=0, le=WIRE_INT64_MAX)
 
     @model_validator(mode="before")
     @classmethod
@@ -179,6 +181,11 @@ class ProviderReadLimitsV1(BaseModel):
     max_acceptance_criteria_per_task: int = Field(default=256, ge=0, le=256)
     max_string_bytes: int = Field(default=65_536, ge=1, le=65_536)
     max_snapshot_bytes: int = Field(default=16_777_216, ge=1, le=16_777_216)
+    max_response_bytes: int = Field(
+        default=MAX_CANONICAL_JSON_RESPONSE_BYTES,
+        ge=1,
+        le=MAX_CANONICAL_JSON_RESPONSE_BYTES,
+    )
     max_prd_content_bytes: int = Field(default=2_097_152, ge=1, le=2_097_152)
 
 
@@ -235,12 +242,12 @@ class PrdRecordV1(BaseModel):
     ref: PrdScopedRefV1
     local_id: str
     title: str = Field(min_length=1, max_length=4096)
-    revision: int = Field(ge=1)
+    revision: int = Field(ge=1, le=WIRE_INT64_MAX)
     status: PrdStatusV1
     target_version: str | None = Field(default=None, max_length=256)
     target_tag: str | None = Field(default=None, max_length=256)
     source_sha256: str | None = Field(default=None, pattern=_FULL_SHA256_PATTERN)
-    source_size_bytes: int | None = Field(default=None, ge=0)
+    source_size_bytes: int | None = Field(default=None, ge=0, le=WIRE_INT64_MAX)
     source_encoding: Literal["utf-8"] | None = None
     provenance_state: Literal["available", "legacy_unbound"]
     content_available: bool
@@ -283,10 +290,10 @@ class FeatureRecordV1(BaseModel):
 class VerificationCountsV1(BaseModel):
     model_config = _WIRE_CONFIG
 
-    commands: int = Field(ge=0)
-    manual_steps: int = Field(ge=0)
-    required_evidence: int = Field(ge=0)
-    typed_proofs: int = Field(ge=0)
+    commands: int = Field(ge=0, le=WIRE_INT64_MAX)
+    manual_steps: int = Field(ge=0, le=WIRE_INT64_MAX)
+    required_evidence: int = Field(ge=0, le=WIRE_INT64_MAX)
+    typed_proofs: int = Field(ge=0, le=WIRE_INT64_MAX)
 
 
 class TaskRecordV1(BaseModel):
@@ -341,7 +348,7 @@ class ProjectSnapshotPayloadV1(BaseModel):
 class EventCursorV1(BaseModel):
     model_config = _WIRE_CONFIG
 
-    event_count: int = Field(ge=0)
+    event_count: int = Field(ge=0, le=WIRE_INT64_MAX)
     event_frontier_sha256: str = Field(pattern=_FULL_SHA256_PATTERN)
 
 
@@ -360,6 +367,7 @@ class ProjectSnapshotDataV1(BaseModel):
         validate_snapshot_limits(self.payload, self.applied_limits)
         if self.snapshot_digest != snapshot_digest(self.payload):
             raise ValueError("snapshot_digest does not match the allowlisted payload")
+        _validate_response_serialized_limit(self, self.applied_limits)
         return self
 
 
@@ -409,6 +417,20 @@ def snapshot_canonical_bytes(payload: ProjectSnapshotPayloadV1) -> bytes:
     )
 
 
+def snapshot_response_canonical_bytes(response: ProjectSnapshotDataV1) -> bytes:
+    """Return canonical bytes for the complete bounded operation data."""
+    limits = response.applied_limits
+    return canonical_json_bytes(
+        response.model_dump(mode="json"),
+        max_nodes=canonical_node_budget_for_bytes(limits.max_response_bytes),
+        max_bytes=limits.max_response_bytes,
+        max_string_bytes=min(
+            limits.max_string_bytes,
+            limits.max_response_bytes,
+        ),
+    )
+
+
 def lowered_limits(requested: Mapping[str, Any]) -> ProviderReadLimitsV1:
     """Validate caller limits, refusing unknown, raised, or non-integer values."""
     merged = PROVIDER_LIMITS_V1.model_dump()
@@ -450,6 +472,7 @@ def _validate_snapshot_shape_limits(
         if len(task.acceptance_criteria) > limits.max_acceptance_criteria_per_task:
             raise ValueError("task acceptance-criteria count exceeds provider limit")
 
+    _validate_snapshot_aggregate_lower_bound(snapshot, limits)
     document = snapshot.model_dump(mode="json")
     for value in _walk_strings(document):
         if len(value) > limits.max_string_bytes:
@@ -463,6 +486,47 @@ def _validate_snapshot_shape_limits(
             ) from exc
         if size > limits.max_string_bytes:
             raise ValueError("string byte size exceeds provider limit")
+
+
+def _validate_snapshot_aggregate_lower_bound(
+    snapshot: ProjectSnapshotPayloadV1,
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Reject structurally impossible payloads without copying nested values.
+
+    The accounting deliberately underestimates canonical JSON: each container
+    contributes only its braces/brackets, each string only its quotes, and
+    field names/separators/scalar contents are omitted.  Crossing either bound
+    therefore proves the real payload cannot fit, while an admitted payload
+    proceeds to exact validation after hierarchy checks.
+    """
+    node_limit = canonical_node_budget_for_bytes(limits.max_snapshot_bytes)
+    minimum_nodes = 5  # root, project, and the three entity arrays
+    minimum_bytes = minimum_nodes * 2
+
+    def add(*, nodes: int, bytes_: int) -> None:
+        nonlocal minimum_nodes, minimum_bytes
+        minimum_nodes += nodes
+        minimum_bytes += bytes_
+        if minimum_nodes > node_limit:
+            raise ValueError("snapshot minimum node count exceeds provider limit")
+        if minimum_bytes > limits.max_snapshot_bytes:
+            raise ValueError("snapshot minimum byte size exceeds provider limit")
+
+    # Record plus its mandatory nested scoped-reference containers.
+    add(nodes=len(snapshot.prds) * 2, bytes_=len(snapshot.prds) * 4)
+    add(nodes=len(snapshot.features) * 3, bytes_=len(snapshot.features) * 6)
+    for task in snapshot.tasks:
+        # Task, three mandatory refs, verification counts, and two list containers.
+        add(nodes=7, bytes_=14)
+        if task.parent_ref is not None:
+            add(nodes=3, bytes_=6)
+        dependency_count = len(task.dependency_refs)
+        if dependency_count:
+            add(nodes=dependency_count * 3, bytes_=dependency_count * 6)
+        criterion_count = len(task.acceptance_criteria)
+        if criterion_count:
+            add(nodes=criterion_count, bytes_=criterion_count * 2)
 
 
 def _validate_raw_snapshot_count_limits(
@@ -523,6 +587,27 @@ def _validate_snapshot_serialized_limit(
     except CanonicalJsonRefusal as exc:
         if exc.code is CanonicalJsonRefusalCode.byte_limit_exceeded:
             raise ValueError("snapshot byte size exceeds provider limit") from exc
+        raise
+
+
+def _validate_response_serialized_limit(
+    response: ProjectSnapshotDataV1,
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Bound the complete operation data, not only its digest payload."""
+    try:
+        canonical_json_bytes(
+            response.model_dump(mode="json"),
+            max_nodes=canonical_node_budget_for_bytes(limits.max_response_bytes),
+            max_bytes=limits.max_response_bytes,
+            max_string_bytes=min(
+                limits.max_string_bytes,
+                limits.max_response_bytes,
+            ),
+        )
+    except CanonicalJsonRefusal as exc:
+        if exc.code is CanonicalJsonRefusalCode.byte_limit_exceeded:
+            raise ValueError("response byte size exceeds provider limit") from exc
         raise
 
 
@@ -657,5 +742,7 @@ __all__ = [
     "lowered_limits",
     "snapshot_canonical_bytes",
     "snapshot_digest",
+    "snapshot_response_canonical_bytes",
     "validate_snapshot_limits",
+    "WIRE_INT64_MAX",
 ]
