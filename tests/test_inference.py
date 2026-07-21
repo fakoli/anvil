@@ -88,6 +88,26 @@ def _make_task(
 
 
 class TestInferDependencies:
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    @pytest.mark.parametrize(
+        ("spelling", "expected"),
+        [
+            (r"C:\project", r"\\?\C:\project"),
+            (r"\\server\share", r"\\?\UNC\server\share" + "\\"),
+            (r"\\?\C:\project", r"\\?\C:\project"),
+            (
+                r"\\?\UNC\wsl.localhost\Ubuntu\tmp",
+                r"\\?\UNC\wsl.localhost\Ubuntu\tmp",
+            ),
+        ],
+    )
+    def test_extended_windows_path_preserves_existing_prefixes(
+        self,
+        spelling: str,
+        expected: str,
+    ) -> None:
+        assert inference_module._extended_windows_path(Path(spelling)) == expected
+
     def test_no_dependencies_when_no_overlap(self) -> None:
         """Tasks with completely disjoint likely_files get no deps inferred."""
         tasks = [
@@ -542,6 +562,436 @@ class TestInferDependencies:
             registry.intern("src/A.py")
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_native_case_distinct_siblings_keep_independent_policy_caches(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mixed_root = tmp_path / "mixed-root"
+        mixed_root.mkdir()
+
+        def set_policy(path: Path, enabled: bool) -> None:
+            try:
+                result = subprocess.run(
+                    [
+                        "fsutil.exe",
+                        "file",
+                        "setCaseSensitiveInfo",
+                        str(path),
+                        "enable" if enabled else "disable",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                pytest.skip(f"per-directory case sensitivity unavailable: {exc}")
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).strip()[:200]
+                pytest.skip("per-directory case sensitivity unavailable: " + detail)
+
+        set_policy(mixed_root, True)
+        sensitive = mixed_root / "Foo"
+        insensitive = mixed_root / "foo"
+        sensitive.mkdir()
+        insensitive.mkdir()
+        set_policy(sensitive, True)
+        set_policy(insensitive, False)
+        assert inference_module._directory_uses_case_sensitive_identity(
+            sensitive
+        )
+        assert not inference_module._directory_uses_case_sensitive_identity(
+            insensitive
+        )
+
+        native_policy = (
+            inference_module._directory_uses_case_sensitive_identity
+        )
+        policy_queries: list[str] = []
+
+        def counted_policy(directory: Path) -> bool:
+            policy_queries.append(str(directory))
+            return native_policy(directory)
+
+        monkeypatch.setattr(
+            inference_module,
+            "_directory_uses_case_sensitive_identity",
+            counted_policy,
+        )
+        expected_queries = sorted(
+            str(path)
+            for path in (tmp_path, mixed_root, sensitive, insensitive)
+        )
+
+        def assert_queries() -> None:
+            assert sorted(policy_queries) == expected_queries
+            policy_queries.clear()
+
+        scenarios = [
+            (
+                [
+                    _make_task("T001", ["mixed-root/Foo/A.py"]),
+                    _make_task(
+                        "T002",
+                        [
+                            "mixed-root/Foo/a.py",
+                            "mixed-root/Foo/extra.py",
+                        ],
+                    ),
+                    _make_task("T003", ["mixed-root/foo/A.py"]),
+                    _make_task(
+                        "T004",
+                        [
+                            "mixed-root/foo/a.py",
+                            "mixed-root/foo/extra.py",
+                        ],
+                    ),
+                ],
+                {"T001": [], "T002": [], "T003": ["T004"], "T004": []},
+                set(),
+                [("T001",), ("T002",), ("T003", "T004")],
+            ),
+            (
+                [
+                    _make_task(
+                        "T005",
+                        ["mixed-root/Foo/A.py", "mixed-root/Foo/left.py"],
+                    ),
+                    _make_task(
+                        "T006",
+                        ["mixed-root/Foo/a.py", "mixed-root/Foo/right.py"],
+                    ),
+                    _make_task(
+                        "T007",
+                        ["mixed-root/foo/A.py", "mixed-root/foo/left.py"],
+                    ),
+                    _make_task(
+                        "T008",
+                        ["mixed-root/foo/a.py", "mixed-root/foo/right.py"],
+                    ),
+                ],
+                {"T005": [], "T006": [], "T007": [], "T008": []},
+                {("T007", "T008")},
+                [("T005",), ("T006",), ("T007", "T008")],
+            ),
+        ]
+
+        for tasks, expected_dependencies, expected_groups, expected_bundles in scenarios:
+            for task_order in permutations(tasks):
+                ordered = list(task_order)
+                before = [task.model_dump(mode="python") for task in ordered]
+
+                dependencies = infer_dependencies(
+                    ordered,
+                    project_root=tmp_path,
+                )
+                assert {
+                    task.id: task.dependencies for task in dependencies
+                } == expected_dependencies
+                assert_queries()
+
+                conflict_tasks, groups = infer_conflict_groups(
+                    ordered,
+                    project_root=tmp_path,
+                )
+                assert {tuple(group.task_ids) for group in groups} == expected_groups
+                assert {
+                    task.id: task.conflict_groups for task in conflict_tasks
+                } == {
+                    task_id: (
+                        ["CG-T007-T008"]
+                        if task_id in {"T007", "T008"}
+                        else []
+                    )
+                    for task_id in expected_dependencies
+                }
+                assert_queries()
+
+                combined = infer_all(ordered, project_root=tmp_path)
+                assert {
+                    task.id: task.dependencies for task in combined.tasks
+                } == expected_dependencies
+                assert {
+                    tuple(group.task_ids) for group in combined.conflict_groups
+                } == expected_groups
+                assert_queries()
+
+                bundle = build_bundle_plan(ordered, project_root=tmp_path)
+                assert bundle.overlap_pair_count == 1
+                assert [
+                    proposal.task_ids for proposal in bundle.proposed_bundles
+                ] == expected_bundles
+                assert_queries()
+
+                assert [
+                    task.model_dump(mode="python") for task in ordered
+                ] == before
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_native_existing_and_prospective_symlink_aliases_share_identity(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        target = tmp_path / "target"
+        target.mkdir()
+        alias = tmp_path / "alias"
+        try:
+            alias.symlink_to(target, target_is_directory=True)
+        except OSError:
+            junction = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(alias),
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if junction.returncode != 0:
+                detail = (junction.stderr or junction.stdout).strip()[:200]
+                pytest.skip(f"directory reparse aliases unavailable: {detail}")
+        (target / "existing.py").write_text("existing", encoding="utf-8")
+        assert alias.samefile(target)
+        assert (alias / "existing.py").samefile(target / "existing.py")
+
+        tasks = [
+            _make_task("T101", ["target/existing.py"]),
+            _make_task(
+                "T102",
+                ["alias/existing.py", "target/existing-extra.py"],
+            ),
+            _make_task("T103", ["target/Future.py"]),
+            _make_task(
+                "T104",
+                ["alias/future.py", "target/future-extra.py"],
+            ),
+        ]
+        expected_dependencies = {
+            "T101": ["T102"],
+            "T102": [],
+            "T103": ["T104"],
+            "T104": [],
+        }
+
+        for task_order in permutations(tasks):
+            ordered = list(task_order)
+            before = [task.model_dump(mode="python") for task in ordered]
+
+            dependencies = infer_dependencies(ordered, project_root=tmp_path)
+            assert {
+                task.id: task.dependencies for task in dependencies
+            } == expected_dependencies
+
+            conflict_tasks, conflict_groups = infer_conflict_groups(
+                ordered,
+                project_root=tmp_path,
+            )
+            assert conflict_groups == []
+            assert all(not task.conflict_groups for task in conflict_tasks)
+
+            combined = infer_all(ordered, project_root=tmp_path)
+            assert {
+                task.id: task.dependencies for task in combined.tasks
+            } == expected_dependencies
+            assert combined.conflict_groups == []
+
+            bundle = build_bundle_plan(ordered, project_root=tmp_path)
+            assert bundle.overlap_pair_count == 2
+            assert [
+                proposal.task_ids for proposal in bundle.proposed_bundles
+            ] == [("T101", "T102"), ("T103", "T104")]
+
+            assert [
+                task.model_dump(mode="python") for task in ordered
+            ] == before
+
+    def test_prospective_walk_stops_after_first_missing_ancestor(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_cached_windows_path_key",
+            lambda path: path.upper(),
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_host_paths_equal",
+            lambda left, right: left.upper() == right.upper(),
+        )
+        root_information = inference_module._WindowsExistingPath(
+            "test-volume",
+            "test-root",
+            True,
+        )
+        identity_queries: list[str] = []
+        policy_queries: list[str] = []
+
+        def existing_path(path: Path) -> object:
+            identity_queries.append(str(path))
+            return root_information if path == tmp_path else None
+
+        def directory_policy(directory: Path) -> bool:
+            policy_queries.append(str(directory))
+            return False
+
+        monkeypatch.setattr(
+            inference_module,
+            "_windows_existing_path_identity",
+            existing_path,
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_directory_uses_case_sensitive_identity",
+            directory_policy,
+        )
+        deep_path = "/".join("a" for _ in range(2_048))
+        assert len(deep_path.encode("utf-8")) == 4_095
+        task = _make_task("T001", [deep_path])
+        before = task.model_dump(mode="python")
+
+        for entrypoint in _PORTABLE_PATH_ENTRYPOINTS:
+            entrypoint([task], project_root=tmp_path)
+            assert len(identity_queries) == 3
+            assert policy_queries == [str(tmp_path)]
+            identity_queries.clear()
+            policy_queries.clear()
+            assert task.model_dump(mode="python") == before
+
+        wave = [
+            _make_task(f"T{index:03d}", [f"missing/{index:03d}.py"])
+            for index in range(500)
+        ]
+        wave_before = [task.model_dump(mode="python") for task in wave]
+
+        infer_all(wave, project_root=tmp_path)
+
+        assert len(identity_queries) == 502
+        assert policy_queries == [str(tmp_path)]
+        assert [task.model_dump(mode="python") for task in wave] == wave_before
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_wsl_unsupported_identity_fails_closed(
+        self,
+    ) -> None:
+        wsl_python = "/usr/bin/" + "python" + "3"
+        script = (
+            "import pathlib, subprocess, tempfile; "
+            "p = pathlib.Path(tempfile.mkdtemp(prefix='anvil-inference.', dir='/tmp')); "
+            "(p / 'A.py').write_text('upper', encoding='utf-8'); "
+            "(p / 'a.py').write_text('lower', encoding='utf-8'); "
+            "print(p); "
+            "print(subprocess.check_output(['/usr/bin/wslpath', '-w', str(p)], "
+            "text=True).strip()); "
+            "print(subprocess.check_output(['/usr/bin/wslpath', '-w', '/'], "
+            "text=True).strip())"
+        )
+        try:
+            created = subprocess.run(
+                ["wsl.exe", wsl_python, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            pytest.skip(f"WSL unavailable: {exc}")
+        lines = [line.strip() for line in created.stdout.splitlines() if line.strip()]
+        if created.returncode != 0 or len(lines) < 3:
+            detail = (created.stderr or created.stdout).strip()[:300]
+            pytest.skip(f"WSL temporary ext4 fixture unavailable: {detail}")
+        linux_root, windows_root, windows_distribution_root = lines[-3:]
+        if not linux_root.startswith("/tmp/anvil-inference."):
+            pytest.skip("WSL returned an unexpected temporary path")
+        project_root = Path(windows_root)
+        cleanup = (
+            "import pathlib, shutil, sys; "
+            "p = pathlib.Path(sys.argv[1]); "
+            "assert str(p).startswith('/tmp/anvil-inference.'); "
+            "shutil.rmtree(p)"
+        )
+        try:
+            upper = project_root / "A.py"
+            lower = project_root / "a.py"
+            assert upper.read_text(encoding="utf-8") == "upper"
+            assert lower.read_text(encoding="utf-8") == "lower"
+            assert not upper.samefile(lower)
+            tasks = [
+                _make_task("T201", ["A.py"]),
+                _make_task("T202", ["a.py"]),
+            ]
+
+            for task_order in permutations(tasks):
+                for entrypoint in _PORTABLE_PATH_ENTRYPOINTS:
+                    ordered = list(task_order)
+                    before = [
+                        task.model_dump(mode="python") for task in ordered
+                    ]
+                    with pytest.raises(
+                        PathIdentityError,
+                        match="Windows path identity query failed",
+                    ):
+                        entrypoint(ordered, project_root=project_root)
+                    assert [
+                        task.model_dump(mode="python") for task in ordered
+                    ] == before
+
+            missing = _make_task("T203", ["missing.py"])
+            for entrypoint in _PORTABLE_PATH_ENTRYPOINTS:
+                before_missing = missing.model_dump(mode="python")
+                with pytest.raises(
+                    PathIdentityError,
+                    match="Windows directory identity query failed",
+                ):
+                    entrypoint([missing], project_root=project_root)
+                assert missing.model_dump(mode="python") == before_missing
+
+            distribution_root = Path(windows_distribution_root)
+            assert (distribution_root / "dev").is_dir()
+            assert (distribution_root / "proc").is_dir()
+            mounted = [
+                _make_task("T204", ["dev"]),
+                _make_task("T205", ["proc"]),
+            ]
+            for entrypoint in _PORTABLE_PATH_ENTRYPOINTS:
+                before_mounted = [
+                    task.model_dump(mode="python") for task in mounted
+                ]
+                with pytest.raises(
+                    PathIdentityError,
+                    match="Windows path identity query failed",
+                ):
+                    entrypoint(mounted, project_root=distribution_root)
+                assert [
+                    task.model_dump(mode="python") for task in mounted
+                ] == before_mounted
+        finally:
+            subprocess.run(
+                [
+                    "wsl.exe",
+                    wsl_python,
+                    "-c",
+                    cleanup,
+                    linux_root,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
     def test_case_equivalent_paths_share_conflict_identity(self) -> None:
         tasks = [
             _make_task("T001", ["src/Widget.py", "src/one.py"]),
@@ -697,8 +1147,23 @@ class TestInferDependencies:
         assert inference_module._host_paths_equal(right, left) is expected
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
-    def test_windows_keys_and_registry_match_systematic_native_oracle(self) -> None:
+    def test_windows_keys_and_registry_match_systematic_native_oracle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         import ctypes
+
+        project_root = Path.cwd().resolve()
+        root_identity = inference_module._WindowsExistingPath(
+            "test-volume",
+            "test-root",
+            True,
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_windows_existing_path_identity",
+            lambda path: root_identity if path == project_root else None,
+        )
 
         compare = ctypes.WinDLL(
             "kernel32", use_last_error=True
@@ -843,6 +1308,128 @@ class TestInferDependencies:
             api.equivalent("a", "A")
         inference_module._load_windows_path_api.cache_clear()
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    @pytest.mark.parametrize("native_error", [1, 50, 87, 120, 5])
+    def test_windows_directory_policy_errors_fail_closed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        native_error: int,
+    ) -> None:
+        import ctypes
+
+        class NativeFunction:
+            argtypes: object = None
+            restype: object = None
+
+            def __init__(self, action: Callable[..., int]) -> None:
+                self.action = action
+
+            def __call__(self, *args: object) -> int:
+                return self.action(*args)
+
+        def basic_information(*args: object) -> int:
+            ctypes.cast(args[1], ctypes.POINTER(ctypes.c_uint32))[0] = (
+                inference_module._FILE_ATTRIBUTE_DIRECTORY
+            )
+            return 1
+
+        def case_information(*_args: object) -> int:
+            ctypes.set_last_error(native_error)
+            return 0
+
+        kernel = SimpleNamespace(
+            CreateFileW=NativeFunction(lambda *_args: 1),
+            GetFileInformationByHandle=NativeFunction(basic_information),
+            GetFileInformationByHandleEx=NativeFunction(case_information),
+            CloseHandle=NativeFunction(lambda *_args: 1),
+        )
+        monkeypatch.setattr(
+            ctypes,
+            "WinDLL",
+            lambda *_args, **_kwargs: kernel,
+        )
+
+        with pytest.raises(
+            PathIdentityError,
+            match="Windows directory identity query failed",
+        ):
+            inference_module._windows_directory_case_sensitive(str(tmp_path))
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    @pytest.mark.parametrize(
+        ("path_spelling", "extended_id", "basic_id"),
+        [
+            (r"C:\project\file.py", bytes(16), 1),
+            (r"C:\project\file.py", bytes([0xFF]) * 16, 1),
+            (r"\\wsl.localhost\Ubuntu\tmp\file.py", None, 0),
+            (r"\\wsl.localhost\Ubuntu\proc", None, 1),
+            (
+                r"\\wsl.localhost\Ubuntu\tmp\file.py",
+                None,
+                0xFFFFFFFFFFFFFFFF,
+            ),
+            (r"\\server\share\file.py", None, 1),
+        ],
+    )
+    def test_windows_unusable_file_ids_fail_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        path_spelling: str,
+        extended_id: bytes | None,
+        basic_id: int,
+    ) -> None:
+        import ctypes
+
+        class NativeFunction:
+            argtypes: object = None
+            restype: object = None
+
+            def __init__(self, action: Callable[..., int]) -> None:
+                self.action = action
+
+            def __call__(self, *args: object) -> int:
+                return self.action(*args)
+
+        def basic_information(*args: object) -> int:
+            words = ctypes.cast(args[1], ctypes.POINTER(ctypes.c_uint32))
+            words[0] = 0
+            words[7] = 0
+            words[11] = basic_id >> 32
+            words[12] = basic_id & 0xFFFFFFFF
+            return 1
+
+        def extended_information(*args: object) -> int:
+            if extended_id is None:
+                ctypes.set_last_error(50)
+                return 0
+            raw = ctypes.cast(args[2], ctypes.POINTER(ctypes.c_ubyte))
+            for index in range(8):
+                raw[index] = 0
+            for index, value in enumerate(extended_id, start=8):
+                raw[index] = value
+            return 1
+
+        kernel = SimpleNamespace(
+            CreateFileW=NativeFunction(lambda *_args: 1),
+            GetFileInformationByHandle=NativeFunction(basic_information),
+            GetFileInformationByHandleEx=NativeFunction(extended_information),
+            CloseHandle=NativeFunction(lambda *_args: 1),
+        )
+        monkeypatch.setattr(
+            ctypes,
+            "WinDLL",
+            lambda *_args, **_kwargs: kernel,
+        )
+
+        with pytest.raises(
+            PathIdentityError,
+            match="Windows path identity query failed",
+        ):
+            inference_module._windows_existing_path_identity(
+                Path(path_spelling)
+            )
+
     def test_non_windows_policy_uses_exact_identity(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -908,18 +1495,21 @@ class TestInferDependencies:
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
     def test_windows_registry_handles_5000_unique_paths_without_cache_thrash(
         self,
+        tmp_path: Path,
     ) -> None:
+        (tmp_path / "src").mkdir()
         inference_module._cached_windows_path_key.cache_clear()
         inference_module._cached_windows_paths_equal.cache_clear()
-        registry = inference_module._PathIdentityRegistry()
+        registry = inference_module._PathIdentityRegistry(tmp_path)
         started = time.perf_counter()
 
         identities = [registry.intern(f"src/file-{index:04d}.py") for index in range(5_000)]
 
         assert len(set(identities)) == 5_000
-        # One shared parent component plus 5,000 distinct file components.
-        assert inference_module._cached_windows_path_key.cache_info().misses == 5_001
-        assert inference_module._cached_windows_path_key.cache_info().currsize == 5_001
+        # The existing shared parent is represented by its authoritative file
+        # identity; only the 5,000 prospective file components need mapping.
+        assert inference_module._cached_windows_path_key.cache_info().misses == 5_000
+        assert inference_module._cached_windows_path_key.cache_info().currsize == 5_000
         assert inference_module._cached_windows_paths_equal.cache_info().misses == 0
         assert time.perf_counter() - started < 2.0
 

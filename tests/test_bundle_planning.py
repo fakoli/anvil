@@ -405,10 +405,14 @@ Atomic inference fixture.
         inference_module, "_uses_windows_path_identity", lambda: True
     )
 
-    def fail_key(path: str) -> str:
+    def fail_identity(path: Path) -> None:
         raise PathIdentityError("Windows path case mapping failed")
 
-    monkeypatch.setattr(inference_module, "_cached_windows_path_key", fail_key)
+    monkeypatch.setattr(
+        inference_module,
+        "_windows_existing_path_identity",
+        fail_identity,
+    )
     result = runner.invoke(app, plan_args)
 
     assert result.exit_code == 1

@@ -263,25 +263,14 @@ class TestScanCommand:
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
         )
-        if failure == "comparison":
-            monkeypatch.setattr(
-                inference_module, "_cached_windows_path_key", lambda path: "collision"
-            )
+        def fail_identity(path: Path) -> None:
+            raise PathIdentityError(message)
 
-            def fail_comparison(left: str, right: str) -> bool:
-                raise PathIdentityError(message)
-
-            monkeypatch.setattr(
-                inference_module, "_host_paths_equal", fail_comparison
-            )
-        else:
-
-            def fail_key(path: str) -> str:
-                raise PathIdentityError(message)
-
-            monkeypatch.setattr(
-                inference_module, "_cached_windows_path_key", fail_key
-            )
+        monkeypatch.setattr(
+            inference_module,
+            "_windows_existing_path_identity",
+            fail_identity,
+        )
 
         arguments = ["scan"] + (["--json"] if json_output else [])
         result = runner.invoke(app, arguments, catch_exceptions=False)
@@ -2356,25 +2345,14 @@ class TestInitFromRepo:
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
         )
-        if failure == "comparison":
-            monkeypatch.setattr(
-                inference_module, "_cached_windows_path_key", lambda path: "collision"
-            )
+        def fail_identity(path: Path) -> None:
+            raise PathIdentityError(message)
 
-            def fail_comparison(left: str, right: str) -> bool:
-                raise PathIdentityError(message)
-
-            monkeypatch.setattr(
-                inference_module, "_host_paths_equal", fail_comparison
-            )
-        else:
-
-            def fail_key(path: str) -> str:
-                raise PathIdentityError(message)
-
-            monkeypatch.setattr(
-                inference_module, "_cached_windows_path_key", fail_key
-            )
+        monkeypatch.setattr(
+            inference_module,
+            "_windows_existing_path_identity",
+            fail_identity,
+        )
 
         result = runner.invoke(
             app, ["init", "--from-repo"], catch_exceptions=False

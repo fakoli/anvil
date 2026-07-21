@@ -27,10 +27,10 @@ Heuristics
 
 from __future__ import annotations
 
+import errno
 import json
 import posixpath
 import re
-import stat
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -255,6 +255,7 @@ def _canonical_project_path(path: object) -> str:
 _WINDOWS_COMPARISON_CACHE_SIZE = 131_072
 _WINDOWS_COLLISION_BUCKET_LIMIT = 64
 _LCMAP_UPPERCASE = 0x00000200
+_FILE_ID_INFO_CLASS = 18
 _FILE_CASE_SENSITIVE_INFO_CLASS = 23
 _FILE_CS_FLAG_CASE_SENSITIVE_DIR = 0x00000001
 _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
@@ -272,6 +273,16 @@ def _uses_windows_path_identity() -> bool:
 class _WindowsPathApi(NamedTuple):
     map_key: Callable[[str], str]
     equivalent: Callable[[str, str], bool]
+
+
+class _WindowsExistingPath(NamedTuple):
+    volume_serial: str
+    file_id: str
+    is_directory: bool
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        return self.volume_serial, self.file_id
 
 
 def _windows_directory_case_sensitive(directory: str) -> bool:
@@ -365,12 +376,6 @@ def _windows_directory_case_sensitive(directory: str) -> bool:
                 ctypes.sizeof(information),
             )
             if not succeeded:
-                error = ctypes.get_last_error()
-                # Hosts predating per-directory case sensitivity report that
-                # this information class is unsupported. Such filesystems are
-                # case-insensitive, so the existing ordinal policy is exact.
-                if error in {1, 50, 87, 120}:
-                    return False
                 raise PathIdentityError(
                     "Windows directory identity query failed"
                 )
@@ -397,17 +402,160 @@ def _directory_uses_case_sensitive_identity(directory: Path) -> bool:
     return _windows_directory_case_sensitive(str(directory))
 
 
-def _is_existing_directory(path: Path) -> bool:
-    """Return whether a path is a directory without hiding identity errors."""
+def _extended_windows_path(path: Path) -> str:
+    spelling = str(path)
+    if spelling.startswith("\\\\?\\"):
+        return spelling
+    if spelling.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + spelling[2:]
+    return "\\\\?\\" + spelling
+
+
+def _windows_existing_path_identity(
+    path: Path,
+) -> _WindowsExistingPath | None:
+    """Return authoritative host identity for an existing path.
+
+    The handle follows symlinks/reparse points. ``FileIdInfo`` supplies the
+    volume serial plus the full 128-bit file ID, so existing aliases share an
+    identity while case-distinct entries on a sensitive filesystem remain
+    distinct. Only authoritative not-found results fall back to prospective
+    component-policy inference; every other failure stays fail-closed.
+    """
+    if any(
+        len(component.encode("utf-16-le")) // 2 > 255
+        for component in path.parts
+    ):
+        return None
     try:
-        metadata = path.stat()
-    except FileNotFoundError:
-        return False
-    except OSError:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        get_basic_information = kernel32.GetFileInformationByHandle
+        get_extended_information = kernel32.GetFileInformationByHandleEx
+        close_handle = kernel32.CloseHandle
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        get_basic_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+        ]
+        get_basic_information.restype = wintypes.BOOL
+        get_extended_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        get_extended_information.restype = wintypes.BOOL
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("file_attributes", wintypes.DWORD),
+                ("creation_time", wintypes.FILETIME),
+                ("last_access_time", wintypes.FILETIME),
+                ("last_write_time", wintypes.FILETIME),
+                ("volume_serial_number", wintypes.DWORD),
+                ("file_size_high", wintypes.DWORD),
+                ("file_size_low", wintypes.DWORD),
+                ("number_of_links", wintypes.DWORD),
+                ("file_index_high", wintypes.DWORD),
+                ("file_index_low", wintypes.DWORD),
+            ]
+
+        class FileId128(ctypes.Structure):
+            _fields_ = [("identifier", ctypes.c_ubyte * 16)]
+
+        class FileIdInfo(ctypes.Structure):
+            _fields_ = [
+                ("volume_serial_number", ctypes.c_ulonglong),
+                ("file_id", FileId128),
+            ]
+
+        handle = create_file(
+            _extended_windows_path(path),
+            _FILE_READ_ATTRIBUTES,
+            _FILE_SHARE_ALL,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle in {None, invalid_handle}:
+            if ctypes.get_last_error() in {2, 3, 206}:
+                return None
+            raise PathIdentityError("Windows path identity query failed")
+        try:
+            basic_information = ByHandleFileInformation()
+            if not get_basic_information(
+                handle,
+                ctypes.byref(basic_information),
+            ):
+                raise PathIdentityError(
+                    "Windows path identity query failed"
+                )
+            file_id_information = FileIdInfo()
+            has_extended_id = get_extended_information(
+                handle,
+                _FILE_ID_INFO_CLASS,
+                ctypes.byref(file_id_information),
+                ctypes.sizeof(file_id_information),
+            )
+            if not has_extended_id:
+                raise PathIdentityError(
+                    "Windows path identity query failed"
+                )
+            file_id_bytes = bytes(
+                file_id_information.file_id.identifier
+            )
+            if file_id_bytes in {bytes(16), bytes([0xFF]) * 16}:
+                raise PathIdentityError(
+                    "Windows path identity query failed"
+                )
+            volume_serial = (
+                f"id128:{file_id_information.volume_serial_number:016x}"
+            )
+            file_id = file_id_bytes.hex()
+            return _WindowsExistingPath(
+                volume_serial=volume_serial,
+                file_id=file_id,
+                is_directory=bool(
+                    basic_information.file_attributes
+                    & _FILE_ATTRIBUTE_DIRECTORY
+                ),
+            )
+        finally:
+            close_handle(handle)
+    except PathIdentityError:
+        raise
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ENOENT or getattr(exc, "winerror", None) in {
+            2,
+            3,
+        }:
+            return None
         raise PathIdentityError(
-            "Windows directory identity query failed"
+            "Windows path identity query failed"
         ) from None
-    return stat.S_ISDIR(metadata.st_mode)
+    except Exception:
+        raise PathIdentityError(
+            "Windows path identity query failed"
+        ) from None
 
 
 def _windows_path_policy(
@@ -416,25 +564,42 @@ def _windows_path_policy(
     directory_policy: Callable[[Path], bool] = (
         _directory_uses_case_sensitive_identity
     ),
+    existing_path: Callable[[Path], _WindowsExistingPath | None] = (
+        _windows_existing_path_identity
+    ),
 ) -> tuple[tuple[str, bool], ...]:
     """Return each component with the policy of its containing directory."""
     current = project_root
     inherited_policy = directory_policy(current)
-    policy: list[tuple[str, bool]] = []
+    root_information = existing_path(current)
+    if root_information is None or not root_information.is_directory:
+        raise PathIdentityError("Windows path identity query failed")
+    policy: list[tuple[str, bool]] = [
+        ("\0".join(("anchor", *root_information.identity)), True)
+    ]
     components = PurePosixPath(path).parts
+    probing = True
     for index, component in enumerate(components):
-        if _is_existing_directory(current):
-            inherited_policy = directory_policy(current)
         policy.append((component, inherited_policy))
         if index == len(components) - 1:
             continue
+        if not probing:
+            continue
         child = current / component
-        if _is_existing_directory(child):
-            current = child
-        else:
+        child_information = existing_path(child)
+        if child_information is None:
             # A prospective child inherits the current directory's policy; do
-            # not accidentally query an unrelated ancestor for later parts.
-            current = child
+            # not probe any deeper or query an unrelated ancestor for later
+            # components after the first missing directory.
+            probing = False
+            continue
+        if not child_information.is_directory:
+            raise PathIdentityError("Windows path identity query failed")
+        current = child
+        inherited_policy = directory_policy(current)
+        policy = [
+            ("\0".join(("anchor", *child_information.identity)), True)
+        ]
     return tuple(policy)
 
 
@@ -616,7 +781,16 @@ class _PathIdentityRegistry:
                 ) from None
         else:
             self._project_root = root.resolve()
-        self._directory_policy: dict[Path, bool] = {}
+        # ``Path`` equality follows the host filesystem policy. On Windows
+        # that makes case-distinct siblings such as ``Foo`` and ``foo`` hash
+        # equal even when their parent has per-directory case sensitivity
+        # enabled. Preserve the exact, already-normalized spelling used while
+        # walking the authored path; the component policy still aliases true
+        # case variants beneath insensitive parents.
+        self._directory_policy: dict[str, bool] = {}
+        self._path_observations: dict[
+            str, _WindowsExistingPath | None
+        ] = {}
         self._exact: dict[str, int] = {}
         self._native_buckets: dict[
             tuple[str, ...],
@@ -625,11 +799,23 @@ class _PathIdentityRegistry:
         self._next_identity = 0
 
     def _case_sensitive_directory(self, directory: Path) -> bool:
-        policy = self._directory_policy.get(directory)
+        exact_key = str(directory)
+        policy = self._directory_policy.get(exact_key)
         if policy is None:
             policy = _directory_uses_case_sensitive_identity(directory)
-            self._directory_policy[directory] = policy
+            self._directory_policy[exact_key] = policy
         return policy
+
+    def _existing_path(
+        self,
+        path: Path,
+    ) -> _WindowsExistingPath | None:
+        exact_key = str(path)
+        if exact_key not in self._path_observations:
+            self._path_observations[exact_key] = (
+                _windows_existing_path_identity(path)
+            )
+        return self._path_observations[exact_key]
 
     def intern(self, path: str) -> int:
         existing = self._exact.get(path)
@@ -641,20 +827,32 @@ class _PathIdentityRegistry:
         ] | None = None
         path_policy: tuple[tuple[str, bool], ...] | None = None
         if self._windows_identity:
-            path_policy = _windows_path_policy(
-                self._project_root,
-                path,
-                self._case_sensitive_directory,
-            )
-            native_key = _windows_path_policy_key(path_policy)
-            bucket = self._native_buckets.setdefault(native_key, [])
-            for _representative, identity, representative_policy in bucket:
-                if _windows_path_policies_equal(
-                    path_policy,
-                    representative_policy,
-                ):
+            host_path = self._project_root.joinpath(*PurePosixPath(path).parts)
+            existing_identity = self._existing_path(host_path)
+            if existing_identity is not None:
+                native_key = ("E", *existing_identity.identity)
+                bucket = self._native_buckets.setdefault(native_key, [])
+                if bucket:
+                    identity = bucket[0][1]
                     self._exact[path] = identity
                     return identity
+                path_policy = ()
+            else:
+                path_policy = _windows_path_policy(
+                    self._project_root,
+                    path,
+                    self._case_sensitive_directory,
+                    self._existing_path,
+                )
+                native_key = _windows_path_policy_key(path_policy)
+                bucket = self._native_buckets.setdefault(native_key, [])
+                for _representative, identity, representative_policy in bucket:
+                    if _windows_path_policies_equal(
+                        path_policy,
+                        representative_policy,
+                    ):
+                        self._exact[path] = identity
+                        return identity
             if len(bucket) >= _WINDOWS_COLLISION_BUCKET_LIMIT:
                 raise PathIdentityError(
                     "Windows path identity collision limit exceeded"
