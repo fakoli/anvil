@@ -379,7 +379,7 @@ If task.prd_id is somehow absent (mis-migrated), get_prd_for_task must fall back
 
 **Feature:** F004
 **Priority:** critical
-**Likely files:** bin/src/anvil/mcp_server.py, tests/test_mcp_server.py
+**Likely files:** bin/src/anvil/mcp_server.py, tests/test_mcp.py
 **Dependencies:** T011
 
 Removing the early inline gate changes the error surface ordering; tests asserting the old pre-ClaimManager message must be updated in the same change.
@@ -393,7 +393,7 @@ Removing the early inline gate changes the error surface ordering; tests asserti
 **Verification:**
 
 - `uv run --project bin pytest -q -k 'mcp and claim'`
-- `cd bin && uv run pytest -q ../tests/test_mcp_server.py`
+- `cd bin && uv run pytest -q ../tests/test_mcp.py`
 
 ### T013: Pin cross-PRD coordination: conflict groups, active claims, and stale reaper span all PRDs
 
@@ -538,7 +538,7 @@ The --prd filter on next MUST build exclusion sets from ALL PRDs then narrow; im
 
 **Verification:**
 
-- `uv run --project bin pytest -q -k 'next and prd'; cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_mcp_server.py`
+- `uv run --project bin pytest -q -k 'next and prd'; cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_mcp.py`
 - `cd bin && uv run anvil next --help | grep -- --prd`
 
 ### T020: Per-PRD rollup for anvil status and get_project_status/get_project_summary
