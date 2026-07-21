@@ -48,6 +48,14 @@ def _plugin_bin_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "bin"
 
 
+def _venv_anvil_candidate(bin_dir: Path, *, os_name: str | None = None) -> Path:
+    """Return the native console-script path created by ``uv sync``."""
+    platform_name = os.name if os_name is None else os_name
+    if platform_name == "nt":
+        return bin_dir / ".venv" / "Scripts" / "anvil.exe"
+    return bin_dir / ".venv" / "bin" / "anvil"
+
+
 @lru_cache(maxsize=1)
 def anvil_binary() -> str:
     """Return an absolute path to a runnable `anvil` console script.
@@ -57,7 +65,7 @@ def anvil_binary() -> str:
     working directory (the project under test).
     """
     bin_dir = _plugin_bin_dir()
-    candidate = bin_dir / ".venv" / "bin" / "anvil"
+    candidate = _venv_anvil_candidate(bin_dir)
     if candidate.exists():
         return str(candidate)
     if shutil.which("uv") is None:

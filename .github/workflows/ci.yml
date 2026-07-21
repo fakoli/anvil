@@ -39,7 +39,11 @@ jobs:
       # pulls `openai>=1.0`; everything else is in the base + dev dep groups.
       - name: Sync dependencies (with custom extra for openai)
         working-directory: bin
-        run: uv sync --extra custom
+        run: uv sync --locked --extra custom
+
+      - name: Enforce repository-wide Ruff baseline
+        working-directory: bin
+        run: uv run --locked ruff check ..
 
       - name: Run test suite
         working-directory: bin
