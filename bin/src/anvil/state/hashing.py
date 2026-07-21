@@ -288,6 +288,8 @@ def _materialize_mapping(
         )
     active.add(identity)
     result: dict[str, Any] = {}
+    entries: list[tuple[int, str, Any]] = []
+    normalized_keys: set[str] = set()
     try:
         _consume_bytes(2, path=path, bytes_used=bytes_used, max_bytes=max_bytes)
         for index, (key, item) in enumerate(value.items()):
@@ -304,7 +306,7 @@ def _materialize_mapping(
                     max_bytes=max_bytes,
                 )
             plain_key = str.__str__(key)
-            if plain_key in result:
+            if plain_key in normalized_keys:
                 raise CanonicalJsonRefusal(
                     CanonicalJsonRefusalCode.duplicate_key_after_normalization,
                     path=f"{path}.key[{index}]",
@@ -322,6 +324,13 @@ def _materialize_mapping(
                 bytes_used=bytes_used,
                 max_bytes=max_bytes,
             )
+            normalized_keys.add(plain_key)
+            entries.append((index, plain_key, item))
+
+        # Key normalization can collapse distinct ``str`` subclass instances.
+        # Finish the complete key preflight before recursively traversing any
+        # value so insertion order cannot expose a hostile value first.
+        for index, plain_key, item in entries:
             result[plain_key] = _materialize_canonical_json_value(
                 item,
                 path=f"{path}.value[{index}]",

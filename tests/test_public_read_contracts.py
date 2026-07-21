@@ -615,7 +615,12 @@ def test_canonical_json_materializes_mapping_and_sequence_implementations() -> N
     )
 
 
-def test_canonical_json_refuses_duplicate_keys_after_base_string_normalization() -> None:
+@pytest.mark.parametrize("hostile_first", [False, True])
+def test_canonical_json_preflights_normalized_keys_before_any_value(
+    hostile_first: bool,
+) -> None:
+    phases: list[str] = []
+
     class IdentityKey(str):
         def __hash__(self) -> int:
             return id(self)
@@ -623,9 +628,22 @@ def test_canonical_json_refuses_duplicate_keys_after_base_string_normalization()
         def __eq__(self, other: object) -> bool:
             return self is other
 
-    clean: dict[str, object] = {"tasks": []}
-    hostile = dict(clean)
-    hostile[IdentityKey("tasks")] = object()
+    class BombSequence(list[object]):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("iterate")
+            raise AssertionError("duplicate value must not be traversed")
+
+        def __len__(self) -> int:
+            phases.append("length")
+            raise AssertionError("duplicate value must not be measured")
+
+    hostile_key = IdentityKey("tasks")
+    bomb = BombSequence()
+    hostile: dict[str, object]
+    if hostile_first:
+        hostile = {hostile_key: bomb, "tasks": []}
+    else:
+        hostile = {"tasks": [], hostile_key: bomb}
 
     with pytest.raises(CanonicalJsonRefusal) as refusal:
         canonical_json_bytes(hostile)
@@ -634,6 +652,47 @@ def test_canonical_json_refuses_duplicate_keys_after_base_string_normalization()
         is CanonicalJsonRefusalCode.duplicate_key_after_normalization
     )
     assert refusal.value.path == "$.key[1]"
+    assert phases == []
+
+
+@pytest.mark.parametrize("hostile_first", [False, True])
+def test_canonical_json_preflights_nested_normalized_keys_before_any_value(
+    hostile_first: bool,
+) -> None:
+    phases: list[str] = []
+
+    class IdentityKey(str):
+        def __hash__(self) -> int:
+            return id(self)
+
+        def __eq__(self, other: object) -> bool:
+            return self is other
+
+    class BombSequence(list[object]):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("iterate")
+            raise AssertionError("nested duplicate value must not be traversed")
+
+        def __len__(self) -> int:
+            phases.append("length")
+            raise AssertionError("nested duplicate value must not be measured")
+
+    hostile_key = IdentityKey("tasks")
+    bomb = BombSequence()
+    nested: dict[str, object]
+    if hostile_first:
+        nested = {hostile_key: bomb, "tasks": []}
+    else:
+        nested = {"tasks": [], hostile_key: bomb}
+
+    with pytest.raises(CanonicalJsonRefusal) as refusal:
+        canonical_json_bytes({"nested": nested})
+    assert (
+        refusal.value.code
+        is CanonicalJsonRefusalCode.duplicate_key_after_normalization
+    )
+    assert refusal.value.path == "$.value[0].key[1]"
+    assert phases == []
 
 
 @pytest.mark.parametrize("value", [1.0, float("nan"), float("inf")])
@@ -802,7 +861,12 @@ def test_snapshot_digest_retains_ordinary_mapping_and_tuple_inputs() -> None:
     assert snapshot_digest(wrapped) == snapshot_digest(snapshot)
 
 
-def test_snapshot_digest_refuses_duplicate_keys_after_base_string_normalization() -> None:
+@pytest.mark.parametrize("hostile_first", [False, True])
+def test_snapshot_digest_preflights_normalized_keys_before_any_value(
+    hostile_first: bool,
+) -> None:
+    phases: list[str] = []
+
     class IdentityKey(str):
         def __hash__(self) -> int:
             return id(self)
@@ -810,9 +874,24 @@ def test_snapshot_digest_refuses_duplicate_keys_after_base_string_normalization(
         def __eq__(self, other: object) -> bool:
             return self is other
 
-    snapshot = _snapshot()
-    hostile = snapshot.model_dump(mode="json")
-    hostile[IdentityKey("tasks")] = []
+    class BombSequence(list[object]):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("iterate")
+            raise AssertionError("duplicate snapshot value must not be traversed")
+
+        def __len__(self) -> int:
+            phases.append("length")
+            raise AssertionError("duplicate snapshot value must not be measured")
+
+    document = _snapshot().model_dump(mode="json")
+    hostile_key = IdentityKey("tasks")
+    hostile: dict[str, object] = {}
+    if hostile_first:
+        hostile[hostile_key] = BombSequence()
+        hostile.update(document)
+    else:
+        hostile.update(document)
+        hostile[hostile_key] = BombSequence()
 
     with pytest.raises(CanonicalJsonRefusal) as refusal:
         snapshot_digest(hostile)
@@ -821,6 +900,7 @@ def test_snapshot_digest_refuses_duplicate_keys_after_base_string_normalization(
         is CanonicalJsonRefusalCode.duplicate_key_after_normalization
     )
     assert refusal.value.path == "$.key[6]"
+    assert phases == []
 
 
 def test_cursor_and_lowered_limits_are_excluded_from_snapshot_digest() -> None:
