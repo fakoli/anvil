@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import datetime
 import time
+from collections.abc import Callable
 
 import pytest
 
 from anvil.planning import inference as inference_module
 from anvil.planning.inference import (
+    BundlePlanningError,
     InferenceResult,
     infer_all,
     infer_conflict_groups,
@@ -87,6 +89,72 @@ class TestInferDependencies:
         t001 = next(t for t in result if t.id == "T001")
         # T001 should depend on T002 (T001 specialises T002)
         assert "T002" in t001.dependencies
+
+    @pytest.mark.parametrize(
+        "specialized_path,broader_paths",
+        [
+            ("src/api.py", ["src/api.py", "src/utils.py"]),
+            ("./src/api.py", ["src\\api.py", ".\\src\\utils.py"]),
+            ("src/./api.py", ["./src/api.py", "src/parts/../utils.py"]),
+        ],
+    )
+    def test_equivalent_path_spellings_produce_the_same_dependency_graph(
+        self,
+        specialized_path: str,
+        broader_paths: list[str],
+    ) -> None:
+        tasks = [
+            _make_task("T001", [specialized_path]),
+            _make_task("T002", broader_paths),
+        ]
+
+        result = infer_dependencies(tasks)
+
+        assert {task.id: task.dependencies for task in result} == {
+            "T001": ["T002"],
+            "T002": [],
+        }
+
+    def test_canonicalization_preserves_callers_and_authored_dependencies(
+        self,
+    ) -> None:
+        tasks = [
+            _make_task("T001", [".\\src\\api.py"], dependencies=["T900"]),
+            _make_task("T002", ["src/api.py", "./src/utils.py"]),
+        ]
+        before = [task.model_dump(mode="python") for task in tasks]
+
+        result = infer_dependencies(tasks)
+
+        assert [task.model_dump(mode="python") for task in tasks] == before
+        assert result[0].likely_files == [".\\src\\api.py"]
+        assert result[0].dependencies == ["T002", "T900"]
+
+    @pytest.mark.parametrize(
+        "unsafe_path",
+        [
+            "",
+            ".",
+            "../outside.py",
+            "src/../../outside.py",
+            "/absolute.py",
+            "\\absolute.py",
+            "C:/absolute.py",
+            "C:drive-relative.py",
+            "src/file.py:stream",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "entrypoint",
+        [infer_dependencies, infer_conflict_groups, infer_all],
+    )
+    def test_malformed_or_escaping_paths_fail_closed(
+        self,
+        unsafe_path: str,
+        entrypoint: Callable[[list[Task]], object],
+    ) -> None:
+        with pytest.raises(BundlePlanningError, match="project"):
+            entrypoint([_make_task("T001", [unsafe_path])])
 
     def test_superset_gets_no_extra_dependency(self) -> None:
         """B.files ⊃ A.files → B does NOT depend on A (A depends on B)."""
@@ -380,6 +448,42 @@ class TestInferConflictGroups:
 
 
 class TestInferAll:
+    @pytest.mark.parametrize(
+        "path_sets",
+        [
+            [
+                ["src/api.py", "src/models.py"],
+                ["src/api.py", "src/routes.py"],
+                ["src/api.py"],
+            ],
+            [
+                ["./src\\api.py", "src/./models.py"],
+                ["src/api.py", ".\\src\\routes.py"],
+                ["src/parts/../api.py"],
+            ],
+        ],
+    )
+    def test_equivalent_path_spellings_produce_the_same_full_graph(
+        self,
+        path_sets: list[list[str]],
+    ) -> None:
+        result = infer_all(
+            [
+                _make_task(f"T{index:03}", paths)
+                for index, paths in enumerate(path_sets, start=1)
+            ]
+        )
+
+        assert {
+            task.id: (task.dependencies, task.conflict_groups)
+            for task in result.tasks
+        } == {
+            "T001": ([], ["CG-T001-T002"]),
+            "T002": ([], ["CG-T001-T002"]),
+            "T003": (["T001", "T002"], []),
+        }
+        assert [group.id for group in result.conflict_groups] == ["CG-T001-T002"]
+
     def test_infer_all_composes_correctly(self) -> None:
         """infer_all: dependencies first, conflicts second, no double-flagging.
 

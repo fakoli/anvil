@@ -148,6 +148,7 @@ class BundlePlanningError(ValueError):
 
 
 def _canonical_project_path(path: str) -> str:
+    """Return one safe project-relative spelling for inference comparisons."""
     candidate = path.strip().replace("\\", "/")
     if (
         not candidate
@@ -371,8 +372,8 @@ def build_bundle_plan(
 
 
 def _files_set(task: Task) -> frozenset[str]:
-    """Return the task's likely_files as a frozenset for set operations."""
-    return frozenset(task.likely_files)
+    """Return a canonical, validated copy of a task's likely file scope."""
+    return frozenset(_canonical_project_path(path) for path in task.likely_files)
 
 
 class _DependencyReachability:
