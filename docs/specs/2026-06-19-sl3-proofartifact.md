@@ -468,7 +468,7 @@ golden to the new shape; never weaken the equivalence assertion.
 | **No-substring guarantee** | `grep` for `_contains_test_keyword` / `_is_pr_related` / substring `in` in `gates.py` returns zero hits |
 
 CI: full suite via `.github/workflows/anvil.yml`
-(`uv run --project plugins/anvil/bin --extra all-providers --with pytest pytest`).
+(`uv run --project bin --extra all-providers --with pytest pytest`).
 
 ## 10. Out of scope
 

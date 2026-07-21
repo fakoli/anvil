@@ -67,7 +67,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Two threads claiming two distinct file-overlapping tasks result in exactly one success and one conflict error, with 0% double-claim across at least 200 iterations; a parallel test asserts the same single-winner guarantee for two distinct tasks in the same conflict group.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_claims.py -k 'overlap or conflict_group' -q`
+- `uv run --project bin pytest tests/test_claims.py -k 'overlap or conflict_group' -q`
 
 ### T002: Thread config default_lease_minutes into the CLI ClaimManager and accept fractional minutes
 **Feature:** F001
@@ -81,7 +81,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A project config with default_lease_minutes 30 produces a CLI claim whose lease_expires_at is created_at plus 30 minutes (not 60); a config of 0.5 yields a 30-second lease; the MCP path is unchanged.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py tests/test_config.py -k lease -q`
+- `uv run --project bin pytest tests/test_cli.py tests/test_config.py -k lease -q`
 
 ### T003: Concurrency regression suite: single-winner under N threads
 **Feature:** F001
@@ -95,7 +95,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - The suite fails on main if T001 or T002 are reverted.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_claims_concurrency.py -q`
+- `uv run --project bin pytest tests/test_claims_concurrency.py -q`
 
 ### T004: One-command standalone quickstart: init --with-sample seeds a runnable PRD-to-next loop
 **Feature:** F002
@@ -109,7 +109,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - README Quick Start shows the zero-to-next path with no crew/flow installed.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py -k with_sample -q`
+- `uv run --project bin pytest tests/test_cli.py -k with_sample -q`
 
 ### T005: ANVIL_ROOT env override and stable root resolution across container/host
 **Feature:** F003
@@ -123,7 +123,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - With ANVIL_ROOT pointed at a fixture project from an unrelated cwd, CLI next and the MCP get_next_task tool resolve the same state.db.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py tests/test_mcp.py -k state_root -q`
+- `uv run --project bin pytest tests/test_cli.py tests/test_mcp.py -k state_root -q`
 
 ### T006: Stable, schema-versioned --json output across read commands
 **Feature:** F004
@@ -138,7 +138,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A round-trip test parses each command's --json output with the published schema; default human output is unchanged.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py -k json_output -q`
+- `uv run --project bin pytest tests/test_cli.py -k json_output -q`
 
 ### T007: Expose the existing SCHEMA_VERSION (=4) and _check_schema_version to tooling
 **Feature:** F004
@@ -153,7 +153,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A test asserts the accessor returns the constant, that status/--json include the version, and that a forward-incompatible version is rejected with upgrade guidance.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_sqlite.py -k schema_version -q`
+- `uv run --project bin pytest tests/test_sqlite.py -k schema_version -q`
 
 ### T008: Brownfield scan/ingest: seed an initial PRD and task graph from an existing repo
 **Feature:** F005
@@ -167,7 +167,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - An integration test runs scan on a fixture repo and asserts a non-empty draft PRD plus tasks plus a queryable codebase model row set.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_scan.py -q`
+- `uv run --project bin pytest tests/test_scan.py -q`
 
 ### T009: Promote the existing in-init schema migration to an explicit migrate state command
 **Feature:** F006
@@ -182,7 +182,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A fixture db at an older version migrates to the current version with all rows preserved, replay still passes, and re-running migrate is a no-op.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_snapshot.py -k migrate -q`
+- `uv run --project bin pytest tests/test_snapshot.py -k migrate -q`
 
 ### T010: anvil doctor: diagnose state, config, lease, and reconciliation health
 **Feature:** F002
@@ -196,7 +196,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Tested against a healthy project (clean exit) and a project with an injected stale claim plus schema mismatch (non-zero, both findings listed).
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py -k doctor -q`
+- `uv run --project bin pytest tests/test_cli.py -k doctor -q`
 
 ### T011: Self-sufficient docs: standalone Getting Started that assumes no crew/flow installed
 **Feature:** F002
@@ -224,7 +224,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - CI fails if a command is added or renamed without updating the manifest.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py -k describe -q`
+- `uv run --project bin pytest tests/test_cli.py -k describe -q`
 
 ### T013: Self-audit plugin token footprint: keep skills/commands context-frugal
 **Feature:** F003
@@ -238,7 +238,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - The budget is documented in docs/architecture.md or a new docs/context-budget.md.
 
 **Verification:**
-- `cd plugins/anvil && uv run pytest tests/test_token_budget.py -q`
+- `uv run --project bin pytest tests/test_token_budget.py -q`
 
 ### T014: get_next_task / finish responses explicitly name the next ready task
 **Feature:** F004
@@ -252,7 +252,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - After finishing task A, the response names the correct next ready task and excludes any task whose files overlap an active claim.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_mcp.py -k next_ready -q`
+- `uv run --project bin pytest tests/test_mcp.py -k next_ready -q`
 
 ### T015: Add non-feature task types (bugfix / refactor / modify) through the PRD-to-claims loop
 **Feature:** F005
@@ -266,7 +266,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A PRD with a bugfix item produces a typed task that claims, executes, and submits evidence end-to-end.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_models.py -k task_type -q`
+- `uv run --project bin pytest tests/test_models.py -k task_type -q`
 
 ### T016: Global-config layer (~/.config/anvil) with project-override precedence
 **Feature:** F006
@@ -280,7 +280,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A global default lease of 45 is overridden to 30 by a project config and to 15 by a CLI flag.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_config.py -k global_config -q`
+- `uv run --project bin pytest tests/test_config.py -k global_config -q`
 
 ### T017: Surface deferred/failed-review evidence back into planning on file overlap
 **Feature:** F007
@@ -294,7 +294,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Deferring a finding on file X and then claiming a later task touching file X makes the prior finding appear in the work packet.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_review.py -k deferred_overlap -q`
+- `uv run --project bin pytest tests/test_review.py -k deferred_overlap -q`
 
 ### T018: Decision back-propagation: persist decisions that back-reference and update the PRD
 **Feature:** F007
@@ -308,7 +308,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - The change is an additive recorded transition visible in the event log.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_decisions.py -k backprop -q`
+- `uv run --project bin pytest tests/test_decisions.py -k backprop -q`
 
 ### T019: Auto-emit a Mermaid dependency/state diagram from the persisted task graph
 **Feature:** F008
@@ -322,7 +322,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A fixture project with known deps produces a Mermaid graph containing the expected edges and node statuses.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py -k graph_mermaid -q`
+- `uv run --project bin pytest tests/test_cli.py -k graph_mermaid -q`
 
 ### T020: Right-size process by score: fast-lane work packets for trivial changes
 **Feature:** F005
@@ -336,7 +336,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A trivial-scored task completes via the fast-lane and still produces an immutable evidence record; a high-blast task still requires the full packet.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_context.py -k fast_lane -q`
+- `uv run --project bin pytest tests/test_context.py -k fast_lane -q`
 
 ### T021: Publish the FastMCP stdio server to the Docker MCP catalog
 **Feature:** F006
@@ -364,7 +364,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - A batch introducing a cycle is rejected with no partial application.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli_plan.py -k batch_deps -q`
+- `uv run --project bin pytest tests/test_cli_plan.py -k batch_deps -q`
 
 ### T023: Structured contract/schema fields per task, enforced by review gates (deferred)
 **Feature:** F007
@@ -378,7 +378,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Supplying a valid contract promotes the task to ready.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_review.py -k contract_field -q`
+- `uv run --project bin pytest tests/test_review.py -k contract_field -q`
 
 ### T024: Opt-in bidirectional GitHub-Issues projection as anti-lock-in positioning (deferred)
 **Feature:** F008
@@ -392,7 +392,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - With a mocked GitHub API, tasks project to issues and a remote status change pulls back as a recorded transition without clobbering local state.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_github_issues_provider.py -q`
+- `uv run --project bin pytest tests/test_github_issues_provider.py -q`
 
 ### T025: Enforceable evidence gate: refuse completion in strict mode when required evidence is absent
 **Feature:** F007
@@ -407,7 +407,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Tested both ways: a strict-mode submit missing required evidence is rejected; the same submit in default advisory mode is accepted with a warning.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_review.py -k strict_evidence -q`
+- `uv run --project bin pytest tests/test_review.py -k strict_evidence -q`
 
 ### T026: Three-source drift command: report spec-vs-plan-vs-code divergence
 **Feature:** F008
@@ -422,7 +422,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Tested on a seeded drift fixture: the command reports the injected divergence and exits clean on a non-drifted project.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py -k drift -q`
+- `uv run --project bin pytest tests/test_cli.py -k drift -q`
 
 ### T027: Caller-supplied / existing-branch claims: attach a claim to a named branch
 **Feature:** F002
@@ -437,7 +437,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Tested: claiming with --branch existing-feature records the claim against that branch, and a claim without the option still generates the default branch name.
 
 **Verification:**
-- `cd bin && uv run pytest tests/test_cli.py -k claim_branch -q`
+- `uv run --project bin pytest tests/test_cli.py -k claim_branch -q`
 
 ### T028: Structured acceptance grammar (EARS/Gherkin) in the PRD parser
 **Feature:** F007

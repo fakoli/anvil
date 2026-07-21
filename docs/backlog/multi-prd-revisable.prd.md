@@ -435,7 +435,7 @@ Low; verification-only, but pins the backward-compat contract for the gate.
 **Verification:**
 
 - `uv run --project bin pytest -q -k 'migration and (gate or claim)'`
-- `cd bin && uv run pytest -q ../tests/test_replay.py`
+- `cd bin && uv run pytest -q ../tests/test_replay_equivalence.py`
 
 ### T015: Make parse_prd prd_id load-bearing with PRD-prefixed auto ids (bare for default) + Release field round-trip
 

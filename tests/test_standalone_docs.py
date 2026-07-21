@@ -45,6 +45,22 @@ def _readme() -> Path:
     return _repo_root() / "README.md"
 
 
+def _published_docs() -> list[Path]:
+    """Maintained Markdown published by MkDocs, excluding preserved archives."""
+    docs_root = _repo_root() / "docs"
+    return [
+        path
+        for path in docs_root.rglob("*.md")
+        if "archive" not in path.relative_to(docs_root).parts
+    ]
+
+
+_PUBLISHED_PRD_COMMAND_DOCS = (
+    "docs/backlog/anvil-backlog.prd.md",
+    "docs/backlog/multi-prd-revisable.prd.md",
+)
+
+
 # ---------------------------------------------------------------------------
 # Sibling-reference detection
 # ---------------------------------------------------------------------------
@@ -75,6 +91,39 @@ def test_onboarding_docs_exist() -> None:
             f"Expected onboarding doc at {path}. The standalone-docs gate "
             "cannot run; check the repo layout."
         )
+
+
+def test_published_docs_do_not_advertise_stale_pytest_launch_shapes() -> None:
+    """Published commands must use the current root project and real test names."""
+    stale_shapes = (
+        "cd bin && uv run pytest tests/",
+        "cd plugins/anvil",
+        "--project plugins/anvil/bin",
+        "test_mcp_server.py",
+    )
+    findings: list[str] = []
+    for path in _published_docs():
+        text = path.read_text(encoding="utf-8")
+        for stale in stale_shapes:
+            if stale in text:
+                findings.append(f"{path.relative_to(_repo_root())}: {stale}")
+    assert not findings, "stale published pytest commands:\n" + "\n".join(findings)
+
+
+def test_published_prd_pytest_commands_reference_existing_test_files() -> None:
+    """Verification bullets in maintained PRDs may only name tests that exist."""
+    missing: list[str] = []
+    pattern = re.compile(r"(?<![A-Za-z0-9_./-])(?:\.\./)?(tests/[A-Za-z0-9_./-]+\.py)")
+    for relative in _PUBLISHED_PRD_COMMAND_DOCS:
+        path = _repo_root() / relative
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.lstrip().startswith("- `") or "pytest" not in line:
+                continue
+            for match in pattern.finditer(line):
+                test_path = _repo_root() / match.group(1)
+                if not test_path.is_file():
+                    missing.append(f"{relative}:{line_number}: {match.group(0)}")
+    assert not missing, "published pytest commands name missing tests:\n" + "\n".join(missing)
 
 
 @pytest.mark.parametrize("doc", ["getting_started", "readme"])
