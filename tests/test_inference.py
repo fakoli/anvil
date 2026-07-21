@@ -8,10 +8,12 @@ All tests follow the pure-function contract:
 from __future__ import annotations
 
 import datetime
+import subprocess
 import sys
 import time
 from collections.abc import Callable
 from itertools import permutations, product
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -339,6 +341,131 @@ class TestInferDependencies:
 
         assert result[0].dependencies == ["T002"]
         assert result[0].likely_files == ["src/Widget.py"]
+        assert [task.model_dump(mode="python") for task in tasks] == before
+
+    def test_injectable_case_sensitive_directory_keeps_child_names_distinct(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_directory_uses_case_sensitive_identity",
+            lambda directory: directory == source,
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_cached_windows_path_key",
+            lambda path: path.upper(),
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_host_paths_equal",
+            lambda left, right: left.upper() == right.upper(),
+        )
+        tasks = [
+            _make_task("T001", ["src/A.py"]),
+            _make_task("T002", ["src/a.py", "src/other.py"]),
+        ]
+        before = [task.model_dump(mode="python") for task in tasks]
+
+        result = infer_dependencies(tasks)
+
+        assert all(not task.dependencies for task in result)
+        assert [task.model_dump(mode="python") for task in tasks] == before
+
+    def test_injectable_case_insensitive_directory_keeps_ordinal_aliases(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / "src").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_directory_uses_case_sensitive_identity",
+            lambda _directory: False,
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_cached_windows_path_key",
+            lambda path: path.upper(),
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_host_paths_equal",
+            lambda left, right: left.upper() == right.upper(),
+        )
+        tasks = [
+            _make_task("T001", ["src/A.py"]),
+            _make_task("T002", ["src/a.py", "src/other.py"]),
+        ]
+
+        result = infer_dependencies(tasks)
+
+        assert result[0].dependencies == ["T002"]
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_native_case_sensitive_directory_preserves_distinct_files(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = tmp_path / "case-sensitive"
+        source.mkdir()
+        try:
+            enabled = subprocess.run(
+                [
+                    "fsutil.exe",
+                    "file",
+                    "setCaseSensitiveInfo",
+                    str(source),
+                    "enable",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            pytest.skip(f"per-directory case sensitivity unavailable: {exc}")
+        if enabled.returncode != 0:
+            detail = (enabled.stderr or enabled.stdout).strip()[:200]
+            pytest.skip(
+                "per-directory case sensitivity unavailable: " + detail
+            )
+
+        upper = source / "A.py"
+        lower = source / "a.py"
+        upper.write_text("upper", encoding="utf-8")
+        lower.write_text("lower", encoding="utf-8")
+        assert upper.read_text(encoding="utf-8") == "upper"
+        assert lower.read_text(encoding="utf-8") == "lower"
+        assert not upper.samefile(lower)
+        monkeypatch.chdir(tmp_path)
+        inference_module._cached_windows_directory_case_sensitive.cache_clear()
+        tasks = [
+            _make_task("T001", ["case-sensitive/A.py"]),
+            _make_task(
+                "T002",
+                ["case-sensitive/a.py", "case-sensitive/other.py"],
+            ),
+        ]
+        before = [task.model_dump(mode="python") for task in tasks]
+
+        result = infer_dependencies(tasks)
+
+        assert inference_module._directory_uses_case_sensitive_identity(source)
+        assert all(not task.dependencies for task in result)
         assert [task.model_dump(mode="python") for task in tasks] == before
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
@@ -715,8 +842,9 @@ class TestInferDependencies:
         identities = [registry.intern(f"src/file-{index:04d}.py") for index in range(5_000)]
 
         assert len(set(identities)) == 5_000
-        assert inference_module._cached_windows_path_key.cache_info().misses == 5_000
-        assert inference_module._cached_windows_path_key.cache_info().currsize == 5_000
+        # One shared parent component plus 5,000 distinct file components.
+        assert inference_module._cached_windows_path_key.cache_info().misses == 5_001
+        assert inference_module._cached_windows_path_key.cache_info().currsize == 5_001
         assert inference_module._cached_windows_paths_equal.cache_info().misses == 0
         assert time.perf_counter() - started < 2.0
 

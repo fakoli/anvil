@@ -34,6 +34,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from functools import lru_cache
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NamedTuple
 
 from anvil.state.models import ConflictGroup, Task
@@ -253,6 +254,12 @@ def _canonical_project_path(path: object) -> str:
 _WINDOWS_COMPARISON_CACHE_SIZE = 131_072
 _WINDOWS_COLLISION_BUCKET_LIMIT = 64
 _LCMAP_UPPERCASE = 0x00000200
+_FILE_CASE_SENSITIVE_INFO_CLASS = 23
+_FILE_CS_FLAG_CASE_SENSITIVE_DIR = 0x00000001
+_FILE_READ_ATTRIBUTES = 0x00000080
+_FILE_SHARE_ALL = 0x00000007
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 
 
 def _uses_windows_path_identity() -> bool:
@@ -263,6 +270,165 @@ def _uses_windows_path_identity() -> bool:
 class _WindowsPathApi(NamedTuple):
     map_key: Callable[[str], str]
     equivalent: Callable[[str, str], bool]
+
+
+@lru_cache(maxsize=_WINDOWS_COMPARISON_CACHE_SIZE)
+def _cached_windows_directory_case_sensitive(directory: str) -> bool:
+    """Return the authoritative per-directory Win32 case-sensitivity flag."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        get_information = kernel32.GetFileInformationByHandleEx
+        close_handle = kernel32.CloseHandle
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        get_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        get_information.restype = wintypes.BOOL
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        class FileCaseSensitiveInfo(ctypes.Structure):
+            _fields_ = [("flags", wintypes.ULONG)]
+
+        handle = create_file(
+            directory,
+            _FILE_READ_ATTRIBUTES,
+            _FILE_SHARE_ALL,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle in {None, invalid_handle}:
+            raise PathIdentityError(
+                "Windows directory identity query failed"
+            )
+        try:
+            information = FileCaseSensitiveInfo()
+            succeeded = get_information(
+                handle,
+                _FILE_CASE_SENSITIVE_INFO_CLASS,
+                ctypes.byref(information),
+                ctypes.sizeof(information),
+            )
+            if not succeeded:
+                error = ctypes.get_last_error()
+                # Hosts predating per-directory case sensitivity report that
+                # this information class is unsupported. Such filesystems are
+                # case-insensitive, so the existing ordinal policy is exact.
+                if error in {1, 50, 87, 120}:
+                    return False
+                raise PathIdentityError(
+                    "Windows directory identity query failed"
+                )
+            return bool(
+                information.flags & _FILE_CS_FLAG_CASE_SENSITIVE_DIR
+            )
+        finally:
+            close_handle(handle)
+    except PathIdentityError:
+        raise
+    except Exception:
+        raise PathIdentityError(
+            "Windows directory identity query failed"
+        ) from None
+
+
+def _directory_uses_case_sensitive_identity(directory: Path) -> bool:
+    """Return one existing directory's policy, with test-host compatibility."""
+    # Cross-platform tests replace ``_uses_windows_path_identity`` to exercise
+    # ordinal collision handling. They cannot query a Win32 directory handle,
+    # so retain the historical insensitive policy off an actual Windows host.
+    if sys.platform != "win32":
+        return False
+    return _cached_windows_directory_case_sensitive(str(directory))
+
+
+def _windows_path_policy(
+    project_root: Path,
+    path: str,
+) -> tuple[tuple[str, bool], ...]:
+    """Return each component with the policy of its containing directory."""
+    current = project_root
+    inherited_policy = _directory_uses_case_sensitive_identity(current)
+    policy: list[tuple[str, bool]] = []
+    for component in PurePosixPath(path).parts:
+        if current.is_dir():
+            inherited_policy = _directory_uses_case_sensitive_identity(current)
+        policy.append((component, inherited_policy))
+        child = current / component
+        if child.is_dir():
+            current = child
+        else:
+            # A prospective child inherits the current directory's policy; do
+            # not accidentally query an unrelated ancestor for later parts.
+            current = child
+    return tuple(policy)
+
+
+def _windows_path_policy_key(
+    policy: tuple[tuple[str, bool], ...],
+) -> tuple[str, ...]:
+    return tuple(
+        f"S:{component}"
+        if case_sensitive
+        else f"I:{_cached_windows_path_key(component)}"
+        for component, case_sensitive in policy
+    )
+
+
+def _windows_path_policies_equal(
+    left_policy: tuple[tuple[str, bool], ...],
+    right_policy: tuple[tuple[str, bool], ...],
+) -> bool:
+    """Verify a key collision under each containing directory's policy."""
+    if len(left_policy) != len(right_policy):
+        return False
+    for (left_component, left_sensitive), (
+        right_component,
+        right_sensitive,
+    ) in zip(left_policy, right_policy, strict=True):
+        if left_sensitive != right_sensitive:
+            return False
+        if left_sensitive:
+            if left_component != right_component:
+                return False
+        elif not _host_paths_equal(left_component, right_component):
+            return False
+    return True
+
+
+def _windows_filesystem_path_key(project_root: Path, path: str) -> tuple[str, ...]:
+    """Build a component key honoring mixed per-directory Windows policies."""
+    return _windows_path_policy_key(_windows_path_policy(project_root, path))
+
+
+def _windows_filesystem_paths_equal(
+    project_root: Path,
+    left: str,
+    right: str,
+) -> bool:
+    return _windows_path_policies_equal(
+        _windows_path_policy(project_root, left),
+        _windows_path_policy(project_root, right),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -385,8 +551,12 @@ class _PathIdentityRegistry:
 
     def __init__(self) -> None:
         self._windows_identity = _uses_windows_path_identity()
+        self._project_root = Path.cwd().resolve()
         self._exact: dict[str, int] = {}
-        self._native_buckets: dict[str, list[tuple[str, int]]] = {}
+        self._native_buckets: dict[
+            tuple[str, ...],
+            list[tuple[str, int, tuple[tuple[str, bool], ...]]],
+        ] = {}
         self._next_identity = 0
 
     def intern(self, path: str) -> int:
@@ -394,12 +564,19 @@ class _PathIdentityRegistry:
         if existing is not None:
             return existing
 
-        bucket: list[tuple[str, int]] | None = None
+        bucket: list[
+            tuple[str, int, tuple[tuple[str, bool], ...]]
+        ] | None = None
+        path_policy: tuple[tuple[str, bool], ...] | None = None
         if self._windows_identity:
-            native_key = _cached_windows_path_key(path)
+            path_policy = _windows_path_policy(self._project_root, path)
+            native_key = _windows_path_policy_key(path_policy)
             bucket = self._native_buckets.setdefault(native_key, [])
-            for representative, identity in bucket:
-                if _host_paths_equal(path, representative):
+            for _representative, identity, representative_policy in bucket:
+                if _windows_path_policies_equal(
+                    path_policy,
+                    representative_policy,
+                ):
                     self._exact[path] = identity
                     return identity
             if len(bucket) >= _WINDOWS_COLLISION_BUCKET_LIMIT:
@@ -411,7 +588,8 @@ class _PathIdentityRegistry:
         self._next_identity += 1
         self._exact[path] = identity
         if bucket is not None:
-            bucket.append((path, identity))
+            assert path_policy is not None
+            bucket.append((path, identity, path_policy))
         return identity
 
 
