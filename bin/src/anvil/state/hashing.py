@@ -42,6 +42,7 @@ class CanonicalJsonRefusalCode(enum.StrEnum):
 
     float_forbidden = "float_forbidden"
     non_string_key = "non_string_key"
+    duplicate_key_after_normalization = "duplicate_key_after_normalization"
     unsupported_type = "unsupported_type"
     container_error = "container_error"
     cyclic_value = "cyclic_value"
@@ -303,6 +304,11 @@ def _materialize_mapping(
                     max_bytes=max_bytes,
                 )
             plain_key = str.__str__(key)
+            if plain_key in result:
+                raise CanonicalJsonRefusal(
+                    CanonicalJsonRefusalCode.duplicate_key_after_normalization,
+                    path=f"{path}.key[{index}]",
+                )
             _consume_scalar_bytes(
                 plain_key,
                 path=f"{path}.key[{index}]",

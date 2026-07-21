@@ -615,6 +615,27 @@ def test_canonical_json_materializes_mapping_and_sequence_implementations() -> N
     )
 
 
+def test_canonical_json_refuses_duplicate_keys_after_base_string_normalization() -> None:
+    class IdentityKey(str):
+        def __hash__(self) -> int:
+            return id(self)
+
+        def __eq__(self, other: object) -> bool:
+            return self is other
+
+    clean: dict[str, object] = {"tasks": []}
+    hostile = dict(clean)
+    hostile[IdentityKey("tasks")] = object()
+
+    with pytest.raises(CanonicalJsonRefusal) as refusal:
+        canonical_json_bytes(hostile)
+    assert (
+        refusal.value.code
+        is CanonicalJsonRefusalCode.duplicate_key_after_normalization
+    )
+    assert refusal.value.path == "$.key[1]"
+
+
 @pytest.mark.parametrize("value", [1.0, float("nan"), float("inf")])
 def test_canonical_json_rejects_every_float(value: float) -> None:
     with pytest.raises(CanonicalJsonRefusal) as raised:
@@ -779,6 +800,27 @@ def test_snapshot_digest_retains_ordinary_mapping_and_tuple_inputs() -> None:
         document[field] = tuple(document[field])
     wrapped = UserDict(document)
     assert snapshot_digest(wrapped) == snapshot_digest(snapshot)
+
+
+def test_snapshot_digest_refuses_duplicate_keys_after_base_string_normalization() -> None:
+    class IdentityKey(str):
+        def __hash__(self) -> int:
+            return id(self)
+
+        def __eq__(self, other: object) -> bool:
+            return self is other
+
+    snapshot = _snapshot()
+    hostile = snapshot.model_dump(mode="json")
+    hostile[IdentityKey("tasks")] = []
+
+    with pytest.raises(CanonicalJsonRefusal) as refusal:
+        snapshot_digest(hostile)
+    assert (
+        refusal.value.code
+        is CanonicalJsonRefusalCode.duplicate_key_after_normalization
+    )
+    assert refusal.value.path == "$.key[6]"
 
 
 def test_cursor_and_lowered_limits_are_excluded_from_snapshot_digest() -> None:
