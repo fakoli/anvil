@@ -340,6 +340,149 @@ def test_all_public_integer_payload_fields_reject_above_signed_int64(
         model.model_validate({**base, field: WIRE_INT64_MAX + 1})  # type: ignore[attr-defined]
 
 
+def test_every_leaf_dto_revalidates_model_copy_corruption() -> None:
+    valid_error = ReadErrorV1(
+        code=ReadErrorCode.limit_exceeded,
+        field="tasks",
+        actual=1,
+        limit=1,
+    )
+    cases: tuple[tuple[type[object], object], ...] = (
+        (
+            PrdScopedRefV1,
+            PrdScopedRefV1(prd_id="default").model_copy(
+                update={"prd_id": "../escape"}
+            ),
+        ),
+        (
+            FeatureScopedRefV1,
+            FeatureScopedRefV1(prd_id="default", feature_id="F001").model_copy(
+                update={"feature_id": "T001"}
+            ),
+        ),
+        (
+            TaskScopedRefV1,
+            TaskScopedRefV1(prd_id="default", task_id="T001").model_copy(
+                update={"task_id": "T1"}
+            ),
+        ),
+        (
+            ProjectRecordV1,
+            ProjectRecordV1(project_id="anvil", name="Anvil").model_copy(
+                update={"name": ""}
+            ),
+        ),
+        (PrdRecordV1, _prd("default").model_copy(update={"revision": 0})),
+        (
+            FeatureRecordV1,
+            _feature("default").model_copy(update={"title": ""}),
+        ),
+        (
+            VerificationCountsV1,
+            VerificationCountsV1(
+                commands=1,
+                manual_steps=0,
+                required_evidence=0,
+                typed_proofs=0,
+            ).model_copy(update={"commands": -1}),
+        ),
+        (TaskRecordV1, _task("default").model_copy(update={"title": ""})),
+        (
+            EventCursorV1,
+            EventCursorV1(
+                event_count=1,
+                event_frontier_sha256=_A_SHA,
+            ).model_copy(update={"event_count": -1}),
+        ),
+        (
+            ProviderReadLimitsV1,
+            PROVIDER_LIMITS_V1.model_copy(
+                update={"max_tasks": PROVIDER_LIMITS_V1.max_tasks + 1}
+            ),
+        ),
+        (ReadErrorV1, valid_error.model_copy(update={"actual": -1})),
+    )
+    for model, corrupted in cases:
+        with pytest.raises(ValidationError):
+            model.model_validate(corrupted)  # type: ignore[attr-defined]
+        document = corrupted.model_dump(mode="json")  # type: ignore[attr-defined]
+        schema = model.model_json_schema()  # type: ignore[attr-defined]
+        assert not Draft202012Validator(schema).is_valid(document)
+
+
+def test_nested_dtos_revalidate_model_copy_corruption_at_parent_boundaries() -> None:
+    payload = _snapshot()
+    corrupt_project = payload.project.model_copy(update={"name": ""})
+    with pytest.raises(ValidationError, match="project.name"):
+        ProjectSnapshotPayloadV1(
+            project=corrupt_project,
+            prds=payload.prds,
+            features=payload.features,
+            tasks=payload.tasks,
+        )
+
+    task = _task("default")
+    corrupt_counts = task.verification_counts.model_copy(update={"commands": -1})
+    with pytest.raises(ValidationError, match="verification_counts.commands"):
+        TaskRecordV1(
+            **{
+                **task.model_dump(),
+                "verification_counts": corrupt_counts,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"event_count": -1},
+        {"event_frontier_sha256": "z" * 64},
+    ],
+)
+def test_snapshot_response_revalidates_corrupt_cursor(
+    update: dict[str, object],
+) -> None:
+    payload = _snapshot()
+    cursor = EventCursorV1(
+        event_count=1,
+        event_frontier_sha256=_A_SHA,
+    ).model_copy(update=update)
+    with pytest.raises(ValidationError, match="event_cursor"):
+        ProjectSnapshotDataV1(
+            payload=payload,
+            event_cursor=cursor,
+            applied_limits=PROVIDER_LIMITS_V1,
+            snapshot_digest=snapshot_digest(payload),
+        )
+    document = cursor.model_dump(mode="json")
+    assert not Draft202012Validator(EventCursorV1.model_json_schema()).is_valid(
+        document
+    )
+
+
+@pytest.mark.parametrize("field", list(PROVIDER_LIMITS_V1.model_dump()))
+def test_snapshot_response_revalidates_every_raised_provider_limit(field: str) -> None:
+    payload = _snapshot()
+    corrupt_limits = PROVIDER_LIMITS_V1.model_copy(
+        update={field: getattr(PROVIDER_LIMITS_V1, field) + 1}
+    )
+    with pytest.raises(ValidationError):
+        ProviderReadLimitsV1.model_validate(corrupt_limits)
+    with pytest.raises(ValidationError):
+        ProjectSnapshotDataV1(
+            payload=payload,
+            event_cursor=EventCursorV1(
+                event_count=1,
+                event_frontier_sha256=_A_SHA,
+            ),
+            applied_limits=corrupt_limits,
+            snapshot_digest=snapshot_digest(payload),
+        )
+    document = corrupt_limits.model_dump(mode="json")
+    schema = ProviderReadLimitsV1.model_json_schema()
+    assert not Draft202012Validator(schema).is_valid(document)
+
+
 def test_valid_cross_prd_dependency_is_explicit_and_serializable() -> None:
     dependency = _snapshot().tasks[1].dependency_refs[0]
     assert dependency.model_dump(mode="json") == {
@@ -1266,6 +1409,8 @@ def test_read_error_codes_and_body_are_closed_and_serializable() -> None:
     [
         (PrdScopedRefV1, {"prd_id": "release-1"}, True),
         (PrdScopedRefV1, {"prd_id": "../escape"}, False),
+        (PrdScopedRefV1, {"prd_id": "release-1\n"}, False),
+        (PrdScopedRefV1, {"prd_id": "release-1\r"}, False),
         (
             FeatureScopedRefV1,
             {"prd_id": "default", "feature_id": "F001.2"},
@@ -1277,6 +1422,11 @@ def test_read_error_codes_and_body_are_closed_and_serializable() -> None:
             False,
         ),
         (
+            FeatureScopedRefV1,
+            {"prd_id": "default", "feature_id": "F001\n"},
+            False,
+        ),
+        (
             TaskScopedRefV1,
             {"prd_id": "default", "task_id": "T001.2"},
             True,
@@ -1284,6 +1434,11 @@ def test_read_error_codes_and_body_are_closed_and_serializable() -> None:
         (
             TaskScopedRefV1,
             {"prd_id": "default", "task_id": "T1"},
+            False,
+        ),
+        (
+            TaskScopedRefV1,
+            {"prd_id": "default", "task_id": "T001\r"},
             False,
         ),
     ],

@@ -38,9 +38,15 @@ PRD_CONTENT_OPERATION_VERSION: Literal[1] = 1
 PRD_CONTENT_SCHEMA_ID = "anvil.state.prd-content.v1"
 
 _FULL_SHA256_PATTERN = r"^[0-9a-f]{64}$"
-_PRD_ID_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$")
-_FEATURE_ID_PATTERN = re.compile(r"^F[0-9]{3}(?:\.[0-9]+)*$")
-_TASK_ID_PATTERN = re.compile(r"^T[0-9]{3}(?:\.[0-9]+)*$")
+_PRD_ID_PATTERN_TEXT = r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$"
+_FEATURE_ID_PATTERN_TEXT = r"^F[0-9]{3}(?:\.[0-9]+)*$"
+_TASK_ID_PATTERN_TEXT = r"^T[0-9]{3}(?:\.[0-9]+)*$"
+_PRD_ID_PATTERN = re.compile(_PRD_ID_PATTERN_TEXT)
+_FEATURE_ID_PATTERN = re.compile(_FEATURE_ID_PATTERN_TEXT)
+_TASK_ID_PATTERN = re.compile(_TASK_ID_PATTERN_TEXT)
+_NO_LINE_TERMINATOR_SCHEMA: dict[str, Any] = {
+    "not": {"pattern": r"[\r\n]"}
+}
 
 FullSha256: TypeAlias = str
 TaskKey: TypeAlias = tuple[str, str]
@@ -95,7 +101,12 @@ ReadErrorMessageV1: TypeAlias = Literal[
     "The requested PRD section selection is invalid.",
 ]
 
-_WIRE_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True)
+_WIRE_CONFIG = ConfigDict(
+    extra="forbid",
+    frozen=True,
+    strict=True,
+    revalidate_instances="always",
+)
 
 
 class ReadErrorCode(enum.StrEnum):
@@ -163,6 +174,7 @@ class ReadErrorV1(BaseModel):
         extra="forbid",
         frozen=True,
         strict=True,
+        revalidate_instances="always",
         json_schema_extra=_read_error_json_schema,
     )
 
@@ -283,7 +295,10 @@ MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES = (
 class PrdScopedRefV1(BaseModel):
     model_config = _WIRE_CONFIG
 
-    prd_id: str = Field(pattern=_PRD_ID_PATTERN)
+    prd_id: str = Field(
+        pattern=_PRD_ID_PATTERN_TEXT,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
 
     @model_validator(mode="after")
     def validate_prd_id(self) -> PrdScopedRefV1:
@@ -294,8 +309,14 @@ class PrdScopedRefV1(BaseModel):
 class FeatureScopedRefV1(BaseModel):
     model_config = _WIRE_CONFIG
 
-    prd_id: str = Field(pattern=_PRD_ID_PATTERN)
-    feature_id: str = Field(pattern=_FEATURE_ID_PATTERN)
+    prd_id: str = Field(
+        pattern=_PRD_ID_PATTERN_TEXT,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
+    feature_id: str = Field(
+        pattern=_FEATURE_ID_PATTERN_TEXT,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
 
     @model_validator(mode="after")
     def validate_ids(self) -> FeatureScopedRefV1:
@@ -307,8 +328,14 @@ class FeatureScopedRefV1(BaseModel):
 class TaskScopedRefV1(BaseModel):
     model_config = _WIRE_CONFIG
 
-    prd_id: str = Field(pattern=_PRD_ID_PATTERN)
-    task_id: str = Field(pattern=_TASK_ID_PATTERN)
+    prd_id: str = Field(
+        pattern=_PRD_ID_PATTERN_TEXT,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
+    task_id: str = Field(
+        pattern=_TASK_ID_PATTERN_TEXT,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
 
     @model_validator(mode="after")
     def validate_ids(self) -> TaskScopedRefV1:
@@ -328,7 +355,10 @@ class PrdRecordV1(BaseModel):
     model_config = _WIRE_CONFIG
 
     ref: PrdScopedRefV1
-    local_id: str = Field(pattern=_PRD_ID_PATTERN)
+    local_id: str = Field(
+        pattern=_PRD_ID_PATTERN_TEXT,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
     title: str = Field(min_length=1, max_length=4096)
     revision: int = Field(ge=1, le=WIRE_INT64_MAX)
     status: PrdStatusV1
@@ -360,7 +390,10 @@ class FeatureRecordV1(BaseModel):
     model_config = _WIRE_CONFIG
 
     ref: FeatureScopedRefV1
-    local_id: str = Field(pattern=_FEATURE_ID_PATTERN)
+    local_id: str = Field(
+        pattern=_FEATURE_ID_PATTERN_TEXT,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
     prd_ref: PrdScopedRefV1
     title: str = Field(min_length=1, max_length=4096)
     status: FeatureStatusV1
@@ -388,7 +421,10 @@ class TaskRecordV1(BaseModel):
     model_config = _WIRE_CONFIG
 
     ref: TaskScopedRefV1
-    local_id: str = Field(pattern=_TASK_ID_PATTERN)
+    local_id: str = Field(
+        pattern=_TASK_ID_PATTERN_TEXT,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
     prd_ref: PrdScopedRefV1
     feature_ref: FeatureScopedRefV1
     parent_ref: TaskScopedRefV1 | None = None
@@ -406,8 +442,15 @@ class TaskRecordV1(BaseModel):
         if not isinstance(value, Mapping):
             return value
         data = dict(value)
+        _require_valid_unicode(data.get("title"), path="$.title")
         for field in ("dependency_refs", "acceptance_criteria"):
             collection = _plain_wire_sequence(data.get(field), field=field)
+            if field == "acceptance_criteria" and collection is not None:
+                for index, item in enumerate(collection):
+                    _require_valid_unicode(
+                        item,
+                        path=f"$.acceptance_criteria[{index}]",
+                    )
             if type(collection) is list:
                 data[field] = tuple(collection)
         return data
@@ -508,8 +551,10 @@ class ProjectSnapshotDataV1(BaseModel):
 
     @model_validator(mode="after")
     def validate_digest(self) -> ProjectSnapshotDataV1:
-        validate_snapshot_limits(self.payload, self.applied_limits)
-        if self.snapshot_digest != snapshot_digest(self.payload):
+        _validate_snapshot_limits_validated(self.payload, self.applied_limits)
+        # Nested DTOs were revalidated while constructing this response, so
+        # avoid a second full hierarchy parse solely to recompute its digest.
+        if self.snapshot_digest != _validated_snapshot_digest(self.payload):
             raise ValueError("snapshot_digest does not match the allowlisted payload")
         _validate_response_serialized_limit(self, self.applied_limits)
         return self
@@ -521,26 +566,30 @@ def snapshot_digest(
     """Return the v1 digest of only schema/version and allowlisted hierarchy."""
     if isinstance(payload, ProjectSnapshotPayloadV1):
         # ``model_copy(update=...)`` deliberately skips validation.  Apply the
-        # cheap structural bounds before serializing such an instance, then
-        # pass its wire document through the same full validation path as a
-        # mapping so typed and untyped inputs cannot disagree on validity.
+        # cheap container-integrity bound, then ask Pydantic to recursively
+        # revalidate the instance exactly once.  Mapping inputs still pass
+        # through canonical JSON so arbitrary safe Mapping implementations are
+        # materialized without changing the digest contract.
         _preflight_typed_snapshot(payload)
-        _validate_snapshot_shape_limits(payload, PROVIDER_LIMITS_V1)
-        document: Mapping[str, Any] = payload.model_dump(mode="json")
+        validated = ProjectSnapshotPayloadV1.model_validate(payload)
     else:
-        document = payload
-    _validate_raw_snapshot_limits(document, PROVIDER_LIMITS_V1)
-    validated = ProjectSnapshotPayloadV1.model_validate_json(
-        canonical_json_bytes(
-            document,
-            max_nodes=canonical_node_budget_for_bytes(
-                PROVIDER_LIMITS_V1.max_snapshot_bytes
-            ),
-            max_bytes=PROVIDER_LIMITS_V1.max_snapshot_bytes,
-            max_string_bytes=PROVIDER_LIMITS_V1.max_string_bytes,
+        _validate_raw_snapshot_limits(payload, PROVIDER_LIMITS_V1)
+        validated = ProjectSnapshotPayloadV1.model_validate_json(
+            canonical_json_bytes(
+                payload,
+                max_nodes=canonical_node_budget_for_bytes(
+                    PROVIDER_LIMITS_V1.max_snapshot_bytes
+                ),
+                max_bytes=PROVIDER_LIMITS_V1.max_snapshot_bytes,
+                max_string_bytes=PROVIDER_LIMITS_V1.max_string_bytes,
+            )
         )
-    )
-    digest_document = validated.model_dump(mode="json")
+    return _validated_snapshot_digest(validated)
+
+
+def _validated_snapshot_digest(payload: ProjectSnapshotPayloadV1) -> FullSha256:
+    """Hash a payload already validated at its immediate public boundary."""
+    digest_document = payload.model_dump(mode="json")
     return domain_separated_sha256(
         PROJECT_SNAPSHOT_DIGEST_DOMAIN,
         digest_document,
@@ -554,8 +603,10 @@ def snapshot_digest(
 
 def snapshot_canonical_bytes(payload: ProjectSnapshotPayloadV1) -> bytes:
     """Expose exact digest preimage JSON for cross-runtime qualification vectors."""
+    _preflight_typed_snapshot(payload)
+    validated = ProjectSnapshotPayloadV1.model_validate(payload)
     return canonical_json_bytes(
-        payload.model_dump(mode="json"),
+        validated.model_dump(mode="json"),
         max_nodes=canonical_node_budget_for_bytes(
             PROVIDER_LIMITS_V1.max_snapshot_bytes
         ),
@@ -566,9 +617,10 @@ def snapshot_canonical_bytes(payload: ProjectSnapshotPayloadV1) -> bytes:
 
 def snapshot_response_canonical_bytes(response: ProjectSnapshotDataV1) -> bytes:
     """Return canonical bytes for the complete bounded operation data."""
-    limits = response.applied_limits
+    validated = ProjectSnapshotDataV1.model_validate(response)
+    limits = validated.applied_limits
     return canonical_json_bytes(
-        response.model_dump(mode="json"),
+        validated.model_dump(mode="json"),
         max_nodes=canonical_node_budget_for_bytes(limits.max_response_bytes),
         max_bytes=limits.max_response_bytes,
         max_string_bytes=min(
@@ -598,6 +650,17 @@ def validate_snapshot_limits(
     limits: ProviderReadLimitsV1,
 ) -> None:
     """Refuse a hierarchy exceeding provider or caller-lowered ceilings."""
+    _preflight_typed_snapshot(snapshot)
+    validated_snapshot = ProjectSnapshotPayloadV1.model_validate(snapshot)
+    validated_limits = ProviderReadLimitsV1.model_validate(limits)
+    _validate_snapshot_limits_validated(validated_snapshot, validated_limits)
+
+
+def _validate_snapshot_limits_validated(
+    snapshot: ProjectSnapshotPayloadV1,
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Apply caller limits to DTOs revalidated at their public boundary."""
     _validate_snapshot_shape_limits(snapshot, limits)
     _validate_snapshot_serialized_limit(snapshot, limits)
 
@@ -786,6 +849,18 @@ def _plain_wire_sequence(
     ):
         raise ValueError(f"{field} must use a plain list or tuple")
     return None
+
+
+def _require_valid_unicode(value: Any, *, path: str) -> None:
+    if not isinstance(value, str):
+        return
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CanonicalJsonRefusal(
+            CanonicalJsonRefusalCode.invalid_unicode,
+            path=path,
+        ) from exc
 
 
 def _preflight_typed_snapshot(payload: ProjectSnapshotPayloadV1) -> None:
