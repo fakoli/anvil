@@ -96,7 +96,7 @@ _EXPAND_MAX_SUBTASKS = 5
 
 
 class InferenceResult(NamedTuple):
-    """Output of ``infer_all`` — always returned, never raised."""
+    """Output returned by ``infer_all`` after its inputs pass validation."""
 
     tasks: list[Task]
     conflict_groups: list[ConflictGroup]
@@ -144,7 +144,7 @@ class BundlePlanReport:
 
 
 class BundlePlanningError(ValueError):
-    """The proposed execution graph cannot be costed safely."""
+    """A planning graph or portable file scope cannot be analyzed safely."""
 
 
 _WINDOWS_ILLEGAL_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
@@ -152,7 +152,10 @@ _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
+    | {f"COM{index}" for index in "¹²³"}
+    | {f"LPT{index}" for index in "¹²³"}
 )
+_WINDOWS_RESERVED_CONSOLE_COMPONENTS = frozenset({"CONIN$", "CONOUT$"})
 
 
 def _validate_portable_project_path(candidate: str, original: str) -> None:
@@ -161,9 +164,10 @@ def _validate_portable_project_path(candidate: str, original: str) -> None:
     Git repositories routinely cross POSIX and Windows hosts.  In addition to
     the traversal checks performed after normalization, every authored path
     component must therefore exclude ASCII control characters, Windows-illegal
-    punctuation, trailing dots/spaces, and Windows device basenames.  ``.`` and
-    ``..`` remain valid normalization aliases and separators are handled before
-    this component-level policy runs.
+    punctuation, trailing dots/spaces, Windows device basenames, and the exact
+    ``CONIN$``/``CONOUT$`` console aliases.  ``.`` and ``..`` remain valid
+    normalization aliases and separators are handled before this component-level
+    policy runs.
     """
     if any(
         ord(character) < 0x20 or ord(character) == 0x7F
@@ -184,6 +188,7 @@ def _validate_portable_project_path(candidate: str, original: str) -> None:
             )
             or component.endswith((".", " "))
             or basename in _WINDOWS_RESERVED_DEVICE_BASENAMES
+            or component.upper() in _WINDOWS_RESERVED_CONSOLE_COMPONENTS
         ):
             raise BundlePlanningError(
                 "bundle planning requires a portable project-relative file path: "
@@ -526,6 +531,11 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
     Returns:
         New list of Task instances with dependencies set from subset edges.
         Tasks with no inferred dependencies are returned unchanged.
+
+    Raises:
+        BundlePlanningError: A likely-file path is absolute, escaping, or not
+            portable.  Validation fails before any result is returned and never
+            mutates the input tasks.
     """
     if not tasks:
         return []
@@ -597,6 +607,11 @@ def infer_conflict_groups(
 
     Returns:
         Tuple of (updated Task list, list of ConflictGroup instances).
+
+    Raises:
+        BundlePlanningError: A likely-file path is absolute, escaping, or not
+            portable.  Validation fails before any result is returned and never
+            mutates the input tasks.
     """
     if not tasks:
         return [], []
@@ -682,6 +697,11 @@ def infer_all(tasks: list[Task]) -> InferenceResult:
 
     Returns:
         InferenceResult with the fully-annotated Task list and conflict groups.
+
+    Raises:
+        BundlePlanningError: A likely-file path is absolute, escaping, or not
+            portable.  Validation fails before an ``InferenceResult`` is returned
+            and never mutates the input tasks.
     """
     tasks_with_deps = infer_dependencies(tasks)
     tasks_with_all, conflict_groups = infer_conflict_groups(tasks_with_deps)

@@ -37,7 +37,10 @@ _WINDOWS_DEVICE_NAMES = [
     "NUL",
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
+    *(f"COM{index}" for index in "¹²³"),
+    *(f"LPT{index}" for index in "¹²³"),
 ]
+_WINDOWS_CONSOLE_DEVICE_NAMES = ["CONIN$", "CONOUT$"]
 _PORTABLE_PATH_ENTRYPOINTS = [
     infer_dependencies,
     infer_conflict_groups,
@@ -166,6 +169,8 @@ class TestInferDependencies:
             "src/trailing-space /file.py",
             *_WINDOWS_DEVICE_NAMES,
             *(f"src/{name.lower()}.txt" for name in _WINDOWS_DEVICE_NAMES),
+            *_WINDOWS_CONSOLE_DEVICE_NAMES,
+            *(f"src/{name.lower()}" for name in _WINDOWS_CONSOLE_DEVICE_NAMES),
         ],
     )
     @pytest.mark.parametrize(
@@ -177,8 +182,19 @@ class TestInferDependencies:
         unsafe_path: str,
         entrypoint: Callable[[list[Task]], object],
     ) -> None:
+        """Every public planner raises before returning or mutating caller state."""
+        task = _make_task(
+            "T001",
+            [unsafe_path],
+            dependencies=["T900"],
+            conflict_groups=["CG-authored"],
+        )
+        before = task.model_dump(mode="python")
+
         with pytest.raises(BundlePlanningError, match="project"):
-            entrypoint([_make_task("T001", [unsafe_path])])
+            entrypoint([task])
+
+        assert task.model_dump(mode="python") == before
 
     @pytest.mark.parametrize(
         "portable_path",
@@ -193,6 +209,10 @@ class TestInferDependencies:
             "src/LPT10.txt",
             "src/.con",
             "src/console.txt",
+            "src/CONIN$.txt",
+            "src/conout$.log",
+            "src/CONINPUT$",
+            "src/CONOUT",
         ],
     )
     @pytest.mark.parametrize("entrypoint", _PORTABLE_PATH_ENTRYPOINTS)
