@@ -754,7 +754,7 @@ def plan(
         except EventRejected as exc:
             if json_output:
                 fail("plan", f"orphan cleanup refused — {exc}", code="event_rejected")
-            typer.echo(f"Error: orphan cleanup refused — {exc}", err=True)
+            typer.echo(f"Error: orphan cleanup refused - {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
         deleted_task_ids = prune_result.pruned_task_ids
@@ -2116,7 +2116,7 @@ def show(
             indented = s.explanation.replace("\n", "\n    ")
             typer.echo(f"\n  Explanation:\n    {indented}")
     else:
-        typer.echo("  (not yet scored — run `anvil score`)")
+        typer.echo("  (not yet scored - run `anvil score`)")
 
     _section("Dependencies")
     if task.dependencies:
@@ -2137,14 +2137,14 @@ def show(
         for criterion in task.acceptance_criteria:
             typer.echo(f"  - {criterion}")
     else:
-        typer.echo("  (none — required before review)")
+        typer.echo("  (none - required before review)")
 
     _section("Verification Commands")
     if task.verification.commands:
         for cmd in task.verification.commands:
             typer.echo(f"  $ {cmd}")
     else:
-        typer.echo("  (none — required before review)")
+        typer.echo("  (none - required before review)")
 
     _section("Likely Files")
     if task.likely_files:

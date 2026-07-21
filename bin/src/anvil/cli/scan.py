@@ -1049,7 +1049,7 @@ def _print_human(result: dict[str, Any], state_dir: Path) -> None:
     delta = result["delta"]
     typer.echo("")
     if result["first_scan"]:
-        typer.echo("First scan — persisted a new codebase model.")
+        typer.echo("First scan - persisted a new codebase model.")
     else:
         typer.echo(
             "Re-scan delta: "
