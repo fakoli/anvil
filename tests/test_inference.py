@@ -197,6 +197,78 @@ class TestInferDependencies:
         assert task.model_dump(mode="python") == before
 
     @pytest.mark.parametrize(
+        "malformed_path",
+        [None, 17, object(), ["src/nested.py"]],
+        ids=["none", "integer", "object", "list"],
+    )
+    @pytest.mark.parametrize("entrypoint", _PORTABLE_PATH_ENTRYPOINTS)
+    def test_post_validation_non_string_paths_fail_closed_without_mutation(
+        self,
+        malformed_path: object,
+        entrypoint: Callable[[list[Task]], object],
+    ) -> None:
+        tasks = [
+            _make_task(
+                "T001",
+                ["src/valid.py"],
+                conflict_groups=["CG-authored"],
+            ),
+            _make_task("T002", ["src/other.py"], dependencies=["T001"]),
+        ]
+        tasks[1].likely_files.append(malformed_path)  # type: ignore[arg-type]
+        before_files = [list(task.likely_files) for task in tasks]
+        before_dependencies = [list(task.dependencies) for task in tasks]
+        before_conflicts = [list(task.conflict_groups) for task in tasks]
+
+        with pytest.raises(BundlePlanningError, match="paths to be strings"):
+            entrypoint(tasks)
+
+        assert [task.likely_files for task in tasks] == before_files
+        assert [task.dependencies for task in tasks] == before_dependencies
+        assert [task.conflict_groups for task in tasks] == before_conflicts
+
+    def test_case_equivalent_paths_share_dependency_identity(self) -> None:
+        tasks = [
+            _make_task("T001", ["src/Widget.py"]),
+            _make_task("T002", ["src/widget.py", "src/other.py"]),
+        ]
+        before = [task.model_dump(mode="python") for task in tasks]
+
+        result = infer_dependencies(tasks)
+
+        assert result[0].dependencies == ["T002"]
+        assert result[0].likely_files == ["src/Widget.py"]
+        assert [task.model_dump(mode="python") for task in tasks] == before
+
+    def test_case_equivalent_paths_share_conflict_identity(self) -> None:
+        tasks = [
+            _make_task("T001", ["src/Widget.py", "src/one.py"]),
+            _make_task("T002", ["src/widget.py", "src/two.py"]),
+        ]
+        before = [task.model_dump(mode="python") for task in tasks]
+
+        result_tasks, groups = infer_conflict_groups(tasks)
+
+        assert [group.id for group in groups] == ["CG-T001-T002"]
+        assert "src/Widget.py" in groups[0].reason
+        assert result_tasks[0].likely_files == ["src/Widget.py", "src/one.py"]
+        assert [task.model_dump(mode="python") for task in tasks] == before
+
+    def test_bundle_plan_coordinates_case_equivalent_paths(self) -> None:
+        tasks = [
+            _make_task("T001", ["src/Widget.py"]),
+            _make_task("T002", ["src/widget.py"]),
+        ]
+        before = [task.model_dump(mode="python") for task in tasks]
+
+        report = build_bundle_plan(tasks)
+
+        assert report.overlap_pair_count == 1
+        assert report.overlap_files == ("src/Widget.py",)
+        assert report.proposed_bundles[0].task_ids == ("T001", "T002")
+        assert [task.model_dump(mode="python") for task in tasks] == before
+
+    @pytest.mark.parametrize(
         "portable_path",
         [
             "./src\\module.py",

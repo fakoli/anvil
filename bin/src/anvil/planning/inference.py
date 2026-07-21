@@ -196,8 +196,13 @@ def _validate_portable_project_path(candidate: str, original: str) -> None:
             )
 
 
-def _canonical_project_path(path: str) -> str:
+def _canonical_project_path(path: object) -> str:
     """Return one safe project-relative spelling for inference comparisons."""
+    if not isinstance(path, str):
+        raise BundlePlanningError(
+            "bundle planning requires likely-file paths to be strings; got "
+            f"{type(path).__name__}"
+        )
     candidate = path.replace("\\", "/")
     if not candidate or candidate.startswith("/"):
         raise BundlePlanningError(
@@ -210,6 +215,15 @@ def _canonical_project_path(path: str) -> str:
             f"bundle planning file path escapes the project: {path!r}"
         )
     return normalized
+
+
+def _canonical_file_scope(task: Task) -> tuple[frozenset[str], dict[str, str]]:
+    """Return case-insensitive comparison keys and their authored spellings."""
+    display_paths: dict[str, str] = {}
+    for path in task.likely_files:
+        comparison_key = _canonical_project_path(path).casefold()
+        display_paths.setdefault(comparison_key, path)
+    return frozenset(display_paths), display_paths
 
 
 def _serial_depth(tasks: list[Task]) -> int:
@@ -282,14 +296,16 @@ def build_bundle_plan(
     if duplicates:
         raise BundlePlanningError(f"bundle planning found duplicate task ids: {duplicates}")
     ordered_input = sorted(tasks, key=lambda task: task.id)
-    canonical_files: dict[str, frozenset[str]] = {
-        task.id: frozenset(_canonical_project_path(path) for path in task.likely_files)
-        for task in ordered_input
+    canonical_scopes = {
+        task.id: _canonical_file_scope(task) for task in ordered_input
+    }
+    canonical_files = {
+        task_id: scope for task_id, (scope, _) in canonical_scopes.items()
     }
     display_path: dict[str, str] = {}
     for task in ordered_input:
-        for path in task.likely_files:
-            display_path.setdefault(_canonical_project_path(path), path)
+        for comparison_key, path in canonical_scopes[task.id][1].items():
+            display_path.setdefault(comparison_key, path)
     inferred_dependencies = {
         task.id: set(task.dependencies) for task in ordered_input
     }
@@ -419,7 +435,7 @@ def build_bundle_plan(
 
 def _files_set(task: Task) -> frozenset[str]:
     """Return a canonical, validated copy of a task's likely file scope."""
-    return frozenset(_canonical_project_path(path) for path in task.likely_files)
+    return _canonical_file_scope(task)[0]
 
 
 class _DependencyReachability:
@@ -548,7 +564,7 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
     # So: A_files ⊂ B_files (strict) → A.dependencies.append(B.id)
 
     file_sets: dict[str, frozenset[str]] = {
-        t.id: _files_set(t) for t in tasks
+        task.id: _files_set(task) for task in tasks
     }
 
     # Collect dependency edges: new_deps[task_id] = set of dependency IDs.
@@ -616,9 +632,14 @@ def infer_conflict_groups(
     if not tasks:
         return [], []
 
-    file_sets: dict[str, frozenset[str]] = {
-        t.id: _files_set(t) for t in tasks
+    canonical_scopes = {task.id: _canonical_file_scope(task) for task in tasks}
+    file_sets = {
+        task_id: scope for task_id, (scope, _) in canonical_scopes.items()
     }
+    display_path: dict[str, str] = {}
+    for task in sorted(tasks, key=lambda item: item.id):
+        for comparison_key, path in canonical_scopes[task.id][1].items():
+            display_path.setdefault(comparison_key, path)
 
     # Map task ID → set of conflict-group IDs it belongs to.
     task_conflict_groups: dict[str, set[str]] = {t.id: set() for t in tasks}
@@ -661,7 +682,7 @@ def infer_conflict_groups(
                 task_ids=sorted_ids,
                 reason=(
                     f"Tasks {id_a} and {id_b} share overlapping files: "
-                    + ", ".join(sorted(overlap))
+                    + ", ".join(display_path[path] for path in sorted(overlap))
                 ),
             )
             conflict_groups.append(cg)
