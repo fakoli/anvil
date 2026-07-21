@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 import anvil.read_contracts as read_contracts_module
 from anvil.read_contracts import (
+    MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES,
     PROVIDER_LIMITS_V1,
     WIRE_INT64_MAX,
     EventCursorV1,
@@ -35,7 +36,9 @@ from anvil.read_contracts import (
 )
 from anvil.state.hashing import (
     MAX_CANONICAL_JSON_DEPTH,
+    MAX_CANONICAL_JSON_INTEGER,
     MAX_CANONICAL_JSON_NODES,
+    MIN_CANONICAL_JSON_INTEGER,
     CanonicalJsonRefusal,
     CanonicalJsonRefusalCode,
     canonical_json_bytes,
@@ -235,6 +238,20 @@ def test_all_public_integer_payload_fields_accept_signed_int64_maximum() -> None
         limit=WIRE_INT64_MAX,
     )
     assert error.actual == WIRE_INT64_MAX
+
+
+def test_public_integer_payload_fields_keep_their_semantic_lower_bounds() -> None:
+    assert EventCursorV1(
+        event_count=0,
+        event_frontier_sha256=_A_SHA,
+    ).event_count == 0
+    with pytest.raises(ValidationError):
+        EventCursorV1(event_count=-1, event_frontier_sha256=_A_SHA)
+
+    prd_data = _prd("default").model_dump()
+    assert PrdRecordV1.model_validate({**prd_data, "revision": 1}).revision == 1
+    with pytest.raises(ValidationError):
+        PrdRecordV1.model_validate({**prd_data, "revision": 0})
 
 
 @pytest.mark.parametrize(
@@ -456,6 +473,23 @@ def test_canonical_json_rejects_every_float(value: float) -> None:
     assert raised.value.code is CanonicalJsonRefusalCode.float_forbidden
 
 
+def test_canonical_json_uses_the_complete_signed_int64_interval() -> None:
+    assert canonical_json_bytes(MIN_CANONICAL_JSON_INTEGER) == str(
+        MIN_CANONICAL_JSON_INTEGER
+    ).encode()
+    assert canonical_json_bytes(MAX_CANONICAL_JSON_INTEGER) == str(
+        MAX_CANONICAL_JSON_INTEGER
+    ).encode()
+
+    for refused in (
+        MIN_CANONICAL_JSON_INTEGER - 1,
+        MAX_CANONICAL_JSON_INTEGER + 1,
+    ):
+        with pytest.raises(CanonicalJsonRefusal) as refusal:
+            canonical_json_bytes(refused)
+        assert refusal.value.code is CanonicalJsonRefusalCode.integer_out_of_range
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -644,6 +678,53 @@ def test_complete_response_ceiling_has_exact_lowered_boundary() -> None:
         )
 
 
+def test_impossible_response_ceiling_precedes_payload_and_digest_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    phases: list[str] = []
+
+    class ExplodingPayload(UserDict[str, object]):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("payload")
+            raise AssertionError("payload validation must not begin")
+
+        def __getitem__(self, key: str) -> object:
+            phases.append("payload")
+            raise AssertionError("payload validation must not begin")
+
+    def fail_expensive(*args: object, **kwargs: object) -> object:
+        phases.append("expensive")
+        raise AssertionError("response validation work must not begin")
+
+    monkeypatch.setattr(read_contracts_module, "validate_snapshot_limits", fail_expensive)
+    monkeypatch.setattr(read_contracts_module, "snapshot_digest", fail_expensive)
+    monkeypatch.setattr(
+        read_contracts_module,
+        "_validate_response_serialized_limit",
+        fail_expensive,
+    )
+    raw_limits = PROVIDER_LIMITS_V1.model_dump(mode="json")
+    raw_limits["max_response_bytes"] = 1
+
+    with pytest.raises(
+        ValidationError,
+        match="response byte ceiling cannot fit invariant response fields",
+    ):
+        ProjectSnapshotDataV1.model_validate(
+            {
+                "payload": ExplodingPayload(),
+                "event_cursor": {
+                    "event_count": 0,
+                    "event_frontier_sha256": _A_SHA,
+                },
+                "applied_limits": raw_limits,
+                "snapshot_digest": _A_SHA,
+            }
+        )
+    assert MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES > 1
+    assert phases == []
+
+
 def test_hash_domains_must_be_ascii_and_nul_terminated() -> None:
     assert len(domain_separated_sha256(b"contract.v1\0", {"a": 1})) == 64
     with pytest.raises(ValueError, match="terminating NUL"):
@@ -722,25 +803,24 @@ def test_public_count_gates_precede_hierarchy_graph_work() -> None:
 def test_aggregate_lower_bound_precedes_dump_sets_and_cycle_graph(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dependency_ref = TaskScopedRefV1(prd_id="default", task_id="T001")
-    maximum_dependencies = (dependency_ref,) * (
+    phases: list[str] = []
+
+    class ExplodingDependency(UserDict[str, object]):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("nested-dto")
+            raise AssertionError("nested dependency validation must not begin")
+
+        def __getitem__(self, key: str) -> object:
+            phases.append("nested-dto")
+            raise AssertionError("nested dependency validation must not begin")
+
+    raw = _snapshot().model_dump(mode="json")
+    raw_task = raw["tasks"][0]
+    raw_task["dependency_refs"] = [ExplodingDependency()] * (
         PROVIDER_LIMITS_V1.max_dependencies_per_task
     )
-    maximum_task = _task(
-        "default",
-        "T002",
-        dependencies=maximum_dependencies,
-        acceptance=(),
-    )
-    maximum_tasks = (maximum_task,) * PROVIDER_LIMITS_V1.max_tasks
-    snapshot = ProjectSnapshotPayloadV1.model_construct(
-        project=ProjectRecordV1(project_id="anvil", name="Anvil"),
-        prds=(_prd("default"),),
-        features=(_feature("default"),),
-        tasks=maximum_tasks,
-    )
-
-    phases: list[str] = []
+    raw_task["acceptance_criteria"] = []
+    raw["tasks"] = [raw_task] * PROVIDER_LIMITS_V1.max_tasks
 
     def fail_dump(*args: object, **kwargs: object) -> object:
         phases.append("model_dump")
@@ -750,14 +830,16 @@ def test_aggregate_lower_bound_precedes_dump_sets_and_cycle_graph(
         phases.append("hierarchy")
         raise AssertionError("hierarchy sets must not be built")
 
+    def fail_canonical(*args: object, **kwargs: object) -> bytes:
+        phases.append("canonical")
+        raise AssertionError("canonical materialization must not begin")
+
     monkeypatch.setattr(ProjectSnapshotPayloadV1, "model_dump", fail_dump)
     monkeypatch.setattr(read_contracts_module, "_validate_hierarchy", fail_hierarchy)
+    monkeypatch.setattr(read_contracts_module, "canonical_json_bytes", fail_canonical)
 
-    with pytest.raises(ValueError, match="snapshot minimum byte size"):
-        read_contracts_module._validate_snapshot_shape_limits(
-            snapshot,
-            PROVIDER_LIMITS_V1,
-        )
+    with pytest.raises(ValidationError, match="snapshot minimum byte size"):
+        ProjectSnapshotPayloadV1.model_validate(raw)
     assert phases == []
 
 

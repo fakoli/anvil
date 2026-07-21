@@ -33,6 +33,7 @@ MAX_CANONICAL_JSON_BYTES = 16_777_216
 MAX_CANONICAL_JSON_RESPONSE_BYTES = 16_842_752
 MAX_CANONICAL_JSON_STRING_BYTES = 16_777_216
 MAX_CANONICAL_JSON_NODE_HARD_LIMIT = MAX_CANONICAL_JSON_RESPONSE_BYTES
+MIN_CANONICAL_JSON_INTEGER = -(2**63)
 MAX_CANONICAL_JSON_INTEGER = (2**63) - 1
 
 
@@ -195,7 +196,7 @@ def _materialize_canonical_json_value(
         )
         return value
     if isinstance(value, int):
-        if not -MAX_CANONICAL_JSON_INTEGER <= value <= MAX_CANONICAL_JSON_INTEGER:
+        if not MIN_CANONICAL_JSON_INTEGER <= value <= MAX_CANONICAL_JSON_INTEGER:
             raise CanonicalJsonRefusal(
                 CanonicalJsonRefusalCode.integer_out_of_range,
                 path=path,

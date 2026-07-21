@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from anvil.state.hashing import (
     MAX_CANONICAL_JSON_RESPONSE_BYTES,
@@ -30,6 +30,9 @@ PROJECT_SNAPSHOT_OPERATION_VERSION = 1
 PROJECT_SNAPSHOT_SCHEMA_ID = "anvil.state.project-snapshot.v1"
 PROJECT_SNAPSHOT_DIGEST_DOMAIN = b"anvil.project-snapshot.v1\0"
 WIRE_INT64_MAX = (2**63) - 1
+MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES = len(
+    b'{"applied_limits":{},"event_cursor":{},"payload":{},"snapshot_digest":""}'
+)
 
 PRD_CONTENT_OPERATION_ID = "state.prd.content"
 PRD_CONTENT_OPERATION_VERSION = 1
@@ -337,6 +340,37 @@ class ProjectSnapshotPayloadV1(BaseModel):
     features: tuple[FeatureRecordV1, ...]
     tasks: tuple[TaskRecordV1, ...]
 
+    @model_validator(mode="before")
+    @classmethod
+    def preflight_raw_limits(cls, value: Any, info: ValidationInfo) -> Any:
+        """Refuse structurally impossible wire input before nested DTO parsing."""
+        if isinstance(value, Mapping):
+            _validate_raw_snapshot_limits(value, PROVIDER_LIMITS_V1)
+            if info.mode == "json":
+                # A before-validator receives decoded JSON as Python lists.
+                # Preserve strict DTO semantics while retaining JSON-array input.
+                value = dict(value)
+                for name in ("prds", "features"):
+                    collection = value.get(name)
+                    if isinstance(collection, list):
+                        value[name] = tuple(collection)
+                tasks = value.get("tasks")
+                if isinstance(tasks, list):
+                    converted_tasks: list[Any] = []
+                    for task in tasks:
+                        if isinstance(task, Mapping):
+                            task = dict(task)
+                            for name in (
+                                "dependency_refs",
+                                "acceptance_criteria",
+                            ):
+                                collection = task.get(name)
+                                if isinstance(collection, list):
+                                    task[name] = tuple(collection)
+                        converted_tasks.append(task)
+                    value["tasks"] = tuple(converted_tasks)
+        return value
+
     @model_validator(mode="after")
     def validate_hierarchy(self) -> ProjectSnapshotPayloadV1:
         _validate_snapshot_shape_limits(self, PROVIDER_LIMITS_V1)
@@ -362,6 +396,32 @@ class ProjectSnapshotDataV1(BaseModel):
     applied_limits: ProviderReadLimitsV1
     snapshot_digest: str = Field(pattern=_FULL_SHA256_PATTERN)
 
+    @model_validator(mode="before")
+    @classmethod
+    def preflight_response_ceiling(cls, value: Any) -> Any:
+        """Reject an impossible envelope ceiling before touching its payload."""
+        if not isinstance(value, Mapping):
+            return value
+        raw_limits = value.get("applied_limits")
+        if isinstance(raw_limits, ProviderReadLimitsV1):
+            ceiling = raw_limits.max_response_bytes
+        elif isinstance(raw_limits, Mapping):
+            ceiling = raw_limits.get(
+                "max_response_bytes",
+                PROVIDER_LIMITS_V1.max_response_bytes,
+            )
+        else:
+            return value
+        if (
+            isinstance(ceiling, int)
+            and not isinstance(ceiling, bool)
+            and ceiling < MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES
+        ):
+            raise ValueError(
+                "response byte ceiling cannot fit invariant response fields"
+            )
+        return value
+
     @model_validator(mode="after")
     def validate_digest(self) -> ProjectSnapshotDataV1:
         validate_snapshot_limits(self.payload, self.applied_limits)
@@ -378,7 +438,7 @@ def snapshot_digest(
     if isinstance(payload, Mapping) and not isinstance(
         payload, ProjectSnapshotPayloadV1
     ):
-        _validate_raw_snapshot_count_limits(payload, PROVIDER_LIMITS_V1)
+        _validate_raw_snapshot_limits(payload, PROVIDER_LIMITS_V1)
     validated = (
         payload
         if isinstance(payload, ProjectSnapshotPayloadV1)
@@ -500,6 +560,82 @@ def _validate_snapshot_aggregate_lower_bound(
     therefore proves the real payload cannot fit, while an admitted payload
     proceeds to exact validation after hierarchy checks.
     """
+    _validate_snapshot_aggregate_counts(
+        prd_count=len(snapshot.prds),
+        feature_count=len(snapshot.features),
+        task_shapes=(
+            (
+                task.parent_ref is not None,
+                len(task.dependency_refs),
+                len(task.acceptance_criteria),
+            )
+            for task in snapshot.tasks
+        ),
+        limits=limits,
+    )
+
+
+def _validate_raw_snapshot_limits(
+    payload: Mapping[str, Any],
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Reject impossible raw collections before nested DTO materialization."""
+    collections = (
+        ("prds", limits.max_prds, "PRD count exceeds provider limit"),
+        ("features", limits.max_features, "feature count exceeds provider limit"),
+        ("tasks", limits.max_tasks, "task count exceeds provider limit"),
+    )
+    for name, limit, message in collections:
+        value = payload.get(name)
+        if _is_json_sequence(value) and len(value) > limit:
+            raise ValueError(message)
+
+    tasks = payload.get("tasks")
+    if not _is_json_sequence(tasks):
+        return
+
+    def raw_task_shapes() -> Iterator[tuple[bool, int, int]]:
+        for task in tasks:
+            if isinstance(task, TaskRecordV1):
+                parent_present = task.parent_ref is not None
+                dependencies = task.dependency_refs
+                criteria = task.acceptance_criteria
+            elif isinstance(task, Mapping):
+                parent_present = task.get("parent_ref") is not None
+                dependencies = task.get("dependency_refs")
+                criteria = task.get("acceptance_criteria")
+            else:
+                continue
+            dependency_count = (
+                len(dependencies) if _is_json_sequence(dependencies) else 0
+            )
+            criterion_count = len(criteria) if _is_json_sequence(criteria) else 0
+            if dependency_count > limits.max_dependencies_per_task:
+                raise ValueError("task dependency count exceeds provider limit")
+            if criterion_count > limits.max_acceptance_criteria_per_task:
+                raise ValueError(
+                    "task acceptance-criteria count exceeds provider limit"
+                )
+            yield parent_present, dependency_count, criterion_count
+
+    prds = payload.get("prds")
+    features = payload.get("features")
+    _validate_snapshot_aggregate_counts(
+        prd_count=len(prds) if _is_json_sequence(prds) else 0,
+        feature_count=len(features) if _is_json_sequence(features) else 0,
+        task_shapes=raw_task_shapes(),
+        limits=limits,
+    )
+
+
+def _validate_snapshot_aggregate_counts(
+    *,
+    prd_count: int,
+    feature_count: int,
+    task_shapes: Iterator[tuple[bool, int, int]],
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Apply a conservative lower bound using only collection lengths."""
     node_limit = canonical_node_budget_for_bytes(limits.max_snapshot_bytes)
     minimum_nodes = 5  # root, project, and the three entity arrays
     minimum_bytes = minimum_nodes * 2
@@ -514,52 +650,17 @@ def _validate_snapshot_aggregate_lower_bound(
             raise ValueError("snapshot minimum byte size exceeds provider limit")
 
     # Record plus its mandatory nested scoped-reference containers.
-    add(nodes=len(snapshot.prds) * 2, bytes_=len(snapshot.prds) * 4)
-    add(nodes=len(snapshot.features) * 3, bytes_=len(snapshot.features) * 6)
-    for task in snapshot.tasks:
+    add(nodes=prd_count * 2, bytes_=prd_count * 4)
+    add(nodes=feature_count * 3, bytes_=feature_count * 6)
+    for parent_present, dependency_count, criterion_count in task_shapes:
         # Task, three mandatory refs, verification counts, and two list containers.
         add(nodes=7, bytes_=14)
-        if task.parent_ref is not None:
+        if parent_present:
             add(nodes=3, bytes_=6)
-        dependency_count = len(task.dependency_refs)
         if dependency_count:
             add(nodes=dependency_count * 3, bytes_=dependency_count * 6)
-        criterion_count = len(task.acceptance_criteria)
         if criterion_count:
             add(nodes=criterion_count, bytes_=criterion_count * 2)
-
-
-def _validate_raw_snapshot_count_limits(
-    payload: Mapping[str, Any],
-    limits: ProviderReadLimitsV1,
-) -> None:
-    """Reject oversized raw wire collections before canonical materialization."""
-    collections = (
-        ("prds", limits.max_prds, "PRD count exceeds provider limit"),
-        ("features", limits.max_features, "feature count exceeds provider limit"),
-        ("tasks", limits.max_tasks, "task count exceeds provider limit"),
-    )
-    for name, limit, message in collections:
-        value = payload.get(name)
-        if _is_json_sequence(value) and len(value) > limit:
-            raise ValueError(message)
-
-    tasks = payload.get("tasks")
-    if not _is_json_sequence(tasks):
-        return
-    for task in tasks:
-        if not isinstance(task, Mapping):
-            continue
-        dependencies = task.get("dependency_refs")
-        if _is_json_sequence(dependencies) and len(dependencies) > (
-            limits.max_dependencies_per_task
-        ):
-            raise ValueError("task dependency count exceeds provider limit")
-        criteria = task.get("acceptance_criteria")
-        if _is_json_sequence(criteria) and len(criteria) > (
-            limits.max_acceptance_criteria_per_task
-        ):
-            raise ValueError("task acceptance-criteria count exceeds provider limit")
 
 
 def _is_json_sequence(value: Any) -> bool:
@@ -727,6 +828,7 @@ __all__ = [
     "PROJECT_SNAPSHOT_OPERATION_ID",
     "PROJECT_SNAPSHOT_OPERATION_VERSION",
     "PROJECT_SNAPSHOT_SCHEMA_ID",
+    "MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES",
     "PROVIDER_LIMITS_V1",
     "PrdRecordV1",
     "PrdScopedRefV1",
