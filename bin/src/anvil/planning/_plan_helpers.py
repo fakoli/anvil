@@ -260,6 +260,10 @@ DEPENDENCY_EVENT_REJECTED_CODE = "event_rejected"
 DEPENDENCY_EVENT_REJECTED_MESSAGE = (
     "dependency update was rejected by state validation."
 )
+SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE = (
+    "invalid dependency edge: scoped task IDs require 'SOURCE->TARGET'; "
+    "'SOURCE:TARGET' is supported only for unscoped IDs."
+)
 
 
 @dataclass(frozen=True)
@@ -327,8 +331,13 @@ def parse_dep_edge(raw: str, op: str) -> DepEdge:
     """
     if "->" in raw:
         parts = raw.split("->", 1)
-    elif ":" in raw:
+    elif raw.count(":") == 1:
         parts = raw.split(":", 1)
+    elif ":" in raw:
+        raise BatchDepError(
+            SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE,
+            code="bad_request",
+        )
     else:
         raise BatchDepError(
             f"invalid edge spec {raw!r}: expected 'SOURCE->TARGET' "

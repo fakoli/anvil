@@ -35,6 +35,8 @@ from typer.testing import CliRunner
 from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.planning._plan_helpers import (
+    SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE,
+    BatchDepError,
     BatchDepPlan,
     emit_batch_dep_events,
     parse_dep_edge,
@@ -805,6 +807,70 @@ class TestBatchDepsValidation:
 
         assert edge.source == "named:T002"
         assert edge.target == "named:T001"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "T002:named:T001",
+            "named:T002:T001",
+            "named:T002:named:T001",
+            "T002::T001",
+        ],
+    )
+    def test_batch_deps_parser_rejects_ambiguous_scoped_colon_form(
+        self, raw: str
+    ) -> None:
+        """Any extra colon fails closed with fixed arrow guidance."""
+        with pytest.raises(BatchDepError) as raised:
+            parse_dep_edge(raw, "add")
+
+        assert raised.value.code == "bad_request"
+        assert raised.value.message == SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE
+        assert len(raised.value.message.encode("utf-8")) <= 4096
+        assert raw not in raised.value.message
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "T002:named:T001",
+            "named:T002:T001",
+            "named:T002:named:T001",
+        ],
+        ids=["default-to-named", "named-to-default", "named-to-named"],
+    )
+    @pytest.mark.parametrize("json_output", [True, False], ids=["json", "human"])
+    def test_batch_deps_cli_rejects_ambiguous_scoped_colon_without_mutation(
+        self, tmp_path: Path, raw: str, json_output: bool
+    ) -> None:
+        """Both CLI surfaces reject before touching events or dependencies."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        events_before = events_path.read_bytes()
+        args = ["deps", "--add", raw]
+        if json_output:
+            args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == (1 if json_output else 2)
+        assert events_path.read_bytes() == events_before
+        assert _deps_of(tmp_path, "T001") == []
+        assert _deps_of(tmp_path, "T002") == []
+        assert raw not in result.output
+        assert len(result.output.encode("utf-8")) <= 4096
+        if json_output:
+            assert json.loads(result.output) == {
+                "ok": False,
+                "command": "deps",
+                "error": {
+                    "code": "bad_request",
+                    "message": SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE,
+                },
+            }
+        else:
+            assert result.output.strip() == (
+                f"Error: {SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE}"
+            )
 
     def test_batch_deps_help_documents_options(self) -> None:
         """`deps --help` surfaces options, canonical syntax, and scope caveat."""
