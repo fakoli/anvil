@@ -5716,6 +5716,75 @@ Named PRD for T017 scoping tests.
 """
 
 
+_NAMED_PRD_INFERRED_CYCLE = """\
+# Project: Inferred Cycle Regression
+
+## Summary
+
+Named-PRD reproduction for issue 179.
+
+## Goals
+
+- Keep authored dependencies executable.
+
+## Requirements
+
+- R001: Planning preserves an acyclic authored graph.
+
+## Features
+
+### F001: Cycle-safe planning
+
+**Requirements:** R001
+
+## Tasks
+
+### T001.2: Parse PRD
+
+**Feature:** F001
+**Priority:** high
+**Likely files:** bin/src/anvil/cli/prd.py, tests/test_cli.py
+
+**Acceptance criteria:**
+
+- The PRD parses.
+
+**Verification:**
+
+- `pytest tests/test_cli.py -q`
+
+### T001.3: Persist PRD
+
+**Feature:** F001
+**Priority:** high
+**Likely files:** bin/src/anvil/state/sqlite.py, tests/test_cli.py
+**Dependencies:** T001.2
+
+**Acceptance criteria:**
+
+- The PRD persists.
+
+**Verification:**
+
+- `pytest tests/test_cli.py -q`
+
+### T002: Document PRD
+
+**Feature:** F001
+**Priority:** high
+**Likely files:** bin/src/anvil/cli/prd.py, tests/test_cli.py, docs/prd-template.md
+**Dependencies:** T001.3
+
+**Acceptance criteria:**
+
+- The PRD is documented.
+
+**Verification:**
+
+- `pytest tests/test_cli.py -q`
+"""
+
+
 class TestPlanPrdScoping:
     """T017: `anvil plan --prd <id>` scopes feature/task creation,
     orphan-prune, dependency inference, and proposed->drafted promotion to a
@@ -5763,6 +5832,63 @@ class TestPlanPrdScoping:
             _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code
             == 0
         )
+
+    def test_named_prd_plan_skips_inferred_cycle_and_next_remains_live(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue 179: named planning persists authored edges but not a cycle.
+
+        The T001.2 file set is a strict subset of T002, so inference proposes
+        T001.2 -> T002. The authored T002 -> T001.3 -> T001.2 path makes that
+        speculative edge cyclic. Planning must omit only that edge, persist the
+        explicit path, and leave the scoped ready queue executable.
+        """
+        _do_init(tmp_path)
+        prd_id = "issue-179"
+        _write_named_prd(tmp_path, prd_id, _NAMED_PRD_INFERRED_CYCLE)
+
+        parsed = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", prd_id])
+        assert parsed.exit_code == 0, parsed.output
+        reviewed = _invoke_cmd(tmp_path, ["prd", "review", "--prd", prd_id])
+        assert reviewed.exit_code == 0, reviewed.output
+        approved = _invoke_cmd(
+            tmp_path, ["prd", "review", "--prd", prd_id, "--approve"]
+        )
+        assert approved.exit_code == 0, approved.output
+
+        planned = _invoke_cmd(
+            tmp_path, ["plan", "--prd", prd_id, "--no-llm"]
+        )
+        assert planned.exit_code == 0, planned.output
+
+        db = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(str(db)) as conn:
+            persisted = {
+                task_id: json.loads(dependencies)
+                for task_id, dependencies in conn.execute(
+                    "SELECT id, dependencies FROM tasks WHERE prd_id = ?",
+                    (prd_id,),
+                )
+            }
+
+        prefix = f"{prd_id}:"
+        assert persisted == {
+            f"{prefix}T001.2": [],
+            f"{prefix}T001.3": [f"{prefix}T001.2"],
+            f"{prefix}T002": [f"{prefix}T001.3"],
+        }
+
+        scored = _invoke_cmd(tmp_path, ["score", "--prd", prd_id])
+        assert scored.exit_code == 0, scored.output
+        task_review = _invoke_cmd(tmp_path, ["review", "tasks"])
+        assert task_review.exit_code == 0, task_review.output
+        next_result = _invoke_cmd(
+            tmp_path, ["next", "--prd", prd_id, "--json"]
+        )
+        assert next_result.exit_code == 0, next_result.output
+        next_task = json.loads(next_result.output)["data"]["task"]
+        assert next_task is not None
+        assert next_task["id"] == f"{prefix}T001.2"
 
     def test_plan_named_prd_creates_tasks_carrying_prd_id(
         self, tmp_path: Path
