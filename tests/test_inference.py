@@ -8,7 +8,11 @@ All tests follow the pure-function contract:
 from __future__ import annotations
 
 import datetime
+import time
 
+import pytest
+
+from anvil.planning import inference as inference_module
 from anvil.planning.inference import (
     InferenceResult,
     infer_all,
@@ -94,6 +98,121 @@ class TestInferDependencies:
         t002 = next(t for t in result if t.id == "T002")
         # T002 is the broader task, should NOT depend on T001
         assert "T001" not in t002.dependencies
+
+    def test_explicit_inverse_edge_wins_over_inference(self) -> None:
+        """An inferred inverse edge is skipped instead of cycling explicit intent."""
+        tasks = [
+            _make_task("T001", ["src/a.py"]),
+            _make_task(
+                "T002",
+                ["src/a.py", "src/b.py"],
+                dependencies=["T001"],
+            ),
+        ]
+
+        result = infer_dependencies(tasks)
+        by_id = {task.id: task for task in result}
+
+        assert by_id["T001"].dependencies == []
+        assert by_id["T002"].dependencies == ["T001"]
+
+    def test_transitive_explicit_path_blocks_inferred_cycle(self) -> None:
+        """A candidate is skipped when its prerequisite reaches it transitively."""
+        tasks = [
+            _make_task("T001", ["src/a.py"]),
+            _make_task("T002", ["src/middle.py"], dependencies=["T001"]),
+            _make_task(
+                "T003",
+                ["src/a.py", "src/b.py"],
+                dependencies=["T002"],
+            ),
+        ]
+
+        result = infer_dependencies(tasks)
+        by_id = {task.id: task for task in result}
+
+        assert by_id["T001"].dependencies == []
+        assert by_id["T002"].dependencies == ["T001"]
+        assert by_id["T003"].dependencies == ["T002"]
+
+    def test_guard_considers_previously_accepted_inferred_edges(self) -> None:
+        """Earlier safe inference participates in later reachability checks."""
+        tasks = [
+            _make_task("T001", ["src/a.py"]),
+            _make_task(
+                "T002",
+                ["src/a.py", "src/b.py", "src/c.py"],
+                dependencies=["T001"],
+            ),
+            _make_task("T003", ["src/a.py", "src/b.py"]),
+        ]
+
+        result = infer_dependencies(tasks)
+        by_id = {task.id: task for task in result}
+
+        assert by_id["T001"].dependencies == ["T003"]
+        assert by_id["T002"].dependencies == ["T001"]
+        assert by_id["T003"].dependencies == []
+
+    def test_cycle_guard_is_deterministic_for_reordered_input(self) -> None:
+        """Reordering equivalent input cannot change accepted inferred edges."""
+        tasks = [
+            _make_task("T001", ["src/a.py"]),
+            _make_task(
+                "T002",
+                ["src/a.py", "src/b.py", "src/c.py"],
+                dependencies=["T001"],
+            ),
+            _make_task("T003", ["src/a.py", "src/b.py"]),
+        ]
+
+        forward = {task.id: task.dependencies for task in infer_dependencies(tasks)}
+        reverse = {
+            task.id: task.dependencies for task in infer_dependencies(list(reversed(tasks)))
+        }
+
+        assert forward == reverse
+
+    def test_dense_nested_plan_has_quadratically_bounded_closure_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dense plans close each reachable pair once, never DFS per candidate."""
+        task_count = 300
+        tasks = [
+            _make_task(
+                f"T{index:03}",
+                [f"src/file-{file_index:03}.py" for file_index in range(index + 1)],
+            )
+            for index in range(task_count)
+        ]
+        trackers: list[inference_module._DependencyReachability] = []
+        reachability_type = inference_module._DependencyReachability
+
+        class _TrackingReachability(reachability_type):
+            def __init__(self, dependencies: dict[str, set[str]]) -> None:
+                super().__init__(dependencies)
+                trackers.append(self)
+
+        monkeypatch.setattr(
+            inference_module, "_DependencyReachability", _TrackingReachability
+        )
+
+        started = time.perf_counter()
+        result = infer_dependencies(tasks)
+        elapsed = time.perf_counter() - started
+
+        candidate_count = task_count * (task_count - 1) // 2
+        tracker = trackers[0]
+        assert sum(len(task.dependencies) for task in result) == candidate_count
+        assert tracker.cycle_checks == candidate_count
+        assert tracker.closure_row_updates <= candidate_count
+        assert tracker.closure_pair_updates <= candidate_count
+        print(  # noqa: T201 - diagnostic only; elapsed time is not an assertion
+            "dense inference diagnostics: "
+            f"tasks={task_count} candidates={candidate_count} "
+            f"row_updates={tracker.closure_row_updates} "
+            f"pair_updates={tracker.closure_pair_updates} elapsed={elapsed:.3f}s"
+        )
 
     def test_empty_files_not_a_subset(self) -> None:
         """Task with empty likely_files does not create dependency edges."""

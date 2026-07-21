@@ -375,6 +375,94 @@ def _files_set(task: Task) -> frozenset[str]:
     return frozenset(task.likely_files)
 
 
+class _DependencyReachability:
+    """Maintain dependency reachability while inferred edges are accepted.
+
+    Reachability rows are Python integer bitsets.  The initial explicit graph
+    is closed once with bitset Floyd-Warshall; each candidate is then checked
+    with one bit lookup.  When a safe edge adds new reachability, only newly
+    reachable pairs are propagated.  Across one inference run each pair can
+    become reachable at most once, keeping dense nested plans bounded instead
+    of traversing the graph once per candidate.
+
+    The counters are intentionally structural diagnostics for regression
+    tests.  They count incremental closure work, not wall-clock time.
+    """
+
+    def __init__(self, dependencies: dict[str, set[str]]) -> None:
+        task_ids = sorted(dependencies)
+        self._index = {task_id: index for index, task_id in enumerate(task_ids)}
+        self._reachable = [0] * len(task_ids)
+
+        for task_id, dependency_ids in dependencies.items():
+            source = self._index[task_id]
+            for dependency_id in dependency_ids:
+                target = self._index.get(dependency_id)
+                if target is not None:
+                    self._reachable[source] |= 1 << target
+
+        # Bitset Floyd-Warshall closes the explicit graph once.  Mutating rows
+        # in place is valid because every newly exposed path also uses the
+        # current intermediate and therefore belongs in the same closure step.
+        for intermediate in range(len(task_ids)):
+            intermediate_bit = 1 << intermediate
+            targets = self._reachable[intermediate]
+            for source, reachable in enumerate(self._reachable):
+                if reachable & intermediate_bit:
+                    self._reachable[source] |= targets
+
+        self._reaching = [0] * len(task_ids)
+        for source, reachable in enumerate(self._reachable):
+            source_bit = 1 << source
+            while reachable:
+                target_bit = reachable & -reachable
+                target = target_bit.bit_length() - 1
+                self._reaching[target] |= source_bit
+                reachable ^= target_bit
+
+        self.cycle_checks = 0
+        self.closure_row_updates = 0
+        self.closure_pair_updates = 0
+
+    def add_if_acyclic(self, task_id: str, dependency_id: str) -> bool:
+        """Add reachability for a safe edge and return whether it was accepted."""
+        self.cycle_checks += 1
+        source = self._index[task_id]
+        target = self._index[dependency_id]
+        source_bit = 1 << source
+        target_bit = 1 << target
+
+        # task -> dependency cycles exactly when dependency already reaches task.
+        if self._reachable[target] & source_bit:
+            return False
+
+        # A direct edge that is already represented transitively changes no
+        # reachability, though the caller still records the inferred direct edge.
+        if self._reachable[source] & target_bit:
+            return True
+
+        target_reach = self._reachable[target] | target_bit
+        predecessors = (self._reaching[source] | source_bit) & ~self._reaching[target]
+
+        while predecessors:
+            predecessor_bit = predecessors & -predecessors
+            predecessor = predecessor_bit.bit_length() - 1
+            newly_reachable = target_reach & ~self._reachable[predecessor]
+            self._reachable[predecessor] |= target_reach
+            self.closure_row_updates += 1
+            self.closure_pair_updates += newly_reachable.bit_count()
+
+            while newly_reachable:
+                reached_bit = newly_reachable & -newly_reachable
+                reached = reached_bit.bit_length() - 1
+                self._reaching[reached] |= predecessor_bit
+                newly_reachable ^= reached_bit
+
+            predecessors ^= predecessor_bit
+
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
@@ -413,8 +501,11 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
 
     # Collect dependency edges: new_deps[task_id] = set of dependency IDs.
     new_deps: dict[str, set[str]] = {t.id: set(t.dependencies) for t in tasks}
+    reachability = _DependencyReachability(new_deps)
 
-    task_ids = [t.id for t in tasks]
+    # Stable ordering makes the chosen safe subset deterministic even when the
+    # caller supplies the same tasks in a different order.
+    task_ids = sorted(file_sets)
     for id_a in task_ids:
         set_a = file_sets[id_a]
         if not set_a:
@@ -427,7 +518,10 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
             # Strict subset: A ⊂ B means A ⊆ B and A ≠ B.
             if set_a < set_b:
                 # A specialises B → A depends on B.
-                new_deps[id_a].add(id_b)
+                if id_b in new_deps[id_a]:
+                    continue
+                if reachability.add_if_acyclic(id_a, id_b):
+                    new_deps[id_a].add(id_b)
 
     # Build the output list, replacing only tasks whose dependency set changed.
     updated: list[Task] = []
