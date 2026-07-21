@@ -378,7 +378,8 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Supplying a valid contract promotes the task to ready.
 
 **Verification:**
-- `uv run --project bin pytest tests/test_review.py -k contract_field -q`
+- Not yet implemented: no passing verification command exists for this deferred
+  task. Add focused contract-schema tests before advertising it as verified.
 
 ### T024: Opt-in bidirectional GitHub-Issues projection as anti-lock-in positioning (deferred)
 **Feature:** F008
@@ -407,7 +408,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Tested both ways: a strict-mode submit missing required evidence is rejected; the same submit in default advisory mode is accepted with a warning.
 
 **Verification:**
-- `uv run --project bin pytest tests/test_review.py -k strict_evidence -q`
+- `uv run --project bin pytest tests/test_strict_evidence.py -q`
 
 ### T026: Three-source drift command: report spec-vs-plan-vs-code divergence
 **Feature:** F008
@@ -422,7 +423,7 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Tested on a seeded drift fixture: the command reports the injected divergence and exits clean on a non-drifted project.
 
 **Verification:**
-- `uv run --project bin pytest tests/test_cli.py -k drift -q`
+- `uv run --project bin pytest tests/test_cli_drift.py -q`
 
 ### T027: Caller-supplied / existing-branch claims: attach a claim to a named branch
 **Feature:** F002
@@ -451,4 +452,4 @@ anvil is the durable, runtime-neutral state-of-record for AI-and-human software 
 - Tested: a PRD with EARS/Gherkin acceptance criteria parses into structured clauses; a freeform PRD still parses unchanged.
 
 **Verification:**
-- `cd bin && uv run pytest ../tests/test_parser.py -k acceptance_grammar -q`
+- `uv run --project bin pytest tests/test_parser.py -k acceptance_grammar -q`

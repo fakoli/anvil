@@ -103,8 +103,8 @@ to `Config` with the same validation as the fast-lane ceiling pair. Reuse
 
 **Verification:**
 
-- `uv run pytest ../tests/test_scoring.py -q`
-- `uv run pytest ../tests/test_config.py -q`
+- `uv run --project bin pytest tests/test_scoring.py -q`
+- `uv run --project bin pytest tests/test_config.py -q`
 
 ### T002: Render review tier in work packets (markdown + JSON)
 
@@ -126,8 +126,8 @@ already is. Fast-lane packet body otherwise unchanged.
 
 **Verification:**
 
-- `uv run pytest ../tests/test_context.py -q`
-- `uv run pytest ../tests/test_packet_quality.py -q`
+- `uv run --project bin pytest tests/test_context.py -q`
+- `uv run --project bin pytest tests/test_packet_quality.py -q`
 
 ### T003: Expose review_tier on anvil next/show and MCP get_next_task/get_task
 
@@ -148,8 +148,8 @@ models. Human output of `anvil next` prints the tier on the task line.
 
 **Verification:**
 
-- `uv run pytest ../tests/test_json_output.py -q`
-- `uv run pytest ../tests/test_mcp.py -q`
+- `uv run --project bin pytest tests/test_json_output.py -q`
+- `uv run --project bin pytest tests/test_mcp.py -q`
 
 ### T004: Tier-aware finish/critic dispatch + update backlog B15
 
@@ -196,7 +196,7 @@ every failure path returns a report, never raises.
 
 **Verification:**
 
-- `uv run pytest ../tests/test_git_ops.py -q`
+- `uv run --project bin pytest tests/test_git_ops.py -q`
 
 ### T006: anvil merge-check command with --run-checks merged-tree verification
 
@@ -221,8 +221,8 @@ offline-degraded), 1 when stale or a merged-tree command fails.
 
 **Verification:**
 
-- `uv run pytest ../tests/test_cli.py -q -k merge_check`
-- `uv run pytest ../tests/test_git_ops.py -q`
+- `uv run --project bin pytest tests/test_cli.py -q -k TestMergeCheck`
+- `uv run --project bin pytest tests/test_git_ops.py -q`
 
 ### T007: Wire freshness gate into apply --approve (advisory/strict config)
 
@@ -246,8 +246,8 @@ JSON error code `base_stale`. Follow the exact strict_evidence precedence patter
 
 **Verification:**
 
-- `uv run pytest ../tests/test_cli.py -q -k "apply and merge"`
-- `uv run pytest ../tests/test_config.py -q`
+- `uv run --project bin pytest tests/test_cli.py -q -k "apply and merge"`
+- `uv run --project bin pytest tests/test_config.py -q`
 
 ### T008: Pre-expiry lease warning in heartbeat hook + notify-digest
 
@@ -271,9 +271,9 @@ B46 progress gate decided). Extend notify-digest's line and JSON with an
 
 **Verification:**
 
-- `uv run pytest ../tests/test_cli.py -q -k heartbeat`
-- `uv run pytest ../tests/test_notify_digest.py -q`
-- `uv run pytest ../tests/test_config.py -q`
+- `uv run --project bin pytest tests/test_cli.py -q -k heartbeat`
+- `uv run --project bin pytest tests/test_notify_digest.py -q`
+- `uv run --project bin pytest tests/test_config.py -q`
 
 ### T009: Advisory collision warnings on anvil next (reuse manager.check_conflicts)
 
@@ -295,9 +295,9 @@ human note. Mirror the field on MCP get_next_task. Selection order untouched.
 
 **Verification:**
 
-- `uv run pytest ../tests/test_json_output.py -q`
-- `uv run pytest ../tests/test_mcp.py -q`
-- `uv run pytest ../tests/test_claims.py -q`
+- `uv run --project bin pytest tests/test_json_output.py -q`
+- `uv run --project bin pytest tests/test_mcp.py -q`
+- `uv run --project bin pytest tests/test_claims.py -q`
 
 ### T010: Add phase/detail to progress.noted payload and MCP submit_progress
 
@@ -319,8 +319,8 @@ dispatch-table change). Old JSONL rows without the new keys must still replay.
 
 **Verification:**
 
-- `uv run pytest ../tests/test_mcp.py -q`
-- `uv run pytest ../tests/test_replay_equivalence.py ../tests/test_schema_version.py -q`
+- `uv run --project bin pytest tests/test_mcp.py -q`
+- `uv run --project bin pytest tests/test_replay_equivalence.py tests/test_schema_version.py -q`
 
 ### T011: New anvil progress CLI command
 
@@ -344,8 +344,8 @@ exits 1 with code task_not_found.
 
 **Verification:**
 
-- `uv run pytest ../tests/test_progress_cli.py -q`
-- `uv run pytest ../tests/test_json_output.py -q`
+- `uv run --project bin pytest tests/test_progress_cli.py -q`
+- `uv run --project bin pytest tests/test_json_output.py -q`
 
 ### T012: Surface phase, elapsed, and lease-expiry in status and notify-digest
 
@@ -371,8 +371,8 @@ claims-expiring-soon segment. MUST NOT touch the --hook-format single-line path
 
 **Verification:**
 
-- `uv run pytest ../tests/test_notify_digest.py -q`
-- `uv run pytest ../tests/test_json_output.py ../tests/test_cli.py -q`
+- `uv run --project bin pytest tests/test_notify_digest.py -q`
+- `uv run --project bin pytest tests/test_json_output.py tests/test_cli.py -q`
 
 ### T013: doctor --preflight with PRD-parse and unresolved-decision probes
 
@@ -399,8 +399,8 @@ Exit contract unchanged: 0 when no ERROR finding, 1 otherwise.
 
 **Verification:**
 
-- `uv run pytest ../tests/test_doctor_preflight.py -q`
-- `uv run pytest ../tests/test_doctor_verification_paths.py -q`
+- `uv run --project bin pytest tests/test_doctor_preflight.py -q`
+- `uv run --project bin pytest tests/test_doctor_verification_paths.py -q`
 
 ### T014: Preflight git tree-state probe
 
@@ -423,5 +423,5 @@ crash. Read-only and fast (single git status --porcelain).
 
 **Verification:**
 
-- `uv run pytest ../tests/test_doctor_preflight.py -q`
-- `uv run pytest ../tests/test_git_ops.py -q`
+- `uv run --project bin pytest tests/test_doctor_preflight.py -q`
+- `uv run --project bin pytest tests/test_git_ops.py -q`

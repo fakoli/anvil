@@ -168,7 +168,7 @@ Adding a REQUIRED prd_id to Task/Feature/Requirement could break existing constr
 **Verification:**
 
 - `cd bin && uv run python -c "from anvil.state.models import PRD, Task, Feature, Requirement, PRDID, DEFAULT_PRD_ID; import datetime as d; t=d.datetime.now(d.timezone.utc); p=PRD(id=DEFAULT_PRD_ID, created_at=t, updated_at=t, target_version='v0.2.0'); print(p.id, p.target_version)"`
-- `cd bin && uv run pytest -q ../tests/test_models.py`
+- `uv run --project bin pytest -q tests/test_models.py`
 
 ### T002: Extend schema.py to SCHEMA_VERSION 7 with multi-row prds, prd_id columns, nullable revision lineage, and sync_mappings partition columns
 
@@ -190,7 +190,7 @@ Bundling all future columns now (revision lineage, sync columns) avoids a second
 **Verification:**
 
 - `cd bin && uv run python -c "from anvil.state.schema import SCHEMA_VERSION, DDL; assert SCHEMA_VERSION==7; assert 'is_default' in DDL and 'idx_tasks_prd_status' in DDL and 'entity_kind' in DDL and 'revision_superseded' in DDL; print('ok')"`
-- `cd bin && uv run pytest -q ../tests/test_schema_version.py ../tests/test_version_sync.py`
+- `uv run --project bin pytest -q tests/test_schema_version.py tests/test_version_sync.py`
 
 ### T003: Thread prd_id + release fields through payloads with DEFAULT_PRD_ID replay defaults
 
@@ -210,7 +210,7 @@ Adding prd_id to NEW prd.parsed/task.created event JSON changes line bytes vs ol
 **Verification:**
 
 - `cd bin && uv run python -c "from anvil.state.payloads import TaskCreatedPayload, PrdParsedPayload; assert TaskCreatedPayload(id='T001',feature_id='F001',title='x').prd_id=='default'; print('ok')"`
-- `cd bin && uv run pytest -q ../tests/ -k payload`
+- `uv run --project bin pytest -q tests/ -k payload`
 
 ### T004: Write the single v6->v7 in-place migration with 'default' PRD backfill (prds rebuild + entity/sync ALTERs)
 
@@ -230,7 +230,7 @@ SQLite cannot ALTER a PK so the prds rebuild must be inside the SAVEPOINT atomic
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_sqlite.py -k 'migrat or v6 or v7'`
+- `uv run --project bin pytest -q tests/test_sqlite.py -k 'migrat or v6 or v7'`
 - `uv run --project bin pytest -q -k 'migration and (sync or prd or default)'`
 
 ### T005: De-literalize the SCHEMA_VERSION migration gate into an ordered _MIGRATIONS ladder
@@ -251,7 +251,7 @@ Refactoring the migration dispatch risks regressing an old upgrade path; pin eve
 **Verification:**
 
 - `cd bin && grep -n 'SCHEMA_VERSION == 6' src/anvil/state/sqlite.py; test $? -eq 1`
-- `cd bin && uv run pytest -q ../tests/test_sqlite.py`
+- `uv run --project bin pytest -q tests/test_sqlite.py`
 
 ### T006: Multi-PRD replay-equivalence oracle (SL-1) covering single-PRD pre-v7 logs and a directly-built 2-PRD DB
 
@@ -270,8 +270,8 @@ serialize_state currently emits a singleton 'prd'; the 2-PRD byte-compare needs 
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/ -k 'replay and equival'`
-- `cd bin && uv run pytest -q ../tests/ -k 'replay and (multi_prd or default_prd)'`
+- `uv run --project bin pytest -q tests/ -k 'replay and equival'`
+- `uv run --project bin pytest -q tests/ -k 'replay and (multi_prd or default_prd)'`
 
 ### T007: Migration crash/idempotency + row-count invariant test
 
@@ -290,7 +290,7 @@ Simulating a mid-SAVEPOINT crash deterministically in SQLite is fiddly; may appr
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_sqlite.py -k 'idempot or crash or rowcount'`
+- `uv run --project bin pytest -q tests/test_sqlite.py -k 'idempot or crash or rowcount'`
 
 ### T008: Add get_prd(prd_id)/list_prds()/default_prd_id() backend API + Protocol + row mappers
 
@@ -311,7 +311,7 @@ get_prd() no-arg must keep returning the single existing PRD (now via is_default
 **Verification:**
 
 - `cd bin && uv run python -c "import inspect; from anvil.state.sqlite import SqliteBackend as B; assert 'prd_id' in inspect.signature(B.get_prd).parameters; assert hasattr(B,'list_prds') and hasattr(B,'default_prd_id'); print('ok')"`
-- `cd bin && uv run pytest -q ../tests/test_sqlite.py -k prd`
+- `uv run --project bin pytest -q tests/test_sqlite.py -k prd`
 
 ### T009: Add prd_id filters to list_tasks/list_features/list_requirements
 
@@ -331,7 +331,7 @@ Low; additive optional kwarg. Ensure None means all-PRDs everywhere to avoid sil
 **Verification:**
 
 - `cd bin && uv run python -c "import inspect; from anvil.state.sqlite import SqliteBackend as B; assert 'prd_id' in inspect.signature(B.list_tasks).parameters and 'prd_id' in inspect.signature(B.list_features).parameters; print('ok')"`
-- `cd bin && uv run pytest -q ../tests/test_sqlite.py -k 'list and prd'`
+- `uv run --project bin pytest -q tests/test_sqlite.py -k 'list and prd'`
 
 ### T010: Thread prd_id through write handlers + per-PRD scoped re-parse + denormalization invariant
 
@@ -351,7 +351,7 @@ Scoping DELETE FROM requirements to WHERE prd_id=? changes destructive-reparse s
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_sqlite.py -k 'replay or prd or task_created or feature_created'`
+- `uv run --project bin pytest -q tests/test_sqlite.py -k 'replay or prd or task_created or feature_created'`
 - `cd bin && grep -n 'DELETE FROM requirements WHERE' src/anvil/state/sqlite.py`
 
 ### T011: Per-PRD claim gate: resolve and check the task's owning PRD via task.prd_id
@@ -372,7 +372,7 @@ If task.prd_id is somehow absent (mis-migrated), get_prd_for_task must fall back
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_transitions.py`
+- `uv run --project bin pytest -q tests/test_claims.py tests/test_transitions.py`
 - `uv run --project bin pytest -q -k 'per_prd_gate or owning_prd'`
 
 ### T012: Collapse the duplicated MCP claim gate onto ClaimManager
@@ -393,7 +393,7 @@ Removing the early inline gate changes the error surface ordering; tests asserti
 **Verification:**
 
 - `uv run --project bin pytest -q -k 'mcp and claim'`
-- `cd bin && uv run pytest -q ../tests/test_mcp.py`
+- `uv run --project bin pytest -q tests/test_mcp.py`
 
 ### T013: Pin cross-PRD coordination: conflict groups, active claims, and stale reaper span all PRDs
 
@@ -414,7 +414,7 @@ This is the moat. The danger is a future --prd filter implemented as list_tasks(
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_inference.py ../tests/test_claims.py`
+- `uv run --project bin pytest -q tests/test_inference.py tests/test_claims.py`
 - `uv run --project bin pytest -q -k cross_prd`
 
 ### T014: v6->v7 gate-equivalence test: migrated single-PRD DB keeps identical claimability
@@ -435,7 +435,7 @@ Low; verification-only, but pins the backward-compat contract for the gate.
 **Verification:**
 
 - `uv run --project bin pytest -q -k 'migration and (gate or claim)'`
-- `cd bin && uv run pytest -q ../tests/test_replay_equivalence.py`
+- `uv run --project bin pytest -q tests/test_replay_equivalence.py`
 
 ### T015: Make parse_prd prd_id load-bearing with PRD-prefixed auto ids (bare for default) + Release field round-trip
 
@@ -454,7 +454,7 @@ Prefixed TaskID shape ('v0.2:T001') could break any '^T\d+' matcher in claims/sk
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/ -k template`
+- `uv run --project bin pytest -q tests/ -k template`
 - `cd bin && uv run python -c "from anvil.planning.template import parse_prd; r=parse_prd('# Project: X\n## Summary\ns\n## Goals\n- g\n## Requirements\n- foo\n', prd_id='v0.2'); print(r.requirements[0].id)" | grep 'v0.2:R001'`
 
 ### T016: Per-PRD source files and --prd on prd parse
@@ -475,8 +475,8 @@ This is the first surface that can mint a 2nd PRD; it must land in the SAME phas
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/ -k 'prd and parse'`
-- `cd bin && uv run pytest -q ../tests/ -k 'prd_parsed and prd_id'`
+- `uv run --project bin pytest -q tests/ -k 'prd and parse'`
+- `uv run --project bin pytest -q tests/ -k 'prd_parsed and prd_id'`
 
 ### T017: Scope plan + orphan-prune to a single PRD while keeping conflict inference cross-PRD
 
@@ -496,8 +496,8 @@ plan needs TWO distinct lists: the --prd subset for prune/deps/draft, the UNION 
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/ -k 'plan and (prune or orphan or prd)'`
-- `cd bin && uv run pytest -q ../tests/ -k 'conflict and prd'`
+- `uv run --project bin pytest -q tests/ -k 'plan and (prune or orphan or prd)'`
+- `uv run --project bin pytest -q tests/ -k 'conflict and prd'`
 
 ### T018: Add shared resolve_prd_id helper + PRD_OPTION (CLI + MCP parity)
 
@@ -538,7 +538,7 @@ The --prd filter on next MUST build exclusion sets from ALL PRDs then narrow; im
 
 **Verification:**
 
-- `uv run --project bin pytest -q -k 'next and prd'; cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_mcp.py`
+- `uv run --project bin pytest -q -k 'next and prd'; uv run --project bin pytest -q tests/test_claims.py tests/test_mcp.py`
 - `cd bin && uv run anvil next --help | grep -- --prd`
 
 ### T020: Per-PRD rollup for anvil status and get_project_status/get_project_summary
@@ -598,7 +598,7 @@ Lineage columns already exist in the v7 DDL (Phase 0); this task only adds the m
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/ -k 'payload or model'`
+- `uv run --project bin pytest -q tests/ -k 'payload or model'`
 - `cd bin && uv run python -c "from anvil.state.payloads import PrdRevisedPayload; PrdRevisedPayload(project_id='p',prd_id='default',revision=2)"`
 
 ### T023: prd.revised handler: amend-aware non-destructive supersede + per-PRD revision counter
@@ -619,8 +619,8 @@ Under order-tolerant git replay two concurrent prd.revised for one prd_id could 
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/ -k 'prd and (revis or parse or review or approve)'`
-- `cd bin && uv run pytest -q ../tests/ -k replay`
+- `uv run --project bin pytest -q tests/ -k 'prd and (revis or parse or review or approve)'`
+- `uv run --project bin pytest -q tests/ -k replay`
 
 ### T024: serialize_state: enumerate all prds + partitioned requirement rows deterministically
 
@@ -640,8 +640,8 @@ A missed sort key lets replay silently diverge on multi-PRD/multi-revision DBs. 
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/ -k 'serialize or snapshot or equivalence'`
-- `cd bin && uv run pytest -q ../tests/ -k 'replay and equival'`
+- `uv run --project bin pytest -q tests/ -k 'serialize or snapshot or equivalence'`
+- `uv run --project bin pytest -q tests/ -k 'replay and equival'`
 
 ### T025: replay-to-revision: bounded replay_to_event_id + CLI re-parse emits prd.revised
 
@@ -660,8 +660,8 @@ Torn-trailing-line tolerance and local/git mode behavior must match replay_from_
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/ -k 'replay and (revision or bounded or to_event)'`
-- `cd bin && uv run pytest -q ../tests/ -k 'cli and prd and revis'`
+- `uv run --project bin pytest -q tests/ -k 'replay and (revision or bounded or to_event)'`
+- `uv run --project bin pytest -q tests/ -k 'cli and prd and revis'`
 
 ### T026: SyncMapping prd_id/entity_kind model + validator + replay-equivalent upserted payload
 
@@ -738,7 +738,7 @@ Documentation-only; ensures the deferred scope is tracked rather than lost.
 
 **Verification:**
 
-- `cd bin && uv run pytest -q ../tests/test_cli_sync.py ../tests/test_reconciliation.py ../tests/test_sync_provider.py ../tests/test_cli_drift.py` (the live sync/reconciliation suites; `test_sync.py` does not exist — this guards the SyncMapping prd_id/entity_kind plumbing and the prd-kind drift special-case that T029's deferral doc relies on)
+- `uv run --project bin pytest -q tests/test_cli_sync.py tests/test_reconciliation.py tests/test_sync_provider.py tests/test_cli_drift.py` (the live sync/reconciliation suites; `test_sync.py` does not exist — this guards the SyncMapping prd_id/entity_kind plumbing and the prd-kind drift special-case that T029's deferral doc relies on)
 
 ### T030: Reframe PRD mental model in architecture.md, _positioning.md, roadmap.md, prd-template.md
 
@@ -759,7 +759,7 @@ Docs can land early in parallel as they describe the target; pinned here so they
 **Verification:**
 
 - `grep -niE 'release-scoped|several PRDs|one state.db' docs/architecture.md docs/_positioning.md`
-- `grep -n '.anvil/prds/' docs/prd-template.md; cd bin && uv run pytest -q ../tests/test_token_budget.py`
+- `grep -n '.anvil/prds/' docs/prd-template.md; uv run --project bin pytest -q tests/test_token_budget.py`
 
 ### T031: Rewrite skills (prd, start-prd, plan, claim) for per-PRD select/create, per-PRD gates, amend-aware revision, cross-PRD conflict messaging
 
@@ -781,7 +781,7 @@ Token budget regression: add ONE short Step-0 paragraph + a shared one-liner, no
 **Verification:**
 
 - `grep -niE 'prd list|per-PRD|owning PRD|across PRDs|release' skills/prd/SKILL.md skills/plan/SKILL.md skills/claim/SKILL.md skills/start-prd/SKILL.md`
-- `cd bin && uv run pytest -q ../tests/test_token_budget.py`
+- `uv run --project bin pytest -q tests/test_token_budget.py`
 
 ### T032: Sweep how-to docs + version lockstep + release hygiene for the v7 schema bump
 
@@ -801,5 +801,5 @@ The SCHEMA_VERSION bump shipped in Phase 0 is publishable; the version lockstep 
 **Verification:**
 
 - `grep -rn '.anvil/prds/' docs/how-to/; grep -rn 'prds/default.md' docs/how-to/`
-- `cd bin && uv run pytest -q ../tests/test_version_sync.py ../tests/test_install_manifests.py`
+- `uv run --project bin pytest -q tests/test_version_sync.py tests/test_install_manifests.py`
 
