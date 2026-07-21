@@ -270,5 +270,5 @@ The 12 open decisions were driven as Q&A with the author and resolved as follows
 4. Two file-overlapping tasks in different PRDs land in one conflict group and are
    never co-routed by `next`.
 5. Single-PRD, no-`--prd` CLI/MCP output is byte-identical to v0.2 (modulo additive `prds[]`).
-6. `cd bin && uv run pytest -q` green at every phase boundary; `ruff`/`mypy` clean
+6. `uv run --project bin pytest -q` green at every phase boundary; `ruff`/`mypy` clean
    (once Phase-3 of the v0.2 review's CI hardening lands).
