@@ -6256,17 +6256,29 @@ class SqliteBackend:
             (timestamp, bundle_id),
         )
 
+    @staticmethod
+    def _normalize_task_payload_shape(task_dict: dict[str, Any]) -> dict[str, Any]:
+        """Coerce a minimal Task payload's None submodels to empty mappings.
+
+        This shape-only normalization is shared by ``task.created`` and
+        ``task.expanded``. It deliberately has no ownership-recovery behavior:
+        expanded subtasks are new rows, while the missing-PRD compatibility
+        path below is restricted to dependency-only upserts of existing tasks.
+        """
+        task_dict = dict(task_dict)
+        if task_dict.get("scores") is None:
+            task_dict["scores"] = {}
+        if task_dict.get("verification") is None:
+            task_dict["verification"] = {}
+        return task_dict
+
     def _normalize_task_payload(
         self,
         conn: sqlite3.Connection,
         task_dict: dict[str, Any],
         event: EventDraft | Event,
     ) -> dict[str, Any]:
-        """Coerce a minimal Task payload's None scores/verification to ``{}``.
-
-        Task.scores / Task.verification are required submodels; the payload
-        allows None so MCP / hand-rolled callers can send a minimal task without
-        preloading sentinels.
+        """Normalize task shape and enforce task.created PRD ownership.
 
         A narrowly bounded compatibility repair also handles the historical
         dependency-upsert bug where ``Task.model_dump()`` omitted ``prd_id``.
@@ -6276,11 +6288,7 @@ class SqliteBackend:
         rewritten. The same helper runs in append preflight and replay/write so
         ownership checks cannot diverge across those paths.
         """
-        task_dict = dict(task_dict)
-        if task_dict.get("scores") is None:
-            task_dict["scores"] = {}
-        if task_dict.get("verification") is None:
-            task_dict["verification"] = {}
+        task_dict = self._normalize_task_payload_shape(task_dict)
 
         feature_id = task_dict.get("feature_id")
         task_id = task_dict.get("id")
@@ -6506,7 +6514,7 @@ class SqliteBackend:
         self, subtask_data: Any, parent_task_id: str
     ) -> dict[str, Any]:
         """Force the parent id and coerce minimal scores/verification (pure)."""
-        normalized: dict[str, Any] = self._normalize_task_payload(dict(subtask_data))
+        normalized = self._normalize_task_payload_shape(dict(subtask_data))
         normalized["parent_task_id"] = parent_task_id
         return normalized
 

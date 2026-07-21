@@ -406,17 +406,20 @@ stale-claim sweep. See
 
 ### `edit_dependencies`
 
-Applies a batch of dependency edits atomically, rejecting cycles. This is a
+Validates a batch of dependency edits before applying it, rejecting cycles. This is a
 planning-gated tool (hidden from the wire unless `ANVIL_MCP_PLANNING=1`; see
 [Tool surface gating](#tool-surface-gating)). It does not run stale-claim reaping — it
 only rewrites dependency lists, so no claim state is touched.
 
 `add` / `remove` are `[source, target]` pairs meaning *source depends on target*. The whole
 batch is validated up front before anything is written: any unknown task ID, self-dependency,
-or resulting cycle rejects the entire batch with no partial apply. Task status is preserved —
-`edit_dependencies` emits a `task.created` upsert per changed task that deliberately omits
-`status` from its write, so a claimed or in-progress task's dependency list can be edited
-without regressing its status.
+or resulting cycle rejects the entire batch with no mutation. After validation,
+`edit_dependencies` emits a separate `task.created` upsert for each changed task. Those
+appends are committed separately, so a later append failure can leave earlier task changes
+committed; persistence is not yet whole-batch atomic. Task status is preserved because each
+upsert deliberately omits `status` from its write, so a claimed or in-progress task's
+dependency list can be edited without regressing its status. True persistence atomicity
+requires the planned single batch event with prior-dependency/graph-cursor revalidation.
 
 **Inputs**
 
