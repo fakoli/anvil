@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import enum
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
+from anvil.state.hashing import (
+    CanonicalJsonRefusal,
+    CanonicalJsonRefusalCode,
+    canonical_json_bytes,
+    canonical_node_budget_for_bytes,
+    domain_separated_sha256,
+)
 
 PROJECT_SNAPSHOT_OPERATION_ID = "state.project.snapshot"
 PROJECT_SNAPSHOT_OPERATION_VERSION = 1
@@ -326,8 +332,9 @@ class ProjectSnapshotPayloadV1(BaseModel):
 
     @model_validator(mode="after")
     def validate_hierarchy(self) -> ProjectSnapshotPayloadV1:
+        _validate_snapshot_shape_limits(self, PROVIDER_LIMITS_V1)
         _validate_hierarchy(self)
-        validate_snapshot_limits(self, PROVIDER_LIMITS_V1)
+        _validate_snapshot_serialized_limit(self, PROVIDER_LIMITS_V1)
         return self
 
 
@@ -360,18 +367,46 @@ def snapshot_digest(
     payload: ProjectSnapshotPayloadV1 | Mapping[str, Any],
 ) -> FullSha256:
     """Return the v1 digest of only schema/version and allowlisted hierarchy."""
+    if isinstance(payload, Mapping) and not isinstance(
+        payload, ProjectSnapshotPayloadV1
+    ):
+        _validate_raw_snapshot_count_limits(payload, PROVIDER_LIMITS_V1)
     validated = (
         payload
         if isinstance(payload, ProjectSnapshotPayloadV1)
-        else ProjectSnapshotPayloadV1.model_validate_json(canonical_json_bytes(payload))
+        else ProjectSnapshotPayloadV1.model_validate_json(
+            canonical_json_bytes(
+                payload,
+                max_nodes=canonical_node_budget_for_bytes(
+                    PROVIDER_LIMITS_V1.max_snapshot_bytes
+                ),
+                max_bytes=PROVIDER_LIMITS_V1.max_snapshot_bytes,
+                max_string_bytes=PROVIDER_LIMITS_V1.max_string_bytes,
+            )
+        )
     )
     digest_document = validated.model_dump(mode="json")
-    return domain_separated_sha256(PROJECT_SNAPSHOT_DIGEST_DOMAIN, digest_document)
+    return domain_separated_sha256(
+        PROJECT_SNAPSHOT_DIGEST_DOMAIN,
+        digest_document,
+        max_nodes=canonical_node_budget_for_bytes(
+            PROVIDER_LIMITS_V1.max_snapshot_bytes
+        ),
+        max_bytes=PROVIDER_LIMITS_V1.max_snapshot_bytes,
+        max_string_bytes=PROVIDER_LIMITS_V1.max_string_bytes,
+    )
 
 
 def snapshot_canonical_bytes(payload: ProjectSnapshotPayloadV1) -> bytes:
     """Expose exact digest preimage JSON for cross-runtime qualification vectors."""
-    return canonical_json_bytes(payload.model_dump(mode="json"))
+    return canonical_json_bytes(
+        payload.model_dump(mode="json"),
+        max_nodes=canonical_node_budget_for_bytes(
+            PROVIDER_LIMITS_V1.max_snapshot_bytes
+        ),
+        max_bytes=PROVIDER_LIMITS_V1.max_snapshot_bytes,
+        max_string_bytes=PROVIDER_LIMITS_V1.max_string_bytes,
+    )
 
 
 def lowered_limits(requested: Mapping[str, Any]) -> ProviderReadLimitsV1:
@@ -394,6 +429,15 @@ def validate_snapshot_limits(
     limits: ProviderReadLimitsV1,
 ) -> None:
     """Refuse a hierarchy exceeding provider or caller-lowered ceilings."""
+    _validate_snapshot_shape_limits(snapshot, limits)
+    _validate_snapshot_serialized_limit(snapshot, limits)
+
+
+def _validate_snapshot_shape_limits(
+    snapshot: ProjectSnapshotPayloadV1,
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Apply cheap count/string gates before any hierarchy graph construction."""
     if len(snapshot.prds) > limits.max_prds:
         raise ValueError("PRD count exceeds provider limit")
     if len(snapshot.features) > limits.max_features:
@@ -408,10 +452,78 @@ def validate_snapshot_limits(
 
     document = snapshot.model_dump(mode="json")
     for value in _walk_strings(document):
-        if len(value.encode("utf-8")) > limits.max_string_bytes:
+        if len(value) > limits.max_string_bytes:
             raise ValueError("string byte size exceeds provider limit")
-    if len(canonical_json_bytes(document)) > limits.max_snapshot_bytes:
-        raise ValueError("snapshot byte size exceeds provider limit")
+        try:
+            size = len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise CanonicalJsonRefusal(
+                CanonicalJsonRefusalCode.invalid_unicode,
+                path="$",
+            ) from exc
+        if size > limits.max_string_bytes:
+            raise ValueError("string byte size exceeds provider limit")
+
+
+def _validate_raw_snapshot_count_limits(
+    payload: Mapping[str, Any],
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Reject oversized raw wire collections before canonical materialization."""
+    collections = (
+        ("prds", limits.max_prds, "PRD count exceeds provider limit"),
+        ("features", limits.max_features, "feature count exceeds provider limit"),
+        ("tasks", limits.max_tasks, "task count exceeds provider limit"),
+    )
+    for name, limit, message in collections:
+        value = payload.get(name)
+        if _is_json_sequence(value) and len(value) > limit:
+            raise ValueError(message)
+
+    tasks = payload.get("tasks")
+    if not _is_json_sequence(tasks):
+        return
+    for task in tasks:
+        if not isinstance(task, Mapping):
+            continue
+        dependencies = task.get("dependency_refs")
+        if _is_json_sequence(dependencies) and len(dependencies) > (
+            limits.max_dependencies_per_task
+        ):
+            raise ValueError("task dependency count exceeds provider limit")
+        criteria = task.get("acceptance_criteria")
+        if _is_json_sequence(criteria) and len(criteria) > (
+            limits.max_acceptance_criteria_per_task
+        ):
+            raise ValueError("task acceptance-criteria count exceeds provider limit")
+
+
+def _is_json_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray, memoryview),
+    )
+
+
+def _validate_snapshot_serialized_limit(
+    snapshot: ProjectSnapshotPayloadV1,
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Apply the final canonical-byte gate after graph invariants are proven."""
+    try:
+        canonical_json_bytes(
+            snapshot.model_dump(mode="json"),
+            max_nodes=canonical_node_budget_for_bytes(limits.max_snapshot_bytes),
+            max_bytes=limits.max_snapshot_bytes,
+            max_string_bytes=min(
+                limits.max_string_bytes,
+                limits.max_snapshot_bytes,
+            ),
+        )
+    except CanonicalJsonRefusal as exc:
+        if exc.code is CanonicalJsonRefusalCode.byte_limit_exceeded:
+            raise ValueError("snapshot byte size exceeds provider limit") from exc
+        raise
 
 
 def _validate_hierarchy(snapshot: ProjectSnapshotPayloadV1) -> None:

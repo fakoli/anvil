@@ -33,10 +33,10 @@ from anvil.read_contracts import (
 from anvil.state.hashing import (
     MAX_CANONICAL_JSON_DEPTH,
     MAX_CANONICAL_JSON_NODES,
-    MAX_CANONICAL_JSON_STRING_CHARS,
     CanonicalJsonRefusal,
     CanonicalJsonRefusalCode,
     canonical_json_bytes,
+    canonical_node_budget_for_bytes,
     domain_separated_sha256,
 )
 
@@ -83,6 +83,7 @@ def _task(
     dependencies: tuple[TaskScopedRefV1, ...] = (),
     parent: TaskScopedRefV1 | None = None,
     title: str | None = None,
+    acceptance: tuple[str, ...] = ("It is bounded.",),
 ) -> TaskRecordV1:
     return TaskRecordV1(
         ref=TaskScopedRefV1(prd_id=prd_id, task_id=task_id),
@@ -94,7 +95,7 @@ def _task(
         status="ready",
         priority="high",
         dependency_refs=dependencies,
-        acceptance_criteria=("It is bounded.",),
+        acceptance_criteria=acceptance,
         verification_counts=VerificationCountsV1(
             commands=2,
             manual_steps=0,
@@ -123,6 +124,14 @@ def _wire_validate(data: dict[str, object]) -> ProjectSnapshotPayloadV1:
     return ProjectSnapshotPayloadV1.model_validate_json(
         json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     )
+
+
+def _count_json_nodes(value: object) -> int:
+    if isinstance(value, dict):
+        return 1 + sum(_count_json_nodes(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return 1 + sum(_count_json_nodes(item) for item in value)
+    return 1
 
 
 def test_models_forbid_unknown_wire_fields_at_every_level() -> None:
@@ -329,6 +338,36 @@ def test_canonical_json_rejects_every_float(value: float) -> None:
     assert raised.value.code is CanonicalJsonRefusalCode.float_forbidden
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\ud800",
+        ["safe", "\udfff"],
+        {"value": "\ud800"},
+        {"\ud800": "value"},
+        UserDict({"nested": MappingProxyType({"value": "\udfff"})}),
+    ],
+)
+def test_canonical_json_refuses_invalid_unicode_at_every_scalar_shape(
+    value: object,
+) -> None:
+    with pytest.raises(CanonicalJsonRefusal) as refusal:
+        canonical_json_bytes(value)
+    assert refusal.value.code is CanonicalJsonRefusalCode.invalid_unicode
+
+
+def test_snapshot_string_limit_reports_invalid_unicode_without_raw_codec_error() -> None:
+    invalid_task = _task("default").model_copy(update={"title": "\ud800"})
+    with pytest.raises(ValidationError, match="invalid_unicode") as refusal:
+        ProjectSnapshotPayloadV1(
+            project=ProjectRecordV1(project_id="anvil", name="Anvil"),
+            prds=(_prd("default"),),
+            features=(_feature("default"),),
+            tasks=(invalid_task,),
+        )
+    assert "UnicodeEncodeError" not in str(refusal.value)
+
+
 def test_canonical_json_refuses_sequence_and_mapping_cycles_safely() -> None:
     cyclic_list: list[object] = []
     cyclic_list.append(cyclic_list)
@@ -356,8 +395,17 @@ def test_canonical_json_refuses_excessive_depth_and_nodes_with_typed_codes() -> 
         canonical_json_bytes(range(MAX_CANONICAL_JSON_NODES + 1))
     assert node_refusal.value.code is CanonicalJsonRefusalCode.node_limit_exceeded
 
+    assert canonical_json_bytes(
+        "x" * 50,
+        max_bytes=60,
+        max_string_bytes=60,
+    ) == b'"' + (b"x" * 50) + b'"'
     with pytest.raises(CanonicalJsonRefusal) as byte_refusal:
-        canonical_json_bytes("x" * (MAX_CANONICAL_JSON_STRING_CHARS + 1))
+        canonical_json_bytes(
+            '"' * 30,
+            max_bytes=60,
+            max_string_bytes=60,
+        )
     assert byte_refusal.value.code is CanonicalJsonRefusalCode.byte_limit_exceeded
 
 
@@ -449,6 +497,101 @@ def test_lowered_entity_and_string_limits_refuse_atomically() -> None:
         validate_snapshot_limits(snapshot, lowered_limits({"max_string_bytes": 2}))
     with pytest.raises(ValueError, match="snapshot byte size"):
         validate_snapshot_limits(snapshot, lowered_limits({"max_snapshot_bytes": 10}))
+
+
+def test_public_count_gates_precede_hierarchy_graph_work() -> None:
+    repeated = tuple(
+        TaskScopedRefV1(prd_id="default", task_id="T001")
+        for _ in range(PROVIDER_LIMITS_V1.max_dependencies_per_task + 1)
+    )
+    with pytest.raises(ValidationError, match="dependency count exceeds") as edges:
+        ProjectSnapshotPayloadV1(
+            project=ProjectRecordV1(project_id="anvil", name="Anvil"),
+            prds=(_prd("default"),),
+            features=(_feature("default"),),
+            tasks=(
+                _task("default"),
+                _task("default", "T002", dependencies=repeated),
+            ),
+        )
+    assert "duplicate task dependency edge" not in str(edges.value)
+
+    with pytest.raises(ValidationError, match="PRD count exceeds") as entities:
+        ProjectSnapshotPayloadV1(
+            project=ProjectRecordV1(project_id="anvil", name="Anvil"),
+            prds=tuple(
+                _prd("default") for _ in range(PROVIDER_LIMITS_V1.max_prds + 1)
+            ),
+            features=(_feature("default"),),
+            tasks=(_task("default"),),
+        )
+    assert "duplicate PRD scoped reference" not in str(entities.value)
+
+    raw = _snapshot().model_dump(mode="json")
+    raw["prds"] = [raw["prds"][0]] * (PROVIDER_LIMITS_V1.max_prds + 1)
+    with pytest.raises(ValueError, match="PRD count exceeds") as raw_entities:
+        snapshot_digest(raw)
+    assert "node_limit_exceeded" not in str(raw_entities.value)
+
+
+def test_public_string_gate_precedes_hierarchy_graph_work() -> None:
+    oversized = "x" * (PROVIDER_LIMITS_V1.max_string_bytes + 1)
+    invalid_feature_task = _task(
+        "default",
+        "T002",
+        acceptance=(oversized,),
+    ).model_copy(
+        update={
+            "feature_ref": FeatureScopedRefV1(
+                prd_id="default",
+                feature_id="F999",
+            )
+        }
+    )
+    with pytest.raises(ValidationError, match="string byte size exceeds") as refusal:
+        ProjectSnapshotPayloadV1(
+            project=ProjectRecordV1(project_id="anvil", name="Anvil"),
+            prds=(_prd("default"),),
+            features=(_feature("default"),),
+            tasks=(_task("default"), invalid_feature_task),
+        )
+    assert "feature target is missing" not in str(refusal.value)
+
+
+def test_provider_node_budget_cannot_reject_a_byte_admitted_json_value() -> None:
+    byte_ceiling = PROVIDER_LIMITS_V1.max_snapshot_bytes
+    assert canonical_node_budget_for_bytes(byte_ceiling) == byte_ceiling
+
+    corpus: tuple[object, ...] = (
+        None,
+        0,
+        "",
+        [],
+        {},
+        [0, 0, 0],
+        {"a": [0, {"b": ""}]},
+    )
+    for value in corpus:
+        assert _count_json_nodes(value) <= len(canonical_json_bytes(value))
+
+
+def test_valid_five_thousand_task_snapshot_exceeds_generic_node_default() -> None:
+    tasks = tuple(
+        _task("default", f"T001.{index}", title="t", acceptance=())
+        for index in range(1, 5001)
+    )
+    snapshot = ProjectSnapshotPayloadV1(
+        project=ProjectRecordV1(project_id="anvil", name="Anvil"),
+        prds=(_prd("default"),),
+        features=(_feature("default"),),
+        tasks=tasks,
+    )
+    encoded = snapshot_canonical_bytes(snapshot)
+    assert 1_500_000 < len(encoded) < 3_000_000
+    assert _count_json_nodes(snapshot.model_dump(mode="json")) > (
+        MAX_CANONICAL_JSON_NODES
+    )
+    assert len(tasks) == 5000
 
 
 @pytest.mark.parametrize(

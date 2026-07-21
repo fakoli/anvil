@@ -31,7 +31,7 @@ MAX_CANONICAL_JSON_DEPTH = 128
 MAX_CANONICAL_JSON_NODES = 100_000
 MAX_CANONICAL_JSON_BYTES = 16_777_216
 MAX_CANONICAL_JSON_STRING_BYTES = 16_777_216
-MAX_CANONICAL_JSON_STRING_CHARS = MAX_CANONICAL_JSON_STRING_BYTES // 6
+MAX_CANONICAL_JSON_NODE_HARD_LIMIT = MAX_CANONICAL_JSON_BYTES
 MAX_CANONICAL_JSON_INTEGER = (2**63) - 1
 
 
@@ -47,6 +47,7 @@ class CanonicalJsonRefusalCode(enum.StrEnum):
     node_limit_exceeded = "node_limit_exceeded"
     byte_limit_exceeded = "byte_limit_exceeded"
     integer_out_of_range = "integer_out_of_range"
+    invalid_unicode = "invalid_unicode"
 
 
 class CanonicalJsonRefusal(ValueError):
@@ -58,7 +59,13 @@ class CanonicalJsonRefusal(ValueError):
         super().__init__(f"canonical JSON refused: {code.value} at {path}")
 
 
-def canonical_json_bytes(value: Any) -> bytes:
+def canonical_json_bytes(
+    value: Any,
+    *,
+    max_nodes: int = MAX_CANONICAL_JSON_NODES,
+    max_bytes: int = MAX_CANONICAL_JSON_BYTES,
+    max_string_bytes: int = MAX_CANONICAL_JSON_STRING_BYTES,
+) -> bytes:
     """Return the portable canonical JSON representation of *value*.
 
     This is the public-contract canonicalizer.  It deliberately differs from
@@ -73,6 +80,11 @@ def canonical_json_bytes(value: Any) -> bytes:
     and sequences other than text/bytes.  Refusing unsupported values keeps
     hashing independent of ``default=`` coercions and object ``repr`` output.
     """
+    _validate_canonical_limits(
+        max_nodes=max_nodes,
+        max_bytes=max_bytes,
+        max_string_bytes=max_string_bytes,
+    )
     materialized = _materialize_canonical_json_value(
         value,
         path="$",
@@ -80,6 +92,9 @@ def canonical_json_bytes(value: Any) -> bytes:
         active=set(),
         nodes=[0],
         bytes_used=[0],
+        max_nodes=max_nodes,
+        max_bytes=max_bytes,
+        max_string_bytes=max_string_bytes,
     )
     encoded = json.dumps(
         materialized,
@@ -88,7 +103,7 @@ def canonical_json_bytes(value: Any) -> bytes:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    if len(encoded) > MAX_CANONICAL_JSON_BYTES:
+    if len(encoded) > max_bytes:
         raise CanonicalJsonRefusal(
             CanonicalJsonRefusalCode.byte_limit_exceeded,
             path="$",
@@ -100,7 +115,14 @@ def canonical_json_bytes(value: Any) -> bytes:
     return encoded
 
 
-def domain_separated_sha256(domain: bytes, value: Any) -> str:
+def domain_separated_sha256(
+    domain: bytes,
+    value: Any,
+    *,
+    max_nodes: int = MAX_CANONICAL_JSON_NODES,
+    max_bytes: int = MAX_CANONICAL_JSON_BYTES,
+    max_string_bytes: int = MAX_CANONICAL_JSON_STRING_BYTES,
+) -> str:
     """Hash canonical JSON under a NUL-terminated ASCII *domain*.
 
     Domain separation is part of the digest contract, so callers must provide
@@ -114,7 +136,29 @@ def domain_separated_sha256(domain: bytes, value: Any) -> str:
         domain.decode("ascii")
     except UnicodeDecodeError as exc:
         raise ValueError("hash domain must be ASCII") from exc
-    return hashlib.sha256(domain + canonical_json_bytes(value)).hexdigest()
+    return hashlib.sha256(
+        domain
+        + canonical_json_bytes(
+            value,
+            max_nodes=max_nodes,
+            max_bytes=max_bytes,
+            max_string_bytes=max_string_bytes,
+        )
+    ).hexdigest()
+
+
+def canonical_node_budget_for_bytes(max_bytes: int) -> int:
+    """Return a node ceiling that cannot reject byte-admitted canonical JSON.
+
+    Every JSON value node contributes at least one encoded byte; containers
+    contribute at least two.  A node budget equal to the serialized-byte
+    ceiling is therefore a conservative upper bound for any admitted payload.
+    Snapshot contracts use this derived ceiling instead of the generic hostile-
+    input default, so the implementation has no unpublished structural limit.
+    """
+    if not 1 <= max_bytes <= MAX_CANONICAL_JSON_BYTES:
+        raise ValueError("canonical JSON byte ceiling is outside the supported range")
+    return max_bytes
 
 
 def _materialize_canonical_json_value(
@@ -125,9 +169,12 @@ def _materialize_canonical_json_value(
     active: set[int],
     nodes: list[int],
     bytes_used: list[int],
+    max_nodes: int,
+    max_bytes: int,
+    max_string_bytes: int,
 ) -> Any:
     nodes[0] += 1
-    if nodes[0] > MAX_CANONICAL_JSON_NODES:
+    if nodes[0] > max_nodes:
         raise CanonicalJsonRefusal(
             CanonicalJsonRefusalCode.node_limit_exceeded,
             path=path,
@@ -138,7 +185,13 @@ def _materialize_canonical_json_value(
             path=path,
         )
     if value is None or isinstance(value, (bool, str)):
-        _consume_scalar_bytes(value, path=path, bytes_used=bytes_used)
+        _consume_scalar_bytes(
+            value,
+            path=path,
+            bytes_used=bytes_used,
+            max_bytes=max_bytes,
+            max_string_bytes=max_string_bytes,
+        )
         return value
     if isinstance(value, int):
         if not -MAX_CANONICAL_JSON_INTEGER <= value <= MAX_CANONICAL_JSON_INTEGER:
@@ -146,7 +199,13 @@ def _materialize_canonical_json_value(
                 CanonicalJsonRefusalCode.integer_out_of_range,
                 path=path,
             )
-        _consume_scalar_bytes(value, path=path, bytes_used=bytes_used)
+        _consume_scalar_bytes(
+            value,
+            path=path,
+            bytes_used=bytes_used,
+            max_bytes=max_bytes,
+            max_string_bytes=max_string_bytes,
+        )
         return value
     if isinstance(value, float):
         raise CanonicalJsonRefusal(
@@ -161,6 +220,9 @@ def _materialize_canonical_json_value(
             active=active,
             nodes=nodes,
             bytes_used=bytes_used,
+            max_nodes=max_nodes,
+            max_bytes=max_bytes,
+            max_string_bytes=max_string_bytes,
         )
     if isinstance(value, Sequence) and not isinstance(
         value, (str, bytes, bytearray, memoryview)
@@ -172,6 +234,9 @@ def _materialize_canonical_json_value(
             active=active,
             nodes=nodes,
             bytes_used=bytes_used,
+            max_nodes=max_nodes,
+            max_bytes=max_bytes,
+            max_string_bytes=max_string_bytes,
         )
     raise CanonicalJsonRefusal(
         CanonicalJsonRefusalCode.unsupported_type,
@@ -187,6 +252,9 @@ def _materialize_mapping(
     active: set[int],
     nodes: list[int],
     bytes_used: list[int],
+    max_nodes: int,
+    max_bytes: int,
+    max_string_bytes: int,
 ) -> dict[str, Any]:
     identity = id(value)
     if identity in active:
@@ -197,7 +265,7 @@ def _materialize_mapping(
     active.add(identity)
     result: dict[str, Any] = {}
     try:
-        _consume_bytes(2, path=path, bytes_used=bytes_used)
+        _consume_bytes(2, path=path, bytes_used=bytes_used, max_bytes=max_bytes)
         for index, (key, item) in enumerate(value.items()):
             if not isinstance(key, str):
                 raise CanonicalJsonRefusal(
@@ -205,13 +273,25 @@ def _materialize_mapping(
                     path=f"{path}.key[{index}]",
                 )
             if index:
-                _consume_bytes(1, path=path, bytes_used=bytes_used)
+                _consume_bytes(
+                    1,
+                    path=path,
+                    bytes_used=bytes_used,
+                    max_bytes=max_bytes,
+                )
             _consume_scalar_bytes(
                 key,
                 path=f"{path}.key[{index}]",
                 bytes_used=bytes_used,
+                max_bytes=max_bytes,
+                max_string_bytes=max_string_bytes,
             )
-            _consume_bytes(1, path=path, bytes_used=bytes_used)
+            _consume_bytes(
+                1,
+                path=path,
+                bytes_used=bytes_used,
+                max_bytes=max_bytes,
+            )
             result[key] = _materialize_canonical_json_value(
                 item,
                 path=f"{path}.value[{index}]",
@@ -219,6 +299,9 @@ def _materialize_mapping(
                 active=active,
                 nodes=nodes,
                 bytes_used=bytes_used,
+                max_nodes=max_nodes,
+                max_bytes=max_bytes,
+                max_string_bytes=max_string_bytes,
             )
     except CanonicalJsonRefusal:
         raise
@@ -240,6 +323,9 @@ def _materialize_sequence(
     active: set[int],
     nodes: list[int],
     bytes_used: list[int],
+    max_nodes: int,
+    max_bytes: int,
+    max_string_bytes: int,
 ) -> list[Any]:
     identity = id(value)
     if identity in active:
@@ -250,10 +336,15 @@ def _materialize_sequence(
     active.add(identity)
     result: list[Any] = []
     try:
-        _consume_bytes(2, path=path, bytes_used=bytes_used)
+        _consume_bytes(2, path=path, bytes_used=bytes_used, max_bytes=max_bytes)
         for index, item in enumerate(value):
             if index:
-                _consume_bytes(1, path=path, bytes_used=bytes_used)
+                _consume_bytes(
+                    1,
+                    path=path,
+                    bytes_used=bytes_used,
+                    max_bytes=max_bytes,
+                )
             result.append(
                 _materialize_canonical_json_value(
                     item,
@@ -262,6 +353,9 @@ def _materialize_sequence(
                     active=active,
                     nodes=nodes,
                     bytes_used=bytes_used,
+                    max_nodes=max_nodes,
+                    max_bytes=max_bytes,
+                    max_string_bytes=max_string_bytes,
                 )
             )
     except CanonicalJsonRefusal:
@@ -281,21 +375,44 @@ def _consume_scalar_bytes(
     *,
     path: str,
     bytes_used: list[int],
+    max_bytes: int,
+    max_string_bytes: int,
 ) -> None:
-    if isinstance(value, str) and len(value) > MAX_CANONICAL_JSON_STRING_CHARS:
-        raise CanonicalJsonRefusal(
-            CanonicalJsonRefusalCode.byte_limit_exceeded,
-            path=path,
+    if isinstance(value, str):
+        minimum_json_size = len(value) + 2
+        if (
+            len(value) > max_string_bytes
+            or bytes_used[0] + minimum_json_size > max_bytes
+        ):
+            raise CanonicalJsonRefusal(
+                CanonicalJsonRefusalCode.byte_limit_exceeded,
+                path=path,
+            )
+        try:
+            raw_size = len(value.encode("utf-8"))
+            encoded_size = len(
+                json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            )
+        except UnicodeEncodeError as exc:
+            raise CanonicalJsonRefusal(
+                CanonicalJsonRefusalCode.invalid_unicode,
+                path=path,
+            ) from exc
+        if raw_size > max_string_bytes:
+            raise CanonicalJsonRefusal(
+                CanonicalJsonRefusalCode.byte_limit_exceeded,
+                path=path,
+            )
+    else:
+        encoded_size = len(
+            json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
         )
-    encoded_size = len(
-        json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    _consume_bytes(
+        encoded_size,
+        path=path,
+        bytes_used=bytes_used,
+        max_bytes=max_bytes,
     )
-    if isinstance(value, str) and encoded_size - 2 > MAX_CANONICAL_JSON_STRING_BYTES:
-        raise CanonicalJsonRefusal(
-            CanonicalJsonRefusalCode.byte_limit_exceeded,
-            path=path,
-        )
-    _consume_bytes(encoded_size, path=path, bytes_used=bytes_used)
 
 
 def _consume_bytes(
@@ -303,13 +420,28 @@ def _consume_bytes(
     *,
     path: str,
     bytes_used: list[int],
+    max_bytes: int,
 ) -> None:
     bytes_used[0] += count
-    if bytes_used[0] > MAX_CANONICAL_JSON_BYTES:
+    if bytes_used[0] > max_bytes:
         raise CanonicalJsonRefusal(
             CanonicalJsonRefusalCode.byte_limit_exceeded,
             path=path,
         )
+
+
+def _validate_canonical_limits(
+    *,
+    max_nodes: int,
+    max_bytes: int,
+    max_string_bytes: int,
+) -> None:
+    if not 1 <= max_nodes <= MAX_CANONICAL_JSON_NODE_HARD_LIMIT:
+        raise ValueError("canonical JSON node ceiling is outside the supported range")
+    if not 1 <= max_bytes <= MAX_CANONICAL_JSON_BYTES:
+        raise ValueError("canonical JSON byte ceiling is outside the supported range")
+    if not 1 <= max_string_bytes <= max_bytes:
+        raise ValueError("canonical JSON string ceiling is outside the supported range")
 
 
 def canonical_payload_json(payload: dict[str, Any]) -> str:
