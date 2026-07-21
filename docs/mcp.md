@@ -465,9 +465,11 @@ backend exception text and its rejection line in `audit.jsonl` are each capped a
 UTF-8 bytes. Raw actor, target, task/feature/owner identifiers, payload values, and
 Pydantic validation details are replaced by stable fingerprints. Repeating the same
 refused append produces the same refusal reason and fingerprints. The refused append
-adds nothing to `events.jsonl` and does not change the SQLite projection, although each
-retry adds a new timestamped rejection line to `audit.jsonl`; any earlier per-task append
-that already committed remains committed.
+adds nothing to `events.jsonl` and does not change the SQLite projection. When the audit
+destination is writable, each retry adds a new timestamped rejection line to
+`audit.jsonl`. An audit I/O failure is best-effort: it does not alter the stable refusal
+or permit state mutation. Any earlier per-task append that already committed remains
+committed.
 
 **When to call**: when a planner agent needs to correct inferred dependencies (add a missing
 edge, drop a spurious one) before promoting tasks to `ready`, without hand-editing state.db.

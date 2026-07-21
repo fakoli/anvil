@@ -237,6 +237,8 @@ def test_cli_reference_deps_states_separator_and_persistence_boundaries() -> Non
         "adds nothing to `events.jsonl`",
         "scoped task ID contains `:`",
         "both IDs are unscoped",
+        "audit destination is writable",
+        "audit I/O failure is best-effort",
         "new timestamped rejection line",
         "separate backend append",
         "stable fingerprints",
@@ -267,6 +269,9 @@ def test_mcp_edit_dependencies_states_recovery_diagnostic_contract() -> None:
         "same refusal reason and fingerprints",
         "stable fingerprints",
         "without the raw backend reason",
+        "audit destination is writable",
+        "audit I/O failure is best-effort",
+        "does not alter the stable refusal or permit state mutation",
     }
     missing = sorted(marker for marker in required if marker not in section)
     assert not missing, (

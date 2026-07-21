@@ -1505,9 +1505,11 @@ flag list; full prose treatment may follow in a later pass.
   payload values, and Pydantic validation details are replaced by stable
   fingerprints. Retrying the same refused append produces the same refusal
   reason and fingerprints; the refused append adds nothing to `events.jsonl`
-  and does not change the SQLite projection. Each retry does add a new
-  timestamped rejection line to `audit.jsonl`; any earlier per-task append that
-  already committed remains committed.
+  and does not change the SQLite projection. When the audit destination is
+  writable, each retry adds a new timestamped rejection line to `audit.jsonl`.
+  An audit I/O failure is best-effort: it does not alter the stable refusal or
+  permit state mutation. Any earlier per-task append that already committed
+  remains committed.
 
 **Diagnostics and health** (read-only)
 

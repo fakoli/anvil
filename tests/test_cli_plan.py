@@ -35,7 +35,7 @@ from typer.testing import CliRunner
 from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.planning._plan_helpers import (
-    SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE,
+    DEPENDENCY_EDGE_FORMAT_MESSAGE,
     BatchDepError,
     BatchDepPlan,
     emit_batch_dep_events,
@@ -825,7 +825,7 @@ class TestBatchDepsValidation:
             parse_dep_edge(raw, "add")
 
         assert raised.value.code == "bad_request"
-        assert raised.value.message == SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE
+        assert raised.value.message == DEPENDENCY_EDGE_FORMAT_MESSAGE
         assert len(raised.value.message.encode("utf-8")) <= 4096
         assert raw not in raised.value.message
 
@@ -864,12 +864,74 @@ class TestBatchDepsValidation:
                 "command": "deps",
                 "error": {
                     "code": "bad_request",
-                    "message": SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE,
+                    "message": DEPENDENCY_EDGE_FORMAT_MESSAGE,
                 },
             }
         else:
             assert result.output.strip() == (
-                f"Error: {SCOPED_DEP_EDGE_REQUIRES_ARROW_MESSAGE}"
+                f"Error: {DEPENDENCY_EDGE_FORMAT_MESSAGE}"
+            )
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "T001->T002->T003",
+            "T001->" + ("SYNTHETIC_ARROW_PAYLOAD" * 5_000) + "->T002",
+        ],
+        ids=["repeated-arrow", "huge-repeated-arrow"],
+    )
+    def test_batch_deps_parser_rejects_repeated_arrow(self, raw: str) -> None:
+        """Arrow syntax is exactly two tokens, even for attacker-sized input."""
+        with pytest.raises(BatchDepError) as raised:
+            parse_dep_edge(raw, "add")
+
+        assert raised.value.code == "bad_request"
+        assert raised.value.message == DEPENDENCY_EDGE_FORMAT_MESSAGE
+        assert len(raised.value.message.encode("utf-8")) <= 4096
+        assert raw not in raised.value.message
+        assert "SYNTHETIC_ARROW_PAYLOAD" not in raised.value.message
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "T001->T002->T003",
+            "T001->" + ("SYNTHETIC_ARROW_PAYLOAD" * 5_000) + "->T002",
+        ],
+        ids=["repeated-arrow", "huge-repeated-arrow"],
+    )
+    @pytest.mark.parametrize("json_output", [True, False], ids=["json", "human"])
+    def test_batch_deps_cli_rejects_repeated_arrow_without_mutation(
+        self, tmp_path: Path, raw: str, json_output: bool
+    ) -> None:
+        """Repeated arrows fail before state opens on both CLI surfaces."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", []), ("T003", [])])
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        events_before = events_path.read_bytes()
+        args = ["deps", "--add", raw]
+        if json_output:
+            args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == (1 if json_output else 2)
+        assert events_path.read_bytes() == events_before
+        for task_id in ("T001", "T002", "T003"):
+            assert _deps_of(tmp_path, task_id) == []
+        assert raw not in result.output
+        assert "SYNTHETIC_ARROW_PAYLOAD" not in result.output
+        assert len(result.output.encode("utf-8")) <= 4096
+        if json_output:
+            assert json.loads(result.output) == {
+                "ok": False,
+                "command": "deps",
+                "error": {
+                    "code": "bad_request",
+                    "message": DEPENDENCY_EDGE_FORMAT_MESSAGE,
+                },
+            }
+        else:
+            assert result.output.strip() == (
+                f"Error: {DEPENDENCY_EDGE_FORMAT_MESSAGE}"
             )
 
     def test_batch_deps_help_documents_options(self) -> None:
