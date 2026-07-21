@@ -6,6 +6,11 @@ coordinate on without conflicts.
 
 `anvil-state` installs the `anvil` CLI and the `anvil-mcp` MCP server.
 
+Runtime compatibility: the published package requires Python 3.11+,
+Pydantic 2.11.7+, and FastMCP 3.x (3.0.0 or newer). These are the lowest
+versions that both resolve and provide Anvil's MCP registration and
+surface-gating APIs; the next FastMCP major remains opt-in until qualified.
+
 ```bash
 uv tool install anvil-state      # or: pipx install anvil-state
 anvil --help

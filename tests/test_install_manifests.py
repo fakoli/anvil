@@ -13,8 +13,10 @@ repo root (matching ``test_agents_md.py`` / ``test_version_sync.py``).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tomllib
 import zipfile
 from collections import Counter
@@ -66,6 +68,138 @@ def test_pyproject_readme_is_inside_the_build_root() -> None:
     (sdist->wheel). Keep the readme path inside bin/ so the release pipeline works."""
     readme = _pyproject()["project"]["readme"]
     assert not str(readme).startswith(".."), "readme must not escape the bin/ build root"
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv required to resolve the wheel")
+def test_built_wheel_runs_at_declared_dependency_floors(tmp_path: Path) -> None:
+    """Keep published floors installable and compatible with Anvil's MCP types."""
+    dependencies = _pyproject()["project"]["dependencies"]
+    assert "pydantic>=2.11.7" in dependencies
+    assert "fastmcp>=3.0.0,<4" in dependencies
+
+    out = tmp_path / "dist"
+    build = subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(out)],
+        cwd=_repo_root() / "bin",
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert build.returncode == 0, build.stderr[-600:]
+    wheel = next(out.glob("*.whl"))
+
+    venv = tmp_path / "resolver-venv"
+    created = subprocess.run(
+        ["uv", "venv", str(venv), "--python", sys.executable],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert created.returncode == 0, created.stderr[-600:]
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+    exact_floor = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            str(wheel),
+            "pydantic==2.11.7",
+            "fastmcp==3.0.0",
+            "pytest>=8,<10",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert exact_floor.returncode == 0, exact_floor.stderr[-1200:]
+
+    dependency_check = subprocess.run(
+        ["uv", "pip", "check", "--python", str(python)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert dependency_check.returncode == 0, dependency_check.stderr[-1200:]
+
+    imported = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "from anvil.mcp_server import apply_surface_gate, mcp; "
+                "assert callable(mcp.enable); assert callable(mcp.disable); "
+                "assert hasattr(mcp, '_transforms'); "
+                "assert apply_surface_gate(mcp, env={}) is False; "
+                "assert apply_surface_gate(mcp, env={'ANVIL_MCP_PLANNING':'1'}) is True"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert imported.returncode == 0, imported.stderr[-1200:]
+
+    mcp_contracts = subprocess.run(
+        [
+            str(python),
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_mcp.py::TestListTools",
+            "tests/test_mcp.py::TestPlanningSurfaceGate",
+            "tests/test_mcp.py::TestGetProjectSummary",
+        ],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert mcp_contracts.returncode == 0, (
+        mcp_contracts.stdout + mcp_contracts.stderr
+    )[-1600:]
+
+    below_floor = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--dry-run",
+            str(wheel),
+            "pydantic==2.11.6",
+            "fastmcp==3.0.0",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert below_floor.returncode != 0
+    assert "pydantic>=2.11.7" in (below_floor.stdout + below_floor.stderr)
+
+    below_fastmcp_floor = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--dry-run",
+            str(wheel),
+            "pydantic==2.11.7",
+            "fastmcp==2.14.7",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert below_fastmcp_floor.returncode != 0
+    fastmcp_refusal = below_fastmcp_floor.stdout + below_fastmcp_floor.stderr
+    assert "fastmcp" in fastmcp_refusal
+    assert ">=3.0.0" in fastmcp_refusal
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv required to build the wheel")

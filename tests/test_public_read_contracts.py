@@ -12,8 +12,10 @@ from pydantic import ValidationError
 
 import anvil.read_contracts as read_contracts_module
 from anvil.read_contracts import (
+    MAX_PROVIDER_LIMIT_REQUEST_FIELDS,
     MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES,
     PROVIDER_LIMITS_V1,
+    PUBLIC_SCHEMA_CONTRACT_KEY_V1,
     WIRE_INT64_MAX,
     EventCursorV1,
     FeatureRecordV1,
@@ -33,6 +35,7 @@ from anvil.read_contracts import (
     snapshot_canonical_bytes,
     snapshot_digest,
     snapshot_response_canonical_bytes,
+    validate_public_wire_document,
     validate_snapshot_limits,
 )
 from anvil.state.hashing import (
@@ -1161,6 +1164,51 @@ def test_provider_limits_are_frozen_serializable_and_may_only_be_lowered() -> No
         lowered_limits({"max_tasks": True})
 
 
+def test_lowered_limits_bounds_untrusted_request_shape_and_error_text() -> None:
+    huge_key = "x" * 100_000
+    with pytest.raises(ValueError) as huge:
+        lowered_limits({huge_key: 1})
+    assert str(huge.value) == "unknown provider limit field"
+    assert huge_key not in str(huge.value)
+
+    many = {
+        f"unknown_{index}": 1
+        for index in range(MAX_PROVIDER_LIMIT_REQUEST_FIELDS + 1)
+    }
+    with pytest.raises(ValueError) as excessive:
+        lowered_limits(many)
+    assert str(excessive.value) == "provider limit request has too many fields"
+
+    with pytest.raises(ValueError) as mixed:
+        lowered_limits({1: 1})  # type: ignore[dict-item]
+    assert str(mixed.value) == "unknown provider limit field"
+
+
+def test_lowered_limits_rejects_hostile_mapping_before_calling_hooks() -> None:
+    phases: list[str] = []
+
+    class HostileDict(dict[str, int]):
+        def __len__(self) -> int:
+            phases.append("length")
+            raise AssertionError("hostile length must not run")
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("iterator")
+            raise AssertionError("hostile iterator must not run")
+
+        def __getitem__(self, key: str) -> int:
+            phases.append("getitem")
+            raise AssertionError("hostile lookup must not run")
+
+        def items(self):  # type: ignore[no-untyped-def]
+            phases.append("items")
+            raise AssertionError("hostile items must not run")
+
+    with pytest.raises(TypeError, match="must be a plain object"):
+        lowered_limits(HostileDict(max_tasks=1))
+    assert phases == []
+
+
 def test_lowered_entity_and_string_limits_refuse_atomically() -> None:
     snapshot = _snapshot()
     with pytest.raises(ValueError, match="task count"):
@@ -1402,6 +1450,146 @@ def test_read_error_codes_and_body_are_closed_and_serializable() -> None:
     assert ReadErrorV1.model_validate_json(error.model_dump_json()) == error
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         ReadErrorV1.model_validate({**error.model_dump(), "path": "C:/secret/state.db"})
+
+
+def test_every_public_wire_model_declares_and_satisfies_the_schema_contract() -> None:
+    payload = _snapshot()
+    response = ProjectSnapshotDataV1(
+        payload=payload,
+        event_cursor=EventCursorV1(
+            event_count=1,
+            event_frontier_sha256=_A_SHA,
+        ),
+        applied_limits=PROVIDER_LIMITS_V1,
+        snapshot_digest=snapshot_digest(payload),
+    )
+    instances = (
+        PrdScopedRefV1(prd_id="default"),
+        FeatureScopedRefV1(prd_id="default", feature_id="F001"),
+        TaskScopedRefV1(prd_id="default", task_id="T001"),
+        ProjectRecordV1(project_id="anvil", name="Anvil"),
+        _prd("default"),
+        _feature("default"),
+        VerificationCountsV1(
+            commands=1,
+            manual_steps=0,
+            required_evidence=1,
+            typed_proofs=1,
+        ),
+        _task("default"),
+        payload,
+        response.event_cursor,
+        response,
+        PROVIDER_LIMITS_V1,
+        ReadErrorV1(code=ReadErrorCode.state_unavailable, field="state"),
+    )
+    for instance in instances:
+        model = type(instance)
+        schema = model.model_json_schema()
+        contract = schema[PUBLIC_SCHEMA_CONTRACT_KEY_V1]
+        assert contract == {
+            "standard_schema_role": "structural-prefilter",
+            "authoritative_validator": (
+                "anvil.read_contracts.validate_public_wire_document"
+            ),
+            "runtime_required_for": [
+                "strict decoded scalar types and JSON lexical distinctions",
+                "cross-field identity and provenance",
+                "cross-record ownership and hierarchy",
+                "snapshot digest equality",
+            ],
+        }
+        document = instance.model_dump(mode="json")
+        assert Draft202012Validator(schema).is_valid(document)
+        assert validate_public_wire_document(model, document) == instance
+
+
+def test_schema_prefilter_overaccepts_documents_rejected_by_runtime_contract() -> None:
+    cursor_float = EventCursorV1(
+        event_count=1,
+        event_frontier_sha256=_A_SHA,
+    ).model_dump(mode="json")
+    cursor_float["event_count"] = 1.0
+
+    payload_float = _snapshot().model_dump(mode="json")
+    payload_float["operation_version"] = 1.0
+
+    mismatched_prd = _prd("default").model_dump(mode="json")
+    mismatched_prd["local_id"] = "release-1"
+
+    false_available_provenance = _prd("default").model_dump(mode="json")
+    false_available_provenance["content_available"] = False
+
+    cross_owned_task = _task("default").model_dump(mode="json")
+    cross_owned_task["feature_ref"] = {
+        "prd_id": "release-1",
+        "feature_id": "F001",
+    }
+
+    missing_dependency = _snapshot().model_dump(mode="json")
+    missing_dependency["tasks"][0]["dependency_refs"] = [
+        {"prd_id": "default", "task_id": "T999"}
+    ]
+
+    payload = _snapshot()
+    wrong_digest = ProjectSnapshotDataV1(
+        payload=payload,
+        event_cursor=EventCursorV1(
+            event_count=1,
+            event_frontier_sha256=_A_SHA,
+        ),
+        applied_limits=PROVIDER_LIMITS_V1,
+        snapshot_digest=snapshot_digest(payload),
+    ).model_dump(mode="json")
+    wrong_digest["snapshot_digest"] = _B_SHA
+
+    cases = (
+        (EventCursorV1, cursor_float),
+        (ProjectSnapshotPayloadV1, payload_float),
+        (PrdRecordV1, mismatched_prd),
+        (PrdRecordV1, false_available_provenance),
+        (TaskRecordV1, cross_owned_task),
+        (ProjectSnapshotPayloadV1, missing_dependency),
+        (ProjectSnapshotDataV1, wrong_digest),
+    )
+    for model, document in cases:
+        assert Draft202012Validator(model.model_json_schema()).is_valid(document)
+        with pytest.raises(ValidationError):
+            validate_public_wire_document(model, document)
+
+
+@pytest.mark.parametrize("invalid_digest", [_A_SHA + "\n", _A_SHA + "\r", "A" * 64])
+def test_full_sha256_schema_and_runtime_exclude_non_exact_values(
+    invalid_digest: str,
+) -> None:
+    payload = _snapshot()
+    response = ProjectSnapshotDataV1(
+        payload=payload,
+        event_cursor=EventCursorV1(
+            event_count=1,
+            event_frontier_sha256=_A_SHA,
+        ),
+        applied_limits=PROVIDER_LIMITS_V1,
+        snapshot_digest=snapshot_digest(payload),
+    )
+    cases = (
+        (PrdRecordV1, _prd("default").model_dump(mode="json"), "source_sha256"),
+        (
+            EventCursorV1,
+            response.event_cursor.model_dump(mode="json"),
+            "event_frontier_sha256",
+        ),
+        (
+            ProjectSnapshotDataV1,
+            response.model_dump(mode="json"),
+            "snapshot_digest",
+        ),
+    )
+    for model, valid_document, field in cases:
+        document = {**valid_document, field: invalid_digest}
+        assert not Draft202012Validator(model.model_json_schema()).is_valid(document)
+        with pytest.raises(ValidationError, match="full lowercase SHA-256 digest"):
+            validate_public_wire_document(model, document)
 
 
 @pytest.mark.parametrize(

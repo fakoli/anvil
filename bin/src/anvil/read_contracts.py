@@ -5,6 +5,13 @@ do not inherit from the mutable state models: adding an internal field must
 never add it to a provider response.  Projection code must construct these
 DTOs field by field and receives an atomic validation failure when ownership
 or dependency invariants are not satisfied.
+
+Every public model's Draft 2020-12 schema carries
+``x-anvil-validation-contract-v1``.  That schema is a structural prefilter,
+not the authorization boundary: providers must pass decoded documents through
+``validate_public_wire_document`` for strict scalar/lexical checks and the
+cross-field identity, provenance, ownership, hierarchy, and digest invariants
+that standard JSON Schema cannot completely represent.
 """
 
 from __future__ import annotations
@@ -12,9 +19,9 @@ from __future__ import annotations
 import enum
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from anvil.state.hashing import (
     MAX_CANONICAL_JSON_RESPONSE_BYTES,
@@ -38,6 +45,7 @@ PRD_CONTENT_OPERATION_VERSION: Literal[1] = 1
 PRD_CONTENT_SCHEMA_ID = "anvil.state.prd-content.v1"
 
 _FULL_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_FULL_SHA256_RE = re.compile(_FULL_SHA256_PATTERN)
 _PRD_ID_PATTERN_TEXT = r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$"
 _FEATURE_ID_PATTERN_TEXT = r"^F[0-9]{3}(?:\.[0-9]+)*$"
 _TASK_ID_PATTERN_TEXT = r"^T[0-9]{3}(?:\.[0-9]+)*$"
@@ -47,6 +55,18 @@ _TASK_ID_PATTERN = re.compile(_TASK_ID_PATTERN_TEXT)
 _NO_LINE_TERMINATOR_SCHEMA: dict[str, Any] = {
     "not": {"pattern": r"[\r\n]"}
 }
+_OPTIONAL_NO_LINE_TERMINATOR_SCHEMA: dict[str, Any] = {
+    "if": {"type": "string"},
+    "then": _NO_LINE_TERMINATOR_SCHEMA,
+}
+
+PUBLIC_SCHEMA_CONTRACT_KEY_V1 = "x-anvil-validation-contract-v1"
+_PUBLIC_SCHEMA_RUNTIME_INVARIANTS = [
+    "strict decoded scalar types and JSON lexical distinctions",
+    "cross-field identity and provenance",
+    "cross-record ownership and hierarchy",
+    "snapshot digest equality",
+]
 
 FullSha256: TypeAlias = str
 TaskKey: TypeAlias = tuple[str, str]
@@ -101,11 +121,22 @@ ReadErrorMessageV1: TypeAlias = Literal[
     "The requested PRD section selection is invalid.",
 ]
 
+def _apply_public_schema_contract(schema: dict[str, Any]) -> None:
+    schema[PUBLIC_SCHEMA_CONTRACT_KEY_V1] = {
+        "standard_schema_role": "structural-prefilter",
+        "authoritative_validator": (
+            "anvil.read_contracts.validate_public_wire_document"
+        ),
+        "runtime_required_for": list(_PUBLIC_SCHEMA_RUNTIME_INVARIANTS),
+    }
+
+
 _WIRE_CONFIG = ConfigDict(
     extra="forbid",
     frozen=True,
     strict=True,
     revalidate_instances="always",
+    json_schema_extra=_apply_public_schema_contract,
 )
 
 
@@ -165,6 +196,7 @@ def _read_error_json_schema(schema: dict[str, Any]) -> None:
         }
         for code, message in _SAFE_ERROR_MESSAGES.items()
     ]
+    _apply_public_schema_contract(schema)
 
 
 class ReadErrorV1(BaseModel):
@@ -231,6 +263,20 @@ class ProviderReadLimitsV1(BaseModel):
 
 
 PROVIDER_LIMITS_V1 = ProviderReadLimitsV1()
+MAX_PROVIDER_LIMIT_REQUEST_FIELDS = len(ProviderReadLimitsV1.model_fields)
+_PROVIDER_LIMIT_FIELDS = (
+    "max_prds",
+    "max_features",
+    "max_tasks",
+    "max_dependencies_per_task",
+    "max_acceptance_criteria_per_task",
+    "max_string_bytes",
+    "max_snapshot_bytes",
+    "max_response_bytes",
+    "max_prd_content_bytes",
+)
+_PROVIDER_LIMIT_FIELD_SET = frozenset(_PROVIDER_LIMIT_FIELDS)
+_MAX_PROVIDER_LIMIT_FIELD_NAME_CHARS = 64
 
 
 def _derive_minimum_project_snapshot_response_bytes() -> int:
@@ -364,11 +410,22 @@ class PrdRecordV1(BaseModel):
     status: PrdStatusV1
     target_version: str | None = Field(default=None, max_length=256)
     target_tag: str | None = Field(default=None, max_length=256)
-    source_sha256: str | None = Field(default=None, pattern=_FULL_SHA256_PATTERN)
+    source_sha256: str | None = Field(
+        default=None,
+        pattern=_FULL_SHA256_PATTERN,
+        json_schema_extra=_OPTIONAL_NO_LINE_TERMINATOR_SCHEMA,
+    )
     source_size_bytes: int | None = Field(default=None, ge=0, le=WIRE_INT64_MAX)
     source_encoding: Literal["utf-8"] | None = None
     provenance_state: Literal["available", "legacy_unbound"]
     content_available: bool
+
+    @field_validator("source_sha256", mode="before")
+    @classmethod
+    def validate_source_sha256(cls, value: Any) -> Any:
+        if type(value) is str and _FULL_SHA256_RE.fullmatch(value) is None:
+            raise ValueError("value must be a full lowercase SHA-256 digest")
+        return value
 
     @model_validator(mode="after")
     def validate_identity_and_provenance(self) -> PrdRecordV1:
@@ -510,7 +567,17 @@ class EventCursorV1(BaseModel):
     model_config = _WIRE_CONFIG
 
     event_count: int = Field(ge=0, le=WIRE_INT64_MAX)
-    event_frontier_sha256: str = Field(pattern=_FULL_SHA256_PATTERN)
+    event_frontier_sha256: str = Field(
+        pattern=_FULL_SHA256_PATTERN,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
+
+    @field_validator("event_frontier_sha256", mode="before")
+    @classmethod
+    def validate_event_frontier_sha256(cls, value: Any) -> Any:
+        if type(value) is str and _FULL_SHA256_RE.fullmatch(value) is None:
+            raise ValueError("value must be a full lowercase SHA-256 digest")
+        return value
 
 
 class ProjectSnapshotDataV1(BaseModel):
@@ -521,7 +588,17 @@ class ProjectSnapshotDataV1(BaseModel):
     payload: ProjectSnapshotPayloadV1
     event_cursor: EventCursorV1
     applied_limits: ProviderReadLimitsV1
-    snapshot_digest: str = Field(pattern=_FULL_SHA256_PATTERN)
+    snapshot_digest: str = Field(
+        pattern=_FULL_SHA256_PATTERN,
+        json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
+    )
+
+    @field_validator("snapshot_digest", mode="before")
+    @classmethod
+    def validate_snapshot_digest(cls, value: Any) -> Any:
+        if type(value) is str and _FULL_SHA256_RE.fullmatch(value) is None:
+            raise ValueError("value must be a full lowercase SHA-256 digest")
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -558,6 +635,34 @@ class ProjectSnapshotDataV1(BaseModel):
             raise ValueError("snapshot_digest does not match the allowlisted payload")
         _validate_response_serialized_limit(self, self.applied_limits)
         return self
+
+
+_PublicReadModelT = TypeVar("_PublicReadModelT", bound=BaseModel)
+_PUBLIC_READ_MODEL_TYPES: tuple[type[BaseModel], ...] = (
+    EventCursorV1,
+    FeatureRecordV1,
+    FeatureScopedRefV1,
+    PrdRecordV1,
+    PrdScopedRefV1,
+    ProjectRecordV1,
+    ProjectSnapshotDataV1,
+    ProjectSnapshotPayloadV1,
+    ProviderReadLimitsV1,
+    ReadErrorV1,
+    TaskRecordV1,
+    TaskScopedRefV1,
+    VerificationCountsV1,
+)
+
+
+def validate_public_wire_document(
+    model: type[_PublicReadModelT],
+    document: Mapping[str, Any],
+) -> _PublicReadModelT:
+    """Apply the authoritative runtime checks after an optional schema prefilter."""
+    if model not in _PUBLIC_READ_MODEL_TYPES:
+        raise TypeError("model is not a public read-contract DTO")
+    return model.model_validate(document)
 
 
 def snapshot_digest(
@@ -631,16 +736,27 @@ def snapshot_response_canonical_bytes(response: ProjectSnapshotDataV1) -> bytes:
 
 
 def lowered_limits(requested: Mapping[str, Any]) -> ProviderReadLimitsV1:
-    """Validate caller limits, refusing unknown, raised, or non-integer values."""
+    """Validate a small plain request without reflecting caller-controlled keys."""
+    if type(requested) is not dict:
+        raise TypeError("provider limit request must be a plain object")
+    if len(requested) > MAX_PROVIDER_LIMIT_REQUEST_FIELDS:
+        raise ValueError("provider limit request has too many fields")
+    for name in requested:
+        if (
+            type(name) is not str
+            or len(name) > _MAX_PROVIDER_LIMIT_FIELD_NAME_CHARS
+            or name not in _PROVIDER_LIMIT_FIELD_SET
+        ):
+            raise ValueError("unknown provider limit field")
     merged = PROVIDER_LIMITS_V1.model_dump()
-    unknown = set(requested) - set(merged)
-    if unknown:
-        raise ValueError(f"unknown provider limit: {sorted(unknown)[0]}")
-    for name, value in requested.items():
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError(f"provider limit {name} must be an integer")
+    for name in _PROVIDER_LIMIT_FIELDS:
+        if name not in requested:
+            continue
+        value = requested[name]
+        if type(value) is not int:
+            raise TypeError("provider limit value must be an integer")
         if value > merged[name]:
-            raise ValueError(f"provider limit {name} may only be lowered")
+            raise ValueError("provider limit may only be lowered")
         merged[name] = value
     return ProviderReadLimitsV1.model_validate(merged)
 
@@ -1041,6 +1157,8 @@ __all__ = [
     "PROJECT_SNAPSHOT_OPERATION_VERSION",
     "PROJECT_SNAPSHOT_SCHEMA_ID",
     "MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES",
+    "MAX_PROVIDER_LIMIT_REQUEST_FIELDS",
+    "PUBLIC_SCHEMA_CONTRACT_KEY_V1",
     "PROVIDER_LIMITS_V1",
     "PrdRecordV1",
     "PrdScopedRefV1",
@@ -1058,5 +1176,6 @@ __all__ = [
     "snapshot_digest",
     "snapshot_response_canonical_bytes",
     "validate_snapshot_limits",
+    "validate_public_wire_document",
     "WIRE_INT64_MAX",
 ]

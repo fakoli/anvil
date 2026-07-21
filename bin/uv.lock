@@ -109,11 +109,11 @@ requires-dist = [
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.26" },
     { name = "claude-agent-sdk", specifier = ">=0.2" },
     { name = "cryptography", specifier = ">=42" },
-    { name = "fastmcp" },
+    { name = "fastmcp", specifier = ">=3.0.0,<4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "openai", marker = "extra == 'all-providers'", specifier = ">=1.0" },
     { name = "openai", marker = "extra == 'custom'", specifier = ">=1.0" },
-    { name = "pydantic", specifier = ">=2.6" },
+    { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.12" },
 ]
