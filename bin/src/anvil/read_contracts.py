@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from anvil.state.hashing import (
     MAX_CANONICAL_JSON_RESPONSE_BYTES,
@@ -30,9 +30,6 @@ PROJECT_SNAPSHOT_OPERATION_VERSION = 1
 PROJECT_SNAPSHOT_SCHEMA_ID = "anvil.state.project-snapshot.v1"
 PROJECT_SNAPSHOT_DIGEST_DOMAIN = b"anvil.project-snapshot.v1\0"
 WIRE_INT64_MAX = (2**63) - 1
-MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES = len(
-    b'{"applied_limits":{},"event_cursor":{},"payload":{},"snapshot_digest":""}'
-)
 
 PRD_CONTENT_OPERATION_ID = "state.prd.content"
 PRD_CONTENT_OPERATION_VERSION = 1
@@ -195,6 +192,65 @@ class ProviderReadLimitsV1(BaseModel):
 PROVIDER_LIMITS_V1 = ProviderReadLimitsV1()
 
 
+def _derive_minimum_project_snapshot_response_bytes() -> int:
+    """Return the exact size of the smallest schema-valid response shape.
+
+    The payload uses the shortest valid project strings and empty hierarchy
+    arrays.  Its lowered limits are the smallest values that still admit that
+    payload and the two mandatory 64-byte hexadecimal digests.  The response
+    ceiling is serialized inside the response, so converge it to the fixed
+    point where the declared ceiling equals the canonical response size.
+
+    Computing this once from the public wire shape keeps the cheap preflight
+    bound sound if a mandatory field name or fixed literal changes.  It is not
+    computed from, and never traverses, caller-controlled response data.
+    """
+    payload: dict[str, Any] = {
+        "schema_id": PROJECT_SNAPSHOT_SCHEMA_ID,
+        "operation_version": PROJECT_SNAPSHOT_OPERATION_VERSION,
+        "project": {"project_id": "x", "name": "x"},
+        "prds": [],
+        "features": [],
+        "tasks": [],
+    }
+    payload_bytes = canonical_json_bytes(payload)
+    payload_digest = domain_separated_sha256(
+        PROJECT_SNAPSHOT_DIGEST_DOMAIN,
+        payload,
+    )
+    ceiling = 1
+    while True:
+        limits = ProviderReadLimitsV1(
+            max_prds=1,
+            max_features=1,
+            max_tasks=1,
+            max_dependencies_per_task=0,
+            max_acceptance_criteria_per_task=0,
+            max_string_bytes=64,
+            max_snapshot_bytes=len(payload_bytes),
+            max_response_bytes=ceiling,
+            max_prd_content_bytes=1,
+        )
+        document = {
+            "payload": payload,
+            "event_cursor": {
+                "event_count": 0,
+                "event_frontier_sha256": "0" * 64,
+            },
+            "applied_limits": limits.model_dump(mode="json"),
+            "snapshot_digest": payload_digest,
+        }
+        exact_size = len(canonical_json_bytes(document))
+        if exact_size == ceiling:
+            return exact_size
+        ceiling = exact_size
+
+
+MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES = (
+    _derive_minimum_project_snapshot_response_bytes()
+)
+
+
 class PrdScopedRefV1(BaseModel):
     model_config = _WIRE_CONFIG
 
@@ -342,33 +398,34 @@ class ProjectSnapshotPayloadV1(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def preflight_raw_limits(cls, value: Any, info: ValidationInfo) -> Any:
+    def preflight_raw_limits(cls, value: Any) -> Any:
         """Refuse structurally impossible wire input before nested DTO parsing."""
         if isinstance(value, Mapping):
             _validate_raw_snapshot_limits(value, PROVIDER_LIMITS_V1)
-            if info.mode == "json":
-                # A before-validator receives decoded JSON as Python lists.
-                # Preserve strict DTO semantics while retaining JSON-array input.
-                value = dict(value)
-                for name in ("prds", "features"):
-                    collection = value.get(name)
-                    if isinstance(collection, list):
-                        value[name] = tuple(collection)
-                tasks = value.get("tasks")
-                if isinstance(tasks, list):
-                    converted_tasks: list[Any] = []
-                    for task in tasks:
-                        if isinstance(task, Mapping):
-                            task = dict(task)
-                            for name in (
-                                "dependency_refs",
-                                "acceptance_criteria",
-                            ):
-                                collection = task.get(name)
-                                if isinstance(collection, list):
-                                    task[name] = tuple(collection)
-                        converted_tasks.append(task)
-                    value["tasks"] = tuple(converted_tasks)
+            # Both ``model_validate_json`` and an already-decoded JSON
+            # document use lists for wire arrays.  Convert only exact lists at
+            # the tuple-shaped public fields; strict nested/scalar validation
+            # remains in force for every other Python value.
+            value = dict(value)
+            for name in ("prds", "features"):
+                collection = value.get(name)
+                if isinstance(collection, list):
+                    value[name] = tuple(collection)
+            tasks = value.get("tasks")
+            if isinstance(tasks, list):
+                converted_tasks: list[Any] = []
+                for task in tasks:
+                    if isinstance(task, Mapping):
+                        task = dict(task)
+                        for name in (
+                            "dependency_refs",
+                            "acceptance_criteria",
+                        ):
+                            collection = task.get(name)
+                            if isinstance(collection, list):
+                                task[name] = tuple(collection)
+                    converted_tasks.append(task)
+                value["tasks"] = tuple(converted_tasks)
         return value
 
     @model_validator(mode="after")

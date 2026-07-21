@@ -678,6 +678,33 @@ def test_complete_response_ceiling_has_exact_lowered_boundary() -> None:
         )
 
 
+def test_decoded_json_payload_and_response_round_trip_under_strict_models() -> None:
+    payload = _snapshot()
+    payload_document = payload.model_dump(mode="json")
+    assert isinstance(payload_document["prds"], list)
+    assert isinstance(payload_document["features"], list)
+    assert isinstance(payload_document["tasks"], list)
+    assert ProjectSnapshotPayloadV1.model_validate(payload_document) == payload
+
+    response = ProjectSnapshotDataV1(
+        payload=payload,
+        event_cursor=EventCursorV1(
+            event_count=1,
+            event_frontier_sha256=_A_SHA,
+        ),
+        applied_limits=PROVIDER_LIMITS_V1,
+        snapshot_digest=snapshot_digest(payload),
+    )
+    response_document = response.model_dump(mode="json")
+    assert isinstance(response_document["payload"]["tasks"], list)
+    assert ProjectSnapshotDataV1.model_validate(response_document) == response
+
+    invalid_scalar = payload.model_dump(mode="json")
+    invalid_scalar["tasks"][0]["verification_counts"]["commands"] = "2"
+    with pytest.raises(ValidationError, match="valid integer"):
+        ProjectSnapshotPayloadV1.model_validate(invalid_scalar)
+
+
 def test_impossible_response_ceiling_precedes_payload_and_digest_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -703,8 +730,10 @@ def test_impossible_response_ceiling_precedes_payload_and_digest_work(
         "_validate_response_serialized_limit",
         fail_expensive,
     )
-    raw_limits = PROVIDER_LIMITS_V1.model_dump(mode="json")
-    raw_limits["max_response_bytes"] = 1
+    below_minimum = PROVIDER_LIMITS_V1.model_dump(mode="json")
+    below_minimum["max_response_bytes"] = (
+        MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES - 1
+    )
 
     with pytest.raises(
         ValidationError,
@@ -717,12 +746,62 @@ def test_impossible_response_ceiling_precedes_payload_and_digest_work(
                     "event_count": 0,
                     "event_frontier_sha256": _A_SHA,
                 },
-                "applied_limits": raw_limits,
+                "applied_limits": below_minimum,
                 "snapshot_digest": _A_SHA,
             }
         )
-    assert MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES > 1
     assert phases == []
+
+    at_minimum = PROVIDER_LIMITS_V1.model_dump(mode="json")
+    at_minimum["max_response_bytes"] = MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES
+    with pytest.raises(
+        ValidationError,
+        match="Assertion failed, payload validation must not begin",
+    ):
+        ProjectSnapshotDataV1.model_validate(
+            {
+                "payload": ExplodingPayload(),
+                "event_cursor": {
+                    "event_count": 0,
+                    "event_frontier_sha256": _A_SHA,
+                },
+                "applied_limits": at_minimum,
+                "snapshot_digest": _A_SHA,
+            }
+        )
+    assert phases == ["payload"]
+
+
+def test_minimum_response_bound_is_a_real_exact_public_response() -> None:
+    payload = ProjectSnapshotPayloadV1(
+        project=ProjectRecordV1(project_id="x", name="x"),
+        prds=(),
+        features=(),
+        tasks=(),
+    )
+    limits = ProviderReadLimitsV1(
+        max_prds=1,
+        max_features=1,
+        max_tasks=1,
+        max_dependencies_per_task=0,
+        max_acceptance_criteria_per_task=0,
+        max_string_bytes=64,
+        max_snapshot_bytes=len(snapshot_canonical_bytes(payload)),
+        max_response_bytes=MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES,
+        max_prd_content_bytes=1,
+    )
+    response = ProjectSnapshotDataV1(
+        payload=payload,
+        event_cursor=EventCursorV1(
+            event_count=0,
+            event_frontier_sha256="0" * 64,
+        ),
+        applied_limits=limits,
+        snapshot_digest=snapshot_digest(payload),
+    )
+    assert len(snapshot_response_canonical_bytes(response)) == (
+        MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES
+    )
 
 
 def test_hash_domains_must_be_ascii_and_nul_terminated() -> None:
