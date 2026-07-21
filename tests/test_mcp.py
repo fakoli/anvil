@@ -4351,6 +4351,30 @@ class TestPlanTasks:
         finally:
             b.close()
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy-source compatibility")
+    def test_plan_tasks_uses_effective_legacy_named_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        legacy_source = state_dir / "prds" / "Release.md"
+        legacy_source.parent.mkdir(exist_ok=True)
+        legacy_source.write_text(_MINIMAL_PRD, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {"prd_id": "Release"})
+                return _data(
+                    await c.call_tool(
+                        "plan_tasks",
+                        {"prd_id": "Release", "use_llm": False},
+                    )
+                )
+
+        plan = _run(run())
+        assert plan["feature_count"] == 1
+        assert plan["task_count"] == 2
+
     def test_plan_named_prd_with_no_default_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

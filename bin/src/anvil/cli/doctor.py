@@ -57,10 +57,11 @@ import typer
 
 from anvil.cli._helpers import (
     PRD_OPTION,
+    PrdSourceIngestError,
     StateRootError,
     _resolve_project_root,
     _resolve_state_dir,
-    prd_source_path,
+    selected_prd_source_path,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 
@@ -270,7 +271,18 @@ def _preflight_findings(
     # read-only probe (review finding: the backend open was near-redundant).
     prd_id = prd.strip() if prd and prd.strip() else "default"
 
-    prd_path = prd_source_path(state_dir, prd_id)
+    try:
+        prd_path = selected_prd_source_path(state_dir, prd_id)
+    except PrdSourceIngestError as exc:
+        findings.append(
+            _Finding(
+                "prd_parse",
+                _ERROR,
+                exc.message,
+                {"prd_id": prd_id, "code": exc.code},
+            )
+        )
+        return findings
 
     # Probe 1 — the PRD parses cleanly.
     if not prd_path.exists():

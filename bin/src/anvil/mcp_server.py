@@ -2774,7 +2774,11 @@ def plan_tasks(
             ``.anvil/prd.md`` source + default partition, byte-identical to the
             pre-multi-PRD behaviour.
     """
-    from anvil.cli._helpers import display_path, prd_source_path
+    from anvil.cli._helpers import (
+        PrdSourceIngestError,
+        display_path,
+        selected_prd_source_path,
+    )
     from anvil.clock import SystemClock
     from anvil.planning.inference import infer_all
     from anvil.planning.llm import LLMProviderError
@@ -2797,9 +2801,12 @@ def plan_tasks(
     # T019: the parse-time prd_id controls id shape AND the source path +
     # partition plan scopes to (mirrors cli/plan.py). None collapses to the
     # 'prd' sentinel (the default PRD).
-    parse_prd_id = prd_id.strip() if (prd_id and prd_id.strip()) else "prd"
+    parse_prd_id = prd_id if prd_id is not None else "prd"
 
-    prd_path = prd_source_path(state_dir, parse_prd_id)
+    try:
+        prd_path = selected_prd_source_path(state_dir, parse_prd_id)
+    except PrdSourceIngestError as exc:
+        raise ToolError(f"Cannot resolve PRD source: {exc.message}") from exc
     prd_display = display_path(prd_path)
     if not prd_path.exists():
         raise ToolError(

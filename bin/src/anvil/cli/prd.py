@@ -11,6 +11,7 @@ from anvil.cli._helpers import (
     _PRD_FILENAME,
     PRD_OPTION,
     PrdSourceIngestError,
+    StateRootError,
     _get_project_id,
     _open_backend,
     _require_state_dir,
@@ -330,7 +331,14 @@ def prd_source_name(
         typer.echo(f"Error: {exc.message}", err=True)
         raise typer.Exit(code=1) from exc
     source_identity = canonical_prd_id(validated_id)
-    state_dir = _resolve_state_dir(cwd)
+    try:
+        state_dir = _resolve_state_dir(cwd)
+    except StateRootError as exc:
+        message = "cannot resolve Anvil state directory"
+        if json_output:
+            fail(command, message, code="state_root_error")
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=1) from exc
     try:
         selected_path = selected_prd_source_path(state_dir, validated_id)
         relative_name = selected_path.relative_to(state_dir).as_posix()

@@ -1350,6 +1350,20 @@ class TestPrdSourcePath:
         assert "migration" in result.output.lower()
         assert "prds/_anvil-prd-" in result.output
 
+    def test_source_name_state_root_error_does_not_disclose_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        invalid_root = tmp_path / "missing-root"
+        monkeypatch.setenv("ANVIL_ROOT", str(invalid_root))
+
+        result = runner.invoke(app, ["prd", "source-name", "--prd", "release"])
+
+        assert result.exit_code == 1
+        assert "cannot resolve Anvil state directory" in result.output
+        assert str(invalid_root) not in result.output
+
 
 class TestPrdParseNamed:
     def test_named_prd_reads_prds_subdir_and_prd_parsed_carries_prd_id(
@@ -5971,6 +5985,27 @@ class TestPlanPrdScoping:
         # Default tasks are in their own partition, unchanged.
         assert rows["T001"][0] == "default"
         assert rows["T002"][0] == "default"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy-source compatibility")
+    def test_plan_and_doctor_use_effective_legacy_named_source(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        legacy_source = tmp_path / ".anvil" / "prds" / "Release.md"
+        legacy_source.parent.mkdir(parents=True)
+        legacy_source.write_text(_MULTIPRD_NAMED, encoding="utf-8")
+        parsed = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "Release"])
+        assert parsed.exit_code == 0, parsed.output
+
+        planned = _invoke_cmd(
+            tmp_path,
+            ["plan", "--prd", "Release", "--no-llm"],
+        )
+        assert planned.exit_code == 0, planned.output
+        assert "Release:T900" in self._task_rows(tmp_path)
+
+        doctor = _invoke_cmd(tmp_path, ["doctor", "--prd", "Release", "--json"])
+        assert "PRD source not found" not in doctor.output
 
     def test_plan_missing_named_prd_source_uses_forward_slash_path(
         self, tmp_path: Path

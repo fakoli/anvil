@@ -19,15 +19,16 @@ import yaml
 
 from anvil.cli._helpers import (
     PRD_OPTION,
+    PrdSourceIngestError,
     _open_backend,
     _require_state_dir,
     _resolve_state_dir,
     _scores_complete,
     canonical_prd_id,
     display_path,
-    prd_source_path,
     resolve_actor,
     resolve_prd_id,
+    selected_prd_source_path,
 )
 from anvil.cli._json import (
     JSON_OPTION,
@@ -358,9 +359,15 @@ def plan(
     # plan scopes to. ``--prd v0.2`` reads .anvil/prds/v0.2.md and prunes /
     # promotes only that PRD's rows; the default ('prd' sentinel) keeps bare
     # ids and the default partition, byte-identical to pre-multi-PRD plan.
-    parse_prd_id = prd if prd else "prd"
+    parse_prd_id = prd if prd is not None else "prd"
 
-    prd_path = prd_source_path(state_dir, parse_prd_id)
+    try:
+        prd_path = selected_prd_source_path(state_dir, parse_prd_id)
+    except PrdSourceIngestError as exc:
+        if json_output:
+            fail("plan", exc.message, code=exc.code)
+        typer.echo(f"Error: {exc.message}", err=True)
+        raise typer.Exit(code=1) from exc
     prd_display = display_path(prd_path)
     if not prd_path.exists():
         if json_output:
