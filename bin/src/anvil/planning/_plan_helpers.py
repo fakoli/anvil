@@ -317,12 +317,13 @@ class BatchDepPlan:
 
 
 def parse_dep_edge(raw: str, op: str) -> DepEdge:
-    """Parse a ``"SOURCE:TARGET"`` (or ``"SOURCE->TARGET"``) edge spec.
+    """Parse a canonical ``"SOURCE->TARGET"`` dependency edge.
 
-    Accepts the two human-friendly separators a CLI user is likely to type:
-    a colon (``T002:T001``) or an arrow (``T002->T001``). Whitespace around the
-    IDs is stripped. Raises :class:`BatchDepError` (``code="bad_request"``) when
-    the spec is not exactly two non-empty tokens.
+    The arrow is required when IDs are PRD-scoped and therefore contain ``:``.
+    For backward compatibility, the colon shorthand (``T002:T001``) remains
+    supported where both IDs are unscoped. Whitespace around IDs is stripped.
+    Raises :class:`BatchDepError` (``code="bad_request"``) when the spec is not
+    exactly two non-empty tokens.
     """
     if "->" in raw:
         parts = raw.split("->", 1)
@@ -330,8 +331,8 @@ def parse_dep_edge(raw: str, op: str) -> DepEdge:
         parts = raw.split(":", 1)
     else:
         raise BatchDepError(
-            f"invalid edge spec {raw!r}: expected 'SOURCE:TARGET' "
-            "(source depends on target).",
+            f"invalid edge spec {raw!r}: expected 'SOURCE->TARGET' "
+            "(source depends on target; use the arrow for scoped IDs).",
             code="bad_request",
         )
     source, target = parts[0].strip(), parts[1].strip()

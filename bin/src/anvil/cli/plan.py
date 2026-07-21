@@ -2143,13 +2143,15 @@ def deps(
     add: list[str] = typer.Option(  # noqa: B008
         None,
         "--add",
-        help="Add a dependency edge 'SOURCE:TARGET' (source depends on "
-        "target). Repeatable; arrow form 'SOURCE->TARGET' also accepted.",
+        help="Add 'SOURCE->TARGET' (source depends on target). Repeatable. "
+        "The arrow is required for scoped IDs containing ':'; the "
+        "'SOURCE:TARGET' shorthand is only unambiguous for unscoped IDs.",
     ),
     remove: list[str] = typer.Option(  # noqa: B008
         None,
         "--remove",
-        help="Remove a dependency edge 'SOURCE:TARGET'. Repeatable.",
+        help="Remove 'SOURCE->TARGET'. Repeatable. The arrow is required for "
+        "scoped IDs containing ':'; 'SOURCE:TARGET' is unscoped shorthand.",
     ),
     actor: str = typer.Option(  # noqa: B008
         "anvil-cli",
@@ -2166,14 +2168,15 @@ def deps(
 ) -> None:
     """Apply dependency edge edits after whole-batch validation.
 
-    Accepts multiple ``--add`` and ``--remove`` edges (each ``SOURCE:TARGET``,
-    meaning *source depends on target*). The whole batch is validated up front —
-    unknown tasks, self-dependencies,
-    and any edit that would introduce a dependency cycle reject the entire batch
-    with NO mutation. On success one ``task.created`` upsert is emitted per task
-    whose dependency set changed (status is preserved). Those upserts are
-    separate backend appends, so a post-validation append failure can leave
-    earlier changed tasks committed.
+    Accepts multiple ``--add`` and ``--remove`` edges. The canonical form is
+    ``SOURCE->TARGET``, meaning *source depends on target*. The arrow is required
+    when either ID is scoped and contains ``:``; ``SOURCE:TARGET`` remains an
+    unambiguous shorthand only for unscoped IDs. The whole request is validated
+    before mutation: unknown tasks, self-dependencies, or a resulting cycle
+    reject it with NO mutation. After validation, one ``task.created`` upsert is
+    appended per changed task (status is preserved). Those appends commit
+    separately, so a later append failure can leave earlier task changes
+    committed; successful multi-task persistence is not atomic.
 
     With ``--json`` emits ``{"ok": true, "command": "deps", "data":
     {"changed": [...], "added": [["S","T"], ...], "removed": [...]}}``. A

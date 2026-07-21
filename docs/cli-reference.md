@@ -1485,9 +1485,15 @@ flag list; full prose treatment may follow in a later pass.
   surface before planning (`--limit`/`-n`, `--json`); advisory only, never
   mutates state. This is a requirement-uncertainty report, distinct from the
   typed `A###` records authored under a PRD's `## Assumptions` section.
-- `anvil deps` — Apply a batch of dependency-edge edits (`--add`/`--remove
-  SOURCE:TARGET`, repeatable) atomically, rejecting the whole batch on any
-  cycle, unknown task, or self-loop.
+- `anvil deps` — Validate a batch of dependency-edge edits before mutation,
+  rejecting the whole request with no changes on any cycle, unknown task, or
+  self-loop. Use repeatable `--add SOURCE->TARGET` / `--remove SOURCE->TARGET`;
+  the arrow form is required when either scoped task ID contains `:`. The
+  `SOURCE:TARGET` shorthand remains supported only where both IDs are unscoped
+  and the separator is unambiguous. After prevalidation, each changed task is
+  persisted through a separate backend append. A later append failure can
+  therefore leave earlier task changes committed; successful multi-task
+  persistence is not atomic.
 
 **Diagnostics and health** (read-only)
 

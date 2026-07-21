@@ -34,7 +34,11 @@ from typer.testing import CliRunner
 
 from anvil.cli import app
 from anvil.clock import FrozenClock
-from anvil.planning._plan_helpers import BatchDepPlan, emit_batch_dep_events
+from anvil.planning._plan_helpers import (
+    BatchDepPlan,
+    emit_batch_dep_events,
+    parse_dep_edge,
+)
 from anvil.planning.llm import LLMResponse
 from anvil.state.backend import EventRejected
 from anvil.state.models import Task
@@ -787,7 +791,7 @@ class TestBatchDepsValidation:
         assert json.loads(result.output)["error"]["code"] == "bad_request"
 
     def test_batch_deps_arrow_separator_accepted(self, tmp_path: Path) -> None:
-        """The 'SOURCE->TARGET' arrow form is accepted as well as the colon."""
+        """The canonical 'SOURCE->TARGET' arrow form is accepted."""
         _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
         result = _invoke_cmd(
             tmp_path, ["deps", "--add", "T002->T001", "--json"]
@@ -795,12 +799,22 @@ class TestBatchDepsValidation:
         assert result.exit_code == 0, result.output
         assert _deps_of(tmp_path, "T002") == ["T001"]
 
+    def test_batch_deps_arrow_preserves_scoped_ids(self) -> None:
+        """Colon-bearing PRD scopes remain part of both IDs with an arrow."""
+        edge = parse_dep_edge("named:T002->named:T001", "add")
+
+        assert edge.source == "named:T002"
+        assert edge.target == "named:T001"
+
     def test_batch_deps_help_documents_options(self) -> None:
-        """`deps --help` surfaces --add and --remove."""
+        """`deps --help` surfaces options, canonical syntax, and scope caveat."""
         result = runner.invoke(app, ["deps", "--help"])
         assert result.exit_code == 0
         assert "--add" in result.output
         assert "--remove" in result.output
+        assert "SOURCE->TARGET" in result.output
+        assert "scoped IDs containing ':'" in result.output
+        assert "unscoped" in result.output
 
 
 # ---------------------------------------------------------------------------

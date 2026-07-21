@@ -219,6 +219,30 @@ def test_bundle_workflow_guide_covers_required_recovery_paths() -> None:
     assert not missing, f"bundle workflow guide is missing topics: {missing}"
 
 
+def test_cli_reference_deps_states_separator_and_persistence_boundaries() -> None:
+    """The deps reference must not imply successful batch atomicity."""
+    text = _read(_docs() / "cli-reference.md")
+    match = re.search(
+        r"^- `anvil deps` — (.*?)(?=^\*\*Diagnostics and health\*\*)",
+        text,
+        re.S | re.M,
+    )
+    assert match, "docs/cli-reference.md is missing the `anvil deps` entry"
+    section = " ".join(match.group(1).split())
+
+    required = {
+        "SOURCE->TARGET",
+        "scoped task ID contains `:`",
+        "both IDs are unscoped",
+        "separate backend append",
+        "later append failure",
+        "successful multi-task persistence is not atomic",
+    }
+    missing = sorted(marker for marker in required if marker not in section)
+    assert not missing, f"`anvil deps` reference is missing contract text: {missing}"
+    assert "atomically" not in section
+
+
 # --- 4. Hooks roster ---------------------------------------------------------
 
 
