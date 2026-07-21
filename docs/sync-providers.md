@@ -255,8 +255,8 @@ On a key miss the provider raises `SyncProviderError` — accidental
 
 Live HTTP / GraphQL calls outside `@pytest.mark.live_github` (or its
 provider equivalent) are forbidden. The default test run
-(`uv run pytest -q`) excludes live markers; the nightly CI workflow runs
-them with secrets.
+(`uv run --project bin pytest`) excludes live markers; the nightly CI workflow
+runs them with secrets.
 
 ---
 

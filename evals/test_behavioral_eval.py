@@ -1,9 +1,9 @@
 """Opt-in pytest wrapper for the anvil behavioral eval.
 
-This test is NOT part of the fast CI gate. The repo's pytest config pins
-``testpaths = ["../tests"]`` (bin/pyproject.toml), so ``cd bin && uv run
-pytest`` never collects this file. Run it deliberately, from a venv that has
-claude-agent-sdk installed:
+This test is NOT part of the fast CI gate. The repository-root ``pytest.ini``
+pins ``testpaths = tests``, so ``uv run --project bin pytest`` never collects
+this file. Run it deliberately, from a venv that has claude-agent-sdk
+installed:
 
     RUN_BEHAVIORAL_EVALS=1 pytest evals/test_behavioral_eval.py -s
 

@@ -60,13 +60,12 @@ cleanup is best-effort (see below).
 ```bash
 export GITHUB_TOKEN=ghp_...                       # your test-repo PAT
 export ANVIL_TEST_REPO=fakoli/anvil-sync-test
-cd bin
-uv run pytest -m live_github -v
+uv run --project bin pytest -m live_github -v
 ```
 
-The default `pytest -q` continues to exclude live tests via the `addopts`
-filter in `bin/pyproject.toml`. You must pass `-m live_github` explicitly
-to opt in.
+The default `uv run --project bin pytest` continues to exclude live tests via
+the `addopts` filter in the repository-root `pytest.ini`. You must pass
+`-m live_github` explicitly to opt in.
 
 ## What the tests cover
 

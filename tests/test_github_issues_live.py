@@ -3,8 +3,9 @@
 Phase 8 Wave 4 Task 8 -- nightly CI drift detection.
 
 Every test in this module is decorated with ``@pytest.mark.live_github`` and
-is EXCLUDED from the default ``pytest -q`` run by the ``addopts`` filter in
-``bin/pyproject.toml``. They only run when explicitly selected via
+is EXCLUDED from the default ``uv run --project bin pytest`` run by the
+``addopts`` filter in the repository-root ``pytest.ini``. They only run when
+explicitly selected via
 ``-m live_github`` and are intended to be invoked nightly by the
 ``.github/workflows/anvil-live-github.yml`` workflow against a real
 GitHub test repo. The intent is to catch upstream API drift -- label format

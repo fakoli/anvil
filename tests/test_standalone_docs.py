@@ -16,8 +16,8 @@ org/marketplace, not a sibling plugin, and do not match the pattern.)
 Layout note: this test lives at ``<repo-root>/tests/test_standalone_docs.py``
 and the docs live at ``<repo-root>/docs/`` and ``<repo-root>/README.md``;
 ``parents[1]`` is the repo root — matching ``test_token_budget.py`` and
-``test_version_sync.py``. Pytest is run from ``bin/`` whose
-``pyproject.toml`` points ``testpaths`` at ``../tests``.
+``test_version_sync.py``. Explicit pytest paths run from ``bin/`` discover the
+repository-root ``pytest.ini`` through ``../tests``.
 """
 
 from __future__ import annotations

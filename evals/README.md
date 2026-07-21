@@ -78,9 +78,9 @@ RUN_BEHAVIORAL_EVALS=1 pytest evals/test_behavioral_eval.py -s
 - It **spends real Claude subscription capacity** (one agent run per case).
 - It is **latency-nondeterministic** (real model, real tool loop).
 
-The repo's pytest config pins `testpaths = ["../tests"]` (`bin/pyproject.toml`),
-so `cd bin && uv run pytest` **never collects `evals/`**. The static evals stay
-the fast gate; this is the deliberate, opt-in behavioral gate.
+The repository-root `pytest.ini` pins `testpaths = tests`, so
+`uv run --project bin pytest` **never collects `evals/`**. The static evals
+stay the fast gate; this is the deliberate, opt-in behavioral gate.
 
 ## Auth (important)
 

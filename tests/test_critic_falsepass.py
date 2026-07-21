@@ -16,8 +16,8 @@ no LLM — and asserts three things:
 Layout note: this file lives at ``<repo-root>/tests/test_critic_falsepass.py``
 and the harness at ``<repo-root>/benchmarks/critic_falsepass.py``. We add
 ``benchmarks/`` to ``sys.path`` and import the module directly — mirroring how
-``benchmarks/run_benchmark.py`` bootstraps its own package. Pytest runs from
-``bin/`` whose ``pyproject.toml`` points ``testpaths`` at ``../tests``.
+``benchmarks/run_benchmark.py`` bootstraps its own package. Explicit test paths
+from ``bin/`` discover the repository-root ``pytest.ini``.
 """
 
 from __future__ import annotations
