@@ -182,7 +182,10 @@ def write_sample_prd(state_dir: Path) -> Path:
 
 
 def seed_sample_pipeline(
-    backend: SqliteBackend, *, actor: str = "anvil-cli"
+    backend: SqliteBackend,
+    *,
+    actor: str = "anvil-cli",
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Drive parse → plan → score → review entirely offline against ``backend``.
 
@@ -206,6 +209,7 @@ def seed_sample_pipeline(
         backend,
         SAMPLE_PRD,
         actor=actor,
+        project_root=project_root,
         parse_error_hint=(
             "This is an anvil packaging bug — please report it."
         ),
@@ -219,6 +223,7 @@ def seed_pipeline_from_prd(
     actor: str = "anvil-cli",
     review_notes: str = "auto-seeded",
     parse_error_hint: str = "Fix the PRD and re-run.",
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Drive parse → plan → score → review offline for an *arbitrary* PRD text.
 
@@ -264,7 +269,7 @@ def seed_pipeline_from_prd(
     # unchanged.  The bounded seed error is shared by sample, scan, and
     # init-from-repo callers instead of leaking a native exception.
     try:
-        inference_result = infer_all(parsed.tasks)
+        inference_result = infer_all(parsed.tasks, project_root=project_root)
     except BundlePlanningError as exc:
         raise SampleSeedError(
             f"seed planning inference refused: {exc}",

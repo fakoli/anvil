@@ -414,6 +414,51 @@ class TestInferDependencies:
 
         assert result[0].dependencies == ["T002"]
 
+    def test_explicit_project_root_controls_directory_identity_queries(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = tmp_path / "src"
+        source.mkdir()
+        observed: list[Path] = []
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+
+        def directory_policy(directory: Path) -> bool:
+            observed.append(directory)
+            return directory == source
+
+        monkeypatch.setattr(
+            inference_module,
+            "_directory_uses_case_sensitive_identity",
+            directory_policy,
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_cached_windows_path_key",
+            lambda path: path.upper(),
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_host_paths_equal",
+            lambda left, right: left.upper() == right.upper(),
+        )
+        tasks = [
+            _make_task("T001", ["src/A.py"]),
+            _make_task("T002", ["src/a.py", "src/other.py"]),
+        ]
+
+        result = infer_dependencies(tasks, project_root=tmp_path)
+
+        assert all(not task.dependencies for task in result)
+        assert source in observed
+        assert all(
+            directory == tmp_path or tmp_path in directory.parents
+            for directory in observed
+        )
+
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
     def test_native_case_sensitive_directory_preserves_distinct_files(
         self,
@@ -422,6 +467,18 @@ class TestInferDependencies:
     ) -> None:
         source = tmp_path / "case-sensitive"
         source.mkdir()
+        monkeypatch.chdir(tmp_path)
+        prospective = [
+            _make_task("T001", ["case-sensitive/A.py"]),
+            _make_task(
+                "T002",
+                ["case-sensitive/a.py", "case-sensitive/other.py"],
+            ),
+        ]
+        assert not inference_module._directory_uses_case_sensitive_identity(
+            source
+        )
+        assert infer_dependencies(prospective)[0].dependencies == ["T002"]
         try:
             enabled = subprocess.run(
                 [
@@ -451,10 +508,10 @@ class TestInferDependencies:
         assert upper.read_text(encoding="utf-8") == "upper"
         assert lower.read_text(encoding="utf-8") == "lower"
         assert not upper.samefile(lower)
-        monkeypatch.chdir(tmp_path)
-        inference_module._cached_windows_directory_case_sensitive.cache_clear()
         tasks = [
-            _make_task("T001", ["case-sensitive/A.py"]),
+            # The insensitive parent aliases the directory spelling, while
+            # the enabled child directory keeps the file names distinct.
+            _make_task("T001", ["CASE-SENSITIVE/A.py"]),
             _make_task(
                 "T002",
                 ["case-sensitive/a.py", "case-sensitive/other.py"],
@@ -467,6 +524,22 @@ class TestInferDependencies:
         assert inference_module._directory_uses_case_sensitive_identity(source)
         assert all(not task.dependencies for task in result)
         assert [task.model_dump(mode="python") for task in tasks] == before
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_windows_project_root_must_be_a_directory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        regular_file = tmp_path / "not-a-directory"
+        regular_file.write_text("file", encoding="utf-8")
+
+        registry = inference_module._PathIdentityRegistry(regular_file)
+
+        with pytest.raises(
+            PathIdentityError,
+            match="Windows directory identity query failed",
+        ):
+            registry.intern("src/A.py")
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
     def test_case_equivalent_paths_share_conflict_identity(self) -> None:
@@ -815,10 +888,12 @@ class TestInferDependencies:
 
         def counting_scopes(
             tasks: list[Task],
+            *,
+            project_root: Path | None = None,
         ) -> tuple[dict[str, frozenset[int]], dict[int, str]]:
             nonlocal calls
             calls += 1
-            return original(tasks)
+            return original(tasks, project_root=project_root)
 
         monkeypatch.setattr(inference_module, "_canonical_file_scopes", counting_scopes)
         infer_all(

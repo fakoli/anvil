@@ -3218,6 +3218,7 @@ def plan_tasks(
     """
     from anvil.cli._helpers import (
         PrdSourceIngestError,
+        _resolve_project_dir,
         display_path,
         ingest_prd_source_for_id,
         replace_prd_source_for_id,
@@ -3236,6 +3237,7 @@ def plan_tasks(
     from anvil.state.models import EventDraft
 
     state_dir = _resolve_state_dir(cwd)
+    project_root = _resolve_project_dir(Path(cwd) if cwd else None)
     if not state_dir.exists():
         raise ToolError(
             f"anvil not initialized in {state_dir.parent}. "
@@ -3422,7 +3424,10 @@ def plan_tasks(
         # appended. Native path identity failures must surface as ToolError
         # and leave both the projection and append-only log byte-identical.
         try:
-            inference_result = infer_all(result.tasks)
+            inference_result = infer_all(
+                result.tasks,
+                project_root=project_root,
+            )
         except BundlePlanningError as exc:
             raise ToolError(f"Planning inference refused: {exc}") from None
 

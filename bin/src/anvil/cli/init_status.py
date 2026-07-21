@@ -17,6 +17,7 @@ from anvil.cli._helpers import (
     _is_plugin_root,
     _open_backend,
     _resolve_base_dir,
+    _resolve_project_dir,
     _resolve_state_dir,
     _slug,
     canonical_prd_id,
@@ -119,6 +120,7 @@ def init(
     # MUST-FIX 1: resolve the project root the SAME way reads do
     # (ANVIL_ROOT > cwd) so `init` and `status` never diverge. `init`
     # has no --cwd flag, so we pass None and let the env var (or cwd) decide.
+    project_dir = _resolve_project_dir(None)
     cwd = _resolve_base_dir(None)
 
     # Guard: refuse to initialise inside the anvil plugin directory — but ONLY
@@ -210,7 +212,10 @@ def init(
 
             write_sample_prd(state_dir)
             try:
-                seed_summary = seed_sample_pipeline(backend)
+                seed_summary = seed_sample_pipeline(
+                    backend,
+                    project_root=project_dir,
+                )
             except SampleSeedError as exc:
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
@@ -249,7 +254,11 @@ def init(
 
         typer.echo("")
         try:
-            result = run_scan_and_report(state_dir, cwd, force=False)
+            result = run_scan_and_report(
+                state_dir,
+                project_dir,
+                force=False,
+            )
         except SampleSeedError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc

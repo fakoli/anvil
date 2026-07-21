@@ -33,7 +33,7 @@ from anvil.cli._helpers import (
     PrdSourceIngestError,
     StateRootError,
     _open_backend,
-    _resolve_base_dir,
+    _resolve_project_dir,
     _resolve_state_dir,
     ingest_prd_source,
 )
@@ -715,9 +715,7 @@ def scan(
         typer.echo(f"Error: {msg}", err=True)
         raise typer.Exit(code=1)
 
-    project_root = _resolve_base_dir(cwd)
-    from anvil.cli._sample import SampleSeedError
-
+    project_root = _resolve_project_dir(cwd)
     try:
         result = _run_scan(state_dir, project_root, force=force)
     except SampleSeedError as exc:
@@ -973,6 +971,7 @@ def _seed_draft(
                     published.markdown,
                     actor="anvil-cli",
                     review_notes="auto-seeded by scan (brownfield)",
+                    project_root=project_root,
                     parse_error_hint=(
                         "The generated draft PRD failed to parse — this is an "
                         "anvil bug; please report it."

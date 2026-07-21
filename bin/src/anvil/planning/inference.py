@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import stat
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -256,6 +257,7 @@ _WINDOWS_COLLISION_BUCKET_LIMIT = 64
 _LCMAP_UPPERCASE = 0x00000200
 _FILE_CASE_SENSITIVE_INFO_CLASS = 23
 _FILE_CS_FLAG_CASE_SENSITIVE_DIR = 0x00000001
+_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _FILE_READ_ATTRIBUTES = 0x00000080
 _FILE_SHARE_ALL = 0x00000007
 _OPEN_EXISTING = 3
@@ -272,8 +274,7 @@ class _WindowsPathApi(NamedTuple):
     equivalent: Callable[[str, str], bool]
 
 
-@lru_cache(maxsize=_WINDOWS_COMPARISON_CACHE_SIZE)
-def _cached_windows_directory_case_sensitive(directory: str) -> bool:
+def _windows_directory_case_sensitive(directory: str) -> bool:
     """Return the authoritative per-directory Win32 case-sensitivity flag."""
     try:
         import ctypes
@@ -281,6 +282,7 @@ def _cached_windows_directory_case_sensitive(directory: str) -> bool:
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         create_file = kernel32.CreateFileW
+        get_file_information = kernel32.GetFileInformationByHandle
         get_information = kernel32.GetFileInformationByHandleEx
         close_handle = kernel32.CloseHandle
         create_file.argtypes = [
@@ -293,6 +295,11 @@ def _cached_windows_directory_case_sensitive(directory: str) -> bool:
             wintypes.HANDLE,
         ]
         create_file.restype = wintypes.HANDLE
+        get_file_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+        ]
+        get_file_information.restype = wintypes.BOOL
         get_information.argtypes = [
             wintypes.HANDLE,
             ctypes.c_int,
@@ -305,6 +312,20 @@ def _cached_windows_directory_case_sensitive(directory: str) -> bool:
 
         class FileCaseSensitiveInfo(ctypes.Structure):
             _fields_ = [("flags", wintypes.ULONG)]
+
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("file_attributes", wintypes.DWORD),
+                ("creation_time", wintypes.FILETIME),
+                ("last_access_time", wintypes.FILETIME),
+                ("last_write_time", wintypes.FILETIME),
+                ("volume_serial_number", wintypes.DWORD),
+                ("file_size_high", wintypes.DWORD),
+                ("file_size_low", wintypes.DWORD),
+                ("number_of_links", wintypes.DWORD),
+                ("file_index_high", wintypes.DWORD),
+                ("file_index_low", wintypes.DWORD),
+            ]
 
         handle = create_file(
             directory,
@@ -321,6 +342,21 @@ def _cached_windows_directory_case_sensitive(directory: str) -> bool:
                 "Windows directory identity query failed"
             )
         try:
+            basic_information = ByHandleFileInformation()
+            if not get_file_information(
+                handle,
+                ctypes.byref(basic_information),
+            ):
+                raise PathIdentityError(
+                    "Windows directory identity query failed"
+                )
+            if not (
+                basic_information.file_attributes
+                & _FILE_ATTRIBUTE_DIRECTORY
+            ):
+                raise PathIdentityError(
+                    "Windows directory identity query failed"
+                )
             information = FileCaseSensitiveInfo()
             succeeded = get_information(
                 handle,
@@ -358,23 +394,42 @@ def _directory_uses_case_sensitive_identity(directory: Path) -> bool:
     # so retain the historical insensitive policy off an actual Windows host.
     if sys.platform != "win32":
         return False
-    return _cached_windows_directory_case_sensitive(str(directory))
+    return _windows_directory_case_sensitive(str(directory))
+
+
+def _is_existing_directory(path: Path) -> bool:
+    """Return whether a path is a directory without hiding identity errors."""
+    try:
+        metadata = path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise PathIdentityError(
+            "Windows directory identity query failed"
+        ) from None
+    return stat.S_ISDIR(metadata.st_mode)
 
 
 def _windows_path_policy(
     project_root: Path,
     path: str,
+    directory_policy: Callable[[Path], bool] = (
+        _directory_uses_case_sensitive_identity
+    ),
 ) -> tuple[tuple[str, bool], ...]:
     """Return each component with the policy of its containing directory."""
     current = project_root
-    inherited_policy = _directory_uses_case_sensitive_identity(current)
+    inherited_policy = directory_policy(current)
     policy: list[tuple[str, bool]] = []
-    for component in PurePosixPath(path).parts:
-        if current.is_dir():
-            inherited_policy = _directory_uses_case_sensitive_identity(current)
+    components = PurePosixPath(path).parts
+    for index, component in enumerate(components):
+        if _is_existing_directory(current):
+            inherited_policy = directory_policy(current)
         policy.append((component, inherited_policy))
+        if index == len(components) - 1:
+            continue
         child = current / component
-        if child.is_dir():
+        if _is_existing_directory(child):
             current = child
         else:
             # A prospective child inherits the current directory's policy; do
@@ -549,15 +604,32 @@ def _host_paths_equal(left: str, right: str) -> bool:
 class _PathIdentityRegistry:
     """Intern host path identities using a native key plus verified collisions."""
 
-    def __init__(self) -> None:
+    def __init__(self, project_root: Path | None = None) -> None:
         self._windows_identity = _uses_windows_path_identity()
-        self._project_root = Path.cwd().resolve()
+        root = Path.cwd() if project_root is None else project_root
+        if self._windows_identity:
+            try:
+                self._project_root = root.resolve(strict=True)
+            except OSError:
+                raise PathIdentityError(
+                    "Windows directory identity query failed"
+                ) from None
+        else:
+            self._project_root = root.resolve()
+        self._directory_policy: dict[Path, bool] = {}
         self._exact: dict[str, int] = {}
         self._native_buckets: dict[
             tuple[str, ...],
             list[tuple[str, int, tuple[tuple[str, bool], ...]]],
         ] = {}
         self._next_identity = 0
+
+    def _case_sensitive_directory(self, directory: Path) -> bool:
+        policy = self._directory_policy.get(directory)
+        if policy is None:
+            policy = _directory_uses_case_sensitive_identity(directory)
+            self._directory_policy[directory] = policy
+        return policy
 
     def intern(self, path: str) -> int:
         existing = self._exact.get(path)
@@ -569,7 +641,11 @@ class _PathIdentityRegistry:
         ] | None = None
         path_policy: tuple[tuple[str, bool], ...] | None = None
         if self._windows_identity:
-            path_policy = _windows_path_policy(self._project_root, path)
+            path_policy = _windows_path_policy(
+                self._project_root,
+                path,
+                self._case_sensitive_directory,
+            )
             native_key = _windows_path_policy_key(path_policy)
             bucket = self._native_buckets.setdefault(native_key, [])
             for _representative, identity, representative_policy in bucket:
@@ -595,6 +671,8 @@ class _PathIdentityRegistry:
 
 def _canonical_file_scopes(
     tasks: list[Task],
+    *,
+    project_root: Path | None = None,
 ) -> tuple[dict[str, frozenset[int]], dict[int, str]]:
     """Validate and intern task scopes under the authoritative host policy.
 
@@ -612,7 +690,7 @@ def _canonical_file_scopes(
             (_canonical_project_path(path), path) for path in task.likely_files
         ]
 
-    registry = _PathIdentityRegistry()
+    registry = _PathIdentityRegistry(project_root)
     identity_by_path = {
         path: registry.intern(path)
         for path in sorted(
@@ -699,6 +777,7 @@ def build_bundle_plan(
     *,
     max_tasks: int = 12,
     max_serial_stages: int = 6,
+    project_root: Path | None = None,
 ) -> BundlePlanReport:
     """Propose stable graph/file components and quantify execution overhead."""
     for name, value in (
@@ -712,7 +791,10 @@ def build_bundle_plan(
     if duplicates:
         raise BundlePlanningError(f"bundle planning found duplicate task ids: {duplicates}")
     ordered_input = sorted(tasks, key=lambda task: task.id)
-    canonical_files, display_path = _canonical_file_scopes(ordered_input)
+    canonical_files, display_path = _canonical_file_scopes(
+        ordered_input,
+        project_root=project_root,
+    )
     inferred_dependencies = {
         task.id: set(task.dependencies) for task in ordered_input
     }
@@ -939,7 +1021,11 @@ class _DependencyReachability:
 # ---------------------------------------------------------------------------
 
 
-def infer_dependencies(tasks: list[Task]) -> list[Task]:
+def infer_dependencies(
+    tasks: list[Task],
+    *,
+    project_root: Path | None = None,
+) -> list[Task]:
     """Return a new Task list with ``.dependencies`` populated by subset heuristics.
 
     For each pair (A, B): if A.likely_files is a *strict* subset of B.likely_files,
@@ -963,7 +1049,7 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
     """
     if not tasks:
         return []
-    file_sets, _ = _canonical_file_scopes(tasks)
+    file_sets, _ = _canonical_file_scopes(tasks, project_root=project_root)
     return _infer_dependencies_with_scopes(tasks, file_sets)
 
 
@@ -1017,6 +1103,8 @@ def _infer_dependencies_with_scopes(
 
 def infer_conflict_groups(
     tasks: list[Task],
+    *,
+    project_root: Path | None = None,
 ) -> tuple[list[Task], list[ConflictGroup]]:
     """Return (tasks-with-conflict_groups-populated, ConflictGroup list).
 
@@ -1043,7 +1131,10 @@ def infer_conflict_groups(
     """
     if not tasks:
         return [], []
-    file_sets, display_path = _canonical_file_scopes(tasks)
+    file_sets, display_path = _canonical_file_scopes(
+        tasks,
+        project_root=project_root,
+    )
     return _infer_conflict_groups_with_scopes(tasks, file_sets, display_path)
 
 
@@ -1117,7 +1208,11 @@ def _infer_conflict_groups_with_scopes(
     return updated_tasks, conflict_groups
 
 
-def infer_all(tasks: list[Task]) -> InferenceResult:
+def infer_all(
+    tasks: list[Task],
+    *,
+    project_root: Path | None = None,
+) -> InferenceResult:
     """Compose dependency and conflict inference into a single result.
 
     Apply in order: dependencies first, then conflict groups.  This ordering
@@ -1139,7 +1234,10 @@ def infer_all(tasks: list[Task]) -> InferenceResult:
     """
     if not tasks:
         return InferenceResult(tasks=[], conflict_groups=[])
-    file_sets, display_path = _canonical_file_scopes(tasks)
+    file_sets, display_path = _canonical_file_scopes(
+        tasks,
+        project_root=project_root,
+    )
     tasks_with_deps = _infer_dependencies_with_scopes(tasks, file_sets)
     tasks_with_all, conflict_groups = _infer_conflict_groups_with_scopes(
         tasks_with_deps, file_sets, display_path

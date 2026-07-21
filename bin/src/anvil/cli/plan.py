@@ -23,6 +23,7 @@ from anvil.cli._helpers import (
     PrdSourceIngestError,
     _open_backend,
     _require_state_dir,
+    _resolve_project_dir,
     _resolve_state_dir,
     _scores_complete,
     canonical_prd_id,
@@ -358,6 +359,7 @@ def plan(
     from anvil.state.models import EventDraft
 
     state_dir = _resolve_state_dir(cwd)
+    project_root = _resolve_project_dir(cwd)
     _require_state_dir(state_dir, command="plan", json_output=json_output)
 
     # Non-fatal warnings collected for the JSON envelope (parse warnings that
@@ -569,6 +571,7 @@ def plan(
                     if config
                     else DEFAULT_BUNDLE_MAX_SERIAL_STAGES
                 ),
+                project_root=project_root,
             )
         except PathIdentityError as exc:
             if json_output:
@@ -702,9 +705,13 @@ def plan(
             if task.id not in subset_ids and task.id not in orphan_ids
         ]
         try:
-            subset_with_deps = infer_dependencies(parsed.tasks)
+            subset_with_deps = infer_dependencies(
+                parsed.tasks,
+                project_root=project_root,
+            )
             all_with_cgs, conflict_groups = infer_conflict_groups(
-                subset_with_deps + other_prd_tasks
+                subset_with_deps + other_prd_tasks,
+                project_root=project_root,
             )
         except BundlePlanningError as exc:
             if json_output:
