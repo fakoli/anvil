@@ -8,6 +8,7 @@ All tests follow the pure-function contract:
 from __future__ import annotations
 
 import datetime
+import sys
 import time
 from collections.abc import Callable
 
@@ -227,6 +228,7 @@ class TestInferDependencies:
         assert [task.dependencies for task in tasks] == before_dependencies
         assert [task.conflict_groups for task in tasks] == before_conflicts
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
     def test_case_equivalent_paths_share_dependency_identity(self) -> None:
         tasks = [
             _make_task("T001", ["src/Widget.py"]),
@@ -240,6 +242,7 @@ class TestInferDependencies:
         assert result[0].likely_files == ["src/Widget.py"]
         assert [task.model_dump(mode="python") for task in tasks] == before
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
     def test_case_equivalent_paths_share_conflict_identity(self) -> None:
         tasks = [
             _make_task("T001", ["src/Widget.py", "src/one.py"]),
@@ -254,6 +257,7 @@ class TestInferDependencies:
         assert result_tasks[0].likely_files == ["src/Widget.py", "src/one.py"]
         assert [task.model_dump(mode="python") for task in tasks] == before
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
     def test_bundle_plan_coordinates_case_equivalent_paths(self) -> None:
         tasks = [
             _make_task("T001", ["src/Widget.py"]),
@@ -274,8 +278,10 @@ class TestInferDependencies:
             ("Widget", "widget"),
             ("Éclair", "éclair"),
             ("Σigma", "σigma"),
+            ("\u1f80λφα", "\u1f88λφα"),
         ],
     )
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
     def test_one_to_one_case_variants_coordinate_across_all_entrypoints(
         self,
         first_spelling: str,
@@ -326,6 +332,8 @@ class TestInferDependencies:
             ("ẞ", "ß"),
             ("I", "ı"),
             ("K", "K"),
+            ("Ԥ", "ԥ"),
+            ("𐐀", "𐐨"),
         ],
     )
     def test_expanding_or_compatibility_case_pairs_remain_distinct(
@@ -336,6 +344,105 @@ class TestInferDependencies:
         tasks = [
             _make_task("T001", [f"src/{first_spelling}.py"]),
             _make_task("T002", [f"src/{second_spelling}.py"]),
+        ]
+        before = [task.model_dump(mode="python") for task in tasks]
+
+        dependencies = infer_dependencies(tasks)
+        conflict_results, conflict_groups = infer_conflict_groups(tasks)
+        combined = infer_all(tasks)
+        bundle = build_bundle_plan(tasks)
+
+        assert all(not task.dependencies for task in dependencies)
+        assert conflict_groups == []
+        assert all(not task.conflict_groups for task in conflict_results)
+        assert combined.conflict_groups == []
+        assert bundle.overlap_pair_count == 0
+        assert [proposal.task_ids for proposal in bundle.proposed_bundles] == [
+            ("T001",),
+            ("T002",),
+        ]
+        assert [task.model_dump(mode="python") for task in tasks] == before
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    @pytest.mark.parametrize(
+        "left,right,expected",
+        [
+            ("Widget", "widget", True),
+            ("straße", "strasse", False),
+            ("É", "é", True),
+            ("Σ", "σ", True),
+            ("Σ", "ς", False),
+            ("ẞ", "ß", False),
+            ("I", "ı", False),
+            ("İ", "i", False),
+            ("K", "K", False),
+            ("ſ", "S", False),
+            ("µ", "Μ", False),
+            ("ǅ", "Ǆ", False),
+            ("Ԥ", "ԥ", False),
+            ("\u1f80", "\u1f88", True),
+            ("𐐀", "𐐨", False),
+        ],
+    )
+    def test_windows_named_ordinal_matrix(
+        self,
+        left: str,
+        right: str,
+        expected: bool,
+    ) -> None:
+        assert inference_module._host_paths_equal(left, right) is expected
+        assert inference_module._host_paths_equal(right, left) is expected
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_windows_comparator_matches_representative_native_oracle(self) -> None:
+        import ctypes
+
+        compare = ctypes.WinDLL(
+            "kernel32", use_last_error=True
+        ).CompareStringOrdinal
+        compare.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        compare.restype = ctypes.c_int
+        codepoints = [
+            *range(0x20, 0xD800, 521),
+            *range(0xE000, 0x10000, 521),
+            *range(0x10000, 0x110000, 8191),
+        ]
+
+        for codepoint in codepoints:
+            character = chr(codepoint)
+            candidates = {
+                character,
+                character.lower(),
+                character.upper(),
+                character.casefold(),
+            }
+            if codepoint < 0x10FFFF:
+                candidates.add(chr(codepoint + 1))
+            for candidate in candidates:
+                native = compare(character, -1, candidate, -1, 1)
+                assert native != 0
+                assert inference_module._host_paths_equal(
+                    character, candidate
+                ) is (native == 2)
+
+    def test_non_windows_policy_uses_exact_identity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            inference_module,
+            "_uses_windows_path_identity",
+            lambda: False,
+        )
+        tasks = [
+            _make_task("T001", ["src/Widget.py"]),
+            _make_task("T002", ["src/widget.py"]),
         ]
         before = [task.model_dump(mode="python") for task in tasks]
 

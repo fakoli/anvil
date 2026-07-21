@@ -31,7 +31,7 @@ import json
 import posixpath
 import re
 import sys
-import unicodedata
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
@@ -219,48 +219,107 @@ def _canonical_project_path(path: object) -> str:
     return normalized
 
 
-@lru_cache(maxsize=4096)
-def _windows_ordinal_case_character(character: str) -> str:
-    """Return a conservative one-code-point Win32 ordinal case identity.
+_WINDOWS_COMPARISON_CACHE_SIZE = 131_072
 
-    Win32 ordinal ignore-case comparison uses an uppercase table rather than
-    linguistic folding.  Python's full-string mappings can expand one code
-    point into several (for example, ``ß`` into ``SS``) or apply compatibility
-    mappings that Windows keeps distinct.  Coordinate only reciprocal ``Lu`` /
-    ``Ll`` pairs whose upper and lower mappings each remain one code point.
+
+def _uses_windows_path_identity() -> bool:
+    """Return whether the host has authoritative Win32 path case semantics."""
+    return sys.platform == "win32"
+
+
+@lru_cache(maxsize=1)
+def _load_windows_path_comparator() -> Callable[[str, str], bool]:
+    """Load a narrow ``CompareStringOrdinal(ignoreCase=TRUE)`` wrapper."""
+    import ctypes
+
+    compare = ctypes.WinDLL("kernel32", use_last_error=True).CompareStringOrdinal
+    compare.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_int,
+        ctypes.c_wchar_p,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    compare.restype = ctypes.c_int
+
+    def equivalent(left: str, right: str) -> bool:
+        # Portable paths reject NUL, so null-terminated comparison is exact and
+        # lets Win32 count supplementary characters in native UTF-16 units.
+        result = compare(left, -1, right, -1, 1)
+        if result == 0:
+            error = ctypes.get_last_error()
+            raise BundlePlanningError(
+                f"Windows path comparison failed with error {error}"
+            )
+        return result == 2  # CSTR_EQUAL
+
+    return equivalent
+
+
+@lru_cache(maxsize=_WINDOWS_COMPARISON_CACHE_SIZE)
+def _cached_windows_paths_equal(left: str, right: str) -> bool:
+    return _load_windows_path_comparator()(left, right)
+
+
+def _host_paths_equal(left: str, right: str) -> bool:
+    """Compare path spellings using only authoritative host semantics.
+
+    Windows delegates to ``CompareStringOrdinal`` with case ignored.  Other
+    hosts remain case-sensitive because this project has no repository-level
+    filesystem policy that can authoritatively override their exact identity.
     """
-    category = unicodedata.category(character)
-    if category == "Ll":
-        uppercase = character.upper()
-        if (
-            len(uppercase) == 1
-            and unicodedata.category(uppercase) == "Lu"
-            and uppercase.lower() == character
-        ):
-            return uppercase
-    elif category == "Lu":
-        lowercase = character.lower()
-        if (
-            len(lowercase) == 1
-            and unicodedata.category(lowercase) == "Ll"
-            and lowercase.upper() == character
-        ):
-            return character
-    return character
+    if left == right:
+        return True
+    if not _uses_windows_path_identity():
+        return False
+    if right < left:
+        left, right = right, left
+    return _cached_windows_paths_equal(left, right)
 
 
-def _windows_ordinal_case_key(path: str) -> str:
-    """Return a length-preserving case-insensitive comparison key."""
-    return "".join(_windows_ordinal_case_character(character) for character in path)
+class _PathIdentityRegistry:
+    """Intern exact path-equivalence classes without inventing a hash key."""
+
+    def __init__(self) -> None:
+        self._windows_identity = _uses_windows_path_identity()
+        self._exact: dict[str, int] = {}
+        self._representatives: list[tuple[str, int]] = []
+        self._next_identity = 0
+
+    def intern(self, path: str) -> int:
+        existing = self._exact.get(path)
+        if existing is not None:
+            return existing
+
+        if self._windows_identity:
+            for representative, identity in self._representatives:
+                if _host_paths_equal(path, representative):
+                    self._exact[path] = identity
+                    return identity
+
+        identity = self._next_identity
+        self._next_identity += 1
+        self._exact[path] = identity
+        if self._windows_identity:
+            self._representatives.append((path, identity))
+        return identity
 
 
-def _canonical_file_scope(task: Task) -> tuple[frozenset[str], dict[str, str]]:
-    """Return Windows-compatible comparison keys and authored spellings."""
-    display_paths: dict[str, str] = {}
-    for path in task.likely_files:
-        comparison_key = _windows_ordinal_case_key(_canonical_project_path(path))
-        display_paths.setdefault(comparison_key, path)
-    return frozenset(display_paths), display_paths
+def _canonical_file_scopes(
+    tasks: list[Task],
+) -> tuple[dict[str, frozenset[int]], dict[int, str]]:
+    """Validate and intern task scopes under the authoritative host policy."""
+    registry = _PathIdentityRegistry()
+    scopes: dict[str, frozenset[int]] = {}
+    display_paths: dict[int, str] = {}
+    for task in sorted(tasks, key=lambda item: item.id):
+        identities: set[int] = set()
+        for path in task.likely_files:
+            identity = registry.intern(_canonical_project_path(path))
+            identities.add(identity)
+            display_paths.setdefault(identity, path)
+        scopes[task.id] = frozenset(identities)
+    return scopes, display_paths
 
 
 def _serial_depth(tasks: list[Task]) -> int:
@@ -333,16 +392,7 @@ def build_bundle_plan(
     if duplicates:
         raise BundlePlanningError(f"bundle planning found duplicate task ids: {duplicates}")
     ordered_input = sorted(tasks, key=lambda task: task.id)
-    canonical_scopes = {
-        task.id: _canonical_file_scope(task) for task in ordered_input
-    }
-    canonical_files = {
-        task_id: scope for task_id, (scope, _) in canonical_scopes.items()
-    }
-    display_path: dict[str, str] = {}
-    for task in ordered_input:
-        for comparison_key, path in canonical_scopes[task.id][1].items():
-            display_path.setdefault(comparison_key, path)
+    canonical_files, display_path = _canonical_file_scopes(ordered_input)
     inferred_dependencies = {
         task.id: set(task.dependencies) for task in ordered_input
     }
@@ -423,7 +473,13 @@ def build_bundle_plan(
             for path in left & right
         }
         risk_members = [
-            task.model_copy(update={"likely_files": sorted(canonical_files[task.id])})
+            task.model_copy(
+                update={
+                    "likely_files": sorted(
+                        display_path[path] for path in canonical_files[task.id]
+                    )
+                }
+            )
             for task in members
         ]
         angles, policies = _risk_angles(risk_members)
@@ -434,7 +490,7 @@ def build_bundle_plan(
                 task_ids=component,
                 serial_depth=_serial_depth(members),
                 overlap_files=tuple(
-                    display_path[path] for path in sorted(component_overlap)
+                    sorted(display_path[path] for path in component_overlap)
                 ),
                 review_angles=angles,
                 expected_reviews=max(3, len(angles)),
@@ -453,7 +509,7 @@ def build_bundle_plan(
         task_count=len(ordered),
         serial_depth=serial_depth,
         overlap_pair_count=overlap_pair_count,
-        overlap_files=tuple(display_path[path] for path in sorted(overlap_files)),
+        overlap_files=tuple(sorted(display_path[path] for path in overlap_files)),
         proposed_bundles=tuple(proposals),
         expected_review_count=sum(item.expected_reviews for item in proposals),
         high_risk_policies=tuple(sorted(high_risk)),
@@ -468,11 +524,6 @@ def build_bundle_plan(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _files_set(task: Task) -> frozenset[str]:
-    """Return a canonical, validated copy of a task's likely file scope."""
-    return _canonical_file_scope(task)[0]
 
 
 class _DependencyReachability:
@@ -600,9 +651,7 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
     # the broader work usually goes first)."
     # So: A_files ⊂ B_files (strict) → A.dependencies.append(B.id)
 
-    file_sets: dict[str, frozenset[str]] = {
-        task.id: _files_set(task) for task in tasks
-    }
+    file_sets, _ = _canonical_file_scopes(tasks)
 
     # Collect dependency edges: new_deps[task_id] = set of dependency IDs.
     new_deps: dict[str, set[str]] = {t.id: set(t.dependencies) for t in tasks}
@@ -669,14 +718,7 @@ def infer_conflict_groups(
     if not tasks:
         return [], []
 
-    canonical_scopes = {task.id: _canonical_file_scope(task) for task in tasks}
-    file_sets = {
-        task_id: scope for task_id, (scope, _) in canonical_scopes.items()
-    }
-    display_path: dict[str, str] = {}
-    for task in sorted(tasks, key=lambda item: item.id):
-        for comparison_key, path in canonical_scopes[task.id][1].items():
-            display_path.setdefault(comparison_key, path)
+    file_sets, display_path = _canonical_file_scopes(tasks)
 
     # Map task ID → set of conflict-group IDs it belongs to.
     task_conflict_groups: dict[str, set[str]] = {t.id: set() for t in tasks}
@@ -719,7 +761,7 @@ def infer_conflict_groups(
                 task_ids=sorted_ids,
                 reason=(
                     f"Tasks {id_a} and {id_b} share overlapping files: "
-                    + ", ".join(display_path[path] for path in sorted(overlap))
+                    + ", ".join(sorted(display_path[path] for path in overlap))
                 ),
             )
             conflict_groups.append(cg)
