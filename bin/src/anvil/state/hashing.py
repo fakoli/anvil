@@ -192,7 +192,7 @@ def _materialize_canonical_json_value(
             CanonicalJsonRefusalCode.depth_exceeded,
             path=path,
         )
-    if value is None or isinstance(value, (bool, str)):
+    if value is None or isinstance(value, bool):
         _consume_scalar_bytes(
             value,
             path=path,
@@ -201,6 +201,18 @@ def _materialize_canonical_json_value(
             max_string_bytes=max_string_bytes,
         )
         return value
+    if isinstance(value, str):
+        # Bypass hostile ``str`` subclass overrides for ``encode``, ``__len__``,
+        # and ``__str__`` while preserving the exact Unicode code points.
+        plain_value = str.__str__(value)
+        _consume_scalar_bytes(
+            plain_value,
+            path=path,
+            bytes_used=bytes_used,
+            max_bytes=max_bytes,
+            max_string_bytes=max_string_bytes,
+        )
+        return plain_value
     if isinstance(value, int):
         if not MIN_CANONICAL_JSON_INTEGER <= value <= MAX_CANONICAL_JSON_INTEGER:
             raise CanonicalJsonRefusal(
@@ -290,8 +302,9 @@ def _materialize_mapping(
                     bytes_used=bytes_used,
                     max_bytes=max_bytes,
                 )
+            plain_key = str.__str__(key)
             _consume_scalar_bytes(
-                key,
+                plain_key,
                 path=f"{path}.key[{index}]",
                 bytes_used=bytes_used,
                 max_bytes=max_bytes,
@@ -303,7 +316,7 @@ def _materialize_mapping(
                 bytes_used=bytes_used,
                 max_bytes=max_bytes,
             )
-            result[key] = _materialize_canonical_json_value(
+            result[plain_key] = _materialize_canonical_json_value(
                 item,
                 path=f"{path}.value[{index}]",
                 depth=depth + 1,
@@ -393,9 +406,10 @@ def _consume_scalar_bytes(
     max_string_bytes: int,
 ) -> None:
     if isinstance(value, str):
-        minimum_json_size = len(value) + 2
+        plain_value = str.__str__(value)
+        minimum_json_size = str.__len__(plain_value) + 2
         if (
-            len(value) > max_string_bytes
+            str.__len__(plain_value) > max_string_bytes
             or bytes_used[0] + minimum_json_size > max_bytes
         ):
             raise CanonicalJsonRefusal(
@@ -403,9 +417,13 @@ def _consume_scalar_bytes(
                 path=path,
             )
         try:
-            raw_size = len(value.encode("utf-8"))
+            raw_size = bytes.__len__(str.encode(plain_value, "utf-8"))
             encoded_size = len(
-                json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                json.dumps(
+                    plain_value,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
             )
         except UnicodeEncodeError as exc:
             raise CanonicalJsonRefusal(

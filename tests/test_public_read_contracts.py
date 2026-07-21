@@ -1283,6 +1283,108 @@ def test_other_strings_use_utf8_bytes_without_an_undocumented_character_cap() ->
         ProjectRecordV1(project_id="anvil", name=exact + "a")
 
 
+def test_hostile_str_subclasses_cannot_bypass_public_or_canonical_byte_gates() -> None:
+    phases: list[str] = []
+
+    class HostileStr(str):
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            phases.append("encode")
+            return b"x"
+
+        def __len__(self) -> int:
+            phases.append("len")
+            return 0
+
+        def __str__(self) -> str:
+            phases.append("str")
+            return "masked"
+
+        def __lt__(self, other: object) -> bool:
+            phases.append("lt")
+            return False
+
+    oversized_other = HostileStr("é" * 32_769)
+    with pytest.raises(ValidationError, match="string byte size"):
+        ProjectRecordV1(project_id="anvil", name=oversized_other)
+    with pytest.raises(ValidationError, match="string byte size"):
+        _task("default", acceptance=(oversized_other,))
+
+    oversized_label = HostileStr("é" * 2049)
+    with pytest.raises(ValidationError, match="string byte size"):
+        VerificationSummaryV1(
+            kind=VerificationKindV1.command,
+            label=oversized_label,
+            count=1,
+        )
+
+    with pytest.raises(CanonicalJsonRefusal) as scalar:
+        canonical_json_bytes({"value": oversized_other}, max_string_bytes=16)
+    assert scalar.value.code is CanonicalJsonRefusalCode.byte_limit_exceeded
+    with pytest.raises(CanonicalJsonRefusal) as key:
+        canonical_json_bytes({HostileStr("k" * 17): 1}, max_string_bytes=16)
+    assert key.value.code is CanonicalJsonRefusalCode.byte_limit_exceeded
+    invalid_unicode = HostileStr("\udfff")
+    with pytest.raises(ValidationError, match="invalid_unicode"):
+        ProjectRecordV1(project_id="anvil", name=invalid_unicode)
+    with pytest.raises(CanonicalJsonRefusal) as invalid:
+        canonical_json_bytes({"value": invalid_unicode})
+    assert invalid.value.code is CanonicalJsonRefusalCode.invalid_unicode
+
+    admitted = ProjectRecordV1(project_id="anvil", name=HostileStr("safe"))
+    assert type(admitted.name) is str
+    assert admitted.name == "safe"
+    assert phases == []
+
+
+def test_lowered_limits_preflight_every_expensive_snapshot_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot()
+    phases: list[str] = []
+
+    def fail_hierarchy(*args: object, **kwargs: object) -> None:
+        phases.append("hierarchy")
+        raise AssertionError("hierarchy graph work must not begin")
+
+    monkeypatch.setattr(read_contracts_module, "_validate_hierarchy", fail_hierarchy)
+    for requested, match in (
+        ({"max_tasks": 1}, "task count"),
+        ({"max_dependency_edges": 0}, "aggregate dependency-edge count"),
+        ({"max_string_bytes": 2}, "string byte size"),
+        ({"max_snapshot_bytes": 10}, r"snapshot (minimum )?byte size"),
+    ):
+        with pytest.raises((ValueError, ValidationError), match=match):
+            validate_snapshot_limits(snapshot, lowered_limits(requested))
+        assert phases == []
+
+
+def test_response_applied_limits_preflight_payload_and_response_before_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _snapshot()
+    cursor = EventCursorV1(event_count=1, event_frontier_sha256=_A_SHA)
+    phases: list[str] = []
+
+    def fail_hierarchy(*args: object, **kwargs: object) -> None:
+        phases.append("hierarchy")
+        raise AssertionError("hierarchy graph work must not begin")
+
+    task_limited = lowered_limits({"max_tasks": 1})
+    task_document = _response_document(payload, cursor, task_limited)
+    response_limited = lowered_limits(
+        {"max_response_bytes": MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES + 1}
+    )
+    response_document = _response_document(payload, cursor, response_limited)
+    monkeypatch.setattr(read_contracts_module, "_validate_hierarchy", fail_hierarchy)
+
+    with pytest.raises(ValidationError, match="task count"):
+        ProjectSnapshotDataV1.model_validate(task_document)
+    assert phases == []
+    with pytest.raises(ValidationError, match="response byte size"):
+        ProjectSnapshotDataV1.model_validate(response_document)
+    assert phases == []
+
+
 def test_lowered_depth_and_aggregate_edge_ceilings_refuse_before_graph_work() -> None:
     snapshot = _snapshot()
     validate_snapshot_limits(snapshot, lowered_limits({"max_dependency_edges": 1}))

@@ -460,8 +460,7 @@ class ProjectRecordV1(BaseModel):
     @field_validator("project_id", "name", mode="before")
     @classmethod
     def validate_bounded_strings(cls, value: Any) -> Any:
-        _require_utf8_bytes(value, limit=65_536, path="$.project")
-        return value
+        return _require_utf8_bytes(value, limit=65_536, path="$.project")
 
 
 class PrdRecordV1(BaseModel):
@@ -497,8 +496,7 @@ class PrdRecordV1(BaseModel):
     @field_validator("title", "target_version", "target_tag", mode="before")
     @classmethod
     def validate_bounded_strings(cls, value: Any) -> Any:
-        _require_utf8_bytes(value, limit=65_536, path="$.prd")
-        return value
+        return _require_utf8_bytes(value, limit=65_536, path="$.prd")
 
     @model_validator(mode="after")
     def validate_identity_and_provenance(self) -> PrdRecordV1:
@@ -531,8 +529,7 @@ class FeatureRecordV1(BaseModel):
     @field_validator("title", mode="before")
     @classmethod
     def validate_bounded_title(cls, value: Any) -> Any:
-        _require_utf8_bytes(value, limit=65_536, path="$.feature.title")
-        return value
+        return _require_utf8_bytes(value, limit=65_536, path="$.feature.title")
 
     @model_validator(mode="after")
     def validate_identity(self) -> FeatureRecordV1:
@@ -573,8 +570,7 @@ class VerificationSummaryV1(BaseModel):
     @field_validator("label", mode="before")
     @classmethod
     def validate_bounded_label(cls, value: Any) -> Any:
-        _require_utf8_bytes(value, limit=4096, path="$.verification.label")
-        return value
+        return _require_utf8_bytes(value, limit=4096, path="$.verification.label")
 
 
 class TaskRecordV1(BaseModel):
@@ -602,7 +598,11 @@ class TaskRecordV1(BaseModel):
         if not isinstance(value, Mapping):
             return value
         data = dict(value)
-        _require_utf8_bytes(data.get("title"), limit=65_536, path="$.title")
+        data["title"] = _require_utf8_bytes(
+            data.get("title"),
+            limit=65_536,
+            path="$.title",
+        )
         for field in (
             "dependency_refs",
             "acceptance_criteria",
@@ -610,12 +610,15 @@ class TaskRecordV1(BaseModel):
         ):
             collection = _plain_wire_sequence(data.get(field), field=field)
             if field == "acceptance_criteria" and collection is not None:
-                for index, item in enumerate(collection):
+                collection = tuple(
                     _require_utf8_bytes(
                         item,
                         limit=65_536,
                         path=f"$.acceptance_criteria[{index}]",
                     )
+                    for index, item in enumerate(collection)
+                )
+                data[field] = collection
             if type(collection) is list:
                 data[field] = tuple(collection)
         return data
@@ -651,7 +654,7 @@ class ProjectSnapshotPayloadV1(BaseModel):
     def preflight_raw_limits(cls, value: Any) -> Any:
         """Refuse structurally impossible wire input before nested DTO parsing."""
         if isinstance(value, Mapping):
-            _validate_raw_snapshot_limits(value, PROVIDER_LIMITS_V1)
+            _preflight_snapshot_value(value, PROVIDER_LIMITS_V1)
             # Both ``model_validate_json`` and an already-decoded JSON
             # document use lists for wire arrays.  Convert only exact lists at
             # the tuple-shaped public fields; strict nested/scalar validation
@@ -711,7 +714,7 @@ class ProjectSnapshotDataV1(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def preflight_response_ceiling(cls, value: Any) -> Any:
-        """Reject an impossible envelope ceiling before touching its payload."""
+        """Apply caller ceilings before nested DTO or hierarchy validation."""
         if not isinstance(value, Mapping):
             return value
         raw_limits = value.get("applied_limits")
@@ -732,6 +735,9 @@ class ProjectSnapshotDataV1(BaseModel):
             raise ValueError(
                 "response byte ceiling cannot fit invariant response fields"
             )
+        validated_limits = ProviderReadLimitsV1.model_validate(raw_limits)
+        _preflight_snapshot_value(value.get("payload"), validated_limits)
+        _preflight_response_value(value, validated_limits)
         return value
 
     @model_validator(mode="after")
@@ -879,9 +885,9 @@ def validate_snapshot_limits(
     limits: ProviderReadLimitsV1,
 ) -> None:
     """Refuse a hierarchy exceeding provider or caller-lowered ceilings."""
-    _preflight_typed_snapshot(snapshot)
-    validated_snapshot = ProjectSnapshotPayloadV1.model_validate(snapshot)
     validated_limits = ProviderReadLimitsV1.model_validate(limits)
+    _preflight_snapshot_value(snapshot, validated_limits)
+    validated_snapshot = ProjectSnapshotPayloadV1.model_validate(snapshot)
     _validate_snapshot_limits_validated(validated_snapshot, validated_limits)
 
 
@@ -925,17 +931,7 @@ def _validate_snapshot_shape_limits(
     _validate_snapshot_aggregate_lower_bound(snapshot, limits)
     document = snapshot.model_dump(mode="json")
     for value in _walk_strings(document):
-        if len(value) > limits.max_string_bytes:
-            raise ValueError("string byte size exceeds provider limit")
-        try:
-            size = len(value.encode("utf-8"))
-        except UnicodeEncodeError as exc:
-            raise CanonicalJsonRefusal(
-                CanonicalJsonRefusalCode.invalid_unicode,
-                path="$",
-            ) from exc
-        if size > limits.max_string_bytes:
-            raise ValueError("string byte size exceeds provider limit")
+        _require_utf8_bytes(value, limit=limits.max_string_bytes, path="$")
 
 
 def _validate_snapshot_aggregate_lower_bound(
@@ -1064,6 +1060,129 @@ def _validate_raw_snapshot_limits(
     )
 
 
+def _preflight_snapshot_value(
+    payload: Any,
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Apply lowered bounds before Pydantic can build or graph the hierarchy."""
+    if isinstance(payload, ProjectSnapshotPayloadV1):
+        _preflight_typed_snapshot(payload)
+        _validate_snapshot_shape_limits(payload, limits)
+        _validate_snapshot_serialized_limit(payload, limits)
+        return
+    if not isinstance(payload, Mapping):
+        return
+    _validate_raw_snapshot_limits(payload, limits)
+    document = _snapshot_preflight_document(payload)
+    for value in _walk_strings(document):
+        _require_utf8_bytes(value, limit=limits.max_string_bytes, path="$")
+    try:
+        canonical_json_bytes(
+            document,
+            max_depth=limits.max_canonical_json_depth,
+            max_nodes=canonical_node_budget_for_bytes(limits.max_snapshot_bytes),
+            max_bytes=limits.max_snapshot_bytes,
+            max_string_bytes=min(limits.max_string_bytes, limits.max_snapshot_bytes),
+        )
+    except CanonicalJsonRefusal as exc:
+        if exc.code is CanonicalJsonRefusalCode.byte_limit_exceeded:
+            raise ValueError("snapshot byte size exceeds provider limit") from exc
+        raise
+
+
+def _snapshot_preflight_document(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Materialize the exact default-complete valid wire shape without validation."""
+    document = dict(payload)
+    document.setdefault("schema_id", PROJECT_SNAPSHOT_SCHEMA_ID)
+    document.setdefault("operation_version", PROJECT_SNAPSHOT_OPERATION_VERSION)
+    project = document.get("project")
+    if isinstance(project, BaseModel):
+        document["project"] = project.model_dump(mode="json")
+    elif isinstance(project, Mapping):
+        document["project"] = dict(project)
+
+    prds = _plain_wire_sequence(document.get("prds"), field="prds")
+    if prds is not None:
+        normalized_prds: list[Any] = []
+        for raw_prd in prds:
+            if isinstance(raw_prd, BaseModel):
+                normalized_prds.append(raw_prd.model_dump(mode="json"))
+                continue
+            if not isinstance(raw_prd, Mapping):
+                normalized_prds.append(raw_prd)
+                continue
+            prd = dict(raw_prd)
+            for name in (
+                "target_version",
+                "target_tag",
+                "source_sha256",
+                "source_size_bytes",
+                "source_encoding",
+            ):
+                prd.setdefault(name, None)
+            normalized_prds.append(prd)
+        document["prds"] = normalized_prds
+
+    features = _plain_wire_sequence(document.get("features"), field="features")
+    if features is not None:
+        document["features"] = [
+            feature.model_dump(mode="json")
+            if isinstance(feature, BaseModel)
+            else dict(feature)
+            if isinstance(feature, Mapping)
+            else feature
+            for feature in features
+        ]
+
+    tasks = _plain_wire_sequence(document.get("tasks"), field="tasks")
+    if tasks is not None:
+        normalized_tasks: list[Any] = []
+        for raw_task in tasks:
+            if isinstance(raw_task, BaseModel):
+                normalized_tasks.append(raw_task.model_dump(mode="json"))
+                continue
+            if not isinstance(raw_task, Mapping):
+                normalized_tasks.append(raw_task)
+                continue
+            task = dict(raw_task)
+            task.setdefault("parent_ref", None)
+            task.setdefault("dependency_refs", [])
+            task.setdefault("acceptance_criteria", [])
+            task.setdefault("verification_summaries", [])
+            normalized_tasks.append(task)
+        document["tasks"] = normalized_tasks
+    return document
+
+
+def _preflight_response_value(
+    response: Mapping[str, Any],
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Bound the default-complete response before payload hierarchy validation."""
+    document = dict(response)
+    payload = document.get("payload")
+    if isinstance(payload, ProjectSnapshotPayloadV1):
+        document["payload"] = payload.model_dump(mode="json")
+    elif isinstance(payload, Mapping):
+        document["payload"] = _snapshot_preflight_document(payload)
+    cursor = document.get("event_cursor")
+    if isinstance(cursor, BaseModel):
+        document["event_cursor"] = cursor.model_dump(mode="json")
+    document["applied_limits"] = limits.model_dump(mode="json")
+    try:
+        canonical_json_bytes(
+            document,
+            max_depth=limits.max_canonical_json_depth,
+            max_nodes=canonical_node_budget_for_bytes(limits.max_response_bytes),
+            max_bytes=limits.max_response_bytes,
+            max_string_bytes=min(limits.max_string_bytes, limits.max_response_bytes),
+        )
+    except CanonicalJsonRefusal as exc:
+        if exc.code is CanonicalJsonRefusalCode.byte_limit_exceeded:
+            raise ValueError("response byte size exceeds provider limit") from exc
+        raise
+
+
 def _validate_snapshot_aggregate_counts(
     *,
     prd_count: int,
@@ -1131,7 +1250,7 @@ def _require_valid_unicode(value: Any, *, path: str) -> None:
     if not isinstance(value, str):
         return
     try:
-        value.encode("utf-8")
+        str.encode(str.__str__(value), "utf-8")
     except UnicodeEncodeError as exc:
         raise CanonicalJsonRefusal(
             CanonicalJsonRefusalCode.invalid_unicode,
@@ -1139,13 +1258,15 @@ def _require_valid_unicode(value: Any, *, path: str) -> None:
         ) from exc
 
 
-def _require_utf8_bytes(value: Any, *, limit: int, path: str) -> None:
+def _require_utf8_bytes(value: Any, *, limit: int, path: str) -> Any:
     """Apply a byte ceiling without an undocumented character-count ceiling."""
     if not isinstance(value, str):
-        return
-    _require_valid_unicode(value, path=path)
-    if len(value.encode("utf-8")) > limit:
+        return value
+    plain_value = str.__str__(value)
+    _require_valid_unicode(plain_value, path=path)
+    if bytes.__len__(str.encode(plain_value, "utf-8")) > limit:
         raise ValueError("string byte size exceeds provider limit")
+    return plain_value
 
 
 def _preflight_typed_snapshot(payload: ProjectSnapshotPayloadV1) -> None:
