@@ -2575,6 +2575,88 @@ class TestEditDependencies:
         # The valid edge in the rejected batch must NOT have applied.
         assert _deps_of(state_dir, "T002") == []
 
+    @pytest.mark.parametrize(
+        ("case", "expected_message"),
+        [
+            (
+                "malformed_pair",
+                "invalid dependency edge: expected a [source, target] pair.",
+            ),
+            (
+                "unknown",
+                "dependency update references an unknown source task.",
+            ),
+            (
+                "self_loop",
+                "self-dependency rejected: a task cannot depend on itself.",
+            ),
+            (
+                "cycle",
+                "dependency cycle rejected: the resulting graph contains a cycle.",
+            ),
+        ],
+    )
+    def test_hostile_dependency_errors_are_bounded_redacted_and_non_mutating(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        case: str,
+        expected_message: str,
+    ) -> None:
+        """MCP never reflects attacker-sized edge or task values in ToolError."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        marker = f"SECRET_{case.upper()}_MCP_VALUE"
+        hostile_id = marker + ("x" * 100_000)
+        if case in {"malformed_pair", "unknown"}:
+            _add_task(state_dir, task_id="T001", status="ready")
+        elif case == "self_loop":
+            _add_task(state_dir, task_id=hostile_id, status="ready")
+        else:
+            _add_task(state_dir, task_id=hostile_id, status="ready")
+            _add_task(
+                state_dir,
+                task_id="T001",
+                status="ready",
+                dependencies=[hostile_id],
+            )
+
+        if case == "malformed_pair":
+            add = [[hostile_id, "T001", "EXTRA"]]
+        elif case == "unknown":
+            add = [[hostile_id, "T001"]]
+        elif case == "self_loop":
+            add = [[hostile_id, hostile_id]]
+        else:
+            add = [[hostile_id, "T001"]]
+
+        monkeypatch.chdir(tmp_path)
+        events_path = state_dir / "events.jsonl"
+        events_before = events_path.read_bytes()
+        tracked_ids = [hostile_id] if case == "self_loop" else ["T001"]
+        if case == "cycle":
+            tracked_ids.append(hostile_id)
+        deps_before = {task_id: _deps_of(state_dir, task_id) for task_id in tracked_ids}
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "edit_dependencies",
+                    {"actor": "agent-x", "add": add},
+                )
+
+        with pytest.raises(ToolError) as raised:
+            _run(run())
+
+        error = str(raised.value)
+        assert expected_message in error
+        assert marker not in error
+        assert len(error.encode("utf-8")) <= 4096
+        assert events_path.read_bytes() == events_before
+        assert {
+            task_id: _deps_of(state_dir, task_id) for task_id in tracked_ids
+        } == deps_before
+
     def test_backend_rejection_is_stable_tool_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

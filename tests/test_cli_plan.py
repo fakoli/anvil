@@ -35,11 +35,16 @@ from typer.testing import CliRunner
 from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.planning._plan_helpers import (
+    DEPENDENCY_CYCLE_MESSAGE,
     DEPENDENCY_EDGE_FORMAT_MESSAGE,
+    DEPENDENCY_SELF_LOOP_MESSAGE,
+    DEPENDENCY_UNKNOWN_SOURCE_MESSAGE,
     BatchDepError,
     BatchDepPlan,
+    DepEdge,
     emit_batch_dep_events,
     parse_dep_edge,
+    plan_batch_dep_edits,
 )
 from anvil.planning.llm import LLMResponse
 from anvil.state.backend import EventRejected
@@ -774,6 +779,33 @@ class TestBatchDepsCycleRejected:
         assert envelope["error"]["code"] == "cycle"
         assert _deps_of(tmp_path, "T001") == []
 
+    def test_deep_graph_cycle_detection_is_iterative_and_correct(self) -> None:
+        """A 1,500-task chain is valid, while its closing edge is a cycle."""
+        now = datetime(2026, 7, 21, tzinfo=UTC)
+        ids = [f"T{index:04d}" for index in range(1_500)]
+        tasks = [
+            Task(
+                id=task_id,
+                feature_id="F001",
+                title=task_id,
+                description="deep graph",
+                dependencies=([ids[index + 1]] if index + 1 < len(ids) else []),
+                created_at=now,
+                updated_at=now,
+            )
+            for index, task_id in enumerate(ids)
+        ]
+
+        assert plan_batch_dep_edits(tasks, []) == BatchDepPlan()
+        with pytest.raises(BatchDepError) as raised:
+            plan_batch_dep_edits(
+                tasks,
+                [DepEdge(op="add", source=ids[-1], target=ids[0])],
+            )
+
+        assert raised.value.code == "cycle"
+        assert raised.value.message == DEPENDENCY_CYCLE_MESSAGE
+
 
 class TestBatchDepsValidation:
     """Edge-spec parsing and empty-batch guards."""
@@ -933,6 +965,75 @@ class TestBatchDepsValidation:
             assert result.output.strip() == (
                 f"Error: {DEPENDENCY_EDGE_FORMAT_MESSAGE}"
             )
+
+    @pytest.mark.parametrize(
+        ("case", "expected_code", "expected_message", "human_exit"),
+        [
+            ("malformed", "bad_request", DEPENDENCY_EDGE_FORMAT_MESSAGE, 2),
+            (
+                "unknown",
+                "unknown_task",
+                DEPENDENCY_UNKNOWN_SOURCE_MESSAGE,
+                1,
+            ),
+            ("self_loop", "self_loop", DEPENDENCY_SELF_LOOP_MESSAGE, 1),
+            ("cycle", "cycle", DEPENDENCY_CYCLE_MESSAGE, 1),
+        ],
+    )
+    @pytest.mark.parametrize("json_output", [True, False], ids=["json", "human"])
+    def test_batch_deps_hostile_diagnostics_are_bounded_and_redacted(
+        self,
+        tmp_path: Path,
+        case: str,
+        expected_code: str,
+        expected_message: str,
+        human_exit: int,
+        json_output: bool,
+    ) -> None:
+        """Every dependency rejection surface omits attacker-sized task IDs."""
+        marker = f"SECRET_{case.upper()}_TASK_ID"
+        hostile_id = marker + ("x" * 100_000)
+        if case == "malformed":
+            seeded = [("T001", [])]
+            raw = hostile_id
+        elif case == "unknown":
+            seeded = [("T001", [])]
+            raw = f"{hostile_id}->T001"
+        elif case == "self_loop":
+            seeded = [(hostile_id, [])]
+            raw = f"{hostile_id}->{hostile_id}"
+        else:
+            seeded = [(hostile_id, []), ("T001", [hostile_id])]
+            raw = f"{hostile_id}->T001"
+
+        _seed_dep_tasks(tmp_path, seeded)
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        events_before = events_path.read_bytes()
+        deps_before = {task_id: _deps_of(tmp_path, task_id) for task_id, _ in seeded}
+        args = ["deps", "--add", raw]
+        if json_output:
+            args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == (1 if json_output else human_exit)
+        assert marker not in result.output
+        assert len(result.output.encode("utf-8")) <= 4096
+        assert events_path.read_bytes() == events_before
+        assert {
+            task_id: _deps_of(tmp_path, task_id) for task_id, _ in seeded
+        } == deps_before
+        if json_output:
+            assert json.loads(result.output) == {
+                "ok": False,
+                "command": "deps",
+                "error": {
+                    "code": expected_code,
+                    "message": expected_message,
+                },
+            }
+        else:
+            assert result.output.strip() == f"Error: {expected_message}"
 
     def test_batch_deps_help_documents_options(self) -> None:
         """`deps --help` surfaces options, canonical syntax, and scope caveat."""

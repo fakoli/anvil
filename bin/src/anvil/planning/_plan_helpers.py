@@ -24,6 +24,7 @@ same `classify_orphans()` + `emit_prune_events()` and surface
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -34,8 +35,15 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SAFE_DELETE_STATUSES",
+    "DEPENDENCY_BAD_OP_MESSAGE",
     "BatchDepError",
     "BatchDepPlan",
+    "DEPENDENCY_CYCLE_MESSAGE",
+    "DEPENDENCY_EDGE_FORMAT_MESSAGE",
+    "DEPENDENCY_PAIR_FORMAT_MESSAGE",
+    "DEPENDENCY_SELF_LOOP_MESSAGE",
+    "DEPENDENCY_UNKNOWN_SOURCE_MESSAGE",
+    "DEPENDENCY_UNKNOWN_TARGET_MESSAGE",
     "DepEdge",
     "OrphanClassification",
     "PruneResult",
@@ -264,6 +272,24 @@ DEPENDENCY_EDGE_FORMAT_MESSAGE = (
     "invalid dependency edge: use exactly one 'SOURCE->TARGET' separator; "
     "'SOURCE:TARGET' is supported only for unscoped IDs."
 )
+DEPENDENCY_PAIR_FORMAT_MESSAGE = (
+    "invalid dependency edge: expected a [source, target] pair."
+)
+DEPENDENCY_BAD_OP_MESSAGE = (
+    "invalid dependency operation: expected 'add' or 'remove'."
+)
+DEPENDENCY_UNKNOWN_SOURCE_MESSAGE = (
+    "dependency update references an unknown source task."
+)
+DEPENDENCY_UNKNOWN_TARGET_MESSAGE = (
+    "dependency update references an unknown target task."
+)
+DEPENDENCY_SELF_LOOP_MESSAGE = (
+    "self-dependency rejected: a task cannot depend on itself."
+)
+DEPENDENCY_CYCLE_MESSAGE = (
+    "dependency cycle rejected: the resulting graph contains a cycle."
+)
 
 
 @dataclass(frozen=True)
@@ -346,14 +372,13 @@ def parse_dep_edge(raw: str, op: str) -> DepEdge:
         )
     else:
         raise BatchDepError(
-            f"invalid edge spec {raw!r}: expected 'SOURCE->TARGET' "
-            "(source depends on target; use the arrow for scoped IDs).",
+            DEPENDENCY_EDGE_FORMAT_MESSAGE,
             code="bad_request",
         )
     source, target = parts[0].strip(), parts[1].strip()
     if not source or not target:
         raise BatchDepError(
-            f"invalid edge spec {raw!r}: both SOURCE and TARGET are required.",
+            DEPENDENCY_EDGE_FORMAT_MESSAGE,
             code="bad_request",
         )
     return DepEdge(op=op, source=source, target=target)
@@ -369,33 +394,42 @@ def _has_cycle(dep_map: dict[str, list[str]]) -> list[str] | None:
     """
     WHITE, GREY, BLACK = 0, 1, 2
     colour: dict[str, int] = {node: WHITE for node in dep_map}
-    stack_path: list[str] = []
 
-    def visit(node: str) -> list[str] | None:
-        colour[node] = GREY
-        stack_path.append(node)
-        for dep in sorted(dep_map.get(node, [])):
+    # Use an explicit DFS stack rather than Python recursion. Real task graphs
+    # can legitimately exceed the interpreter recursion limit; depth alone is
+    # not a cycle and must not turn a valid edit into an internal error.
+    for start in sorted(dep_map):
+        if colour[start] != WHITE:
+            continue
+        colour[start] = GREY
+        path = [start]
+        path_index = {start: 0}
+        stack: list[tuple[str, Iterator[str]]] = [
+            (start, iter(sorted(dep_map.get(start, []))))
+        ]
+        while stack:
+            node, edge_iter = stack[-1]
+            try:
+                dep = next(edge_iter)
+            except StopIteration:
+                stack.pop()
+                path_index.pop(node, None)
+                path.pop()
+                colour[node] = BLACK
+                continue
+
             if dep not in colour:
                 # Edge to a task with no outgoing deps recorded — treat as a
                 # leaf; it cannot start a cycle on its own.
                 continue
             if colour[dep] == GREY:
-                # Back-edge: slice the path from the first occurrence of `dep`.
-                idx = stack_path.index(dep)
-                return [*stack_path[idx:], dep]
+                idx = path_index[dep]
+                return [*path[idx:], dep]
             if colour[dep] == WHITE:
-                found = visit(dep)
-                if found is not None:
-                    return found
-        stack_path.pop()
-        colour[node] = BLACK
-        return None
-
-    for node in sorted(dep_map):
-        if colour[node] == WHITE:
-            found = visit(node)
-            if found is not None:
-                return found
+                colour[dep] = GREY
+                path_index[dep] = len(path)
+                path.append(dep)
+                stack.append((dep, iter(sorted(dep_map.get(dep, [])))))
     return None
 
 
@@ -431,19 +465,22 @@ def plan_batch_dep_edits(
     for edge in edges:
         if edge.op not in {"add", "remove"}:
             raise BatchDepError(
-                f"unknown dependency op {edge.op!r}: expected 'add' or 'remove'.",
+                DEPENDENCY_BAD_OP_MESSAGE,
                 code="bad_request",
             )
         for tid, role in ((edge.source, "source"), (edge.target, "target")):
             if tid not in known_ids:
                 raise BatchDepError(
-                    f"{role} task {tid!r} does not exist.",
+                    (
+                        DEPENDENCY_UNKNOWN_SOURCE_MESSAGE
+                        if role == "source"
+                        else DEPENDENCY_UNKNOWN_TARGET_MESSAGE
+                    ),
                     code="unknown_task",
                 )
         if edge.source == edge.target:
             raise BatchDepError(
-                f"self-dependency rejected: task {edge.source!r} cannot depend "
-                "on itself.",
+                DEPENDENCY_SELF_LOOP_MESSAGE,
                 code="self_loop",
             )
 
@@ -460,7 +497,7 @@ def plan_batch_dep_edits(
     cycle = _has_cycle(dep_map)
     if cycle is not None:
         raise BatchDepError(
-            "dependency cycle rejected: " + " -> ".join(cycle) + ".",
+            DEPENDENCY_CYCLE_MESSAGE,
             code="cycle",
         )
 

@@ -10737,6 +10737,84 @@ class TestDecideApplyContract:
         finally:
             healed.close()
 
+    def test_task_created_replay_from_empty_recovers_exact_legacy_missing_prd_event(
+        self, tmp_path: Path
+    ) -> None:
+        """Full replay accepts the exact missing-prd dependency emitter shape."""
+        events_path = tmp_path / "events.jsonl"
+        original = _make_backend(tmp_path)
+        try:
+            _setup_project(original)
+            feature_id = "named:F001"
+            task_id = "named:T001"
+            original.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": "named"},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            original.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": "named",
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = original.get_task(task_id)
+            assert task is not None
+            # This is the historical emitter shape: full Task.model_dump(),
+            # dependency/timestamp changed, and the excluded prd_id omitted.
+            payload = task.model_copy(
+                update={"dependencies": ["named:T000"], "updated_at": _T1}
+            ).model_dump(mode="json")
+            assert "prd_id" not in payload
+        finally:
+            original.close()
+
+        legacy_event = Event(
+            id="E000005",
+            timestamp=_T1,
+            actor="old-deps-emitter",
+            action="task.created",
+            target_kind="task",
+            target_id=task_id,
+            payload_json=payload,
+        )
+        with events_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                legacy_event.model_dump_json(exclude={"parent_event_id", "lamport"})
+                + "\n"
+            )
+        events_before = events_path.read_bytes()
+
+        replay_db = tmp_path / "replayed-state.db"
+        replayed = SqliteBackend(
+            db_path=str(replay_db),
+            events_path=str(events_path),
+            clock=_make_clock(_T1),
+        )
+        try:
+            # Deliberately do not initialize first: replay_from_empty itself
+            # creates an empty projection and applies every event from the log.
+            replayed.replay_from_empty(str(events_path))
+            task = replayed.get_task(task_id)
+            assert task is not None
+            assert task.prd_id == "named"
+            assert task.feature_id == feature_id
+            assert task.dependencies == ["named:T000"]
+            conn = sqlite3.connect(str(replay_db))
+            try:
+                assert conn.execute(
+                    "SELECT MAX(id) FROM events"
+                ).fetchone() == ("E000005",)
+            finally:
+                conn.close()
+            assert events_path.read_bytes() == events_before
+        finally:
+            replayed.close()
+
     @pytest.mark.parametrize("explicit_prd", ["default", "other"])
     def test_task_created_never_rewrites_explicit_prd_mismatch(
         self, tmp_path: Path, explicit_prd: str
@@ -10983,6 +11061,69 @@ class TestDecideApplyContract:
             assert audit["actor"].startswith("<redacted")
             assert audit["target_id"].startswith("<redacted")
             assert audit["reason"] == error
+        finally:
+            b.close()
+
+    def test_task_created_recovery_deep_payload_serialization_is_bounded(
+        self, tmp_path: Path
+    ) -> None:
+        """Serializer depth failures stay inside the recovery refusal boundary."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        audit_path = tmp_path / "audit.jsonl"
+        marker = "SECRET_DEEP_ACCEPTANCE_CRITERION"
+        try:
+            _setup_project(b)
+            feature_id = "named:F001"
+            task_id = "named:T001"
+            b.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": "named"},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            b.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": "named",
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = b.get_task(task_id)
+            assert task is not None
+            payload = task.model_copy(update={"updated_at": _T1}).model_dump(
+                mode="json"
+            )
+            nested: Any = marker
+            for _ in range(1_000):
+                nested = [nested]
+            payload["acceptance_criteria"] = [nested]
+            draft = _make_event(
+                "task.created",
+                payload,
+                target_kind="task",
+                target_id=task_id,
+                now=_T1,
+            )
+            events_before = events_path.read_bytes()
+            stored_before = b.get_task(task_id)
+
+            with pytest.raises(EventRejected) as raised:
+                b.append(draft)
+
+            error = str(raised.value)
+            assert error.startswith("task.created ownership recovery refused:")
+            assert "code=invalid_task_payload" in error
+            assert marker not in error
+            assert len(error.encode("utf-8")) <= 4096
+            assert events_path.read_bytes() == events_before
+            assert b.get_task(task_id) == stored_before
+            audit_line = audit_path.read_bytes().splitlines(keepends=True)[-1]
+            assert marker.encode() not in audit_line
+            assert len(audit_line) <= 4096
+            assert json.loads(audit_line)["reason"] == error
         finally:
             b.close()
 

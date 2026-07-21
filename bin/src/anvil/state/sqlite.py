@@ -149,7 +149,7 @@ def _redacted_identifier(value: Any) -> str:
                 separators=(",", ":"),
                 default=lambda item: f"<{type(item).__name__[:64]}>",
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             # Never fall back to repr(value): it may contain the secret-like
             # content this helper exists to keep out of diagnostics.
             rendered = f"<unserializable-{value_type}>"
@@ -6544,8 +6544,19 @@ class SqliteBackend:
                 code="invalid_task_payload",
             ) from None
 
-        existing_data = existing_task.model_dump(mode="json")
-        incoming_data = incoming_task.model_dump(mode="json")
+        try:
+            existing_data = existing_task.model_dump(mode="json")
+            incoming_data = incoming_task.model_dump(mode="json")
+        except Exception:
+            # Pydantic's serializer has a finite nesting depth and detects
+            # circular references. Recovery candidates cross an untrusted
+            # compatibility boundary, so neither serializer details nor raw
+            # nested values may escape it.
+            raise self._task_created_recovery_refusal(
+                event,
+                owner_prd_id=owner_prd_id,
+                code="invalid_task_payload",
+            ) from None
         for mutable_key in ("dependencies", "updated_at"):
             existing_data.pop(mutable_key, None)
             incoming_data.pop(mutable_key, None)
@@ -6566,9 +6577,18 @@ class SqliteBackend:
         Was a validation guard inside the old handler (``raise
         TransactionAborted`` on an invalid Task); now rejects up front.
         """
-        task_dict = self._normalize_task_payload(
-            conn, payload.model_dump(mode="json"), event
-        )
+        try:
+            payload_data = payload.model_dump(mode="json")
+        except Exception:
+            recovery_owner = self._task_created_recovery_owner(conn, event)
+            if recovery_owner is not None:
+                raise self._task_created_recovery_refusal(
+                    event,
+                    owner_prd_id=recovery_owner,
+                    code="invalid_task_payload",
+                ) from None
+            raise
+        task_dict = self._normalize_task_payload(conn, payload_data, event)
         try:
             Task.model_validate(task_dict)
         except Exception as exc:
@@ -6597,9 +6617,19 @@ class SqliteBackend:
         The payload was already validated by ``_check_task_created``; the
         ``model_validate`` here is an infallible rebuild.
         """
-        task_dict = self._normalize_task_payload(
-            conn, payload.model_dump(mode="json"), event
-        )
+        try:
+            payload_data = payload.model_dump(mode="json")
+        except Exception:
+            recovery_owner = self._task_created_recovery_owner(conn, event)
+            if recovery_owner is not None:
+                refusal = self._task_created_recovery_refusal(
+                    event,
+                    owner_prd_id=recovery_owner,
+                    code="invalid_task_payload",
+                )
+                raise TransactionAborted(f"_write_task_created: {refusal}") from None
+            raise
+        task_dict = self._normalize_task_payload(conn, payload_data, event)
         task = Task.model_validate(task_dict)
         self._insert_task_row(conn, task)
 

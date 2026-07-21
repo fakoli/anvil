@@ -6,6 +6,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- **Named-PRD dependency recovery and bounded diagnostics (#181).** Legacy
+  dependency upserts that omitted `prd_id` now recover during forward catch-up
+  and full replay without renumbering events. Dependency validation and
+  ownership-recovery failures use bounded, redacted messages across CLI, MCP,
+  and audit output; deep task graphs are checked without recursion failures.
+
 ## [0.6.0] - 2026-07-19
 
 ### Added

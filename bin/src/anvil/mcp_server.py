@@ -1816,6 +1816,7 @@ def edit_dependencies(
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
         DEPENDENCY_EVENT_REJECTED_MESSAGE,
+        DEPENDENCY_PAIR_FORMAT_MESSAGE,
         BatchDepError,
         DepEdge,
         emit_batch_dep_events,
@@ -1834,9 +1835,7 @@ def edit_dependencies(
         out: list[DepEdge] = []
         for pair in pairs:
             if len(pair) != 2:
-                raise ToolError(
-                    f"invalid {op} edge {pair!r}: expected a [source, target] pair."
-                )
+                raise ToolError(DEPENDENCY_PAIR_FORMAT_MESSAGE)
             out.append(DepEdge(op=op, source=pair[0], target=pair[1]))
         return out
 
@@ -1854,7 +1853,7 @@ def edit_dependencies(
         try:
             batch_plan = plan_batch_dep_edits(all_tasks, edges)
         except BatchDepError as exc:
-            raise ToolError(exc.message) from exc
+            raise ToolError(exc.message) from None
 
         try:
             changed = emit_batch_dep_events(

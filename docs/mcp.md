@@ -423,6 +423,8 @@ requires the planned single batch event with prior-dependency/graph-cursor reval
 If an individual backend append is rejected, MCP returns the fixed ToolError
 `dependency update was rejected by state validation.`; the CLI returns the same message
 with JSON error code `event_rejected`. Backend validation details are not exposed.
+Malformed pairs, unknown tasks, self-loops, and cycles also return fixed, bounded
+ToolErrors; raw edge and task values are never reflected in those errors.
 
 **Inputs**
 

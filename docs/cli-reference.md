@@ -1496,7 +1496,9 @@ flag list; full prose treatment may follow in a later pass.
   persistence is not atomic. If the backend refuses an individual append,
   `deps --json` returns the fixed `event_rejected` message `dependency update
   was rejected by state validation.`; human output uses the same text. Neither
-  surface exposes the raw backend reason.
+  surface exposes the raw backend reason. Malformed edges, unknown tasks,
+  self-loops, and cycles likewise return fixed, bounded diagnostics on both
+  surfaces; raw edge and task values are never reflected in an error.
 
   Ownership-recovery refusals have an additional diagnostic contract. When a
   legacy missing-`prd_id` `task.created` upsert cannot be safely recovered, the
