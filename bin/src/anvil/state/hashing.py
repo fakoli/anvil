@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 # 12 hex chars = 48 bits. The birthday bound puts a 50% collision chance at
@@ -24,6 +25,75 @@ from typing import Any
 _HASH_HEX_LEN = 12
 
 EVENT_HASH_ID_PREFIX = "E-"
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Return the portable canonical JSON representation of *value*.
+
+    This is the public-contract canonicalizer.  It deliberately differs from
+    :func:`canonical_payload_json`, whose historical ASCII representation is
+    part of the git-event id contract.  Public read payloads are encoded as
+    UTF-8, preserve every Unicode code point and newline byte represented by
+    the input string, and reject floats instead of relying on implementation-
+    specific or non-standard JSON spellings.
+
+    The accepted value space is the JSON data model with integers but without
+    floats: ``None``, booleans, integers, strings, mappings with string keys,
+    and sequences other than text/bytes.  Refusing unsupported values keeps
+    hashing independent of ``default=`` coercions and object ``repr`` output.
+    """
+    _validate_canonical_json_value(value, path="$")
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    # ``json.dumps`` never emits these, but keep the byte-level invariants
+    # executable at the boundary where future serializer changes would land.
+    if encoded.startswith(b"\xef\xbb\xbf") or encoded.endswith((b"\n", b"\r")):
+        raise ValueError("canonical JSON must not contain a BOM or trailing newline")
+    return encoded
+
+
+def domain_separated_sha256(domain: bytes, value: Any) -> str:
+    """Hash canonical JSON under a NUL-terminated ASCII *domain*.
+
+    Domain separation is part of the digest contract, so callers must provide
+    a non-empty ASCII label ending in exactly one NUL byte.
+    """
+    if not domain or not domain.endswith(b"\0") or domain.endswith(b"\0\0"):
+        raise ValueError("hash domain must be non-empty and NUL-terminated")
+    try:
+        domain.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("hash domain must be ASCII") from exc
+    return hashlib.sha256(domain + canonical_json_bytes(value)).hexdigest()
+
+
+def _validate_canonical_json_value(value: Any, *, path: str) -> None:
+    if value is None or isinstance(value, (bool, str)):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        raise TypeError(f"floats are not allowed in canonical JSON at {path}")
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"canonical JSON object key at {path} is not a string")
+            _validate_canonical_json_value(item, path=f"{path}.{key}")
+        return
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray, memoryview)
+    ):
+        for index, item in enumerate(value):
+            _validate_canonical_json_value(item, path=f"{path}[{index}]")
+        return
+    raise TypeError(
+        f"unsupported canonical JSON value {type(value).__name__} at {path}"
+    )
 
 
 def canonical_payload_json(payload: dict[str, Any]) -> str:
