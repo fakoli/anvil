@@ -40,12 +40,12 @@ from fastmcp.exceptions import ToolError
 from anvil import __version__
 from anvil.build_identity import get_build_identity
 from anvil.mcp_server import mcp
+from anvil.planning import inference as inference_module
 from anvil.planning._plan_helpers import (
     DEPENDENCY_BATCH_LIMIT_MESSAGE,
     DEPENDENCY_PAIR_FORMAT_MESSAGE,
     MAX_DEPENDENCY_EDGES_PER_BATCH,
 )
-from anvil.planning import inference as inference_module
 from anvil.planning.inference import PathIdentityError
 from anvil.state.backend import EventRejected
 from anvil.state.schema import SCHEMA_VERSION

@@ -208,7 +208,7 @@ class TestInferDependencies:
         entrypoint: Callable[[list[Task]], object],
     ) -> None:
         limit = inference_module._MAX_PORTABLE_PROJECT_PATH_BYTES
-        path = "é" * (limit // len("é".encode("utf-8")))
+        path = "é" * (limit // len("é".encode()))
         assert len(path.encode("utf-8")) == limit
         task = _make_task("T001", [path])
         before = task.model_dump(mode="python")
@@ -224,7 +224,7 @@ class TestInferDependencies:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         limit = inference_module._MAX_PORTABLE_PROJECT_PATH_BYTES
-        path = "é" * (limit // len("é".encode("utf-8"))) + "a"
+        path = "é" * (limit // len("é".encode())) + "a"
         assert len(path.encode("utf-8")) == limit + 1
         task = _make_task("T001", [path])
         before = task.model_dump(mode="python")
