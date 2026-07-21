@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections import UserDict
+from types import MappingProxyType
 
 import pytest
 from pydantic import ValidationError
@@ -28,7 +30,15 @@ from anvil.read_contracts import (
     snapshot_digest,
     validate_snapshot_limits,
 )
-from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
+from anvil.state.hashing import (
+    MAX_CANONICAL_JSON_DEPTH,
+    MAX_CANONICAL_JSON_NODES,
+    MAX_CANONICAL_JSON_STRING_CHARS,
+    CanonicalJsonRefusal,
+    CanonicalJsonRefusalCode,
+    canonical_json_bytes,
+    domain_separated_sha256,
+)
 
 _A_SHA = "a" * 64
 _B_SHA = "b" * 64
@@ -293,10 +303,62 @@ def test_canonical_json_has_a_portable_exact_utf8_vector() -> None:
     assert not expected.endswith((b"\n", b"\r"))
 
 
+def test_canonical_json_materializes_mapping_and_sequence_implementations() -> None:
+    value = MappingProxyType(
+        {
+            "z": range(3),
+            "a": UserDict(
+                {
+                    "nested": MappingProxyType({"values": range(2)}),
+                }
+            ),
+        }
+    )
+    assert canonical_json_bytes(value) == (
+        b'{"a":{"nested":{"values":[0,1]}},"z":[0,1,2]}'
+    )
+    assert canonical_json_bytes(value) == canonical_json_bytes(
+        {"a": {"nested": {"values": [0, 1]}}, "z": [0, 1, 2]}
+    )
+
+
 @pytest.mark.parametrize("value", [1.0, float("nan"), float("inf")])
 def test_canonical_json_rejects_every_float(value: float) -> None:
-    with pytest.raises(TypeError, match="floats are not allowed"):
+    with pytest.raises(CanonicalJsonRefusal) as raised:
         canonical_json_bytes({"value": value})
+    assert raised.value.code is CanonicalJsonRefusalCode.float_forbidden
+
+
+def test_canonical_json_refuses_sequence_and_mapping_cycles_safely() -> None:
+    cyclic_list: list[object] = []
+    cyclic_list.append(cyclic_list)
+    with pytest.raises(CanonicalJsonRefusal) as list_refusal:
+        canonical_json_bytes(cyclic_list)
+    assert list_refusal.value.code is CanonicalJsonRefusalCode.cyclic_value
+
+    backing: dict[str, object] = {}
+    cyclic_proxy = MappingProxyType(backing)
+    backing["self"] = cyclic_proxy
+    with pytest.raises(CanonicalJsonRefusal) as mapping_refusal:
+        canonical_json_bytes(cyclic_proxy)
+    assert mapping_refusal.value.code is CanonicalJsonRefusalCode.cyclic_value
+
+
+def test_canonical_json_refuses_excessive_depth_and_nodes_with_typed_codes() -> None:
+    too_deep: object = None
+    for _ in range(MAX_CANONICAL_JSON_DEPTH + 1):
+        too_deep = [too_deep]
+    with pytest.raises(CanonicalJsonRefusal) as depth_refusal:
+        canonical_json_bytes(too_deep)
+    assert depth_refusal.value.code is CanonicalJsonRefusalCode.depth_exceeded
+
+    with pytest.raises(CanonicalJsonRefusal) as node_refusal:
+        canonical_json_bytes(range(MAX_CANONICAL_JSON_NODES + 1))
+    assert node_refusal.value.code is CanonicalJsonRefusalCode.node_limit_exceeded
+
+    with pytest.raises(CanonicalJsonRefusal) as byte_refusal:
+        canonical_json_bytes("x" * (MAX_CANONICAL_JSON_STRING_CHARS + 1))
+    assert byte_refusal.value.code is CanonicalJsonRefusalCode.byte_limit_exceeded
 
 
 def test_unicode_and_newline_bytes_are_not_normalized() -> None:
@@ -351,8 +413,12 @@ def test_cursor_and_lowered_limits_are_excluded_from_snapshot_digest() -> None:
 
 def test_hash_domains_must_be_ascii_and_nul_terminated() -> None:
     assert len(domain_separated_sha256(b"contract.v1\0", {"a": 1})) == 64
-    with pytest.raises(ValueError, match="NUL-terminated"):
+    with pytest.raises(ValueError, match="terminating NUL"):
         domain_separated_sha256(b"contract.v1", {"a": 1})
+    with pytest.raises(ValueError, match="non-empty"):
+        domain_separated_sha256(b"\0", {"a": 1})
+    with pytest.raises(ValueError, match="exactly one terminating NUL"):
+        domain_separated_sha256(b"contract\0v1\0", {"a": 1})
     with pytest.raises(ValueError, match="ASCII"):
         domain_separated_sha256("é\0".encode(), {"a": 1})
 
@@ -385,10 +451,33 @@ def test_lowered_entity_and_string_limits_refuse_atomically() -> None:
         validate_snapshot_limits(snapshot, lowered_limits({"max_snapshot_bytes": 10}))
 
 
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"max_tasks": 1},
+        {"max_string_bytes": 2},
+        {"max_snapshot_bytes": 10},
+    ],
+)
+def test_snapshot_data_refuses_payload_that_exceeds_applied_limits(
+    limits: dict[str, int],
+) -> None:
+    payload = _snapshot()
+    with pytest.raises(ValidationError, match="exceeds provider limit"):
+        ProjectSnapshotDataV1(
+            payload=payload,
+            event_cursor=EventCursorV1(
+                event_count=1,
+                event_frontier_sha256=_A_SHA,
+            ),
+            applied_limits=lowered_limits(limits),
+            snapshot_digest=snapshot_digest(payload),
+        )
+
+
 def test_read_error_codes_and_body_are_closed_and_serializable() -> None:
     error = ReadErrorV1(
         code=ReadErrorCode.limit_exceeded,
-        message="task count exceeds provider limit",
         field="tasks",
         actual=11,
         limit=10,
@@ -396,10 +485,47 @@ def test_read_error_codes_and_body_are_closed_and_serializable() -> None:
     assert error.model_dump(mode="json") == {
         "schema_id": "anvil.state.read-error.v1",
         "code": "limit_exceeded",
-        "message": "task count exceeds provider limit",
         "field": "tasks",
         "actual": 11,
         "limit": 10,
+        "message": "A provider read limit was exceeded.",
     }
+    assert ReadErrorV1.model_validate(error.model_dump()) == error
+    assert ReadErrorV1.model_validate_json(error.model_dump_json()) == error
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         ReadErrorV1.model_validate({**error.model_dump(), "path": "C:/secret/state.db"})
+
+
+@pytest.mark.parametrize(
+    "untrusted",
+    [
+        {"message": "C:/secret/state.db"},
+        {"exception": "sqlite failed at C:/secret/state.db"},
+        {"details": "TOKEN=do-not-leak"},
+    ],
+)
+def test_read_error_rejects_untrusted_rendering_and_exception_text(
+    untrusted: dict[str, str],
+) -> None:
+    with pytest.raises(ValidationError):
+        ReadErrorV1.model_validate(
+            {
+                "code": ReadErrorCode.state_unavailable,
+                "field": "state",
+                **untrusted,
+            }
+        )
+
+
+def test_read_error_field_is_closed_and_rendering_contains_no_input_text() -> None:
+    sentinel = "C:/secret/state.db?token=do-not-leak"
+    with pytest.raises(ValidationError):
+        ReadErrorV1(code=ReadErrorCode.state_unavailable, field=sentinel)
+
+    rendered = ReadErrorV1(
+        code=ReadErrorCode.state_unavailable,
+        field="state",
+    ).model_dump_json()
+    assert sentinel not in rendered
+    assert "secret" not in rendered
+    assert "state.db" not in rendered

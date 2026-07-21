@@ -50,6 +50,40 @@ TaskStatusV1: TypeAlias = Literal[
     "rejected",
 ]
 TaskPriorityV1: TypeAlias = Literal["low", "medium", "high", "critical"]
+ReadErrorFieldV1: TypeAlias = Literal[
+    "request",
+    "prd_id",
+    "expected_digest",
+    "sections",
+    "state",
+    "schema",
+    "projection",
+    "prds",
+    "features",
+    "tasks",
+    "dependencies",
+    "acceptance_criteria",
+    "content",
+    "snapshot",
+]
+ReadErrorMessageV1: TypeAlias = Literal[
+    "The read request is invalid.",
+    "The requested identifier is invalid.",
+    "The project hierarchy is invalid.",
+    "A referenced hierarchy target is unavailable.",
+    "The hierarchy contains a duplicate edge.",
+    "The task dependency graph contains a cycle.",
+    "A provider read limit was exceeded.",
+    "Project state is unavailable.",
+    "The project schema is incompatible.",
+    "The project projection is not converged.",
+    "The requested PRD was not found.",
+    "The requested PRD content is unavailable.",
+    "The expected PRD digest is stale.",
+    "The persisted PRD content is not valid UTF-8.",
+    "The persisted PRD source binding is inconsistent.",
+    "The requested PRD section selection is invalid.",
+]
 
 _WIRE_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -75,6 +109,26 @@ class ReadErrorCode(enum.StrEnum):
     invalid_section = "invalid_section"
 
 
+_SAFE_ERROR_MESSAGES: dict[ReadErrorCode, str] = {
+    ReadErrorCode.invalid_request: "The read request is invalid.",
+    ReadErrorCode.invalid_identifier: "The requested identifier is invalid.",
+    ReadErrorCode.invalid_hierarchy: "The project hierarchy is invalid.",
+    ReadErrorCode.missing_target: "A referenced hierarchy target is unavailable.",
+    ReadErrorCode.duplicate_edge: "The hierarchy contains a duplicate edge.",
+    ReadErrorCode.dependency_cycle: "The task dependency graph contains a cycle.",
+    ReadErrorCode.limit_exceeded: "A provider read limit was exceeded.",
+    ReadErrorCode.state_unavailable: "Project state is unavailable.",
+    ReadErrorCode.schema_incompatible: "The project schema is incompatible.",
+    ReadErrorCode.projection_not_converged: "The project projection is not converged.",
+    ReadErrorCode.prd_not_found: "The requested PRD was not found.",
+    ReadErrorCode.content_unavailable: "The requested PRD content is unavailable.",
+    ReadErrorCode.stale_digest: "The expected PRD digest is stale.",
+    ReadErrorCode.invalid_utf8: "The persisted PRD content is not valid UTF-8.",
+    ReadErrorCode.source_drift: "The persisted PRD source binding is inconsistent.",
+    ReadErrorCode.invalid_section: "The requested PRD section selection is invalid.",
+}
+
+
 class ReadErrorV1(BaseModel):
     """Closed machine-readable refusal body; never carries exception text."""
 
@@ -82,10 +136,29 @@ class ReadErrorV1(BaseModel):
 
     schema_id: Literal["anvil.state.read-error.v1"] = "anvil.state.read-error.v1"
     code: ReadErrorCode
-    message: str = Field(min_length=1, max_length=512)
-    field: str | None = Field(default=None, max_length=128)
-    actual: int | None = Field(default=None, ge=0)
-    limit: int | None = Field(default=None, ge=0)
+    message: ReadErrorMessageV1
+    field: ReadErrorFieldV1 | None = None
+    actual: int | None = Field(default=None, ge=0, le=(2**63) - 1)
+    limit: int | None = Field(default=None, ge=0, le=(2**63) - 1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def bind_safe_message(cls, value: Any) -> Any:
+        """Inject or verify the one fixed rendering belonging to the code."""
+        if not isinstance(value, Mapping):
+            return value
+        data = dict(value)
+        raw_code = data.get("code")
+        try:
+            code = raw_code if isinstance(raw_code, ReadErrorCode) else ReadErrorCode(raw_code)
+        except (TypeError, ValueError):
+            return data
+        expected = _SAFE_ERROR_MESSAGES[code]
+        supplied = data.get("message")
+        if supplied is not None and supplied != expected:
+            raise ValueError("error message must match the closed rendering for its code")
+        data["message"] = expected
+        return data
 
 
 class ProviderReadLimitsV1(BaseModel):
@@ -277,6 +350,7 @@ class ProjectSnapshotDataV1(BaseModel):
 
     @model_validator(mode="after")
     def validate_digest(self) -> ProjectSnapshotDataV1:
+        validate_snapshot_limits(self.payload, self.applied_limits)
         if self.snapshot_digest != snapshot_digest(self.payload):
             raise ValueError("snapshot_digest does not match the allowlisted payload")
         return self
