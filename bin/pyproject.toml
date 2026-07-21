@@ -124,11 +124,3 @@ disallow_any_generics = false
 warn_return_any = false
 no_implicit_reexport = false
 ignore_errors = true
-
-[tool.pytest.ini_options]
-testpaths = ["../tests"]
-addopts = "-m 'not live_github'"
-markers = [
-    "live_github: tests that hit the real GitHub API (require ANVIL_TEST_GH_TOKEN env)",
-    "slow: Git-heavy tests with substantial repository setup cost",
-]

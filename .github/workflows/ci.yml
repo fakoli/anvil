@@ -73,14 +73,13 @@ jobs:
         run: uv run --locked ruff check ..
 
       - name: Run test suite
-        working-directory: bin
         env:
           # GitHub Actions sets GITHUB_ACTIONS=true which makes typer/rich
           # set FORCE_TERMINAL=True at import time, injecting ANSI codes into
           # CliRunner output. _TYPER_FORCE_DISABLE_TERMINAL overrides that so
           # --help assertions can match plain flag text (e.g. "--use-llm").
           _TYPER_FORCE_DISABLE_TERMINAL: "1"
-        run: uv run pytest -q
+        run: uv run --project bin pytest
 
       # Coordination benchmark smoke: drives the real anvil CLI against
       # a live SQLite state engine. Uses the venv materialized by `uv sync`
