@@ -22,6 +22,7 @@
   - [`anvil scan`](#scan)
 - PRD authoring
   - [`anvil prd parse`](#prd-parse)
+  - [`anvil prd source-name`](#prd-source-name)
   - [`anvil prd assess`](#prd-assess)
   - [`anvil prd review`](#prd-review)
 - Planning
@@ -280,12 +281,15 @@ assumptions).
 
 - `--file PATH` *(optional)* — path to the PRD markdown file. Defaults to
   `.anvil/prd.md` in the current project directory.
+- `--prd ID` *(optional)* — named PRD identity; reads its portable managed
+  source and scopes the parsed partition.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
 
 - `0` — PRD parsed and `prd.parsed` event recorded. Prints the count of
-  requirements, features, and tasks found.
+  requirements, features, and tasks found plus the stable source identity
+  (`default`, the named ID, or `custom`), never an absolute path.
 - `1` — PRD file not found, unreadable, or contains parse errors (every error
   is printed to stderr with `[section:line] message` formatting).
 
@@ -299,6 +303,24 @@ anvil prd parse --file ./drafts/v2-prd.md
 **See also:** [`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md);
 [`docs/prd-template.md`](prd-template.md) for the required section structure;
 [`anvil prd review`](#prd-review) for the next step.
+
+### `anvil prd source-name` { #prd-source-name }
+
+**Synopsis:** Print the portable relative source name used to author a default
+or named PRD. Join this value with the `.anvil` directory from `anvil status`;
+do not derive an editable path from `prd parse` output.
+
+**Flags:**
+
+- `--prd ID` *(optional)* — named PRD identity; omit for the default.
+- `--json` *(optional)* — return `prd_source` plus `relative_name`.
+
+**Example:**
+
+```bash
+anvil prd source-name
+anvil prd source-name --prd CON
+```
 
 ### `anvil prd assess` { #prd-assess }
 

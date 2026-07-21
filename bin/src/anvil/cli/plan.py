@@ -243,7 +243,7 @@ def plan(
         None,
         "--prd",
         help=(
-            "Named PRD to plan (multi-PRD). Reads .anvil/prds/<id>.md and "
+            "Named PRD to plan (multi-PRD). Reads its portable collection source and "
             "scopes feature/task creation, orphan-prune, dependency "
             "inference, and proposed->drafted promotion to that PRD's "
             "partition; conflict-group inference still spans ALL PRDs. Omit "

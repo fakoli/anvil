@@ -1301,6 +1301,28 @@ class TestPrdSourcePath:
             == state_dir / "prds" / "v0.2.md"
         )
 
+    def test_source_name_reports_portable_relative_name_without_absolute_path(
+        self, tmp_path: Path
+    ) -> None:
+        result = _invoke_cmd(tmp_path, ["prd", "source-name", "--prd", "CON"])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip().startswith("prds/_anvil-prd-")
+        assert result.output.strip().endswith(".md")
+        assert str(tmp_path) not in result.output
+
+    def test_source_name_json_reports_identity_and_relative_name(
+        self, tmp_path: Path
+    ) -> None:
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "source-name", "--prd", "Release", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["data"]["prd_source"] == "Release"
+        assert payload["data"]["relative_name"].startswith("prds/_anvil-prd-")
+        assert str(tmp_path) not in result.output
+
 
 class TestPrdParseNamed:
     def test_named_prd_reads_prds_subdir_and_prd_parsed_carries_prd_id(

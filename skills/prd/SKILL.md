@@ -58,7 +58,12 @@ The selected `<prd_id>` scopes everything below: its on-disk file, its overwrite
 
 Drive this step inline. Check for an existing file before suggesting any edit — the subsequent `anvil prd parse` step (Step 2) rewrites the `Requirement`, `Feature`, and `Task` rows **in the selected PRD's partition** of `state.db` (the first parse of a PRD is a destructive create; a re-parse amends non-destructively — see "Revising a PRD" below).
 
-First resolve the PRD path from the CLI — never hardcode it (the default PRD lives at `.anvil/prd.md`, a named PRD at `.anvil/prds/<prd_id>.md`, both under the workspace, not the repo). `anvil status` prints a `Path:` line with the active `.anvil` directory; the default PRD is `prd.md` inside it, and a named PRD is `prds/<prd_id>.md`. `anvil init` also echoes the exact location (`Next step: author your PRD at <path>`). Read that file with whatever read primitive the runtime exposes (Bash, MCP filesystem tool).
+First resolve the PRD path from the CLI — never hardcode it. `anvil status`
+prints the active `.anvil` directory and `anvil prd source-name [--prd <id>]`
+prints the portable relative source name. Join those two values; this preserves
+uppercase and Windows-reserved IDs without exposing an absolute path during
+parse. `anvil init` also echoes the default PRD location. Read the resolved file
+with whatever read primitive the runtime exposes (Bash, MCP filesystem tool).
 
 **If the file exists**, do not edit or re-parse without confirmation. Read the file, surface a one-line summary (first heading and total line count are usually enough), and ask:
 
@@ -107,7 +112,12 @@ Invoke the parse yourself once the file is written — do not hand the user a co
 anvil prd parse           # default PRD; add --prd <prd_id> for a named release PRD
 ```
 
-This reads the selected PRD's source (the command echoes `PRD source: <path>`; pass `--file PATH` to point elsewhere), validates structure, and writes `Requirement`, `Feature`, and `Task` entities into **that PRD's partition** of `state.db` — other PRDs are untouched. PRD status becomes `draft`. Surface the parser output inline in the same message so the user sees the result without a context switch.
+This reads the selected PRD's source (the command echoes only its stable
+identity: `default`, the named ID, or `custom`; pass `--file PATH` to point
+elsewhere), validates structure, and writes `Requirement`, `Feature`, and `Task`
+entities into **that PRD's partition** of `state.db` — other PRDs are untouched.
+PRD status becomes `draft`. Surface the parser output inline in the same message
+so the user sees the result without a context switch.
 
 **On parse error:** the parser prints a line per problem in the form `Parse error [## Section:0]: <message>`, then exits with `Error: PRD parse failed with N error(s). Fix the issues above and re-run.` Existing `state.db` content is preserved (no silent rollback of previous good state). Read the error, propose the fix inline, apply it after confirmation, and re-run `prd parse` yourself.
 
@@ -118,7 +128,7 @@ Common parse errors:
 - `Parse error [## Requirements:0]: Missing required '## Requirements' section.` (the heading is absent)
 - A duplicate requirement ID (the same `R00N:` twice) aborts the write with a unique-constraint error; renumber so each ID is distinct
 
-**On success:** the command prints a summary line (and the `PRD source:` path). Present the counts to the user and confirm they match expectations:
+**On success:** the command prints a summary line and stable `PRD source:` identity. Present the counts to the user and confirm they match expectations:
 
 ```
 Parsed 6 requirements, 3 features, 8 tasks.
@@ -220,7 +230,7 @@ A PRD is revisable: the FIRST parse of a `prd_id` emits a `prd.parsed` event, an
 
 Here is the safe sequence for a revision:
 
-1. Edit the selected PRD's file with the revised content (resolve its path from the `Path:` line of `anvil status` or the `PRD source:` line `prd parse` echoes — never hardcode; named PRDs are at `prds/<prd_id>.md`). Before re-parsing, confirm the user intends to revise the existing `Requirement`/`Feature`/`Task` rows **in this PRD's partition**. Mirror the Step 1 confirm pattern: show the user a one-line summary (heading + line count) of the current PRD, and prompt `proceed / cancel / save-as-backup` before running `prd parse`. On `save-as-backup`, copy the file to `<name>.md.bak` in the same directory first.
+1. Edit the selected PRD's file with the revised content (join the `Path:` directory from `anvil status` with the portable relative name from `anvil prd source-name [--prd <id>]`; never derive it from parse output). Before re-parsing, confirm the user intends to revise the existing `Requirement`/`Feature`/`Task` rows **in this PRD's partition**. Mirror the Step 1 confirm pattern: show the user a one-line summary (heading + line count) of the current PRD, and prompt `proceed / cancel / save-as-backup` before running `prd parse`. On `save-as-backup`, copy the file to `<name>.md.bak` in the same directory first.
 2. Run `anvil prd parse` again (add `--prd <prd_id>` for a named PRD). A re-parse emits `prd.revised`, which amends the requirements in that PRD's partition — added rows are inserted, removed rows are superseded (lineage retained), unchanged rows are carried forward. It is an amend recorded in the event log, not a merge and not a destructive overwrite.
 3. Re-run `anvil prd review` if the changes are material (added/removed requirements, changed acceptance criteria, altered feature scope).
 4. Re-run `anvil prd review --approve` for significant scope changes. Minor editorial corrections (typo fixes, clarified wording, unchanged structure) do not require re-approval.

@@ -168,7 +168,7 @@ Running `anvil prd parse` against a PRD shaped like this produces:
 ```text
 $ anvil prd parse
 Parsed 2 requirements, 1 features, 1 tasks.
-PRD source: ~/.anvil/workspaces/my-project-183a2542/.anvil/prd.md
+PRD source: default
 ```
 
 The parser writes a `prd.parsed` event with the full payload (summary, goals,

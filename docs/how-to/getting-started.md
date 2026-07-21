@@ -140,7 +140,7 @@ Parse the positional file argument, read as UTF-8, write back uppercased.
 ```bash
 anvil prd parse
 # → Parsed 3 requirements, 1 features, 1 tasks.
-# → PRD source: ~/.anvil/workspaces/my-project-183a2542/.anvil/prd.md
+# → PRD source: default
 
 anvil prd assess            # optional, advisory, and read-only
 

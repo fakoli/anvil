@@ -595,7 +595,8 @@ encoding of the exact ASCII ID. This reversible mapping preserves distinct IDs
 such as `A` and `a` on case-insensitive filesystems and remains within the
 Windows component-length ceiling. Code integrations must call
 `prd_source_path()` rather than construct filenames. Prefer lowercase IDs for
-sources authored by hand. On Windows, an existing uppercase legacy filename
+sources authored by hand; operators can run `anvil prd source-name --prd <id>`
+to obtain the portable relative name. On Windows, an existing uppercase legacy filename
 must be moved to its portable encoded name before it can be read; Anvil fails
 closed rather than aliasing it to a different wire ID.
 

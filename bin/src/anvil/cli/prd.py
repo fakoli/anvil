@@ -18,6 +18,7 @@ from anvil.cli._helpers import (
     canonical_prd_id,
     ingest_prd_source,
     ingest_prd_source_for_id,
+    prd_source_filename,
     resolve_prd_id,
     validate_prd_id,
 )
@@ -301,6 +302,42 @@ def prd_parse(
         f"{len(result.tasks)} tasks."
     )
     typer.echo(f"PRD source: {source_identity}")
+
+
+@prd_app.command("source-name")
+def prd_source_name(
+    prd: str | None = typer.Option(  # noqa: B008
+        None,
+        "--prd",
+        help="Named PRD identity. Omit for the default PRD.",
+    ),
+    json_output: bool = JSON_OPTION,
+) -> None:
+    """Print the portable relative source name for authoring workflows."""
+    command = "prd source-name"
+    try:
+        validated_id = validate_prd_id(prd if prd is not None else "prd")
+    except PrdSourceIngestError as exc:
+        if json_output:
+            fail(command, exc.message, code=exc.code)
+        typer.echo(f"Error: {exc.message}", err=True)
+        raise typer.Exit(code=1) from exc
+    source_identity = canonical_prd_id(validated_id)
+    relative_name = (
+        _PRD_FILENAME
+        if validated_id in _DEFAULT_PRD_IDS
+        else f"prds/{prd_source_filename(validated_id)}"
+    )
+    if json_output:
+        emit_success(
+            command,
+            {
+                "prd_source": source_identity,
+                "relative_name": relative_name,
+            },
+        )
+        return
+    typer.echo(relative_name)
 
 
 @prd_app.command("assess")
