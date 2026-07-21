@@ -1498,7 +1498,9 @@ flag list; full prose treatment may follow in a later pass.
   was rejected by state validation.`; human output uses the same text. Neither
   surface exposes the raw backend reason. Malformed edges, unknown tasks,
   self-loops, and cycles likewise return fixed, bounded diagnostics on both
-  surfaces; raw edge and task values are never reflected in an error.
+  surfaces; raw edge and task values are never reflected in an error. A batch
+  is capped at 10,000 total `--add` plus `--remove` edges; cap+1 is rejected
+  with fixed `bad_request` output before state access.
 
   Ownership-recovery refusals have an additional diagnostic contract. When a
   legacy missing-`prd_id` `task.created` upsert cannot be safely recovered, the

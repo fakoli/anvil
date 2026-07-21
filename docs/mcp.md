@@ -424,7 +424,10 @@ If an individual backend append is rejected, MCP returns the fixed ToolError
 `dependency update was rejected by state validation.`; the CLI returns the same message
 with JSON error code `event_rejected`. Backend validation details are not exposed.
 Malformed pairs, unknown tasks, self-loops, and cycles also return fixed, bounded
-ToolErrors; raw edge and task values are never reflected in those errors.
+ToolErrors; raw edge and task values are never reflected in those errors or in
+server logs. The public schema remains `list[list[string]] | null`; runtime
+shape validation occurs before state access. A request is capped at 10,000
+total `add` plus `remove` pairs, and cap+1 receives a fixed ToolError.
 
 **Inputs**
 

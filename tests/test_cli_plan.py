@@ -35,10 +35,12 @@ from typer.testing import CliRunner
 from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.planning._plan_helpers import (
+    DEPENDENCY_BATCH_LIMIT_MESSAGE,
     DEPENDENCY_CYCLE_MESSAGE,
     DEPENDENCY_EDGE_FORMAT_MESSAGE,
     DEPENDENCY_SELF_LOOP_MESSAGE,
     DEPENDENCY_UNKNOWN_SOURCE_MESSAGE,
+    MAX_DEPENDENCY_EDGES_PER_BATCH,
     BatchDepError,
     BatchDepPlan,
     DepEdge,
@@ -806,6 +808,91 @@ class TestBatchDepsCycleRejected:
         assert raised.value.code == "cycle"
         assert raised.value.message == DEPENDENCY_CYCLE_MESSAGE
 
+    def test_star_batch_at_public_limit_preserves_order(self) -> None:
+        """The largest supported star batch is linear and deterministically ordered."""
+        now = datetime(2026, 7, 21, tzinfo=UTC)
+        target_ids = [
+            f"T{index:05d}" for index in range(MAX_DEPENDENCY_EDGES_PER_BATCH)
+        ]
+        tasks = [
+            Task(
+                id="SOURCE",
+                feature_id="F001",
+                title="source",
+                description="large star source",
+                created_at=now,
+                updated_at=now,
+            ),
+            *[
+                Task(
+                    id=task_id,
+                    feature_id="F001",
+                    title=task_id,
+                    description="large star target",
+                    created_at=now,
+                    updated_at=now,
+                )
+                for task_id in target_ids
+            ],
+        ]
+        edges = [
+            DepEdge(op="add", source="SOURCE", target=target_id)
+            for target_id in target_ids
+        ]
+
+        batch = plan_batch_dep_edits(tasks, edges)
+
+        assert batch.new_dependencies == {"SOURCE": target_ids}
+        assert batch.added == [("SOURCE", target_id) for target_id in target_ids]
+
+    def test_ordered_membership_preserves_duplicate_remove_readd_semantics(self) -> None:
+        """Set-backed lookup retains legacy list ordering and duplicate behavior."""
+        now = datetime(2026, 7, 21, tzinfo=UTC)
+        source = Task(
+            id="SOURCE",
+            feature_id="F001",
+            title="source",
+            description="duplicate dependencies",
+            dependencies=["A", "A", "B"],
+            created_at=now,
+            updated_at=now,
+        )
+        targets = [
+            Task(
+                id=task_id,
+                feature_id="F001",
+                title=task_id,
+                description="target",
+                created_at=now,
+                updated_at=now,
+            )
+            for task_id in ("A", "B")
+        ]
+        edges = [
+            DepEdge(op="remove", source="SOURCE", target="A"),
+            DepEdge(op="add", source="SOURCE", target="A"),
+            DepEdge(op="remove", source="SOURCE", target="A"),
+            DepEdge(op="add", source="SOURCE", target="A"),
+        ]
+
+        batch = plan_batch_dep_edits([source, *targets], edges)
+
+        assert batch.new_dependencies == {"SOURCE": ["B", "A"]}
+        assert batch.removed == [("SOURCE", "A"), ("SOURCE", "A")]
+        assert batch.added == [("SOURCE", "A")]
+
+    def test_shared_planner_rejects_cap_plus_one_before_graph_work(self) -> None:
+        """The shared primitive independently enforces the public batch cap."""
+        edges = [
+            DepEdge(op="add", source="SOURCE", target="TARGET")
+        ] * (MAX_DEPENDENCY_EDGES_PER_BATCH + 1)
+
+        with pytest.raises(BatchDepError) as raised:
+            plan_batch_dep_edits([], edges)
+
+        assert raised.value.code == "bad_request"
+        assert raised.value.message == DEPENDENCY_BATCH_LIMIT_MESSAGE
+
 
 class TestBatchDepsValidation:
     """Edge-spec parsing and empty-batch guards."""
@@ -1034,6 +1121,43 @@ class TestBatchDepsValidation:
             }
         else:
             assert result.output.strip() == f"Error: {expected_message}"
+
+    def test_batch_deps_accepts_exact_public_edge_limit(self, tmp_path: Path) -> None:
+        """Exactly 10,000 repeated edges remain a valid bounded request."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        args = ["deps"]
+        for _ in range(MAX_DEPENDENCY_EDGES_PER_BATCH):
+            args.extend(["--add", "T002->T001"])
+        args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["added"] == [["T002", "T001"]]
+        assert _deps_of(tmp_path, "T002") == ["T001"]
+
+    def test_batch_deps_rejects_over_limit_before_state_access(
+        self, tmp_path: Path
+    ) -> None:
+        """Cap+1 fails with fixed JSON even when no state directory exists."""
+        args = ["deps"]
+        for _ in range(MAX_DEPENDENCY_EDGES_PER_BATCH + 1):
+            args.extend(["--add", "T002->T001"])
+        args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == 1
+        assert json.loads(result.output) == {
+            "ok": False,
+            "command": "deps",
+            "error": {
+                "code": "bad_request",
+                "message": DEPENDENCY_BATCH_LIMIT_MESSAGE,
+            },
+        }
+        assert not (tmp_path / ".anvil").exists()
 
     def test_batch_deps_help_documents_options(self) -> None:
         """`deps --help` surfaces options, canonical syntax, and scope caveat."""

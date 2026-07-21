@@ -24,6 +24,7 @@ same `classify_orphans()` + `emit_prune_events()` and surface
 from __future__ import annotations
 
 import re
+from collections import defaultdict, deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -36,15 +37,18 @@ if TYPE_CHECKING:
 __all__ = [
     "SAFE_DELETE_STATUSES",
     "DEPENDENCY_BAD_OP_MESSAGE",
+    "DEPENDENCY_BATCH_LIMIT_MESSAGE",
     "BatchDepError",
     "BatchDepPlan",
     "DEPENDENCY_CYCLE_MESSAGE",
     "DEPENDENCY_EDGE_FORMAT_MESSAGE",
+    "DEPENDENCY_EDGE_LIST_FORMAT_MESSAGE",
     "DEPENDENCY_PAIR_FORMAT_MESSAGE",
     "DEPENDENCY_SELF_LOOP_MESSAGE",
     "DEPENDENCY_UNKNOWN_SOURCE_MESSAGE",
     "DEPENDENCY_UNKNOWN_TARGET_MESSAGE",
     "DepEdge",
+    "MAX_DEPENDENCY_EDGES_PER_BATCH",
     "OrphanClassification",
     "PruneResult",
     "classify_orphans",
@@ -273,7 +277,14 @@ DEPENDENCY_EDGE_FORMAT_MESSAGE = (
     "'SOURCE:TARGET' is supported only for unscoped IDs."
 )
 DEPENDENCY_PAIR_FORMAT_MESSAGE = (
-    "invalid dependency edge: expected a [source, target] pair."
+    "invalid dependency edge: expected a two-element [source, target] string pair."
+)
+DEPENDENCY_EDGE_LIST_FORMAT_MESSAGE = (
+    "invalid dependency edges: expected a list of [source, target] string pairs."
+)
+MAX_DEPENDENCY_EDGES_PER_BATCH = 10_000
+DEPENDENCY_BATCH_LIMIT_MESSAGE = (
+    "dependency update exceeds the maximum batch size of 10000 edges."
 )
 DEPENDENCY_BAD_OP_MESSAGE = (
     "invalid dependency operation: expected 'add' or 'remove'."
@@ -454,9 +465,24 @@ def plan_batch_dep_edits(
             runs to completion BEFORE the caller emits any event, a raised error
             guarantees no partial application.
     """
+    if len(edges) > MAX_DEPENDENCY_EDGES_PER_BATCH:
+        raise BatchDepError(DEPENDENCY_BATCH_LIMIT_MESSAGE, code="bad_request")
+
     known_ids = {t.id for t in tasks}
-    # Work on a mutable copy of every task's dependency list, preserving order.
-    dep_map: dict[str, list[str]] = {t.id: list(t.dependencies) for t in tasks}
+    # Each task keeps an append-only ordered entry list plus per-target queues
+    # of live positions. Membership, add, and remove are O(1), while the final
+    # compaction preserves exact list semantics (including duplicate legacy
+    # entries and remove-then-readd moving an edge to the end).
+    removed_sentinel = object()
+    dep_entries: dict[str, list[str | object]] = {}
+    dep_positions: dict[str, dict[str, deque[int]]] = {}
+    for task in tasks:
+        entries: list[str | object] = list(task.dependencies)
+        positions: dict[str, deque[int]] = defaultdict(deque)
+        for index, dependency in enumerate(task.dependencies):
+            positions[dependency].append(index)
+        dep_entries[task.id] = entries
+        dep_positions[task.id] = positions
     original: dict[str, list[str]] = {t.id: list(t.dependencies) for t in tasks}
 
     added: list[tuple[str, str]] = []
@@ -484,16 +510,27 @@ def plan_batch_dep_edits(
                 code="self_loop",
             )
 
-        deps = dep_map[edge.source]
+        entries = dep_entries[edge.source]
+        positions = dep_positions[edge.source]
         if edge.op == "add":
-            if edge.target not in deps:
-                deps.append(edge.target)
+            if not positions.get(edge.target):
+                positions[edge.target].append(len(entries))
+                entries.append(edge.target)
                 added.append((edge.source, edge.target))
         else:  # remove
-            if edge.target in deps:
-                deps.remove(edge.target)
+            live_positions = positions.get(edge.target)
+            if live_positions:
+                entries[live_positions.popleft()] = removed_sentinel
                 removed.append((edge.source, edge.target))
 
+    dep_map = {
+        task_id: [
+            dependency
+            for dependency in entries
+            if dependency is not removed_sentinel and isinstance(dependency, str)
+        ]
+        for task_id, entries in dep_entries.items()
+    }
     cycle = _has_cycle(dep_map)
     if cycle is not None:
         raise BatchDepError(

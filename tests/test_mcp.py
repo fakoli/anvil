@@ -21,16 +21,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastmcp import Client
+from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 
 from anvil.mcp_server import mcp
+from anvil.planning._plan_helpers import (
+    DEPENDENCY_BATCH_LIMIT_MESSAGE,
+    DEPENDENCY_PAIR_FORMAT_MESSAGE,
+    MAX_DEPENDENCY_EDGES_PER_BATCH,
+)
 from anvil.state.backend import EventRejected
 
 # ---------------------------------------------------------------------------
@@ -2512,6 +2521,68 @@ def _deps_of(state_dir: Path, task_id: str) -> list[str]:
 
 
 class TestEditDependencies:
+    def test_public_schema_remains_list_of_string_pairs(self) -> None:
+        """Runtime-unconstrained validation does not weaken tool discovery."""
+        tool = _run(mcp.get_tool("edit_dependencies"))
+        expected = {
+            "anyOf": [
+                {
+                    "items": {
+                        "items": {"type": "string"},
+                        "type": "array",
+                    },
+                    "type": "array",
+                },
+                {"type": "null"},
+            ],
+            "default": None,
+        }
+        assert tool.parameters["properties"]["add"] == expected
+        assert tool.parameters["properties"]["remove"] == expected
+
+    @pytest.mark.parametrize(
+        ("add", "expected_message"),
+        [
+            ({"source": "T002", "target": "T001"},
+             "invalid dependency edges: expected a list of "
+             "[source, target] string pairs."),
+            (["T002->T001"], DEPENDENCY_PAIR_FORMAT_MESSAGE),
+            ([["T002"]], DEPENDENCY_PAIR_FORMAT_MESSAGE),
+            ([[1, "T001"]], DEPENDENCY_PAIR_FORMAT_MESSAGE),
+        ],
+        ids=["outer-list", "pair-list", "pair-length", "string-elements"],
+    )
+    def test_manual_shape_validation_precedes_state_access(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        add: Any,
+        expected_message: str,
+    ) -> None:
+        """Every advertised container constraint is checked before state access."""
+        import anvil.mcp_server as mcp_server
+
+        state_accesses = 0
+
+        def tracked_resolver() -> Path:
+            nonlocal state_accesses
+            state_accesses += 1
+            raise AssertionError("state must not be resolved for invalid input")
+
+        monkeypatch.setattr(mcp_server, "_resolve_state_dir", tracked_resolver)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "edit_dependencies",
+                    {"actor": "agent-x", "add": add},
+                )
+
+        with pytest.raises(ToolError) as raised:
+            _run(run())
+
+        assert str(raised.value) == expected_message
+        assert state_accesses == 0
+
     def test_batch_add_applies_all_edges(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
@@ -2580,7 +2651,7 @@ class TestEditDependencies:
         [
             (
                 "malformed_pair",
-                "invalid dependency edge: expected a [source, target] pair.",
+                DEPENDENCY_PAIR_FORMAT_MESSAGE,
             ),
             (
                 "unknown",
@@ -2656,6 +2727,155 @@ class TestEditDependencies:
         assert {
             task_id: _deps_of(state_dir, task_id) for task_id in tracked_ids
         } == deps_before
+
+    @pytest.mark.parametrize("value_size", [16, 100_000], ids=["short", "100kb"])
+    def test_non_string_pair_direct_error_and_server_logs_are_redacted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        value_size: int,
+    ) -> None:
+        """In-process transport reaches bounded manual validation, not Pydantic."""
+        import anvil.mcp_server as mcp_server
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        monkeypatch.chdir(tmp_path)
+        marker = "SECRET_NON_STRING_DIRECT"
+        hostile = {"secret": marker + ("x" * value_size)}
+        events_path = state_dir / "events.jsonl"
+        events_before = events_path.read_bytes()
+        state_accesses = 0
+        original_resolver = mcp_server._resolve_state_dir
+
+        def tracked_resolver() -> Path:
+            nonlocal state_accesses
+            state_accesses += 1
+            return original_resolver()
+
+        monkeypatch.setattr(mcp_server, "_resolve_state_dir", tracked_resolver)
+        caplog.clear()
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "edit_dependencies",
+                    {"actor": "agent-x", "add": [[hostile, "T001"]]},
+                )
+
+        with caplog.at_level(logging.DEBUG), pytest.raises(ToolError) as raised:
+            _run(run())
+
+        error = str(raised.value)
+        logs = "\n".join(record.getMessage() for record in caplog.records)
+        assert error == DEPENDENCY_PAIR_FORMAT_MESSAGE
+        assert marker not in error
+        assert marker not in logs
+        assert len(error.encode("utf-8")) <= 4096
+        assert len(logs.encode("utf-8")) <= 4096
+        assert state_accesses == 0
+        assert events_path.read_bytes() == events_before
+        assert _deps_of(state_dir, "T001") == []
+
+    @pytest.mark.parametrize("value_size", [16, 100_000], ids=["short", "100kb"])
+    def test_non_string_pair_stdio_error_and_server_logs_are_redacted(
+        self,
+        tmp_path: Path,
+        value_size: int,
+    ) -> None:
+        """Real stdio transport keeps ToolError and subprocess stderr bounded."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        marker = "SECRET_NON_STRING_STDIO"
+        hostile = {"secret": marker + ("x" * value_size)}
+        events_path = state_dir / "events.jsonl"
+        events_before = events_path.read_bytes()
+        log_path = tmp_path / "mcp-stderr.log"
+        repo_bin = Path(__file__).resolve().parents[1] / "bin"
+        transport = StdioTransport(
+            command=sys.executable,
+            args=["-m", "anvil.mcp_server"],
+            env={
+                **os.environ,
+                "ANVIL_ROOT": str(tmp_path),
+                "ANVIL_MCP_PLANNING": "1",
+            },
+            cwd=str(repo_bin),
+            keep_alive=False,
+            log_file=log_path,
+        )
+
+        async def run() -> None:
+            async with Client(transport) as c:
+                await c.call_tool(
+                    "edit_dependencies",
+                    {"actor": "agent-x", "add": [[hostile, "T001"]]},
+                )
+
+        with pytest.raises(ToolError) as raised:
+            _run(run())
+
+        error = str(raised.value)
+        logs = log_path.read_text(encoding="utf-8")
+        assert DEPENDENCY_PAIR_FORMAT_MESSAGE in error
+        assert marker not in error
+        assert marker not in logs
+        assert len(error.encode("utf-8")) <= 4096
+        assert len(logs.encode("utf-8")) <= 4096
+        assert events_path.read_bytes() == events_before
+        assert _deps_of(state_dir, "T001") == []
+
+    def test_exact_edge_limit_accepted_and_cap_plus_one_rejected_before_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MCP accepts 10,000 edges and rejects 10,001 before reopening state."""
+        import anvil.mcp_server as mcp_server
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_task(state_dir, task_id="T002", status="ready")
+        monkeypatch.chdir(tmp_path)
+        at_limit = [
+            ["T002", "T001"] for _ in range(MAX_DEPENDENCY_EDGES_PER_BATCH)
+        ]
+
+        async def accepted() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool(
+                    "edit_dependencies",
+                    {"actor": "agent-x", "add": at_limit},
+                ))
+
+        response = _run(accepted())
+        assert response["added"] == [["T002", "T001"]]
+        assert _deps_of(state_dir, "T002") == ["T001"]
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        state_accesses = 0
+        original_resolver = mcp_server._resolve_state_dir
+
+        def tracked_resolver() -> Path:
+            nonlocal state_accesses
+            state_accesses += 1
+            return original_resolver()
+
+        monkeypatch.setattr(mcp_server, "_resolve_state_dir", tracked_resolver)
+
+        async def rejected() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "edit_dependencies",
+                    {"actor": "agent-x", "add": [*at_limit, ["T002", "T001"]]},
+                )
+
+        with pytest.raises(ToolError, match=DEPENDENCY_BATCH_LIMIT_MESSAGE):
+            _run(rejected())
+
+        assert state_accesses == 0
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
 
     def test_backend_rejection_is_stable_tool_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

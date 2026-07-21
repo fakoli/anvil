@@ -16,11 +16,11 @@ import json
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 from anvil.state.rollup import BundleRollupEntry
 
@@ -64,6 +64,23 @@ mcp: FastMCP = FastMCP("anvil")
 # shrinks. No tool is removed; all 36 remain reachable.
 
 PLANNING_TAG = "planning"
+
+# FastMCP/Pydantic must not render raw hostile values before this tool's own
+# bounded validation runs. ``Any`` makes runtime input unconstrained, while
+# WithJsonSchema preserves the public list[list[string]] | null contract.
+_DEPENDENCY_EDGES_INPUT_SCHEMA: dict[str, Any] = {
+    "anyOf": [
+        {
+            "items": {"items": {"type": "string"}, "type": "array"},
+            "type": "array",
+        },
+        {"type": "null"},
+    ]
+}
+DependencyEdgesInput = Annotated[
+    Any,
+    WithJsonSchema(_DEPENDENCY_EDGES_INPUT_SCHEMA),
+]
 
 # Env flag that opts a live server back into the full 36-tool surface.
 _PLANNING_ENV = "ANVIL_MCP_PLANNING"
@@ -1801,8 +1818,8 @@ def get_dependency_graph(
 @mcp.tool(tags={PLANNING_TAG})
 def edit_dependencies(
     actor: str,
-    add: list[list[str]] | None = None,
-    remove: list[list[str]] | None = None,
+    add: DependencyEdgesInput = None,
+    remove: DependencyEdgesInput = None,
 ) -> EditDependenciesResponse:
     """Apply dependency edits after whole-batch validation.
 
@@ -1811,12 +1828,16 @@ def edit_dependencies(
     self-dependency, or cycle rejects the ENTIRE batch (ToolError) before any
     mutation. Changed tasks are then emitted as separate backend appends, so a
     later append failure can leave earlier changes committed. Task status is
-    preserved.
+    preserved. Inputs are manually shape-checked before state access and a
+    request may contain at most 10,000 edges.
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
+        DEPENDENCY_BATCH_LIMIT_MESSAGE,
+        DEPENDENCY_EDGE_LIST_FORMAT_MESSAGE,
         DEPENDENCY_EVENT_REJECTED_MESSAGE,
         DEPENDENCY_PAIR_FORMAT_MESSAGE,
+        MAX_DEPENDENCY_EDGES_PER_BATCH,
         BatchDepError,
         DepEdge,
         emit_batch_dep_events,
@@ -1824,22 +1845,36 @@ def edit_dependencies(
     )
     from anvil.state.backend import EventRejected
 
-    add = add or []
-    remove = remove or []
-    if not add and not remove:
+    def _outer_list(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ToolError(DEPENDENCY_EDGE_LIST_FORMAT_MESSAGE)
+        return value
+
+    add_pairs = _outer_list(add)
+    remove_pairs = _outer_list(remove)
+    if not add_pairs and not remove_pairs:
         raise ToolError(
             "no edges supplied; pass at least one add or remove pair."
         )
+    if len(add_pairs) + len(remove_pairs) > MAX_DEPENDENCY_EDGES_PER_BATCH:
+        raise ToolError(DEPENDENCY_BATCH_LIMIT_MESSAGE)
 
-    def _to_edges(pairs: list[list[str]], op: str) -> list[DepEdge]:
+    def _to_edges(pairs: list[Any], op: str) -> list[DepEdge]:
         out: list[DepEdge] = []
         for pair in pairs:
-            if len(pair) != 2:
+            if (
+                not isinstance(pair, list)
+                or len(pair) != 2
+                or not isinstance(pair[0], str)
+                or not isinstance(pair[1], str)
+            ):
                 raise ToolError(DEPENDENCY_PAIR_FORMAT_MESSAGE)
             out.append(DepEdge(op=op, source=pair[0], target=pair[1]))
         return out
 
-    edges = _to_edges(add, "add") + _to_edges(remove, "remove")
+    edges = _to_edges(add_pairs, "add") + _to_edges(remove_pairs, "remove")
 
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)

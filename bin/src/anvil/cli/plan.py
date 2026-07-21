@@ -2183,20 +2183,20 @@ def deps(
     rejected batch yields ``{"ok": false, ... "error": {"code": "cycle" |
     "unknown_task" | "self_loop" | "bad_request" | "event_rejected", ...}}``
     and exit 1. ``event_rejected`` uses fixed prose rather than exposing
-    backend validation details.
+    backend validation details. A request may contain at most 10,000 edges;
+    larger batches fail before state access with ``bad_request``.
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
+        DEPENDENCY_BATCH_LIMIT_MESSAGE,
         DEPENDENCY_EVENT_REJECTED_CODE,
         DEPENDENCY_EVENT_REJECTED_MESSAGE,
+        MAX_DEPENDENCY_EDGES_PER_BATCH,
         BatchDepError,
         emit_batch_dep_events,
         parse_dep_edge,
         plan_batch_dep_edits,
     )
-
-    state_dir = _resolve_state_dir(cwd)
-    _require_state_dir(state_dir, command="deps", json_output=json_output)
 
     add = add or []
     remove = remove or []
@@ -2205,6 +2205,11 @@ def deps(
         if json_output:
             fail("deps", msg, code="bad_request")
         typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=2)
+    if len(add) + len(remove) > MAX_DEPENDENCY_EDGES_PER_BATCH:
+        if json_output:
+            fail("deps", DEPENDENCY_BATCH_LIMIT_MESSAGE, code="bad_request")
+        typer.echo(f"Error: {DEPENDENCY_BATCH_LIMIT_MESSAGE}", err=True)
         raise typer.Exit(code=2)
 
     # Parse the edge specs first so a malformed spec fails before opening state.
@@ -2217,6 +2222,9 @@ def deps(
             fail("deps", exc.message, code=exc.code)
         typer.echo(f"Error: {exc.message}", err=True)
         raise typer.Exit(code=2) from exc
+
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command="deps", json_output=json_output)
 
     backend = _open_backend(state_dir)
     try:
