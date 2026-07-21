@@ -7,6 +7,7 @@ from collections import UserDict
 from types import MappingProxyType
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 import anvil.read_contracts as read_contracts_module
@@ -163,6 +164,20 @@ def test_models_forbid_unknown_wire_fields_at_every_level() -> None:
     data["tasks"][0]["raw_command"] = "printenv SECRET"
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         _wire_validate(data)
+
+
+@pytest.mark.parametrize("operation_version", [True, 1.0, "1", 2])
+def test_operation_version_requires_the_exact_integer_literal(
+    operation_version: object,
+) -> None:
+    data = _snapshot().model_dump(mode="json")
+    data["operation_version"] = operation_version
+    with pytest.raises(ValidationError, match="must be the integer 1"):
+        ProjectSnapshotPayloadV1.model_validate(data)
+    with pytest.raises(ValidationError, match="must be the integer 1"):
+        ProjectSnapshotPayloadV1.model_validate_json(
+            json.dumps(data, separators=(",", ":"))
+        )
 
 
 @pytest.mark.parametrize(
@@ -585,6 +600,53 @@ def test_snapshot_digest_has_a_domain_separated_full_sha256_vector() -> None:
     assert snapshot_digest(snapshot.model_dump(mode="json")) == snapshot_digest(snapshot)
 
 
+def test_snapshot_digest_revalidates_typed_model_copy_instances() -> None:
+    snapshot = _snapshot()
+    orphan = snapshot.tasks[0].model_copy(
+        update={
+            "feature_ref": FeatureScopedRefV1(
+                prd_id="default",
+                feature_id="F999",
+            )
+        }
+    )
+    invalid = snapshot.model_copy(
+        update={"tasks": (orphan, snapshot.tasks[1])},
+    )
+    with pytest.raises(ValidationError, match="feature target is missing"):
+        snapshot_digest(invalid)
+    with pytest.raises(ValidationError, match="feature target is missing"):
+        snapshot_digest(invalid.model_dump(mode="json"))
+
+
+def test_snapshot_digest_refuses_typed_hostile_arrays_without_consuming() -> None:
+    phases: list[str] = []
+
+    class HostileList(list[object]):
+        def __len__(self) -> int:
+            phases.append("length")
+            raise AssertionError("hostile typed length must not run")
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("iterator")
+            while True:
+                yield object()
+
+    invalid = _snapshot().model_copy(update={"tasks": HostileList()})
+    with pytest.raises(ValueError, match="typed snapshot tasks must remain a tuple"):
+        snapshot_digest(invalid)
+    assert phases == []
+
+
+def test_snapshot_digest_retains_ordinary_mapping_and_tuple_inputs() -> None:
+    snapshot = _snapshot()
+    document = snapshot.model_dump(mode="json")
+    for field in ("prds", "features", "tasks"):
+        document[field] = tuple(document[field])
+    wrapped = UserDict(document)
+    assert snapshot_digest(wrapped) == snapshot_digest(snapshot)
+
+
 def test_cursor_and_lowered_limits_are_excluded_from_snapshot_digest() -> None:
     payload = _snapshot()
     digest = snapshot_digest(payload)
@@ -705,6 +767,23 @@ def test_decoded_json_payload_and_response_round_trip_under_strict_models() -> N
         ProjectSnapshotPayloadV1.model_validate(invalid_scalar)
 
 
+def test_decoded_json_leaf_dtos_round_trip_without_scalar_coercion() -> None:
+    task = _task(
+        "default",
+        dependencies=(TaskScopedRefV1(prd_id="default", task_id="T002"),),
+        acceptance=("criterion",),
+    )
+    task_document = task.model_dump(mode="json")
+    assert isinstance(task_document["dependency_refs"], list)
+    assert isinstance(task_document["acceptance_criteria"], list)
+    assert TaskRecordV1.model_validate(task_document) == task
+    assert TaskRecordV1.model_validate_json(task.model_dump_json()) == task
+
+    task_document["verification_counts"]["commands"] = "2"
+    with pytest.raises(ValidationError, match="valid integer"):
+        TaskRecordV1.model_validate(task_document)
+
+
 def test_impossible_response_ceiling_precedes_payload_and_digest_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -772,7 +851,112 @@ def test_impossible_response_ceiling_precedes_payload_and_digest_work(
     assert phases == ["payload"]
 
 
+@pytest.mark.parametrize(
+    ("ceiling", "message"),
+    [
+        ("593", "response byte ceiling must be an integer"),
+        (False, "response byte ceiling must be an integer"),
+        (None, "response byte ceiling must be an integer"),
+        (593.0, "response byte ceiling must be an integer"),
+        (-1, "response byte ceiling is outside provider bounds"),
+        (0, "response byte ceiling is outside provider bounds"),
+        (
+            PROVIDER_LIMITS_V1.max_response_bytes + 1,
+            "response byte ceiling is outside provider bounds",
+        ),
+        (2**80, "response byte ceiling is outside provider bounds"),
+    ],
+)
+def test_malformed_response_ceiling_refuses_before_hostile_payload(
+    ceiling: object,
+    message: str,
+) -> None:
+    phases: list[str] = []
+
+    class ExplodingPayload(UserDict[str, object]):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("payload")
+            raise AssertionError("payload validation must not begin")
+
+        def __getitem__(self, key: str) -> object:
+            phases.append("payload")
+            raise AssertionError("payload validation must not begin")
+
+    raw_limits = PROVIDER_LIMITS_V1.model_dump(mode="json")
+    raw_limits["max_response_bytes"] = ceiling
+    with pytest.raises(ValidationError, match=message):
+        ProjectSnapshotDataV1.model_validate(
+            {
+                "payload": ExplodingPayload(),
+                "event_cursor": {
+                    "event_count": 0,
+                    "event_frontier_sha256": _A_SHA,
+                },
+                "applied_limits": raw_limits,
+                "snapshot_digest": _A_SHA,
+            }
+        )
+    assert phases == []
+
+
+@pytest.mark.parametrize("raw_limits", [None, False, "limits", []])
+def test_malformed_applied_limits_refuse_before_hostile_payload(
+    raw_limits: object,
+) -> None:
+    phases: list[str] = []
+
+    class ExplodingPayload(UserDict[str, object]):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("payload")
+            raise AssertionError("payload validation must not begin")
+
+        def __getitem__(self, key: str) -> object:
+            phases.append("payload")
+            raise AssertionError("payload validation must not begin")
+
+    with pytest.raises(ValidationError, match="applied_limits must be a mapping"):
+        ProjectSnapshotDataV1.model_validate(
+            {
+                "payload": ExplodingPayload(),
+                "event_cursor": {
+                    "event_count": 0,
+                    "event_frontier_sha256": _A_SHA,
+                },
+                "applied_limits": raw_limits,
+                "snapshot_digest": _A_SHA,
+            }
+        )
+    assert phases == []
+
+
+def test_integer_subclass_response_ceiling_refuses_without_comparison() -> None:
+    phases: list[str] = []
+
+    class HostileInteger(int):
+        def __lt__(self, other: object) -> bool:
+            phases.append("compare")
+            raise AssertionError("integer subclass comparison must not run")
+
+        def __le__(self, other: object) -> bool:
+            phases.append("compare")
+            raise AssertionError("integer subclass comparison must not run")
+
+    raw_limits = PROVIDER_LIMITS_V1.model_dump(mode="json")
+    raw_limits["max_response_bytes"] = HostileInteger(593)
+    with pytest.raises(ValidationError, match="ceiling must be an integer"):
+        ProjectSnapshotDataV1.model_validate(
+            {
+                "payload": {},
+                "event_cursor": {},
+                "applied_limits": raw_limits,
+                "snapshot_digest": _A_SHA,
+            }
+        )
+    assert phases == []
+
+
 def test_minimum_response_bound_is_a_real_exact_public_response() -> None:
+    assert MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES == 593
     payload = ProjectSnapshotPayloadV1(
         project=ProjectRecordV1(project_id="x", name="x"),
         prds=(),
@@ -877,6 +1061,55 @@ def test_public_count_gates_precede_hierarchy_graph_work() -> None:
     with pytest.raises(ValueError, match="PRD count exceeds") as raw_entities:
         snapshot_digest(raw)
     assert "node_limit_exceeded" not in str(raw_entities.value)
+
+
+def test_raw_preflight_refuses_list_subclasses_without_consuming_them() -> None:
+    phases: list[str] = []
+
+    class FalseLengthList(list[object]):
+        def __len__(self) -> int:
+            phases.append("false-length")
+            return 0
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("false-iterator")
+            raise AssertionError("subclass iterator must not run")
+
+    class InfiniteList(list[object]):
+        def __len__(self) -> int:
+            phases.append("infinite-length")
+            return 0
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            phases.append("infinite-iterator")
+            while True:
+                yield object()
+
+    raw = _snapshot().model_dump(mode="json")
+    raw["prds"] = FalseLengthList(
+        [raw["prds"][0]] * (PROVIDER_LIMITS_V1.max_prds + 1)
+    )
+    with pytest.raises(ValidationError, match="prds must use a plain list or tuple"):
+        ProjectSnapshotPayloadV1.model_validate(raw)
+    assert phases == []
+
+    raw = _snapshot().model_dump(mode="json")
+    raw["tasks"] = InfiniteList()
+    with pytest.raises(ValidationError, match="tasks must use a plain list or tuple"):
+        ProjectSnapshotPayloadV1.model_validate(raw)
+    assert phases == []
+
+    raw = _snapshot().model_dump(mode="json")
+    raw["tasks"][0]["dependency_refs"] = FalseLengthList(
+        [raw["tasks"][0]["ref"]]
+        * (PROVIDER_LIMITS_V1.max_dependencies_per_task + 1)
+    )
+    with pytest.raises(
+        ValidationError,
+        match="task dependency_refs must use a plain list or tuple",
+    ):
+        ProjectSnapshotPayloadV1.model_validate(raw)
+    assert phases == []
 
 
 def test_aggregate_lower_bound_precedes_dump_sets_and_cycle_graph(
@@ -1022,9 +1255,94 @@ def test_read_error_codes_and_body_are_closed_and_serializable() -> None:
         "message": "A provider read limit was exceeded.",
     }
     assert ReadErrorV1.model_validate(error.model_dump()) == error
+    assert ReadErrorV1.model_validate(error.model_dump(mode="json")) == error
     assert ReadErrorV1.model_validate_json(error.model_dump_json()) == error
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         ReadErrorV1.model_validate({**error.model_dump(), "path": "C:/secret/state.db"})
+
+
+@pytest.mark.parametrize(
+    ("model", "document", "expected"),
+    [
+        (PrdScopedRefV1, {"prd_id": "release-1"}, True),
+        (PrdScopedRefV1, {"prd_id": "../escape"}, False),
+        (
+            FeatureScopedRefV1,
+            {"prd_id": "default", "feature_id": "F001.2"},
+            True,
+        ),
+        (
+            FeatureScopedRefV1,
+            {"prd_id": "default", "feature_id": "T001"},
+            False,
+        ),
+        (
+            TaskScopedRefV1,
+            {"prd_id": "default", "task_id": "T001.2"},
+            True,
+        ),
+        (
+            TaskScopedRefV1,
+            {"prd_id": "default", "task_id": "T1"},
+            False,
+        ),
+    ],
+)
+def test_scoped_id_json_schema_matches_runtime(
+    model: type[PrdScopedRefV1 | FeatureScopedRefV1 | TaskScopedRefV1],
+    document: dict[str, object],
+    expected: bool,
+) -> None:
+    schema_accepts = Draft202012Validator(model.model_json_schema()).is_valid(document)
+    try:
+        model.model_validate(document)
+    except ValidationError:
+        runtime_accepts = False
+    else:
+        runtime_accepts = True
+    assert schema_accepts is expected
+    assert runtime_accepts is expected
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ({"code": "state_unavailable", "field": "state"}, True),
+        (
+            {
+                "code": "state_unavailable",
+                "field": "state",
+                "message": "Project state is unavailable.",
+            },
+            True,
+        ),
+        (
+            {
+                "code": "state_unavailable",
+                "field": "state",
+                "message": "A provider read limit was exceeded.",
+            },
+            False,
+        ),
+        ({"code": "state_unavailable", "field": "state", "message": None}, False),
+        ({"code": "unknown", "field": "state"}, False),
+    ],
+)
+def test_read_error_json_schema_matches_runtime(
+    document: dict[str, object],
+    expected: bool,
+) -> None:
+    schema_accepts = Draft202012Validator(
+        ReadErrorV1.model_json_schema()
+    ).is_valid(document)
+    try:
+        ReadErrorV1.model_validate(document)
+    except ValidationError:
+        runtime_accepts = False
+    else:
+        runtime_accepts = True
+    assert schema_accepts is expected
+    assert runtime_accepts is expected
 
 
 @pytest.mark.parametrize(
