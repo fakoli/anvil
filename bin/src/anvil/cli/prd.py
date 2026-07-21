@@ -20,6 +20,7 @@ from anvil.cli._helpers import (
     ingest_prd_source_for_id,
     prd_source_filename,
     resolve_prd_id,
+    selected_prd_source_path,
     validate_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
@@ -312,6 +313,12 @@ def prd_source_name(
         help="Named PRD identity. Omit for the default PRD.",
     ),
     json_output: bool = JSON_OPTION,
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        help="Project directory. Defaults to the current working directory.",
+        hidden=True,
+    ),
 ) -> None:
     """Print the portable relative source name for authoring workflows."""
     command = "prd source-name"
@@ -323,11 +330,20 @@ def prd_source_name(
         typer.echo(f"Error: {exc.message}", err=True)
         raise typer.Exit(code=1) from exc
     source_identity = canonical_prd_id(validated_id)
-    relative_name = (
-        _PRD_FILENAME
-        if validated_id in _DEFAULT_PRD_IDS
-        else f"prds/{prd_source_filename(validated_id)}"
-    )
+    state_dir = _resolve_state_dir(cwd)
+    try:
+        selected_path = selected_prd_source_path(state_dir, validated_id)
+        relative_name = selected_path.relative_to(state_dir).as_posix()
+    except PrdSourceIngestError as exc:
+        if exc.code == "legacy_source_migration_required":
+            destination = f"prds/{prd_source_filename(validated_id)}"
+            message = f"{exc.message}; move it to {destination}"
+        else:
+            message = exc.message
+        if json_output:
+            fail(command, message, code=exc.code)
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=1) from exc
     if json_output:
         emit_success(
             command,

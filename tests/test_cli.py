@@ -1323,6 +1323,33 @@ class TestPrdSourcePath:
         assert payload["data"]["relative_name"].startswith("prds/_anvil-prd-")
         assert str(tmp_path) not in result.output
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy-source compatibility")
+    def test_source_name_returns_effective_legacy_name_on_posix(
+        self, tmp_path: Path
+    ) -> None:
+        legacy_source = tmp_path / ".anvil" / "prds" / "Release.md"
+        legacy_source.parent.mkdir(parents=True)
+        legacy_source.write_text("# Legacy\n", encoding="utf-8")
+
+        result = _invoke_cmd(tmp_path, ["prd", "source-name", "--prd", "Release"])
+
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == "prds/Release.md"
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows migration behavior")
+    def test_source_name_reports_legacy_migration_destination_on_windows(
+        self, tmp_path: Path
+    ) -> None:
+        legacy_source = tmp_path / ".anvil" / "prds" / "Release.md"
+        legacy_source.parent.mkdir(parents=True)
+        legacy_source.write_text("# Legacy\n", encoding="utf-8")
+
+        result = _invoke_cmd(tmp_path, ["prd", "source-name", "--prd", "Release"])
+
+        assert result.exit_code == 1
+        assert "migration" in result.output.lower()
+        assert "prds/_anvil-prd-" in result.output
+
 
 class TestPrdParseNamed:
     def test_named_prd_reads_prds_subdir_and_prd_parsed_carries_prd_id(

@@ -1006,13 +1006,8 @@ def ingest_prd_source(
     )
 
 
-def ingest_prd_source_for_id(
-    state_dir: Path,
-    prd_id: str,
-    *,
-    max_bytes: int = MAX_PRD_SOURCE_BYTES_V1,
-) -> IngestedPrdSource:
-    """Resolve and atomically ingest one contained default or named source."""
+def selected_prd_source_path(state_dir: Path, prd_id: str) -> Path:
+    """Return the managed source selected by portable/legacy policy."""
     validated_id = validate_prd_id(prd_id)
     source_path = prd_source_path(state_dir, validated_id)
     required_parent = (
@@ -1020,8 +1015,6 @@ def ingest_prd_source_for_id(
         if validated_id in _DEFAULT_PRD_IDS
         else state_dir / _PRDS_DIR_NAME
     )
-    portable_path = source_path
-    legacy_path: Path | None = None
     if validated_id not in _DEFAULT_PRD_IDS:
         legacy_path = required_parent / f"{validated_id}.md"
         if legacy_path != source_path:
@@ -1082,6 +1075,29 @@ def ingest_prd_source_for_id(
                 "source_case_alias",
                 "PRD source spelling aliases another wire identity",
             )
+    return source_path
+
+
+def ingest_prd_source_for_id(
+    state_dir: Path,
+    prd_id: str,
+    *,
+    max_bytes: int = MAX_PRD_SOURCE_BYTES_V1,
+) -> IngestedPrdSource:
+    """Resolve and atomically ingest one contained default or named source."""
+    validated_id = validate_prd_id(prd_id)
+    source_path = selected_prd_source_path(state_dir, validated_id)
+    required_parent = (
+        state_dir
+        if validated_id in _DEFAULT_PRD_IDS
+        else state_dir / _PRDS_DIR_NAME
+    )
+    portable_path = prd_source_path(state_dir, validated_id)
+    legacy_path = (
+        None
+        if validated_id in _DEFAULT_PRD_IDS
+        else required_parent / f"{validated_id}.md"
+    )
     ingested = ingest_prd_source(
         source_path,
         max_bytes=max_bytes,
