@@ -45,6 +45,8 @@ from anvil.planning._plan_helpers import (
     DEPENDENCY_PAIR_FORMAT_MESSAGE,
     MAX_DEPENDENCY_EDGES_PER_BATCH,
 )
+from anvil.planning import inference as inference_module
+from anvil.planning.inference import PathIdentityError
 from anvil.state.backend import EventRejected
 from anvil.state.schema import SCHEMA_VERSION
 
@@ -5882,6 +5884,47 @@ class TestPlanTasks:
         statuses = {t["id"]: t["status"] for t in tasks}
         assert statuses.get("T001") == "drafted"
         assert statuses.get("T002") == "drafted"
+
+    def test_native_path_failure_is_tool_error_and_atomic_before_task_creation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        _run(parse())
+        events_path = state_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+
+        def fail_key(path: str) -> str:
+            raise PathIdentityError("Windows path case mapping failed")
+
+        monkeypatch.setattr(inference_module, "_cached_windows_path_key", fail_key)
+
+        async def plan() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("plan_tasks", {})
+
+        with pytest.raises(
+            ToolError,
+            match="Planning inference refused: Windows path case mapping failed",
+        ):
+            _run(plan())
+
+        assert events_path.read_bytes() == before
+
+        async def list_tasks() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("list_tasks", {}))
+
+        assert _run(list_tasks()) == []
 
     def test_error_when_no_prd_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

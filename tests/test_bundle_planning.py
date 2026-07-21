@@ -11,7 +11,12 @@ import pytest
 from typer.testing import CliRunner
 
 from anvil.cli import app
-from anvil.planning.inference import BundlePlanningError, build_bundle_plan
+from anvil.planning import inference as inference_module
+from anvil.planning.inference import (
+    BundlePlanningError,
+    PathIdentityError,
+    build_bundle_plan,
+)
 from anvil.review.gates import evaluate_bundle_reviews
 from anvil.state.models import (
     BundleReviewPolicy,
@@ -339,3 +344,82 @@ Cycle fixture.
         assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == before
     finally:
         os.chdir(original)
+
+
+@pytest.mark.parametrize(
+    "plan_args,json_output",
+    [
+        (["plan"], False),
+        (["plan", "--json"], True),
+        (["plan", "--bundles"], False),
+        (["plan", "--bundles", "--json"], True),
+    ],
+    ids=["normal-human", "normal-json", "bundles-human", "bundles-json"],
+)
+def test_plan_native_path_failure_is_typed_and_atomic_before_task_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plan_args: list[str],
+    json_output: bool,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--name", "Atomic Plan"]).exit_code == 0
+    (tmp_path / ".anvil" / "prd.md").write_text(
+        """# Project: Atomic Plan
+
+## Summary
+Atomic inference fixture.
+## Goals
+- Refuse before writes.
+## Requirements
+- R001: Plan safely.
+## Features
+### F001: Planner
+**Requirements:** R001
+## Tasks
+### T001: First
+**Feature:** F001
+**Likely files:** src/shared.py
+**Acceptance criteria:**
+- First works.
+**Verification:**
+- `pytest -q`
+### T002: Second
+**Feature:** F001
+**Likely files:** src/shared.py, src/other.py
+**Acceptance criteria:**
+- Second works.
+**Verification:**
+- `pytest -q`
+""",
+        encoding="utf-8",
+    )
+    parsed = runner.invoke(app, ["prd", "parse"])
+    assert parsed.exit_code == 0, parsed.output
+    events_path = tmp_path / ".anvil" / "events.jsonl"
+    before = events_path.read_bytes()
+
+    monkeypatch.setattr(
+        inference_module, "_uses_windows_path_identity", lambda: True
+    )
+
+    def fail_key(path: str) -> str:
+        raise PathIdentityError("Windows path case mapping failed")
+
+    monkeypatch.setattr(inference_module, "_cached_windows_path_key", fail_key)
+    result = runner.invoke(app, plan_args)
+
+    assert result.exit_code == 1
+    if json_output:
+        payload = json.loads(result.output)
+        assert payload["error"] == {
+            "code": "path_identity_error",
+            "message": "Windows path case mapping failed",
+        }
+    else:
+        assert result.output == "Error: Windows path case mapping failed\n"
+    assert events_path.read_bytes() == before
+    listed = runner.invoke(app, ["list", "--json"])
+    assert listed.exit_code == 0
+    assert json.loads(listed.output)["data"]["tasks"] == []

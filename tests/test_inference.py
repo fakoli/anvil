@@ -10,8 +10,8 @@ from __future__ import annotations
 import datetime
 import sys
 import time
-from types import SimpleNamespace
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +19,7 @@ from anvil.planning import inference as inference_module
 from anvil.planning.inference import (
     BundlePlanningError,
     InferenceResult,
+    PathIdentityError,
     build_bundle_plan,
     infer_all,
     infer_conflict_groups,
@@ -621,6 +622,80 @@ class TestInferDependencies:
         assert inference_module._cached_windows_path_key.cache_info().currsize == 5_000
         assert inference_module._cached_windows_paths_equal.cache_info().misses == 0
         assert time.perf_counter() - started < 2.0
+
+    def test_windows_collision_bucket_refuses_in_bounded_comparator_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        comparisons = 0
+
+        def distinct(left: str, right: str) -> bool:
+            nonlocal comparisons
+            comparisons += 1
+            return False
+
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        monkeypatch.setattr(
+            inference_module, "_cached_windows_path_key", lambda path: "collision"
+        )
+        monkeypatch.setattr(inference_module, "_host_paths_equal", distinct)
+        registry = inference_module._PathIdentityRegistry()
+        started = time.perf_counter()
+
+        with pytest.raises(PathIdentityError, match="collision limit exceeded"):
+            for index in range(2_000):
+                registry.intern(f"src/collision-{index}.py")
+
+        limit = inference_module._WINDOWS_COLLISION_BUCKET_LIMIT
+        assert comparisons == limit * (limit + 1) // 2
+        assert time.perf_counter() - started < 0.5
+
+    def test_full_collision_bucket_still_accepts_verified_equivalent_spelling(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        monkeypatch.setattr(
+            inference_module, "_cached_windows_path_key", lambda path: "collision"
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_host_paths_equal",
+            lambda left, right: left.casefold() == right.casefold(),
+        )
+        registry = inference_module._PathIdentityRegistry()
+        identities = [
+            registry.intern(f"src/collision-{index}.py")
+            for index in range(inference_module._WINDOWS_COLLISION_BUCKET_LIMIT)
+        ]
+
+        assert registry.intern("SRC/COLLISION-0.PY") == identities[0]
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_adversarial_deseret_collisions_refuse_before_quadratic_scan(
+        self,
+    ) -> None:
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        registry = inference_module._PathIdentityRegistry()
+        spellings = [
+            "src/"
+            + "".join("𐐀" if index & (1 << bit) else "𐐨" for bit in range(11))
+            + ".py"
+            for index in range(2_000)
+        ]
+        started = time.perf_counter()
+
+        with pytest.raises(PathIdentityError, match="collision limit exceeded"):
+            for spelling in spellings:
+                registry.intern(spelling)
+
+        assert inference_module._cached_windows_paths_equal.cache_info().misses <= 2_080
+        assert time.perf_counter() - started < 1.0
 
     @pytest.mark.parametrize(
         "portable_path",

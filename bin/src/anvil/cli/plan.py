@@ -341,7 +341,13 @@ def plan(
     ``prd.md`` it is never re-appended.
     """
     from anvil.clock import SystemClock
-    from anvil.planning.inference import InferenceResult
+    from anvil.planning.inference import (
+        BundlePlanningError,
+        InferenceResult,
+        PathIdentityError,
+        infer_conflict_groups,
+        infer_dependencies,
+    )
     from anvil.planning.llm import LLMProviderError
     from anvil.planning.llm_planner import (
         PlannerProviderUnavailable,
@@ -550,10 +556,7 @@ def plan(
             DEFAULT_BUNDLE_MAX_SERIAL_STAGES,
             DEFAULT_BUNDLE_MAX_TASKS,
         )
-        from anvil.planning.inference import (
-            BundlePlanningError,
-            build_bundle_plan,
-        )
+        from anvil.planning.inference import build_bundle_plan
 
         try:
             bundle_report = build_bundle_plan(
@@ -567,6 +570,11 @@ def plan(
                     else DEFAULT_BUNDLE_MAX_SERIAL_STAGES
                 ),
             )
+        except PathIdentityError as exc:
+            if json_output:
+                fail("plan", str(exc), code="path_identity_error")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         except BundlePlanningError as exc:
             if json_output:
                 fail("plan", str(exc), code="invalid_bundle_graph")
@@ -625,29 +633,6 @@ def plan(
         # NOT — it spans every PRD so cross-PRD file overlaps are detected.
         scope_prd_id = parsed.prd.id
 
-        if (
-            bundle_report is not None
-            and bundle_report.limit_breaches
-            and acknowledge_bundle_limits
-        ):
-            now = clock.now()
-            acknowledged_by = resolve_actor(None)
-            backend.append(
-                EventDraft(
-                    timestamp=now,
-                    actor=acknowledged_by,
-                    action="bundle.plan_acknowledged",
-                    target_kind="prd",
-                    target_id=scope_prd_id,
-                    payload_json={
-                        "prd_id": scope_prd_id,
-                        "breaches": list(bundle_report.limit_breaches),
-                        "acknowledged_by": acknowledged_by,
-                        "created_at": now.isoformat(),
-                    },
-                )
-            )
-
         # Scope orphan classification to THIS PRD: tasks/features in OTHER
         # PRDs must never be pruned just because they are absent from this
         # PRD's prd.md. Passing the prd_id-filtered lists means the diff only
@@ -699,6 +684,57 @@ def plan(
                 err=True,
             )
             raise typer.Exit(code=1)
+
+        # Complete every path-sensitive inference pass before the first event
+        # append. A host path API failure must refuse atomically: no prune,
+        # acknowledgement, feature, task, or conflict-group event may land.
+        subset_ids = {task.id for task in parsed.tasks}
+        orphan_ids = {
+            task.id
+            for task in (
+                classification.safe_task_orphans
+                + classification.unsafe_task_orphans
+            )
+        }
+        other_prd_tasks = [
+            task
+            for task in backend.list_tasks()
+            if task.id not in subset_ids and task.id not in orphan_ids
+        ]
+        try:
+            subset_with_deps = infer_dependencies(parsed.tasks)
+            all_with_cgs, conflict_groups = infer_conflict_groups(
+                subset_with_deps + other_prd_tasks
+            )
+        except BundlePlanningError as exc:
+            if json_output:
+                fail("plan", str(exc), code="path_identity_error")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        cgs_by_id = {task.id: task for task in all_with_cgs}
+
+        if (
+            bundle_report is not None
+            and bundle_report.limit_breaches
+            and acknowledge_bundle_limits
+        ):
+            now = clock.now()
+            acknowledged_by = resolve_actor(None)
+            backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=acknowledged_by,
+                    action="bundle.plan_acknowledged",
+                    target_kind="prd",
+                    target_id=scope_prd_id,
+                    payload_json={
+                        "prd_id": scope_prd_id,
+                        "breaches": list(bundle_report.limit_breaches),
+                        "acknowledged_by": acknowledged_by,
+                        "created_at": now.isoformat(),
+                    },
+                )
+            )
 
         # Surface TransactionAborted as a clean CLI error rather than a
         # raw Python traceback. The handler's message is user-actionable
@@ -775,26 +811,6 @@ def plan(
         # already-persisted OTHER-PRD tasks, so a cross-PRD overlap lands in
         # a single CG-* group that both tasks reference.
         # ------------------------------------------------------------------
-        from anvil.planning.inference import (
-            infer_conflict_groups,
-            infer_dependencies,
-        )
-
-        subset_with_deps = infer_dependencies(parsed.tasks)
-        subset_ids = {t.id for t in subset_with_deps}
-
-        # OTHER-PRD persisted tasks: everything NOT in this partition. The
-        # just-emitted subset task.created rows are excluded by id so the
-        # in-memory (deps-annotated) copies are the ones fed to the scan.
-        other_prd_tasks = [
-            t for t in backend.list_tasks() if t.id not in subset_ids
-        ]
-
-        all_with_cgs, conflict_groups = infer_conflict_groups(
-            subset_with_deps + other_prd_tasks
-        )
-        cgs_by_id = {t.id: t for t in all_with_cgs}
-
         # Re-upsert THIS PRD's tasks with inferred dependencies + conflict
         # groups, then promote proposed -> drafted (subset only).
         for base_task in subset_with_deps:

@@ -45,6 +45,7 @@ __all__ = [
     "InferenceResult",
     "BundlePlanReport",
     "BundlePlanningError",
+    "PathIdentityError",
     "BundleProposal",
     "build_bundle_plan",
     "SubtaskProposal",
@@ -149,6 +150,10 @@ class BundlePlanningError(ValueError):
     """A planning graph or portable file scope cannot be analyzed safely."""
 
 
+class PathIdentityError(BundlePlanningError):
+    """Host path identity cannot be established within bounded resources."""
+
+
 _WINDOWS_ILLEGAL_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
@@ -220,6 +225,7 @@ def _canonical_project_path(path: object) -> str:
 
 
 _WINDOWS_COMPARISON_CACHE_SIZE = 131_072
+_WINDOWS_COLLISION_BUCKET_LIMIT = 64
 _LCMAP_UPPERCASE = 0x00000200
 
 
@@ -241,7 +247,7 @@ def _load_windows_path_api() -> _WindowsPathApi:
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     except Exception:
-        raise BundlePlanningError(
+        raise PathIdentityError(
             "Windows path API unavailable (library load failed)"
         ) from None
 
@@ -249,7 +255,7 @@ def _load_windows_path_api() -> _WindowsPathApi:
         compare = kernel32.CompareStringOrdinal
         map_string = kernel32.LCMapStringEx
     except Exception:
-        raise BundlePlanningError(
+        raise PathIdentityError(
             "Windows path API unavailable (required symbol missing)"
         ) from None
 
@@ -275,7 +281,7 @@ def _load_windows_path_api() -> _WindowsPathApi:
         ]
         map_string.restype = ctypes.c_int
     except Exception:
-        raise BundlePlanningError(
+        raise PathIdentityError(
             "Windows path API unavailable (signature configuration failed)"
         ) from None
 
@@ -287,7 +293,7 @@ def _load_windows_path_api() -> _WindowsPathApi:
                 "", _LCMAP_UPPERCASE, path, -1, None, 0, None, None, 0
             )
             if required == 0:
-                raise BundlePlanningError("Windows path case mapping failed")
+                raise PathIdentityError("Windows path case mapping failed")
             buffer = ctypes.create_unicode_buffer(required)
             written = map_string(
                 "",
@@ -301,12 +307,12 @@ def _load_windows_path_api() -> _WindowsPathApi:
                 0,
             )
             if written == 0:
-                raise BundlePlanningError("Windows path case mapping failed")
+                raise PathIdentityError("Windows path case mapping failed")
             return buffer.value
-        except BundlePlanningError:
+        except PathIdentityError:
             raise
         except Exception:
-            raise BundlePlanningError("Windows path case mapping failed") from None
+            raise PathIdentityError("Windows path case mapping failed") from None
 
     def equivalent(left: str, right: str) -> bool:
         # Portable paths reject NUL, so null-terminated comparison is exact and
@@ -314,9 +320,9 @@ def _load_windows_path_api() -> _WindowsPathApi:
         try:
             result = compare(left, -1, right, -1, 1)
         except Exception:
-            raise BundlePlanningError("Windows path comparison failed") from None
+            raise PathIdentityError("Windows path comparison failed") from None
         if result == 0:
-            raise BundlePlanningError("Windows path comparison failed")
+            raise PathIdentityError("Windows path comparison failed")
         return result == 2  # CSTR_EQUAL
 
     return _WindowsPathApi(map_key=map_key, equivalent=equivalent)
@@ -370,6 +376,10 @@ class _PathIdentityRegistry:
                 if _host_paths_equal(path, representative):
                     self._exact[path] = identity
                     return identity
+            if len(bucket) >= _WINDOWS_COLLISION_BUCKET_LIMIT:
+                raise PathIdentityError(
+                    "Windows path identity collision limit exceeded"
+                )
 
         identity = self._next_identity
         self._next_identity += 1

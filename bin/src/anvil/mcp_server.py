@@ -3224,7 +3224,7 @@ def plan_tasks(
         selected_prd_source_path,
     )
     from anvil.clock import SystemClock
-    from anvil.planning.inference import infer_all
+    from anvil.planning.inference import BundlePlanningError, infer_all
     from anvil.planning.llm import LLMProviderError
     from anvil.planning.llm_planner import (
         PlannerProviderUnavailable,
@@ -3418,6 +3418,14 @@ def plan_tasks(
                 "task events are emitted."
             )
 
+        # Validate and infer the complete parsed task set before any event is
+        # appended. Native path identity failures must surface as ToolError
+        # and leave both the projection and append-only log byte-identical.
+        try:
+            inference_result = infer_all(result.tasks)
+        except BundlePlanningError as exc:
+            raise ToolError(f"Planning inference refused: {exc}") from None
+
         clock = SystemClock()
 
         def _with_prd_id(payload: dict[str, Any], model_prd_id: str) -> dict[str, Any]:
@@ -3508,8 +3516,6 @@ def plan_tasks(
                 ))
             except EventRejected as exc:
                 raise ToolError(str(exc)) from exc
-
-        inference_result = infer_all(result.tasks)
 
         for inferred_task in inference_result.tasks:
             now = clock.now()
