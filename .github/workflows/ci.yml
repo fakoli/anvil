@@ -12,6 +12,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-floor:
+    name: dependency floors (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Qualify exact FastMCP and Pydantic floors from the built wheel
+        run: >-
+          uv run --project bin --locked pytest
+          tests/test_install_manifests.py
+          -k built_wheel_runs_at_declared_dependency_floors
+          -q
+
   test:
     name: test (python 3.11)
     runs-on: ubuntu-latest

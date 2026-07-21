@@ -29,8 +29,10 @@ keywords = [
 ]
 dependencies = [
     "typer>=0.12",
-    "pydantic>=2.6",
-    "fastmcp",
+    # These are the lowest versions that both resolve and register Anvil's MCP
+    # type surface successfully; keep the wheel metadata truthful.
+    "pydantic>=2.11.7",
+    "fastmcp>=3.0.0,<4",
     # Default LLM path: the Claude Agent SDK drives the bundled Claude Code CLI
     # over the logged-in subscription (no per-token API key). Needs the `claude`
     # CLI on PATH at call time — the provider surfaces a clear error if absent.
