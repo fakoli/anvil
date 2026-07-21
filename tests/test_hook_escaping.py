@@ -18,7 +18,7 @@ import json
 import os
 import shutil
 import subprocess
-import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -35,7 +35,6 @@ _RECORD_CHANGE_SH = _REPO_ROOT / "hooks" / "record-file-change.sh"
 _CAPTURE_EVIDENCE_SH = _REPO_ROOT / "hooks" / "capture-evidence.sh"
 
 _T0_STR = "2026-05-24T18:00:00Z"
-from datetime import UTC, datetime
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=UTC)
 
 
@@ -108,7 +107,6 @@ def project_dir(tmp_path: Path) -> Path:
 @pytest.fixture()
 def backend(project_dir: Path):  # type: ignore[no-untyped-def]
     """An initialized SqliteBackend in project_dir."""
-    from datetime import UTC, datetime
     db_path = str(project_dir / ".anvil" / "state.db")
     events_path = str(project_dir / ".anvil" / "events.jsonl")
     b = SqliteBackend(
@@ -193,7 +191,7 @@ def test_record_file_change_appends_valid_json(
 def test_replay_from_empty_survives_escaped_path(
     file_path: str,
     project_dir: Path,
-    backend: "SqliteBackend",
+    backend: SqliteBackend,
 ) -> None:
     """replay_from_empty() must not raise when events.jsonl has escaped paths.
 

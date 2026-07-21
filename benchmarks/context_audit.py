@@ -406,7 +406,7 @@ def main() -> int:
         always_total += cat.tokens
     print()
     print(hr("-"))
-    print(f"  ALWAYS-ON SUBTOTALS:")
+    print("  ALWAYS-ON SUBTOTALS:")
     for cat in always:
         pct = (cat.tokens / always_total * 100) if always_total else 0.0
         print(f"    {cat.name:<40.40} {cat.tokens:>8,d} tok  ({pct:4.1f}%)")
@@ -426,7 +426,7 @@ def main() -> int:
     print()
     print(hr("-"))
     print(f"  ON-DEMAND TOTAL (sum of all bodies):{'':<5}{ondemand_total:>8,d} tok")
-    print(f"  (Worst case if EVERY body loaded at once; real usage loads 1-2.)")
+    print("  (Worst case if EVERY body loaded at once; real usage loads 1-2.)")
     print(hr("-"))
 
     # ---- Top contributors (always-on only) ----
@@ -460,8 +460,8 @@ def main() -> int:
         "ondemand_total": ondemand_total,
         "ondemand_by_category": {c.name: c.tokens for c in ondemand},
         "top_contributors": [
-            {"label": l, "category": c.split(" (")[0], "tokens": t}
-            for c, l, t in all_always_items[:10]
+            {"label": label, "category": category.split(" (")[0], "tokens": tokens}
+            for category, label, tokens in all_always_items[:10]
         ],
     }
     print()

@@ -3,7 +3,7 @@ knobs. The SAME scenario runs through both coordination arms.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .engine import TaskSpec
 
@@ -51,7 +51,8 @@ def _dependency() -> Scenario:
     for _chain in range(3):
         prev = None
         for _step in range(3):
-            tid = f"T{n:03d}"; n += 1
+            tid = f"T{n:03d}"
+            n += 1
             deps = (prev,) if prev else ()
             tasks.append(TaskSpec(
                 tid, f"Chain step {tid}",

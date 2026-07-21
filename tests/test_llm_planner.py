@@ -7,12 +7,6 @@ import importlib.util
 
 import pytest
 
-_openai_available = importlib.util.find_spec("openai") is not None
-_skip_no_openai = pytest.mark.skipif(
-    not _openai_available,
-    reason="openai SDK not installed (pip install openai or pip install 'anvil[custom]')",
-)
-
 from anvil.clock import FrozenClock
 from anvil.planning.llm import LLMResponse, RecordedLLMProvider
 from anvil.planning.llm_planner import (
@@ -26,6 +20,12 @@ from anvil.planning.llm_planner import (
 )
 from anvil.planning.template import parse_prd
 from anvil.state.models import PRD, Feature, Requirement, Task
+
+_openai_available = importlib.util.find_spec("openai") is not None
+_skip_no_openai = pytest.mark.skipif(
+    not _openai_available,
+    reason="openai SDK not installed (pip install openai or pip install 'anvil[custom]')",
+)
 
 _FROZEN = FrozenClock(datetime.datetime(2026, 5, 26, 12, 0, tzinfo=datetime.UTC))
 

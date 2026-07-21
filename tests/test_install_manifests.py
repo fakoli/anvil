@@ -12,12 +12,12 @@ repo root (matching ``test_agents_md.py`` / ``test_version_sync.py``).
 
 from __future__ import annotations
 
-from collections import Counter
 import json
 import shutil
 import subprocess
 import tomllib
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 import pytest

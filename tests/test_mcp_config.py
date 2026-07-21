@@ -10,6 +10,7 @@ the JSON envelope.
 
 from __future__ import annotations
 
+import importlib
 import json
 import tomllib
 from pathlib import Path
@@ -17,8 +18,6 @@ from pathlib import Path
 import pytest
 import yaml
 from typer.testing import CliRunner
-
-import importlib
 
 from anvil.cli import app
 from anvil.cli.mcp_config import CLIENTS, _server_spec

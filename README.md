@@ -74,6 +74,17 @@ paste-ready config block.
 
 </details>
 
+## Development
+
+Run the same locked lint gate as CI from the source checkout:
+
+```bash
+cd bin
+uv sync --locked --extra custom
+uv run --locked ruff check ..
+uv run pytest -q
+```
+
 ## Quick start
 
 ```bash

@@ -5,15 +5,18 @@ the injected Coordinator differs.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import random
+import shutil
+import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
-from . import engine, metrics as M
-from .coordinators import (AnvilCoordinator, MarkdownCoordinator, WorkLog,
-                           do_work)
+from . import engine
+from . import metrics as M
+from .coordinators import AnvilCoordinator, MarkdownCoordinator, WorkLog, do_work
 from .engine import setup_project
 from .scenarios import Scenario, all_scenarios
 
@@ -29,6 +32,41 @@ METRIC_LABELS = {
     "gamed_detected_pct": "gamed work detected (%)",
     "final_state_valid": "final state valid (1=yes)",
 }
+
+
+def _remove_trial_directory(
+    path: Path,
+    *,
+    max_attempts: int = 30,
+    retry_delay_seconds: float = 0.1,
+) -> None:
+    """Remove a trial directory, tolerating transient Windows handle release."""
+    for attempt in range(max_attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt + 1 == max_attempts:
+                raise
+            time.sleep(retry_delay_seconds)
+
+
+@contextlib.contextmanager
+def _trial_directory():
+    path = Path(tempfile.mkdtemp(prefix="fsbench-"))
+    try:
+        yield path
+    finally:
+        _remove_trial_directory(path)
+
+
+def _configure_utf8_stdout() -> None:
+    """Make the Unicode benchmark report safe on legacy Windows consoles."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8", errors="replace")
 
 
 def _coord(arm: str, proj):
@@ -107,8 +145,8 @@ def run_scenario(scenario: Scenario, trials: int, seed: int, jitter: float,
     for arm in ARMS:
         per_trial = []
         for trial in range(trials):
-            with tempfile.TemporaryDirectory(prefix="fsbench-") as td:
-                root = Path(td) / "proj"
+            with _trial_directory() as trial_dir:
+                root = trial_dir / "proj"
                 t0 = time.time()
                 m = run_trial(scenario, arm, seed + trial, trial, root, jitter, deadline)
                 per_trial.append(m)
@@ -203,6 +241,7 @@ def render_report(scenarios: list[Scenario], all_res: dict, meta: dict) -> str:
 
 
 def main(argv=None) -> int:
+    _configure_utf8_stdout()
     ap = argparse.ArgumentParser(description="anvil coordination benchmark")
     ap.add_argument("--scenarios", default="all",
                     help="comma-separated scenario keys, or 'all'")
