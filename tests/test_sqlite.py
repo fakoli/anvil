@@ -10782,6 +10782,114 @@ class TestDecideApplyContract:
             b.close()
 
     @pytest.mark.parametrize(
+        "owner_prd",
+        [
+            "SECRET_TOKEN_MARKER-" + ("x" * 100_000),
+            "SECRET_TOKEN_MARKER\nmalformed\x00snowman-☃",
+            "sk-SECRET_TOKEN_MARKER",
+        ],
+        ids=["huge", "malformed", "safe-secret-like"],
+    )
+    def test_task_created_recovery_redacts_huge_or_malformed_owner_ids(
+        self, tmp_path: Path, owner_prd: str
+    ) -> None:
+        """Recovery errors/audits are bounded and never disclose raw owner IDs."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        audit_path = tmp_path / "audit.jsonl"
+        feature_id = f"{owner_prd}:F001"
+        task_id = f"{owner_prd}:T001"
+        try:
+            _setup_project(b)
+            b.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": owner_prd},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            b.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": owner_prd,
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = b.get_task(task_id)
+            assert task is not None
+            payload = task.model_copy(update={"updated_at": _T1}).model_dump(mode="json")
+            payload["prd_id"] = "default"
+            events_before = events_path.read_bytes()
+
+            with pytest.raises(EventRejected) as raised:
+                b.append(_make_event(
+                    "task.created", payload, target_kind="task", target_id=task_id
+                ))
+
+            error = str(raised.value)
+            assert len(error.encode("utf-8")) <= 4096
+            assert "SECRET_TOKEN_MARKER" not in error
+            assert "<redacted" in error
+            assert events_path.read_bytes() == events_before
+
+            audit_lines = audit_path.read_bytes().splitlines(keepends=True)
+            assert len(audit_lines[-1]) <= 4096
+            assert b"SECRET_TOKEN_MARKER" not in audit_lines[-1]
+            audit = json.loads(audit_lines[-1])
+            assert audit["target_id"].startswith("<redacted")
+            assert "<redacted" in audit["reason"]
+        finally:
+            b.close()
+
+    def test_task_created_recovery_redacts_huge_payload_prd_id(
+        self, tmp_path: Path
+    ) -> None:
+        """A secret-like explicit payload partition is fingerprinted, not echoed."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        audit_path = tmp_path / "audit.jsonl"
+        try:
+            _setup_project(b)
+            feature_id = "named:F001"
+            task_id = "named:T001"
+            b.append(_make_event(
+                "feature.created",
+                {**_make_feature_payload(feat_id=feature_id), "prd_id": "named"},
+                target_kind="feature",
+                target_id=feature_id,
+            ))
+            b.append(_make_event(
+                "task.created",
+                {
+                    **_make_task_payload(task_id=task_id, feature_id=feature_id),
+                    "prd_id": "named",
+                },
+                target_kind="task",
+                target_id=task_id,
+            ))
+            task = b.get_task(task_id)
+            assert task is not None
+            payload = task.model_copy(update={"updated_at": _T1}).model_dump(mode="json")
+            payload["prd_id"] = "SECRET_PAYLOAD_MARKER-" + ("y" * 100_000)
+            events_before = events_path.read_bytes()
+
+            with pytest.raises(EventRejected) as raised:
+                b.append(_make_event(
+                    "task.created", payload, target_kind="task", target_id=task_id
+                ))
+
+            error = str(raised.value)
+            assert len(error.encode("utf-8")) <= 4096
+            assert "SECRET_PAYLOAD_MARKER" not in error
+            assert events_path.read_bytes() == events_before
+            audit_line = audit_path.read_bytes().splitlines(keepends=True)[-1]
+            assert len(audit_line) <= 4096
+            assert b"SECRET_PAYLOAD_MARKER" not in audit_line
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize(
         ("task_id", "feature_id"),
         [
             ("T001", "named:F001"),

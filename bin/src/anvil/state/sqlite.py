@@ -26,6 +26,7 @@ try:
 except ImportError:  # POSIX: msvcrt is Windows-only.
     msvcrt = None  # type: ignore[assignment]
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -117,6 +118,22 @@ from anvil.state.payloads import (
     TaskSyncedFromRemotePayload,
 )
 from anvil.state.schema import DDL, SCHEMA_VERSION
+
+_AUDIT_LINE_MAX_UTF8_BYTES = 4096
+
+
+def _redacted_identifier(value: Any) -> str:
+    """Return a stable ASCII fingerprint without disclosing identifier text."""
+    if isinstance(value, str):
+        raw = value.encode("utf-8", errors="replace")
+        value_type = "str"
+    else:
+        rendered = json.dumps(value, ensure_ascii=False, default=type(value).__name__)
+        raw = rendered.encode("utf-8", errors="replace")
+        value_type = type(value).__name__
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    return f"<redacted type={value_type} utf8_bytes={len(raw)} sha256={digest}>"
+
 
 if TYPE_CHECKING:
     from anvil.clock import Clock
@@ -2901,13 +2918,24 @@ class SqliteBackend:
         """
         audit_path = self._audit_path()
         now = self._clock.now().isoformat()
+        recovery_refusal = reason.startswith(
+            "task.created ownership recovery refused:"
+        )
         if kind == "rejection":
             record: dict[str, Any] = {
                 "ts": now,
                 "kind": "rejection",
-                "actor": draft.actor,
+                "actor": (
+                    _redacted_identifier(draft.actor)
+                    if recovery_refusal
+                    else draft.actor
+                ),
                 "attempted_action": draft.action,
-                "target_id": draft.target_id,
+                "target_id": (
+                    _redacted_identifier(draft.target_id)
+                    if recovery_refusal
+                    else draft.target_id
+                ),
                 "reason": reason,
             }
         elif kind == "idempotent_no_op":
@@ -2937,8 +2965,31 @@ class SqliteBackend:
             }
 
         try:
+            line = json.dumps(record) + "\n"
+            if (
+                recovery_refusal
+                and len(line.encode("utf-8")) > _AUDIT_LINE_MAX_UTF8_BYTES
+            ):
+                # Every identifier is already fingerprinted. This also bounds
+                # an unexpectedly long future recovery reason without leaking it.
+                record["reason"] = _redacted_identifier(reason)
+                line = json.dumps(record) + "\n"
+            if (
+                recovery_refusal
+                and len(line.encode("utf-8")) > _AUDIT_LINE_MAX_UTF8_BYTES
+            ):
+                # Defensive last resort: preserve only fixed metadata plus one
+                # stable record fingerprint; this is always bounded ASCII.
+                record = {
+                    "ts": now,
+                    "kind": "rejection",
+                    "reason": _redacted_identifier(
+                        json.dumps(record, sort_keys=True)
+                    ),
+                }
+                line = json.dumps(record) + "\n"
             with open(audit_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
+                fh.write(line)
         except OSError as exc:
             logger.error(
                 "Failed to write audit line (kind=%r, action=%r): %s",
@@ -6308,16 +6359,24 @@ class SqliteBackend:
 
         def reject(reason: str) -> None:
             raise EventRejected(
-                f"task.created: task {task_id!r} cannot use owning feature "
-                f"{feature_id!r} prd_id={owner_prd_id!r}: {reason}"
+                "task.created ownership recovery refused: "
+                f"task={_redacted_identifier(task_id)} "
+                f"feature={_redacted_identifier(feature_id)} "
+                f"owner_prd={_redacted_identifier(owner_prd_id)}: {reason}"
             )
 
         # Never reinterpret an explicit partition value, including an explicit
         # 'default'. Only the exact historical omission is compatibility-safe.
         if "prd_id" in event.payload_json:
-            reject(f"explicit prd_id={payload_prd_id!r} does not match")
+            reject(
+                "explicit prd_id payload="
+                f"{_redacted_identifier(payload_prd_id)} does not match"
+            )
         if payload_prd_id != DEFAULT_PRD_ID or owner_prd_id == DEFAULT_PRD_ID:
-            reject(f"prd_id={payload_prd_id!r} does not match")
+            reject(
+                f"payload_prd_id={_redacted_identifier(payload_prd_id)} "
+                "does not match"
+            )
 
         legacy_base_keys = {
             "id",
