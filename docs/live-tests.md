@@ -11,7 +11,7 @@ nightly in CI — that exercises the
 real GitHub Issues REST API. It catches upstream contract drift -- label
 format changes, deprecated endpoints, header renames, REST PATCH semantics
 shifts -- before users hit them. These tests are marker-gated and excluded
-from the default `pytest -q` run.
+from the default `uv run --project bin pytest` run.
 
 This page is the operator runbook: how to enable the nightly job, how to run
 the same tests locally, and what residue they leave behind in the test repo.
