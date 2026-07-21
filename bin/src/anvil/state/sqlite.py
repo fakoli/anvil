@@ -26,6 +26,7 @@ try:
 except ImportError:  # POSIX: msvcrt is Windows-only.
     msvcrt = None  # type: ignore[assignment]
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -117,6 +118,45 @@ from anvil.state.payloads import (
     TaskSyncedFromRemotePayload,
 )
 from anvil.state.schema import DDL, SCHEMA_VERSION
+
+_AUDIT_LINE_MAX_UTF8_BYTES = 4096
+_OWNERSHIP_RECOVERY_REFUSAL_PREFIX = "task.created ownership recovery refused:"
+_OWNERSHIP_RECOVERY_REFUSAL_MESSAGES = {
+    "explicit_prd_mismatch": "explicit prd_id mismatch",
+    "payload_prd_mismatch": "payload prd_id mismatch",
+    "schema_mismatch": "compatibility schema is not allowed",
+    "event_identity_mismatch": "event identity does not match task payload",
+    "noncanonical_owner_scope": "IDs are not canonically owner-scoped",
+    "new_task": "compatibility recovery cannot create a task",
+    "stored_identity_mismatch": "stored task identity does not match owner",
+    "invalid_task_payload": "recoverable Task payload is invalid",
+    "not_dependency_only": "event is not a dependency-only upsert",
+}
+
+
+def _redacted_identifier(value: Any) -> str:
+    """Return a stable ASCII fingerprint without disclosing untrusted text."""
+    if isinstance(value, str):
+        raw = value.encode("utf-8", errors="replace")
+        value_type = "str"
+    else:
+        value_type = type(value).__name__[:64]
+        try:
+            rendered = json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=lambda item: f"<{type(item).__name__[:64]}>",
+            )
+        except (TypeError, ValueError, RecursionError):
+            # Never fall back to repr(value): it may contain the secret-like
+            # content this helper exists to keep out of diagnostics.
+            rendered = f"<unserializable-{value_type}>"
+        raw = rendered.encode("utf-8", errors="replace")
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    return f"<redacted type={value_type} utf8_bytes={len(raw)} sha256={digest}>"
+
 
 if TYPE_CHECKING:
     from anvil.clock import Clock
@@ -564,8 +604,23 @@ class SqliteBackend:
             try:
                 typed_payload = spec.payload_model.model_validate(draft.payload_json)
             except Exception as exc:
-                reason = f"payload validation failed for action {action!r}: {exc}"
+                recovery_owner = self._task_created_recovery_owner(conn, draft)
+                if recovery_owner is not None:
+                    reason = str(
+                        self._task_created_recovery_refusal(
+                            draft,
+                            owner_prd_id=recovery_owner,
+                            code="invalid_task_payload",
+                        )
+                    )
+                else:
+                    reason = f"payload validation failed for action {action!r}: {exc}"
                 self._append_audit_line("rejection", draft, reason)
+                if recovery_owner is not None:
+                    # The Pydantic exception can retain raw payload values in
+                    # its rendered traceback. Suppress that chain at this
+                    # security boundary as well as keeping it out of ``reason``.
+                    raise EventRejected(reason) from None
                 raise EventRejected(reason) from exc
 
             try:
@@ -2854,6 +2909,16 @@ class SqliteBackend:
         try:
             typed_payload = spec.payload_model.model_validate(event.payload_json)
         except Exception as exc:
+            recovery_owner = self._task_created_recovery_owner(conn, event)
+            if recovery_owner is not None:
+                refusal = self._task_created_recovery_refusal(
+                    event,
+                    owner_prd_id=recovery_owner,
+                    code="invalid_task_payload",
+                )
+                raise TransactionAborted(
+                    f"_apply_write_only: {refusal}"
+                ) from None
             raise TransactionAborted(
                 f"_apply_write_only: payload parse failed for {action!r}: {exc}"
             ) from exc
@@ -2901,13 +2966,22 @@ class SqliteBackend:
         """
         audit_path = self._audit_path()
         now = self._clock.now().isoformat()
+        recovery_refusal = reason.startswith(_OWNERSHIP_RECOVERY_REFUSAL_PREFIX)
         if kind == "rejection":
             record: dict[str, Any] = {
                 "ts": now,
                 "kind": "rejection",
-                "actor": draft.actor,
+                "actor": (
+                    _redacted_identifier(draft.actor)
+                    if recovery_refusal
+                    else draft.actor
+                ),
                 "attempted_action": draft.action,
-                "target_id": draft.target_id,
+                "target_id": (
+                    _redacted_identifier(draft.target_id)
+                    if recovery_refusal
+                    else draft.target_id
+                ),
                 "reason": reason,
             }
         elif kind == "idempotent_no_op":
@@ -2937,8 +3011,31 @@ class SqliteBackend:
             }
 
         try:
+            line = json.dumps(record) + "\n"
+            if (
+                recovery_refusal
+                and len(line.encode("utf-8")) > _AUDIT_LINE_MAX_UTF8_BYTES
+            ):
+                # Every identifier is already fingerprinted. This also bounds
+                # an unexpectedly long future recovery reason without leaking it.
+                record["reason"] = _redacted_identifier(reason)
+                line = json.dumps(record) + "\n"
+            if (
+                recovery_refusal
+                and len(line.encode("utf-8")) > _AUDIT_LINE_MAX_UTF8_BYTES
+            ):
+                # Defensive last resort: preserve only fixed metadata plus one
+                # stable record fingerprint; this is always bounded ASCII.
+                record = {
+                    "ts": now,
+                    "kind": "rejection",
+                    "reason": _redacted_identifier(
+                        json.dumps(record, sort_keys=True)
+                    ),
+                }
+                line = json.dumps(record) + "\n"
             with open(audit_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
+                fh.write(line)
         except OSError as exc:
             logger.error(
                 "Failed to write audit line (kind=%r, action=%r): %s",
@@ -6257,19 +6354,216 @@ class SqliteBackend:
         )
 
     @staticmethod
-    def _normalize_task_payload(task_dict: dict[str, Any]) -> dict[str, Any]:
-        """Coerce a minimal Task payload's None scores/verification to ``{}``.
+    def _normalize_task_payload_shape(task_dict: dict[str, Any]) -> dict[str, Any]:
+        """Coerce a minimal Task payload's None submodels to empty mappings.
 
-        Task.scores / Task.verification are required submodels; the payload
-        allows None so MCP / hand-rolled callers can send a minimal task without
-        preloading sentinels. Pure dict munging — shared by the check and write
-        phases so both validate / build the identical normalized shape.
+        This shape-only normalization is shared by ``task.created`` and
+        ``task.expanded``. It deliberately has no ownership-recovery behavior:
+        expanded subtasks are new rows, while the missing-PRD compatibility
+        path below is restricted to dependency-only upserts of existing tasks.
         """
         task_dict = dict(task_dict)
         if task_dict.get("scores") is None:
             task_dict["scores"] = {}
         if task_dict.get("verification") is None:
             task_dict["verification"] = {}
+        return task_dict
+
+    @staticmethod
+    def _task_created_recovery_owner(
+        conn: sqlite3.Connection,
+        event: EventDraft | Event,
+    ) -> str | None:
+        """Return the named owner when *event* enters the recovery boundary.
+
+        This intentionally inspects only enough raw shape to identify a
+        ``task.created`` event aimed at an existing named feature. It is safe to
+        call when ``TaskCreatedPayload`` validation itself failed, which keeps
+        malformed dependency/verification/list shapes on the same redacted
+        refusal path as failures discovered by ``Task.model_validate``.
+        """
+        if event.action != "task.created":
+            return None
+        feature_id = event.payload_json.get("feature_id")
+        if not isinstance(feature_id, str):
+            return None
+        feature_row = conn.execute(
+            "SELECT prd_id FROM features WHERE id = ?", (feature_id,)
+        ).fetchone()
+        if feature_row is None:
+            return None
+        owner_prd_id = str(feature_row[0])
+        payload_prd_id = event.payload_json.get("prd_id", DEFAULT_PRD_ID)
+        if owner_prd_id == DEFAULT_PRD_ID or payload_prd_id == owner_prd_id:
+            return None
+        return owner_prd_id
+
+    @staticmethod
+    def _task_created_recovery_refusal(
+        event: EventDraft | Event,
+        *,
+        owner_prd_id: str,
+        code: str,
+    ) -> EventRejected:
+        """Build the sole bounded diagnostic for ownership-recovery refusal.
+
+        The code is selected from fixed internal tokens. Actor, target, owner,
+        task/feature identifiers, and the complete payload are represented only
+        by stable fingerprints, so neither Pydantic details nor attacker-sized
+        values can escape into the exception or its audit JSONL record.
+        """
+        safe_code = code if code in _OWNERSHIP_RECOVERY_REFUSAL_MESSAGES else "unknown"
+        message = _OWNERSHIP_RECOVERY_REFUSAL_MESSAGES.get(
+            safe_code, "ownership recovery was refused"
+        )
+        payload = event.payload_json
+        return EventRejected(
+            f"{_OWNERSHIP_RECOVERY_REFUSAL_PREFIX} "
+            f"code={safe_code} detail={message}; "
+            f"actor={_redacted_identifier(event.actor)} "
+            f"target={_redacted_identifier(event.target_id)} "
+            f"task={_redacted_identifier(payload.get('id'))} "
+            f"feature={_redacted_identifier(payload.get('feature_id'))} "
+            f"owner_prd={_redacted_identifier(owner_prd_id)} "
+            f"payload={_redacted_identifier(payload)}"
+        )
+
+    def _normalize_task_payload(
+        self,
+        conn: sqlite3.Connection,
+        task_dict: dict[str, Any],
+        event: EventDraft | Event,
+    ) -> dict[str, Any]:
+        """Normalize task shape and enforce task.created PRD ownership.
+
+        A narrowly bounded compatibility repair also handles the historical
+        dependency-upsert bug where ``Task.model_dump()`` omitted ``prd_id``.
+        Recovery is allowed only for a full-shape, dependency-only ``task.created``
+        upsert of an already-existing named task whose task and feature IDs both
+        carry the owning PRD prefix. Explicit ``prd_id`` values are never
+        rewritten. The same helper runs in append preflight and replay/write so
+        ownership checks cannot diverge across those paths.
+        """
+        task_dict = self._normalize_task_payload_shape(task_dict)
+
+        feature_id = task_dict.get("feature_id")
+        task_id = task_dict.get("id")
+        if not isinstance(feature_id, str) or not isinstance(task_id, str):
+            return task_dict
+
+        feature_row = conn.execute(
+            "SELECT prd_id FROM features WHERE id = ?", (feature_id,)
+        ).fetchone()
+        if feature_row is None:
+            return task_dict
+
+        owner_prd_id = str(feature_row[0])
+        payload_prd_id = task_dict.get("prd_id", DEFAULT_PRD_ID)
+        if payload_prd_id == owner_prd_id:
+            return task_dict
+
+        def reject(code: str) -> None:
+            raise self._task_created_recovery_refusal(
+                event,
+                owner_prd_id=owner_prd_id,
+                code=code,
+            )
+
+        # Never reinterpret an explicit partition value, including an explicit
+        # 'default'. Only the exact historical omission is compatibility-safe.
+        if "prd_id" in event.payload_json:
+            reject("explicit_prd_mismatch")
+        if payload_prd_id != DEFAULT_PRD_ID or owner_prd_id == DEFAULT_PRD_ID:
+            reject("payload_prd_mismatch")
+
+        legacy_base_keys = {
+            "id",
+            "feature_id",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "task_type",
+            "dependencies",
+            "conflict_groups",
+            "scores",
+            "acceptance_criteria",
+            "implementation_notes",
+            "verification",
+            "likely_files",
+            "parent_task_id",
+            "created_at",
+            "updated_at",
+        }
+        raw_keys = set(event.payload_json)
+        if raw_keys not in (legacy_base_keys, legacy_base_keys | {"claims"}):
+            reject("schema_mismatch")
+        if (
+            event.action != "task.created"
+            or event.target_kind != "task"
+            or event.target_id != task_id
+        ):
+            reject("event_identity_mismatch")
+
+        prefix = f"{owner_prd_id}:"
+        if not (
+            task_id.startswith(prefix)
+            and task_id != prefix
+            and feature_id.startswith(prefix)
+            and feature_id != prefix
+        ):
+            reject("noncanonical_owner_scope")
+
+        existing_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if existing_row is None:
+            reject("new_task")
+        try:
+            existing_task = self._row_to_task(existing_row, conn)
+        except Exception:
+            raise self._task_created_recovery_refusal(
+                event,
+                owner_prd_id=owner_prd_id,
+                code="invalid_task_payload",
+            ) from None
+        if (
+            existing_task.prd_id != owner_prd_id
+            or existing_task.feature_id != feature_id
+        ):
+            reject("stored_identity_mismatch")
+
+        recovered = dict(task_dict)
+        recovered["prd_id"] = owner_prd_id
+        try:
+            incoming_task = Task.model_validate(recovered)
+        except Exception:
+            raise self._task_created_recovery_refusal(
+                event,
+                owner_prd_id=owner_prd_id,
+                code="invalid_task_payload",
+            ) from None
+
+        try:
+            existing_data = existing_task.model_dump(mode="json")
+            incoming_data = incoming_task.model_dump(mode="json")
+        except Exception:
+            # Pydantic's serializer has a finite nesting depth and detects
+            # circular references. Recovery candidates cross an untrusted
+            # compatibility boundary, so neither serializer details nor raw
+            # nested values may escape it.
+            raise self._task_created_recovery_refusal(
+                event,
+                owner_prd_id=owner_prd_id,
+                code="invalid_task_payload",
+            ) from None
+        for mutable_key in ("dependencies", "updated_at"):
+            existing_data.pop(mutable_key, None)
+            incoming_data.pop(mutable_key, None)
+        if incoming_data != existing_data:
+            reject("not_dependency_only")
+
+        task_dict["prd_id"] = owner_prd_id
         return task_dict
 
     def _check_task_created(
@@ -6283,11 +6577,28 @@ class SqliteBackend:
         Was a validation guard inside the old handler (``raise
         TransactionAborted`` on an invalid Task); now rejects up front.
         """
-        _ = (conn, event)
-        task_dict = self._normalize_task_payload(payload.model_dump(mode="json"))
+        try:
+            payload_data = payload.model_dump(mode="json")
+        except Exception:
+            recovery_owner = self._task_created_recovery_owner(conn, event)
+            if recovery_owner is not None:
+                raise self._task_created_recovery_refusal(
+                    event,
+                    owner_prd_id=recovery_owner,
+                    code="invalid_task_payload",
+                ) from None
+            raise
+        task_dict = self._normalize_task_payload(conn, payload_data, event)
         try:
             Task.model_validate(task_dict)
         except Exception as exc:
+            recovery_owner = self._task_created_recovery_owner(conn, event)
+            if recovery_owner is not None:
+                raise self._task_created_recovery_refusal(
+                    event,
+                    owner_prd_id=recovery_owner,
+                    code="invalid_task_payload",
+                ) from None
             raise EventRejected(
                 f"task.created: invalid Task payload: {exc}"
             ) from exc
@@ -6306,7 +6617,19 @@ class SqliteBackend:
         The payload was already validated by ``_check_task_created``; the
         ``model_validate`` here is an infallible rebuild.
         """
-        task_dict = self._normalize_task_payload(payload.model_dump(mode="json"))
+        try:
+            payload_data = payload.model_dump(mode="json")
+        except Exception:
+            recovery_owner = self._task_created_recovery_owner(conn, event)
+            if recovery_owner is not None:
+                refusal = self._task_created_recovery_refusal(
+                    event,
+                    owner_prd_id=recovery_owner,
+                    code="invalid_task_payload",
+                )
+                raise TransactionAborted(f"_write_task_created: {refusal}") from None
+            raise
+        task_dict = self._normalize_task_payload(conn, payload_data, event)
         task = Task.model_validate(task_dict)
         self._insert_task_row(conn, task)
 
@@ -6394,7 +6717,7 @@ class SqliteBackend:
         self, subtask_data: Any, parent_task_id: str
     ) -> dict[str, Any]:
         """Force the parent id and coerce minimal scores/verification (pure)."""
-        normalized: dict[str, Any] = self._normalize_task_payload(dict(subtask_data))
+        normalized = self._normalize_task_payload_shape(dict(subtask_data))
         normalized["parent_task_id"] = parent_task_id
         return normalized
 

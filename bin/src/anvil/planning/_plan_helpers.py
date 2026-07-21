@@ -24,6 +24,8 @@ same `classify_orphans()` + `emit_prune_events()` and surface
 from __future__ import annotations
 
 import re
+from collections import defaultdict, deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -34,9 +36,19 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SAFE_DELETE_STATUSES",
+    "DEPENDENCY_BAD_OP_MESSAGE",
+    "DEPENDENCY_BATCH_LIMIT_MESSAGE",
     "BatchDepError",
     "BatchDepPlan",
+    "DEPENDENCY_CYCLE_MESSAGE",
+    "DEPENDENCY_EDGE_FORMAT_MESSAGE",
+    "DEPENDENCY_EDGE_LIST_FORMAT_MESSAGE",
+    "DEPENDENCY_PAIR_FORMAT_MESSAGE",
+    "DEPENDENCY_SELF_LOOP_MESSAGE",
+    "DEPENDENCY_UNKNOWN_SOURCE_MESSAGE",
+    "DEPENDENCY_UNKNOWN_TARGET_MESSAGE",
     "DepEdge",
+    "MAX_DEPENDENCY_EDGES_PER_BATCH",
     "OrphanClassification",
     "PruneResult",
     "classify_orphans",
@@ -236,7 +248,7 @@ def emit_prune_events(
 # Batch dependency-edit primitive (backlog T022/F007)
 # ---------------------------------------------------------------------------
 #
-# A single atomic, cycle-detecting primitive shared by the CLI ``deps`` command
+# A single cycle-detecting primitive shared by the CLI ``deps`` command
 # and the MCP ``edit_dependencies`` tool. The contract:
 #
 #   * Edges are ``(source, target)`` pairs meaning *source depends on target*
@@ -248,12 +260,47 @@ def emit_prune_events(
 #     IDs, self-loops, and any edit that would introduce a dependency *cycle*
 #     reject the entire batch with NO partial application.
 #
-# Atomicity note: the SQLite backend commits one event per ``append`` call, so
-# there is no multi-event SQL transaction. Atomicity is therefore enforced at
-# *this* layer — ``plan_batch_dep_edits`` does all validation up front and
-# raises ``BatchDepError`` before a single event is emitted, so a rejected
-# batch never mutates state. Only after planning succeeds does the caller emit
-# the (already-validated) per-task upserts.
+# Atomicity boundary: ``plan_batch_dep_edits`` validates the entire requested
+# graph before mutation, so a validation rejection never partially applies.
+# The SQLite backend still commits one event per ``append`` call, however, so a
+# failure while emitting an already-validated multi-task plan can leave earlier
+# task upserts committed. True whole-batch atomicity requires a single batch
+# event whose write handler revalidates the prior dependencies/graph cursor and
+# applies every task update in one SQLite transaction.
+
+DEPENDENCY_EVENT_REJECTED_CODE = "event_rejected"
+DEPENDENCY_EVENT_REJECTED_MESSAGE = (
+    "dependency update was rejected by state validation."
+)
+DEPENDENCY_EDGE_FORMAT_MESSAGE = (
+    "invalid dependency edge: use exactly one 'SOURCE->TARGET' separator; "
+    "'SOURCE:TARGET' is supported only for unscoped IDs."
+)
+DEPENDENCY_PAIR_FORMAT_MESSAGE = (
+    "invalid dependency edge: expected a two-element [source, target] string pair."
+)
+DEPENDENCY_EDGE_LIST_FORMAT_MESSAGE = (
+    "invalid dependency edges: expected a list of [source, target] string pairs."
+)
+MAX_DEPENDENCY_EDGES_PER_BATCH = 10_000
+DEPENDENCY_BATCH_LIMIT_MESSAGE = (
+    "dependency update exceeds the maximum batch size of 10000 edges."
+)
+DEPENDENCY_BAD_OP_MESSAGE = (
+    "invalid dependency operation: expected 'add' or 'remove'."
+)
+DEPENDENCY_UNKNOWN_SOURCE_MESSAGE = (
+    "dependency update references an unknown source task."
+)
+DEPENDENCY_UNKNOWN_TARGET_MESSAGE = (
+    "dependency update references an unknown target task."
+)
+DEPENDENCY_SELF_LOOP_MESSAGE = (
+    "self-dependency rejected: a task cannot depend on itself."
+)
+DEPENDENCY_CYCLE_MESSAGE = (
+    "dependency cycle rejected: the resulting graph contains a cycle."
+)
 
 
 @dataclass(frozen=True)
@@ -311,27 +358,38 @@ class BatchDepPlan:
 
 
 def parse_dep_edge(raw: str, op: str) -> DepEdge:
-    """Parse a ``"SOURCE:TARGET"`` (or ``"SOURCE->TARGET"``) edge spec.
+    """Parse a canonical ``"SOURCE->TARGET"`` dependency edge.
 
-    Accepts the two human-friendly separators a CLI user is likely to type:
-    a colon (``T002:T001``) or an arrow (``T002->T001``). Whitespace around the
-    IDs is stripped. Raises :class:`BatchDepError` (``code="bad_request"``) when
-    the spec is not exactly two non-empty tokens.
+    The arrow is required when IDs are PRD-scoped and therefore contain ``:``.
+    For backward compatibility, the colon shorthand (``T002:T001``) remains
+    supported where both IDs are unscoped. Whitespace around IDs is stripped.
+    Raises :class:`BatchDepError` (``code="bad_request"``) when the spec is not
+    exactly two non-empty tokens.
     """
-    if "->" in raw:
+    arrow_count = raw.count("->")
+    if arrow_count == 1:
         parts = raw.split("->", 1)
-    elif ":" in raw:
+    elif arrow_count > 1:
+        raise BatchDepError(
+            DEPENDENCY_EDGE_FORMAT_MESSAGE,
+            code="bad_request",
+        )
+    elif raw.count(":") == 1:
         parts = raw.split(":", 1)
+    elif ":" in raw:
+        raise BatchDepError(
+            DEPENDENCY_EDGE_FORMAT_MESSAGE,
+            code="bad_request",
+        )
     else:
         raise BatchDepError(
-            f"invalid edge spec {raw!r}: expected 'SOURCE:TARGET' "
-            "(source depends on target).",
+            DEPENDENCY_EDGE_FORMAT_MESSAGE,
             code="bad_request",
         )
     source, target = parts[0].strip(), parts[1].strip()
     if not source or not target:
         raise BatchDepError(
-            f"invalid edge spec {raw!r}: both SOURCE and TARGET are required.",
+            DEPENDENCY_EDGE_FORMAT_MESSAGE,
             code="bad_request",
         )
     return DepEdge(op=op, source=source, target=target)
@@ -347,33 +405,42 @@ def _has_cycle(dep_map: dict[str, list[str]]) -> list[str] | None:
     """
     WHITE, GREY, BLACK = 0, 1, 2
     colour: dict[str, int] = {node: WHITE for node in dep_map}
-    stack_path: list[str] = []
 
-    def visit(node: str) -> list[str] | None:
-        colour[node] = GREY
-        stack_path.append(node)
-        for dep in sorted(dep_map.get(node, [])):
+    # Use an explicit DFS stack rather than Python recursion. Real task graphs
+    # can legitimately exceed the interpreter recursion limit; depth alone is
+    # not a cycle and must not turn a valid edit into an internal error.
+    for start in sorted(dep_map):
+        if colour[start] != WHITE:
+            continue
+        colour[start] = GREY
+        path = [start]
+        path_index = {start: 0}
+        stack: list[tuple[str, Iterator[str]]] = [
+            (start, iter(sorted(dep_map.get(start, []))))
+        ]
+        while stack:
+            node, edge_iter = stack[-1]
+            try:
+                dep = next(edge_iter)
+            except StopIteration:
+                stack.pop()
+                path_index.pop(node, None)
+                path.pop()
+                colour[node] = BLACK
+                continue
+
             if dep not in colour:
                 # Edge to a task with no outgoing deps recorded — treat as a
                 # leaf; it cannot start a cycle on its own.
                 continue
             if colour[dep] == GREY:
-                # Back-edge: slice the path from the first occurrence of `dep`.
-                idx = stack_path.index(dep)
-                return [*stack_path[idx:], dep]
+                idx = path_index[dep]
+                return [*path[idx:], dep]
             if colour[dep] == WHITE:
-                found = visit(dep)
-                if found is not None:
-                    return found
-        stack_path.pop()
-        colour[node] = BLACK
-        return None
-
-    for node in sorted(dep_map):
-        if colour[node] == WHITE:
-            found = visit(node)
-            if found is not None:
-                return found
+                colour[dep] = GREY
+                path_index[dep] = len(path)
+                path.append(dep)
+                stack.append((dep, iter(sorted(dep_map.get(dep, [])))))
     return None
 
 
@@ -398,9 +465,24 @@ def plan_batch_dep_edits(
             runs to completion BEFORE the caller emits any event, a raised error
             guarantees no partial application.
     """
+    if len(edges) > MAX_DEPENDENCY_EDGES_PER_BATCH:
+        raise BatchDepError(DEPENDENCY_BATCH_LIMIT_MESSAGE, code="bad_request")
+
     known_ids = {t.id for t in tasks}
-    # Work on a mutable copy of every task's dependency list, preserving order.
-    dep_map: dict[str, list[str]] = {t.id: list(t.dependencies) for t in tasks}
+    # Each task keeps an append-only ordered entry list plus per-target queues
+    # of live positions. Membership, add, and remove are O(1), while the final
+    # compaction preserves exact list semantics (including duplicate legacy
+    # entries and remove-then-readd moving an edge to the end).
+    removed_sentinel = object()
+    dep_entries: dict[str, list[str | object]] = {}
+    dep_positions: dict[str, dict[str, deque[int]]] = {}
+    for task in tasks:
+        entries: list[str | object] = list(task.dependencies)
+        positions: dict[str, deque[int]] = defaultdict(deque)
+        for index, dependency in enumerate(task.dependencies):
+            positions[dependency].append(index)
+        dep_entries[task.id] = entries
+        dep_positions[task.id] = positions
     original: dict[str, list[str]] = {t.id: list(t.dependencies) for t in tasks}
 
     added: list[tuple[str, str]] = []
@@ -409,36 +491,50 @@ def plan_batch_dep_edits(
     for edge in edges:
         if edge.op not in {"add", "remove"}:
             raise BatchDepError(
-                f"unknown dependency op {edge.op!r}: expected 'add' or 'remove'.",
+                DEPENDENCY_BAD_OP_MESSAGE,
                 code="bad_request",
             )
         for tid, role in ((edge.source, "source"), (edge.target, "target")):
             if tid not in known_ids:
                 raise BatchDepError(
-                    f"{role} task {tid!r} does not exist.",
+                    (
+                        DEPENDENCY_UNKNOWN_SOURCE_MESSAGE
+                        if role == "source"
+                        else DEPENDENCY_UNKNOWN_TARGET_MESSAGE
+                    ),
                     code="unknown_task",
                 )
         if edge.source == edge.target:
             raise BatchDepError(
-                f"self-dependency rejected: task {edge.source!r} cannot depend "
-                "on itself.",
+                DEPENDENCY_SELF_LOOP_MESSAGE,
                 code="self_loop",
             )
 
-        deps = dep_map[edge.source]
+        entries = dep_entries[edge.source]
+        positions = dep_positions[edge.source]
         if edge.op == "add":
-            if edge.target not in deps:
-                deps.append(edge.target)
+            if not positions.get(edge.target):
+                positions[edge.target].append(len(entries))
+                entries.append(edge.target)
                 added.append((edge.source, edge.target))
         else:  # remove
-            if edge.target in deps:
-                deps.remove(edge.target)
+            live_positions = positions.get(edge.target)
+            if live_positions:
+                entries[live_positions.popleft()] = removed_sentinel
                 removed.append((edge.source, edge.target))
 
+    dep_map = {
+        task_id: [
+            dependency
+            for dependency in entries
+            if dependency is not removed_sentinel and isinstance(dependency, str)
+        ]
+        for task_id, entries in dep_entries.items()
+    }
     cycle = _has_cycle(dep_map)
     if cycle is not None:
         raise BatchDepError(
-            "dependency cycle rejected: " + " -> ".join(cycle) + ".",
+            DEPENDENCY_CYCLE_MESSAGE,
             code="cycle",
         )
 
@@ -483,6 +579,10 @@ def emit_batch_dep_events(
         task = tasks_by_id[task_id]
         now = clock.now()
         task_data = task.model_dump(mode="json")
+        # Task.prd_id is intentionally excluded from model_dump() so legacy API
+        # snapshots stay byte-identical. Event payloads are different: prd_id is
+        # ownership-critical and must be carried explicitly for named PRDs.
+        task_data["prd_id"] = task.prd_id
         task_data["dependencies"] = list(new_deps)
         task_data["updated_at"] = now.isoformat()
         draft = EventDraft(

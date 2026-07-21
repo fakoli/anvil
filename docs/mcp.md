@@ -406,17 +406,28 @@ stale-claim sweep. See
 
 ### `edit_dependencies`
 
-Applies a batch of dependency edits atomically, rejecting cycles. This is a
+Validates a batch of dependency edits before applying it, rejecting cycles. This is a
 planning-gated tool (hidden from the wire unless `ANVIL_MCP_PLANNING=1`; see
 [Tool surface gating](#tool-surface-gating)). It does not run stale-claim reaping — it
 only rewrites dependency lists, so no claim state is touched.
 
 `add` / `remove` are `[source, target]` pairs meaning *source depends on target*. The whole
 batch is validated up front before anything is written: any unknown task ID, self-dependency,
-or resulting cycle rejects the entire batch with no partial apply. Task status is preserved —
-`edit_dependencies` emits a `task.created` upsert per changed task that deliberately omits
-`status` from its write, so a claimed or in-progress task's dependency list can be edited
-without regressing its status.
+or resulting cycle rejects the entire batch with no mutation. After validation,
+`edit_dependencies` emits a separate `task.created` upsert for each changed task. Those
+appends are committed separately, so a later append failure can leave earlier task changes
+committed; persistence is not yet whole-batch atomic. Task status is preserved because each
+upsert deliberately omits `status` from its write, so a claimed or in-progress task's
+dependency list can be edited without regressing its status. True persistence atomicity
+requires the planned single batch event with prior-dependency/graph-cursor revalidation.
+If an individual backend append is rejected, MCP returns the fixed ToolError
+`dependency update was rejected by state validation.`; the CLI returns the same message
+with JSON error code `event_rejected`. Backend validation details are not exposed.
+Malformed pairs, unknown tasks, self-loops, and cycles also return fixed, bounded
+ToolErrors; raw edge and task values are never reflected in those errors or in
+server logs. The public schema remains `list[list[string]] | null`; runtime
+shape validation occurs before state access. A request is capped at 10,000
+total `add` plus `remove` pairs, and cap+1 receives a fixed ToolError.
 
 **Inputs**
 
@@ -450,6 +461,20 @@ already exists) are excluded from both.
 - `ToolError` — self-dependency (`source == target`).
 - `ToolError` — the batch would introduce a dependency cycle.
 - `ToolError` — state directory not found.
+- `ToolError` — an individual backend append was rejected. MCP returns the fixed message
+  `dependency update was rejected by state validation.` without the raw backend reason;
+  the CLI uses the same text and JSON error code `event_rejected`.
+
+When the rejected append is a legacy `task.created` ownership-recovery refusal, the
+backend exception text and its rejection line in `audit.jsonl` are each capped at 4096
+UTF-8 bytes. Raw actor, target, task/feature/owner identifiers, payload values, and
+Pydantic validation details are replaced by stable fingerprints. Repeating the same
+refused append produces the same refusal reason and fingerprints. The refused append
+adds nothing to `events.jsonl` and does not change the SQLite projection. When the audit
+destination is writable, each retry adds a new timestamped rejection line to
+`audit.jsonl`. An audit I/O failure is best-effort: it does not alter the stable refusal
+or permit state mutation. Any earlier per-task append that already committed remains
+committed.
 
 **When to call**: when a planner agent needs to correct inferred dependencies (add a missing
 edge, drop a spurious one) before promoting tasks to `ready`, without hand-editing state.db.

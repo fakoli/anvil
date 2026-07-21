@@ -2143,13 +2143,15 @@ def deps(
     add: list[str] = typer.Option(  # noqa: B008
         None,
         "--add",
-        help="Add a dependency edge 'SOURCE:TARGET' (source depends on "
-        "target). Repeatable; arrow form 'SOURCE->TARGET' also accepted.",
+        help="Add 'SOURCE->TARGET' (source depends on target). Repeatable. "
+        "The arrow is required for scoped IDs containing ':'; the "
+        "'SOURCE:TARGET' shorthand is only unambiguous for unscoped IDs.",
     ),
     remove: list[str] = typer.Option(  # noqa: B008
         None,
         "--remove",
-        help="Remove a dependency edge 'SOURCE:TARGET'. Repeatable.",
+        help="Remove 'SOURCE->TARGET'. Repeatable. The arrow is required for "
+        "scoped IDs containing ':'; 'SOURCE:TARGET' is unscoped shorthand.",
     ),
     actor: str = typer.Option(  # noqa: B008
         "anvil-cli",
@@ -2164,30 +2166,37 @@ def deps(
         hidden=True,
     ),
 ) -> None:
-    """Apply a batch of dependency edge edits atomically, rejecting cycles.
+    """Apply dependency edge edits after whole-batch validation.
 
-    Accepts multiple ``--add`` and ``--remove`` edges (each ``SOURCE:TARGET``,
-    meaning *source depends on target*) and applies them as ONE transaction:
-    the whole batch is validated up front — unknown tasks, self-dependencies,
-    and any edit that would introduce a dependency cycle reject the entire batch
-    with NO partial application. On success one ``task.created`` upsert is
-    emitted per task whose dependency set changed (status is preserved).
+    Accepts multiple ``--add`` and ``--remove`` edges. The canonical form is
+    ``SOURCE->TARGET``, meaning *source depends on target*. The arrow is required
+    when either ID is scoped and contains ``:``; ``SOURCE:TARGET`` remains an
+    unambiguous shorthand only for unscoped IDs. The whole request is validated
+    before mutation: unknown tasks, self-dependencies, or a resulting cycle
+    reject it with NO mutation. After validation, one ``task.created`` upsert is
+    appended per changed task (status is preserved). Those appends commit
+    separately, so a later append failure can leave earlier task changes
+    committed; successful multi-task persistence is not atomic.
 
     With ``--json`` emits ``{"ok": true, "command": "deps", "data":
     {"changed": [...], "added": [["S","T"], ...], "removed": [...]}}``. A
     rejected batch yields ``{"ok": false, ... "error": {"code": "cycle" |
-    "unknown_task" | "self_loop" | "bad_request", ...}}`` and exit 1.
+    "unknown_task" | "self_loop" | "bad_request" | "event_rejected", ...}}``
+    and exit 1. ``event_rejected`` uses fixed prose rather than exposing
+    backend validation details. A request may contain at most 10,000 edges;
+    larger batches fail before state access with ``bad_request``.
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
+        DEPENDENCY_BATCH_LIMIT_MESSAGE,
+        DEPENDENCY_EVENT_REJECTED_CODE,
+        DEPENDENCY_EVENT_REJECTED_MESSAGE,
+        MAX_DEPENDENCY_EDGES_PER_BATCH,
         BatchDepError,
         emit_batch_dep_events,
         parse_dep_edge,
         plan_batch_dep_edits,
     )
-
-    state_dir = _resolve_state_dir(cwd)
-    _require_state_dir(state_dir, command="deps", json_output=json_output)
 
     add = add or []
     remove = remove or []
@@ -2196,6 +2205,11 @@ def deps(
         if json_output:
             fail("deps", msg, code="bad_request")
         typer.echo(f"Error: {msg}", err=True)
+        raise typer.Exit(code=2)
+    if len(add) + len(remove) > MAX_DEPENDENCY_EDGES_PER_BATCH:
+        if json_output:
+            fail("deps", DEPENDENCY_BATCH_LIMIT_MESSAGE, code="bad_request")
+        typer.echo(f"Error: {DEPENDENCY_BATCH_LIMIT_MESSAGE}", err=True)
         raise typer.Exit(code=2)
 
     # Parse the edge specs first so a malformed spec fails before opening state.
@@ -2208,6 +2222,9 @@ def deps(
             fail("deps", exc.message, code=exc.code)
         typer.echo(f"Error: {exc.message}", err=True)
         raise typer.Exit(code=2) from exc
+
+    state_dir = _resolve_state_dir(cwd)
+    _require_state_dir(state_dir, command="deps", json_output=json_output)
 
     backend = _open_backend(state_dir)
     try:
@@ -2225,9 +2242,25 @@ def deps(
             typer.echo(f"Error: {exc.message}", err=True)
             raise typer.Exit(code=1) from exc
 
-        changed = emit_batch_dep_events(
-            backend, tasks_by_id, batch_plan, actor=actor, clock=clock
-        )
+        event_rejected = False
+        try:
+            changed = emit_batch_dep_events(
+                backend, tasks_by_id, batch_plan, actor=actor, clock=clock
+            )
+        except EventRejected:
+            # Leave the exception context before emitting either CLI surface;
+            # the backend reason may contain implementation details even though
+            # neither user-facing message does.
+            event_rejected = True
+        if event_rejected:
+            if json_output:
+                fail(
+                    "deps",
+                    DEPENDENCY_EVENT_REJECTED_MESSAGE,
+                    code=DEPENDENCY_EVENT_REJECTED_CODE,
+                )
+            typer.echo(f"Error: {DEPENDENCY_EVENT_REJECTED_MESSAGE}", err=True)
+            raise typer.Exit(code=1)
     finally:
         backend.close()
 

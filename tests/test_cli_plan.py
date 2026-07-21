@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,24 @@ import pytest
 from typer.testing import CliRunner
 
 from anvil.cli import app
+from anvil.clock import FrozenClock
+from anvil.planning._plan_helpers import (
+    DEPENDENCY_BATCH_LIMIT_MESSAGE,
+    DEPENDENCY_CYCLE_MESSAGE,
+    DEPENDENCY_EDGE_FORMAT_MESSAGE,
+    DEPENDENCY_SELF_LOOP_MESSAGE,
+    DEPENDENCY_UNKNOWN_SOURCE_MESSAGE,
+    MAX_DEPENDENCY_EDGES_PER_BATCH,
+    BatchDepError,
+    BatchDepPlan,
+    DepEdge,
+    emit_batch_dep_events,
+    parse_dep_edge,
+    plan_batch_dep_edits,
+)
 from anvil.planning.llm import LLMResponse
+from anvil.state.backend import EventRejected
+from anvil.state.models import Task
 
 runner = CliRunner()
 
@@ -546,9 +564,47 @@ def _status_of(tmp_path: Path, task_id: str) -> str:
 
 
 class TestBatchDepsApply:
-    """A batch of edges applies atomically (T022 acceptance: 10 edges at once)."""
+    """A validated request can apply many dependency edges in one invocation."""
 
-    def test_batch_deps_applies_ten_edges_atomically(self, tmp_path: Path) -> None:
+    def test_named_prd_is_explicit_in_dependency_upsert_payload(self) -> None:
+        """Dependency upserts preserve named-PRD ownership in the event log."""
+        now = datetime(2026, 7, 21, tzinfo=UTC)
+        task = Task(
+            id="named:T002",
+            feature_id="named:F001",
+            prd_id="named",
+            title="Named task",
+            description="desc",
+            dependencies=[],
+            created_at=now,
+            updated_at=now,
+        )
+
+        class CaptureBackend:
+            def __init__(self) -> None:
+                self.drafts: list[Any] = []
+
+            def append(self, draft: Any) -> None:
+                self.drafts.append(draft)
+
+        backend = CaptureBackend()
+        changed = emit_batch_dep_events(
+            backend,  # type: ignore[arg-type]
+            {task.id: task},
+            BatchDepPlan(
+                new_dependencies={task.id: ["named:T001"]},
+                added=[(task.id, "named:T001")],
+                removed=[],
+            ),
+            actor="test",
+            clock=FrozenClock(now),
+        )
+
+        assert changed == [task.id]
+        assert backend.drafts[0].payload_json["prd_id"] == "named"
+        assert backend.drafts[0].payload_json["dependencies"] == ["named:T001"]
+
+    def test_batch_deps_applies_ten_validated_edges(self, tmp_path: Path) -> None:
         """Ten add-edges across many tasks land in a single `deps` invocation."""
         # 11 independent tasks, no starting deps.
         ids = [f"T0{n:02d}" for n in range(1, 12)]
@@ -582,6 +638,49 @@ class TestBatchDepsApply:
         assert _deps_of(tmp_path, "T002") == ["T001"]
         # Seeded as 'ready'; the dependency edit must leave status untouched.
         assert _status_of(tmp_path, "T002") == "ready"
+
+    @pytest.mark.parametrize("json_output", [True, False])
+    def test_batch_deps_translates_backend_rejection(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        json_output: bool,
+    ) -> None:
+        """A backend refusal is stable on both CLI output surfaces."""
+        import anvil.planning._plan_helpers as plan_helpers
+
+        marker = "SYNTHETIC_BACKEND_VALIDATION_DETAIL"
+
+        def reject_emit(*args: Any, **kwargs: Any) -> list[str]:
+            _ = (args, kwargs)
+            raise EventRejected(marker)
+
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        monkeypatch.setattr(plan_helpers, "emit_batch_dep_events", reject_emit)
+        args = ["deps", "--add", "T002:T001"]
+        if json_output:
+            args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == 1
+        assert marker not in result.output
+        assert _deps_of(tmp_path, "T002") == []
+        if json_output:
+            envelope = json.loads(result.output)
+            assert envelope == {
+                "ok": False,
+                "command": "deps",
+                "error": {
+                    "code": "event_rejected",
+                    "message": "dependency update was rejected by state validation.",
+                },
+            }
+            assert len(result.output.encode("utf-8")) <= 4096
+        else:
+            assert result.output.strip() == (
+                "Error: dependency update was rejected by state validation."
+            )
 
     def test_batch_deps_mixed_add_and_remove(self, tmp_path: Path) -> None:
         """A single batch can both add and remove edges."""
@@ -682,6 +781,118 @@ class TestBatchDepsCycleRejected:
         assert envelope["error"]["code"] == "cycle"
         assert _deps_of(tmp_path, "T001") == []
 
+    def test_deep_graph_cycle_detection_is_iterative_and_correct(self) -> None:
+        """A 1,500-task chain is valid, while its closing edge is a cycle."""
+        now = datetime(2026, 7, 21, tzinfo=UTC)
+        ids = [f"T{index:04d}" for index in range(1_500)]
+        tasks = [
+            Task(
+                id=task_id,
+                feature_id="F001",
+                title=task_id,
+                description="deep graph",
+                dependencies=([ids[index + 1]] if index + 1 < len(ids) else []),
+                created_at=now,
+                updated_at=now,
+            )
+            for index, task_id in enumerate(ids)
+        ]
+
+        assert plan_batch_dep_edits(tasks, []) == BatchDepPlan()
+        with pytest.raises(BatchDepError) as raised:
+            plan_batch_dep_edits(
+                tasks,
+                [DepEdge(op="add", source=ids[-1], target=ids[0])],
+            )
+
+        assert raised.value.code == "cycle"
+        assert raised.value.message == DEPENDENCY_CYCLE_MESSAGE
+
+    def test_star_batch_at_public_limit_preserves_order(self) -> None:
+        """The largest supported star batch is linear and deterministically ordered."""
+        now = datetime(2026, 7, 21, tzinfo=UTC)
+        target_ids = [
+            f"T{index:05d}" for index in range(MAX_DEPENDENCY_EDGES_PER_BATCH)
+        ]
+        tasks = [
+            Task(
+                id="SOURCE",
+                feature_id="F001",
+                title="source",
+                description="large star source",
+                created_at=now,
+                updated_at=now,
+            ),
+            *[
+                Task(
+                    id=task_id,
+                    feature_id="F001",
+                    title=task_id,
+                    description="large star target",
+                    created_at=now,
+                    updated_at=now,
+                )
+                for task_id in target_ids
+            ],
+        ]
+        edges = [
+            DepEdge(op="add", source="SOURCE", target=target_id)
+            for target_id in target_ids
+        ]
+
+        batch = plan_batch_dep_edits(tasks, edges)
+
+        assert batch.new_dependencies == {"SOURCE": target_ids}
+        assert batch.added == [("SOURCE", target_id) for target_id in target_ids]
+
+    def test_ordered_membership_preserves_duplicate_remove_readd_semantics(self) -> None:
+        """Set-backed lookup retains legacy list ordering and duplicate behavior."""
+        now = datetime(2026, 7, 21, tzinfo=UTC)
+        source = Task(
+            id="SOURCE",
+            feature_id="F001",
+            title="source",
+            description="duplicate dependencies",
+            dependencies=["A", "A", "B"],
+            created_at=now,
+            updated_at=now,
+        )
+        targets = [
+            Task(
+                id=task_id,
+                feature_id="F001",
+                title=task_id,
+                description="target",
+                created_at=now,
+                updated_at=now,
+            )
+            for task_id in ("A", "B")
+        ]
+        edges = [
+            DepEdge(op="remove", source="SOURCE", target="A"),
+            DepEdge(op="add", source="SOURCE", target="A"),
+            DepEdge(op="remove", source="SOURCE", target="A"),
+            DepEdge(op="add", source="SOURCE", target="A"),
+        ]
+
+        batch = plan_batch_dep_edits([source, *targets], edges)
+
+        assert batch.new_dependencies == {"SOURCE": ["B", "A"]}
+        assert batch.removed == [("SOURCE", "A"), ("SOURCE", "A")]
+        assert batch.added == [("SOURCE", "A")]
+
+    def test_shared_planner_rejects_cap_plus_one_before_graph_work(self) -> None:
+        """The shared primitive independently enforces the public batch cap."""
+        edges = [
+            DepEdge(op="add", source="SOURCE", target="TARGET")
+        ] * (MAX_DEPENDENCY_EDGES_PER_BATCH + 1)
+
+        with pytest.raises(BatchDepError) as raised:
+            plan_batch_dep_edits([], edges)
+
+        assert raised.value.code == "bad_request"
+        assert raised.value.message == DEPENDENCY_BATCH_LIMIT_MESSAGE
+
 
 class TestBatchDepsValidation:
     """Edge-spec parsing and empty-batch guards."""
@@ -701,7 +912,7 @@ class TestBatchDepsValidation:
         assert json.loads(result.output)["error"]["code"] == "bad_request"
 
     def test_batch_deps_arrow_separator_accepted(self, tmp_path: Path) -> None:
-        """The 'SOURCE->TARGET' arrow form is accepted as well as the colon."""
+        """The canonical 'SOURCE->TARGET' arrow form is accepted."""
         _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
         result = _invoke_cmd(
             tmp_path, ["deps", "--add", "T002->T001", "--json"]
@@ -709,12 +920,254 @@ class TestBatchDepsValidation:
         assert result.exit_code == 0, result.output
         assert _deps_of(tmp_path, "T002") == ["T001"]
 
+    def test_batch_deps_arrow_preserves_scoped_ids(self) -> None:
+        """Colon-bearing PRD scopes remain part of both IDs with an arrow."""
+        edge = parse_dep_edge("named:T002->named:T001", "add")
+
+        assert edge.source == "named:T002"
+        assert edge.target == "named:T001"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "T002:named:T001",
+            "named:T002:T001",
+            "named:T002:named:T001",
+            "T002::T001",
+        ],
+    )
+    def test_batch_deps_parser_rejects_ambiguous_scoped_colon_form(
+        self, raw: str
+    ) -> None:
+        """Any extra colon fails closed with fixed arrow guidance."""
+        with pytest.raises(BatchDepError) as raised:
+            parse_dep_edge(raw, "add")
+
+        assert raised.value.code == "bad_request"
+        assert raised.value.message == DEPENDENCY_EDGE_FORMAT_MESSAGE
+        assert len(raised.value.message.encode("utf-8")) <= 4096
+        assert raw not in raised.value.message
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "T002:named:T001",
+            "named:T002:T001",
+            "named:T002:named:T001",
+        ],
+        ids=["default-to-named", "named-to-default", "named-to-named"],
+    )
+    @pytest.mark.parametrize("json_output", [True, False], ids=["json", "human"])
+    def test_batch_deps_cli_rejects_ambiguous_scoped_colon_without_mutation(
+        self, tmp_path: Path, raw: str, json_output: bool
+    ) -> None:
+        """Both CLI surfaces reject before touching events or dependencies."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        events_before = events_path.read_bytes()
+        args = ["deps", "--add", raw]
+        if json_output:
+            args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == (1 if json_output else 2)
+        assert events_path.read_bytes() == events_before
+        assert _deps_of(tmp_path, "T001") == []
+        assert _deps_of(tmp_path, "T002") == []
+        assert raw not in result.output
+        assert len(result.output.encode("utf-8")) <= 4096
+        if json_output:
+            assert json.loads(result.output) == {
+                "ok": False,
+                "command": "deps",
+                "error": {
+                    "code": "bad_request",
+                    "message": DEPENDENCY_EDGE_FORMAT_MESSAGE,
+                },
+            }
+        else:
+            assert result.output.strip() == (
+                f"Error: {DEPENDENCY_EDGE_FORMAT_MESSAGE}"
+            )
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "T001->T002->T003",
+            "T001->" + ("SYNTHETIC_ARROW_PAYLOAD" * 5_000) + "->T002",
+        ],
+        ids=["repeated-arrow", "huge-repeated-arrow"],
+    )
+    def test_batch_deps_parser_rejects_repeated_arrow(self, raw: str) -> None:
+        """Arrow syntax is exactly two tokens, even for attacker-sized input."""
+        with pytest.raises(BatchDepError) as raised:
+            parse_dep_edge(raw, "add")
+
+        assert raised.value.code == "bad_request"
+        assert raised.value.message == DEPENDENCY_EDGE_FORMAT_MESSAGE
+        assert len(raised.value.message.encode("utf-8")) <= 4096
+        assert raw not in raised.value.message
+        assert "SYNTHETIC_ARROW_PAYLOAD" not in raised.value.message
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "T001->T002->T003",
+            "T001->" + ("SYNTHETIC_ARROW_PAYLOAD" * 5_000) + "->T002",
+        ],
+        ids=["repeated-arrow", "huge-repeated-arrow"],
+    )
+    @pytest.mark.parametrize("json_output", [True, False], ids=["json", "human"])
+    def test_batch_deps_cli_rejects_repeated_arrow_without_mutation(
+        self, tmp_path: Path, raw: str, json_output: bool
+    ) -> None:
+        """Repeated arrows fail before state opens on both CLI surfaces."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", []), ("T003", [])])
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        events_before = events_path.read_bytes()
+        args = ["deps", "--add", raw]
+        if json_output:
+            args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == (1 if json_output else 2)
+        assert events_path.read_bytes() == events_before
+        for task_id in ("T001", "T002", "T003"):
+            assert _deps_of(tmp_path, task_id) == []
+        assert raw not in result.output
+        assert "SYNTHETIC_ARROW_PAYLOAD" not in result.output
+        assert len(result.output.encode("utf-8")) <= 4096
+        if json_output:
+            assert json.loads(result.output) == {
+                "ok": False,
+                "command": "deps",
+                "error": {
+                    "code": "bad_request",
+                    "message": DEPENDENCY_EDGE_FORMAT_MESSAGE,
+                },
+            }
+        else:
+            assert result.output.strip() == (
+                f"Error: {DEPENDENCY_EDGE_FORMAT_MESSAGE}"
+            )
+
+    @pytest.mark.parametrize(
+        ("case", "expected_code", "expected_message", "human_exit"),
+        [
+            ("malformed", "bad_request", DEPENDENCY_EDGE_FORMAT_MESSAGE, 2),
+            (
+                "unknown",
+                "unknown_task",
+                DEPENDENCY_UNKNOWN_SOURCE_MESSAGE,
+                1,
+            ),
+            ("self_loop", "self_loop", DEPENDENCY_SELF_LOOP_MESSAGE, 1),
+            ("cycle", "cycle", DEPENDENCY_CYCLE_MESSAGE, 1),
+        ],
+    )
+    @pytest.mark.parametrize("json_output", [True, False], ids=["json", "human"])
+    def test_batch_deps_hostile_diagnostics_are_bounded_and_redacted(
+        self,
+        tmp_path: Path,
+        case: str,
+        expected_code: str,
+        expected_message: str,
+        human_exit: int,
+        json_output: bool,
+    ) -> None:
+        """Every dependency rejection surface omits attacker-sized task IDs."""
+        marker = f"SECRET_{case.upper()}_TASK_ID"
+        hostile_id = marker + ("x" * 100_000)
+        if case == "malformed":
+            seeded = [("T001", [])]
+            raw = hostile_id
+        elif case == "unknown":
+            seeded = [("T001", [])]
+            raw = f"{hostile_id}->T001"
+        elif case == "self_loop":
+            seeded = [(hostile_id, [])]
+            raw = f"{hostile_id}->{hostile_id}"
+        else:
+            seeded = [(hostile_id, []), ("T001", [hostile_id])]
+            raw = f"{hostile_id}->T001"
+
+        _seed_dep_tasks(tmp_path, seeded)
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        events_before = events_path.read_bytes()
+        deps_before = {task_id: _deps_of(tmp_path, task_id) for task_id, _ in seeded}
+        args = ["deps", "--add", raw]
+        if json_output:
+            args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == (1 if json_output else human_exit)
+        assert marker not in result.output
+        assert len(result.output.encode("utf-8")) <= 4096
+        assert events_path.read_bytes() == events_before
+        assert {
+            task_id: _deps_of(tmp_path, task_id) for task_id, _ in seeded
+        } == deps_before
+        if json_output:
+            assert json.loads(result.output) == {
+                "ok": False,
+                "command": "deps",
+                "error": {
+                    "code": expected_code,
+                    "message": expected_message,
+                },
+            }
+        else:
+            assert result.output.strip() == f"Error: {expected_message}"
+
+    def test_batch_deps_accepts_exact_public_edge_limit(self, tmp_path: Path) -> None:
+        """Exactly 10,000 repeated edges remain a valid bounded request."""
+        _seed_dep_tasks(tmp_path, [("T001", []), ("T002", [])])
+        args = ["deps"]
+        for _ in range(MAX_DEPENDENCY_EDGES_PER_BATCH):
+            args.extend(["--add", "T002->T001"])
+        args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["added"] == [["T002", "T001"]]
+        assert _deps_of(tmp_path, "T002") == ["T001"]
+
+    def test_batch_deps_rejects_over_limit_before_state_access(
+        self, tmp_path: Path
+    ) -> None:
+        """Cap+1 fails with fixed JSON even when no state directory exists."""
+        args = ["deps"]
+        for _ in range(MAX_DEPENDENCY_EDGES_PER_BATCH + 1):
+            args.extend(["--add", "T002->T001"])
+        args.append("--json")
+
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == 1
+        assert json.loads(result.output) == {
+            "ok": False,
+            "command": "deps",
+            "error": {
+                "code": "bad_request",
+                "message": DEPENDENCY_BATCH_LIMIT_MESSAGE,
+            },
+        }
+        assert not (tmp_path / ".anvil").exists()
+
     def test_batch_deps_help_documents_options(self) -> None:
-        """`deps --help` surfaces --add and --remove."""
+        """`deps --help` surfaces options, canonical syntax, and scope caveat."""
         result = runner.invoke(app, ["deps", "--help"])
         assert result.exit_code == 0
         assert "--add" in result.output
         assert "--remove" in result.output
+        assert "SOURCE->TARGET" in result.output
+        assert "scoped IDs containing ':'" in result.output
+        assert "unscoped" in result.output
 
 
 # ---------------------------------------------------------------------------

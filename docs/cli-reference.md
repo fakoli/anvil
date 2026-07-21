@@ -1485,9 +1485,35 @@ flag list; full prose treatment may follow in a later pass.
   surface before planning (`--limit`/`-n`, `--json`); advisory only, never
   mutates state. This is a requirement-uncertainty report, distinct from the
   typed `A###` records authored under a PRD's `## Assumptions` section.
-- `anvil deps` — Apply a batch of dependency-edge edits (`--add`/`--remove
-  SOURCE:TARGET`, repeatable) atomically, rejecting the whole batch on any
-  cycle, unknown task, or self-loop.
+- `anvil deps` — Validate a batch of dependency-edge edits before mutation,
+  rejecting the whole request with no changes on any cycle, unknown task, or
+  self-loop. Use repeatable `--add SOURCE->TARGET` / `--remove SOURCE->TARGET`;
+  the arrow form is required when either scoped task ID contains `:`. The
+  `SOURCE:TARGET` shorthand remains supported only where both IDs are unscoped
+  and the separator is unambiguous. After prevalidation, each changed task is
+  persisted through a separate backend append. A later append failure can
+  therefore leave earlier task changes committed; successful multi-task
+  persistence is not atomic. If the backend refuses an individual append,
+  `deps --json` returns the fixed `event_rejected` message `dependency update
+  was rejected by state validation.`; human output uses the same text. Neither
+  surface exposes the raw backend reason. Malformed edges, unknown tasks,
+  self-loops, and cycles likewise return fixed, bounded diagnostics on both
+  surfaces; raw edge and task values are never reflected in an error. A batch
+  is capped at 10,000 total `--add` plus `--remove` edges; cap+1 is rejected
+  with fixed `bad_request` output before state access.
+
+  Ownership-recovery refusals have an additional diagnostic contract. When a
+  legacy missing-`prd_id` `task.created` upsert cannot be safely recovered, the
+  backend exception text and its rejection line in `audit.jsonl` are each
+  capped at 4096 UTF-8 bytes. Raw actor, target, task/feature/owner identifiers,
+  payload values, and Pydantic validation details are replaced by stable
+  fingerprints. Retrying the same refused append produces the same refusal
+  reason and fingerprints; the refused append adds nothing to `events.jsonl`
+  and does not change the SQLite projection. When the audit destination is
+  writable, each retry adds a new timestamped rejection line to `audit.jsonl`.
+  An audit I/O failure is best-effort: it does not alter the stable refusal or
+  permit state mutation. Any earlier per-task append that already committed
+  remains committed.
 
 **Diagnostics and health** (read-only)
 
