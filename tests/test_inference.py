@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import sys
 import time
+from types import SimpleNamespace
 from collections.abc import Callable
 
 import pytest
@@ -331,7 +332,11 @@ class TestInferDependencies:
             ("Σ", "ς"),
             ("ẞ", "ß"),
             ("I", "ı"),
+            ("İ", "i"),
             ("K", "K"),
+            ("ſ", "S"),
+            ("µ", "Μ"),
+            ("ǅ", "Ǆ"),
             ("Ԥ", "ԥ"),
             ("𐐀", "𐐨"),
         ],
@@ -394,7 +399,7 @@ class TestInferDependencies:
         assert inference_module._host_paths_equal(right, left) is expected
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
-    def test_windows_comparator_matches_representative_native_oracle(self) -> None:
+    def test_windows_keys_and_registry_match_systematic_native_oracle(self) -> None:
         import ctypes
 
         compare = ctypes.WinDLL(
@@ -409,10 +414,11 @@ class TestInferDependencies:
         ]
         compare.restype = ctypes.c_int
         codepoints = [
-            *range(0x20, 0xD800, 521),
-            *range(0xE000, 0x10000, 521),
-            *range(0x10000, 0x110000, 8191),
+            *range(0x20, 0xD800, 31),
+            *range(0xE000, 0x10000, 31),
+            *range(0x10000, 0x110000, 1301),
         ]
+        checked_pairs = 0
 
         for codepoint in codepoints:
             character = chr(codepoint)
@@ -427,9 +433,117 @@ class TestInferDependencies:
             for candidate in candidates:
                 native = compare(character, -1, candidate, -1, 1)
                 assert native != 0
-                assert inference_module._host_paths_equal(
-                    character, candidate
-                ) is (native == 2)
+                expected = native == 2
+                assert inference_module._host_paths_equal(character, candidate) is expected
+                if expected:
+                    assert inference_module._cached_windows_path_key(
+                        character
+                    ) == inference_module._cached_windows_path_key(candidate)
+                registry = inference_module._PathIdentityRegistry()
+                assert (registry.intern(character) == registry.intern(candidate)) is expected
+                checked_pairs += 1
+
+        assert checked_pairs >= 5_000
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_windows_native_key_collision_is_verified_by_ordinal_comparison(
+        self,
+    ) -> None:
+        registry = inference_module._PathIdentityRegistry()
+
+        upper = registry.intern("src/𐐀.py")
+        lower = registry.intern("src/𐐨.py")
+
+        assert inference_module._cached_windows_path_key(
+            "src/𐐀.py"
+        ) == inference_module._cached_windows_path_key("src/𐐨.py")
+        assert upper != lower
+
+    def test_windows_loader_failure_is_typed_and_bounded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import ctypes
+
+        def fail_loader(*args: object, **kwargs: object) -> object:
+            raise OSError("sensitive raw loader details")
+
+        monkeypatch.setattr(ctypes, "WinDLL", fail_loader, raising=False)
+        inference_module._load_windows_path_api.cache_clear()
+        with pytest.raises(BundlePlanningError) as error:
+            inference_module._load_windows_path_api()
+        assert str(error.value) == "Windows path API unavailable (library load failed)"
+        assert "sensitive" not in str(error.value)
+        inference_module._load_windows_path_api.cache_clear()
+
+    def test_windows_missing_symbol_is_typed_and_bounded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import ctypes
+
+        kernel = SimpleNamespace(CompareStringOrdinal=lambda *args: 2)
+        monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+        inference_module._load_windows_path_api.cache_clear()
+        with pytest.raises(BundlePlanningError) as error:
+            inference_module._load_windows_path_api()
+        assert str(error.value) == "Windows path API unavailable (required symbol missing)"
+        inference_module._load_windows_path_api.cache_clear()
+
+    def test_windows_signature_configuration_failure_is_typed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import ctypes
+
+        class RejectSignature:
+            def __call__(self, *args: object) -> int:
+                return 2
+
+            def __setattr__(self, name: str, value: object) -> None:
+                raise TypeError("raw signature failure")
+
+        kernel = SimpleNamespace(
+            CompareStringOrdinal=RejectSignature(),
+            LCMapStringEx=RejectSignature(),
+        )
+        monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+        inference_module._load_windows_path_api.cache_clear()
+        with pytest.raises(BundlePlanningError) as error:
+            inference_module._load_windows_path_api()
+        assert str(error.value) == (
+            "Windows path API unavailable (signature configuration failed)"
+        )
+        inference_module._load_windows_path_api.cache_clear()
+
+    def test_windows_runtime_zero_results_are_typed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import ctypes
+
+        class NativeFunction:
+            argtypes: object = None
+            restype: object = None
+
+            def __init__(self, result: int) -> None:
+                self.result = result
+
+            def __call__(self, *args: object) -> int:
+                return self.result
+
+        kernel = SimpleNamespace(
+            CompareStringOrdinal=NativeFunction(0),
+            LCMapStringEx=NativeFunction(0),
+        )
+        monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+        inference_module._load_windows_path_api.cache_clear()
+        api = inference_module._load_windows_path_api()
+        with pytest.raises(BundlePlanningError, match="case mapping failed"):
+            api.map_key("src/file.py")
+        with pytest.raises(BundlePlanningError, match="comparison failed"):
+            api.equivalent("a", "A")
+        inference_module._load_windows_path_api.cache_clear()
 
     def test_non_windows_policy_uses_exact_identity(
         self,
@@ -439,6 +553,11 @@ class TestInferDependencies:
             inference_module,
             "_uses_windows_path_identity",
             lambda: False,
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_load_windows_path_api",
+            lambda: pytest.fail("non-Windows policy loaded a native API"),
         )
         tasks = [
             _make_task("T001", ["src/Widget.py"]),
@@ -461,6 +580,47 @@ class TestInferDependencies:
             ("T002",),
         ]
         assert [task.model_dump(mode="python") for task in tasks] == before
+
+    def test_infer_all_reuses_one_canonical_scope_pass(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        original = inference_module._canonical_file_scopes
+        calls = 0
+
+        def counting_scopes(
+            tasks: list[Task],
+        ) -> tuple[dict[str, frozenset[int]], dict[int, str]]:
+            nonlocal calls
+            calls += 1
+            return original(tasks)
+
+        monkeypatch.setattr(inference_module, "_canonical_file_scopes", counting_scopes)
+        infer_all(
+            [
+                _make_task("T001", ["src/a.py"]),
+                _make_task("T002", ["src/a.py", "src/b.py"]),
+            ]
+        )
+
+        assert calls == 1
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows path policy")
+    def test_windows_registry_handles_5000_unique_paths_without_cache_thrash(
+        self,
+    ) -> None:
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        registry = inference_module._PathIdentityRegistry()
+        started = time.perf_counter()
+
+        identities = [registry.intern(f"src/file-{index:04d}.py") for index in range(5_000)]
+
+        assert len(set(identities)) == 5_000
+        assert inference_module._cached_windows_path_key.cache_info().misses == 5_000
+        assert inference_module._cached_windows_path_key.cache_info().currsize == 5_000
+        assert inference_module._cached_windows_paths_equal.cache_info().misses == 0
+        assert time.perf_counter() - started < 2.0
 
     @pytest.mark.parametrize(
         "portable_path",

@@ -220,6 +220,7 @@ def _canonical_project_path(path: object) -> str:
 
 
 _WINDOWS_COMPARISON_CACHE_SIZE = 131_072
+_LCMAP_UPPERCASE = 0x00000200
 
 
 def _uses_windows_path_identity() -> bool:
@@ -227,38 +228,108 @@ def _uses_windows_path_identity() -> bool:
     return sys.platform == "win32"
 
 
-@lru_cache(maxsize=1)
-def _load_windows_path_comparator() -> Callable[[str, str], bool]:
-    """Load a narrow ``CompareStringOrdinal(ignoreCase=TRUE)`` wrapper."""
-    import ctypes
+class _WindowsPathApi(NamedTuple):
+    map_key: Callable[[str], str]
+    equivalent: Callable[[str, str], bool]
 
-    compare = ctypes.WinDLL("kernel32", use_last_error=True).CompareStringOrdinal
-    compare.argtypes = [
-        ctypes.c_wchar_p,
-        ctypes.c_int,
-        ctypes.c_wchar_p,
-        ctypes.c_int,
-        ctypes.c_int,
-    ]
-    compare.restype = ctypes.c_int
+
+@lru_cache(maxsize=1)
+def _load_windows_path_api() -> _WindowsPathApi:
+    """Load fail-closed wrappers for the two authoritative Win32 operations."""
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except Exception:
+        raise BundlePlanningError(
+            "Windows path API unavailable (library load failed)"
+        ) from None
+
+    try:
+        compare = kernel32.CompareStringOrdinal
+        map_string = kernel32.LCMapStringEx
+    except Exception:
+        raise BundlePlanningError(
+            "Windows path API unavailable (required symbol missing)"
+        ) from None
+
+    try:
+        compare.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        compare.restype = ctypes.c_int
+        map_string.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_wchar_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_ssize_t,
+        ]
+        map_string.restype = ctypes.c_int
+    except Exception:
+        raise BundlePlanningError(
+            "Windows path API unavailable (signature configuration failed)"
+        ) from None
+
+    def map_key(path: str) -> str:
+        # LOCALE_NAME_INVARIANT plus LCMAP_UPPERCASE, without
+        # LCMAP_LINGUISTIC_CASING, requests Windows' file-system casing rules.
+        try:
+            required = map_string(
+                "", _LCMAP_UPPERCASE, path, -1, None, 0, None, None, 0
+            )
+            if required == 0:
+                raise BundlePlanningError("Windows path case mapping failed")
+            buffer = ctypes.create_unicode_buffer(required)
+            written = map_string(
+                "",
+                _LCMAP_UPPERCASE,
+                path,
+                -1,
+                buffer,
+                required,
+                None,
+                None,
+                0,
+            )
+            if written == 0:
+                raise BundlePlanningError("Windows path case mapping failed")
+            return buffer.value
+        except BundlePlanningError:
+            raise
+        except Exception:
+            raise BundlePlanningError("Windows path case mapping failed") from None
 
     def equivalent(left: str, right: str) -> bool:
         # Portable paths reject NUL, so null-terminated comparison is exact and
         # lets Win32 count supplementary characters in native UTF-16 units.
-        result = compare(left, -1, right, -1, 1)
+        try:
+            result = compare(left, -1, right, -1, 1)
+        except Exception:
+            raise BundlePlanningError("Windows path comparison failed") from None
         if result == 0:
-            error = ctypes.get_last_error()
-            raise BundlePlanningError(
-                f"Windows path comparison failed with error {error}"
-            )
+            raise BundlePlanningError("Windows path comparison failed")
         return result == 2  # CSTR_EQUAL
 
-    return equivalent
+    return _WindowsPathApi(map_key=map_key, equivalent=equivalent)
 
 
 @lru_cache(maxsize=_WINDOWS_COMPARISON_CACHE_SIZE)
 def _cached_windows_paths_equal(left: str, right: str) -> bool:
-    return _load_windows_path_comparator()(left, right)
+    return _load_windows_path_api().equivalent(left, right)
+
+
+@lru_cache(maxsize=_WINDOWS_COMPARISON_CACHE_SIZE)
+def _cached_windows_path_key(path: str) -> str:
+    return _load_windows_path_api().map_key(path)
 
 
 def _host_paths_equal(left: str, right: str) -> bool:
@@ -278,12 +349,12 @@ def _host_paths_equal(left: str, right: str) -> bool:
 
 
 class _PathIdentityRegistry:
-    """Intern exact path-equivalence classes without inventing a hash key."""
+    """Intern host path identities using a native key plus verified collisions."""
 
     def __init__(self) -> None:
         self._windows_identity = _uses_windows_path_identity()
         self._exact: dict[str, int] = {}
-        self._representatives: list[tuple[str, int]] = []
+        self._native_buckets: dict[str, list[tuple[str, int]]] = {}
         self._next_identity = 0
 
     def intern(self, path: str) -> int:
@@ -291,8 +362,11 @@ class _PathIdentityRegistry:
         if existing is not None:
             return existing
 
+        bucket: list[tuple[str, int]] | None = None
         if self._windows_identity:
-            for representative, identity in self._representatives:
+            native_key = _cached_windows_path_key(path)
+            bucket = self._native_buckets.setdefault(native_key, [])
+            for representative, identity in bucket:
                 if _host_paths_equal(path, representative):
                     self._exact[path] = identity
                     return identity
@@ -300,8 +374,8 @@ class _PathIdentityRegistry:
         identity = self._next_identity
         self._next_identity += 1
         self._exact[path] = identity
-        if self._windows_identity:
-            self._representatives.append((path, identity))
+        if bucket is not None:
+            bucket.append((path, identity))
         return identity
 
 
@@ -643,15 +717,21 @@ def infer_dependencies(tasks: list[Task]) -> list[Task]:
     """
     if not tasks:
         return []
+    file_sets, _ = _canonical_file_scopes(tasks)
+    return _infer_dependencies_with_scopes(tasks, file_sets)
 
+
+def _infer_dependencies_with_scopes(
+    tasks: list[Task],
+    file_sets: dict[str, frozenset[int]],
+) -> list[Task]:
+    """Infer dependencies using caller-validated, reusable file scopes."""
     # Build a map from task ID to its file set, then find all strict-subset edges.
     # An edge A → B means "A.files ⊂ B.files (strict)", so B depends on A.
     # Wait — task spec says: "if Task A's likely_files is a strict subset of
     # Task B's, A depends on B (because B is a broader change that A specialises;
     # the broader work usually goes first)."
     # So: A_files ⊂ B_files (strict) → A.dependencies.append(B.id)
-
-    file_sets, _ = _canonical_file_scopes(tasks)
 
     # Collect dependency edges: new_deps[task_id] = set of dependency IDs.
     new_deps: dict[str, set[str]] = {t.id: set(t.dependencies) for t in tasks}
@@ -717,8 +797,16 @@ def infer_conflict_groups(
     """
     if not tasks:
         return [], []
-
     file_sets, display_path = _canonical_file_scopes(tasks)
+    return _infer_conflict_groups_with_scopes(tasks, file_sets, display_path)
+
+
+def _infer_conflict_groups_with_scopes(
+    tasks: list[Task],
+    file_sets: dict[str, frozenset[int]],
+    display_path: dict[int, str],
+) -> tuple[list[Task], list[ConflictGroup]]:
+    """Infer conflicts using caller-validated, reusable file scopes."""
 
     # Map task ID → set of conflict-group IDs it belongs to.
     task_conflict_groups: dict[str, set[str]] = {t.id: set() for t in tasks}
@@ -803,8 +891,13 @@ def infer_all(tasks: list[Task]) -> InferenceResult:
             portable.  Validation fails before an ``InferenceResult`` is returned
             and never mutates the input tasks.
     """
-    tasks_with_deps = infer_dependencies(tasks)
-    tasks_with_all, conflict_groups = infer_conflict_groups(tasks_with_deps)
+    if not tasks:
+        return InferenceResult(tasks=[], conflict_groups=[])
+    file_sets, display_path = _canonical_file_scopes(tasks)
+    tasks_with_deps = _infer_dependencies_with_scopes(tasks, file_sets)
+    tasks_with_all, conflict_groups = _infer_conflict_groups_with_scopes(
+        tasks_with_deps, file_sets, display_path
+    )
     return InferenceResult(tasks=tasks_with_all, conflict_groups=conflict_groups)
 
 
