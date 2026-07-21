@@ -6915,6 +6915,31 @@ def _doctor_json(result) -> dict:  # type: ignore[no-untyped-def]
 class TestDoctorHealthy:
     """A healthy project: doctor exits 0 with no ERROR-level findings."""
 
+    @pytest.mark.parametrize("prd_id", [" Release ", "   "])
+    def test_doctor_preflight_rejects_inexact_prd_id_without_fallback(
+        self, tmp_path: Path, prd_id: str
+    ) -> None:
+        _do_init(tmp_path)
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["doctor", "--preflight", "--prd", prd_id, "--json"],
+        )
+
+        assert result.exit_code == 1, result.output
+        env = _doctor_json(result)
+        finding = next(
+            item
+            for item in env["data"]["findings"]
+            if item["check"] == "prd_parse"
+        )
+        assert finding["severity"] == "error"
+        assert finding["message"] == "PRD id is invalid"
+        assert finding["detail"] == {
+            "prd_id": prd_id,
+            "code": "invalid_prd_id",
+        }
+
     def test_doctor_clean_project_exits_zero(self, tmp_path: Path) -> None:
         _do_init(tmp_path)
         result = _invoke_cmd(tmp_path, ["doctor"])

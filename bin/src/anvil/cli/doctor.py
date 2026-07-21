@@ -262,14 +262,10 @@ def _preflight_findings(
                 )
             )
 
-    # Resolve which partition to check. The shared sentinel rule: an explicit
-    # --prd / $ANVIL_PRD wins; otherwise the default partition. resolve_prd_id
-    # needs an open backend; fall back to the raw value on any hiccup so the
-    # probe still runs against SOME file rather than dying on resolution.
-    # PRD_OPTION already carries $ANVIL_PRD into ``prd``, and the explicit
-    # tier of resolve_prd_id is a pure strip() — no backend needed for a
-    # read-only probe (review finding: the backend open was near-redundant).
-    prd_id = prd.strip() if prd and prd.strip() else "default"
+    # Resolve which partition to check. An explicit --prd / $ANVIL_PRD wins
+    # byte-for-byte; otherwise select the default partition. The shared source
+    # selector applies the authoritative wire-identity validation below.
+    prd_id = prd if prd is not None else "default"
 
     try:
         prd_path = selected_prd_source_path(state_dir, prd_id)
