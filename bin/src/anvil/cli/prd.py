@@ -10,14 +10,17 @@ from anvil.cli._helpers import (
     _DEFAULT_PRD_IDS,
     _PRD_FILENAME,
     PRD_OPTION,
+    PrdSourceIngestError,
     _get_project_id,
     _open_backend,
     _require_state_dir,
     _resolve_state_dir,
     canonical_prd_id,
     display_path,
+    ingest_prd_source,
     prd_source_path,
     resolve_prd_id,
+    validate_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 from anvil.state.backend import EventRejected
@@ -76,27 +79,25 @@ def prd_parse(
     # sentinel) keeps bare ids and the default partition, byte-identical to
     # the pre-multi-PRD behaviour. ``--file`` always reads the given path but
     # still honours ``--prd`` for the partition.
-    parse_prd_id = prd if prd else "prd"
-
-    if file is not None:
-        prd_path = file
-    else:
-        prd_path = prd_source_path(state_dir, parse_prd_id)
-    prd_display = display_path(prd_path)
-    if not prd_path.exists():
-        typer.echo(
-            f"Error: PRD file not found at {prd_display}. "
-            "Author your PRD there or pass --file PATH.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
+    source_label: str | None = None
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        reason = exc.strerror or exc.__class__.__name__
-        typer.echo(f"Error: cannot read {prd_display}: {reason}", err=True)
+        parse_prd_id = validate_prd_id(prd if prd else "prd")
+        if file is not None:
+            prd_path = file
+        else:
+            prd_path = prd_source_path(state_dir, parse_prd_id)
+            source_label = (
+                _PRD_FILENAME
+                if parse_prd_id in _DEFAULT_PRD_IDS
+                else f"prds/{parse_prd_id}.md"
+            )
+        source = ingest_prd_source(prd_path)
+    except PrdSourceIngestError as exc:
+        suffix = f": {source_label}" if source_label is not None else ""
+        typer.echo(f"Error: {exc.message}{suffix}", err=True)
         raise typer.Exit(code=1) from exc
+    prd_display = display_path(prd_path)
+    markdown = source.markdown
 
     result = parse_prd(markdown, prd_id=parse_prd_id)
 
@@ -627,6 +628,7 @@ def prd_find_decisions(
     """
     from anvil.planning.decisions import (
         DecisionKind,
+        UnresolvedDecision,
         find_unresolved_decisions,
     )
     from anvil.planning.template import parse_prd
@@ -742,7 +744,7 @@ def prd_find_decisions(
     # Group by kind, preserving the canonical order needs_decision →
     # open_question → missing_field. The detector already returns items in
     # that order so we can partition cheaply.
-    by_kind: dict[DecisionKind, list] = {
+    by_kind: dict[DecisionKind, list[UnresolvedDecision]] = {
         DecisionKind.needs_decision: [],
         DecisionKind.open_question: [],
         DecisionKind.missing_field: [],

@@ -6,9 +6,11 @@ common dependency, not a consumer. Circular imports are impossible by design.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,6 +30,23 @@ _STATE_DIR_NAME = ".anvil"
 _PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
 _PRD_FILENAME = "prd.md"
 _PRDS_DIR_NAME = "prds"
+
+# Version 1 admits at most 2 MiB of exact PRD source bytes.  Read paths use a
+# bounded ``limit + 1`` probe so an over-limit source is refused before
+# unbounded allocation growth or UTF-8 decoding.
+MAX_PRD_SOURCE_BYTES_V1 = 2_097_152
+_PRD_ID_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$")
+_WINDOWS_RESERVED_PRD_STEMS = {
+    "AUX",
+    "CLOCK$",
+    "CON",
+    "CONIN$",
+    "CONOUT$",
+    "NUL",
+    "PRN",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 # The PRD ids that denote the implicit/default PRD. Both ``DEFAULT_PRD_ID``
 # ('default', the stored model id) and the parse-time sentinel ('prd', what
@@ -162,6 +181,27 @@ class PrdAmbiguityError(click.ClickException):
     exit_code = 1
 
 
+class PrdSourceIngestError(click.ClickException):
+    """Bounded, path-safe refusal from PRD source identity or ingestion."""
+
+    exit_code = 1
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class IngestedPrdSource:
+    """One exact, bounded PRD source read with no retained filesystem path."""
+
+    source_bytes: bytes
+    markdown: str
+    source_sha256: str
+    source_size_bytes: int
+    source_encoding: str = "utf-8"
+
+
 def resolve_prd_id(backend: SqliteBackend, explicit: str | None = None) -> str:
     """Resolve which PRD partition a command targets.
 
@@ -250,6 +290,26 @@ def canonical_prd_id(prd_id: str) -> str:
     from anvil.state.models import DEFAULT_PRD_ID
 
     return DEFAULT_PRD_ID if prd_id in _DEFAULT_PRD_IDS else prd_id
+
+
+def validate_prd_id(prd_id: str) -> str:
+    """Return a plain canonical source identifier or refuse before path use.
+
+    The closed ASCII shape is shared with the public Version 1 read contract.
+    In particular, path separators, drive/URI colons, NUL/control characters,
+    absolute/traversal spellings, and leading/trailing punctuation never reach
+    filesystem interpolation.
+    """
+    if not isinstance(prd_id, str):
+        raise PrdSourceIngestError("invalid_prd_id", "PRD id is invalid")
+    plain_prd_id = str.__str__(prd_id)
+    windows_stem = plain_prd_id.partition(".")[0].upper()
+    if (
+        not _PRD_ID_PATTERN.fullmatch(plain_prd_id)
+        or windows_stem in _WINDOWS_RESERVED_PRD_STEMS
+    ):
+        raise PrdSourceIngestError("invalid_prd_id", "PRD id is invalid")
+    return plain_prd_id
 
 # T005/B07: env override pointing at the PROJECT ROOT (the directory that
 # *contains* .anvil/). Resolution precedence — applied identically by
@@ -514,9 +574,95 @@ def prd_source_path(state_dir: Path, prd_id: str) -> Path:
     Returns:
         Absolute Path to the PRD's markdown source.
     """
-    if prd_id in _DEFAULT_PRD_IDS:
-        return state_dir / _PRD_FILENAME
-    return state_dir / _PRDS_DIR_NAME / f"{prd_id}.md"
+    validated_id = validate_prd_id(prd_id)
+    if validated_id in _DEFAULT_PRD_IDS:
+        source_root = state_dir
+        candidate = state_dir / _PRD_FILENAME
+    else:
+        source_root = state_dir / _PRDS_DIR_NAME
+        candidate = source_root / f"{validated_id}.md"
+
+    # Resolve only after the identifier is proven non-path-shaped.  This
+    # follows any existing parent/file symlinks for a containment comparison,
+    # but does not open or read the target.  Return the logical candidate so
+    # existing portable display behavior remains unchanged.
+    try:
+        resolved_state_dir = state_dir.resolve(strict=False)
+        resolved_root = source_root.resolve(strict=False)
+        resolved_candidate = candidate.resolve(strict=False)
+    except OSError as exc:
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "PRD source is unavailable or unreadable",
+        ) from exc
+    expected_root = (
+        resolved_state_dir
+        if validated_id in _DEFAULT_PRD_IDS
+        else resolved_state_dir / _PRDS_DIR_NAME
+    )
+    if (
+        resolved_root != expected_root
+        or not resolved_candidate.is_relative_to(resolved_root)
+    ):
+        raise PrdSourceIngestError(
+            "source_outside_prd_directory",
+            "PRD source escapes its contained source directory",
+        )
+    return candidate
+
+
+def ingest_prd_source(
+    source_path: Path,
+    *,
+    max_bytes: int = MAX_PRD_SOURCE_BYTES_V1,
+) -> IngestedPrdSource:
+    """Read, bound, hash, and strict-decode one exact PRD source.
+
+    ``Path.read_text`` is intentionally forbidden here because it applies
+    universal-newline translation.  A single binary ``limit + 1`` probe keeps
+    allocation bounded and proves an overrun before decoding or any caller
+    opens a mutation-capable backend.
+    """
+    if (
+        type(max_bytes) is not int
+        or max_bytes < 1
+        or max_bytes > MAX_PRD_SOURCE_BYTES_V1
+    ):
+        raise ValueError("PRD source byte limit must be within the Version 1 ceiling")
+
+    try:
+        with source_path.open("rb") as stream:
+            source_bytes = stream.read(max_bytes + 1)
+    except FileNotFoundError as exc:
+        raise PrdSourceIngestError(
+            "source_not_found",
+            "PRD source not found",
+        ) from exc
+    except OSError as exc:
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "cannot read PRD source",
+        ) from exc
+
+    if len(source_bytes) > max_bytes:
+        raise PrdSourceIngestError(
+            "source_limit_exceeded",
+            "PRD source exceeds the configured byte limit",
+        )
+    try:
+        markdown = source_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise PrdSourceIngestError(
+            "source_invalid_utf8",
+            "PRD source is not valid UTF-8",
+        ) from exc
+
+    return IngestedPrdSource(
+        source_bytes=source_bytes,
+        markdown=markdown,
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        source_size_bytes=len(source_bytes),
+    )
 
 
 def display_path(path: Path) -> str:
