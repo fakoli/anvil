@@ -154,6 +154,7 @@ def _canonical_project_path(path: str) -> str:
         not candidate
         or candidate.startswith("/")
         or ":" in candidate
+        or "\0" in candidate
     ):
         raise BundlePlanningError(
             f"bundle planning requires a project-relative file path: {path!r}"

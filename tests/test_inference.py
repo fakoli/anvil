@@ -142,6 +142,7 @@ class TestInferDependencies:
             "C:/absolute.py",
             "C:drive-relative.py",
             "src/file.py:stream",
+            "src/null\0byte.py",
         ],
     )
     @pytest.mark.parametrize(
