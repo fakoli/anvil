@@ -231,16 +231,48 @@ def test_cli_reference_deps_states_separator_and_persistence_boundaries() -> Non
     section = " ".join(match.group(1).split())
 
     required = {
+        "4096 UTF-8 bytes",
         "SOURCE->TARGET",
+        "`event_rejected`",
+        "adds nothing to `events.jsonl`",
         "scoped task ID contains `:`",
         "both IDs are unscoped",
+        "new timestamped rejection line",
         "separate backend append",
+        "stable fingerprints",
         "later append failure",
         "successful multi-task persistence is not atomic",
     }
     missing = sorted(marker for marker in required if marker not in section)
     assert not missing, f"`anvil deps` reference is missing contract text: {missing}"
     assert "atomically" not in section
+
+
+def test_mcp_edit_dependencies_states_recovery_diagnostic_contract() -> None:
+    """MCP docs must expose bounded/redacted refusal behavior precisely."""
+    text = _read(_docs() / "mcp.md")
+    match = re.search(
+        r"^### `edit_dependencies`\n(.*?)(?=^---$)",
+        text,
+        re.S | re.M,
+    )
+    assert match, "docs/mcp.md is missing the `edit_dependencies` section"
+    section = " ".join(match.group(1).split())
+
+    required = {
+        "4096 UTF-8 bytes",
+        "`event_rejected`",
+        "adds nothing to `events.jsonl`",
+        "new timestamped rejection line",
+        "same refusal reason and fingerprints",
+        "stable fingerprints",
+        "without the raw backend reason",
+    }
+    missing = sorted(marker for marker in required if marker not in section)
+    assert not missing, (
+        "`edit_dependencies` recovery diagnostics are missing contract text: "
+        f"{missing}"
+    )
 
 
 # --- 4. Hooks roster ---------------------------------------------------------

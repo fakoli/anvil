@@ -1493,7 +1493,21 @@ flag list; full prose treatment may follow in a later pass.
   and the separator is unambiguous. After prevalidation, each changed task is
   persisted through a separate backend append. A later append failure can
   therefore leave earlier task changes committed; successful multi-task
-  persistence is not atomic.
+  persistence is not atomic. If the backend refuses an individual append,
+  `deps --json` returns the fixed `event_rejected` message `dependency update
+  was rejected by state validation.`; human output uses the same text. Neither
+  surface exposes the raw backend reason.
+
+  Ownership-recovery refusals have an additional diagnostic contract. When a
+  legacy missing-`prd_id` `task.created` upsert cannot be safely recovered, the
+  backend exception text and its rejection line in `audit.jsonl` are each
+  capped at 4096 UTF-8 bytes. Raw actor, target, task/feature/owner identifiers,
+  payload values, and Pydantic validation details are replaced by stable
+  fingerprints. Retrying the same refused append produces the same refusal
+  reason and fingerprints; the refused append adds nothing to `events.jsonl`
+  and does not change the SQLite projection. Each retry does add a new
+  timestamped rejection line to `audit.jsonl`; any earlier per-task append that
+  already committed remains committed.
 
 **Diagnostics and health** (read-only)
 

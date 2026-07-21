@@ -456,6 +456,18 @@ already exists) are excluded from both.
 - `ToolError` — self-dependency (`source == target`).
 - `ToolError` — the batch would introduce a dependency cycle.
 - `ToolError` — state directory not found.
+- `ToolError` — an individual backend append was rejected. MCP returns the fixed message
+  `dependency update was rejected by state validation.` without the raw backend reason;
+  the CLI uses the same text and JSON error code `event_rejected`.
+
+When the rejected append is a legacy `task.created` ownership-recovery refusal, the
+backend exception text and its rejection line in `audit.jsonl` are each capped at 4096
+UTF-8 bytes. Raw actor, target, task/feature/owner identifiers, payload values, and
+Pydantic validation details are replaced by stable fingerprints. Repeating the same
+refused append produces the same refusal reason and fingerprints. The refused append
+adds nothing to `events.jsonl` and does not change the SQLite projection, although each
+retry adds a new timestamped rejection line to `audit.jsonl`; any earlier per-task append
+that already committed remains committed.
 
 **When to call**: when a planner agent needs to correct inferred dependencies (add a missing
 edge, drop a spurious one) before promoting tasks to `ready`, without hand-editing state.db.
