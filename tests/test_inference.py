@@ -11,6 +11,7 @@ import datetime
 import sys
 import time
 from collections.abc import Callable
+from itertools import permutations, product
 from types import SimpleNamespace
 
 import pytest
@@ -165,6 +166,8 @@ class TestInferDependencies:
             "src/file.py:stream",
             *(f"src/control-{code:02x}-{chr(code)}.py" for code in range(0x20)),
             "src/delete-\x7f.py",
+            "src/unpaired-high-\ud800.py",
+            "src/unpaired-low-\udfff.py",
             *(f"src/illegal-{character}.py" for character in '<>\"|?*'),
             "src/trailing-dot.",
             "src/trailing-space ",
@@ -929,6 +932,66 @@ class TestInferConflictGroups:
         assert groups_ab[0].id == groups_ba[0].id
         # ID follows "CG-T001-T002" pattern (sorted)
         assert groups_ab[0].id == "CG-T001-T002"
+
+    def test_full_conflict_records_are_deterministic_for_all_input_orders(
+        self,
+    ) -> None:
+        """Task/file order cannot change any inferred persistence record."""
+        definitions = {
+            "T003": ["src/shared.py", "src/three.py"],
+            "T001": ["src/shared.py", "src/one.py"],
+            "T002": ["./src/shared.py", "src/two.py"],
+        }
+        expected_groups: list[dict[str, object]] | None = None
+        expected_conflicts: dict[str, list[str]] | None = None
+
+        for task_order in permutations(definitions):
+            for reversals in product((False, True), repeat=len(definitions)):
+                tasks = [
+                    _make_task(
+                        task_id,
+                        list(
+                            reversed(definitions[task_id])
+                            if reverse
+                            else definitions[task_id]
+                        ),
+                    )
+                    for task_id, reverse in zip(task_order, reversals, strict=True)
+                ]
+
+                conflict_tasks, groups = infer_conflict_groups(tasks)
+                combined = infer_all(tasks)
+                records = [group.model_dump(mode="json") for group in groups]
+                combined_records = [
+                    group.model_dump(mode="json") for group in combined.conflict_groups
+                ]
+                conflicts = {
+                    task.id: task.conflict_groups for task in conflict_tasks
+                }
+                combined_conflicts = {
+                    task.id: task.conflict_groups for task in combined.tasks
+                }
+
+                if expected_groups is None:
+                    expected_groups = records
+                    expected_conflicts = conflicts
+                assert records == expected_groups
+                assert combined_records == expected_groups
+                assert conflicts == expected_conflicts
+                assert combined_conflicts == expected_conflicts
+
+        assert expected_groups is not None
+        assert [record["id"] for record in expected_groups] == [
+            "CG-T001-T002",
+            "CG-T001-T003",
+            "CG-T002-T003",
+        ]
+        assert all(
+            str(record["reason"]).endswith(
+                "share overlapping files: src/shared.py"
+            )
+            for record in expected_groups
+        )
 
     def test_strict_subset_not_a_conflict(self) -> None:
         """A ⊂ B → dependency edge, not a conflict group."""

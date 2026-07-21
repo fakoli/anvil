@@ -5926,6 +5926,133 @@ class TestPlanTasks:
 
         assert _run(list_tasks()) == []
 
+    def test_persists_identical_conflict_records_for_reordered_input(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        header = """# Project: Deterministic MCP Conflicts
+
+## Summary
+Conflict persistence fixture.
+## Goals
+- Persist stable conflicts.
+## Requirements
+- R001: Coordinate overlaps.
+## Features
+### F001: Planner
+**Requirements:** R001
+## Tasks
+"""
+        blocks = {
+            "T001": """### T001: One
+**Feature:** F001
+**Likely files:** src/shared.py, src/one.py
+**Acceptance criteria:**
+- One works.
+**Verification:**
+- `pytest -q`
+""",
+            "T002": """### T002: Two
+**Feature:** F001
+**Likely files:** ./src/shared.py, src/two.py
+**Acceptance criteria:**
+- Two works.
+**Verification:**
+- `pytest -q`
+""",
+            "T003": """### T003: Three
+**Feature:** F001
+**Likely files:** src/three.py, src/shared.py
+**Acceptance criteria:**
+- Three works.
+**Verification:**
+- `pytest -q`
+""",
+        }
+
+        def run(root: Path, order: list[str]) -> list[tuple[str, str, str, str]]:
+            root.mkdir()
+            state_dir = _init_state_dir(root)
+            _write_prd_file(
+                state_dir,
+                header + "\n".join(blocks[task_id] for task_id in order),
+            )
+            monkeypatch.chdir(root)
+
+            async def plan() -> None:
+                async with Client(mcp) as client:
+                    await client.call_tool("parse_prd", {})
+                    await client.call_tool("plan_tasks", {})
+
+            _run(plan())
+            connection = sqlite3.connect(state_dir / "state.db")
+            try:
+                return connection.execute(
+                    "SELECT id, name, task_ids, reason "
+                    "FROM conflict_groups ORDER BY id"
+                ).fetchall()
+            finally:
+                connection.close()
+
+        forward = run(tmp_path / "forward", ["T003", "T001", "T002"])
+        reverse = run(tmp_path / "reverse", ["T002", "T001", "T003"])
+
+        assert forward == reverse
+        assert [row[0] for row in forward] == [
+            "CG-T001-T002",
+            "CG-T001-T003",
+            "CG-T002-T003",
+        ]
+        assert all(
+            row[3].endswith("share overlapping files: src/shared.py")
+            for row in forward
+        )
+
+    @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"], ids=["high", "low"])
+    def test_rejects_unpaired_surrogates_before_state_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        surrogate: str,
+    ) -> None:
+        from anvil.planning import template as template_module
+
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("parse_prd", {})
+
+        _run(parse())
+        events_path = state_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        original_parse = template_module.parse_prd
+
+        def parse_with_surrogate(*args: object, **kwargs: object) -> object:
+            result = original_parse(*args, **kwargs)
+            result.tasks[0].likely_files.append(f"src/{surrogate}.py")
+            return result
+
+        monkeypatch.setattr(template_module, "parse_prd", parse_with_surrogate)
+
+        async def plan() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("plan_tasks", {})
+
+        with pytest.raises(
+            ToolError,
+            match="Planning inference refused: bundle planning requires a portable",
+        ):
+            _run(plan())
+
+        assert events_path.read_bytes() == before
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
+
     def test_error_when_no_prd_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

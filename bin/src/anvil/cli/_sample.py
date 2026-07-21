@@ -165,6 +165,10 @@ class SampleSeedError(RuntimeError):
     ``Error: ...`` line (exit 1) rather than a traceback.
     """
 
+    def __init__(self, message: str, *, code: str = "sample_seed_error") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def write_sample_prd(state_dir: Path) -> Path:
     """Write the embedded sample PRD to ``<state_dir>/prd.md`` and return its path.
@@ -231,7 +235,7 @@ def seed_pipeline_from_prd(
     to parse.
     """
     from anvil.clock import SystemClock
-    from anvil.planning.inference import infer_all
+    from anvil.planning.inference import BundlePlanningError, infer_all
     from anvil.planning.scoring import score_task
     from anvil.planning.template import parse_prd
     from anvil.state.models import EventDraft
@@ -253,6 +257,19 @@ def seed_pipeline_from_prd(
             f"({len(parsed.errors)} error(s)): {detail}. "
             + parse_error_hint
         )
+
+    # Path identity is the only host-sensitive part of seeding.  Complete it
+    # before the first PRD/feature/task event append so loader, mapping,
+    # comparison, and collision-limit failures leave canonical state exactly
+    # unchanged.  The bounded seed error is shared by sample, scan, and
+    # init-from-repo callers instead of leaking a native exception.
+    try:
+        inference_result = infer_all(parsed.tasks)
+    except BundlePlanningError as exc:
+        raise SampleSeedError(
+            f"seed planning inference refused: {exc}",
+            code="path_identity_error",
+        ) from None
 
     project_id = backend.get_project().id  # type: ignore[union-attr]
 
@@ -422,7 +439,6 @@ def seed_pipeline_from_prd(
             )
         )
 
-    inference_result = infer_all(parsed.tasks)
     for inferred in inference_result.tasks:
         now = clock.now()
         backend.append(

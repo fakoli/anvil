@@ -403,6 +403,73 @@ class TestInitWithSample:
 
         assert task_rows(state_dir / "state.db") == task_rows(scratch)
 
+    @pytest.mark.parametrize(
+        "failure,message",
+        [
+            ("loader", "Windows path API unavailable (library load failed)"),
+            ("mapping", "Windows path case mapping failed"),
+            ("comparison", "Windows path comparison failed"),
+        ],
+    )
+    def test_init_with_sample_native_path_failure_is_bounded_and_seed_atomic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        message: str,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning.inference import PathIdentityError
+
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        if failure == "comparison":
+            monkeypatch.setattr(
+                inference_module, "_cached_windows_path_key", lambda path: "collision"
+            )
+
+            def fail_comparison(left: str, right: str) -> bool:
+                raise PathIdentityError(message)
+
+            monkeypatch.setattr(
+                inference_module, "_host_paths_equal", fail_comparison
+            )
+        else:
+
+            def fail_key(path: str) -> str:
+                raise PathIdentityError(message)
+
+            monkeypatch.setattr(
+                inference_module, "_cached_windows_path_key", fail_key
+            )
+
+        result = self._run(["init", "--with-sample"], tmp_path)
+
+        assert result.exit_code == 1
+        assert result.output == f"Error: seed planning inference refused: {message}\n"
+        state_dir = tmp_path / ".anvil"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events] == [
+            "project.created",
+            "state.initialized",
+        ]
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM features").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM conflict_groups"
+            ).fetchone() == (0,)
+        finally:
+            connection.close()
+
 
 # ---------------------------------------------------------------------------
 # status — uninitialized

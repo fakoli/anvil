@@ -233,6 +233,76 @@ class TestScanCommand:
         assert res.exit_code == 1
         assert "not initialized" in res.output.lower()
 
+    @pytest.mark.parametrize(
+        "failure,message",
+        [
+            ("loader", "Windows path API unavailable (library load failed)"),
+            ("mapping", "Windows path case mapping failed"),
+            ("comparison", "Windows path comparison failed"),
+        ],
+    )
+    @pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+    def test_scan_native_path_failure_is_bounded_and_seed_atomic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        message: str,
+        json_output: bool,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning.inference import PathIdentityError
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before = events_path.read_bytes()
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        if failure == "comparison":
+            monkeypatch.setattr(
+                inference_module, "_cached_windows_path_key", lambda path: "collision"
+            )
+
+            def fail_comparison(left: str, right: str) -> bool:
+                raise PathIdentityError(message)
+
+            monkeypatch.setattr(
+                inference_module, "_host_paths_equal", fail_comparison
+            )
+        else:
+
+            def fail_key(path: str) -> str:
+                raise PathIdentityError(message)
+
+            monkeypatch.setattr(
+                inference_module, "_cached_windows_path_key", fail_key
+            )
+
+        arguments = ["scan"] + (["--json"] if json_output else [])
+        result = runner.invoke(app, arguments, catch_exceptions=False)
+
+        assert result.exit_code == 1
+        bounded = f"seed planning inference refused: {message}"
+        if json_output:
+            payload = json.loads(result.output)
+            assert payload["error"] == {
+                "code": "path_identity_error",
+                "message": bounded,
+            }
+        else:
+            assert result.output == f"Error: {bounded}\n"
+        assert events_path.read_bytes() == before
+        connection = sqlite3.connect(tmp_path / ".anvil" / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM features").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
+
     def test_first_scan_seeds_prd_tasks_and_codebase_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2114,3 +2184,71 @@ class TestInitFromRepo:
         )
         assert res.exit_code == 1
         assert "mutually exclusive" in res.output.lower()
+
+    @pytest.mark.parametrize(
+        "failure,message",
+        [
+            ("loader", "Windows path API unavailable (library load failed)"),
+            ("mapping", "Windows path case mapping failed"),
+            ("comparison", "Windows path comparison failed"),
+        ],
+    )
+    def test_init_from_repo_native_path_failure_is_bounded_and_seed_atomic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        message: str,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning.inference import PathIdentityError
+
+        _make_fixture_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        if failure == "comparison":
+            monkeypatch.setattr(
+                inference_module, "_cached_windows_path_key", lambda path: "collision"
+            )
+
+            def fail_comparison(left: str, right: str) -> bool:
+                raise PathIdentityError(message)
+
+            monkeypatch.setattr(
+                inference_module, "_host_paths_equal", fail_comparison
+            )
+        else:
+
+            def fail_key(path: str) -> str:
+                raise PathIdentityError(message)
+
+            monkeypatch.setattr(
+                inference_module, "_cached_windows_path_key", fail_key
+            )
+
+        result = runner.invoke(
+            app, ["init", "--from-repo"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 1
+        assert f"Error: seed planning inference refused: {message}" in result.output
+        state_dir = tmp_path / ".anvil"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events] == [
+            "project.created",
+            "state.initialized",
+        ]
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM features").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()

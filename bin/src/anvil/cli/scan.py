@@ -722,7 +722,7 @@ def scan(
         result = _run_scan(state_dir, project_root, force=force)
     except SampleSeedError as exc:
         if json_output:
-            fail(_COMMAND, str(exc), code="seed_rejected")
+            fail(_COMMAND, str(exc), code=exc.code)
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from None
 

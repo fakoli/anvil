@@ -244,10 +244,15 @@ def init(
         # working tree, persist the codebase model, write a draft prd.md, and
         # seed the feature/task graph. Reuses the scan engine so init and the
         # standalone `scan` command stay in lock-step.
+        from anvil.cli._sample import SampleSeedError
         from anvil.cli.scan import run_scan_and_report
 
         typer.echo("")
-        result = run_scan_and_report(state_dir, cwd, force=False)
+        try:
+            result = run_scan_and_report(state_dir, cwd, force=False)
+        except SampleSeedError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         seeded = result.get("seeded")
         typer.echo(
             f"Scanned {result['files_scanned']} file(s) into a codebase model."

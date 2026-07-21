@@ -177,7 +177,9 @@ def _validate_portable_project_path(candidate: str, original: str) -> None:
     policy runs.
     """
     if any(
-        ord(character) < 0x20 or ord(character) == 0x7F
+        ord(character) < 0x20
+        or ord(character) == 0x7F
+        or 0xD800 <= ord(character) <= 0xDFFF
         for character in candidate
     ):
         raise BundlePlanningError(
@@ -392,17 +394,49 @@ class _PathIdentityRegistry:
 def _canonical_file_scopes(
     tasks: list[Task],
 ) -> tuple[dict[str, frozenset[int]], dict[int, str]]:
-    """Validate and intern task scopes under the authoritative host policy."""
+    """Validate and intern task scopes under the authoritative host policy.
+
+    Validation is completed before native identity work begins.  Canonical
+    spellings are then interned in exact lexical order, independent of task or
+    ``likely_files`` input order.  Each identity's display spelling is selected
+    by lowest task ID and then exact authored spelling, preserving the
+    established sorted-task display policy while removing file-order effects.
+    This keeps the full persisted conflict-group record deterministic and
+    retains an authored spelling rather than inventing an engine spelling.
+    """
+    canonical_by_task: dict[str, list[tuple[str, str]]] = {}
+    for task in tasks:
+        canonical_by_task[task.id] = [
+            (_canonical_project_path(path), path) for path in task.likely_files
+        ]
+
     registry = _PathIdentityRegistry()
+    identity_by_path = {
+        path: registry.intern(path)
+        for path in sorted(
+            {
+                canonical
+                for task_paths in canonical_by_task.values()
+                for canonical, _authored in task_paths
+            }
+        )
+    }
     scopes: dict[str, frozenset[int]] = {}
-    display_paths: dict[int, str] = {}
-    for task in sorted(tasks, key=lambda item: item.id):
-        identities: set[int] = set()
-        for path in task.likely_files:
-            identity = registry.intern(_canonical_project_path(path))
-            identities.add(identity)
-            display_paths.setdefault(identity, path)
-        scopes[task.id] = frozenset(identities)
+    display_candidates: dict[int, list[tuple[str, str]]] = {}
+    for task_id in sorted(canonical_by_task):
+        identities = {
+            identity_by_path[canonical]
+            for canonical, _authored in canonical_by_task[task_id]
+        }
+        scopes[task_id] = frozenset(identities)
+        for canonical, authored in canonical_by_task[task_id]:
+            display_candidates.setdefault(identity_by_path[canonical], []).append(
+                (task_id, authored)
+            )
+    display_paths = {
+        identity: min(candidates)[1]
+        for identity, candidates in display_candidates.items()
+    }
     return scopes, display_paths
 
 
@@ -822,7 +856,7 @@ def _infer_conflict_groups_with_scopes(
     task_conflict_groups: dict[str, set[str]] = {t.id: set() for t in tasks}
     conflict_groups: list[ConflictGroup] = []
 
-    task_ids = [t.id for t in tasks]
+    task_ids = sorted(t.id for t in tasks)
     seen_pairs: set[frozenset[str]] = set()
 
     for idx_a in range(len(task_ids)):
@@ -851,14 +885,14 @@ def _infer_conflict_groups_with_scopes(
                 continue
 
             # Partial overlap and neither is a subset: this is a conflict group.
-            sorted_ids = sorted([id_a, id_b])
+            sorted_ids = [id_a, id_b]
             cg_id = "CG-" + "-".join(sorted_ids)
             cg = ConflictGroup(
                 id=cg_id,
                 name=cg_id,
                 task_ids=sorted_ids,
                 reason=(
-                    f"Tasks {id_a} and {id_b} share overlapping files: "
+                    f"Tasks {sorted_ids[0]} and {sorted_ids[1]} share overlapping files: "
                     + ", ".join(sorted(display_path[path] for path in overlap))
                 ),
             )
