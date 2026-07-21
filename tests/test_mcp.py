@@ -6007,12 +6007,31 @@ Conflict persistence fixture.
             for row in forward
         )
 
-    @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"], ids=["high", "low"])
-    def test_rejects_unpaired_surrogates_before_state_mutation(
+    @pytest.mark.parametrize(
+        "invalid_path,expected",
+        [
+            (
+                "src/\ud800.py",
+                "bundle planning requires valid UTF-8 likely-file paths",
+            ),
+            (
+                "src/\udfff.py",
+                "bundle planning requires valid UTF-8 likely-file paths",
+            ),
+            (
+                "é" * 2_048 + "a",
+                "bundle planning requires likely-file paths no longer than "
+                "4096 UTF-8 bytes",
+            ),
+        ],
+        ids=["high-surrogate", "low-surrogate", "oversized-multibyte"],
+    )
+    def test_rejects_malformed_paths_before_state_or_cache_mutation(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        surrogate: str,
+        invalid_path: str,
+        expected: str,
     ) -> None:
         from anvil.planning import template as template_module
 
@@ -6028,25 +6047,38 @@ Conflict persistence fixture.
         events_path = state_dir / "events.jsonl"
         before = events_path.read_bytes()
         original_parse = template_module.parse_prd
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
 
-        def parse_with_surrogate(*args: object, **kwargs: object) -> object:
+        def parse_with_invalid_path(*args: object, **kwargs: object) -> object:
             result = original_parse(*args, **kwargs)
-            result.tasks[0].likely_files.append(f"src/{surrogate}.py")
+            result.tasks[0].likely_files.append(invalid_path)
             return result
 
-        monkeypatch.setattr(template_module, "parse_prd", parse_with_surrogate)
+        monkeypatch.setattr(
+            template_module, "parse_prd", parse_with_invalid_path
+        )
 
         async def plan() -> None:
             async with Client(mcp) as client:
                 await client.call_tool("plan_tasks", {})
 
-        with pytest.raises(
-            ToolError,
-            match="Planning inference refused: bundle planning requires a portable",
-        ):
+        with pytest.raises(ToolError) as error:
             _run(plan())
 
+        assert str(error.value) == f"Planning inference refused: {expected}"
+        assert len(str(error.value)) <= 4_096
+        assert str(error.value).encode("cp1252")
         assert events_path.read_bytes() == before
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
         connection = sqlite3.connect(state_dir / "state.db")
         try:
             assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)

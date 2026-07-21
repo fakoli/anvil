@@ -154,6 +154,28 @@ class PathIdentityError(BundlePlanningError):
     """Host path identity cannot be established within bounded resources."""
 
 
+_MAX_PORTABLE_PROJECT_PATH_BYTES = 4_096
+"""Maximum UTF-8 bytes accepted for one portable project-relative path.
+
+4,096 bytes matches the common portable ``PATH_MAX`` envelope while counting
+the serialized representation consistently on every host.  Enforcing it before
+normalization and native identity work bounds diagnostics, temporary strings,
+Win32 calls, and the process-wide identity caches.
+"""
+
+_PATH_TYPE_ERROR = "bundle planning requires likely-file paths to be strings"
+_PATH_UNICODE_ERROR = "bundle planning requires valid UTF-8 likely-file paths"
+_PATH_SIZE_ERROR = (
+    "bundle planning requires likely-file paths no longer than "
+    f"{_MAX_PORTABLE_PROJECT_PATH_BYTES} UTF-8 bytes"
+)
+_PATH_PORTABILITY_ERROR = (
+    "bundle planning requires a valid portable project-relative file path"
+)
+_PATH_RELATIVE_ERROR = "bundle planning requires a project-relative file path"
+_PATH_ESCAPE_ERROR = "bundle planning file path escapes the project"
+
+
 _WINDOWS_ILLEGAL_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
@@ -165,7 +187,7 @@ _WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
 _WINDOWS_RESERVED_CONSOLE_COMPONENTS = frozenset({"CONIN$", "CONOUT$"})
 
 
-def _validate_portable_project_path(candidate: str, original: str) -> None:
+def _validate_portable_project_path(candidate: str) -> None:
     """Reject spellings that cannot name a portable repository path.
 
     Git repositories routinely cross POSIX and Windows hosts.  In addition to
@@ -182,10 +204,7 @@ def _validate_portable_project_path(candidate: str, original: str) -> None:
         or 0xD800 <= ord(character) <= 0xDFFF
         for character in candidate
     ):
-        raise BundlePlanningError(
-            "bundle planning requires a portable project-relative file path: "
-            f"{original!r}"
-        )
+        raise BundlePlanningError(_PATH_PORTABILITY_ERROR)
     for component in candidate.split("/"):
         if component in {"", ".", ".."}:
             continue
@@ -199,30 +218,35 @@ def _validate_portable_project_path(candidate: str, original: str) -> None:
             or basename in _WINDOWS_RESERVED_DEVICE_BASENAMES
             or component.upper() in _WINDOWS_RESERVED_CONSOLE_COMPONENTS
         ):
-            raise BundlePlanningError(
-                "bundle planning requires a portable project-relative file path: "
-                f"{original!r}"
-            )
+            raise BundlePlanningError(_PATH_PORTABILITY_ERROR)
 
 
 def _canonical_project_path(path: object) -> str:
     """Return one safe project-relative spelling for inference comparisons."""
     if not isinstance(path, str):
-        raise BundlePlanningError(
-            "bundle planning requires likely-file paths to be strings; got "
-            f"{type(path).__name__}"
-        )
+        raise BundlePlanningError(_PATH_TYPE_ERROR)
+    encoded_size = 0
+    for character in path:
+        codepoint = ord(character)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise BundlePlanningError(_PATH_UNICODE_ERROR)
+        if codepoint <= 0x7F:
+            encoded_size += 1
+        elif codepoint <= 0x7FF:
+            encoded_size += 2
+        elif codepoint <= 0xFFFF:
+            encoded_size += 3
+        else:
+            encoded_size += 4
+        if encoded_size > _MAX_PORTABLE_PROJECT_PATH_BYTES:
+            raise BundlePlanningError(_PATH_SIZE_ERROR)
     candidate = path.replace("\\", "/")
     if not candidate or candidate.startswith("/"):
-        raise BundlePlanningError(
-            f"bundle planning requires a project-relative file path: {path!r}"
-        )
-    _validate_portable_project_path(candidate, path)
+        raise BundlePlanningError(_PATH_RELATIVE_ERROR)
+    _validate_portable_project_path(candidate)
     normalized = posixpath.normpath(candidate)
     if normalized in {"", ".", ".."} or normalized.startswith("../"):
-        raise BundlePlanningError(
-            f"bundle planning file path escapes the project: {path!r}"
-        )
+        raise BundlePlanningError(_PATH_ESCAPE_ERROR)
     return normalized
 
 

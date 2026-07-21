@@ -470,6 +470,64 @@ class TestInitWithSample:
         finally:
             connection.close()
 
+    def test_init_with_sample_oversized_path_is_bounded_and_cache_atomic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning import template as template_module
+
+        oversized = "é" * 2_048 + "a"
+        original_parse = template_module.parse_prd
+
+        def parse_with_oversized_path(*args: object, **kwargs: object) -> object:
+            result = original_parse(*args, **kwargs)
+            result.tasks[0].likely_files.append(oversized)
+            return result
+
+        monkeypatch.setattr(
+            template_module, "parse_prd", parse_with_oversized_path
+        )
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+
+        result = self._run(["init", "--with-sample"], tmp_path)
+
+        message = (
+            "seed planning inference refused: bundle planning requires "
+            "likely-file paths no longer than 4096 UTF-8 bytes"
+        )
+        assert result.exit_code == 1
+        assert result.output == f"Error: {message}\n"
+        assert len(message) <= 4_096
+        assert message.encode("cp1252")
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+        state_dir = tmp_path / ".anvil"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events] == [
+            "project.created",
+            "state.initialized",
+        ]
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
+
 
 # ---------------------------------------------------------------------------
 # status — uninitialized

@@ -197,10 +197,104 @@ class TestInferDependencies:
         )
         before = task.model_dump(mode="python")
 
-        with pytest.raises(BundlePlanningError, match="project"):
+        with pytest.raises(BundlePlanningError, match="bundle planning"):
             entrypoint([task])
 
         assert task.model_dump(mode="python") == before
+
+    @pytest.mark.parametrize("entrypoint", _PORTABLE_PATH_ENTRYPOINTS)
+    def test_utf8_path_byte_ceiling_accepts_exact_multibyte_boundary(
+        self,
+        entrypoint: Callable[[list[Task]], object],
+    ) -> None:
+        limit = inference_module._MAX_PORTABLE_PROJECT_PATH_BYTES
+        path = "é" * (limit // len("é".encode("utf-8")))
+        assert len(path.encode("utf-8")) == limit
+        task = _make_task("T001", [path])
+        before = task.model_dump(mode="python")
+
+        entrypoint([task])
+
+        assert task.model_dump(mode="python") == before
+
+    @pytest.mark.parametrize("entrypoint", _PORTABLE_PATH_ENTRYPOINTS)
+    def test_utf8_path_byte_ceiling_rejects_n_plus_one_before_native_cache(
+        self,
+        entrypoint: Callable[[list[Task]], object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        limit = inference_module._MAX_PORTABLE_PROJECT_PATH_BYTES
+        path = "é" * (limit // len("é".encode("utf-8"))) + "a"
+        assert len(path.encode("utf-8")) == limit + 1
+        task = _make_task("T001", [path])
+        before = task.model_dump(mode="python")
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        monkeypatch.setattr(
+            inference_module,
+            "_load_windows_path_api",
+            lambda: pytest.fail("oversized path reached native identity"),
+        )
+
+        with pytest.raises(BundlePlanningError) as error:
+            entrypoint([task])
+
+        assert str(error.value) == (
+            "bundle planning requires likely-file paths no longer than "
+            f"{limit} UTF-8 bytes"
+        )
+        assert len(str(error.value)) <= 4_096
+        assert str(error.value).encode("cp1252")
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+        assert task.model_dump(mode="python") == before
+
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            (
+                "a" * (inference_module._MAX_PORTABLE_PROJECT_PATH_BYTES + 1),
+                "bundle planning requires likely-file paths no longer than "
+                f"{inference_module._MAX_PORTABLE_PROJECT_PATH_BYTES} UTF-8 bytes",
+            ),
+            (
+                "\n" + "a" * inference_module._MAX_PORTABLE_PROJECT_PATH_BYTES,
+                "bundle planning requires likely-file paths no longer than "
+                f"{inference_module._MAX_PORTABLE_PROJECT_PATH_BYTES} UTF-8 bytes",
+            ),
+            (
+                "src/unpaired-\ud800.py",
+                "bundle planning requires valid UTF-8 likely-file paths",
+            ),
+            (
+                "/" + "é" * 2_000,
+                "bundle planning requires a project-relative file path",
+            ),
+        ],
+        ids=["huge-valid", "huge-invalid", "invalid-unicode", "bounded-invalid"],
+    )
+    def test_path_diagnostics_are_fixed_bounded_and_cp1252_safe(
+        self,
+        path: str,
+        expected: str,
+    ) -> None:
+        with pytest.raises(BundlePlanningError) as error:
+            infer_all([_make_task("T001", [path])])
+
+        assert str(error.value) == expected
+        assert len(str(error.value)) <= 4_096
+        assert str(error.value).encode("cp1252")
+        assert path not in str(error.value)
 
     @pytest.mark.parametrize(
         "malformed_path",

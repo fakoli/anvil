@@ -258,6 +258,7 @@ class TestScanCommand:
         monkeypatch.chdir(tmp_path)
         events_path = tmp_path / ".anvil" / "events.jsonl"
         before = events_path.read_bytes()
+        state_before = (tmp_path / ".anvil" / "state.db").read_bytes()
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
         )
@@ -295,6 +296,9 @@ class TestScanCommand:
         else:
             assert result.output == f"Error: {bounded}\n"
         assert events_path.read_bytes() == before
+        assert (tmp_path / ".anvil" / "state.db").read_bytes() == state_before
+        assert not (tmp_path / ".anvil" / "scan.db").exists()
+        assert not (tmp_path / ".anvil" / "prd.md").exists()
         connection = sqlite3.connect(tmp_path / ".anvil" / "state.db")
         try:
             assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
@@ -302,6 +306,149 @@ class TestScanCommand:
             assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
         finally:
             connection.close()
+
+    @pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+    def test_scan_oversized_path_failure_restores_artifacts_and_retry_seeds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        json_output: bool,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning import template as template_module
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        oversized = "é" * 2_048 + "a"
+        original_parse = template_module.parse_prd
+        parse_calls = 0
+
+        def fail_first_parse(*args: object, **kwargs: object) -> object:
+            nonlocal parse_calls
+            result = original_parse(*args, **kwargs)
+            parse_calls += 1
+            if parse_calls == 1:
+                result.tasks[0].likely_files.append(oversized)
+            return result
+
+        monkeypatch.setattr(template_module, "parse_prd", fail_first_parse)
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+        state_dir = tmp_path / ".anvil"
+        events_path = state_dir / "events.jsonl"
+        events_before = events_path.read_bytes()
+        state_before = (state_dir / "state.db").read_bytes()
+
+        arguments = ["scan"] + (["--json"] if json_output else [])
+        failed = runner.invoke(app, arguments, catch_exceptions=False)
+
+        message = (
+            "seed planning inference refused: bundle planning requires "
+            "likely-file paths no longer than 4096 UTF-8 bytes"
+        )
+        assert failed.exit_code == 1
+        if json_output:
+            assert json.loads(failed.output)["error"] == {
+                "code": "path_identity_error",
+                "message": message,
+            }
+        else:
+            assert failed.output == f"Error: {message}\n"
+        assert len(message) <= 4_096
+        assert message.encode("cp1252")
+        assert events_path.read_bytes() == events_before
+        assert (state_dir / "state.db").read_bytes() == state_before
+        assert not (state_dir / "scan.db").exists()
+        assert not (state_dir / "prd.md").exists()
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+
+        retried = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+
+        assert retried.exit_code == 0, retried.output
+        retry_data = json.loads(retried.output)["data"]
+        assert retry_data["first_scan"] is True
+        assert retry_data["seeded"] is not None
+        assert retry_data["seeded"]["ready"] >= 1
+        assert (state_dir / "scan.db").exists()
+        assert (state_dir / "prd.md").exists()
+
+    def test_force_scan_failure_restores_existing_artifacts_byte_for_byte(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning import template as template_module
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        seeded = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert seeded.exit_code == 0, seeded.output
+        state_dir = tmp_path / ".anvil"
+        scan_before = (state_dir / "scan.db").read_bytes()
+        prd_before = (state_dir / "prd.md").read_bytes()
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            counts_before = tuple(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("prds", "features", "tasks", "conflict_groups")
+            )
+        finally:
+            connection.close()
+        state_before = (state_dir / "state.db").read_bytes()
+
+        original_parse = template_module.parse_prd
+
+        def parse_with_oversized_path(*args: object, **kwargs: object) -> object:
+            result = original_parse(*args, **kwargs)
+            result.tasks[0].likely_files.append("é" * 2_048 + "a")
+            return result
+
+        monkeypatch.setattr(
+            template_module, "parse_prd", parse_with_oversized_path
+        )
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+
+        failed = runner.invoke(
+            app, ["scan", "--force", "--json"], catch_exceptions=False
+        )
+
+        assert failed.exit_code == 1
+        assert json.loads(failed.output)["error"]["code"] == "path_identity_error"
+        assert (state_dir / "scan.db").read_bytes() == scan_before
+        assert (state_dir / "prd.md").read_bytes() == prd_before
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+        assert (state_dir / "state.db").read_bytes() == state_before
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            counts_after = tuple(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("prds", "features", "tasks", "conflict_groups")
+            )
+        finally:
+            connection.close()
+        assert counts_after == counts_before
 
     def test_first_scan_seeds_prd_tasks_and_codebase_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2245,6 +2392,8 @@ class TestInitFromRepo:
             "project.created",
             "state.initialized",
         ]
+        assert not (state_dir / "scan.db").exists()
+        assert not (state_dir / "prd.md").exists()
         connection = sqlite3.connect(state_dir / "state.db")
         try:
             assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
@@ -2252,3 +2401,72 @@ class TestInitFromRepo:
             assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
         finally:
             connection.close()
+
+    def test_init_from_repo_oversized_path_restores_artifacts_and_scan_retries(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning import template as template_module
+
+        _make_fixture_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        oversized = "é" * 2_048 + "a"
+        original_parse = template_module.parse_prd
+        parse_calls = 0
+
+        def fail_first_parse(*args: object, **kwargs: object) -> object:
+            nonlocal parse_calls
+            result = original_parse(*args, **kwargs)
+            parse_calls += 1
+            if parse_calls == 1:
+                result.tasks[0].likely_files.append(oversized)
+            return result
+
+        monkeypatch.setattr(template_module, "parse_prd", fail_first_parse)
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+
+        failed = runner.invoke(
+            app, ["init", "--from-repo"], catch_exceptions=False
+        )
+
+        message = (
+            "seed planning inference refused: bundle planning requires "
+            "likely-file paths no longer than 4096 UTF-8 bytes"
+        )
+        assert failed.exit_code == 1
+        assert f"Error: {message}" in failed.output
+        assert len(message) <= 4_096
+        assert message.encode("cp1252")
+        state_dir = tmp_path / ".anvil"
+        assert not (state_dir / "scan.db").exists()
+        assert not (state_dir / "prd.md").exists()
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events] == [
+            "project.created",
+            "state.initialized",
+        ]
+
+        retried = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+
+        assert retried.exit_code == 0, retried.output
+        retry_data = json.loads(retried.output)["data"]
+        assert retry_data["first_scan"] is True
+        assert retry_data["seeded"] is not None
+        assert retry_data["seeded"]["ready"] >= 1

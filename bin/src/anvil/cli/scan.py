@@ -757,6 +757,10 @@ def _run_scan(
     *,
     force: bool,
 ) -> dict[str, Any]:
+    from shutil import copy2
+    from tempfile import TemporaryDirectory
+
+    from anvil.cli._sample import SampleSeedError
     from anvil.scan.model import (
         SCAN_DB_NAME,
         compute_delta,
@@ -766,24 +770,45 @@ def _run_scan(
     )
 
     scan_db = state_dir / SCAN_DB_NAME
+    prd_path = state_dir / _PRD_FILENAME
 
     previous: CodebaseModel | None = load_model(scan_db)
     current: CodebaseModel = scan_working_tree(project_root)
     delta: ScanDelta = compute_delta(previous, current)
 
-    # Persist the refreshed model AFTER computing the delta against the old one.
-    save_model(current, scan_db)
-
     seeded: dict[str, Any] | None = None
-    prd_path = state_dir / _PRD_FILENAME
     seed_reason = _should_seed(state_dir, prd_path, force=force)
-    if seed_reason is not None:
-        seeded = _seed_draft(
-            state_dir,
-            project_root,
-            current,
-            revalidate_first_seed=seed_reason == "no_prd",
-        )
+    if seed_reason is None:
+        # Ordinary re-scans cannot enter the seed failure path and need no
+        # artifact backup; persist the refreshed model directly.
+        save_model(current, scan_db)
+    else:
+        # Preserve scan.db before its first mutation. _seed_draft owns the
+        # canonical PRD source's atomic publish/rollback under the state lock;
+        # duplicating that rollback here could restore stale bytes after a
+        # successful state append.
+        with TemporaryDirectory(
+            prefix=".scan-rollback-", dir=state_dir
+        ) as backup_dir:
+            backup_root = Path(backup_dir)
+            backup_path: Path | None = None
+            if scan_db.exists():
+                backup_path = backup_root / scan_db.name
+                copy2(scan_db, backup_path)
+            try:
+                save_model(current, scan_db)
+                seeded = _seed_draft(
+                    state_dir,
+                    project_root,
+                    current,
+                    revalidate_first_seed=seed_reason == "no_prd",
+                )
+            except SampleSeedError:
+                if backup_path is None:
+                    scan_db.unlink(missing_ok=True)
+                else:
+                    backup_path.replace(scan_db)
+                raise
 
     return {
         "project_root": str(project_root),
