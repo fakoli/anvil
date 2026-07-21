@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import UserDict
+from importlib import resources
 from types import MappingProxyType
 
 import pytest
@@ -15,6 +17,7 @@ from anvil.read_contracts import (
     MAX_PROVIDER_LIMIT_REQUEST_FIELDS,
     MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES,
     PROVIDER_LIMITS_V1,
+    PROVIDER_READ_CONTRACT_FIXTURE_SHA256,
     PUBLIC_SCHEMA_CONTRACT_KEY_V1,
     WIRE_INT64_MAX,
     EventCursorV1,
@@ -25,12 +28,15 @@ from anvil.read_contracts import (
     ProjectRecordV1,
     ProjectSnapshotDataV1,
     ProjectSnapshotPayloadV1,
+    ProviderLimitNameV1,
+    ProviderLimitRefusalV1,
     ProviderReadLimitsV1,
     ReadErrorCode,
     ReadErrorV1,
     TaskRecordV1,
     TaskScopedRefV1,
-    VerificationCountsV1,
+    VerificationKindV1,
+    VerificationSummaryV1,
     lowered_limits,
     snapshot_canonical_bytes,
     snapshot_digest,
@@ -106,11 +112,22 @@ def _task(
         priority="high",
         dependency_refs=dependencies,
         acceptance_criteria=acceptance,
-        verification_counts=VerificationCountsV1(
-            commands=2,
-            manual_steps=0,
-            required_evidence=1,
-            typed_proofs=2,
+        verification_summaries=(
+            VerificationSummaryV1(
+                kind=VerificationKindV1.command,
+                label="Automated checks",
+                count=2,
+            ),
+            VerificationSummaryV1(
+                kind=VerificationKindV1.required_evidence,
+                label="Required evidence",
+                count=1,
+            ),
+            VerificationSummaryV1(
+                kind=VerificationKindV1.typed_proof,
+                label="Typed proofs",
+                count=2,
+            ),
         ),
     )
 
@@ -235,13 +252,12 @@ def test_all_public_integer_payload_fields_accept_signed_int64_maximum() -> None
     )
     assert PrdRecordV1.model_validate(prd_data).revision == WIRE_INT64_MAX
 
-    counts = VerificationCountsV1(
-        commands=WIRE_INT64_MAX,
-        manual_steps=WIRE_INT64_MAX,
-        required_evidence=WIRE_INT64_MAX,
-        typed_proofs=WIRE_INT64_MAX,
+    summary = VerificationSummaryV1(
+        kind=VerificationKindV1.command,
+        label="Checks",
+        count=WIRE_INT64_MAX,
     )
-    assert counts.typed_proofs == WIRE_INT64_MAX
+    assert summary.count == WIRE_INT64_MAX
 
     cursor = EventCursorV1(
         event_count=WIRE_INT64_MAX,
@@ -278,43 +294,12 @@ def test_public_integer_payload_fields_keep_their_semantic_lower_bounds() -> Non
         (PrdRecordV1, "revision", _prd("default").model_dump()),
         (PrdRecordV1, "source_size_bytes", _prd("default").model_dump()),
         (
-            VerificationCountsV1,
-            "commands",
+            VerificationSummaryV1,
+            "count",
             {
-                "commands": 0,
-                "manual_steps": 0,
-                "required_evidence": 0,
-                "typed_proofs": 0,
-            },
-        ),
-        (
-            VerificationCountsV1,
-            "manual_steps",
-            {
-                "commands": 0,
-                "manual_steps": 0,
-                "required_evidence": 0,
-                "typed_proofs": 0,
-            },
-        ),
-        (
-            VerificationCountsV1,
-            "required_evidence",
-            {
-                "commands": 0,
-                "manual_steps": 0,
-                "required_evidence": 0,
-                "typed_proofs": 0,
-            },
-        ),
-        (
-            VerificationCountsV1,
-            "typed_proofs",
-            {
-                "commands": 0,
-                "manual_steps": 0,
-                "required_evidence": 0,
-                "typed_proofs": 0,
+                "kind": VerificationKindV1.command,
+                "label": "Checks",
+                "count": 1,
             },
         ),
         (
@@ -381,13 +366,12 @@ def test_every_leaf_dto_revalidates_model_copy_corruption() -> None:
             _feature("default").model_copy(update={"title": ""}),
         ),
         (
-            VerificationCountsV1,
-            VerificationCountsV1(
-                commands=1,
-                manual_steps=0,
-                required_evidence=0,
-                typed_proofs=0,
-            ).model_copy(update={"commands": -1}),
+            VerificationSummaryV1,
+            VerificationSummaryV1(
+                kind=VerificationKindV1.command,
+                label="Checks",
+                count=1,
+            ).model_copy(update={"count": 0}),
         ),
         (TaskRecordV1, _task("default").model_copy(update={"title": ""})),
         (
@@ -425,12 +409,12 @@ def test_nested_dtos_revalidate_model_copy_corruption_at_parent_boundaries() -> 
         )
 
     task = _task("default")
-    corrupt_counts = task.verification_counts.model_copy(update={"commands": -1})
-    with pytest.raises(ValidationError, match="verification_counts.commands"):
+    corrupt_summary = task.verification_summaries[0].model_copy(update={"count": 0})
+    with pytest.raises(ValidationError, match="verification_summaries.0.count"):
         TaskRecordV1(
             **{
                 **task.model_dump(),
-                "verification_counts": corrupt_counts,
+                "verification_summaries": (corrupt_summary,),
             }
         )
 
@@ -559,7 +543,7 @@ def test_parent_cycles_refuse() -> None:
         _wire_validate(data)
 
 
-def test_exact_snapshot_allowlist_contains_counts_not_operational_content() -> None:
+def test_exact_snapshot_allowlist_contains_summaries_not_operational_content() -> None:
     snapshot = _snapshot()
     assert set(snapshot.model_dump()) == {
         "schema_id",
@@ -580,7 +564,7 @@ def test_exact_snapshot_allowlist_contains_counts_not_operational_content() -> N
         "priority",
         "dependency_refs",
         "acceptance_criteria",
-        "verification_counts",
+        "verification_summaries",
     }
     serialized = snapshot_canonical_bytes(snapshot)
     for excluded in (
@@ -595,7 +579,11 @@ def test_exact_snapshot_allowlist_contains_counts_not_operational_content() -> N
         b"printenv SECRET",
     ):
         assert excluded not in serialized
-    assert snapshot.tasks[0].verification_counts.commands == 2
+    assert snapshot.tasks[0].verification_summaries[0] == VerificationSummaryV1(
+        kind=VerificationKindV1.command,
+        label="Automated checks",
+        count=2,
+    )
 
 
 def test_canonical_json_has_a_portable_exact_utf8_vector() -> None:
@@ -740,7 +728,7 @@ def test_unicode_and_newline_bytes_are_not_normalized() -> None:
 def test_snapshot_digest_has_a_domain_separated_full_sha256_vector() -> None:
     snapshot = _snapshot()
     assert snapshot_digest(snapshot) == (
-        "edf47a596cceceb757b524fb073cb267c24b55ed2defcdbe6284a3d959c42c0a"
+        "ef29b5224da13784c2c3fded74fc3d5a42a36a1fca083a0d69a68fb391cf95a8"
     )
     assert len(snapshot_digest(snapshot)) == 64
     assert snapshot_digest(snapshot.model_dump(mode="json")) == snapshot_digest(snapshot)
@@ -908,7 +896,7 @@ def test_decoded_json_payload_and_response_round_trip_under_strict_models() -> N
     assert ProjectSnapshotDataV1.model_validate(response_document) == response
 
     invalid_scalar = payload.model_dump(mode="json")
-    invalid_scalar["tasks"][0]["verification_counts"]["commands"] = "2"
+    invalid_scalar["tasks"][0]["verification_summaries"][0]["count"] = "2"
     with pytest.raises(ValidationError, match="valid integer"):
         ProjectSnapshotPayloadV1.model_validate(invalid_scalar)
 
@@ -925,7 +913,7 @@ def test_decoded_json_leaf_dtos_round_trip_without_scalar_coercion() -> None:
     assert TaskRecordV1.model_validate(task_document) == task
     assert TaskRecordV1.model_validate_json(task.model_dump_json()) == task
 
-    task_document["verification_counts"]["commands"] = "2"
+    task_document["verification_summaries"][0]["count"] = "2"
     with pytest.raises(ValidationError, match="valid integer"):
         TaskRecordV1.model_validate(task_document)
 
@@ -1102,7 +1090,7 @@ def test_integer_subclass_response_ceiling_refuses_without_comparison() -> None:
 
 
 def test_minimum_response_bound_is_a_real_exact_public_response() -> None:
-    assert MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES == 593
+    assert MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES == 768
     payload = ProjectSnapshotPayloadV1(
         project=ProjectRecordV1(project_id="x", name="x"),
         prds=(),
@@ -1162,6 +1150,162 @@ def test_provider_limits_are_frozen_serializable_and_may_only_be_lowered() -> No
         lowered_limits({"max_secrets": 1})
     with pytest.raises(TypeError, match="must be an integer"):
         lowered_limits({"max_tasks": True})
+
+
+def test_exact_provider_limits_and_packaged_contract_fixture_are_digest_pinned() -> None:
+    expected_limits = {
+        "max_prds": 128,
+        "max_features": 4096,
+        "max_tasks": 50_000,
+        "max_dependency_edges": 200_000,
+        "max_dependencies_per_task": 512,
+        "max_acceptance_criteria_per_task": 256,
+        "max_verification_summaries_per_task": 256,
+        "max_verification_summary_label_bytes": 4096,
+        "max_string_bytes": 65_536,
+        "max_snapshot_bytes": 16_777_216,
+        "max_response_bytes": 16_842_752,
+        "max_prd_content_bytes": 2_097_152,
+        "max_canonical_json_depth": 128,
+        "max_diagnostic_bytes": 4096,
+    }
+    assert PROVIDER_LIMITS_V1.model_dump(mode="json") == expected_limits
+    assert {name.value for name in ProviderLimitNameV1} == set(expected_limits)
+
+    fixture_bytes = (
+        resources.files("anvil")
+        .joinpath("_data/provider-read-contract-v1.json")
+        .read_bytes()
+    )
+    document = json.loads(fixture_bytes)
+    assert (
+        hashlib.sha256(canonical_json_bytes(document)).hexdigest()
+        == PROVIDER_READ_CONTRACT_FIXTURE_SHA256
+    )
+    assert document["schema_id"] == "anvil.provider-read-contract.v1"
+    assert document["operation_version"] == 1
+    assert document["provider_limits"] == expected_limits
+    assert document["limit_refusal"]["required_fields"] == [
+        "code",
+        "operation_id",
+        "operation_version",
+        "limit_name",
+        "actual",
+        "limit",
+    ]
+    assert set(document["limit_refusal"]["limit_names"]) == set(expected_limits)
+
+
+def test_limit_refusal_metadata_is_exact_closed_and_value_safe() -> None:
+    refusal = ProviderLimitRefusalV1(
+        operation_id="state.project.snapshot",
+        limit_name=ProviderLimitNameV1.max_dependency_edges,
+        actual=200_001,
+        limit=200_000,
+    )
+    assert refusal.model_dump(mode="json") == {
+        "code": "limit_exceeded",
+        "operation_id": "state.project.snapshot",
+        "operation_version": 1,
+        "limit_name": "max_dependency_edges",
+        "actual": 200_001,
+        "limit": 200_000,
+    }
+    assert len(canonical_json_bytes(refusal.model_dump(mode="json"))) < (
+        PROVIDER_LIMITS_V1.max_diagnostic_bytes
+    )
+    assert ProviderLimitRefusalV1.model_validate_json(refusal.model_dump_json()) == refusal
+    for forbidden in ("message", "path", "author_text", "schema_id"):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            ProviderLimitRefusalV1.model_validate(
+                {**refusal.model_dump(), forbidden: "secret"}
+            )
+    with pytest.raises(ValidationError):
+        ProviderLimitRefusalV1.model_validate(
+            {**refusal.model_dump(), "limit_name": "max_secrets"}
+        )
+
+
+def test_verification_summary_count_and_utf8_label_boundaries_are_exact() -> None:
+    exact_label = "é" * 2048
+    exact = VerificationSummaryV1(
+        kind=VerificationKindV1.command,
+        label=exact_label,
+        count=1,
+    )
+    task = _task("default").model_copy(
+        update={"verification_summaries": (exact,) * 256}
+    )
+    snapshot = ProjectSnapshotPayloadV1(
+        project=ProjectRecordV1(project_id="anvil", name="Anvil"),
+        prds=(_prd("default"),),
+        features=(_feature("default"),),
+        tasks=(task,),
+    )
+    assert len(snapshot.tasks[0].verification_summaries) == 256
+
+    with pytest.raises(ValidationError, match="verification-summary count"):
+        ProjectSnapshotPayloadV1(
+            project=snapshot.project,
+            prds=snapshot.prds,
+            features=snapshot.features,
+            tasks=(
+                task.model_copy(
+                    update={"verification_summaries": (exact,) * 257}
+                ),
+            ),
+        )
+    with pytest.raises(ValidationError, match="string byte size"):
+        VerificationSummaryV1(
+            kind=VerificationKindV1.command,
+            label=exact_label + "a",
+            count=1,
+        )
+
+    phases: list[str] = []
+
+    class ExplodingSummary(UserDict[str, object]):
+        def get(self, key: str, default: object = None) -> object:
+            phases.append(key)
+            raise AssertionError("nested verification summary must not materialize")
+
+    raw = _snapshot().model_dump(mode="json")
+    raw["tasks"][0]["verification_summaries"] = [ExplodingSummary()] * 257
+    with pytest.raises(ValidationError, match="verification-summary count"):
+        ProjectSnapshotPayloadV1.model_validate(raw)
+    assert phases == []
+
+
+def test_other_strings_use_utf8_bytes_without_an_undocumented_character_cap() -> None:
+    exact = "é" * 32_768
+    assert ProjectRecordV1(project_id="anvil", name=exact).name == exact
+    with pytest.raises(ValidationError, match="string byte size"):
+        ProjectRecordV1(project_id="anvil", name=exact + "a")
+
+
+def test_lowered_depth_and_aggregate_edge_ceilings_refuse_before_graph_work() -> None:
+    snapshot = _snapshot()
+    validate_snapshot_limits(snapshot, lowered_limits({"max_dependency_edges": 1}))
+    with pytest.raises(ValueError, match="aggregate dependency-edge count"):
+        validate_snapshot_limits(snapshot, lowered_limits({"max_dependency_edges": 0}))
+    with pytest.raises(CanonicalJsonRefusal) as depth:
+        canonical_json_bytes({"a": {"b": 1}}, max_depth=1)
+    assert depth.value.code is CanonicalJsonRefusalCode.depth_exceeded
+    with pytest.raises(CanonicalJsonRefusal) as lowered_depth:
+        validate_snapshot_limits(
+            snapshot,
+            lowered_limits({"max_canonical_json_depth": 1}),
+        )
+    assert lowered_depth.value.code is CanonicalJsonRefusalCode.depth_exceeded
+    with pytest.raises(ValueError, match="depth ceiling"):
+        canonical_json_bytes({}, max_depth=129)
+
+    raw = snapshot.model_dump(mode="json")
+    raw_task = raw["tasks"][0]
+    raw_task["dependency_refs"] = [raw_task["ref"]] * 512
+    raw["tasks"] = [raw_task] * 391  # 200,192 edges: over the exact 200,000 cap.
+    with pytest.raises(ValidationError, match="aggregate dependency-edge count"):
+        ProjectSnapshotPayloadV1.model_validate(raw)
 
 
 def test_lowered_limits_bounds_untrusted_request_shape_and_error_text() -> None:
@@ -1341,19 +1485,16 @@ def test_aggregate_lower_bound_precedes_dump_sets_and_cycle_graph(
     monkeypatch.setattr(read_contracts_module, "_validate_hierarchy", fail_hierarchy)
     monkeypatch.setattr(read_contracts_module, "canonical_json_bytes", fail_canonical)
 
-    with pytest.raises(ValidationError, match="snapshot minimum byte size"):
+    with pytest.raises(ValidationError, match="aggregate dependency-edge count"):
         ProjectSnapshotPayloadV1.model_validate(raw)
     assert phases == []
 
 
 def test_public_string_gate_precedes_hierarchy_graph_work() -> None:
     oversized = "x" * (PROVIDER_LIMITS_V1.max_string_bytes + 1)
-    invalid_feature_task = _task(
-        "default",
-        "T002",
-        acceptance=(oversized,),
-    ).model_copy(
+    invalid_feature_task = _task("default", "T002").model_copy(
         update={
+            "acceptance_criteria": (oversized,),
             "feature_ref": FeatureScopedRefV1(
                 prd_id="default",
                 feature_id="F999",
@@ -1470,17 +1611,22 @@ def test_every_public_wire_model_declares_and_satisfies_the_schema_contract() ->
         ProjectRecordV1(project_id="anvil", name="Anvil"),
         _prd("default"),
         _feature("default"),
-        VerificationCountsV1(
-            commands=1,
-            manual_steps=0,
-            required_evidence=1,
-            typed_proofs=1,
+        VerificationSummaryV1(
+            kind=VerificationKindV1.command,
+            label="Checks",
+            count=1,
         ),
         _task("default"),
         payload,
         response.event_cursor,
         response,
         PROVIDER_LIMITS_V1,
+        ProviderLimitRefusalV1(
+            operation_id="state.project.snapshot",
+            limit_name=ProviderLimitNameV1.max_tasks,
+            actual=11,
+            limit=10,
+        ),
         ReadErrorV1(code=ReadErrorCode.state_unavailable, field="state"),
     )
     for instance in instances:

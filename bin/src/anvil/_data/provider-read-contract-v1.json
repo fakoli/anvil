@@ -1,0 +1,52 @@
+{
+  "schema_id": "anvil.provider-read-contract.v1",
+  "operation_version": 1,
+  "provider_limits": {
+    "max_prds": 128,
+    "max_features": 4096,
+    "max_tasks": 50000,
+    "max_dependency_edges": 200000,
+    "max_dependencies_per_task": 512,
+    "max_acceptance_criteria_per_task": 256,
+    "max_verification_summaries_per_task": 256,
+    "max_verification_summary_label_bytes": 4096,
+    "max_string_bytes": 65536,
+    "max_snapshot_bytes": 16777216,
+    "max_response_bytes": 16842752,
+    "max_prd_content_bytes": 2097152,
+    "max_canonical_json_depth": 128,
+    "max_diagnostic_bytes": 4096
+  },
+  "limit_refusal": {
+    "required_fields": [
+      "code",
+      "operation_id",
+      "operation_version",
+      "limit_name",
+      "actual",
+      "limit"
+    ],
+    "code": "limit_exceeded",
+    "operation_ids": [
+      "state.project.snapshot",
+      "state.prd.content"
+    ],
+    "operation_version": 1,
+    "limit_names": [
+      "max_prds",
+      "max_features",
+      "max_tasks",
+      "max_dependency_edges",
+      "max_dependencies_per_task",
+      "max_acceptance_criteria_per_task",
+      "max_verification_summaries_per_task",
+      "max_verification_summary_label_bytes",
+      "max_string_bytes",
+      "max_snapshot_bytes",
+      "max_response_bytes",
+      "max_prd_content_bytes",
+      "max_canonical_json_depth",
+      "max_diagnostic_bytes"
+    ]
+  }
+}

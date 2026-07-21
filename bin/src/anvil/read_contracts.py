@@ -43,6 +43,9 @@ WIRE_INT64_MAX = (2**63) - 1
 PRD_CONTENT_OPERATION_ID = "state.prd.content"
 PRD_CONTENT_OPERATION_VERSION: Literal[1] = 1
 PRD_CONTENT_SCHEMA_ID = "anvil.state.prd-content.v1"
+PROVIDER_READ_CONTRACT_FIXTURE_SHA256 = (
+    "e1d20f10c98727ee88c68057d89ea1b1651d24d7eaa139ba4f16e33a000507a7"
+)
 
 _FULL_SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _FULL_SHA256_RE = re.compile(_FULL_SHA256_PATTERN)
@@ -86,6 +89,10 @@ TaskStatusV1: TypeAlias = Literal[
     "rejected",
 ]
 TaskPriorityV1: TypeAlias = Literal["low", "medium", "high", "critical"]
+ProviderOperationIdV1: TypeAlias = Literal[
+    "state.project.snapshot",
+    "state.prd.content",
+]
 ReadErrorFieldV1: TypeAlias = Literal[
     "request",
     "prd_id",
@@ -159,6 +166,25 @@ class ReadErrorCode(enum.StrEnum):
     invalid_utf8 = "invalid_utf8"
     source_drift = "source_drift"
     invalid_section = "invalid_section"
+
+
+class ProviderLimitNameV1(enum.StrEnum):
+    """Closed names for every immutable or caller-lowerable v1 ceiling."""
+
+    max_prds = "max_prds"
+    max_features = "max_features"
+    max_tasks = "max_tasks"
+    max_dependency_edges = "max_dependency_edges"
+    max_dependencies_per_task = "max_dependencies_per_task"
+    max_acceptance_criteria_per_task = "max_acceptance_criteria_per_task"
+    max_verification_summaries_per_task = "max_verification_summaries_per_task"
+    max_verification_summary_label_bytes = "max_verification_summary_label_bytes"
+    max_string_bytes = "max_string_bytes"
+    max_snapshot_bytes = "max_snapshot_bytes"
+    max_response_bytes = "max_response_bytes"
+    max_prd_content_bytes = "max_prd_content_bytes"
+    max_canonical_json_depth = "max_canonical_json_depth"
+    max_diagnostic_bytes = "max_diagnostic_bytes"
 
 
 _SAFE_ERROR_MESSAGES: dict[ReadErrorCode, str] = {
@@ -250,8 +276,11 @@ class ProviderReadLimitsV1(BaseModel):
     max_prds: int = Field(default=128, ge=1, le=128)
     max_features: int = Field(default=4096, ge=1, le=4096)
     max_tasks: int = Field(default=50_000, ge=1, le=50_000)
+    max_dependency_edges: int = Field(default=200_000, ge=0, le=200_000)
     max_dependencies_per_task: int = Field(default=512, ge=0, le=512)
     max_acceptance_criteria_per_task: int = Field(default=256, ge=0, le=256)
+    max_verification_summaries_per_task: int = Field(default=256, ge=0, le=256)
+    max_verification_summary_label_bytes: int = Field(default=4096, ge=1, le=4096)
     max_string_bytes: int = Field(default=65_536, ge=1, le=65_536)
     max_snapshot_bytes: int = Field(default=16_777_216, ge=1, le=16_777_216)
     max_response_bytes: int = Field(
@@ -260,6 +289,33 @@ class ProviderReadLimitsV1(BaseModel):
         le=MAX_CANONICAL_JSON_RESPONSE_BYTES,
     )
     max_prd_content_bytes: int = Field(default=2_097_152, ge=1, le=2_097_152)
+    max_canonical_json_depth: int = Field(default=128, ge=1, le=128)
+    max_diagnostic_bytes: int = Field(default=4096, ge=1, le=4096)
+
+
+class ProviderLimitRefusalV1(BaseModel):
+    """Exact value-safe metadata for a v1 provider-limit refusal."""
+
+    model_config = _WIRE_CONFIG
+
+    code: Literal[ReadErrorCode.limit_exceeded] = ReadErrorCode.limit_exceeded
+    operation_id: ProviderOperationIdV1
+    operation_version: Literal[1] = 1
+    limit_name: ProviderLimitNameV1
+    actual: int = Field(ge=0, le=WIRE_INT64_MAX)
+    limit: int = Field(ge=0, le=WIRE_INT64_MAX)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_closed_json_enums(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        data = dict(value)
+        if type(data.get("code")) is str:
+            data["code"] = ReadErrorCode(data["code"])
+        if type(data.get("limit_name")) is str:
+            data["limit_name"] = ProviderLimitNameV1(data["limit_name"])
+        return data
 
 
 PROVIDER_LIMITS_V1 = ProviderReadLimitsV1()
@@ -268,12 +324,17 @@ _PROVIDER_LIMIT_FIELDS = (
     "max_prds",
     "max_features",
     "max_tasks",
+    "max_dependency_edges",
     "max_dependencies_per_task",
     "max_acceptance_criteria_per_task",
+    "max_verification_summaries_per_task",
+    "max_verification_summary_label_bytes",
     "max_string_bytes",
     "max_snapshot_bytes",
     "max_response_bytes",
     "max_prd_content_bytes",
+    "max_canonical_json_depth",
+    "max_diagnostic_bytes",
 )
 _PROVIDER_LIMIT_FIELD_SET = frozenset(_PROVIDER_LIMIT_FIELDS)
 _MAX_PROVIDER_LIMIT_FIELD_NAME_CHARS = 64
@@ -393,8 +454,14 @@ class TaskScopedRefV1(BaseModel):
 class ProjectRecordV1(BaseModel):
     model_config = _WIRE_CONFIG
 
-    project_id: str = Field(min_length=1, max_length=256)
-    name: str = Field(min_length=1, max_length=4096)
+    project_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+    @field_validator("project_id", "name", mode="before")
+    @classmethod
+    def validate_bounded_strings(cls, value: Any) -> Any:
+        _require_utf8_bytes(value, limit=65_536, path="$.project")
+        return value
 
 
 class PrdRecordV1(BaseModel):
@@ -405,11 +472,11 @@ class PrdRecordV1(BaseModel):
         pattern=_PRD_ID_PATTERN_TEXT,
         json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
     )
-    title: str = Field(min_length=1, max_length=4096)
+    title: str = Field(min_length=1)
     revision: int = Field(ge=1, le=WIRE_INT64_MAX)
     status: PrdStatusV1
-    target_version: str | None = Field(default=None, max_length=256)
-    target_tag: str | None = Field(default=None, max_length=256)
+    target_version: str | None = None
+    target_tag: str | None = None
     source_sha256: str | None = Field(
         default=None,
         pattern=_FULL_SHA256_PATTERN,
@@ -425,6 +492,12 @@ class PrdRecordV1(BaseModel):
     def validate_source_sha256(cls, value: Any) -> Any:
         if type(value) is str and _FULL_SHA256_RE.fullmatch(value) is None:
             raise ValueError("value must be a full lowercase SHA-256 digest")
+        return value
+
+    @field_validator("title", "target_version", "target_tag", mode="before")
+    @classmethod
+    def validate_bounded_strings(cls, value: Any) -> Any:
+        _require_utf8_bytes(value, limit=65_536, path="$.prd")
         return value
 
     @model_validator(mode="after")
@@ -452,8 +525,14 @@ class FeatureRecordV1(BaseModel):
         json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
     )
     prd_ref: PrdScopedRefV1
-    title: str = Field(min_length=1, max_length=4096)
+    title: str = Field(min_length=1)
     status: FeatureStatusV1
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def validate_bounded_title(cls, value: Any) -> Any:
+        _require_utf8_bytes(value, limit=65_536, path="$.feature.title")
+        return value
 
     @model_validator(mode="after")
     def validate_identity(self) -> FeatureRecordV1:
@@ -465,13 +544,37 @@ class FeatureRecordV1(BaseModel):
         return self
 
 
-class VerificationCountsV1(BaseModel):
+class VerificationKindV1(enum.StrEnum):
+    """Closed, non-executable categories represented in task summaries."""
+
+    command = "command"
+    manual_step = "manual_step"
+    required_evidence = "required_evidence"
+    typed_proof = "typed_proof"
+
+
+class VerificationSummaryV1(BaseModel):
     model_config = _WIRE_CONFIG
 
-    commands: int = Field(ge=0, le=WIRE_INT64_MAX)
-    manual_steps: int = Field(ge=0, le=WIRE_INT64_MAX)
-    required_evidence: int = Field(ge=0, le=WIRE_INT64_MAX)
-    typed_proofs: int = Field(ge=0, le=WIRE_INT64_MAX)
+    kind: VerificationKindV1
+    label: str = Field(min_length=1)
+    count: int = Field(ge=1, le=WIRE_INT64_MAX)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_closed_json_kind(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        data = dict(value)
+        if type(data.get("kind")) is str:
+            data["kind"] = VerificationKindV1(data["kind"])
+        return data
+
+    @field_validator("label", mode="before")
+    @classmethod
+    def validate_bounded_label(cls, value: Any) -> Any:
+        _require_utf8_bytes(value, limit=4096, path="$.verification.label")
+        return value
 
 
 class TaskRecordV1(BaseModel):
@@ -485,12 +588,12 @@ class TaskRecordV1(BaseModel):
     prd_ref: PrdScopedRefV1
     feature_ref: FeatureScopedRefV1
     parent_ref: TaskScopedRefV1 | None = None
-    title: str = Field(min_length=1, max_length=4096)
+    title: str = Field(min_length=1)
     status: TaskStatusV1
     priority: TaskPriorityV1
     dependency_refs: tuple[TaskScopedRefV1, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
-    verification_counts: VerificationCountsV1
+    verification_summaries: tuple[VerificationSummaryV1, ...] = ()
 
     @model_validator(mode="before")
     @classmethod
@@ -499,13 +602,18 @@ class TaskRecordV1(BaseModel):
         if not isinstance(value, Mapping):
             return value
         data = dict(value)
-        _require_valid_unicode(data.get("title"), path="$.title")
-        for field in ("dependency_refs", "acceptance_criteria"):
+        _require_utf8_bytes(data.get("title"), limit=65_536, path="$.title")
+        for field in (
+            "dependency_refs",
+            "acceptance_criteria",
+            "verification_summaries",
+        ):
             collection = _plain_wire_sequence(data.get(field), field=field)
             if field == "acceptance_criteria" and collection is not None:
                 for index, item in enumerate(collection):
-                    _require_valid_unicode(
+                    _require_utf8_bytes(
                         item,
+                        limit=65_536,
                         path=f"$.acceptance_criteria[{index}]",
                     )
             if type(collection) is list:
@@ -651,7 +759,8 @@ _PUBLIC_READ_MODEL_TYPES: tuple[type[BaseModel], ...] = (
     ReadErrorV1,
     TaskRecordV1,
     TaskScopedRefV1,
-    VerificationCountsV1,
+    VerificationSummaryV1,
+    ProviderLimitRefusalV1,
 )
 
 
@@ -682,6 +791,7 @@ def snapshot_digest(
         validated = ProjectSnapshotPayloadV1.model_validate_json(
             canonical_json_bytes(
                 payload,
+                max_depth=PROVIDER_LIMITS_V1.max_canonical_json_depth,
                 max_nodes=canonical_node_budget_for_bytes(
                     PROVIDER_LIMITS_V1.max_snapshot_bytes
                 ),
@@ -698,6 +808,7 @@ def _validated_snapshot_digest(payload: ProjectSnapshotPayloadV1) -> FullSha256:
     return domain_separated_sha256(
         PROJECT_SNAPSHOT_DIGEST_DOMAIN,
         digest_document,
+        max_depth=PROVIDER_LIMITS_V1.max_canonical_json_depth,
         max_nodes=canonical_node_budget_for_bytes(
             PROVIDER_LIMITS_V1.max_snapshot_bytes
         ),
@@ -712,6 +823,7 @@ def snapshot_canonical_bytes(payload: ProjectSnapshotPayloadV1) -> bytes:
     validated = ProjectSnapshotPayloadV1.model_validate(payload)
     return canonical_json_bytes(
         validated.model_dump(mode="json"),
+        max_depth=PROVIDER_LIMITS_V1.max_canonical_json_depth,
         max_nodes=canonical_node_budget_for_bytes(
             PROVIDER_LIMITS_V1.max_snapshot_bytes
         ),
@@ -726,6 +838,7 @@ def snapshot_response_canonical_bytes(response: ProjectSnapshotDataV1) -> bytes:
     limits = validated.applied_limits
     return canonical_json_bytes(
         validated.model_dump(mode="json"),
+        max_depth=limits.max_canonical_json_depth,
         max_nodes=canonical_node_budget_for_bytes(limits.max_response_bytes),
         max_bytes=limits.max_response_bytes,
         max_string_bytes=min(
@@ -797,6 +910,17 @@ def _validate_snapshot_shape_limits(
             raise ValueError("task dependency count exceeds provider limit")
         if len(task.acceptance_criteria) > limits.max_acceptance_criteria_per_task:
             raise ValueError("task acceptance-criteria count exceeds provider limit")
+        if (
+            len(task.verification_summaries)
+            > limits.max_verification_summaries_per_task
+        ):
+            raise ValueError("task verification-summary count exceeds provider limit")
+        for summary in task.verification_summaries:
+            _require_utf8_bytes(
+                summary.label,
+                limit=limits.max_verification_summary_label_bytes,
+                path="$.tasks.verification_summaries.label",
+            )
 
     _validate_snapshot_aggregate_lower_bound(snapshot, limits)
     document = snapshot.model_dump(mode="json")
@@ -834,6 +958,7 @@ def _validate_snapshot_aggregate_lower_bound(
                 task.parent_ref is not None,
                 len(task.dependency_refs),
                 len(task.acceptance_criteria),
+                len(task.verification_summaries),
             )
             for task in snapshot.tasks
         ),
@@ -870,18 +995,21 @@ def _validate_raw_snapshot_limits(
     if tasks is None:
         return
 
-    def raw_task_shapes() -> Iterator[tuple[bool, int, int]]:
+    def raw_task_shapes() -> Iterator[tuple[bool, int, int, int]]:
         for task in tasks:
             dependencies: Any
             criteria: Any
+            summaries: Any
             if isinstance(task, TaskRecordV1):
                 parent_present = task.parent_ref is not None
                 dependencies = task.dependency_refs
                 criteria = task.acceptance_criteria
+                summaries = task.verification_summaries
             elif isinstance(task, Mapping):
                 parent_present = task.get("parent_ref") is not None
                 dependencies = task.get("dependency_refs")
                 criteria = task.get("acceptance_criteria")
+                summaries = task.get("verification_summaries")
             else:
                 continue
             dependency_values = _plain_wire_sequence(
@@ -892,19 +1020,39 @@ def _validate_raw_snapshot_limits(
                 criteria,
                 field="task acceptance_criteria",
             )
+            summary_values = _plain_wire_sequence(
+                summaries,
+                field="task verification_summaries",
+            )
             dependency_count = (
                 len(dependency_values) if dependency_values is not None else 0
             )
             criterion_count = (
                 len(criterion_values) if criterion_values is not None else 0
             )
+            summary_count = len(summary_values) if summary_values is not None else 0
             if dependency_count > limits.max_dependencies_per_task:
                 raise ValueError("task dependency count exceeds provider limit")
             if criterion_count > limits.max_acceptance_criteria_per_task:
                 raise ValueError(
                     "task acceptance-criteria count exceeds provider limit"
                 )
-            yield parent_present, dependency_count, criterion_count
+            if summary_count > limits.max_verification_summaries_per_task:
+                raise ValueError("task verification-summary count exceeds provider limit")
+            if summary_values is not None:
+                for summary in summary_values:
+                    if isinstance(summary, VerificationSummaryV1):
+                        label: Any = summary.label
+                    elif isinstance(summary, Mapping):
+                        label = summary.get("label")
+                    else:
+                        continue
+                    _require_utf8_bytes(
+                        label,
+                        limit=limits.max_verification_summary_label_bytes,
+                        path="$.tasks.verification_summaries.label",
+                    )
+            yield parent_present, dependency_count, criterion_count, summary_count
 
     prds = _plain_wire_sequence(payload.get("prds"), field="prds")
     features = _plain_wire_sequence(payload.get("features"), field="features")
@@ -920,13 +1068,14 @@ def _validate_snapshot_aggregate_counts(
     *,
     prd_count: int,
     feature_count: int,
-    task_shapes: Iterator[tuple[bool, int, int]],
+    task_shapes: Iterator[tuple[bool, int, int, int]],
     limits: ProviderReadLimitsV1,
 ) -> None:
     """Apply a conservative lower bound using only collection lengths."""
     node_limit = canonical_node_budget_for_bytes(limits.max_snapshot_bytes)
     minimum_nodes = 5  # root, project, and the three entity arrays
     minimum_bytes = minimum_nodes * 2
+    dependency_edges = 0
 
     def add(*, nodes: int, bytes_: int) -> None:
         nonlocal minimum_nodes, minimum_bytes
@@ -940,8 +1089,16 @@ def _validate_snapshot_aggregate_counts(
     # Record plus its mandatory nested scoped-reference containers.
     add(nodes=prd_count * 2, bytes_=prd_count * 4)
     add(nodes=feature_count * 3, bytes_=feature_count * 6)
-    for parent_present, dependency_count, criterion_count in task_shapes:
-        # Task, three mandatory refs, verification counts, and two list containers.
+    for (
+        parent_present,
+        dependency_count,
+        criterion_count,
+        summary_count,
+    ) in task_shapes:
+        dependency_edges += dependency_count
+        if dependency_edges > limits.max_dependency_edges:
+            raise ValueError("aggregate dependency-edge count exceeds provider limit")
+        # Task, three mandatory refs, and three list containers.
         add(nodes=7, bytes_=14)
         if parent_present:
             add(nodes=3, bytes_=6)
@@ -949,6 +1106,9 @@ def _validate_snapshot_aggregate_counts(
             add(nodes=dependency_count * 3, bytes_=dependency_count * 6)
         if criterion_count:
             add(nodes=criterion_count, bytes_=criterion_count * 2)
+        if summary_count:
+            # Every summary contributes its record plus three scalar leaves.
+            add(nodes=summary_count * 4, bytes_=summary_count * 8)
 
 
 def _plain_wire_sequence(
@@ -979,6 +1139,15 @@ def _require_valid_unicode(value: Any, *, path: str) -> None:
         ) from exc
 
 
+def _require_utf8_bytes(value: Any, *, limit: int, path: str) -> None:
+    """Apply a byte ceiling without an undocumented character-count ceiling."""
+    if not isinstance(value, str):
+        return
+    _require_valid_unicode(value, path=path)
+    if len(value.encode("utf-8")) > limit:
+        raise ValueError("string byte size exceeds provider limit")
+
+
 def _preflight_typed_snapshot(payload: ProjectSnapshotPayloadV1) -> None:
     """Reject model-copy corruption before invoking container hooks or dumps."""
     typed_collections = (
@@ -996,6 +1165,13 @@ def _preflight_typed_snapshot(payload: ProjectSnapshotPayloadV1) -> None:
             raise ValueError("typed task dependency_refs must remain a tuple")
         if type(task.acceptance_criteria) is not tuple:
             raise ValueError("typed task acceptance_criteria must remain a tuple")
+        if type(task.verification_summaries) is not tuple:
+            raise ValueError("typed task verification_summaries must remain a tuple")
+        if any(
+            not isinstance(summary, VerificationSummaryV1)
+            for summary in task.verification_summaries
+        ):
+            raise ValueError("typed task verification_summaries contains an invalid record")
 
 
 def _validate_snapshot_serialized_limit(
@@ -1006,6 +1182,7 @@ def _validate_snapshot_serialized_limit(
     try:
         canonical_json_bytes(
             snapshot.model_dump(mode="json"),
+            max_depth=limits.max_canonical_json_depth,
             max_nodes=canonical_node_budget_for_bytes(limits.max_snapshot_bytes),
             max_bytes=limits.max_snapshot_bytes,
             max_string_bytes=min(
@@ -1027,6 +1204,7 @@ def _validate_response_serialized_limit(
     try:
         canonical_json_bytes(
             response.model_dump(mode="json"),
+            max_depth=limits.max_canonical_json_depth,
             max_nodes=canonical_node_budget_for_bytes(limits.max_response_bytes),
             max_bytes=limits.max_response_bytes,
             max_string_bytes=min(
@@ -1156,6 +1334,7 @@ __all__ = [
     "PROJECT_SNAPSHOT_OPERATION_ID",
     "PROJECT_SNAPSHOT_OPERATION_VERSION",
     "PROJECT_SNAPSHOT_SCHEMA_ID",
+    "PROVIDER_READ_CONTRACT_FIXTURE_SHA256",
     "MIN_PROJECT_SNAPSHOT_RESPONSE_BYTES",
     "MAX_PROVIDER_LIMIT_REQUEST_FIELDS",
     "PUBLIC_SCHEMA_CONTRACT_KEY_V1",
@@ -1166,11 +1345,14 @@ __all__ = [
     "ProjectSnapshotDataV1",
     "ProjectSnapshotPayloadV1",
     "ProviderReadLimitsV1",
+    "ProviderLimitNameV1",
+    "ProviderLimitRefusalV1",
     "ReadErrorCode",
     "ReadErrorV1",
     "TaskRecordV1",
     "TaskScopedRefV1",
-    "VerificationCountsV1",
+    "VerificationKindV1",
+    "VerificationSummaryV1",
     "lowered_limits",
     "snapshot_canonical_bytes",
     "snapshot_digest",

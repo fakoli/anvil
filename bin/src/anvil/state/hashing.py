@@ -64,6 +64,7 @@ class CanonicalJsonRefusal(ValueError):
 def canonical_json_bytes(
     value: Any,
     *,
+    max_depth: int = MAX_CANONICAL_JSON_DEPTH,
     max_nodes: int = MAX_CANONICAL_JSON_NODES,
     max_bytes: int = MAX_CANONICAL_JSON_BYTES,
     max_string_bytes: int = MAX_CANONICAL_JSON_STRING_BYTES,
@@ -83,6 +84,7 @@ def canonical_json_bytes(
     hashing independent of ``default=`` coercions and object ``repr`` output.
     """
     _validate_canonical_limits(
+        max_depth=max_depth,
         max_nodes=max_nodes,
         max_bytes=max_bytes,
         max_string_bytes=max_string_bytes,
@@ -97,6 +99,7 @@ def canonical_json_bytes(
         max_nodes=max_nodes,
         max_bytes=max_bytes,
         max_string_bytes=max_string_bytes,
+        max_depth=max_depth,
     )
     encoded = json.dumps(
         materialized,
@@ -121,6 +124,7 @@ def domain_separated_sha256(
     domain: bytes,
     value: Any,
     *,
+    max_depth: int = MAX_CANONICAL_JSON_DEPTH,
     max_nodes: int = MAX_CANONICAL_JSON_NODES,
     max_bytes: int = MAX_CANONICAL_JSON_BYTES,
     max_string_bytes: int = MAX_CANONICAL_JSON_STRING_BYTES,
@@ -142,6 +146,7 @@ def domain_separated_sha256(
         domain
         + canonical_json_bytes(
             value,
+            max_depth=max_depth,
             max_nodes=max_nodes,
             max_bytes=max_bytes,
             max_string_bytes=max_string_bytes,
@@ -174,6 +179,7 @@ def _materialize_canonical_json_value(
     max_nodes: int,
     max_bytes: int,
     max_string_bytes: int,
+    max_depth: int,
 ) -> Any:
     nodes[0] += 1
     if nodes[0] > max_nodes:
@@ -181,7 +187,7 @@ def _materialize_canonical_json_value(
             CanonicalJsonRefusalCode.node_limit_exceeded,
             path=path,
         )
-    if depth > MAX_CANONICAL_JSON_DEPTH:
+    if depth > max_depth:
         raise CanonicalJsonRefusal(
             CanonicalJsonRefusalCode.depth_exceeded,
             path=path,
@@ -225,6 +231,7 @@ def _materialize_canonical_json_value(
             max_nodes=max_nodes,
             max_bytes=max_bytes,
             max_string_bytes=max_string_bytes,
+            max_depth=max_depth,
         )
     if isinstance(value, Sequence) and not isinstance(
         value, (str, bytes, bytearray, memoryview)
@@ -239,6 +246,7 @@ def _materialize_canonical_json_value(
             max_nodes=max_nodes,
             max_bytes=max_bytes,
             max_string_bytes=max_string_bytes,
+            max_depth=max_depth,
         )
     raise CanonicalJsonRefusal(
         CanonicalJsonRefusalCode.unsupported_type,
@@ -257,6 +265,7 @@ def _materialize_mapping(
     max_nodes: int,
     max_bytes: int,
     max_string_bytes: int,
+    max_depth: int,
 ) -> dict[str, Any]:
     identity = id(value)
     if identity in active:
@@ -304,6 +313,7 @@ def _materialize_mapping(
                 max_nodes=max_nodes,
                 max_bytes=max_bytes,
                 max_string_bytes=max_string_bytes,
+                max_depth=max_depth,
             )
     except CanonicalJsonRefusal:
         raise
@@ -328,6 +338,7 @@ def _materialize_sequence(
     max_nodes: int,
     max_bytes: int,
     max_string_bytes: int,
+    max_depth: int,
 ) -> list[Any]:
     identity = id(value)
     if identity in active:
@@ -358,6 +369,7 @@ def _materialize_sequence(
                     max_nodes=max_nodes,
                     max_bytes=max_bytes,
                     max_string_bytes=max_string_bytes,
+                    max_depth=max_depth,
                 )
             )
     except CanonicalJsonRefusal:
@@ -434,10 +446,13 @@ def _consume_bytes(
 
 def _validate_canonical_limits(
     *,
+    max_depth: int,
     max_nodes: int,
     max_bytes: int,
     max_string_bytes: int,
 ) -> None:
+    if not 1 <= max_depth <= MAX_CANONICAL_JSON_DEPTH:
+        raise ValueError("canonical JSON depth ceiling is outside the supported range")
     if not 1 <= max_nodes <= MAX_CANONICAL_JSON_NODE_HARD_LIMIT:
         raise ValueError("canonical JSON node ceiling is outside the supported range")
     if not 1 <= max_bytes <= MAX_CANONICAL_JSON_RESPONSE_BYTES:

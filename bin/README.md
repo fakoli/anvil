@@ -11,6 +11,11 @@ Pydantic 2.11.7+, and FastMCP 3.x (3.0.0 or newer). These are the lowest
 versions that both resolve and provide Anvil's MCP registration and
 surface-gating APIs; the next FastMCP major remains opt-in until qualified.
 
+The immutable version-1 provider-read ceilings and exact limit-refusal shape
+are published in the packaged `_data/provider-read-contract-v1.json` fixture;
+the runtime pins its canonical-JSON SHA-256 so line-ending conversion cannot
+mask or invent drift from the validated `anvil.read_contracts` models.
+
 ```bash
 uv tool install anvil-state      # or: pipx install anvil-state
 anvil --help

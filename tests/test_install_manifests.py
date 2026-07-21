@@ -109,6 +109,7 @@ def test_built_wheel_runs_at_declared_dependency_floors(tmp_path: Path) -> None:
             "pydantic==2.11.7",
             "fastmcp==3.0.0",
             "pytest>=8,<10",
+            "jsonschema>=4,<5",
         ],
         capture_output=True,
         text=True,
@@ -129,7 +130,10 @@ def test_built_wheel_runs_at_declared_dependency_floors(tmp_path: Path) -> None:
             str(python),
             "-c",
             (
+                "from anvil import read_contracts; "
                 "from anvil.mcp_server import apply_surface_gate, mcp; "
+                "assert read_contracts.PROVIDER_LIMITS_V1.max_dependency_edges == 200000; "
+                "assert read_contracts.VerificationSummaryV1.model_json_schema(); "
                 "assert callable(mcp.enable); assert callable(mcp.disable); "
                 "assert hasattr(mcp, '_transforms'); "
                 "assert apply_surface_gate(mcp, env={}) is False; "
@@ -160,6 +164,23 @@ def test_built_wheel_runs_at_declared_dependency_floors(tmp_path: Path) -> None:
     assert mcp_contracts.returncode == 0, (
         mcp_contracts.stdout + mcp_contracts.stderr
     )[-1600:]
+
+    public_contracts = subprocess.run(
+        [
+            str(python),
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_public_read_contracts.py",
+        ],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert public_contracts.returncode == 0, (
+        public_contracts.stdout + public_contracts.stderr
+    )[-2000:]
 
     below_floor = subprocess.run(
         [
