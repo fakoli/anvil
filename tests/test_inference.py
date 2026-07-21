@@ -17,6 +17,7 @@ from anvil.planning import inference as inference_module
 from anvil.planning.inference import (
     BundlePlanningError,
     InferenceResult,
+    build_bundle_plan,
     infer_all,
     infer_conflict_groups,
     infer_dependencies,
@@ -29,6 +30,20 @@ from anvil.state.models import Score, Task, TaskPriority, TaskStatus, Verificati
 
 _UTC = datetime.UTC
 _NOW = datetime.datetime(2026, 5, 24, 18, 0, 0, tzinfo=_UTC)
+_WINDOWS_DEVICE_NAMES = [
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+]
+_PORTABLE_PATH_ENTRYPOINTS = [
+    infer_dependencies,
+    infer_conflict_groups,
+    infer_all,
+    build_bundle_plan,
+]
 
 
 def _make_task(
@@ -142,12 +157,20 @@ class TestInferDependencies:
             "C:/absolute.py",
             "C:drive-relative.py",
             "src/file.py:stream",
-            "src/null\0byte.py",
+            *(f"src/control-{code:02x}-{chr(code)}.py" for code in range(0x20)),
+            "src/delete-\x7f.py",
+            *(f"src/illegal-{character}.py" for character in '<>\"|?*'),
+            "src/trailing-dot.",
+            "src/trailing-space ",
+            "src/trailing-dot./file.py",
+            "src/trailing-space /file.py",
+            *_WINDOWS_DEVICE_NAMES,
+            *(f"src/{name.lower()}.txt" for name in _WINDOWS_DEVICE_NAMES),
         ],
     )
     @pytest.mark.parametrize(
         "entrypoint",
-        [infer_dependencies, infer_conflict_groups, infer_all],
+        _PORTABLE_PATH_ENTRYPOINTS,
     )
     def test_malformed_or_escaping_paths_fail_closed(
         self,
@@ -156,6 +179,29 @@ class TestInferDependencies:
     ) -> None:
         with pytest.raises(BundlePlanningError, match="project"):
             entrypoint([_make_task("T001", [unsafe_path])])
+
+    @pytest.mark.parametrize(
+        "portable_path",
+        [
+            "./src\\module.py",
+            "src/parts/../module.py",
+            ".github/workflows/test.yml",
+            "src/space name.py",
+            "src/COM0.txt",
+            "src/COM10.txt",
+            "src/LPT0.txt",
+            "src/LPT10.txt",
+            "src/.con",
+            "src/console.txt",
+        ],
+    )
+    @pytest.mark.parametrize("entrypoint", _PORTABLE_PATH_ENTRYPOINTS)
+    def test_portable_aliases_remain_valid(
+        self,
+        portable_path: str,
+        entrypoint: Callable[[list[Task]], object],
+    ) -> None:
+        entrypoint([_make_task("T001", [portable_path])])
 
     def test_superset_gets_no_extra_dependency(self) -> None:
         """B.files ⊃ A.files → B does NOT depend on A (A depends on B)."""

@@ -147,18 +147,58 @@ class BundlePlanningError(ValueError):
     """The proposed execution graph cannot be costed safely."""
 
 
+_WINDOWS_ILLEGAL_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
+_WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
+
+
+def _validate_portable_project_path(candidate: str, original: str) -> None:
+    """Reject spellings that cannot name a portable repository path.
+
+    Git repositories routinely cross POSIX and Windows hosts.  In addition to
+    the traversal checks performed after normalization, every authored path
+    component must therefore exclude ASCII control characters, Windows-illegal
+    punctuation, trailing dots/spaces, and Windows device basenames.  ``.`` and
+    ``..`` remain valid normalization aliases and separators are handled before
+    this component-level policy runs.
+    """
+    if any(
+        ord(character) < 0x20 or ord(character) == 0x7F
+        for character in candidate
+    ):
+        raise BundlePlanningError(
+            "bundle planning requires a portable project-relative file path: "
+            f"{original!r}"
+        )
+    for component in candidate.split("/"):
+        if component in {"", ".", ".."}:
+            continue
+        basename = component.split(".", maxsplit=1)[0].upper()
+        if (
+            any(
+                character in _WINDOWS_ILLEGAL_COMPONENT_CHARACTERS
+                for character in component
+            )
+            or component.endswith((".", " "))
+            or basename in _WINDOWS_RESERVED_DEVICE_BASENAMES
+        ):
+            raise BundlePlanningError(
+                "bundle planning requires a portable project-relative file path: "
+                f"{original!r}"
+            )
+
+
 def _canonical_project_path(path: str) -> str:
     """Return one safe project-relative spelling for inference comparisons."""
-    candidate = path.strip().replace("\\", "/")
-    if (
-        not candidate
-        or candidate.startswith("/")
-        or ":" in candidate
-        or "\0" in candidate
-    ):
+    candidate = path.replace("\\", "/")
+    if not candidate or candidate.startswith("/"):
         raise BundlePlanningError(
             f"bundle planning requires a project-relative file path: {path!r}"
         )
+    _validate_portable_project_path(candidate, path)
     normalized = posixpath.normpath(candidate)
     if normalized in {"", ".", ".."} or normalized.startswith("../"):
         raise BundlePlanningError(
