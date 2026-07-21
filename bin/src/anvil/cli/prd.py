@@ -152,6 +152,11 @@ def prd_parse(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
+                # The parsed heading title (guaranteed non-empty here — an
+                # empty/malformed heading is a ParseError that exits above).
+                # Stamped for default and named PRDs alike so `prd list`/`show`
+                # surface the same readable label for both.
+                "title": result.prd.title,
             }
 
             # Named PRD: stamp the partition so the backend writes ONLY this PRD's
@@ -173,7 +178,6 @@ def prd_parse(
             if not is_default_prd:
                 payload["prd_id"] = stored_prd_id
                 payload["is_default"] = False
-                payload["title"] = result.prd.title
                 payload["target_version"] = result.prd.target_version
                 payload["target_tag"] = result.prd.target_tag
 
@@ -252,7 +256,10 @@ def prd_parse(
                 "prd_id": stored_prd_id,
                 "revision": existing_prd.revision + 1,
                 "is_default": existing_prd.is_default,
-                "title": existing_prd.title,
+                # Title follows the SOURCE on every parse (non-empty here — an
+                # empty/malformed heading is a ParseError that exits above), so
+                # renaming the heading and re-parsing updates the stored title.
+                "title": result.prd.title,
                 "target_version": existing_prd.target_version,
                 "target_tag": existing_prd.target_tag,
                 # Carry the CURRENT stored status, NOT result.prd.status: a freshly

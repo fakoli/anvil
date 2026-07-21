@@ -423,6 +423,12 @@ _RELEASE_FIELD_RE = re.compile(
 # "v0.2.0 (v0.2)". The parenthetical sets target_tag; the leading token sets
 # target_version.
 _RELEASE_TAG_RE = re.compile(r"^(.*?)\s*\(\s*(?:tag\s*:\s*)?([^)]+?)\s*\)\s*$")
+# The top-level PRD heading: ``# Project: <Name>`` (template form) or a bare
+# ``# <Name>``. The optional ``Project:`` prefix is boilerplate, not part of
+# the readable name, so it is stripped from the captured title.
+_PROJECT_TITLE_RE = re.compile(
+    r"^#\s+(?:project\s*:\s*)?(?P<title>.*)$", re.IGNORECASE
+)
 
 
 def _split_release_value(value: str) -> tuple[str | None, str | None]:
@@ -1785,8 +1791,12 @@ def parse_prd(
     sections = _split_sections(lines)
 
     # --- Required: # Project heading ------------------------------------
-    # The project name lives in the heading but is not stored on PRD (which has
-    # no name field).  We validate its presence and emit an error if absent.
+    # The heading names the PRD: ``# Project: <Name>`` (the template form) or a
+    # bare ``# <Name>``. The extracted name becomes ``PRD.title`` — the
+    # canonical human-readable label that ``prd list``/``prd show`` and API
+    # consumers surface. A heading that yields an empty name is a parse error,
+    # so a persisted PRD always carries a non-empty title.
+    title = ""
     proj_block = sections.get("__project__")
     if proj_block is None:
         errors.append(
@@ -1798,7 +1808,9 @@ def parse_prd(
         )
     else:
         proj_line = proj_block[1][0] if proj_block[1] else ""
-        if not re.match(r"^#\s+\S", proj_line.strip()):
+        m_title = _PROJECT_TITLE_RE.match(proj_line.strip())
+        title = m_title.group("title").strip() if m_title else ""
+        if not title:
             errors.append(
                 ParseError(
                     section="# Project",
@@ -1906,6 +1918,7 @@ def parse_prd(
     # --- Build PRD model ------------------------------------------------
     prd = PRD(
         id=_model_prd_id(prd_id),
+        title=title,
         target_version=target_version,
         target_tag=target_tag,
         summary=summary,

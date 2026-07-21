@@ -152,6 +152,64 @@ A summary.
 
 
 # ---------------------------------------------------------------------------
+# Project-heading title extraction (issue #177)
+# ---------------------------------------------------------------------------
+
+
+class TestProjectTitleExtraction:
+    """The # Project heading names the PRD: parse_prd stores it as PRD.title."""
+
+    def test_project_prefix_heading_yields_title(self) -> None:
+        """'# Project: Minimal Project' → title 'Minimal Project' (prefix stripped)."""
+        result = parse_prd(_MINIMAL_PRD)
+        assert result.errors == []
+        assert result.prd.title == "Minimal Project"
+
+    def test_bare_heading_yields_title(self) -> None:
+        """A heading without the 'Project:' prefix is the title verbatim."""
+        prd = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# Workbench Foundation"
+        )
+        result = parse_prd(prd)
+        assert result.errors == []
+        assert result.prd.title == "Workbench Foundation"
+
+    def test_project_prefix_is_case_insensitive(self) -> None:
+        """'# project: X' strips the prefix regardless of case."""
+        prd = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# PROJECT: Shouty Name"
+        )
+        result = parse_prd(prd)
+        assert result.errors == []
+        assert result.prd.title == "Shouty Name"
+
+    def test_named_prd_id_yields_same_title(self) -> None:
+        """Title extraction is identical for default and named PRD ids."""
+        result = parse_prd(_MINIMAL_PRD, prd_id="v0.2")
+        assert result.errors == []
+        assert result.prd.title == "Minimal Project"
+
+    def test_empty_project_name_is_parse_error(self) -> None:
+        """'# Project:' with no name → ParseError; title stays empty."""
+        prd = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# Project:"
+        )
+        result = parse_prd(prd)
+        assert result.prd.title == ""
+        assert any(
+            "Could not extract project name" in e.message for e in result.errors
+        )
+
+    def test_missing_heading_leaves_title_empty(self) -> None:
+        """No # Project heading at all → the existing missing-heading error,
+        and title stays empty (the parse never persists — errors exit 1)."""
+        prd = _MINIMAL_PRD.replace("# Project: Minimal Project\n", "")
+        result = parse_prd(prd)
+        assert result.prd.title == ""
+        assert any("# Project" in e.section for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
 # Happy path — minimal valid PRD
 # ---------------------------------------------------------------------------
 
