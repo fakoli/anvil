@@ -231,7 +231,7 @@ SQLite cannot ALTER a PK so the prds rebuild must be inside the SAVEPOINT atomic
 **Verification:**
 
 - `cd bin && uv run pytest -q ../tests/test_sqlite.py -k 'migrat or v6 or v7'`
-- `cd bin && uv run pytest -q -k 'migration and (sync or prd or default)'`
+- `uv run --project bin pytest -q -k 'migration and (sync or prd or default)'`
 
 ### T005: De-literalize the SCHEMA_VERSION migration gate into an ordered _MIGRATIONS ladder
 
@@ -373,7 +373,7 @@ If task.prd_id is somehow absent (mis-migrated), get_prd_for_task must fall back
 **Verification:**
 
 - `cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_transitions.py`
-- `cd bin && uv run pytest -q -k 'per_prd_gate or owning_prd'`
+- `uv run --project bin pytest -q -k 'per_prd_gate or owning_prd'`
 
 ### T012: Collapse the duplicated MCP claim gate onto ClaimManager
 
@@ -392,7 +392,7 @@ Removing the early inline gate changes the error surface ordering; tests asserti
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'mcp and claim'`
+- `uv run --project bin pytest -q -k 'mcp and claim'`
 - `cd bin && uv run pytest -q ../tests/test_mcp_server.py`
 
 ### T013: Pin cross-PRD coordination: conflict groups, active claims, and stale reaper span all PRDs
@@ -415,7 +415,7 @@ This is the moat. The danger is a future --prd filter implemented as list_tasks(
 **Verification:**
 
 - `cd bin && uv run pytest -q ../tests/test_inference.py ../tests/test_claims.py`
-- `cd bin && uv run pytest -q -k cross_prd`
+- `uv run --project bin pytest -q -k cross_prd`
 
 ### T014: v6->v7 gate-equivalence test: migrated single-PRD DB keeps identical claimability
 
@@ -434,7 +434,7 @@ Low; verification-only, but pins the backward-compat contract for the gate.
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'migration and (gate or claim)'`
+- `uv run --project bin pytest -q -k 'migration and (gate or claim)'`
 - `cd bin && uv run pytest -q ../tests/test_replay.py`
 
 ### T015: Make parse_prd prd_id load-bearing with PRD-prefixed auto ids (bare for default) + Release field round-trip
@@ -517,7 +517,7 @@ MCP args have no Typer envvar binding; ANVIL_PRD must be read explicitly in _res
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'resolve_prd_id or anvil_prd_env'`
+- `uv run --project bin pytest -q -k 'resolve_prd_id or anvil_prd_env'`
 - `cd bin && uv run python -c "from anvil.cli._helpers import resolve_prd_id, PRD_OPTION; print('ok')"`
 
 ### T019: Thread --prd/prd_id through prd parse/review, plan, score, list, show, packet, next (CLI + MCP)
@@ -538,7 +538,7 @@ The --prd filter on next MUST build exclusion sets from ALL PRDs then narrow; im
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'next and prd'; cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_mcp_server.py`
+- `uv run --project bin pytest -q -k 'next and prd'; cd bin && uv run pytest -q ../tests/test_claims.py ../tests/test_mcp_server.py`
 - `cd bin && uv run anvil next --help | grep -- --prd`
 
 ### T020: Per-PRD rollup for anvil status and get_project_status/get_project_summary
@@ -558,7 +558,7 @@ The --prd filter on next MUST build exclusion sets from ALL PRDs then narrow; im
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'status_rollup or get_project_status or get_project_summary'`
+- `uv run --project bin pytest -q -k 'status_rollup or get_project_status or get_project_summary'`
 - `cd bin && uv run anvil status --json | python -c "import sys,json; d=json.load(sys.stdin); assert 'prds' in d['data']; print('ok')"`
 
 ### T021: Backward-compat surface tests + get_prd() no-arg call-site audit
@@ -578,7 +578,7 @@ A call site left on bare get_prd() silently operates only on the default PRD onc
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'single_prd_backcompat or prd_ambiguity or anvil_prd_env'`
+- `uv run --project bin pytest -q -k 'single_prd_backcompat or prd_ambiguity or anvil_prd_env'`
 - `cd bin && grep -rn 'get_prd()' src/anvil/ | wc -l`
 
 ### T022: Add PRD.revision + Requirement lineage model fields + PrdRevisedPayload
@@ -680,7 +680,7 @@ Overloading task_id on prd-kind rows: nullable task_id + the validator prevent g
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'sync_mapping or sync and (push or replay or mapping)'`
+- `uv run --project bin pytest -q -k 'sync_mapping or sync and (push or replay or mapping)'`
 - `cd bin && uv run python -c "from anvil.state.models import SyncMapping; import datetime as d; m=SyncMapping(task_id='t1', external_system='github_issues', external_id='1', last_synced_at=d.datetime.now(d.timezone.utc)); assert m.entity_kind=='task'; print('ok')"`
 
 ### T027: Per-PRD sync push scoping in the CLI + prd_id stamped on mappings
@@ -700,7 +700,7 @@ Cross-PRD push ordering with deferred milestones is two round-trips per PRD; for
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'sync and (prd or scope or dispatch or push)'`
+- `uv run --project bin pytest -q -k 'sync and (prd or scope or dispatch or push)'`
 - `cd bin && uv run anvil sync --help`
 
 ### T028: Attribute reconciliation sync discrepancies to a PRD
@@ -720,7 +720,7 @@ missing_sync_mapping iterates done tasks with no PRD filter; once tasks carry pr
 
 **Verification:**
 
-- `cd bin && uv run pytest -q -k 'recon or drift or missing_sync'`
+- `uv run --project bin pytest -q -k 'recon or drift or missing_sync'`
 
 ### T029: DEFERRED placeholder: ensure_release_group Protocol + GitHub milestone client (tracked, not implemented this release)
 
