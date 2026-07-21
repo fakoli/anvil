@@ -16,6 +16,7 @@ Tests run in isolated tmp directories and never touch the real cwd state.
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import sqlite3
 import threading
@@ -438,6 +439,212 @@ class TestScanCommand:
         finally:
             connection.close()
         assert counts_after == counts_before
+
+    @pytest.mark.parametrize("mode", ["first-run", "force"])
+    @pytest.mark.parametrize("failure_point", ["save-model", "prd-write"])
+    def test_every_post_mutation_failure_rolls_back_and_retry_succeeds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+        failure_point: str,
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        scan_model = importlib.import_module("anvil.scan.model")
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        if mode == "force":
+            seeded = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+            assert seeded.exit_code == 0, seeded.output
+
+        artifacts_before = {
+            name: (state_dir / name).read_bytes()
+            if (state_dir / name).exists()
+            else None
+            for name in ("scan.db", "prd.md")
+        }
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        state_before = (state_dir / "state.db").read_bytes()
+
+        with monkeypatch.context() as injected:
+            if failure_point == "save-model":
+                original_save = scan_model.save_model
+
+                def fail_after_save(*args: object, **kwargs: object) -> None:
+                    original_save(*args, **kwargs)
+                    raise OSError("injected raw save failure")
+
+                injected.setattr(scan_model, "save_model", fail_after_save)
+            else:
+                original_write = scan_module._write_generated_prd
+
+                def fail_after_prd_write(path: Path, text: str) -> None:
+                    original_write(path, text)
+                    with path.open("a", encoding="utf-8") as handle:
+                        handle.write("\n# injected mutation\n")
+                    raise OSError("injected raw PRD failure")
+
+                injected.setattr(
+                    scan_module, "_write_generated_prd", fail_after_prd_write
+                )
+
+            arguments = ["scan", "--json"]
+            if mode == "force":
+                arguments.append("--force")
+            failed = runner.invoke(app, arguments, catch_exceptions=False)
+
+        assert failed.exit_code == 1
+        assert json.loads(failed.output)["error"] == {
+            "code": "scan_artifact_error",
+            "message": "scan artifact update failed; prior artifacts were restored",
+        }
+        assert "injected" not in failed.output
+        assert str(tmp_path) not in failed.output
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+        assert (state_dir / "state.db").read_bytes() == state_before
+        for name, prior_bytes in artifacts_before.items():
+            artifact = state_dir / name
+            if prior_bytes is None:
+                assert not artifact.exists()
+            else:
+                assert artifact.read_bytes() == prior_bytes
+        recovery_parent = state_dir / "recovery"
+        assert not list(recovery_parent.glob("scan-*"))
+
+        retried = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert retried.exit_code == 0, retried.output
+        retry_data = json.loads(retried.output)["data"]
+        if mode == "first-run":
+            assert retry_data["first_scan"] is True
+            assert retry_data["seeded"] is not None
+        else:
+            assert retry_data["seeded"] is None
+
+    @pytest.mark.parametrize("mode", ["first-run", "force"])
+    @pytest.mark.parametrize("restore_failure", ["scan.db", "prd.md"])
+    def test_incomplete_restore_retains_durable_backups_and_retry_recovers(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+        restore_failure: str,
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        if mode == "force":
+            seeded = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+            assert seeded.exit_code == 0, seeded.output
+
+        artifacts_before = {
+            name: (state_dir / name).read_bytes()
+            if (state_dir / name).exists()
+            else None
+            for name in ("scan.db", "prd.md")
+        }
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        state_before = (state_dir / "state.db").read_bytes()
+        restore_attempts: list[str] = []
+
+        with monkeypatch.context() as injected:
+            original_write = scan_module._write_generated_prd
+            original_restore = scan_module._restore_scan_artifact
+
+            def fail_after_prd_write(path: Path, text: str) -> None:
+                original_write(path, text)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write("\n# injected mutation\n")
+                raise OSError("injected raw PRD failure")
+
+            def fail_one_restore(
+                recovery_state_dir: Path,
+                recovery_root: Path,
+                artifact_name: str,
+            ) -> None:
+                restore_attempts.append(artifact_name)
+                if artifact_name == restore_failure:
+                    raise OSError("injected raw restore failure")
+                original_restore(
+                    recovery_state_dir, recovery_root, artifact_name
+                )
+
+            injected.setattr(
+                scan_module, "_write_generated_prd", fail_after_prd_write
+            )
+            injected.setattr(
+                scan_module, "_restore_scan_artifact", fail_one_restore
+            )
+            arguments = ["scan", "--json"]
+            if mode == "force":
+                arguments.append("--force")
+            failed = runner.invoke(app, arguments, catch_exceptions=False)
+
+        assert restore_attempts == ["scan.db", "prd.md"]
+        assert failed.exit_code == 1
+        error = json.loads(failed.output)["error"]
+        assert error["code"] == "scan_recovery_incomplete"
+        assert error["message"].startswith(
+            "scan artifact recovery incomplete; backups retained at "
+            "recovery/scan-"
+        )
+        assert len(error["message"]) <= 4_096
+        assert error["message"].encode("cp1252")
+        assert "injected" not in error["message"]
+        assert str(tmp_path) not in error["message"]
+        token = error["message"].rsplit("/", maxsplit=1)[1]
+        assert len(token) == len("scan-") + 16
+        recovery_root = state_dir / "recovery" / token
+        assert recovery_root.is_dir()
+        for name, prior_bytes in artifacts_before.items():
+            marker = recovery_root / f"{name}.absent"
+            backup = recovery_root / f"{name}.backup"
+            if prior_bytes is None:
+                assert marker.read_bytes() == b"absent\n"
+                assert not backup.exists()
+            else:
+                assert backup.read_bytes() == prior_bytes
+                assert not marker.exists()
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+        assert (state_dir / "state.db").read_bytes() == state_before
+
+        original_resume = scan_module._resume_scan_recovery
+        restored_snapshot: dict[str, bytes | None] = {}
+        resume_calls = 0
+
+        def observe_automatic_resume(recovery_state_dir: Path) -> None:
+            nonlocal resume_calls
+            original_resume(recovery_state_dir)
+            resume_calls += 1
+            for name in ("scan.db", "prd.md"):
+                artifact = recovery_state_dir / name
+                restored_snapshot[name] = (
+                    artifact.read_bytes() if artifact.exists() else None
+                )
+
+        with monkeypatch.context() as retry_patch:
+            retry_patch.setattr(
+                scan_module, "_resume_scan_recovery", observe_automatic_resume
+            )
+            retried = runner.invoke(
+                app, ["scan", "--json"], catch_exceptions=False
+            )
+
+        assert resume_calls == 1
+        assert restored_snapshot == artifacts_before
+        assert not recovery_root.exists()
+        assert retried.exit_code == 0, retried.output
+        retry_data = json.loads(retried.output)["data"]
+        if mode == "first-run":
+            assert retry_data["first_scan"] is True
+            assert retry_data["seeded"] is not None
+        else:
+            assert retry_data["seeded"] is None
 
     def test_first_scan_seeds_prd_tasks_and_codebase_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

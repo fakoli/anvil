@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import errno
 import os
+import secrets
+import shutil
 import sys
 import tempfile
 import threading
@@ -50,6 +52,10 @@ __all__ = ["scan"]
 _COMMAND = "scan"
 _PRD_FILENAME = "prd.md"
 _SOURCE_MISSING = object()
+_SCAN_RECOVERY_DIRECTORY = "recovery"
+_SCAN_RECOVERY_PREFIX = "scan-"
+_SCAN_ARTIFACT_NAMES = ("scan.db", _PRD_FILENAME)
+_SCAN_KEEP_MARKER = b"state-bound\n"
 
 
 def _canonical_requirement_index(identifier: str) -> str | None:
@@ -674,6 +680,182 @@ def _restore_prd_source_if_unchanged(
     )
 
 
+class ScanArtifactError(SampleSeedError):
+    """A scan artifact update failed after rollback completed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "scan artifact update failed; prior artifacts were restored",
+            code="scan_artifact_error",
+        )
+
+
+class ScanRecoveryError(SampleSeedError):
+    """Scan artifact rollback is incomplete and durable backups remain."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        super().__init__(
+            "scan artifact recovery incomplete; backups retained at "
+            f"recovery/{token}",
+            code="scan_recovery_incomplete",
+        )
+
+
+def _new_scan_recovery_token() -> str:
+    """Return one opaque, filesystem-safe recovery token."""
+    return _SCAN_RECOVERY_PREFIX + secrets.token_hex(8)
+
+
+def _is_scan_recovery_token(token: str) -> bool:
+    suffix = token.removeprefix(_SCAN_RECOVERY_PREFIX)
+    return (
+        token.startswith(_SCAN_RECOVERY_PREFIX)
+        and len(suffix) == 16
+        and all(character in "0123456789abcdef" for character in suffix)
+    )
+
+
+def _write_durable_marker(path: Path) -> None:
+    """Create and flush a fixed recovery marker before artifact mutation."""
+    with path.open("xb") as marker:
+        marker.write(b"absent\n")
+        marker.flush()
+        os.fsync(marker.fileno())
+
+
+def _fsync_file(path: Path) -> None:
+    # Windows requires a writable descriptor for FlushFileBuffers/fsync.
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _mark_scan_artifact_state_bound(
+    recovery_root: Path,
+    artifact_name: str,
+) -> None:
+    """Durably exempt a state-bound artifact from rollback."""
+    if artifact_name not in _SCAN_ARTIFACT_NAMES:
+        raise OSError("artifact is not allowlisted")
+    marker = recovery_root / f"{artifact_name}.state-bound"
+    with marker.open("xb") as handle:
+        handle.write(_SCAN_KEEP_MARKER)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _create_scan_recovery(state_dir: Path) -> tuple[str, Path]:
+    """Persist pre-mutation backups and return their opaque recovery token."""
+    recovery_parent = state_dir / _SCAN_RECOVERY_DIRECTORY
+    try:
+        recovery_parent.mkdir(exist_ok=True)
+    except Exception:
+        raise ScanArtifactError() from None
+    if recovery_parent.is_symlink():
+        raise ScanArtifactError()
+
+    for _attempt in range(16):
+        token = _new_scan_recovery_token()
+        recovery_root = recovery_parent / token
+        try:
+            recovery_root.mkdir()
+        except FileExistsError:
+            continue
+        except Exception:
+            raise ScanArtifactError() from None
+        try:
+            for artifact_name in _SCAN_ARTIFACT_NAMES:
+                artifact = state_dir / artifact_name
+                if artifact.exists():
+                    backup = recovery_root / f"{artifact_name}.backup"
+                    shutil.copy2(artifact, backup)
+                    _fsync_file(backup)
+                else:
+                    _write_durable_marker(
+                        recovery_root / f"{artifact_name}.absent"
+                    )
+            return token, recovery_root
+        except Exception:
+            try:
+                shutil.rmtree(recovery_root)
+            except Exception:
+                raise ScanRecoveryError(token) from None
+            raise ScanArtifactError() from None
+    raise ScanArtifactError()
+
+
+def _restore_scan_artifact(
+    state_dir: Path,
+    recovery_root: Path,
+    artifact_name: str,
+) -> None:
+    """Restore one artifact while retaining its durable source backup."""
+    artifact = state_dir / artifact_name
+    backup = recovery_root / f"{artifact_name}.backup"
+    absent = recovery_root / f"{artifact_name}.absent"
+    state_bound = recovery_root / f"{artifact_name}.state-bound"
+    if state_bound.exists():
+        if state_bound.read_bytes() != _SCAN_KEEP_MARKER:
+            raise OSError("invalid state-bound recovery marker")
+        return
+    if backup.exists() == absent.exists():
+        raise OSError("invalid recovery record")
+    if absent.exists():
+        artifact.unlink(missing_ok=True)
+        return
+    staging = recovery_root / f"{artifact_name}.restore"
+    shutil.copy2(backup, staging)
+    _fsync_file(staging)
+    staging.replace(artifact)
+
+
+def _retire_scan_recovery(recovery_root: Path) -> bool:
+    """Atomically make a completed recovery inactive, then remove it."""
+    completed = recovery_root.with_name(f".completed-{recovery_root.name}")
+    try:
+        recovery_root.replace(completed)
+    except Exception:
+        return False
+    try:
+        shutil.rmtree(completed)
+    except Exception:
+        # The leading-dot completed name is deliberately outside the active
+        # ``scan-*`` namespace. Cleanup can be retried by maintenance without
+        # risking a rollback of committed artifacts.
+        pass
+    return True
+
+
+def _restore_scan_recovery(state_dir: Path, recovery_root: Path) -> bool:
+    """Best-effort every artifact; return true only after full restoration."""
+    failures = False
+    for artifact_name in _SCAN_ARTIFACT_NAMES:
+        try:
+            _restore_scan_artifact(state_dir, recovery_root, artifact_name)
+        except BaseException:
+            failures = True
+    if failures:
+        return False
+    return _retire_scan_recovery(recovery_root)
+
+
+def _resume_scan_recovery(state_dir: Path) -> None:
+    """Finish any durable rollback before reading or mutating scan artifacts."""
+    recovery_parent = state_dir / _SCAN_RECOVERY_DIRECTORY
+    if not recovery_parent.is_dir():
+        return
+    for recovery_root in sorted(recovery_parent.glob(f"{_SCAN_RECOVERY_PREFIX}*")):
+        if (
+            not recovery_root.is_dir()
+            or recovery_root.is_symlink()
+            or not _is_scan_recovery_token(recovery_root.name)
+        ):
+            continue
+        token = recovery_root.name
+        if not _restore_scan_recovery(state_dir, recovery_root):
+            raise ScanRecoveryError(token)
+
+
 def scan(
     json_output: bool = JSON_OPTION,
     force: bool = typer.Option(  # noqa: B008
@@ -757,9 +939,6 @@ def _run_scan(
     *,
     force: bool,
 ) -> dict[str, Any]:
-    from shutil import copy2
-    from tempfile import TemporaryDirectory
-
     from anvil.cli._sample import SampleSeedError
     from anvil.scan.model import (
         SCAN_DB_NAME,
@@ -772,43 +951,36 @@ def _run_scan(
     scan_db = state_dir / SCAN_DB_NAME
     prd_path = state_dir / _PRD_FILENAME
 
+    _resume_scan_recovery(state_dir)
     previous: CodebaseModel | None = load_model(scan_db)
     current: CodebaseModel = scan_working_tree(project_root)
     delta: ScanDelta = compute_delta(previous, current)
 
     seeded: dict[str, Any] | None = None
     seed_reason = _should_seed(state_dir, prd_path, force=force)
-    if seed_reason is None:
-        # Ordinary re-scans cannot enter the seed failure path and need no
-        # artifact backup; persist the refreshed model directly.
+    # Every scan rewrites scan.db. Establish a durable two-artifact recovery
+    # record before the first mutation so an interrupted restore can resume.
+    token, recovery_root = _create_scan_recovery(state_dir)
+    try:
         save_model(current, scan_db)
-    else:
-        # Preserve scan.db before its first mutation. _seed_draft owns the
-        # canonical PRD source's atomic publish/rollback under the state lock;
-        # duplicating that rollback here could restore stale bytes after a
-        # successful state append.
-        with TemporaryDirectory(
-            prefix=".scan-rollback-", dir=state_dir
-        ) as backup_dir:
-            backup_root = Path(backup_dir)
-            backup_path: Path | None = None
-            if scan_db.exists():
-                backup_path = backup_root / scan_db.name
-                copy2(scan_db, backup_path)
-            try:
-                save_model(current, scan_db)
-                seeded = _seed_draft(
-                    state_dir,
-                    project_root,
-                    current,
-                    revalidate_first_seed=seed_reason == "no_prd",
-                )
-            except SampleSeedError:
-                if backup_path is None:
-                    scan_db.unlink(missing_ok=True)
-                else:
-                    backup_path.replace(scan_db)
-                raise
+        if seed_reason is not None:
+            seeded = _seed_draft(
+                state_dir,
+                project_root,
+                current,
+                revalidate_first_seed=seed_reason == "no_prd",
+                recovery_root=recovery_root,
+            )
+    except BaseException as exc:
+        if not _restore_scan_recovery(state_dir, recovery_root):
+            raise ScanRecoveryError(token) from None
+        if isinstance(exc, SampleSeedError):
+            raise
+        if not isinstance(exc, Exception):
+            raise
+        raise ScanArtifactError() from None
+    if not _retire_scan_recovery(recovery_root):
+        raise ScanRecoveryError(token)
 
     return {
         "project_root": str(project_root),
@@ -866,6 +1038,7 @@ def _seed_draft(
     model: CodebaseModel,
     *,
     revalidate_first_seed: bool = False,
+    recovery_root: Path | None = None,
 ) -> dict[str, Any] | None:
     """Write the draft prd.md and drive the offline seed pipeline.
 
@@ -997,6 +1170,18 @@ def _seed_draft(
                         f"checked safely: {state_error.__class__.__name__}"
                     )
                     state_advanced = True
+                if state_advanced and recovery_root is not None:
+                    try:
+                        _mark_scan_artifact_state_bound(
+                            recovery_root,
+                            _PRD_FILENAME,
+                        )
+                    except BaseException as marker_error:
+                        failure.add_note(
+                            "PRD recovery state could not be recorded safely: "
+                            f"{marker_error.__class__.__name__}"
+                        )
+                        raise ScanRecoveryError(recovery_root.name) from failure
                 if not state_advanced:
                     try:
                         _restore_prd_source_if_unchanged(
