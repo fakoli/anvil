@@ -176,7 +176,57 @@ def test_projection_model_hides_raw_source_from_generic_dumps() -> None:
     assert not any(key.startswith("source_") for key in python_dump)
     assert "provenance_state" not in python_dump
     assert "content_available" not in python_dump
+    assert "source_bytes" not in dict(prd)
+    assert "provenance_state" not in dict(prd)
+    assert "content_available" not in dict(prd)
     assert repr(source_bytes) not in repr(prd)
+
+
+def test_projection_provenance_is_immutable_and_updates_revalidate() -> None:
+    source_bytes = b"# Project: Immutable\r\n"
+    prd = PRD(
+        revision=4,
+        source_bytes=source_bytes,
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        source_size_bytes=len(source_bytes),
+        source_encoding="utf-8",
+        source_revision=4,
+        provenance_state="available",
+        content_available=True,
+    )
+
+    with pytest.raises(ValidationError):
+        prd.source_sha256 = "0" * 64
+    assert prd.source_sha256 == hashlib.sha256(source_bytes).hexdigest()
+
+    with pytest.raises(ValidationError):
+        prd.validated_copy(source_revision=5)
+    assert prd.source_revision == 4
+
+
+@pytest.mark.parametrize(
+    ("payload_field", "invalid_value"),
+    [("source_text", b"coerced"), ("source_revision", "1")],
+)
+def test_payload_provenance_rejects_coercible_types(
+    payload_field: str, invalid_value: object
+) -> None:
+    source_bytes = b"coerced"
+    payload = {
+        "project_id": "project",
+        **_available_source_fields(source_bytes, 1),
+        payload_field: invalid_value,
+    }
+
+    with pytest.raises(ValidationError):
+        PrdParsedPayload.model_validate(payload)
+
+
+def test_projection_source_bytes_and_revision_reject_coercible_types() -> None:
+    with pytest.raises(ValidationError):
+        PRD(source_bytes="not-bytes")
+    with pytest.raises(ValidationError):
+        PRD(revision="1")
 
 
 @pytest.mark.parametrize(

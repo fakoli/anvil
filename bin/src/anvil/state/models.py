@@ -33,6 +33,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    StrictBytes,
     StrictInt,
     field_validator,
     model_serializer,
@@ -677,8 +678,7 @@ class PRD(BaseModel):
     """Product Requirements Document — the gate that controls task claimability."""
 
     model_config = ConfigDict(
-        frozen=False,
-        validate_assignment=True,
+        frozen=True,
         extra="forbid",
         hide_input_in_errors=True,
     )
@@ -701,11 +701,11 @@ class PRD(BaseModel):
     # predates the column) reads as the first revision. ``exclude=True`` keeps
     # Phase 0 additive — omitted from ``model_dump()`` so existing event
     # payloads / snapshot blobs stay byte-identical until Phase 6 wires it in.
-    revision: int = Field(default=1, ge=1, exclude=True)
+    revision: StrictInt = Field(default=1, ge=1, exclude=True)
     # Exact source provenance is projection state, not part of generic PRD
     # serialization. Dedicated content/read contracts access these attributes
     # explicitly; ``model_dump()`` must never leak raw source bytes.
-    source_bytes: bytes | None = Field(default=None, exclude=True, repr=False)
+    source_bytes: StrictBytes | None = Field(default=None, exclude=True, repr=False)
     source_sha256: str | None = Field(default=None, exclude=True)
     source_size_bytes: StrictInt | None = Field(
         default=None,
@@ -736,6 +736,25 @@ class PRD(BaseModel):
     last_reviewed_by: str | None = None
     created_at: datetime.datetime | None = Field(default=None, exclude=True)
     updated_at: datetime.datetime | None = Field(default=None, exclude=True)
+
+    def __iter__(self):
+        """Iterate only the public projection shape, matching ``model_dump``.
+
+        Pydantic's default iterator exposes fields marked ``exclude=True`` to
+        ``dict(model)``.  Source provenance is deliberately available only via
+        the dedicated content contract, so generic mapping conversion must use
+        the same redacted boundary as generic model dumps.
+        """
+        yield from self.model_dump().items()
+
+    def validated_copy(self, **updates: object) -> PRD:
+        """Return an immutable PRD update with every invariant revalidated."""
+        values = {
+            name: getattr(self, name)
+            for name in type(self).model_fields
+        }
+        values.update(updates)
+        return type(self).model_validate(values)
 
     @model_validator(mode="after")
     def _validate_source_provenance(self) -> PRD:

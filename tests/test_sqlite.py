@@ -13,6 +13,7 @@ Coverage targets:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -32,6 +33,7 @@ from anvil.state.backend import (
     TransactionAborted,
 )
 from anvil.state.models import Event, EventDraft
+from anvil.state.payloads import PrdParsedPayload
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import (
     _FLOCK_BACKOFF_CAP_S,
@@ -1491,6 +1493,53 @@ def _setup_project(b: SqliteBackend) -> None:
 
 
 class TestHandlePrdParsed:
+    def test_append_uses_one_detached_payload_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Caller mutation after snapshot cannot split validation from logging."""
+        b = _make_backend(tmp_path)
+        events_path = str(tmp_path / "events.jsonl")
+        try:
+            _setup_project(b)
+            source_bytes = b"# Project: Snapshot\r\n"
+            payload = _make_prd_parsed_payload()
+            payload.update(
+                {
+                    "source_text": source_bytes.decode(),
+                    "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                    "source_size_bytes": len(source_bytes),
+                    "source_encoding": "utf-8",
+                    "source_revision": 1,
+                    "provenance_state": "available",
+                    "content_available": True,
+                }
+            )
+            draft = _make_event("prd.parsed", payload)
+            original_validate = PrdParsedPayload.model_validate
+
+            def mutate_caller_after_validation(value: object) -> PrdParsedPayload:
+                snapshot = original_validate(value)
+                draft.payload_json["source_text"] = "MUTATED AFTER VALIDATION"
+                return snapshot
+
+            monkeypatch.setattr(
+                PrdParsedPayload,
+                "model_validate",
+                staticmethod(mutate_caller_after_validation),
+            )
+            b.append(draft)
+
+            recorded = _read_jsonl(events_path)[-1]
+            assert recorded["payload_json"]["source_text"] == source_bytes.decode()
+            assert recorded["payload_json"]["source_sha256"] == hashlib.sha256(
+                source_bytes
+            ).hexdigest()
+
+            b.replay_from_empty(events_path)
+            assert _read_jsonl(events_path)[-1] == recorded
+        finally:
+            b.close()
+
     def test_handle_prd_parsed_writes_jsonl_and_sqlite(self, tmp_path: Path) -> None:
         """prd.parsed event writes JSONL line AND PRD + requirements rows to SQLite."""
         b = _make_backend(tmp_path)

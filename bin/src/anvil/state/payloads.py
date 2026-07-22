@@ -28,6 +28,7 @@ from pydantic import (
     Field,
     StrictBool,
     StrictInt,
+    StrictStr,
     field_validator,
     model_validator,
 )
@@ -75,7 +76,7 @@ class _PrdSourcePayload(BaseModel):
 
     model_config = _PRD_PAYLOAD_CONFIG
 
-    source_text: str | None = None
+    source_text: StrictStr | None = None
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_size_bytes: StrictInt | None = Field(
         default=None,
@@ -113,6 +114,10 @@ class _PrdSourcePayload(BaseModel):
 
         if self.source_text is None:
             raise ValueError("available provenance requires exact source text")
+        # Every UTF-8 code point occupies at least one byte.  Reject obviously
+        # oversized input before allocating a second multi-megabyte buffer.
+        if len(self.source_text) > _MAX_PRD_SOURCE_BYTES_V1:
+            raise ValueError("available source exceeds the Version 1 byte ceiling")
         try:
             source_bytes = self.source_text.encode("utf-8", errors="strict")
         except UnicodeEncodeError:

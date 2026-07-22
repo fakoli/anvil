@@ -616,39 +616,50 @@ class SqliteBackend:
                 else:
                     reason = f"payload validation failed for action {action!r}: {exc}"
                 self._append_audit_line("rejection", draft, reason)
+                # Pydantic ValidationError objects retain rejected input in
+                # ``errors()``.  Do not expose that object as the public
+                # backend exception cause, especially for raw PRD source.
+                raise EventRejected(reason) from None
+
+            # The typed model is the detached payload snapshot.  Persist only
+            # its validated JSON values while retaining the original explicit
+            # field set, so legacy/additive payload byte shape does not gain
+            # omitted defaults. Caller mutation after validation cannot alter
+            # the checked, hashed, logged, or projected event.
+            try:
+                canonical_payload = typed_payload.model_dump(
+                    mode="json", exclude_unset=True
+                )
+            except Exception as exc:
+                recovery_owner = self._task_created_recovery_owner(conn, draft)
                 if recovery_owner is not None:
-                    # The Pydantic exception can retain raw payload values in
-                    # its rendered traceback. Suppress that chain at this
-                    # security boundary as well as keeping it out of ``reason``.
-                    raise EventRejected(reason) from None
-                raise EventRejected(reason) from exc
+                    reason = str(
+                        self._task_created_recovery_refusal(
+                            draft,
+                            owner_prd_id=recovery_owner,
+                            code="invalid_task_payload",
+                        )
+                    )
+                else:
+                    reason = (
+                        f"payload materialization failed for action {action!r}: {exc}"
+                    )
+                self._append_audit_line("rejection", draft, reason)
+                raise EventRejected(reason) from None
+            materialized_draft = draft.model_copy(
+                update={"payload_json": canonical_payload}
+            )
 
             try:
-                spec.check(conn, typed_payload, draft)
+                spec.check(conn, typed_payload, materialized_draft)
             except EventRejected as exc:
                 reason = str(exc)
-                self._append_audit_line("rejection", draft, reason)
+                self._append_audit_line("rejection", materialized_draft, reason)
                 raise
             except IdempotentNoOp as exc:
                 reason = str(exc)
-                self._append_audit_line("idempotent_no_op", draft, reason)
+                self._append_audit_line("idempotent_no_op", materialized_draft, reason)
                 return None
-
-            # Persist the canonical typed assumption records in new PRD events.
-            # Older logs that omitted the additive field retain their original
-            # shape and continue to replay as an empty assumption list.
-            materialized_draft = draft
-            if isinstance(typed_payload, (PrdParsedPayload, PrdRevisedPayload)) and (
-                "assumptions" in draft.payload_json
-            ):
-                canonical_payload = dict(draft.payload_json)
-                canonical_payload["assumptions"] = [
-                    assumption.model_dump(mode="json")
-                    for assumption in typed_payload.assumptions
-                ]
-                materialized_draft = draft.model_copy(
-                    update={"payload_json": canonical_payload}
-                )
 
             # ---- Phase 2: id assignment ----
             if self._events_storage == "git":
