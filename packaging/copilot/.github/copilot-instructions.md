@@ -29,7 +29,7 @@ submit evidence → apply review verdict.
 ```bash
 anvil init                 # scaffold state; echoes the prd.md path to author
 # author the prd.md at the path init printed (see docs/prd-template.md), then:
-anvil prd parse            # echoes 'PRD source: <path>'
+anvil prd parse            # echoes stable source identity (default/id/custom)
 anvil prd review           # draft → reviewed
 anvil prd review --approve # reviewed → approved
 anvil plan && anvil score
