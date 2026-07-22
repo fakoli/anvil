@@ -2135,6 +2135,7 @@ def test_replay_aggregate_conflict_is_first_event_wins(
         replay.close()
 
 
+@pytest.mark.slow
 def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
     tmp_path: Path,
 ) -> None:

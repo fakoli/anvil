@@ -82,7 +82,8 @@ Run the same locked lint gate as CI from the source checkout:
 cd bin
 uv sync --locked --extra custom
 uv run --locked ruff check ..
-uv run pytest -q
+cd ..
+uv run --project bin pytest
 ```
 
 ## Quick start

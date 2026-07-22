@@ -297,6 +297,7 @@ class TestMissingExpectedFile:
 
 
 class TestOrphanBranchDrift:
+    @pytest.mark.slow
     def test_orphan_agent_branch_surfaces(self, tmp_path: Path) -> None:
         _init_project(tmp_path)
         _init_git(tmp_path)
@@ -531,6 +532,7 @@ class TestBadStateRootJson:
 
 
 class TestOrphanWorktreeFileLabel:
+    @pytest.mark.slow
     def test_worktree_dir_is_path_not_file(self, tmp_path: Path) -> None:
         """An orphan worktree's directory must land in ``path``, with
         ``file`` left null (it is a directory, not a plan file)."""

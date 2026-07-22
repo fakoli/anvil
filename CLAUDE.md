@@ -5,8 +5,9 @@ can be inferred from the code, it does not belong here.
 
 ## Golden rules
 
-- **Python via `uv` only.** Tests run from `bin/`: `cd bin && uv run pytest -q`.
-  Never bare `pip`/`python`.
+- **Python via `uv` only.** Run the default suite from the repository root:
+  `uv run --project bin pytest`. Explicit paths from `bin/` remain valid as
+  `cd bin && uv run pytest ../tests/<file>.py`. Never bare `pip`/`python`.
 - **`gh` needs the token unset:** `env -u GITHUB_TOKEN gh …`. The ambient PAT
   lacks repo permissions; the keyring login works once it is unset.
 - **Never commit secrets or anything confidential.** This is a public repo — no

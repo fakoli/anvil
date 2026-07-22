@@ -79,6 +79,7 @@ class TestIsGitAvailable:
 
 
 class TestIsGitRepo:
+    @pytest.mark.slow
     def test_is_git_repo_true_in_repo(self, git_repo: Path) -> None:
         """is_git_repo returns True inside a git repository."""
         assert is_git_repo(git_repo) is True
@@ -122,6 +123,7 @@ class TestSlug:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestCreateBranchForTask:
     def test_create_branch_happy_path(self, git_repo: Path) -> None:
         """task T001 + title 'Add retry' → branch 'agent/t001-add-retry'; created=True."""
@@ -326,6 +328,7 @@ class TestCreateBranchForTask:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestCreateWorktreeForTask:
     def test_create_worktree_happy_path(self, tmp_path: Path) -> None:
         """A branch must exist before creating a worktree. Create branch then worktree."""
@@ -410,6 +413,7 @@ class TestCreateWorktreeForTask:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestWorkspaceLayoutGitOps:
     """`anvil claim` in the default HOME-workspace layout: state lands in
     ~/.anvil/workspaces/<key>/, but the agent/<task>-<slug> branch must be
@@ -598,6 +602,7 @@ def _default_branch(repo: Path) -> str:
     return _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
 
 
+@pytest.mark.slow
 class TestResolveBase:
     def test_no_remote_degrades_to_local_default(self, git_repo: Path) -> None:
         """AC: fixture repo with no remote → local default branch,
@@ -633,6 +638,7 @@ class TestResolveBase:
         assert "fetch failed" in (base.reason or "")
 
 
+@pytest.mark.slow
 class TestCheckFreshness:
     def test_up_to_date_branch_reports_zero_behind(self, git_repo: Path) -> None:
         _git(git_repo, "branch", "feature")

@@ -210,6 +210,7 @@ def _git_init(tmp_path: Path) -> None:
 
 
 class TestPreflightTreeState:
+    @pytest.mark.slow
     def test_dirty_repo_warns_but_still_go(self, tmp_path: Path) -> None:
         """AC: uncommitted changes → WARNING tree-state finding, exit 0 when
         no ERROR exists (GO with warnings)."""
@@ -222,6 +223,7 @@ class TestPreflightTreeState:
         assert "[WARNING] tree_state" in result.output
         assert "PREFLIGHT: GO" in result.output
 
+    @pytest.mark.slow
     def test_clean_repo_is_ok(self, tmp_path: Path) -> None:
         """AC: clean repo → tree-state finding is OK."""
         _git_init(tmp_path)
@@ -240,6 +242,7 @@ class TestPreflightTreeState:
         assert "[OK] tree_state" in result.output
         assert "working tree clean" in result.output
 
+    @pytest.mark.slow
     def test_gitignored_anvil_dir_reads_clean(self, tmp_path: Path) -> None:
         """Locks in the no-noise guarantee (review): a local-layout project
         that gitignores .anvil/ — as `anvil migrate` guidance instructs —
@@ -271,6 +274,7 @@ class TestPreflightTreeState:
         assert "not_a_repo" in result.output
         assert "PREFLIGHT: GO" in result.output
 
+    @pytest.mark.slow
     def test_probe_never_runs_without_preflight(self, tmp_path: Path) -> None:
         """AC: the probe never runs without --preflight."""
         _git_init(tmp_path)

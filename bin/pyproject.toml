@@ -80,6 +80,7 @@ anvil-mcp = "anvil.mcp_server:main"
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
+    "pytest-xdist>=3.6",
     "ruff>=0.5",
     "mypy>=1.10",
     "types-pyyaml>=6.0.12.20260518",
@@ -123,10 +124,3 @@ disallow_any_generics = false
 warn_return_any = false
 no_implicit_reexport = false
 ignore_errors = true
-
-[tool.pytest.ini_options]
-testpaths = ["../tests"]
-addopts = "-m 'not live_github'"
-markers = [
-    "live_github: tests that hit the real GitHub API (require ANVIL_TEST_GH_TOKEN env)",
-]

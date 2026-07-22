@@ -227,6 +227,7 @@ def _create_active_claim(
 class TestEmptyProject:
     """A fresh project with nothing in it produces an empty report."""
 
+    @pytest.mark.slow
     def test_empty_project_returns_empty_report(self, tmp_path: Path) -> None:
         _init_git_repo(tmp_path)
         b = _make_backend(tmp_path)
@@ -260,6 +261,7 @@ class TestEmptyProject:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestOrphanBranch:
     """``agent/t*-*`` branches whose task id is not in the SQLite store."""
 
@@ -461,6 +463,7 @@ class TestOrphanPacket:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestOrphanWorktree:
     """Worktrees pointing at ``agent/t*-*`` branches whose task/claim is gone."""
 
@@ -905,6 +908,7 @@ class TestMissingExpectedFile:
         finally:
             b.close()
 
+    @pytest.mark.slow
     def test_bin_src_homonym_does_not_hide_deleted_tracked_root_src(
         self, tmp_path: Path,
     ) -> None:
@@ -1410,6 +1414,7 @@ class TestReconciliationReport:
         assert rebuilt.discrepancies[0].target_id == "agent/t001-foo"
         assert rebuilt.summary == {"orphan_branch": 1}
 
+    @pytest.mark.slow
     def test_summary_counts_match_discrepancy_histogram(
         self, tmp_path: Path,
     ) -> None:
@@ -1475,6 +1480,7 @@ class TestReconciliationReport:
                 surprise="boom",  # type: ignore[call-arg]
             )
 
+    @pytest.mark.slow
     def test_discrepancies_sorted_deterministically(
         self, tmp_path: Path,
     ) -> None:
@@ -1498,6 +1504,7 @@ class TestReconciliationReport:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestDryRun:
     """``fix(dry_run=True)`` returns the action list without mutating."""
 
@@ -1554,6 +1561,7 @@ class TestDryRun:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestBestEffortFixLoop:
     """A single fix failure must not skip subsequent discrepancies."""
 

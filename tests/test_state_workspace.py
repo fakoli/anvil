@@ -34,6 +34,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return h
 
 
+@pytest.mark.slow
 def test_worktrees_share_one_home_workspace(
     home: Path, tmp_path: Path
 ) -> None:

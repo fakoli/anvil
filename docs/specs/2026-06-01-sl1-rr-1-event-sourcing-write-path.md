@@ -351,7 +351,7 @@ A test with a large synthetic log asserting `scan_tail` reads bounded bytes
 
 Full suite runs on every anvil PR via `.github/workflows/anvil.yml`
 (with the `TERM=dumb` / unset `FORCE_COLOR` guard already in place), invoked as
-`uv run --project plugins/anvil/bin --extra all-providers --with pytest pytest`.
+`uv run --project bin --extra all-providers --with pytest pytest`.
 
 ## 9. Acceptance criteria
 
