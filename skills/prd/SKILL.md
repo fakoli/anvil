@@ -259,7 +259,7 @@ Avoid editing a task's acceptance criteria or scope while that task is `claimed`
 ## Common Pitfalls
 
 - **Parsing a thinking-out-loud draft.** `prd.md` is not a scratchpad. Parse only when the document is intended as a real spec. Parsing a half-formed draft seeds `state.db` with garbage requirements that downstream planning will dutifully score and promote.
-- **Approving without re-reading.** Read the full PRD (resolve its path from the `Path:` line of `anvil status` or the `PRD source:` line `prd parse` echoes) before invoking `--approve`. An approval event is permanent in `events.jsonl`. It cannot be undone without replaying from a snapshot.
+- **Approving without re-reading.** Read the full PRD before invoking `--approve`. Resolve its path by joining the `Path:` directory from `anvil status` with the portable relative name from `anvil prd source-name [--prd <id>]`; the stable `PRD source:` identity printed by parse is not a filesystem path. An approval event is permanent in `events.jsonl`. It cannot be undone without replaying from a snapshot.
 - **Skipping `## Non-Goals`.** The planner agent uses non-goals to bound task generation. Without them, tasks may sprawl into adjacent features. Even one item is better than none.
 - **Tasks without verification commands.** The `review tasks` gate (in the plan skill) requires at least one item under `**Verification:**`. Add shell commands — `pytest tests/test_foo.py`, `python -m mymodule --help` — so the gate does not block the entire queue.
 - **Re-parsing with active claims and no coordination.** This silently replaces task rows. Agents holding those tasks will find their task ID in an unexpected state on next heartbeat. Always check `anvil status` before re-parsing.
