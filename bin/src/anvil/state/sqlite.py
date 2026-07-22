@@ -628,7 +628,7 @@ class SqliteBackend:
             # the checked, hashed, logged, or projected event.
             try:
                 canonical_payload = typed_payload.model_dump(
-                    mode="json", exclude_unset=True
+                    mode="json", exclude_unset=True, by_alias=True
                 )
             except Exception as exc:
                 recovery_owner = self._task_created_recovery_owner(conn, draft)

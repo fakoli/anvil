@@ -2604,7 +2604,10 @@ class TestHandleTaskStatusChanged:
             b.append(event)
 
             events = _read_jsonl(events_path)
-            assert any(e.get("action") == "task.status_changed" for e in events)
+            recorded = next(
+                e for e in events if e.get("action") == "task.status_changed"
+            )
+            assert recorded["payload_json"] == status_payload
 
             task = b.get_task("T001")
             assert task is not None

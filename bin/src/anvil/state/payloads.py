@@ -77,7 +77,9 @@ class _PrdSourcePayload(BaseModel):
     model_config = _PRD_PAYLOAD_CONFIG
 
     source_text: StrictStr | None = None
-    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    source_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     source_size_bytes: StrictInt | None = Field(
         default=None,
         ge=0,
@@ -199,7 +201,7 @@ class PrdRevisedPayload(_PrdSourcePayload):
 
     project_id: str
     prd_id: str = DEFAULT_PRD_ID
-    revision: int = Field(ge=1)
+    revision: StrictInt = Field(ge=1)
     # Scalar PRD fields (mirror PrdParsedPayload) — describe the revised PRD row.
     title: str = ""
     target_version: str | None = None

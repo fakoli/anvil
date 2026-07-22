@@ -222,7 +222,7 @@ Type aliases (`TaskID`, `FeatureID`, `RequirementID`, `ClaimID`, `EvidenceID`,
 `DecisionID`, `ReviewID`, `EventID`) are plain `str` newtypes — no runtime
 overhead but grep-able at every call site.
 
-The shared model config on every entity:
+Most entities use the shared mutable model config:
 
 ```python
 _MODEL_CONFIG = ConfigDict(
@@ -231,6 +231,10 @@ _MODEL_CONFIG = ConfigDict(
     extra="forbid",           # unknown fields are an error
 )
 ```
+
+`PRD` is the exception: exact-source provenance makes it a frozen value object.
+PRD lifecycle transitions construct a fully revalidated copy rather than using
+assignment or Pydantic's non-validating `model_copy(update=...)` path.
 
 ---
 

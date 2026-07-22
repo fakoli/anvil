@@ -203,10 +203,17 @@ def test_projection_provenance_is_immutable_and_updates_revalidate() -> None:
         prd.validated_copy(source_revision=5)
     assert prd.source_revision == 4
 
+    with pytest.raises(TypeError, match="use validated_copy"):
+        prd.model_copy(update={"source_revision": 5})
+
 
 @pytest.mark.parametrize(
     ("payload_field", "invalid_value"),
-    [("source_text", b"coerced"), ("source_revision", "1")],
+    [
+        ("source_text", b"coerced"),
+        ("source_sha256", b"0" * 64),
+        ("source_revision", "1"),
+    ],
 )
 def test_payload_provenance_rejects_coercible_types(
     payload_field: str, invalid_value: object
@@ -227,6 +234,13 @@ def test_projection_source_bytes_and_revision_reject_coercible_types() -> None:
         PRD(source_bytes="not-bytes")
     with pytest.raises(ValidationError):
         PRD(revision="1")
+    with pytest.raises(ValidationError):
+        PRD(source_sha256=b"0" * 64)
+
+
+def test_revised_payload_revision_rejects_coercible_type() -> None:
+    with pytest.raises(ValidationError):
+        PrdRevisedPayload(project_id="project", revision="2")
 
 
 @pytest.mark.parametrize(

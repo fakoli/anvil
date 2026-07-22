@@ -9,9 +9,9 @@ Design decisions:
 - Score dimensions are nullable until explicitly scored; Field(ge=1, le=5) when set.
 - Type aliases (TaskID, FeatureID, …) are plain str — no over-engineering, but they
   give search-grep ability and document intent at every call site.
-- ConfigDict(frozen=False, validate_assignment=True, extra='forbid') on every model:
-  mutable for state transitions, but assignment-validated so transitions cannot
-  smuggle bad values.
+- Most state models use ConfigDict(frozen=False, validate_assignment=True,
+  extra='forbid') so mutable transitions remain assignment-validated. PRD is a
+  frozen provenance value object and updates only through validated_copy().
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ from typing import (  # noqa: UP035 — TypeAlias required for 3.11 compat
     Annotated,
     Any,
     Literal,
+    Mapping,
+    Self,
     TypeAlias,
 )
 
@@ -35,6 +37,7 @@ from pydantic import (
     StrictBool,
     StrictBytes,
     StrictInt,
+    StrictStr,
     field_validator,
     model_serializer,
     model_validator,
@@ -706,7 +709,7 @@ class PRD(BaseModel):
     # serialization. Dedicated content/read contracts access these attributes
     # explicitly; ``model_dump()`` must never leak raw source bytes.
     source_bytes: StrictBytes | None = Field(default=None, exclude=True, repr=False)
-    source_sha256: str | None = Field(default=None, exclude=True)
+    source_sha256: StrictStr | None = Field(default=None, exclude=True)
     source_size_bytes: StrictInt | None = Field(
         default=None,
         ge=0,
@@ -755,6 +758,17 @@ class PRD(BaseModel):
         }
         values.update(updates)
         return type(self).model_validate(values)
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        """Copy safely; provenance-bearing updates must pass full validation."""
+        if update:
+            raise TypeError("PRD.model_copy(update=...) is disabled; use validated_copy")
+        return super().model_copy(deep=deep)
 
     @model_validator(mode="after")
     def _validate_source_provenance(self) -> PRD:
