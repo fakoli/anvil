@@ -3766,6 +3766,7 @@ class TestClaimBranchOption:
     branch on the claim. Default (no --branch) behavior is unchanged.
     """
 
+    @pytest.mark.slow
     def test_claim_branch_existing_records_named_branch(
         self, tmp_path: Path
     ) -> None:
@@ -3809,6 +3810,7 @@ class TestClaimBranchOption:
             f"--branch must not generate an agent/ branch; got:\n{branches}"
         )
 
+    @pytest.mark.slow
     def test_claim_branch_new_name_creates_and_records(
         self, tmp_path: Path
     ) -> None:
@@ -3827,6 +3829,7 @@ class TestClaimBranchOption:
         assert _get_claim_branch(tmp_path, task_id) == "feature/my-thing"
         assert _git_current_branch(tmp_path) == "feature/my-thing"
 
+    @pytest.mark.slow
     def test_claim_branch_default_generates_branch_name(
         self, tmp_path: Path
     ) -> None:
@@ -3847,6 +3850,7 @@ class TestClaimBranchOption:
             f"default claim should generate agent/<task>-<slug>; got: {current}"
         )
 
+    @pytest.mark.slow
     def test_claim_branch_json_envelope_reports_branch(
         self, tmp_path: Path
     ) -> None:
@@ -4091,6 +4095,7 @@ class TestHookSubcommands:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestE2EClaimRelease:
     def test_full_claim_release_cycle(self, tmp_path: Path) -> None:
         """init + git init + PRD + plan + review_tasks + next + claim + renew + release.
@@ -7456,6 +7461,7 @@ def _advance_default_branch(tmp_path: Path, commits: int) -> None:
     _git_out(tmp_path, "checkout", current)
 
 
+@pytest.mark.slow
 class TestMergeCheck:
     def test_fresh_branch_json_envelope_exit_0(self, tmp_path: Path) -> None:
         """AC: --json emits behind_count/has_conflicts/base_ref/remote_checked/
@@ -7619,6 +7625,7 @@ class TestHeartbeatLeaseWarning:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestApplyMergeCheck:
     def _claim_submit(self, tmp_path: Path, task_id: str = "T001") -> None:
         claim_result = _invoke_cmd(

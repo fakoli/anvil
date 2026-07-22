@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,10 @@ _PARTITION_TARGETS = (
     "tests/test_git_ops.py",
     "tests/test_reconciliation.py",
     "tests/test_github_issues_live.py",
+    "tests/test_cli.py::TestClaimBranchOption",
+    "tests/test_cli.py::TestE2EClaimRelease",
+    "tests/test_cli.py::TestMergeCheck",
+    "tests/test_cli.py::TestApplyMergeCheck",
 )
 
 
@@ -19,6 +24,7 @@ def _collected_nodes(
     marker_expression: str | tuple[str, ...] | None = None,
     *,
     allow_empty: bool = False,
+    pytest_addopts: str | None = None,
 ) -> set[str]:
     command = [
         sys.executable,
@@ -34,6 +40,7 @@ def _collected_nodes(
         expressions = marker_expression or ()
     for expression in expressions:
         command.extend(("-m", expression))
+    env = {**os.environ, "PYTEST_ADDOPTS": pytest_addopts or ""}
     result = subprocess.run(
         command,
         cwd=_REPO_ROOT,
@@ -41,6 +48,7 @@ def _collected_nodes(
         text=True,
         timeout=60,
         check=False,
+        env=env,
     )
     expected_exit_codes = {0, 5} if allow_empty else {0}
     assert result.returncode in expected_exit_codes, result.stdout + result.stderr
@@ -74,9 +82,24 @@ def test_fast_selection_preserves_default_live_exclusion_and_partition() -> None
     assert live_then_fast == safe_fast
     assert fast_then_live == live
     assert default | live == slow | safe_fast | live
-    assert len(slow) == 50
-    assert len(safe_fast) == 58
+    assert len(slow) == 70
+    assert len(safe_fast) == 59
     assert len(live) == 3
+
+
+def test_ambient_live_marker_is_not_external_write_authorization() -> None:
+    """Only an explicit CLI marker may enable credentialed GitHub tests."""
+    ambient_only = _collected_nodes(
+        allow_empty=True,
+        pytest_addopts="-m live_github",
+    )
+    explicit = _collected_nodes(
+        "live_github",
+        pytest_addopts='-m "not slow"',
+    )
+
+    assert ambient_only == set()
+    assert len(explicit) == 3
 
 
 def test_malformed_live_expression_refuses_before_collection() -> None:
@@ -97,11 +120,8 @@ def test_malformed_live_expression_refuses_before_collection() -> None:
         text=True,
         timeout=60,
         check=False,
+        env={**os.environ, "PYTEST_ADDOPTS": ""},
     )
 
     assert result.returncode != 0
     assert "Wrong expression passed to '-m'" in result.stdout + result.stderr
-    assert not any(
-        line.startswith("tests/test_github_issues_live.py::")
-        for line in result.stdout.splitlines()
-    )

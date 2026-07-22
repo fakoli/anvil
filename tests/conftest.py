@@ -17,27 +17,46 @@ from anvil.clock import FrozenClock
 def _explicitly_selects_live_github(config: pytest.Config) -> bool:
     """Allow live tests only for the documented exact marker opt-in.
 
-    ``Config.getoption('markexpr')`` is pytest's public effective marker
-    expression and follows pytest's own last-option-wins behavior.  Treating
-    only the exact documented ``-m live_github`` expression as authorization
-    avoids reimplementing pytest's expression parser and fails closed for
-    mixed, malformed, or future marker syntax.
+    Read only the arguments supplied to this pytest invocation.  The effective
+    marker expression also includes ambient ``PYTEST_ADDOPTS`` and configuration,
+    neither of which is deliberate authorization to mutate a real repository.
+    Mirror pytest's last-option-wins behavior for the four accepted CLI spellings
+    and fail closed for every broader expression.
     """
-    expression = config.getoption("markexpr", default="")
-    return isinstance(expression, str) and expression.strip() == "live_github"
+    expression: str | None = None
+    args = config.invocation_params.args
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in {"-m", "--markexpr"}:
+            expression = args[index + 1] if index + 1 < len(args) else None
+            index += 2
+            continue
+        if arg.startswith("--markexpr="):
+            expression = arg.partition("=")[2]
+        elif arg.startswith("-m") and arg != "-m":
+            expression = arg[2:]
+        index += 1
+    return expression is not None and expression.strip() == "live_github"
 
 
-@pytest.hookimpl(tryfirst=True)
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
     """Keep credentialed live tests opt-in under replacement CLI selectors."""
     if _explicitly_selects_live_github(config):
         return
-    live_items = [item for item in items if item.get_closest_marker("live_github")]
+    selected_items: list[pytest.Item] = []
+    live_items: list[pytest.Item] = []
+    for item in items:
+        if item.get_closest_marker("live_github"):
+            live_items.append(item)
+        else:
+            selected_items.append(item)
     if not live_items:
         return
-    items[:] = [item for item in items if item not in live_items]
+    items[:] = selected_items
     config.hook.pytest_deselected(items=live_items)
 
 
