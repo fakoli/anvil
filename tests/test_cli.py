@@ -3613,6 +3613,7 @@ def _git_current_branch(tmp_path: Path) -> str:
 
 
 class TestClaimCommand:
+    @pytest.mark.slow
     def test_claim_happy_path_creates_lease_and_branch(self, tmp_path: Path) -> None:
         """Claim a ready task; command exits 0 and prints claim ID + branch."""
         _do_init_and_plan(tmp_path, with_git=True)
@@ -7578,6 +7579,7 @@ class TestHeartbeatLeaseWarning:
         )
         assert claim_result.exit_code == 0, claim_result.output
 
+    @pytest.mark.slow
     def test_warns_once_across_consecutive_invocations(self, tmp_path: Path) -> None:
         """AC: exactly one [anvil:lease] warning across two heartbeats, exit 0."""
         self._setup_short_lease_claim(tmp_path)
@@ -7589,6 +7591,7 @@ class TestHeartbeatLeaseWarning:
         assert second.exit_code == 0
         assert "[anvil:lease]" not in second.output  # debounced
 
+    @pytest.mark.slow
     def test_renewed_above_threshold_rearms_the_warning(self, tmp_path: Path) -> None:
         """AC: crossing back above the threshold clears the marker so a later
         crossing warns again."""
@@ -7605,6 +7608,7 @@ class TestHeartbeatLeaseWarning:
         again = _invoke_cmd(tmp_path, ["hook", "heartbeat", "--actor", "hb-agent"])
         assert "[anvil:lease] WARNING" in again.output
 
+    @pytest.mark.slow
     def test_zero_threshold_disables_warnings(self, tmp_path: Path) -> None:
         """AC: lease_warning_minutes: 0 produces no warnings."""
         self._setup_short_lease_claim(tmp_path)
@@ -7921,6 +7925,7 @@ class TestNextConflictWarnings:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestStatusClaimReadback:
     def _setup_with_claim(self, tmp_path: Path) -> None:
         _setup_merge_check_project(tmp_path)

@@ -12,6 +12,8 @@ GitHub test repo. The intent is to catch upstream API drift -- label format
 changes, deprecated endpoints, header renames -- before users do.
 
 Required env when running:
+    - ``ANVIL_RUN_LIVE_GITHUB=1``: independent write authorization. This is
+      required even if pytest's collection hooks are disabled.
     - ``GITHUB_TOKEN``: PAT with ``repo:read`` + ``issues:write`` on the
       target test repo. In CI this is ``secrets.ANVIL_TEST_GH_TOKEN``.
     - ``ANVIL_TEST_REPO``: ``<owner>/<repo>`` of the scratch repo the
@@ -54,11 +56,22 @@ UTC = datetime.UTC
 # matching this prefix is fair game to manually close if a CI run dies before
 # its teardown ran.
 _TEST_PREFIX = "[fakoli-test]"
+_WRITE_AUTHORIZATION_ENV = "ANVIL_RUN_LIVE_GITHUB"
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def require_live_write_authorization() -> None:
+    """Refuse external writes unless the operator sets the independent gate."""
+    if os.environ.get(_WRITE_AUTHORIZATION_ENV) != "1":
+        pytest.fail(
+            f"set {_WRITE_AUTHORIZATION_ENV}=1 to authorize live GitHub writes",
+            pytrace=False,
+        )
 
 
 @pytest.fixture

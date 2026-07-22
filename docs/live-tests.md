@@ -60,12 +60,15 @@ cleanup is best-effort (see below).
 ```bash
 export GITHUB_TOKEN=ghp_...                       # your test-repo PAT
 export ANVIL_TEST_REPO=fakoli/anvil-sync-test
+export ANVIL_RUN_LIVE_GITHUB=1                    # explicit write authorization
 uv run --project bin pytest -m live_github -v
 ```
 
 The default `uv run --project bin pytest` continues to exclude live tests via
 the `addopts` filter in the repository-root `pytest.ini`. You must pass
-`-m live_github` explicitly to opt in.
+`-m live_github` explicitly to opt in. The live module independently requires
+`ANVIL_RUN_LIVE_GITHUB=1`, so disabling pytest's repository `conftest.py`
+cannot turn ambient marker configuration into external-write authorization.
 
 ## What the tests cover
 
@@ -106,6 +109,8 @@ the repo's Labels page when the count gets noisy.
 - **Workflow notice "Live GitHub tests skipped"** -- the
   `ANVIL_TEST_GH_TOKEN` secret is unset on this repo. Add it (see
   above) or accept the skip if drift detection is not desired here.
+- **Authorization failure before the tests start** -- export
+  `ANVIL_RUN_LIVE_GITHUB=1` only when you intend to permit real issue writes.
 - **All tests `SKIPPED` locally** -- you did not export `GITHUB_TOKEN` or
   `ANVIL_TEST_REPO`. The marker gate accepts the run; the fixtures
   defensively skip when the env is incomplete.

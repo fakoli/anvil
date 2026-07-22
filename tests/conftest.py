@@ -6,6 +6,7 @@ are hermetically isolated and leave no on-disk state after completion.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,30 +15,48 @@ import pytest
 from anvil.clock import FrozenClock
 
 
+def _explicitly_selects_live_github_args(args: Sequence[str]) -> bool:
+    """Return whether raw pytest CLI arguments exactly select live tests."""
+    expression: str | None = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            break
+        if arg == "-m":
+            expression = args[index + 1] if index + 1 < len(args) else None
+            index += 2
+            continue
+        if arg.startswith("-") and not arg.startswith("--"):
+            short_options = arg[1:]
+            marker_index = short_options.find("m")
+            if marker_index >= 0 and set(short_options[:marker_index]) <= set("qvsx"):
+                inline_value = short_options[marker_index + 1 :]
+                if inline_value.startswith("="):
+                    inline_value = inline_value[1:]
+                expression = (
+                    inline_value
+                    if inline_value
+                    else args[index + 1] if index + 1 < len(args) else None
+                )
+                index += 1 if inline_value else 2
+                continue
+        index += 1
+    return expression is not None and expression.strip() == "live_github"
+
+
 def _explicitly_selects_live_github(config: pytest.Config) -> bool:
     """Allow live tests only for the documented exact marker opt-in.
 
     Read only the arguments supplied to this pytest invocation.  The effective
     marker expression also includes ambient ``PYTEST_ADDOPTS`` and configuration,
     neither of which is deliberate authorization to mutate a real repository.
-    Mirror pytest's last-option-wins behavior for the four accepted CLI spellings
-    and fail closed for every broader expression.
+    Mirror pytest's last-option-wins behavior for ``-m VALUE``, ``-mVALUE``,
+    and clusters of pytest's argument-free short flags (for example
+    ``-qmlive_github``).  Stop at the option terminator and fail closed for
+    every broader expression or unsupported spelling.
     """
-    expression: str | None = None
-    args = config.invocation_params.args
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg in {"-m", "--markexpr"}:
-            expression = args[index + 1] if index + 1 < len(args) else None
-            index += 2
-            continue
-        if arg.startswith("--markexpr="):
-            expression = arg.partition("=")[2]
-        elif arg.startswith("-m") and arg != "-m":
-            expression = arg[2:]
-        index += 1
-    return expression is not None and expression.strip() == "live_github"
+    return _explicitly_selects_live_github_args(config.invocation_params.args)
 
 
 @pytest.hookimpl(trylast=True)

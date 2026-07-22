@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_LIVE_SELECTOR = runpy.run_path(str(_REPO_ROOT / "tests" / "conftest.py"))[
+    "_explicitly_selects_live_github_args"
+]
 _PARTITION_TARGETS = (
     "tests/test_git_ops.py",
     "tests/test_reconciliation.py",
@@ -17,6 +23,15 @@ _PARTITION_TARGETS = (
     "tests/test_cli.py::TestE2EClaimRelease",
     "tests/test_cli.py::TestMergeCheck",
     "tests/test_cli.py::TestApplyMergeCheck",
+    "tests/test_cli.py::TestHeartbeatLeaseWarning",
+    "tests/test_cli.py::TestStatusClaimReadback",
+    "tests/test_cli.py::TestClaimCommand::test_claim_happy_path_creates_lease_and_branch",
+    "tests/test_doctor_preflight.py::TestPreflightTreeState",
+    "tests/test_bundle_execution.py::test_bundle_claim_packet_and_progress_cli_share_coordinator_flow",
+    "tests/test_cli_drift.py::TestOrphanBranchDrift",
+    "tests/test_cli_drift.py::TestOrphanWorktreeFileLabel",
+    "tests/test_migrate_workspace.py::test_finds_worktree_stranded_state",
+    "tests/test_state_workspace.py::test_worktrees_share_one_home_workspace",
 )
 
 
@@ -82,8 +97,8 @@ def test_fast_selection_preserves_default_live_exclusion_and_partition() -> None
     assert live_then_fast == safe_fast
     assert fast_then_live == live
     assert default | live == slow | safe_fast | live
-    assert len(slow) == 70
-    assert len(safe_fast) == 59
+    assert len(slow) == 88
+    assert len(safe_fast) == 61
     assert len(live) == 3
 
 
@@ -100,6 +115,57 @@ def test_ambient_live_marker_is_not_external_write_authorization() -> None:
 
     assert ambient_only == set()
     assert len(explicit) == 3
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (("-m", "live_github"), True),
+        (("-mlive_github",), True),
+        (("-m=live_github",), True),
+        (("-qm", "live_github"), True),
+        (("-qmlive_github",), True),
+        (("-m", "not live_github", "-mlive_github"), True),
+        (("-m", "live_github", "-mnot_live"), False),
+        (("--", "-mlive_github"), False),
+        (("-m", "not live_github", "--", "-mlive_github"), False),
+        (("-m", "live_github", "--", "-mnot_live"), True),
+        (("--markexpr=live_github",), False),
+    ],
+)
+def test_live_opt_in_parser_matches_supported_pytest_argv(
+    args: tuple[str, ...], expected: bool
+) -> None:
+    assert _LIVE_SELECTOR(args) is expected
+
+
+def test_live_module_refuses_writes_when_collection_hooks_are_disabled() -> None:
+    env = {
+        **os.environ,
+        "PYTEST_ADDOPTS": "-m live_github",
+        "GITHUB_TOKEN": "not-a-real-token",
+        "ANVIL_TEST_REPO": "example/scratch",
+    }
+    env.pop("ANVIL_RUN_LIVE_GITHUB", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--noconftest",
+            "tests/test_github_issues_live.py::test_rate_limit_handling",
+            "-q",
+        ],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "set ANVIL_RUN_LIVE_GITHUB=1" in result.stdout + result.stderr
 
 
 def test_malformed_live_expression_refuses_before_collection() -> None:

@@ -136,6 +136,7 @@ def test_migrated_project_resolves_to_target(home: Path, tmp_path: Path) -> None
     assert (target / "state.db").read_text() == "LEGACY-DB"
 
 
+@pytest.mark.slow
 def test_finds_worktree_stranded_state(home: Path, tmp_path: Path) -> None:
     """Legacy state stranded INSIDE a non-main worktree (not the canonical root) is
     found when migrate runs from that worktree — the exact case the layout fixes."""
