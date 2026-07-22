@@ -280,6 +280,25 @@ def test_mcp_edit_dependencies_states_recovery_diagnostic_contract() -> None:
     )
 
 
+def test_prd_source_docs_respect_workspace_layout() -> None:
+    """CLI/MCP references must not regress to a cwd-only default source."""
+    for relative_path in ("cli-reference.md", "mcp.md"):
+        text = _read(_docs() / relative_path)
+        assert "~/.anvil/workspaces/<key>/.anvil/prd.md" in text
+        assert "ANVIL_STATE_LAYOUT=local" in text
+        assert "resolver-selected state directory" in text
+
+
+def test_cli_reference_leaf_count_matches_live_surface() -> None:
+    """The CLI-reference headline count must match ``anvil describe``."""
+    from anvil.cli.describe import cli_command_names
+
+    text = _read(_docs() / "cli-reference.md")
+    match = re.search(r"CLI: (\d+) executable leaf commands", text)
+    assert match, "docs/cli-reference.md is missing its CLI leaf-command count"
+    assert int(match.group(1)) == len(cli_command_names())
+
+
 # --- 4. Hooks roster ---------------------------------------------------------
 
 

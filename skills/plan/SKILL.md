@@ -187,7 +187,7 @@ Two score signals still warrant explicit attention in chat (these are NOT auto-h
 anvil expand T001 --use-llm --format prd
 ```
 
-For each queued task: run the expand command, take the returned `### T00X.N` blocks, apply them to the `## Tasks` section of the PRD file (the path `anvil prd parse` echoes as `PRD source:` — it lives in the HOME workspace under the default layout, not in-repo), dropping or keeping the parent block per the parser's behavior — confirm before removing. Then re-run the pipeline once at the end:
+For each queued task: run the expand command, take the returned `### T00X.N` blocks, and apply them to the `## Tasks` section of the selected PRD file. Resolve that file by joining the `Path:` directory from `anvil status` with the portable relative name from `anvil prd source-name [--prd <id>]`; the stable `PRD source:` identity printed by parse is not a filesystem path. Drop or keep the parent block per the parser's behavior — confirm before removing. Then re-run the pipeline once at the end:
 
 ```bash
 anvil prd parse
@@ -257,7 +257,7 @@ Blocked 1 task(s):
   T004: Task 'T004' cannot move to 'reviewed': verification.commands (must be non-empty).
 ```
 
-For each blocked task, surface the exact missing field in chat — do not just report "blocked". Propose the fix inline, apply it to the PRD after confirmation (edit the `## Tasks` block in the file `anvil prd parse` echoes as `PRD source:`), re-parse, and re-run `review tasks` yourself. Do not retry without fixing the underlying gap — the gate will block on the same condition again.
+For each blocked task, surface the exact missing field in chat — do not just report "blocked". Propose the fix inline, apply it to the PRD after confirmation (resolve the selected file by joining the `Path:` directory from `anvil status` with `anvil prd source-name [--prd <id>]`), re-parse, and re-run `review tasks` yourself. Do not retry without fixing the underlying gap — the gate will block on the same condition again.
 
 When the gate passes for every expected task, run `anvil list --status ready` yourself and present the queue:
 

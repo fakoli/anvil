@@ -87,7 +87,7 @@ The answer populates `## Risks` and `## Open Questions`. If the user says "none"
 
 > Is this PRD scoped to a specific release or milestone (e.g. `v0.2.0`, optionally a tag)? A project can hold several release-scoped PRDs side by side. Leave blank for the single default PRD.
 
-A non-empty answer becomes the `**Release:**` field in the draft (the parser pulls it into `PRD.target_version` / `target_tag`). It does **not** auto-derive the `prd_id` — the parser takes `prd_id` only from the `--prd` flag (defaulting to the file path), never from the Release text. So you must choose a short, filesystem-safe `prd_id` slug yourself (e.g. for Release `v0.2.0 (tag: v0.2)`, pick `v0.2`), then use that **same** slug in two places: store the file at `.anvil/prds/<prd_id>.md` and parse it with `anvil prd parse --prd <prd_id>`. Keep the file name and the `--prd` value identical — a mismatch points `parse` at the wrong (or empty) file. A blank answer keeps the default PRD (no `**Release:**` line, written to `.anvil/prd.md`, parsed with no `--prd` flag).
+A non-empty answer becomes the `**Release:**` field in the draft (the parser pulls it into `PRD.target_version` / `target_tag`). It does **not** auto-derive the `prd_id` — the parser takes `prd_id` only from the `--prd` flag, never from the Release text. Choose a short canonical `prd_id` (for Release `v0.2.0 (tag: v0.2)`, pick `v0.2`), ask `anvil prd source-name --prd <prd_id>` for its portable relative filename, and parse it with that **same** `--prd` value. A blank answer keeps the default PRD (no `**Release:**` line, portable name `prd.md`, parsed with no `--prd` flag).
 
 **Stop at seven questions unless something material remains unclear.** Asking more questions than necessary fatigues the user and rarely improves the draft. If the answers are sparse, ask a single follow-up before moving to Step 2 — do not chain three more questions to "fix" thin input.
 
@@ -152,7 +152,7 @@ separate human approval step.
 
 **Show the draft to the user before writing.** Present the full proposed `prd.md` content inline (or as a fenced markdown block) and ask:
 
-> Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to the workspace (the per-PRD path under the `.anvil` directory `anvil status` echoes — `prd.md` for the default PRD, `prds/<prd_id>.md` for a named release PRD).
+> Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to the workspace (the per-PRD file formed from the `.anvil` directory `anvil status` echoes plus the portable relative name from `anvil prd source-name [--prd <id>]`).
 
 Wait for explicit approval. Apply any requested edits in-place and re-present until the user accepts.
 
@@ -161,14 +161,13 @@ Wait for explicit approval. Apply any requested edits in-place and re-present un
 The PRD does not live in an in-repo `.anvil/`, and its filename depends on the
 `prd_id` from Question 7 — **never hardcode it.** Resolve the layout-aware
 directory first: `anvil status` echoes a `Path:` line pointing at the active
-`.anvil` directory (in the HOME workspace by default). The default PRD belongs at
-`prd.md` inside it; a named release PRD belongs at `prds/<prd_id>.md`. Capture the
-directory, then derive the per-PRD file:
+`.anvil` directory (in the HOME workspace by default). Capture the directory and
+ask the CLI for the portable relative name, then join them:
 
 ```bash
 ANVIL_DIR=$(anvil status | sed -n 's/^Path:[[:space:]]*//p')
-# default PRD → $ANVIL_DIR/prd.md ; named PRD (Question 7) → $ANVIL_DIR/prds/<prd_id>.md
-PRD_FILE="$ANVIL_DIR/prd.md"   # or "$ANVIL_DIR/prds/v0.2.md" for a named release PRD
+PRD_RELATIVE=$(anvil prd source-name) # add --prd <prd_id> for a named PRD
+PRD_FILE="$ANVIL_DIR/$PRD_RELATIVE"
 ```
 
 Once the user has approved the draft, check whether a PRD already exists at the
@@ -196,9 +195,9 @@ Confirm the parse and run it:
 
 > Draft written to the workspace (`$PRD_FILE`). Ready to parse it into `state.db`? (yes / no / let me edit first)
 
-- **On `yes`**: invoke `anvil prd parse` for the default PRD, or `anvil prd parse --prd <prd_id>` for a named release PRD (via Bash, the MCP `parse_prd` tool when available, or whichever tool the runtime exposes). It reads the resolved per-PRD file and prints a count line plus a `PRD source:` line echoing the file it read. Surface the result inline. The user sees the parse output in the same conversation, not after a context switch. For example, `anvil prd parse` prints:
+- **On `yes`**: invoke `anvil prd parse` for the default PRD, or `anvil prd parse --prd <prd_id>` for a named release PRD (via Bash, the MCP `parse_prd` tool when available, or whichever tool the runtime exposes). It reads the resolved per-PRD file and prints a count line plus a stable `PRD source:` identity. Surface the result inline. The user sees the parse output in the same conversation, not after a context switch. For example, `anvil prd parse` prints:
   > Parsed 6 requirements, 3 features, 8 tasks.
-  > PRD source: /Users/you/.anvil/workspaces/<key>/.anvil/prd.md
+  > PRD source: default
 
   Then ask: Any unexpected counts? The next step is `prd review`, want me to drive that with you now? (yes / not yet)
 - **On `no`**: stop. Confirm the file is on disk (at the resolved `$PRD_FILE`) and tell the user it is theirs to refine.

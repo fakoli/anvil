@@ -9,21 +9,27 @@ Design decisions:
 - Score dimensions are nullable until explicitly scored; Field(ge=1, le=5) when set.
 - Type aliases (TaskID, FeatureID, …) are plain str — no over-engineering, but they
   give search-grep ability and document intent at every call site.
-- ConfigDict(frozen=False, validate_assignment=True, extra='forbid') on every model:
-  mutable for state transitions, but assignment-validated so transitions cannot
-  smuggle bad values.
+- Most state models use ConfigDict(frozen=False, validate_assignment=True,
+  extra='forbid') so mutable transitions remain assignment-validated. PRD is a
+  frozen provenance value object and updates only through validated_copy().
 """
 
 from __future__ import annotations
 
+import copy
 import datetime
 import enum
+import hashlib
 import json
 import re
+from collections.abc import Iterable
 from typing import (  # noqa: UP035 — TypeAlias required for 3.11 compat
     Annotated,
     Any,
     Literal,
+    Mapping,
+    Self,
+    SupportsIndex,
     TypeAlias,
 )
 
@@ -31,6 +37,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
+    StrictBytes,
+    StrictInt,
+    StrictStr,
+    field_serializer,
     field_validator,
     model_serializer,
     model_validator,
@@ -632,6 +643,44 @@ MAX_PRD_ASSUMPTION_RATIONALE_LENGTH = 1_000
 MAX_PRD_ASSUMPTION_REQUIREMENTS = 100
 
 
+class _FrozenList(tuple[Any, ...]):
+    """Tuple-backed sequence with list-compatible equality and wire shape."""
+
+    def __new__(cls, values: Iterable[Any] = ()) -> Self:
+        return super().__new__(cls, values)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, list):
+            return tuple.__eq__(self, tuple(other))
+        return tuple.__eq__(self, other)
+
+    def __ne__(self, other: object) -> bool:
+        if isinstance(other, list):
+            return tuple.__ne__(self, tuple(other))
+        return tuple.__ne__(self, other)
+
+    __hash__ = tuple.__hash__
+
+    def __iadd__(self, value: Iterable[Any]) -> Self:  # type: ignore[misc]
+        raise TypeError("frozen list cannot be mutated")
+
+    def __imul__(self, value: SupportsIndex) -> Self:
+        raise TypeError("frozen list cannot be mutated")
+
+    @staticmethod
+    def _immutable(*_args: object, **_kwargs: object) -> None:
+        raise TypeError("frozen list cannot be mutated")
+
+    append = _immutable
+    clear = _immutable
+    extend = _immutable
+    insert = _immutable
+    pop = _immutable
+    remove = _immutable
+    reverse = _immutable
+    sort = _immutable
+
+
 class PRDAssumption(BaseModel):
     """A bounded, reviewable premise used while planning a PRD.
 
@@ -641,7 +690,11 @@ class PRDAssumption(BaseModel):
     scopes it to the requirements it affects.
     """
 
-    model_config = _MODEL_CONFIG
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        revalidate_instances="always",
+    )
 
     id: str = Field(max_length=MAX_PRD_ASSUMPTION_ID_LENGTH)
     statement: str = Field(max_length=MAX_PRD_ASSUMPTION_STATEMENT_LENGTH)
@@ -669,11 +722,48 @@ class PRDAssumption(BaseModel):
             raise ValueError("PRD assumption statement and rationale must not be blank")
         return normalized
 
+    @model_validator(mode="after")
+    def _freeze_requirement_ids(self) -> PRDAssumption:
+        object.__setattr__(self, "requirement_ids", _FrozenList(self.requirement_ids))
+        return self
+
+    @field_serializer("requirement_ids")
+    def _serialize_requirement_ids(self, value: list[RequirementID]) -> list[str]:
+        return list(value)
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        if update:
+            raise TypeError(
+                "PRDAssumption.model_copy(update=...) is disabled; revalidate instead"
+            )
+        return super().model_copy(deep=deep)
+
+    def copy(
+        self,
+        *,
+        include: Any = None,
+        exclude: Any = None,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        if include is not None or exclude is not None or update:
+            raise TypeError("PRDAssumption.copy filters/updates are disabled; revalidate instead")
+        return super().copy(deep=deep)
+
 
 class PRD(BaseModel):
     """Product Requirements Document — the gate that controls task claimability."""
 
-    model_config = _MODEL_CONFIG
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
     # Identity / release fields (v0.3 multi-PRD, Phase 0). All default so reading
     # a v6 prds row that predates these columns still constructs. ``exclude=True``
@@ -693,7 +783,25 @@ class PRD(BaseModel):
     # predates the column) reads as the first revision. ``exclude=True`` keeps
     # Phase 0 additive — omitted from ``model_dump()`` so existing event
     # payloads / snapshot blobs stay byte-identical until Phase 6 wires it in.
-    revision: int = Field(default=1, ge=1, exclude=True)
+    revision: StrictInt = Field(default=1, ge=1, exclude=True)
+    # Exact source provenance is projection state, not part of generic PRD
+    # serialization. Dedicated content/read contracts access these attributes
+    # explicitly; ``model_dump()`` must never leak raw source bytes.
+    source_bytes: StrictBytes | None = Field(default=None, exclude=True, repr=False)
+    source_sha256: StrictStr | None = Field(default=None, exclude=True)
+    source_size_bytes: StrictInt | None = Field(
+        default=None,
+        ge=0,
+        le=2_097_152,
+        exclude=True,
+    )
+    source_encoding: Literal["utf-8"] | None = Field(default=None, exclude=True)
+    source_revision: StrictInt | None = Field(default=None, ge=1, exclude=True)
+    provenance_state: Literal["available", "legacy_unbound"] = Field(
+        default="legacy_unbound",
+        exclude=True,
+    )
+    content_available: StrictBool = Field(default=False, exclude=True)
     status: PRDStatus = PRDStatus.draft
     summary: str = ""
     goals: list[str] = Field(default_factory=list)
@@ -710,6 +818,131 @@ class PRD(BaseModel):
     last_reviewed_by: str | None = None
     created_at: datetime.datetime | None = Field(default=None, exclude=True)
     updated_at: datetime.datetime | None = Field(default=None, exclude=True)
+
+    def __iter__(self):
+        """Preserve legacy mapping shape while redacting source provenance.
+
+        Pydantic's default iterator exposes fields marked ``exclude=True`` to
+        ``dict(model)``. Existing identity/release fields historically relied
+        on that behavior, so filter only the newly sensitive provenance fields
+        rather than changing the established mapping contract wholesale.
+        """
+        sensitive_fields = {
+            "source_bytes",
+            "source_sha256",
+            "source_size_bytes",
+            "source_encoding",
+            "source_revision",
+            "provenance_state",
+            "content_available",
+        }
+        yield from (
+            (name, value)
+            for name, value in super().__iter__()
+            if name not in sensitive_fields
+        )
+
+    def validated_copy(self, **updates: object) -> PRD:
+        """Return an immutable PRD update with every invariant revalidated."""
+        values = {
+            name: copy.deepcopy(getattr(self, name))
+            for name in type(self).model_fields
+        }
+        values.update(updates)
+        return type(self).model_validate(values)
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        """Copy safely; provenance-bearing updates must pass full validation."""
+        if update:
+            raise TypeError("PRD.model_copy(update=...) is disabled; use validated_copy")
+        return super().model_copy(deep=deep)
+
+    def copy(
+        self,
+        *,
+        include: Any = None,
+        exclude: Any = None,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        if include is not None or exclude is not None or update:
+            raise TypeError("PRD.copy filters/updates are disabled; use validated_copy")
+        return super().copy(deep=deep)
+
+    @model_validator(mode="after")
+    def _freeze_nested_state(self) -> PRD:
+        for field_name in (
+            "goals",
+            "non_goals",
+            "requirements",
+            "acceptance_criteria",
+            "risks",
+            "open_questions",
+            "assumptions",
+        ):
+            object.__setattr__(self, field_name, _FrozenList(getattr(self, field_name)))
+        return self
+
+    @field_serializer(
+        "goals",
+        "non_goals",
+        "requirements",
+        "acceptance_criteria",
+        "risks",
+        "open_questions",
+        "assumptions",
+    )
+    def _serialize_frozen_lists(self, value: list[Any]) -> list[Any]:
+        return list(value)
+
+    @model_validator(mode="after")
+    def _validate_source_provenance(self) -> PRD:
+        source_fields = (
+            self.source_bytes,
+            self.source_sha256,
+            self.source_size_bytes,
+            self.source_encoding,
+            self.source_revision,
+        )
+        if self.provenance_state == "legacy_unbound":
+            if self.content_available or any(value is not None for value in source_fields):
+                raise ValueError(
+                    "legacy-unbound provenance cannot fabricate source metadata"
+                )
+            return self
+
+        if not self.content_available or any(
+            value is None for value in source_fields
+        ):
+            raise ValueError(
+                "available provenance requires exact source bytes, digest, size, "
+                "encoding, revision, and content availability"
+            )
+        if self.source_bytes is None:
+            raise ValueError("available provenance requires exact source bytes")
+        # Inspect the raw buffer before copying it so hostile subclasses cannot
+        # bypass the ceiling and oversized inputs do not amplify memory use.
+        source_view = memoryview(self.source_bytes)
+        if source_view.nbytes > 2_097_152:
+            raise ValueError("available source exceeds the Version 1 byte ceiling")
+        source_bytes = source_view.tobytes()
+        object.__setattr__(self, "source_bytes", source_bytes)
+        try:
+            source_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise ValueError("available source must be valid UTF-8") from None
+        if self.source_size_bytes != len(source_bytes):
+            raise ValueError("source byte size does not match exact source bytes")
+        if self.source_sha256 != hashlib.sha256(source_bytes).hexdigest():
+            raise ValueError("source digest does not match exact source bytes")
+        if self.source_revision != self.revision:
+            raise ValueError("source provenance must bind the projected PRD revision")
+        return self
 
     @field_validator("last_reviewed_at", mode="after")
     @classmethod

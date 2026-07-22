@@ -151,6 +151,51 @@ class TestDoctorPreflight:
         assert "PRD source not found" in result.output
         assert "PREFLIGHT: NO-GO" in result.output
 
+    def test_invalid_utf8_is_a_typed_preflight_finding(self, tmp_path: Path) -> None:
+        assert _invoke(tmp_path, ["init", "--name", "Invalid UTF-8"]).exit_code == 0
+        (tmp_path / ".anvil" / "prd.md").write_bytes(
+            b"PRIVATE-DOCTOR-PREFIX\xffPRIVATE-DOCTOR-SUFFIX"
+        )
+
+        result = _invoke(tmp_path, ["doctor", "--preflight", "--json"])
+
+        assert result.exit_code == 1, result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        finding = next(
+            item
+            for item in envelope["data"]["findings"]
+            if item["check"] == "prd_parse"
+        )
+        assert finding["detail"]["code"] == "source_invalid_utf8"
+        assert "PRIVATE-DOCTOR" not in result.output
+
+    def test_preflight_never_follows_managed_source_symlink(
+        self, tmp_path: Path
+    ) -> None:
+        assert _invoke(tmp_path, ["init", "--name", "Symlink"]).exit_code == 0
+        outside = tmp_path / "outside.md"
+        outside_bytes = b"PRIVATE-DOCTOR-OUTSIDE-SENTINEL\n"
+        outside.write_bytes(outside_bytes)
+        source_path = tmp_path / ".anvil" / "prd.md"
+        source_path.unlink(missing_ok=True)
+        try:
+            source_path.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = _invoke(tmp_path, ["doctor", "--preflight", "--json"])
+
+        assert result.exit_code == 1, result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        finding = next(
+            item
+            for item in envelope["data"]["findings"]
+            if item["check"] == "prd_parse"
+        )
+        assert finding["detail"]["code"] == "source_outside_prd_directory"
+        assert "PRIVATE-DOCTOR-OUTSIDE-SENTINEL" not in result.output
+        assert outside.read_bytes() == outside_bytes
+
     def test_named_prd_partition_probed(self, tmp_path: Path) -> None:
         """Coverage (review finding): --prd <name> probes prds/<name>.md."""
         assert _invoke(tmp_path, ["init", "--name", "Named"]).exit_code == 0

@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 67 executable leaf commands,
+> Single-page reference for the `anvil` CLI: 68 executable leaf commands,
 > including the milestone bundle lifecycle. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
@@ -22,6 +22,7 @@
   - [`anvil scan`](#scan)
 - PRD authoring
   - [`anvil prd parse`](#prd-parse)
+  - [`anvil prd source-name`](#prd-source-name)
   - [`anvil prd assess`](#prd-assess)
   - [`anvil prd review`](#prd-review)
 - Planning
@@ -270,22 +271,29 @@ project.
 
 ### `anvil prd parse` { #prd-parse }
 
-**Synopsis:** Parse `.anvil/prd.md` (or `--file PATH`) and store the
-result as a `prd.parsed` event. Calls the template parser, validates the
-required sections, and persists the full PRD payload (summary, goals,
-non-goals, requirements, acceptance criteria, risks, open questions, and typed
-assumptions).
+**Synopsis:** Parse the managed default PRD source (or `--file PATH`) and store
+the result as a `prd.parsed` event. The resolver normally selects
+`~/.anvil/workspaces/<key>/.anvil/prd.md`, shared by the repository's
+worktrees; `ANVIL_STATE_LAYOUT=local` opts into `<cwd>/.anvil/prd.md`. Calls
+the template parser, validates the required sections, and persists the full
+PRD payload (summary, goals, non-goals, requirements, acceptance criteria,
+risks, open questions, and typed assumptions).
 
 **Flags:**
 
-- `--file PATH` *(optional)* — path to the PRD markdown file. Defaults to
-  `.anvil/prd.md` in the current project directory.
+- `--file PATH` *(optional)* — explicit PRD markdown path. When omitted, uses
+  the managed source under the resolver-selected state directory (normally the
+  HOME workspace; `<cwd>/.anvil/prd.md` only with
+  `ANVIL_STATE_LAYOUT=local`).
+- `--prd ID` *(optional)* — named PRD identity; reads its portable managed
+  source and scopes the parsed partition.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
 
 - `0` — PRD parsed and `prd.parsed` event recorded. Prints the count of
-  requirements, features, and tasks found.
+  requirements, features, and tasks found plus the stable source identity
+  (`default`, the named ID, or `custom`), never an absolute path.
 - `1` — PRD file not found, unreadable, or contains parse errors (every error
   is printed to stderr with `[section:line] message` formatting).
 
@@ -299,6 +307,24 @@ anvil prd parse --file ./drafts/v2-prd.md
 **See also:** [`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md);
 [`docs/prd-template.md`](prd-template.md) for the required section structure;
 [`anvil prd review`](#prd-review) for the next step.
+
+### `anvil prd source-name` { #prd-source-name }
+
+**Synopsis:** Print the portable relative source name used to author a default
+or named PRD. Join this value with the `.anvil` directory from `anvil status`;
+do not derive an editable path from `prd parse` output.
+
+**Flags:**
+
+- `--prd ID` *(optional)* — named PRD identity; omit for the default.
+- `--json` *(optional)* — return `prd_source` plus `relative_name`.
+
+**Example:**
+
+```bash
+anvil prd source-name
+anvil prd source-name --prd CON
+```
 
 ### `anvil prd assess` { #prd-assess }
 
@@ -385,8 +411,8 @@ tasks that have already advanced past `drafted`.
   augmentation and the no-tasks backstop. For agent-sdk a CLI name like
   `sonnet`/`opus` or a full id; for anthropic/bedrock a model id; for custom
   the route name your endpoint serves.
-- `--prd TEXT` *(optional)* — named PRD to plan (multi-PRD). Reads
-  `.anvil/prds/<id>.md` and scopes feature/task creation, orphan-prune,
+- `--prd TEXT` *(optional)* — named PRD to plan (multi-PRD). Reads its portable
+  source under `.anvil/prds/` and scopes feature/task creation, orphan-prune,
   dependency inference, and `proposed` → `drafted` promotion to that PRD's
   partition (conflict-group inference still spans all PRDs). Omit for the
   default PRD (`.anvil/prd.md`).

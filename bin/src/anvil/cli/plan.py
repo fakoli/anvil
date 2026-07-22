@@ -19,15 +19,18 @@ import yaml
 
 from anvil.cli._helpers import (
     PRD_OPTION,
+    PrdSourceIngestError,
     _open_backend,
     _require_state_dir,
     _resolve_state_dir,
     _scores_complete,
     canonical_prd_id,
     display_path,
-    prd_source_path,
+    ingest_prd_source_for_id,
+    replace_prd_source_for_id,
     resolve_actor,
     resolve_prd_id,
+    selected_prd_source_path,
 )
 from anvil.cli._json import (
     JSON_OPTION,
@@ -243,7 +246,7 @@ def plan(
         None,
         "--prd",
         help=(
-            "Named PRD to plan (multi-PRD). Reads .anvil/prds/<id>.md and "
+            "Named PRD to plan (multi-PRD). Reads its portable collection source and "
             "scopes feature/task creation, orphan-prune, dependency "
             "inference, and proposed->drafted promotion to that PRD's "
             "partition; conflict-group inference still spans ALL PRDs. Omit "
@@ -358,33 +361,31 @@ def plan(
     # plan scopes to. ``--prd v0.2`` reads .anvil/prds/v0.2.md and prunes /
     # promotes only that PRD's rows; the default ('prd' sentinel) keeps bare
     # ids and the default partition, byte-identical to pre-multi-PRD plan.
-    parse_prd_id = prd if prd else "prd"
-
-    prd_path = prd_source_path(state_dir, parse_prd_id)
-    prd_display = display_path(prd_path)
-    if not prd_path.exists():
-        if json_output:
-            fail(
-                "plan",
-                f"PRD file not found at {prd_display}. "
-                "Author your PRD first, then run `anvil prd parse`.",
-                code="not_found",
-            )
-        typer.echo(
-            f"Error: PRD file not found at {prd_display}. "
-            "Author your PRD first, then run `anvil prd parse`.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    parse_prd_id = prd if prd is not None else "prd"
 
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        reason = exc.strerror or exc.__class__.__name__
+        prd_path = selected_prd_source_path(state_dir, parse_prd_id)
+    except PrdSourceIngestError as exc:
         if json_output:
-            fail("plan", f"cannot read {prd_display}: {reason}", code="io_error")
-        typer.echo(f"Error: cannot read {prd_display}: {reason}", err=True)
+            fail("plan", exc.message, code=exc.code)
+        typer.echo(f"Error: {exc.message}", err=True)
         raise typer.Exit(code=1) from exc
+    prd_display = display_path(prd_path)
+    try:
+        source = ingest_prd_source_for_id(state_dir, parse_prd_id)
+    except PrdSourceIngestError as exc:
+        if exc.code == "source_not_found":
+            message = (
+                f"PRD file not found at {prd_display}. "
+                "Author your PRD first, then run `anvil prd parse`."
+            )
+        else:
+            message = f"cannot read {prd_display}: {exc.message}"
+        if json_output:
+            fail("plan", message, code=exc.code)
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=1) from exc
+    markdown = source.markdown
 
     # v1.17.0: load config once and pass it to every LLM call site so the
     # project's llm_provider / llm_tier / bedrock_* / custom_* knobs apply
@@ -479,52 +480,49 @@ def plan(
         # `## Tasks` substring check ensures concurrent writers can't
         # double-append.
         try:
-            current_markdown = prd_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            reason = exc.strerror or exc.__class__.__name__
+            current_source = ingest_prd_source_for_id(state_dir, parse_prd_id)
+        except PrdSourceIngestError as exc:
             if json_output:
                 fail(
                     "plan",
-                    f"cannot re-read {prd_display}: {reason}",
-                    code="io_error",
+                    f"cannot re-read {prd_display}: {exc.message}",
+                    code=exc.code,
                 )
-            typer.echo(f"Error: cannot re-read {prd_display}: {reason}", err=True)
+            typer.echo(
+                f"Error: cannot re-read {prd_display}: {exc.message}",
+                err=True,
+            )
             raise typer.Exit(code=1) from exc
 
         from anvil.planning._plan_helpers import has_tasks_section
+        current_markdown = current_source.markdown
         if not has_tasks_section(current_markdown):
             new_markdown = (
                 current_markdown.rstrip() + "\n\n" + gen_result.markdown + "\n"
             )
             try:
-                prd_path.write_text(new_markdown, encoding="utf-8")
-            except OSError as exc:
-                reason = exc.strerror or exc.__class__.__name__
+                updated_source = replace_prd_source_for_id(
+                    state_dir,
+                    parse_prd_id,
+                    expected_sha256=current_source.source_sha256,
+                    markdown=new_markdown,
+                )
+            except PrdSourceIngestError as exc:
                 if json_output:
                     fail(
                         "plan",
-                        f"cannot write generated tasks to {prd_display}: {reason}",
-                        code="io_error",
+                        f"cannot write generated tasks to {prd_display}: {exc.message}",
+                        code=exc.code,
                     )
                 typer.echo(
-                    f"Error: cannot write generated tasks to {prd_display}: {reason}",
+                    f"Error: cannot write generated tasks to {prd_display}: "
+                    f"{exc.message}",
                     err=True,
                 )
                 raise typer.Exit(code=1) from exc
-
-        # Re-parse so the rest of plan() consumes the freshly-appended tasks.
-        try:
-            markdown = prd_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            reason = exc.strerror or exc.__class__.__name__
-            if json_output:
-                fail(
-                    "plan",
-                    f"cannot re-read {prd_display}: {reason}",
-                    code="io_error",
-                )
-            typer.echo(f"Error: cannot re-read {prd_display}: {reason}", err=True)
-            raise typer.Exit(code=1) from exc
+            markdown = updated_source.markdown
+        else:
+            markdown = current_markdown
 
         parsed = parse_prd(markdown, prd_id=parse_prd_id, provider=provider)
         llm_generated_count = len(parsed.tasks)

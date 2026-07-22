@@ -227,12 +227,10 @@ def prd_draft_to_reviewed(prd: PRD, reviewer: str, now: datetime.datetime) -> PR
         TransitionError: If prd.status is not 'draft'.
     """
     _assert_prd_status(prd, PRDStatus.draft, "draft → reviewed")
-    return prd.model_copy(
-        update={
-            "status": PRDStatus.reviewed,
-            "last_reviewed_at": now,
-            "last_reviewed_by": reviewer,
-        }
+    return prd.validated_copy(
+        status=PRDStatus.reviewed,
+        last_reviewed_at=now,
+        last_reviewed_by=reviewer,
     )
 
 
@@ -253,12 +251,10 @@ def prd_reviewed_to_approved(
         TransitionError: If prd.status is not 'reviewed'.
     """
     _assert_prd_status(prd, PRDStatus.reviewed, "reviewed → approved")
-    return prd.model_copy(
-        update={
-            "status": PRDStatus.approved,
-            "last_reviewed_at": now,
-            "last_reviewed_by": approver,
-        }
+    return prd.validated_copy(
+        status=PRDStatus.approved,
+        last_reviewed_at=now,
+        last_reviewed_by=approver,
     )
 
 
@@ -289,13 +285,11 @@ def prd_to_rejected(
             ),
         )
     updated_questions = list(prd.open_questions) + [f"Rejected by {reviewer}: {reason}"]
-    return prd.model_copy(
-        update={
-            "status": PRDStatus.rejected,
-            "last_reviewed_at": now,
-            "last_reviewed_by": reviewer,
-            "open_questions": updated_questions,
-        }
+    return prd.validated_copy(
+        status=PRDStatus.rejected,
+        last_reviewed_at=now,
+        last_reviewed_by=reviewer,
+        open_questions=updated_questions,
     )
 
 

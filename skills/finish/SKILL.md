@@ -126,7 +126,7 @@ Do not invoke `apply` at all. Capture the open questions inline:
 
 > What context do we need before this can be dispositioned? I will add it to the task notes so the next review has the full picture.
 
-Once the user lists the open questions, record them. There is no CLI subcommand for editing a task's notes in place, so capture the context where the next reviewer will see it: edit the PRD at the path `anvil prd parse` echoes as `PRD source:`, re-run `anvil prd parse`, and coordinate with the next reviewer directly; drive that loop yourself. (PRD-level decision markers can be resolved with `anvil prd resolve-decision`; see `/anvil:resolve-decisions`.) Then loop back to Step 2.
+Once the user lists the open questions, record them. There is no CLI subcommand for editing a task's notes in place, so capture the context where the next reviewer will see it: join the `Path:` directory from `anvil status` with the portable relative name from `anvil prd source-name [--prd <id>]`, edit that PRD, re-run `anvil prd parse`, and coordinate with the next reviewer directly; drive that loop yourself. (PRD-level decision markers can be resolved with `anvil prd resolve-decision`; see `/anvil:resolve-decisions`.) Then loop back to Step 2.
 
 #### On "discard" (4)
 

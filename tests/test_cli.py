@@ -1301,6 +1301,55 @@ class TestPrdSourcePath:
             == state_dir / "prds" / "v0.2.md"
         )
 
+    def test_source_name_reports_portable_relative_name_without_absolute_path(
+        self, tmp_path: Path
+    ) -> None:
+        result = _invoke_cmd(tmp_path, ["prd", "source-name", "--prd", "CON"])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip().startswith("prds/_anvil-prd-")
+        assert result.output.strip().endswith(".md")
+        assert str(tmp_path) not in result.output
+
+    def test_source_name_json_reports_identity_and_relative_name(
+        self, tmp_path: Path
+    ) -> None:
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "source-name", "--prd", "Release", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["data"]["prd_source"] == "Release"
+        assert payload["data"]["relative_name"].startswith("prds/_anvil-prd-")
+        assert str(tmp_path) not in result.output
+
+    def test_source_name_reports_legacy_migration_destination_on_every_platform(
+        self, tmp_path: Path
+    ) -> None:
+        legacy_source = tmp_path / ".anvil" / "prds" / "Release.md"
+        legacy_source.parent.mkdir(parents=True)
+        legacy_source.write_text("# Legacy\n", encoding="utf-8")
+
+        result = _invoke_cmd(tmp_path, ["prd", "source-name", "--prd", "Release"])
+
+        assert result.exit_code == 1
+        assert "migration" in result.output.lower()
+        assert "prds/_anvil-prd-" in result.output
+
+    def test_source_name_state_root_error_does_not_disclose_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        invalid_root = tmp_path / "missing-root"
+        monkeypatch.setenv("ANVIL_ROOT", str(invalid_root))
+
+        result = runner.invoke(app, ["prd", "source-name", "--prd", "release"])
+
+        assert result.exit_code == 1
+        assert "cannot resolve Anvil state directory" in result.output
+        assert str(invalid_root) not in result.output
+
 
 class TestPrdParseNamed:
     def test_named_prd_reads_prds_subdir_and_prd_parsed_carries_prd_id(
@@ -1313,8 +1362,9 @@ class TestPrdParseNamed:
 
         result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
         assert result.exit_code == 0, f"named parse failed: {result.output}"
-        # Source line points at the prds/ subdir, not the bare prd.md.
-        assert "prds/v0.2.md" in result.output
+        # Source output carries only the stable PRD identity, never a path.
+        assert "PRD source: v0.2" in result.output
+        assert "prds/" not in result.output
 
         payload = _prd_parsed_payload(tmp_path)
         assert payload.get("prd_id") == "v0.2"
@@ -1351,9 +1401,8 @@ class TestPrdParseNamed:
 
         result = _invoke_cmd(tmp_path, ["prd", "parse"])
         assert result.exit_code == 0, f"prd parse failed: {result.output}"
-        # The default source is the bare prd.md (no prds/ subdir).
-        assert "prd.md" in result.output
-        assert "prds/" not in result.output
+        assert "PRD source: default" in result.output
+        assert ".md" not in result.output
 
         payload = _prd_parsed_payload(tmp_path)
         # Omitted entirely so the event matches the pre-multi-PRD golden.
@@ -1391,11 +1440,10 @@ class TestPrdParseNamed:
         # ...and the named partition holds only its own (prefixed) rows.
         assert named_reqs == ["v0.2:R001", "v0.2:R002"]
 
-    def test_missing_named_prd_source_exits_1_with_path(
+    def test_missing_named_prd_source_exits_1_with_identity(
         self, tmp_path: Path
     ) -> None:
-        """A missing .anvil/prds/<id>.md exits 1 with an actionable message
-        naming the exact path the author must create."""
+        """A missing named source reports its stable ID without a path."""
         _do_init(tmp_path)
         # Do NOT create prds/nope.md.
         result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "nope"])
@@ -1403,13 +1451,14 @@ class TestPrdParseNamed:
         combined = result.output + (
             result.stderr if hasattr(result, "stderr") and result.stderr else ""
         )
-        assert "prds/nope.md" in combined
+        assert ": nope" in combined
+        assert ".md" not in combined
         assert "not found" in combined.lower()
 
-    def test_unreadable_named_prd_source_uses_forward_slash_path(
+    def test_unreadable_named_prd_source_reports_only_identity(
         self, tmp_path: Path
     ) -> None:
-        """Read failures should not leak a raw Windows path from OSError text."""
+        """Read failures do not disclose either Windows or POSIX paths."""
         _do_init(tmp_path)
         blocked = tmp_path / ".anvil" / "prds" / "blocked.md"
         blocked.mkdir(parents=True)
@@ -1419,9 +1468,9 @@ class TestPrdParseNamed:
         combined = result.output + (
             result.stderr if hasattr(result, "stderr") and result.stderr else ""
         )
-        assert "prds/blocked.md" in combined
-        assert "prds\\blocked.md" not in combined
-        assert "cannot read" in combined.lower()
+        assert ": blocked" in combined
+        assert ".md" not in combined
+        assert "regular contained file" in combined.lower()
 
     @pytest.mark.parametrize("sentinel", ["default", "prd"])
     def test_reserved_sentinel_prd_flag_creates_visible_default(
@@ -1443,8 +1492,8 @@ class TestPrdParseNamed:
 
         result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", sentinel])
         assert result.exit_code == 0, f"sentinel parse failed: {result.output}"
-        # Resolves to the bare prd.md, not a prds/ subdir.
-        assert "prds/" not in result.output
+        assert "PRD source: default" in result.output
+        assert ".md" not in result.output
 
         # The sentinel must take the no-stamp (default) branch, so the event
         # omits prd_id/is_default exactly like a no-flag parse.
@@ -1490,8 +1539,8 @@ class TestPrdParseNamed:
             tmp_path, ["prd", "parse", "--file", str(custom), "--prd", "v0.2"]
         )
         assert result.exit_code == 0, f"--file --prd failed: {result.output}"
-        # The source line points at the --file path, not prds/v0.2.md.
-        assert "external_prd.md" in result.output
+        assert "PRD source: custom" in result.output
+        assert "external_prd.md" not in result.output
 
         # Event is stamped into the v0.2 partition despite the --file source.
         payload = _prd_parsed_payload(tmp_path)
@@ -2345,6 +2394,8 @@ class TestPrdAssess:
         assert payload["command"] == "prd assess"
         assert payload["data"]["advisory"] is True
         assert payload["data"]["count"] == len(payload["data"]["findings"])
+        assert payload["data"]["prd_source"] == "default"
+        assert str(state_dir) not in human.output
         assert (state_dir / "events.jsonl").read_text(encoding="utf-8") == before
 
     def test_relative_file_resolves_against_explicit_cwd(self, tmp_path: Path) -> None:
@@ -2368,14 +2419,15 @@ class TestPrdAssess:
         )
 
         assert result.exit_code == 0, result.output
-        source = Path(json.loads(result.output)["data"]["prd_source"])
-        assert source == (specs / "prd.md").resolve()
+        payload = json.loads(result.output)
+        assert payload["data"]["prd_source"] == "custom"
+        assert str((specs / "prd.md").resolve()) not in result.output
 
     @pytest.mark.parametrize(
         ("content", "code"),
         [
             (b"# Project: Incomplete", "parse_error"),
-            (b"\xff\xfe\x00", "io_error"),
+            (b"\xff\xfe\x00", "source_invalid_utf8"),
         ],
     )
     def test_json_rejects_malformed_or_non_utf8_prds(
@@ -2388,6 +2440,15 @@ class TestPrdAssess:
 
         assert result.exit_code == 1
         assert json.loads(result.output)["error"]["code"] == code
+
+    def test_explicit_empty_prd_id_is_not_treated_as_default(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+
+        result = _invoke_cmd(tmp_path, ["prd", "assess", "--prd", "", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"]["code"] == "invalid_prd_id"
 
 
 # ---------------------------------------------------------------------------
@@ -3036,15 +3097,23 @@ class TestPlanLlmBackstop:
 
         self._install_recorded_resolver(monkeypatch, _Provider())
 
-        prd_path = tmp_path / ".anvil" / "prds" / "v0.2.md"
-        original_write_text = Path.write_text
+        import importlib
 
-        def _fail_named_prd_write(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-            if self == prd_path:
-                raise OSError(13, "simulated write failure", str(self))
-            return original_write_text(self, *args, **kwargs)
+        from anvil.cli._helpers import PrdSourceIngestError
 
-        monkeypatch.setattr(Path, "write_text", _fail_named_prd_write)
+        plan_module = importlib.import_module("anvil.cli.plan")
+
+        def _fail_named_prd_write(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise PrdSourceIngestError(
+                "source_unavailable",
+                "simulated write failure",
+            )
+
+        monkeypatch.setattr(
+            plan_module,
+            "replace_prd_source_for_id",
+            _fail_named_prd_write,
+        )
 
         result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2"])
         assert result.exit_code == 1
@@ -5917,6 +5986,37 @@ class TestPlanPrdScoping:
         assert rows["T001"][0] == "default"
         assert rows["T002"][0] == "default"
 
+    def test_parse_plan_and_doctor_refuse_legacy_named_source(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        legacy_source = tmp_path / ".anvil" / "prds" / "Release.md"
+        legacy_source.parent.mkdir(parents=True)
+        legacy_source.write_text(_MULTIPRD_NAMED, encoding="utf-8")
+        parsed = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "Release"])
+        assert parsed.exit_code == 1
+        assert "migration" in parsed.output.lower()
+
+        planned = _invoke_cmd(
+            tmp_path,
+            ["plan", "--prd", "Release", "--no-llm"],
+        )
+        assert planned.exit_code == 1
+        assert "migration" in planned.output.lower()
+
+        doctor = _invoke_cmd(
+            tmp_path,
+            ["doctor", "--preflight", "--prd", "Release", "--json"],
+        )
+        assert doctor.exit_code == 1
+        payload = json.loads(doctor.output.strip().splitlines()[-1])
+        finding = next(
+            item
+            for item in payload["data"]["findings"]
+            if item["check"] == "prd_parse"
+        )
+        assert finding["detail"]["code"] == "legacy_source_migration_required"
+
     def test_plan_missing_named_prd_source_uses_forward_slash_path(
         self, tmp_path: Path
     ) -> None:
@@ -5948,6 +6048,51 @@ class TestPlanPrdScoping:
         assert "prds/blocked.md" in combined
         assert "prds\\blocked.md" not in combined
         assert "cannot read" in combined.lower()
+
+    def test_plan_refuses_over_limit_source_before_state_mutation(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        source_path = tmp_path / ".anvil" / "prd.md"
+        source_path.write_bytes(b"x" * (2_097_152 + 1))
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before_events = events_path.read_bytes()
+
+        result = _invoke_cmd(tmp_path, ["plan", "--no-llm", "--json"])
+
+        assert result.exit_code == 1, result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "source_limit_exceeded"
+        assert events_path.read_bytes() == before_events
+
+    def test_plan_never_reads_or_writes_through_named_source_symlink(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        outside = tmp_path / "outside.md"
+        outside_bytes = b"PRIVATE-OUTSIDE-PLAN-SENTINEL\n"
+        outside.write_bytes(outside_bytes)
+        prds_dir = tmp_path / ".anvil" / "prds"
+        prds_dir.mkdir()
+        source_path = prds_dir / "release.md"
+        try:
+            source_path.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before_events = events_path.read_bytes()
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["plan", "--prd", "release", "--no-llm", "--json"],
+        )
+
+        assert result.exit_code == 1, result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "source_outside_prd_directory"
+        assert "PRIVATE-OUTSIDE-PLAN-SENTINEL" not in result.output
+        assert outside.read_bytes() == outside_bytes
+        assert events_path.read_bytes() == before_events
 
     def test_plan_named_prd_does_not_prune_default_tasks(
         self, tmp_path: Path
@@ -6824,6 +6969,31 @@ def _doctor_json(result) -> dict:  # type: ignore[no-untyped-def]
 
 class TestDoctorHealthy:
     """A healthy project: doctor exits 0 with no ERROR-level findings."""
+
+    @pytest.mark.parametrize("prd_id", [" Release ", "   "])
+    def test_doctor_preflight_rejects_inexact_prd_id_without_fallback(
+        self, tmp_path: Path, prd_id: str
+    ) -> None:
+        _do_init(tmp_path)
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["doctor", "--preflight", "--prd", prd_id, "--json"],
+        )
+
+        assert result.exit_code == 1, result.output
+        env = _doctor_json(result)
+        finding = next(
+            item
+            for item in env["data"]["findings"]
+            if item["check"] == "prd_parse"
+        )
+        assert finding["severity"] == "error"
+        assert finding["message"] == "PRD id is invalid"
+        assert finding["detail"] == {
+            "prd_id": prd_id,
+            "code": "invalid_prd_id",
+        }
 
     def test_doctor_clean_project_exits_zero(self, tmp_path: Path) -> None:
         _do_init(tmp_path)

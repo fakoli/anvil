@@ -57,10 +57,12 @@ import typer
 
 from anvil.cli._helpers import (
     PRD_OPTION,
+    PrdSourceIngestError,
     StateRootError,
     _resolve_project_root,
     _resolve_state_dir,
-    prd_source_path,
+    ingest_prd_source_for_id,
+    selected_prd_source_path,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
 
@@ -261,42 +263,45 @@ def _preflight_findings(
                 )
             )
 
-    # Resolve which partition to check. The shared sentinel rule: an explicit
-    # --prd / $ANVIL_PRD wins; otherwise the default partition. resolve_prd_id
-    # needs an open backend; fall back to the raw value on any hiccup so the
-    # probe still runs against SOME file rather than dying on resolution.
-    # PRD_OPTION already carries $ANVIL_PRD into ``prd``, and the explicit
-    # tier of resolve_prd_id is a pure strip() — no backend needed for a
-    # read-only probe (review finding: the backend open was near-redundant).
-    prd_id = prd.strip() if prd and prd.strip() else "default"
-
-    prd_path = prd_source_path(state_dir, prd_id)
-
-    # Probe 1 — the PRD parses cleanly.
-    if not prd_path.exists():
-        findings.append(
-            _Finding(
-                "prd_parse",
-                _ERROR,
-                f"PRD source not found at {prd_path} — author it, then run "
-                "`anvil prd parse`.",
-                {"path": str(prd_path), "prd_id": prd_id},
-            )
-        )
-        return findings  # nothing further to probe without a file
+    # Resolve which partition to check. An explicit --prd / $ANVIL_PRD wins
+    # byte-for-byte; otherwise select the default partition. The shared source
+    # selector applies the authoritative wire-identity validation below.
+    prd_id = prd if prd is not None else "default"
 
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        prd_path = selected_prd_source_path(state_dir, prd_id)
+    except PrdSourceIngestError as exc:
         findings.append(
             _Finding(
                 "prd_parse",
                 _ERROR,
-                f"PRD source unreadable at {prd_path}: {exc}",
-                {"path": str(prd_path), "prd_id": prd_id},
+                exc.message,
+                {"prd_id": prd_id, "code": exc.code},
             )
         )
         return findings
+
+    # Probe 1 — ingest through the same bounded, handle-verified source
+    # contract as parse/plan before handing any text to the parser.
+    try:
+        source = ingest_prd_source_for_id(state_dir, prd_id)
+    except PrdSourceIngestError as exc:
+        message = (
+            f"PRD source not found at {prd_path} — author it, then run "
+            "`anvil prd parse`."
+            if exc.code == "source_not_found"
+            else exc.message
+        )
+        findings.append(
+            _Finding(
+                "prd_parse",
+                _ERROR,
+                message,
+                {"path": str(prd_path), "prd_id": prd_id, "code": exc.code},
+            )
+        )
+        return findings
+    markdown = source.markdown
 
     from anvil.planning.template import parse_prd
 

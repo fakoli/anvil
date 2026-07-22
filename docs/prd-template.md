@@ -18,7 +18,7 @@ and `anvil status` shows the state directory on its `Path:` line. To author the
 PRD elsewhere, pass `anvil prd parse --file <path>`; to keep state in the
 project tree at `./.anvil`, set `ANVIL_STATE_LAYOUT=local` before `anvil init`
 (`ANVIL_ROOT=<dir>` pins state to `<dir>/.anvil` literally). Each **named**
-release PRD is a separate file at `<state dir>/prds/<prd_id>.md` and is parsed
+release PRD is a separate portable file under `<state dir>/prds/` and is parsed
 with `anvil prd parse --prd <prd_id>`.
 
 **Hard rule**: structure matters. The parser rejects the file with a `ParseError` if any
@@ -580,12 +580,25 @@ Each PRD has its own markdown source file:
 | PRD | Source file | Parse command |
 |---|---|---|
 | Default | `.anvil/prd.md` | `anvil prd parse` |
-| Named release (`<prd_id>`) | `.anvil/prds/<prd_id>.md` | `anvil prd parse --prd <prd_id>` |
+| Named release (`<prd_id>`) | portable file under `.anvil/prds/` | `anvil prd parse --prd <prd_id>` |
 
 The `.anvil/prds/` collection holds every named PRD; a fresh single-PRD project
 has just the default PRD at `.anvil/prd.md`. The source path is resolved by the
 CLI (`prd_source_path()`), never hardcoded — the default PRD keeps the bare
 `.anvil/prd.md`; named PRDs live under the `.anvil/prds/` collection.
+
+Lowercase IDs that are not Windows device names retain the familiar
+`<prd_id>.md` filename. IDs containing uppercase characters, plus Windows
+reserved stems such as `CON`, `NUL`, `COM1`, and `LPT9`, use
+`_anvil-prd-<BASE32>.md`, where `BASE32` is the unpadded RFC 4648 Base32
+encoding of the exact ASCII ID. This reversible mapping preserves distinct IDs
+such as `A` and `a` on case-insensitive filesystems and remains within the
+Windows component-length ceiling. Code integrations must call
+`prd_source_path()` rather than construct filenames. Prefer lowercase IDs for
+sources authored by hand; operators can run `anvil prd source-name --prd <id>`
+to obtain the portable relative name. On Windows, an existing uppercase legacy filename
+must be moved to its portable encoded name before it can be read; Anvil fails
+closed rather than aliasing it to a different wire ID.
 
 **Named-PRD ids are prefixed** (see [ID Conventions](#id-conventions)): the
 `default` PRD keeps bare ids (`T001`), a PRD parsed with `--prd v0.2` gets every
