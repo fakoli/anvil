@@ -4282,6 +4282,59 @@ class TestPlanTasks:
         assert "prds\\blocked.md" not in message
         assert "cannot read" in message.lower()
 
+    def test_plan_tasks_rejects_invalid_utf8_before_state_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        source_path = state_dir / "prd.md"
+        source_path.write_bytes(b"PRIVATE-MCP-PREFIX\xffPRIVATE-MCP-SUFFIX")
+        events_path = state_dir / "events.jsonl"
+        before_events = events_path.read_bytes()
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("plan_tasks", {"use_llm": False})
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        message = str(excinfo.value)
+        assert "valid UTF-8" in message
+        assert "PRIVATE-MCP" not in message
+        assert events_path.read_bytes() == before_events
+
+    def test_plan_tasks_never_follows_named_source_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        outside = tmp_path / "outside.md"
+        outside_bytes = b"PRIVATE-MCP-OUTSIDE-SENTINEL\n"
+        outside.write_bytes(outside_bytes)
+        prds_dir = state_dir / "prds"
+        prds_dir.mkdir()
+        source_path = prds_dir / "release.md"
+        try:
+            source_path.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        events_path = state_dir / "events.jsonl"
+        before_events = events_path.read_bytes()
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "plan_tasks",
+                    {"prd_id": "release", "use_llm": False},
+                )
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        message = str(excinfo.value)
+        assert "PRIVATE-MCP-OUTSIDE-SENTINEL" not in message
+        assert outside.read_bytes() == outside_bytes
+        assert events_path.read_bytes() == before_events
+
     def test_error_when_prd_file_present_but_not_parsed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4351,8 +4404,7 @@ class TestPlanTasks:
         finally:
             b.close()
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy-source compatibility")
-    def test_plan_tasks_uses_effective_legacy_named_source(
+    def test_parse_prd_refuses_legacy_named_source_on_every_platform(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_dir = _init_state_dir(tmp_path)
@@ -4361,19 +4413,13 @@ class TestPlanTasks:
         legacy_source.write_text(_MINIMAL_PRD, encoding="utf-8")
         monkeypatch.chdir(tmp_path)
 
-        async def run() -> Any:
+        async def run() -> None:
             async with Client(mcp) as c:
                 await c.call_tool("parse_prd", {"prd_id": "Release"})
-                return _data(
-                    await c.call_tool(
-                        "plan_tasks",
-                        {"prd_id": "Release", "use_llm": False},
-                    )
-                )
 
-        plan = _run(run())
-        assert plan["feature_count"] == 1
-        assert plan["task_count"] == 2
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        assert "migration" in str(excinfo.value).lower()
 
     def test_plan_named_prd_with_no_default_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4725,14 +4771,19 @@ class TestPlanTasksLlmBackstop:
 
         _run(parse())
 
-        original_write_text = Path.write_text
+        import anvil.cli._helpers as helpers_module
 
-        def _fail_named_prd_write(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-            if self == prd_path:
-                raise OSError(13, "simulated write failure", str(self))
-            return original_write_text(self, *args, **kwargs)
+        def _fail_named_prd_write(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise helpers_module.PrdSourceIngestError(
+                "source_unavailable",
+                "simulated write failure",
+            )
 
-        monkeypatch.setattr(Path, "write_text", _fail_named_prd_write)
+        monkeypatch.setattr(
+            helpers_module,
+            "replace_prd_source_for_id",
+            _fail_named_prd_write,
+        )
 
         async def plan() -> None:
             async with Client(mcp) as c:

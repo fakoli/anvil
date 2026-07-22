@@ -23,6 +23,7 @@ from anvil.cli._helpers import (
     prd_id_from_source_filename,
     prd_source_filename,
     prd_source_path,
+    replace_prd_source_for_id,
     validate_prd_id,
 )
 from anvil.read_contracts import PrdScopedRefV1
@@ -157,6 +158,9 @@ def test_payload_invalid_unicode_source_fails_without_source_echo() -> None:
 def test_projection_model_hides_raw_source_from_generic_dumps() -> None:
     source_bytes = b"# Project: Projection\r\n"
     prd = PRD(
+        id="release",
+        title="Release",
+        is_default=False,
         revision=4,
         source_bytes=source_bytes,
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
@@ -180,6 +184,10 @@ def test_projection_model_hides_raw_source_from_generic_dumps() -> None:
     assert "source_bytes" not in dict(prd)
     assert "provenance_state" not in dict(prd)
     assert "content_available" not in dict(prd)
+    assert dict(prd)["id"] == "release"
+    assert dict(prd)["title"] == "Release"
+    assert dict(prd)["revision"] == 4
+    assert dict(prd)["is_default"] is False
     assert repr(source_bytes) not in repr(prd)
 
 
@@ -466,6 +474,111 @@ def test_ingest_limit_accepts_n_and_refuses_n_plus_one(tmp_path: Path) -> None:
     assert refusal.value.code == "source_limit_exceeded"
 
 
+def test_verified_replacement_is_bounded_atomic_and_revision_checked(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    source_path = state_dir / "prd.md"
+    original = b"# Original\r\n"
+    source_path.write_bytes(original)
+    current = ingest_prd_source_for_id(state_dir, "default")
+
+    updated = replace_prd_source_for_id(
+        state_dir,
+        "default",
+        expected_sha256=current.source_sha256,
+        markdown="# Updated\n",
+    )
+
+    assert source_path.read_bytes() == b"# Updated\n"
+    assert updated.source_bytes == b"# Updated\n"
+    assert list(state_dir.glob(".prd.md.*.tmp")) == []
+
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        replace_prd_source_for_id(
+            state_dir,
+            "default",
+            expected_sha256=current.source_sha256,
+            markdown="# Stale overwrite\n",
+        )
+    assert refusal.value.code == "source_changed"
+    assert source_path.read_bytes() == b"# Updated\n"
+
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        replace_prd_source_for_id(
+            state_dir,
+            "default",
+            expected_sha256=updated.source_sha256,
+            markdown="x" * (MAX_PRD_SOURCE_BYTES_V1 + 1),
+        )
+    assert refusal.value.code == "source_limit_exceeded"
+    assert source_path.read_bytes() == b"# Updated\n"
+
+
+def test_verified_replacement_never_follows_managed_source_symlink(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    prds_dir = state_dir / "prds"
+    prds_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside_bytes = b"# Outside sentinel\n"
+    outside.write_bytes(outside_bytes)
+    source_path = prds_dir / "release.md"
+    try:
+        source_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        replace_prd_source_for_id(
+            state_dir,
+            "release",
+            expected_sha256=hashlib.sha256(outside_bytes).hexdigest(),
+            markdown="# Must not escape\n",
+        )
+
+    assert refusal.value.code == "source_outside_prd_directory"
+    assert outside.read_bytes() == outside_bytes
+
+
+def test_verified_replacement_does_not_follow_symlink_substituted_at_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    source_path = state_dir / "prd.md"
+    source_path.write_bytes(b"# Original\n")
+    current = ingest_prd_source_for_id(state_dir, "default")
+    outside = tmp_path / "outside.md"
+    outside_bytes = b"# Outside sentinel\n"
+    outside.write_bytes(outside_bytes)
+    real_replace = os.replace
+
+    def substitute_then_replace(staged: os.PathLike[str], target: os.PathLike[str]) -> None:
+        Path(target).unlink()
+        try:
+            Path(target).symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        real_replace(staged, target)
+
+    monkeypatch.setattr(helpers_module.os, "replace", substitute_then_replace)
+    updated = replace_prd_source_for_id(
+        state_dir,
+        "default",
+        expected_sha256=current.source_sha256,
+        markdown="# Updated\n",
+    )
+
+    assert updated.source_bytes == b"# Updated\n"
+    assert not source_path.is_symlink()
+    assert source_path.read_bytes() == b"# Updated\n"
+    assert outside.read_bytes() == outside_bytes
+
+
 @pytest.mark.parametrize("max_bytes", [0, -1, True, MAX_PRD_SOURCE_BYTES_V1 + 1])
 def test_ingest_limit_must_be_within_the_fixed_provider_ceiling(
     tmp_path: Path,
@@ -579,19 +692,17 @@ def test_identity_case_distinct_ids_have_distinct_portable_filenames() -> None:
     assert prd_id_from_source_filename(lowercase_filename) == "a"
 
 
-def test_identity_legacy_uppercase_source_remains_readable(tmp_path: Path) -> None:
+def test_identity_legacy_uppercase_source_requires_portable_migration(
+    tmp_path: Path,
+) -> None:
     state_dir = tmp_path / ".anvil"
     legacy_source = state_dir / "prds" / "Release.md"
     legacy_source.parent.mkdir(parents=True)
     legacy_source.write_bytes(b"# Legacy\r\n")
 
-    if os.name == "nt":
-        with pytest.raises(PrdSourceIngestError) as refusal:
-            ingest_prd_source_for_id(state_dir, "Release")
-        assert refusal.value.code == "legacy_source_migration_required"
-    else:
-        ingested = ingest_prd_source_for_id(state_dir, "Release")
-        assert ingested.source_bytes == b"# Legacy\r\n"
+    with pytest.raises(PrdSourceIngestError) as refusal:
+        ingest_prd_source_for_id(state_dir, "Release")
+    assert refusal.value.code == "legacy_source_migration_required"
 
 
 def test_identity_portable_and_legacy_sources_refuse_as_ambiguous(
@@ -609,8 +720,7 @@ def test_identity_portable_and_legacy_sources_refuse_as_ambiguous(
     assert refusal.value.code == "source_ambiguous"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows legacy sources require migration")
-def test_identity_legacy_selection_rechecks_late_portable_creation(
+def test_identity_legacy_migration_rechecks_late_portable_creation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -637,8 +747,9 @@ def test_identity_legacy_selection_rechecks_late_portable_creation(
     assert refusal.value.code == "source_ambiguous"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires case-insensitive Windows paths")
-def test_identity_windows_legacy_case_aliases_fail_closed(tmp_path: Path) -> None:
+def test_identity_legacy_case_aliases_fail_closed_on_every_platform(
+    tmp_path: Path,
+) -> None:
     state_dir = tmp_path / ".anvil"
     legacy_source = state_dir / "prds" / "A.md"
     legacy_source.parent.mkdir(parents=True)
@@ -653,8 +764,8 @@ def test_identity_windows_legacy_case_aliases_fail_closed(tmp_path: Path) -> Non
     assert lowercase_refusal.value.code == "source_case_alias"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires case-insensitive Windows paths")
-def test_identity_windows_case_alias_swap_before_open_fails_closed(
+@pytest.mark.skipif(os.name != "nt", reason="requires a case-insensitive filesystem")
+def test_identity_case_alias_swap_before_open_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

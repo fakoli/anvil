@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 67 executable leaf commands,
+> Single-page reference for the `anvil` CLI: 68 executable leaf commands,
 > including the milestone bundle lifecycle. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
@@ -271,16 +271,20 @@ project.
 
 ### `anvil prd parse` { #prd-parse }
 
-**Synopsis:** Parse `.anvil/prd.md` (or `--file PATH`) and store the
-result as a `prd.parsed` event. Calls the template parser, validates the
-required sections, and persists the full PRD payload (summary, goals,
-non-goals, requirements, acceptance criteria, risks, open questions, and typed
-assumptions).
+**Synopsis:** Parse the managed default PRD source (or `--file PATH`) and store
+the result as a `prd.parsed` event. The resolver normally selects
+`~/.anvil/workspaces/<key>/.anvil/prd.md`, shared by the repository's
+worktrees; `ANVIL_STATE_LAYOUT=local` opts into `<cwd>/.anvil/prd.md`. Calls
+the template parser, validates the required sections, and persists the full
+PRD payload (summary, goals, non-goals, requirements, acceptance criteria,
+risks, open questions, and typed assumptions).
 
 **Flags:**
 
-- `--file PATH` *(optional)* — path to the PRD markdown file. Defaults to
-  `.anvil/prd.md` in the current project directory.
+- `--file PATH` *(optional)* — explicit PRD markdown path. When omitted, uses
+  the managed source under the resolver-selected state directory (normally the
+  HOME workspace; `<cwd>/.anvil/prd.md` only with
+  `ANVIL_STATE_LAYOUT=local`).
 - `--prd ID` *(optional)* — named PRD identity; reads its portable managed
   source and scopes the parsed partition.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.

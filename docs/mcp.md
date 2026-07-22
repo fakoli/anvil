@@ -937,16 +937,18 @@ None — always returns a response.
 
 ### `parse_prd`
 
-Reads `.anvil/prd.md` (or `file=` path), parses via
-`anvil.planning.template.parse_prd`, and emits `prd.parsed` on success. Parse errors
-are returned in the response (not raised) so the caller can decide whether to fix and retry.
-Mirrors `anvil prd parse`.
+Reads the managed default PRD source (or `file=` path), parses via
+`anvil.planning.template.parse_prd`, and emits `prd.parsed` on success. The
+resolver normally selects `~/.anvil/workspaces/<key>/.anvil/prd.md`, shared by
+the repository's worktrees; `ANVIL_STATE_LAYOUT=local` opts into
+`<cwd>/.anvil/prd.md`. Parse errors are returned in the response (not raised)
+so the caller can decide whether to fix and retry. Mirrors `anvil prd parse`.
 
 **Inputs**
 
 | Parameter | Type             | Required | Default                          |
 |-----------|------------------|----------|----------------------------------|
-| `file`    | `string \| null` | no       | `<cwd>/.anvil/prd.md`     |
+| `file`    | `string \| null` | no       | managed source in resolver-selected state directory |
 | `prd_id`  | `string \| null` | no       | default PRD               |
 | `cwd`     | `string \| null` | no       | `Path.cwd()`                     |
 

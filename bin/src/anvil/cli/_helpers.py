@@ -14,6 +14,7 @@ import json
 import os
 import re
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1051,24 +1052,62 @@ def selected_prd_source_path(state_dir: Path, prd_id: str) -> Path:
                     "source_unavailable",
                     "cannot inspect PRD source collection",
                 ) from exc
-            if canonical_present and legacy_present:
-                raise PrdSourceIngestError(
-                    "source_ambiguous",
-                    "both portable and legacy PRD sources exist",
-                )
             if legacy_present:
-                if os.name == "nt":
-                    raise PrdSourceIngestError(
-                        "legacy_source_migration_required",
-                        "legacy PRD source requires portable filename migration",
+                try:
+                    canonical_present = canonical_present or os.path.lexists(
+                        source_path
                     )
-                source_path = legacy_path
-    if os.name == "nt" and required_parent.exists():
-        with os.scandir(required_parent) as entries:
-            case_alias = any(
-                entry.name.casefold() == source_path.name.casefold()
-                and entry.name != source_path.name
-                for entry in entries
+                except OSError as exc:
+                    raise PrdSourceIngestError(
+                        "source_unavailable",
+                        "cannot recheck portable PRD source",
+                    ) from exc
+                if canonical_present:
+                    raise PrdSourceIngestError(
+                        "source_ambiguous",
+                        "both portable and legacy PRD sources exist",
+                    )
+                raise PrdSourceIngestError(
+                    "legacy_source_migration_required",
+                    "legacy PRD source requires portable filename migration",
+                )
+    # Enforce the case-insensitive namespace on every host.  Linux commonly
+    # has case-sensitive storage while macOS commonly does not; accepting an
+    # alias only on the former would create state that cannot move safely to
+    # the latter.  Scanning actual directory entries also avoids relying on
+    # ``os.path.normcase``, which only reflects Windows behavior.
+    try:
+        collection_before = os.stat(required_parent, follow_symlinks=False)
+    except FileNotFoundError:
+        case_alias = False
+    except OSError as exc:
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "cannot inspect PRD source collection",
+        ) from exc
+    else:
+        if not stat.S_ISDIR(collection_before.st_mode):
+            raise PrdSourceIngestError(
+                "source_outside_prd_directory",
+                "PRD source collection is not a contained directory",
+            )
+        try:
+            with os.scandir(required_parent) as entries:
+                case_alias = any(
+                    entry.name.casefold() == source_path.name.casefold()
+                    and entry.name != source_path.name
+                    for entry in entries
+                )
+            collection_after = os.stat(required_parent, follow_symlinks=False)
+        except OSError as exc:
+            raise PrdSourceIngestError(
+                "source_unavailable",
+                "cannot inspect PRD source collection",
+            ) from exc
+        if not os.path.samestat(collection_before, collection_after):
+            raise PrdSourceIngestError(
+                "source_changed",
+                "PRD source collection changed during inspection",
             )
         if case_alias:
             raise PrdSourceIngestError(
@@ -1124,6 +1163,139 @@ def ingest_prd_source_for_id(
                 "both portable and legacy PRD sources exist",
             )
     return ingested
+
+
+def replace_prd_source_for_id(
+    state_dir: Path,
+    prd_id: str,
+    *,
+    expected_sha256: str,
+    markdown: str,
+    max_bytes: int = MAX_PRD_SOURCE_BYTES_V1,
+) -> IngestedPrdSource:
+    """Atomically replace one verified managed source without following links.
+
+    The caller supplies the digest from its last bounded read.  We verify that
+    exact source again before staging and immediately before replacement to
+    detect stale input observed before the atomic swap.  ``os.replace``
+    replaces the directory entry itself; it never opens or writes through a
+    link substituted at the destination.
+    """
+    if type(markdown) is not str:
+        raise ValueError("replacement PRD source must be plain text")
+    if type(expected_sha256) is not str or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_sha256
+    ):
+        raise ValueError("expected PRD source digest must be lowercase SHA-256")
+    if (
+        type(max_bytes) is not int
+        or max_bytes < 1
+        or max_bytes > MAX_PRD_SOURCE_BYTES_V1
+    ):
+        raise ValueError("PRD source byte limit must be within the Version 1 ceiling")
+
+    try:
+        source_bytes = markdown.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise PrdSourceIngestError(
+            "source_invalid_utf8",
+            "PRD source is not valid UTF-8",
+        ) from exc
+    if len(source_bytes) > max_bytes:
+        raise PrdSourceIngestError(
+            "source_limit_exceeded",
+            "PRD source exceeds the configured byte limit",
+        )
+
+    validated_id = validate_prd_id(prd_id)
+    current = ingest_prd_source_for_id(
+        state_dir,
+        validated_id,
+        max_bytes=max_bytes,
+    )
+    if current.source_sha256 != expected_sha256:
+        raise PrdSourceIngestError(
+            "source_changed",
+            "PRD source changed before verified replacement",
+        )
+
+    source_path = selected_prd_source_path(state_dir, validated_id)
+    required_parent = (
+        state_dir
+        if validated_id in _DEFAULT_PRD_IDS
+        else state_dir / _PRDS_DIR_NAME
+    )
+    temp_path: Path | None = None
+    descriptor = -1
+    try:
+        descriptor, raw_temp_path = tempfile.mkstemp(
+            prefix=f".{source_path.name}.",
+            suffix=".tmp",
+            dir=required_parent,
+        )
+        temp_path = Path(raw_temp_path)
+        opened_temp = os.fstat(descriptor)
+        _refuse_non_regular_source(opened_temp)
+        if os.name == "nt":
+            opened_temp_path = _windows_final_path_for_descriptor(descriptor)
+            expected_parent = required_parent.resolve(strict=True)
+            if os.path.normcase(os.path.normpath(str(opened_temp_path.parent))) != (
+                os.path.normcase(os.path.normpath(str(expected_parent)))
+            ):
+                raise PrdSourceIngestError(
+                    "source_outside_prd_directory",
+                    "replacement source escapes its contained source directory",
+                )
+
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            stream.write(source_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        latest = ingest_prd_source_for_id(
+            state_dir,
+            validated_id,
+            max_bytes=max_bytes,
+        )
+        if latest.source_sha256 != expected_sha256:
+            raise PrdSourceIngestError(
+                "source_changed",
+                "PRD source changed before verified replacement",
+            )
+
+        try:
+            source_mode = stat.S_IMODE(os.stat(source_path, follow_symlinks=False).st_mode)
+            os.chmod(temp_path, source_mode)
+            os.replace(temp_path, source_path)
+        except OSError as exc:
+            raise PrdSourceIngestError(
+                "source_unavailable",
+                "cannot replace verified PRD source",
+            ) from exc
+        temp_path = None
+    except PrdSourceIngestError:
+        raise
+    except OSError as exc:
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "cannot stage verified PRD source replacement",
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return IngestedPrdSource(
+        source_bytes=source_bytes,
+        markdown=markdown,
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        source_size_bytes=len(source_bytes),
+    )
 
 
 def display_path(path: Path) -> str:

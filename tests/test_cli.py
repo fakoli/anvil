@@ -1323,21 +1323,7 @@ class TestPrdSourcePath:
         assert payload["data"]["relative_name"].startswith("prds/_anvil-prd-")
         assert str(tmp_path) not in result.output
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy-source compatibility")
-    def test_source_name_returns_effective_legacy_name_on_posix(
-        self, tmp_path: Path
-    ) -> None:
-        legacy_source = tmp_path / ".anvil" / "prds" / "Release.md"
-        legacy_source.parent.mkdir(parents=True)
-        legacy_source.write_text("# Legacy\n", encoding="utf-8")
-
-        result = _invoke_cmd(tmp_path, ["prd", "source-name", "--prd", "Release"])
-
-        assert result.exit_code == 0, result.output
-        assert result.output.strip() == "prds/Release.md"
-
-    @pytest.mark.skipif(os.name != "nt", reason="Windows migration behavior")
-    def test_source_name_reports_legacy_migration_destination_on_windows(
+    def test_source_name_reports_legacy_migration_destination_on_every_platform(
         self, tmp_path: Path
     ) -> None:
         legacy_source = tmp_path / ".anvil" / "prds" / "Release.md"
@@ -3111,15 +3097,23 @@ class TestPlanLlmBackstop:
 
         self._install_recorded_resolver(monkeypatch, _Provider())
 
-        prd_path = tmp_path / ".anvil" / "prds" / "v0.2.md"
-        original_write_text = Path.write_text
+        import importlib
 
-        def _fail_named_prd_write(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-            if self == prd_path:
-                raise OSError(13, "simulated write failure", str(self))
-            return original_write_text(self, *args, **kwargs)
+        from anvil.cli._helpers import PrdSourceIngestError
 
-        monkeypatch.setattr(Path, "write_text", _fail_named_prd_write)
+        plan_module = importlib.import_module("anvil.cli.plan")
+
+        def _fail_named_prd_write(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise PrdSourceIngestError(
+                "source_unavailable",
+                "simulated write failure",
+            )
+
+        monkeypatch.setattr(
+            plan_module,
+            "replace_prd_source_for_id",
+            _fail_named_prd_write,
+        )
 
         result = _invoke_cmd(tmp_path, ["plan", "--prd", "v0.2"])
         assert result.exit_code == 1
@@ -5986,8 +5980,7 @@ class TestPlanPrdScoping:
         assert rows["T001"][0] == "default"
         assert rows["T002"][0] == "default"
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy-source compatibility")
-    def test_plan_and_doctor_use_effective_legacy_named_source(
+    def test_parse_plan_and_doctor_refuse_legacy_named_source(
         self, tmp_path: Path
     ) -> None:
         _do_init(tmp_path)
@@ -5995,17 +5988,28 @@ class TestPlanPrdScoping:
         legacy_source.parent.mkdir(parents=True)
         legacy_source.write_text(_MULTIPRD_NAMED, encoding="utf-8")
         parsed = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "Release"])
-        assert parsed.exit_code == 0, parsed.output
+        assert parsed.exit_code == 1
+        assert "migration" in parsed.output.lower()
 
         planned = _invoke_cmd(
             tmp_path,
             ["plan", "--prd", "Release", "--no-llm"],
         )
-        assert planned.exit_code == 0, planned.output
-        assert "Release:T900" in self._task_rows(tmp_path)
+        assert planned.exit_code == 1
+        assert "migration" in planned.output.lower()
 
-        doctor = _invoke_cmd(tmp_path, ["doctor", "--prd", "Release", "--json"])
-        assert "PRD source not found" not in doctor.output
+        doctor = _invoke_cmd(
+            tmp_path,
+            ["doctor", "--preflight", "--prd", "Release", "--json"],
+        )
+        assert doctor.exit_code == 1
+        payload = json.loads(doctor.output.strip().splitlines()[-1])
+        finding = next(
+            item
+            for item in payload["data"]["findings"]
+            if item["check"] == "prd_parse"
+        )
+        assert finding["detail"]["code"] == "legacy_source_migration_required"
 
     def test_plan_missing_named_prd_source_uses_forward_slash_path(
         self, tmp_path: Path
@@ -6038,6 +6042,51 @@ class TestPlanPrdScoping:
         assert "prds/blocked.md" in combined
         assert "prds\\blocked.md" not in combined
         assert "cannot read" in combined.lower()
+
+    def test_plan_refuses_over_limit_source_before_state_mutation(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        source_path = tmp_path / ".anvil" / "prd.md"
+        source_path.write_bytes(b"x" * (2_097_152 + 1))
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before_events = events_path.read_bytes()
+
+        result = _invoke_cmd(tmp_path, ["plan", "--no-llm", "--json"])
+
+        assert result.exit_code == 1, result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "source_limit_exceeded"
+        assert events_path.read_bytes() == before_events
+
+    def test_plan_never_reads_or_writes_through_named_source_symlink(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        outside = tmp_path / "outside.md"
+        outside_bytes = b"PRIVATE-OUTSIDE-PLAN-SENTINEL\n"
+        outside.write_bytes(outside_bytes)
+        prds_dir = tmp_path / ".anvil" / "prds"
+        prds_dir.mkdir()
+        source_path = prds_dir / "release.md"
+        try:
+            source_path.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before_events = events_path.read_bytes()
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["plan", "--prd", "release", "--no-llm", "--json"],
+        )
+
+        assert result.exit_code == 1, result.output
+        envelope = json.loads(result.output.strip().splitlines()[-1])
+        assert envelope["error"]["code"] == "source_outside_prd_directory"
+        assert "PRIVATE-OUTSIDE-PLAN-SENTINEL" not in result.output
+        assert outside.read_bytes() == outside_bytes
+        assert events_path.read_bytes() == before_events
 
     def test_plan_named_prd_does_not_prune_default_tasks(
         self, tmp_path: Path

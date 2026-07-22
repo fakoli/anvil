@@ -2777,6 +2777,8 @@ def plan_tasks(
     from anvil.cli._helpers import (
         PrdSourceIngestError,
         display_path,
+        ingest_prd_source_for_id,
+        replace_prd_source_for_id,
         selected_prd_source_path,
     )
     from anvil.clock import SystemClock
@@ -2808,17 +2810,16 @@ def plan_tasks(
     except PrdSourceIngestError as exc:
         raise ToolError(f"Cannot resolve PRD source: {exc.message}") from exc
     prd_display = display_path(prd_path)
-    if not prd_path.exists():
-        raise ToolError(
-            f"PRD file not found at {prd_display}. "
-            "Author your PRD and call parse_prd first.",
-        )
-
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        reason = exc.strerror or exc.__class__.__name__
-        raise ToolError(f"Cannot read {prd_display}: {reason}") from exc
+        source = ingest_prd_source_for_id(state_dir, parse_prd_id)
+    except PrdSourceIngestError as exc:
+        if exc.code == "source_not_found":
+            raise ToolError(
+                f"PRD file not found at {prd_display}. "
+                "Author your PRD and call parse_prd first."
+            ) from exc
+        raise ToolError(f"Cannot read {prd_display}: {exc.message}") from exc
+    markdown = source.markdown
 
     # v1.17.0 — load config so the LLM-planner backstop honors the
     # project's llm_provider / llm_tier / bedrock / custom-endpoint knobs.
@@ -2916,30 +2917,32 @@ def plan_tasks(
         # present, so re-running plan_tasks after a previous append is a
         # no-op on the file.
         try:
-            current_markdown = prd_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            reason = exc.strerror or exc.__class__.__name__
-            raise ToolError(f"Cannot re-read {prd_display}: {reason}") from exc
+            current_source = ingest_prd_source_for_id(state_dir, parse_prd_id)
+        except PrdSourceIngestError as exc:
+            raise ToolError(
+                f"Cannot re-read {prd_display}: {exc.message}"
+            ) from exc
 
         from anvil.planning._plan_helpers import has_tasks_section
+        current_markdown = current_source.markdown
         if not has_tasks_section(current_markdown):
             new_markdown = (
                 current_markdown.rstrip() + "\n\n" + gen_result.markdown + "\n"
             )
             try:
-                prd_path.write_text(new_markdown, encoding="utf-8")
-            except OSError as exc:
-                reason = exc.strerror or exc.__class__.__name__
+                updated_source = replace_prd_source_for_id(
+                    state_dir,
+                    parse_prd_id,
+                    expected_sha256=current_source.source_sha256,
+                    markdown=new_markdown,
+                )
+            except PrdSourceIngestError as exc:
                 raise ToolError(
-                    f"Cannot write generated tasks to {prd_display}: {reason}"
+                    f"Cannot write generated tasks to {prd_display}: {exc.message}"
                 ) from exc
-
-        # Re-parse so the event emission below sees the new tasks.
-        try:
-            markdown = prd_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            reason = exc.strerror or exc.__class__.__name__
-            raise ToolError(f"Cannot re-read {prd_display}: {reason}") from exc
+            markdown = updated_source.markdown
+        else:
+            markdown = current_markdown
         result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
         llm_generated = True
         llm_provider = gen_result.provider_used

@@ -61,6 +61,7 @@ from anvil.cli._helpers import (
     StateRootError,
     _resolve_project_root,
     _resolve_state_dir,
+    ingest_prd_source_for_id,
     selected_prd_source_path,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
@@ -280,31 +281,27 @@ def _preflight_findings(
         )
         return findings
 
-    # Probe 1 — the PRD parses cleanly.
-    if not prd_path.exists():
-        findings.append(
-            _Finding(
-                "prd_parse",
-                _ERROR,
-                f"PRD source not found at {prd_path} — author it, then run "
-                "`anvil prd parse`.",
-                {"path": str(prd_path), "prd_id": prd_id},
-            )
-        )
-        return findings  # nothing further to probe without a file
-
+    # Probe 1 — ingest through the same bounded, handle-verified source
+    # contract as parse/plan before handing any text to the parser.
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        source = ingest_prd_source_for_id(state_dir, prd_id)
+    except PrdSourceIngestError as exc:
+        message = (
+            f"PRD source not found at {prd_path} — author it, then run "
+            "`anvil prd parse`."
+            if exc.code == "source_not_found"
+            else exc.message
+        )
         findings.append(
             _Finding(
                 "prd_parse",
                 _ERROR,
-                f"PRD source unreadable at {prd_path}: {exc}",
-                {"path": str(prd_path), "prd_id": prd_id},
+                message,
+                {"path": str(prd_path), "prd_id": prd_id, "code": exc.code},
             )
         )
         return findings
+    markdown = source.markdown
 
     from anvil.planning.template import parse_prd
 

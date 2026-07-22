@@ -820,14 +820,27 @@ class PRD(BaseModel):
     updated_at: datetime.datetime | None = Field(default=None, exclude=True)
 
     def __iter__(self):
-        """Iterate only the public projection shape, matching ``model_dump``.
+        """Preserve legacy mapping shape while redacting source provenance.
 
         Pydantic's default iterator exposes fields marked ``exclude=True`` to
-        ``dict(model)``.  Source provenance is deliberately available only via
-        the dedicated content contract, so generic mapping conversion must use
-        the same redacted boundary as generic model dumps.
+        ``dict(model)``. Existing identity/release fields historically relied
+        on that behavior, so filter only the newly sensitive provenance fields
+        rather than changing the established mapping contract wholesale.
         """
-        yield from self.model_dump().items()
+        sensitive_fields = {
+            "source_bytes",
+            "source_sha256",
+            "source_size_bytes",
+            "source_encoding",
+            "source_revision",
+            "provenance_state",
+            "content_available",
+        }
+        yield from (
+            (name, value)
+            for name, value in super().__iter__()
+            if name not in sensitive_fields
+        )
 
     def validated_copy(self, **updates: object) -> PRD:
         """Return an immutable PRD update with every invariant revalidated."""
