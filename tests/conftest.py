@@ -6,63 +6,25 @@ are hermetically isolated and leave no on-disk state after completion.
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
-from itertools import product
 from pathlib import Path
 
 import pytest
-from _pytest.mark.expression import Expression
 
 from anvil.clock import FrozenClock
 
 
-def _command_line_mark_expression(config: pytest.Config) -> str | None:
-    """Return only the explicit CLI ``-m`` expression, excluding addopts."""
-    args = [str(arg) for arg in config.invocation_params.args]
-    for index, arg in enumerate(args):
-        if arg == "-m" and index + 1 < len(args):
-            return args[index + 1]
-        if arg.startswith("-m="):
-            return arg.removeprefix("-m=")
-    return None
+def _explicitly_selects_live_github(config: pytest.Config) -> bool:
+    """Allow live tests only for the documented exact marker opt-in.
 
-
-def _positively_selects_live_github(expression: str | None) -> bool:
-    """Whether an explicit marker expression opts into ``live_github``.
-
-    Pytest replaces, rather than composes, the configured ``-m`` expression
-    when the CLI supplies another one. We therefore keep live tests excluded
-    unless the command-line expression semantically selects them positively.
+    ``Config.getoption('markexpr')`` is pytest's public effective marker
+    expression and follows pytest's own last-option-wins behavior.  Treating
+    only the exact documented ``-m live_github`` expression as authorization
+    avoids reimplementing pytest's expression parser and fails closed for
+    mixed, malformed, or future marker syntax.
     """
-    if expression is None:
-        return False
-    identifiers = {
-        token
-        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression)
-        if token not in {"and", "or", "not"}
-    }
-    if "live_github" not in identifiers:
-        return False
-    compiled = Expression.compile(expression)
-    others = sorted(identifiers - {"live_github"})
-    # Marker expressions are normally tiny; fail closed instead of allowing a
-    # user-supplied expression to trigger exponential collection work.
-    if len(others) > 8:
-        return False
-    for combination in product((False, True), repeat=len(others)):
-        values = dict(zip(others, combination, strict=True))
-
-        def evaluate(live_github: bool) -> bool:
-            return compiled.evaluate(
-                lambda identifier: live_github
-                if identifier == "live_github"
-                else values[identifier]
-            )
-
-        if evaluate(True):
-            return True
-    return False
+    expression = config.getoption("markexpr", default="")
+    return isinstance(expression, str) and expression.strip() == "live_github"
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -70,8 +32,7 @@ def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
     """Keep credentialed live tests opt-in under replacement CLI selectors."""
-    expression = _command_line_mark_expression(config)
-    if _positively_selects_live_github(expression):
+    if _explicitly_selects_live_github(config):
         return
     live_items = [item for item in items if item.get_closest_marker("live_github")]
     if not live_items:
