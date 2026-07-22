@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import pickle
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -205,9 +206,13 @@ def test_projection_provenance_is_immutable_and_updates_revalidate() -> None:
 
     with pytest.raises(TypeError, match="use validated_copy"):
         prd.model_copy(update={"source_revision": 5})
+    with pytest.raises(TypeError, match="use validated_copy"):
+        prd.copy(update={"source_revision": 5})
 
     with pytest.raises(TypeError, match="frozen list"):
         prd.goals.append("mutation")
+    with pytest.raises(TypeError):
+        list.append(prd.goals, "descriptor bypass")
 
 
 def test_projection_validated_copy_does_not_share_nested_assumptions() -> None:
@@ -226,9 +231,19 @@ def test_projection_validated_copy_does_not_share_nested_assumptions() -> None:
     assert copied.assumptions[0] is not prd.assumptions[0]
     with pytest.raises(TypeError, match="frozen list"):
         copied.assumptions[0].requirement_ids.append("R002")
+    with pytest.raises(TypeError):
+        list.append(copied.assumptions[0].requirement_ids, "R002")
+    with pytest.raises(TypeError, match="revalidate instead"):
+        copied.assumptions[0].model_copy(update={"id": "BAD"})
+    with pytest.raises(TypeError, match="revalidate instead"):
+        copied.assumptions[0].copy(update={"id": "BAD"})
     with pytest.raises(ValidationError):
         copied.assumptions[0].statement = "changed"
     assert prd.assumptions[0].requirement_ids == ["R001"]
+
+    restored = pickle.loads(pickle.dumps(copied))
+    assert restored == copied
+    assert restored.model_dump()["assumptions"][0]["requirement_ids"] == ["R001"]
 
 
 def test_projection_normalizes_hostile_bytes_subclass_before_validation() -> None:

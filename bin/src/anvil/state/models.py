@@ -41,6 +41,7 @@ from pydantic import (
     StrictBytes,
     StrictInt,
     StrictStr,
+    field_serializer,
     field_validator,
     model_serializer,
     model_validator,
@@ -642,14 +643,18 @@ MAX_PRD_ASSUMPTION_RATIONALE_LENGTH = 1_000
 MAX_PRD_ASSUMPTION_REQUIREMENTS = 100
 
 
-class _FrozenList(list[Any]):
-    """List-compatible immutable sequence for frozen public value objects."""
+class _FrozenList(tuple[Any, ...]):
+    """Tuple-backed sequence with list-compatible equality and wire shape."""
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenList:
-        """Copy through a mutable intermediary without invoking blocked mutators."""
-        copied = _FrozenList(copy.deepcopy(list(self), memo))
-        memo[id(self)] = copied
-        return copied
+    def __new__(cls, values: Iterable[Any] = ()) -> Self:
+        return super().__new__(cls, values)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, list):
+            return tuple.__eq__(self, tuple(other))
+        return tuple.__eq__(self, other)
+
+    __hash__ = tuple.__hash__
 
     def __iadd__(self, value: Iterable[Any]) -> Self:  # type: ignore[misc]
         raise TypeError("frozen list cannot be mutated")
@@ -661,8 +666,6 @@ class _FrozenList(list[Any]):
     def _immutable(*_args: object, **_kwargs: object) -> None:
         raise TypeError("frozen list cannot be mutated")
 
-    __setitem__ = _immutable
-    __delitem__ = _immutable
     append = _immutable
     clear = _immutable
     extend = _immutable
@@ -682,7 +685,11 @@ class PRDAssumption(BaseModel):
     scopes it to the requirements it affects.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        revalidate_instances="always",
+    )
 
     id: str = Field(max_length=MAX_PRD_ASSUMPTION_ID_LENGTH)
     statement: str = Field(max_length=MAX_PRD_ASSUMPTION_STATEMENT_LENGTH)
@@ -714,6 +721,34 @@ class PRDAssumption(BaseModel):
     def _freeze_requirement_ids(self) -> PRDAssumption:
         object.__setattr__(self, "requirement_ids", _FrozenList(self.requirement_ids))
         return self
+
+    @field_serializer("requirement_ids")
+    def _serialize_requirement_ids(self, value: list[RequirementID]) -> list[str]:
+        return list(value)
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        if update:
+            raise TypeError(
+                "PRDAssumption.model_copy(update=...) is disabled; revalidate instead"
+            )
+        return super().model_copy(deep=deep)
+
+    def copy(
+        self,
+        *,
+        include: Any = None,
+        exclude: Any = None,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        if update:
+            raise TypeError("PRDAssumption.copy(update=...) is disabled; revalidate instead")
+        return super().copy(include=include, exclude=exclude, deep=deep)
 
 
 class PRD(BaseModel):
@@ -809,6 +844,18 @@ class PRD(BaseModel):
             raise TypeError("PRD.model_copy(update=...) is disabled; use validated_copy")
         return super().model_copy(deep=deep)
 
+    def copy(
+        self,
+        *,
+        include: Any = None,
+        exclude: Any = None,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        if update:
+            raise TypeError("PRD.copy(update=...) is disabled; use validated_copy")
+        return super().copy(include=include, exclude=exclude, deep=deep)
+
     @model_validator(mode="after")
     def _freeze_nested_state(self) -> PRD:
         for field_name in (
@@ -822,6 +869,18 @@ class PRD(BaseModel):
         ):
             object.__setattr__(self, field_name, _FrozenList(getattr(self, field_name)))
         return self
+
+    @field_serializer(
+        "goals",
+        "non_goals",
+        "requirements",
+        "acceptance_criteria",
+        "risks",
+        "open_questions",
+        "assumptions",
+    )
+    def _serialize_frozen_lists(self, value: list[Any]) -> list[Any]:
+        return list(value)
 
     @model_validator(mode="after")
     def _validate_source_provenance(self) -> PRD:
@@ -848,16 +907,17 @@ class PRD(BaseModel):
             )
         if self.source_bytes is None:
             raise ValueError("available provenance requires exact source bytes")
-        # Normalize subclasses through the buffer protocol before using len or
-        # decode so overridden Python methods cannot bypass bounds or leak data.
-        source_bytes = memoryview(self.source_bytes).tobytes()
+        # Inspect the raw buffer before copying it so hostile subclasses cannot
+        # bypass the ceiling and oversized inputs do not amplify memory use.
+        source_view = memoryview(self.source_bytes)
+        if source_view.nbytes > 2_097_152:
+            raise ValueError("available source exceeds the Version 1 byte ceiling")
+        source_bytes = source_view.tobytes()
         object.__setattr__(self, "source_bytes", source_bytes)
         try:
             source_bytes.decode("utf-8", errors="strict")
         except UnicodeDecodeError:
             raise ValueError("available source must be valid UTF-8") from None
-        if len(self.source_bytes) > 2_097_152:
-            raise ValueError("available source exceeds the Version 1 byte ceiling")
         if self.source_size_bytes != len(source_bytes):
             raise ValueError("source byte size does not match exact source bytes")
         if self.source_sha256 != hashlib.sha256(source_bytes).hexdigest():
