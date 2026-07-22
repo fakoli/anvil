@@ -19,9 +19,18 @@ Constraining them here would duplicate that validation.
 from __future__ import annotations
 
 import datetime
+import hashlib
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from anvil.state.models import (
     DEFAULT_PRD_ID,
@@ -57,7 +66,67 @@ class StateInitializedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class PrdParsedPayload(BaseModel):
+_MAX_PRD_SOURCE_BYTES_V1 = 2_097_152
+_PRD_PAYLOAD_CONFIG = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+
+class _PrdSourcePayload(BaseModel):
+    """Backward-compatible exact-source binding shared by PRD content events."""
+
+    model_config = _PRD_PAYLOAD_CONFIG
+
+    source_text: str | None = None
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    source_size_bytes: StrictInt | None = Field(
+        default=None,
+        ge=0,
+        le=_MAX_PRD_SOURCE_BYTES_V1,
+    )
+    source_encoding: Literal["utf-8"] | None = None
+    source_revision: StrictInt | None = Field(default=None, ge=1)
+    provenance_state: Literal["available", "legacy_unbound"] = "legacy_unbound"
+    content_available: StrictBool = False
+
+    @model_validator(mode="after")
+    def _validate_source_binding(self) -> _PrdSourcePayload:
+        source_fields = (
+            self.source_text,
+            self.source_sha256,
+            self.source_size_bytes,
+            self.source_encoding,
+            self.source_revision,
+        )
+        if self.provenance_state == "legacy_unbound":
+            if self.content_available or any(value is not None for value in source_fields):
+                raise ValueError(
+                    "legacy-unbound provenance cannot fabricate source metadata"
+                )
+            return self
+
+        if not self.content_available or any(
+            value is None for value in source_fields
+        ):
+            raise ValueError(
+                "available provenance requires exact source, digest, size, "
+                "encoding, revision, and content availability"
+            )
+
+        if self.source_text is None:
+            raise ValueError("available provenance requires exact source text")
+        try:
+            source_bytes = self.source_text.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            raise ValueError("available source must be valid UTF-8") from None
+        if len(source_bytes) > _MAX_PRD_SOURCE_BYTES_V1:
+            raise ValueError("available source exceeds the Version 1 byte ceiling")
+        if self.source_size_bytes != len(source_bytes):
+            raise ValueError("source byte size does not match exact source bytes")
+        if self.source_sha256 != hashlib.sha256(source_bytes).hexdigest():
+            raise ValueError("source digest does not match exact source bytes")
+        return self
+
+
+class PrdParsedPayload(_PrdSourcePayload):
     """Payload for 'prd.parsed'.
 
     ``prd_id`` defaults to ``DEFAULT_PRD_ID`` ('default') so a PRE-v7
@@ -67,7 +136,7 @@ class PrdParsedPayload(BaseModel):
     default so old payloads validate unchanged.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = _PRD_PAYLOAD_CONFIG
 
     project_id: str
     prd_id: str = DEFAULT_PRD_ID
@@ -90,8 +159,14 @@ class PrdParsedPayload(BaseModel):
         max_length=MAX_PRD_ASSUMPTIONS,
     )
 
+    @model_validator(mode="after")
+    def _validate_source_revision_binding(self) -> PrdParsedPayload:
+        if self.provenance_state == "available" and self.source_revision != 1:
+            raise ValueError("prd.parsed source provenance must bind revision 1")
+        return self
 
-class PrdRevisedPayload(BaseModel):
+
+class PrdRevisedPayload(_PrdSourcePayload):
     """Payload for 'prd.revised' (v0.3 multi-PRD, Phase 6).
 
     Emitted when an existing ``prd_id`` is re-parsed. Carries the new
@@ -115,7 +190,7 @@ class PrdRevisedPayload(BaseModel):
     :class:`PrdParsedPayload.requirements`).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = _PRD_PAYLOAD_CONFIG
 
     project_id: str
     prd_id: str = DEFAULT_PRD_ID
@@ -148,6 +223,17 @@ class PrdRevisedPayload(BaseModel):
     requirements_added: list[Any] = []
     requirements_superseded: list[Any] = []
     requirements_unchanged: list[Any] = []
+
+    @model_validator(mode="after")
+    def _validate_source_revision_binding(self) -> PrdRevisedPayload:
+        if (
+            self.provenance_state == "available"
+            and self.source_revision != self.revision
+        ):
+            raise ValueError(
+                "prd.revised source provenance must bind the event revision"
+            )
+        return self
 
 
 class PrdReviewedPayload(BaseModel):

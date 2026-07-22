@@ -9,6 +9,7 @@ from typing import Any, BinaryIO
 
 import pytest
 import typer
+from pydantic import ValidationError
 
 import anvil.cli._helpers as helpers_module
 import anvil.cli.prd as prd_module
@@ -24,6 +25,221 @@ from anvil.cli._helpers import (
     validate_prd_id,
 )
 from anvil.read_contracts import PrdScopedRefV1
+from anvil.state.models import PRD
+from anvil.state.payloads import PrdParsedPayload, PrdRevisedPayload
+
+
+def _available_source_fields(source_bytes: bytes, revision: int) -> dict[str, Any]:
+    return {
+        "source_text": source_bytes.decode("utf-8"),
+        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "source_size_bytes": len(source_bytes),
+        "source_encoding": "utf-8",
+        "source_revision": revision,
+        "provenance_state": "available",
+        "content_available": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("payload_type", "revision"),
+    [(PrdParsedPayload, 1), (PrdRevisedPayload, 3)],
+)
+def test_payload_available_provenance_binds_exact_bytes_and_revision(
+    payload_type: type[PrdParsedPayload | PrdRevisedPayload],
+    revision: int,
+) -> None:
+    source_bytes = "# Project: Crème\r\n\r\nNFD e\u0301 🚀\r\n".encode()
+    payload_data: dict[str, Any] = {
+        "project_id": "project",
+        **_available_source_fields(source_bytes, revision),
+    }
+    if payload_type is PrdRevisedPayload:
+        payload_data["revision"] = revision
+
+    payload = payload_type.model_validate(payload_data)
+
+    assert payload.source_text is not None
+    assert payload.source_text.encode("utf-8") == source_bytes
+    assert payload.source_sha256 == hashlib.sha256(source_bytes).hexdigest()
+    assert payload.source_size_bytes == len(source_bytes)
+    assert payload.source_encoding == "utf-8"
+    assert payload.source_revision == revision
+    assert payload.provenance_state == "available"
+    assert payload.content_available is True
+
+
+@pytest.mark.parametrize("payload_type", [PrdParsedPayload, PrdRevisedPayload])
+def test_legacy_payload_model_is_explicitly_unavailable_without_shape_drift(
+    payload_type: type[PrdParsedPayload | PrdRevisedPayload],
+) -> None:
+    payload_data: dict[str, Any] = {"project_id": "legacy"}
+    if payload_type is PrdRevisedPayload:
+        payload_data["revision"] = 2
+
+    payload = payload_type.model_validate(payload_data)
+
+    assert payload.provenance_state == "legacy_unbound"
+    assert payload.content_available is False
+    assert payload.source_text is None
+    assert payload.source_sha256 is None
+    assert payload.source_size_bytes is None
+    assert payload.source_encoding is None
+    assert payload.source_revision is None
+    assert not {
+        "source_text",
+        "source_sha256",
+        "source_size_bytes",
+        "source_encoding",
+        "source_revision",
+        "provenance_state",
+        "content_available",
+    }.intersection(payload.model_dump(exclude_unset=True))
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"source_sha256": None},
+        {"source_sha256": "0" * 64},
+        {"source_size_bytes": 1},
+        {"source_encoding": "utf-16"},
+        {"source_revision": 2},
+        {"content_available": False},
+        {"content_available": 1},
+    ],
+)
+def test_payload_invalid_available_provenance_fails_without_source_echo(
+    override: dict[str, Any],
+) -> None:
+    source_bytes = b"PRIVATE-PROVENANCE-SENTINEL\r\n"
+    payload_data = {
+        "project_id": "project",
+        **_available_source_fields(source_bytes, 1),
+        **override,
+    }
+
+    with pytest.raises(ValidationError) as refusal:
+        PrdParsedPayload.model_validate(payload_data)
+
+    assert "PRIVATE-PROVENANCE-SENTINEL" not in str(refusal.value)
+
+
+def test_payload_legacy_provenance_cannot_fabricate_metadata() -> None:
+    with pytest.raises(ValidationError, match="cannot fabricate"):
+        PrdParsedPayload(
+            project_id="legacy",
+            provenance_state="legacy_unbound",
+            content_available=False,
+            source_sha256="0" * 64,
+        )
+
+
+def test_payload_invalid_unicode_source_fails_without_source_echo() -> None:
+    payload_data = {
+        "project_id": "project",
+        "source_text": "PRIVATE-SURROGATE-\ud800",
+        "source_sha256": "0" * 64,
+        "source_size_bytes": 1,
+        "source_encoding": "utf-8",
+        "source_revision": 1,
+        "provenance_state": "available",
+        "content_available": True,
+    }
+
+    with pytest.raises(ValidationError) as refusal:
+        PrdParsedPayload.model_validate(payload_data)
+
+    assert "PRIVATE-SURROGATE" not in str(refusal.value)
+
+
+def test_projection_model_hides_raw_source_from_generic_dumps() -> None:
+    source_bytes = b"# Project: Projection\r\n"
+    prd = PRD(
+        revision=4,
+        source_bytes=source_bytes,
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        source_size_bytes=len(source_bytes),
+        source_encoding="utf-8",
+        source_revision=4,
+        provenance_state="available",
+        content_available=True,
+    )
+
+    generic = prd.model_dump(mode="json")
+    python_dump = prd.model_dump()
+    assert prd.source_bytes == source_bytes
+    assert prd.source_revision == prd.revision
+    assert not any(key.startswith("source_") for key in generic)
+    assert "provenance_state" not in generic
+    assert "content_available" not in generic
+    assert not any(key.startswith("source_") for key in python_dump)
+    assert "provenance_state" not in python_dump
+    assert "content_available" not in python_dump
+    assert repr(source_bytes) not in repr(prd)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"source_sha256": None},
+        {"source_sha256": "0" * 64},
+        {"source_size_bytes": 1},
+        {"source_encoding": None},
+        {"source_revision": 5},
+        {"content_available": False},
+        {"content_available": 1},
+    ],
+)
+def test_projection_model_rejects_inconsistent_available_provenance(
+    override: dict[str, Any],
+) -> None:
+    source_bytes = b"PRIVATE-PROJECTION-SENTINEL\r\n"
+    fields: dict[str, Any] = {
+        "revision": 4,
+        "source_bytes": source_bytes,
+        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "source_size_bytes": len(source_bytes),
+        "source_encoding": "utf-8",
+        "source_revision": 4,
+        "provenance_state": "available",
+        "content_available": True,
+        **override,
+    }
+
+    with pytest.raises(ValidationError) as refusal:
+        PRD.model_validate(fields)
+
+    assert "PRIVATE-PROJECTION-SENTINEL" not in str(refusal.value)
+
+
+def test_projection_model_rejects_non_utf8_source_without_echo() -> None:
+    source_bytes = b"PRIVATE-PROJECTION-SENTINEL-\xff"
+
+    with pytest.raises(ValidationError) as refusal:
+        PRD(
+            revision=4,
+            source_bytes=source_bytes,
+            source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+            source_size_bytes=len(source_bytes),
+            source_encoding="utf-8",
+            source_revision=4,
+            provenance_state="available",
+            content_available=True,
+        )
+
+    assert "PRIVATE-PROJECTION-SENTINEL" not in str(refusal.value)
+
+
+def test_projection_model_defaults_legacy_provenance_to_unavailable() -> None:
+    prd = PRD()
+    assert prd.provenance_state == "legacy_unbound"
+    assert prd.content_available is False
+    assert prd.source_bytes is None
+    assert prd.source_sha256 is None
+    assert prd.source_size_bytes is None
+    assert prd.source_encoding is None
+    assert prd.source_revision is None
 
 
 @pytest.mark.parametrize(

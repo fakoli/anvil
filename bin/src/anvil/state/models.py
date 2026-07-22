@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import enum
+import hashlib
 import json
 import re
 from typing import (  # noqa: UP035 — TypeAlias required for 3.11 compat
@@ -31,6 +32,8 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
+    StrictInt,
     field_validator,
     model_serializer,
     model_validator,
@@ -673,7 +676,12 @@ class PRDAssumption(BaseModel):
 class PRD(BaseModel):
     """Product Requirements Document — the gate that controls task claimability."""
 
-    model_config = _MODEL_CONFIG
+    model_config = ConfigDict(
+        frozen=False,
+        validate_assignment=True,
+        extra="forbid",
+        hide_input_in_errors=True,
+    )
 
     # Identity / release fields (v0.3 multi-PRD, Phase 0). All default so reading
     # a v6 prds row that predates these columns still constructs. ``exclude=True``
@@ -694,6 +702,24 @@ class PRD(BaseModel):
     # Phase 0 additive — omitted from ``model_dump()`` so existing event
     # payloads / snapshot blobs stay byte-identical until Phase 6 wires it in.
     revision: int = Field(default=1, ge=1, exclude=True)
+    # Exact source provenance is projection state, not part of generic PRD
+    # serialization. Dedicated content/read contracts access these attributes
+    # explicitly; ``model_dump()`` must never leak raw source bytes.
+    source_bytes: bytes | None = Field(default=None, exclude=True, repr=False)
+    source_sha256: str | None = Field(default=None, exclude=True)
+    source_size_bytes: StrictInt | None = Field(
+        default=None,
+        ge=0,
+        le=2_097_152,
+        exclude=True,
+    )
+    source_encoding: Literal["utf-8"] | None = Field(default=None, exclude=True)
+    source_revision: StrictInt | None = Field(default=None, ge=1, exclude=True)
+    provenance_state: Literal["available", "legacy_unbound"] = Field(
+        default="legacy_unbound",
+        exclude=True,
+    )
+    content_available: StrictBool = Field(default=False, exclude=True)
     status: PRDStatus = PRDStatus.draft
     summary: str = ""
     goals: list[str] = Field(default_factory=list)
@@ -710,6 +736,45 @@ class PRD(BaseModel):
     last_reviewed_by: str | None = None
     created_at: datetime.datetime | None = Field(default=None, exclude=True)
     updated_at: datetime.datetime | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _validate_source_provenance(self) -> PRD:
+        source_fields = (
+            self.source_bytes,
+            self.source_sha256,
+            self.source_size_bytes,
+            self.source_encoding,
+            self.source_revision,
+        )
+        if self.provenance_state == "legacy_unbound":
+            if self.content_available or any(value is not None for value in source_fields):
+                raise ValueError(
+                    "legacy-unbound provenance cannot fabricate source metadata"
+                )
+            return self
+
+        if not self.content_available or any(
+            value is None for value in source_fields
+        ):
+            raise ValueError(
+                "available provenance requires exact source bytes, digest, size, "
+                "encoding, revision, and content availability"
+            )
+        if self.source_bytes is None:
+            raise ValueError("available provenance requires exact source bytes")
+        try:
+            self.source_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise ValueError("available source must be valid UTF-8") from None
+        if len(self.source_bytes) > 2_097_152:
+            raise ValueError("available source exceeds the Version 1 byte ceiling")
+        if self.source_size_bytes != len(self.source_bytes):
+            raise ValueError("source byte size does not match exact source bytes")
+        if self.source_sha256 != hashlib.sha256(self.source_bytes).hexdigest():
+            raise ValueError("source digest does not match exact source bytes")
+        if self.source_revision != self.revision:
+            raise ValueError("source provenance must bind the projected PRD revision")
+        return self
 
     @field_validator("last_reviewed_at", mode="after")
     @classmethod
