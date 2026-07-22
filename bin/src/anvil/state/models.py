@@ -655,7 +655,9 @@ class _FrozenList(tuple[Any, ...]):
         return tuple.__eq__(self, other)
 
     def __ne__(self, other: object) -> bool:
-        return not self.__eq__(other)
+        if isinstance(other, list):
+            return tuple.__ne__(self, tuple(other))
+        return tuple.__ne__(self, other)
 
     __hash__ = tuple.__hash__
 

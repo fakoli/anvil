@@ -243,6 +243,8 @@ def test_projection_validated_copy_does_not_share_nested_assumptions() -> None:
         copied.assumptions[0].statement = "changed"
     assert prd.assumptions[0].requirement_ids == ["R001"]
     assert not (prd.assumptions[0].requirement_ids != ["R001"])
+    assert prd.assumptions[0].requirement_ids != ["R002"]
+    assert prd.assumptions[0].requirement_ids != object()
     with pytest.raises(TypeError, match="revalidate instead"):
         copied.assumptions[0].copy(exclude={"id"})
 
