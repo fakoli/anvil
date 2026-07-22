@@ -208,6 +208,8 @@ def test_projection_provenance_is_immutable_and_updates_revalidate() -> None:
         prd.model_copy(update={"source_revision": 5})
     with pytest.raises(TypeError, match="use validated_copy"):
         prd.copy(update={"source_revision": 5})
+    with pytest.raises(TypeError, match="use validated_copy"):
+        prd.copy(exclude={"source_sha256"})
 
     with pytest.raises(TypeError, match="frozen list"):
         prd.goals.append("mutation")
@@ -240,6 +242,9 @@ def test_projection_validated_copy_does_not_share_nested_assumptions() -> None:
     with pytest.raises(ValidationError):
         copied.assumptions[0].statement = "changed"
     assert prd.assumptions[0].requirement_ids == ["R001"]
+    assert not (prd.assumptions[0].requirement_ids != ["R001"])
+    with pytest.raises(TypeError, match="revalidate instead"):
+        copied.assumptions[0].copy(exclude={"id"})
 
     restored = pickle.loads(pickle.dumps(copied))
     assert restored == copied

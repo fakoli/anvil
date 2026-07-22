@@ -654,6 +654,9 @@ class _FrozenList(tuple[Any, ...]):
             return tuple.__eq__(self, tuple(other))
         return tuple.__eq__(self, other)
 
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
+
     __hash__ = tuple.__hash__
 
     def __iadd__(self, value: Iterable[Any]) -> Self:  # type: ignore[misc]
@@ -746,9 +749,9 @@ class PRDAssumption(BaseModel):
         update: dict[str, Any] | None = None,
         deep: bool = False,
     ) -> Self:
-        if update:
-            raise TypeError("PRDAssumption.copy(update=...) is disabled; revalidate instead")
-        return super().copy(include=include, exclude=exclude, deep=deep)
+        if include is not None or exclude is not None or update:
+            raise TypeError("PRDAssumption.copy filters/updates are disabled; revalidate instead")
+        return super().copy(deep=deep)
 
 
 class PRD(BaseModel):
@@ -852,9 +855,9 @@ class PRD(BaseModel):
         update: dict[str, Any] | None = None,
         deep: bool = False,
     ) -> Self:
-        if update:
-            raise TypeError("PRD.copy(update=...) is disabled; use validated_copy")
-        return super().copy(include=include, exclude=exclude, deep=deep)
+        if include is not None or exclude is not None or update:
+            raise TypeError("PRD.copy filters/updates are disabled; use validated_copy")
+        return super().copy(deep=deep)
 
     @model_validator(mode="after")
     def _freeze_nested_state(self) -> PRD:
