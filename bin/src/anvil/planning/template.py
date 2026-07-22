@@ -370,17 +370,27 @@ def _split_sections(lines: list[str]) -> dict[str, tuple[int, list[str]]]:
     current_start: int = 0
     current_body: list[str] = []
 
+    def _store(name: str, start: int, body: list[str]) -> None:
+        # First # heading wins: the splitter is fence-blind, so a later
+        # top-level line (a trailing `# Appendix` H1, or a `# comment` inside
+        # a fenced code block) must not replace the PRD's title block — it
+        # would hijack the extracted title or, for a fenced `# Project:`
+        # line, turn a valid PRD into a parse error.
+        if name == "__project__" and name in sections:
+            return
+        sections[name] = (start, body)
+
     for lineno, raw in enumerate(lines, start=1):
         if raw.startswith("# ") and not raw.startswith("## "):
             # Top-level heading — project title.
             if current_name is not None:
-                sections[current_name] = (current_start, current_body)
+                _store(current_name, current_start, current_body)
             current_name = "__project__"
             current_start = lineno
             current_body = [raw]
         elif raw.startswith("## "):
             if current_name is not None:
-                sections[current_name] = (current_start, current_body)
+                _store(current_name, current_start, current_body)
             heading = raw[3:].strip()
             current_name = heading.strip().lower().replace(" ", "_")
             current_start = lineno
@@ -390,7 +400,7 @@ def _split_sections(lines: list[str]) -> dict[str, tuple[int, list[str]]]:
                 current_body.append(raw)
 
     if current_name is not None:
-        sections[current_name] = (current_start, current_body)
+        _store(current_name, current_start, current_body)
 
     return sections
 
@@ -1793,9 +1803,9 @@ def parse_prd(
     # --- Required: # Project heading ------------------------------------
     # The heading names the PRD: ``# Project: <Name>`` (the template form) or a
     # bare ``# <Name>``. The extracted name becomes ``PRD.title`` — the
-    # canonical human-readable label that ``prd list``/``prd show`` and API
-    # consumers surface. A heading that yields an empty name is a parse error,
-    # so a persisted PRD always carries a non-empty title.
+    # canonical human-readable label that ``prd list`` and API consumers
+    # surface. A heading that yields an empty name is a parse error, so a
+    # parse-persisted PRD always carries a non-empty title.
     title = ""
     proj_block = sections.get("__project__")
     if proj_block is None:

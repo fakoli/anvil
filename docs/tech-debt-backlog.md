@@ -753,6 +753,55 @@ advisory and harmless.
 
 ---
 
+## PT — PRD-title findings deferred from PR #188 adversarial review (issue #177)
+
+### PT-1 · MCP read surfaces expose no PRD title
+
+**From**: PR #188 adversarial review (cross-surface lens). **Status**: OPEN.
+
+`PrdStatusEntry` (mcp_server.py — the per-PRD rollup in `get_project_status` /
+`get_project_summary`) and `ParsePrdResponse` carry no `title`, and there is no
+`list_prds` MCP tool — so an MCP-only agent choosing among PRDs sees opaque ids
+while CLI users see titles. **Fix**: additive `title` field on `PrdStatusEntry`
+(populated from `list_prds()`) and on `ParsePrdResponse`; underlying
+`compute_prd_rollup` (state/rollup.py) needs the same field, which also gives
+CLI `anvil status` per-PRD lines the title.
+
+### PT-2 · Pre-fix rows keep `title=""` and will fail the #178 read contract
+
+**From**: PR #188 adversarial review (cross-surface lens). **Status**: OPEN.
+
+Workspaces parsed before the #177 fix (and any seeded before PT-3's sibling fix
+landed) keep empty PRD titles until re-parsed; nothing signals this. The #178
+provider contract pins `PrdRecordV1.title` to `min_length=1`
+(read_contracts.py), so the future snapshot builder will fail closed on legacy
+rows. **Fix**: when the snapshot builder lands, either coalesce empty titles to
+the PRD id (documented), or add a doctor hint ("empty PRD title — re-run
+`anvil prd parse`"). Decide before the builder ships.
+
+### PT-3 · Default PRD `target_version`/`target_tag` never persist
+
+**From**: PR #188 adversarial review (replay lens). **Status**: OPEN.
+
+The default-PRD `prd.parsed` branch still omits `target_version`/`target_tag`
+(cli/prd.py + mcp_server.py), and the revised path pins the stored values — so
+a default PRD whose source declares a `**Release:**` marker never persists it.
+The omission was justified by the pre-multi-PRD byte-identity rule that the
+title stamping (deliberately) abandoned; the surviving half is residue, not
+policy. **Fix**: stamp `target_*` from the parse for the default branch too
+(same version-safety argument as title: `assumptions` is already stamped
+unconditionally since v16).
+
+### PT-4 · Replay golden fixture never exercises a title-stamped payload
+
+**From**: PR #188 adversarial review (replay lens). **Status**: OPEN.
+
+`tests/fixtures/replay/sample-project/events.jsonl` contains only an old-style
+title-less `prd.parsed`, and `regenerate.py` still generates payloads without
+`title` — the committed golden proves nothing about the new payload shape.
+**Fix**: on the next deliberate golden regeneration, include a titled
+`prd.parsed` plus a `prd.revised` carrying a title change.
+
 ## Closed in PR #41 fixup commits (for reference)
 
 - DONE · Greptile #1: `_is_pr_related` bare "pr" substring

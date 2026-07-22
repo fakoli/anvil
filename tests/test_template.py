@@ -208,6 +208,35 @@ class TestProjectTitleExtraction:
         assert result.prd.title == ""
         assert any("# Project" in e.section for e in result.errors)
 
+    def test_first_heading_wins_over_fenced_code_comment(self) -> None:
+        """A `# comment` line inside a fenced code block (the splitter is
+        fence-blind) must not hijack the title."""
+        prd = _MINIMAL_PRD + (
+            "\n## Risks\n\n"
+            "```bash\n# install deps\nuv sync\n```\n"
+        )
+        result = parse_prd(prd)
+        assert result.errors == []
+        assert result.prd.title == "Minimal Project"
+
+    def test_first_heading_wins_over_trailing_h1(self) -> None:
+        """A trailing `# Appendix` H1 must not replace the title."""
+        prd = _MINIMAL_PRD + "\n# Appendix\n\nExtra notes.\n"
+        result = parse_prd(prd)
+        assert result.errors == []
+        assert result.prd.title == "Minimal Project"
+
+    def test_fenced_empty_project_heading_is_not_an_error(self) -> None:
+        """A literal `# Project:` line quoted inside a fence must not turn a
+        valid PRD into a parse error — the real first heading wins."""
+        prd = _MINIMAL_PRD + (
+            "\n## Open Questions\n\n"
+            "```markdown\n# Project:\n```\n"
+        )
+        result = parse_prd(prd)
+        assert result.errors == []
+        assert result.prd.title == "Minimal Project"
+
 
 # ---------------------------------------------------------------------------
 # Happy path — minimal valid PRD

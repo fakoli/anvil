@@ -2446,13 +2446,14 @@ def parse_prd(
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
                 # The parsed heading title (non-empty here — an empty/malformed
                 # heading is a parse error that aborts above). Stamped for
-                # default and named PRDs alike, mirroring cli/prd.py.
+                # default and named PRDs alike, mirroring cli/prd.py (see there
+                # for why adding it to the default payload is version-safe).
                 "title": result.prd.title,
             }
 
             # Named PRD: stamp the partition so the handler writes ONLY this PRD's
-            # rows. The default PRD omits these keys so the payload stays
-            # byte-identical to the pre-multi-PRD event. Gate on the RESOLVED
+            # rows. The default PRD omits prd_id / is_default / target_* so the
+            # payload defaults reproduce them. Gate on the RESOLVED
             # parse_prd_id so the reserved 'default'/'prd' sentinels take the
             # default (no-stamp) branch (see cli/prd.py for the invariant).
             if not is_default_prd:

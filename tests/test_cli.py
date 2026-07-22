@@ -303,6 +303,17 @@ class TestInitWithSample:
         assert "ready" in result.output
         assert "anvil next" in result.output
 
+    def test_init_with_sample_persists_prd_title(self, tmp_path: Path) -> None:
+        """Issue #177 — the seed pipeline's hand-built prd.parsed payload must
+        stamp the parsed heading title like `prd parse` does, so the seeded
+        default PRD does not list as untitled."""
+        assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
+        rj = self._run(["prd", "list", "--json"], tmp_path)
+        assert rj.exit_code == 0, rj.output
+        prds = json.loads(rj.output)["data"]["prds"]
+        assert prds[0]["id"] == "default"
+        assert prds[0]["title"] == "Markdown Link Checker"
+
     def test_init_with_sample_status_shows_ready_tasks(self, tmp_path: Path) -> None:
         """status reflects the seeded ready tasks (state actually persisted)."""
         assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0

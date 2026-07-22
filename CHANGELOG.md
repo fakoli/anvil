@@ -14,7 +14,10 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   `anvil prd list`/`--json` surface a non-empty title for default and named
   PRDs alike. Re-parsing after a heading rename updates the stored title, and
   a heading with an empty name is now a parse error (exit 1) instead of
-  silently persisting an untitled PRD.
+  silently persisting an untitled PRD. The seed pipeline
+  (`init --with-sample` / `init --from-repo` / `scan`) stamps the title too,
+  and title extraction is first-heading-wins so a trailing `#` line or a
+  `# comment` inside a fenced code block cannot hijack the title.
 - **Named-PRD dependency recovery and bounded diagnostics (#181).** Legacy
   dependency upserts that omitted `prd_id` now recover during forward catch-up
   and full replay without renumbering events. Dependency validation and

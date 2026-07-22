@@ -3544,6 +3544,52 @@ class TestParsePrd:
         finally:
             b.close()
 
+    def test_title_persisted_on_parse_and_follows_source_on_reparse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #177 — the MCP parse path stamps the parsed heading title on
+        prd.parsed, and a re-parse refreshes it from the source (mirrors the
+        CLI's TestPrdTitle so the hand-duplicated payload builders can't
+        silently drift apart)."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def run_parse() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        assert _run(run_parse())["errors"] == []
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+
+        def _stored_title() -> str:
+            b = SqliteBackend(
+                db_path=str(state_dir / "state.db"),
+                events_path=str(state_dir / "events.jsonl"),
+                clock=SystemClock(),
+            )
+            b.initialize()
+            try:
+                prd = b.get_prd()
+                assert prd is not None
+                return prd.title
+            finally:
+                b.close()
+
+        assert _stored_title() == "MCP Test Project"
+
+        # Rename the heading and re-parse: prd.revised must carry the NEW
+        # source title, not the stored one.
+        _write_prd_file(
+            state_dir,
+            _MINIMAL_PRD.replace(
+                "# Project: MCP Test Project", "# Project: Renamed MCP Project"
+            ),
+        )
+        assert _run(run_parse())["errors"] == []
+        assert _stored_title() == "Renamed MCP Project"
 
     def test_error_when_no_prd_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
