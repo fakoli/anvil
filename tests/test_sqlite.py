@@ -1540,6 +1540,38 @@ class TestHandlePrdParsed:
         finally:
             b.close()
 
+    def test_append_detaches_nested_any_payload_before_projection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            payload = _make_prd_parsed_payload()
+            draft = _make_event("prd.parsed", payload)
+            original_dump = PrdParsedPayload.model_dump
+
+            def mutate_caller_after_materialization(
+                model: PrdParsedPayload, *args: object, **kwargs: object
+            ) -> dict[str, Any]:
+                snapshot = original_dump(model, *args, **kwargs)
+                draft.payload_json["requirements"][0]["text"] = "AFTER"
+                return snapshot
+
+            monkeypatch.setattr(
+                PrdParsedPayload,
+                "model_dump",
+                mutate_caller_after_materialization,
+            )
+            b.append(draft)
+
+            assert b.list_requirements()[0].text == "First requirement."
+            recorded = _read_jsonl(str(tmp_path / "events.jsonl"))[-1]
+            assert recorded["payload_json"]["requirements"][0]["text"] == (
+                "First requirement."
+            )
+        finally:
+            b.close()
+
     def test_handle_prd_parsed_writes_jsonl_and_sqlite(self, tmp_path: Path) -> None:
         """prd.parsed event writes JSONL line AND PRD + requirements rows to SQLite."""
         b = _make_backend(tmp_path)

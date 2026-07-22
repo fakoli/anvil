@@ -630,6 +630,11 @@ class SqliteBackend:
                 canonical_payload = typed_payload.model_dump(
                     mode="json", exclude_unset=True, by_alias=True
                 )
+                # Re-validate the detached JSON tree and use that exact typed
+                # object for checks and projection. Some payload fields are
+                # intentionally ``Any`` for compatibility; the first Pydantic
+                # pass can retain references to caller-owned nested dicts.
+                typed_payload = spec.payload_model.model_validate(canonical_payload)
             except Exception as exc:
                 recovery_owner = self._task_created_recovery_owner(conn, draft)
                 if recovery_owner is not None:

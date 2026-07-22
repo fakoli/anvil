@@ -16,17 +16,20 @@ Design decisions:
 
 from __future__ import annotations
 
+import copy
 import datetime
 import enum
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from typing import (  # noqa: UP035 — TypeAlias required for 3.11 compat
     Annotated,
     Any,
     Literal,
     Mapping,
     Self,
+    SupportsIndex,
     TypeAlias,
 )
 
@@ -639,6 +642,37 @@ MAX_PRD_ASSUMPTION_RATIONALE_LENGTH = 1_000
 MAX_PRD_ASSUMPTION_REQUIREMENTS = 100
 
 
+class _FrozenList(list[Any]):
+    """List-compatible immutable sequence for frozen public value objects."""
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenList:
+        """Copy through a mutable intermediary without invoking blocked mutators."""
+        copied = _FrozenList(copy.deepcopy(list(self), memo))
+        memo[id(self)] = copied
+        return copied
+
+    def __iadd__(self, value: Iterable[Any]) -> Self:  # type: ignore[misc]
+        raise TypeError("frozen list cannot be mutated")
+
+    def __imul__(self, value: SupportsIndex) -> Self:
+        raise TypeError("frozen list cannot be mutated")
+
+    @staticmethod
+    def _immutable(*_args: object, **_kwargs: object) -> None:
+        raise TypeError("frozen list cannot be mutated")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    append = _immutable
+    clear = _immutable
+    extend = _immutable
+    insert = _immutable
+    pop = _immutable
+    remove = _immutable
+    reverse = _immutable
+    sort = _immutable
+
+
 class PRDAssumption(BaseModel):
     """A bounded, reviewable premise used while planning a PRD.
 
@@ -648,7 +682,7 @@ class PRDAssumption(BaseModel):
     scopes it to the requirements it affects.
     """
 
-    model_config = _MODEL_CONFIG
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     id: str = Field(max_length=MAX_PRD_ASSUMPTION_ID_LENGTH)
     statement: str = Field(max_length=MAX_PRD_ASSUMPTION_STATEMENT_LENGTH)
@@ -675,6 +709,11 @@ class PRDAssumption(BaseModel):
         if not normalized:
             raise ValueError("PRD assumption statement and rationale must not be blank")
         return normalized
+
+    @model_validator(mode="after")
+    def _freeze_requirement_ids(self) -> PRDAssumption:
+        object.__setattr__(self, "requirement_ids", _FrozenList(self.requirement_ids))
+        return self
 
 
 class PRD(BaseModel):
@@ -753,7 +792,7 @@ class PRD(BaseModel):
     def validated_copy(self, **updates: object) -> PRD:
         """Return an immutable PRD update with every invariant revalidated."""
         values = {
-            name: getattr(self, name)
+            name: copy.deepcopy(getattr(self, name))
             for name in type(self).model_fields
         }
         values.update(updates)
@@ -769,6 +808,20 @@ class PRD(BaseModel):
         if update:
             raise TypeError("PRD.model_copy(update=...) is disabled; use validated_copy")
         return super().model_copy(deep=deep)
+
+    @model_validator(mode="after")
+    def _freeze_nested_state(self) -> PRD:
+        for field_name in (
+            "goals",
+            "non_goals",
+            "requirements",
+            "acceptance_criteria",
+            "risks",
+            "open_questions",
+            "assumptions",
+        ):
+            object.__setattr__(self, field_name, _FrozenList(getattr(self, field_name)))
+        return self
 
     @model_validator(mode="after")
     def _validate_source_provenance(self) -> PRD:
@@ -795,15 +848,19 @@ class PRD(BaseModel):
             )
         if self.source_bytes is None:
             raise ValueError("available provenance requires exact source bytes")
+        # Normalize subclasses through the buffer protocol before using len or
+        # decode so overridden Python methods cannot bypass bounds or leak data.
+        source_bytes = memoryview(self.source_bytes).tobytes()
+        object.__setattr__(self, "source_bytes", source_bytes)
         try:
-            self.source_bytes.decode("utf-8", errors="strict")
+            source_bytes.decode("utf-8", errors="strict")
         except UnicodeDecodeError:
             raise ValueError("available source must be valid UTF-8") from None
         if len(self.source_bytes) > 2_097_152:
             raise ValueError("available source exceeds the Version 1 byte ceiling")
-        if self.source_size_bytes != len(self.source_bytes):
+        if self.source_size_bytes != len(source_bytes):
             raise ValueError("source byte size does not match exact source bytes")
-        if self.source_sha256 != hashlib.sha256(self.source_bytes).hexdigest():
+        if self.source_sha256 != hashlib.sha256(source_bytes).hexdigest():
             raise ValueError("source digest does not match exact source bytes")
         if self.source_revision != self.revision:
             raise ValueError("source provenance must bind the projected PRD revision")

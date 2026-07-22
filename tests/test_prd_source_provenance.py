@@ -206,6 +206,52 @@ def test_projection_provenance_is_immutable_and_updates_revalidate() -> None:
     with pytest.raises(TypeError, match="use validated_copy"):
         prd.model_copy(update={"source_revision": 5})
 
+    with pytest.raises(TypeError, match="frozen list"):
+        prd.goals.append("mutation")
+
+
+def test_projection_validated_copy_does_not_share_nested_assumptions() -> None:
+    prd = PRD(
+        assumptions=[
+            {
+                "id": "A001",
+                "statement": "One premise.",
+                "rationale": "It is bounded.",
+                "requirement_ids": ["R001"],
+            }
+        ]
+    )
+    copied = prd.validated_copy(status="reviewed")
+
+    assert copied.assumptions[0] is not prd.assumptions[0]
+    with pytest.raises(TypeError, match="frozen list"):
+        copied.assumptions[0].requirement_ids.append("R002")
+    with pytest.raises(ValidationError):
+        copied.assumptions[0].statement = "changed"
+    assert prd.assumptions[0].requirement_ids == ["R001"]
+
+
+def test_projection_normalizes_hostile_bytes_subclass_before_validation() -> None:
+    class MisleadingBytes(bytes):
+        def __len__(self) -> int:
+            return 1
+
+        def decode(self, *_args: object, **_kwargs: object) -> str:
+            return "looks valid"
+
+    source = MisleadingBytes(b"x" * (2_097_152 + 1))
+    with pytest.raises(ValidationError):
+        PRD(
+            revision=1,
+            source_bytes=source,
+            source_sha256=hashlib.sha256(bytes(source)).hexdigest(),
+            source_size_bytes=1,
+            source_encoding="utf-8",
+            source_revision=1,
+            provenance_state="available",
+            content_available=True,
+        )
+
 
 @pytest.mark.parametrize(
     ("payload_field", "invalid_value"),
