@@ -132,6 +132,7 @@ nav:
       - Architecture: architecture.md
       - Design rationale: design.md
   - Development (contributors):
+      - Contributing: contributing.md
       - Sync providers (contributing): sync-providers.md
       - Backlog: backlog/anvil-backlog.md
       - Strategic backlog: backlog/strategic-backlog.md
