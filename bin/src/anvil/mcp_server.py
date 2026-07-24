@@ -2460,17 +2460,21 @@ def parse_prd(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
+                # The parsed heading title (non-empty here — an empty/malformed
+                # heading is a parse error that aborts above). Stamped for
+                # default and named PRDs alike, mirroring cli/prd.py (see there
+                # for why adding it to the default payload is version-safe).
+                "title": result.prd.title,
             }
 
             # Named PRD: stamp the partition so the handler writes ONLY this PRD's
-            # rows. The default PRD omits these keys so the payload stays
-            # byte-identical to the pre-multi-PRD event. Gate on the RESOLVED
+            # rows. The default PRD omits prd_id / is_default / target_* so the
+            # payload defaults reproduce them. Gate on the RESOLVED
             # parse_prd_id so the reserved 'default'/'prd' sentinels take the
             # default (no-stamp) branch (see cli/prd.py for the invariant).
             if not is_default_prd:
                 payload["prd_id"] = stored_prd_id
                 payload["is_default"] = False
-                payload["title"] = result.prd.title
                 payload["target_version"] = result.prd.target_version
                 payload["target_tag"] = result.prd.target_tag
 
@@ -2535,7 +2539,10 @@ def parse_prd(
                 "prd_id": stored_prd_id,
                 "revision": existing_prd.revision + 1,
                 "is_default": existing_prd.is_default,
-                "title": existing_prd.title,
+                # Title follows the SOURCE on every parse (non-empty here — a
+                # bad heading is a parse error that aborts above; mirrors the
+                # CLI), so a heading rename propagates on re-parse.
+                "title": result.prd.title,
                 "target_version": existing_prd.target_version,
                 "target_tag": existing_prd.target_tag,
                 # Carry the CURRENT stored status (mirrors the CLI): result.prd is a

@@ -370,17 +370,27 @@ def _split_sections(lines: list[str]) -> dict[str, tuple[int, list[str]]]:
     current_start: int = 0
     current_body: list[str] = []
 
+    def _store(name: str, start: int, body: list[str]) -> None:
+        # First # heading wins: the splitter is fence-blind, so a later
+        # top-level line (a trailing `# Appendix` H1, or a `# comment` inside
+        # a fenced code block) must not replace the PRD's title block — it
+        # would hijack the extracted title or, for a fenced `# Project:`
+        # line, turn a valid PRD into a parse error.
+        if name == "__project__" and name in sections:
+            return
+        sections[name] = (start, body)
+
     for lineno, raw in enumerate(lines, start=1):
         if raw.startswith("# ") and not raw.startswith("## "):
             # Top-level heading — project title.
             if current_name is not None:
-                sections[current_name] = (current_start, current_body)
+                _store(current_name, current_start, current_body)
             current_name = "__project__"
             current_start = lineno
             current_body = [raw]
         elif raw.startswith("## "):
             if current_name is not None:
-                sections[current_name] = (current_start, current_body)
+                _store(current_name, current_start, current_body)
             heading = raw[3:].strip()
             current_name = heading.strip().lower().replace(" ", "_")
             current_start = lineno
@@ -390,7 +400,7 @@ def _split_sections(lines: list[str]) -> dict[str, tuple[int, list[str]]]:
                 current_body.append(raw)
 
     if current_name is not None:
-        sections[current_name] = (current_start, current_body)
+        _store(current_name, current_start, current_body)
 
     return sections
 
@@ -423,6 +433,12 @@ _RELEASE_FIELD_RE = re.compile(
 # "v0.2.0 (v0.2)". The parenthetical sets target_tag; the leading token sets
 # target_version.
 _RELEASE_TAG_RE = re.compile(r"^(.*?)\s*\(\s*(?:tag\s*:\s*)?([^)]+?)\s*\)\s*$")
+# The top-level PRD heading: ``# Project: <Name>`` (template form) or a bare
+# ``# <Name>``. The optional ``Project:`` prefix is boilerplate, not part of
+# the readable name, so it is stripped from the captured title.
+_PROJECT_TITLE_RE = re.compile(
+    r"^#\s+(?:project\s*:\s*)?(?P<title>.*)$", re.IGNORECASE
+)
 
 
 def _split_release_value(value: str) -> tuple[str | None, str | None]:
@@ -1785,8 +1801,12 @@ def parse_prd(
     sections = _split_sections(lines)
 
     # --- Required: # Project heading ------------------------------------
-    # The project name lives in the heading but is not stored on PRD (which has
-    # no name field).  We validate its presence and emit an error if absent.
+    # The heading names the PRD: ``# Project: <Name>`` (the template form) or a
+    # bare ``# <Name>``. The extracted name becomes ``PRD.title`` — the
+    # canonical human-readable label that ``prd list`` and API consumers
+    # surface. A heading that yields an empty name is a parse error, so a
+    # parse-persisted PRD always carries a non-empty title.
+    title = ""
     proj_block = sections.get("__project__")
     if proj_block is None:
         errors.append(
@@ -1798,7 +1818,9 @@ def parse_prd(
         )
     else:
         proj_line = proj_block[1][0] if proj_block[1] else ""
-        if not re.match(r"^#\s+\S", proj_line.strip()):
+        m_title = _PROJECT_TITLE_RE.match(proj_line.strip())
+        title = m_title.group("title").strip() if m_title else ""
+        if not title:
             errors.append(
                 ParseError(
                     section="# Project",
@@ -1906,6 +1928,7 @@ def parse_prd(
     # --- Build PRD model ------------------------------------------------
     prd = PRD(
         id=_model_prd_id(prd_id),
+        title=title,
         target_version=target_version,
         target_tag=target_tag,
         summary=summary,

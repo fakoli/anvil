@@ -46,7 +46,7 @@ The structured template at `docs/prd-template.md` (relative to the plugin root) 
 
 ### Step 0 — Select or create the PRD
 
-A project can hold several release-scoped PRDs in one `state.db`; each is separately gated. Run `anvil prd list` to discover them: it prints one line per PRD (`<id>  [<status> r<revision>]`, with the default PRD marked `*`). Pick which one you are authoring. **If only one PRD exists, auto-select it silently, say nothing, proceed to Step 1.** Only prompt when `anvil prd list` shows more than one PRD:
+A project can hold several release-scoped PRDs in one `state.db`; each is separately gated. Run `anvil prd list` to discover them: it prints one line per PRD (`<id>  [<status> r<revision>] -> <target>  <title>`, target/title present when set, with the default PRD marked `*`). Pick which one you are authoring. **If only one PRD exists, auto-select it silently, say nothing, proceed to Step 1.** Only prompt when `anvil prd list` shows more than one PRD:
 
 > This project has multiple PRDs: `default` (approved), `v0.2` (draft). Which one are you authoring — or are you creating a new release PRD? (default / v0.2 / new)
 

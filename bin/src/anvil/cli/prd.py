@@ -154,14 +154,23 @@ def prd_parse(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
+                # The parsed heading title (guaranteed non-empty here — an
+                # empty/malformed heading is a ParseError that exits above).
+                # Stamped for default and named PRDs alike so `prd list`
+                # surfaces the same readable label for both. Safe to add to
+                # the default payload: ``title`` has been a PrdParsedPayload
+                # field since schema v7, and ``assumptions`` above is already
+                # stamped unconditionally (v16), so any older anvil that
+                # rejects this payload rejected it before this key existed.
+                "title": result.prd.title,
             }
 
             # Named PRD: stamp the partition so the backend writes ONLY this PRD's
             # rows (the prd.parsed handler scopes its DELETE/UPSERT by prd_id),
             # leaving other PRDs' requirements untouched. The default PRD omits
-            # these keys entirely so the payload stays byte-identical to the
-            # pre-multi-PRD event (PrdParsedPayload defaults prd_id='default',
-            # is_default=True), preserving replay equivalence.
+            # prd_id / is_default / target_* so the payload defaults reproduce
+            # them (PrdParsedPayload defaults prd_id='default',
+            # is_default=True, target_*=None).
             #
             # Gate on the RESOLVED parse_prd_id, not the raw ``--prd`` flag: the
             # reserved sentinels ``--prd default`` / ``--prd prd`` are legitimate
@@ -175,7 +184,6 @@ def prd_parse(
             if not is_default_prd:
                 payload["prd_id"] = stored_prd_id
                 payload["is_default"] = False
-                payload["title"] = result.prd.title
                 payload["target_version"] = result.prd.target_version
                 payload["target_tag"] = result.prd.target_tag
 
@@ -254,7 +262,10 @@ def prd_parse(
                 "prd_id": stored_prd_id,
                 "revision": existing_prd.revision + 1,
                 "is_default": existing_prd.is_default,
-                "title": existing_prd.title,
+                # Title follows the SOURCE on every parse (non-empty here — an
+                # empty/malformed heading is a ParseError that exits above), so
+                # renaming the heading and re-parsing updates the stored title.
+                "title": result.prd.title,
                 "target_version": existing_prd.target_version,
                 "target_tag": existing_prd.target_tag,
                 # Carry the CURRENT stored status, NOT result.prd.status: a freshly

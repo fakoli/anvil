@@ -303,6 +303,17 @@ class TestInitWithSample:
         assert "ready" in result.output
         assert "anvil next" in result.output
 
+    def test_init_with_sample_persists_prd_title(self, tmp_path: Path) -> None:
+        """Issue #177 — the seed pipeline's hand-built prd.parsed payload must
+        stamp the parsed heading title like `prd parse` does, so the seeded
+        default PRD does not list as untitled."""
+        assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
+        rj = self._run(["prd", "list", "--json"], tmp_path)
+        assert rj.exit_code == 0, rj.output
+        prds = json.loads(rj.output)["data"]["prds"]
+        assert prds[0]["id"] == "default"
+        assert prds[0]["title"] == "Markdown Link Checker"
+
     def test_init_with_sample_status_shows_ready_tasks(self, tmp_path: Path) -> None:
         """status reflects the seeded ready tasks (state actually persisted)."""
         assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
@@ -1654,6 +1665,94 @@ class TestPrdList:
         assert {p["id"] for p in prds} == {"default"}
         assert prds[0]["is_default"] is True
         assert prds[0]["status"] == "draft"
+
+
+class TestPrdTitle:
+    """Issue #177 — the parsed heading title is persisted and surfaced."""
+
+    def test_named_prd_title_persisted_and_listed(self, tmp_path: Path) -> None:
+        """A named PRD's heading reaches the event payload, `prd list --json`,
+        and the human list output."""
+        _do_init(tmp_path)
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code == 0
+
+        payload = _prd_parsed_payload(tmp_path)
+        assert payload["title"] == "CLI Named PRD"
+
+        rj = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
+        assert rj.exit_code == 0, rj.output
+        prds = json.loads(rj.output)["data"]["prds"]
+        assert prds == [
+            {
+                "id": "v0.2",
+                "status": "draft",
+                "revision": 1,
+                "is_default": False,
+                "title": "CLI Named PRD",
+                "target_version": None,
+                "target_tag": None,
+            }
+        ]
+
+        text = _invoke_cmd(tmp_path, ["prd", "list"])
+        assert "CLI Named PRD" in text.output
+
+    def test_default_prd_title_persisted_and_listed(self, tmp_path: Path) -> None:
+        """The default PRD gets the same title treatment as named PRDs."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+
+        payload = _prd_parsed_payload(tmp_path)
+        assert payload["title"] == "CLI Test Project"
+
+        rj = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
+        prds = json.loads(rj.output)["data"]["prds"]
+        assert prds[0]["id"] == "default"
+        assert prds[0]["title"] == "CLI Test Project"
+
+    def test_reparse_follows_renamed_heading(self, tmp_path: Path) -> None:
+        """Renaming the # Project heading and re-parsing updates the stored
+        title (title follows the source, not the first parse)."""
+        _do_init(tmp_path)
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code == 0
+
+        renamed = _NAMED_PRD_CONTENT.replace(
+            "# Project: CLI Named PRD", "# Project: Renamed PRD"
+        )
+        _write_named_prd(tmp_path, "v0.2", renamed)
+        assert _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code == 0
+
+        rj = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
+        prds = json.loads(rj.output)["data"]["prds"]
+        assert prds == [
+            {
+                "id": "v0.2",
+                "status": "draft",
+                "revision": 2,
+                "is_default": False,
+                "title": "Renamed PRD",
+                "target_version": None,
+                "target_tag": None,
+            }
+        ]
+
+    def test_empty_heading_name_exits_1(self, tmp_path: Path) -> None:
+        """'# Project:' with no name is a parse error: exit 1, nothing persisted."""
+        _do_init(tmp_path)
+        broken = _NAMED_PRD_CONTENT.replace(
+            "# Project: CLI Named PRD", "# Project:"
+        )
+        _write_named_prd(tmp_path, "v0.2", broken)
+        result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "Could not extract project name" in combined
+        assert _prd_parsed_payload(tmp_path) == {}
 
 
 class TestPrdReparse:

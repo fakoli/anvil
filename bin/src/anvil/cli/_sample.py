@@ -284,6 +284,9 @@ def seed_pipeline_from_prd(
                 "acceptance_criteria": parsed.prd.acceptance_criteria,
                 "risks": parsed.prd.risks,
                 "open_questions": parsed.prd.open_questions,
+                # The parsed heading title, mirroring `prd parse` (issue #177)
+                # — without it the seeded default PRD lists as untitled.
+                "title": parsed.prd.title,
             },
         )
     )
