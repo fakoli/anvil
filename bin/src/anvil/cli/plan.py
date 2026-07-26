@@ -356,6 +356,10 @@ def plan(
     # Non-fatal warnings collected for the JSON envelope (parse warnings that
     # otherwise go to stderr in human mode).
     plan_warnings: list[str] = []
+    warning_count = 0
+    warnings_shown = 0
+    warnings_omitted = 0
+    warning_messages_truncated = 0
 
     # T017: the parse-time prd_id controls id shape AND the partition that
     # plan scopes to. ``--prd v0.2`` reads .anvil/prds/v0.2.md and prunes /
@@ -411,14 +415,25 @@ def plan(
 
     # Non-fatal parse errors are surfaced as warnings during plan.
     if parsed.errors:
+        from anvil.planning.diagnostics import format_parse_error, parse_diagnostic_report
+
+        report = parse_diagnostic_report(parsed.errors)
+        warning_count = report.total_count
+        warnings_shown = report.shown_count
+        warnings_omitted = report.omitted_count
+        warning_messages_truncated = report.messages_truncated
         if json_output:
-            plan_warnings.extend(
-                f"[{err.section}:{err.line}] {err.message}" for err in parsed.errors
-            )
+            plan_warnings.extend(format_parse_error(err) for err in report.entries)
         else:
-            for err in parsed.errors:
+            for err in report.entries:
                 typer.echo(
-                    f"  Warning [{err.section}:{err.line}]: {err.message}",
+                    f"  Warning {format_parse_error(err)}",
+                    err=True,
+                )
+            if report.omitted_count:
+                typer.echo(
+                    f"  ... showing {report.shown_count} of {report.total_count}; "
+                    f"{report.omitted_count} omitted.",
                     err=True,
                 )
 
@@ -897,6 +912,11 @@ def plan(
                     "pruned_task_ids": list(deleted_task_ids),
                     "pruned_feature_ids": list(deleted_feature_ids),
                     "warnings": plan_warnings,
+                    "warning_count": warning_count,
+                    "warnings_shown": warnings_shown,
+                    "warnings_omitted": warnings_omitted,
+                    "warnings_truncated": bool(warnings_omitted),
+                    "warning_messages_truncated": warning_messages_truncated,
                     **(
                         {
                             "bundle_plan": bundle_report.to_dict(),

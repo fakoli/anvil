@@ -3511,6 +3511,102 @@ class TestGetProjectStatus:
 
 
 class TestParsePrd:
+    def test_non_utf8_source_is_bounded_typed_and_mutation_free(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        (state_dir / "prd.md").write_bytes(b"# Project: bad\n\xff\xfe\x80")
+        events = state_dir / "events.jsonl"
+        before = events.read_bytes()
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        with pytest.raises(ToolError) as excinfo:
+            _run(run())
+        message = str(excinfo.value)
+        assert "PRD source is not valid UTF-8." in message
+        assert "invalid start byte" not in message
+        assert len(message) < 200
+        assert events.read_bytes() == before
+
+    def test_first_parse_race_rejects_stale_payload_after_concurrent_approval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        from anvil.clock import SystemClock
+        from anvil.state.models import EventDraft
+        from anvil.state.sqlite import SqliteBackend
+
+        real_append = SqliteBackend.append
+        interleaved = False
+
+        def create_and_approve_before_stale(self, draft):  # type: ignore[no-untyped-def]
+            nonlocal interleaved
+            if draft.action == "prd.parsed" and not interleaved:
+                interleaved = True
+                winner = dict(draft.payload_json)
+                winner["title"] = "Concurrent MCP Winner"
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-parser",
+                        action="prd.parsed",
+                        target_kind="prd",
+                        target_id=draft.target_id,
+                        payload_json=winner,
+                    ),
+                )
+                for action, identity_key in (
+                    ("prd.reviewed", "reviewer"),
+                    ("prd.approved", "approver"),
+                ):
+                    real_append(
+                        self,
+                        EventDraft(
+                            timestamp=draft.timestamp,
+                            actor="concurrent-human",
+                            action=action,
+                            target_kind="prd",
+                            target_id=draft.target_id,
+                            payload_json={
+                                "project_id": draft.payload_json["project_id"],
+                                identity_key: "concurrent-human",
+                            },
+                        ),
+                    )
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", create_and_approve_before_stale)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        with pytest.raises(ToolError, match="created after the first parse was prepared"):
+            _run(run())
+        assert len(_events_with_action(state_dir, "prd.parsed")) == 1
+
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.title == "Concurrent MCP Winner"
+        assert prd.status.value == "approved"
+
     def test_happy_path_emits_prd_parsed_and_returns_counts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3530,6 +3626,9 @@ class TestParsePrd:
         assert resp["prd_status"] == "draft"
         assert resp["prd_path"] == "default"
         assert str(state_dir) not in json.dumps(resp)
+        parsed = _events_with_action(state_dir, "prd.parsed")
+        assert len(parsed) == 1
+        assert parsed[0]["title"] == "MCP Test Project"
         # Verify the PRD was actually persisted.
         from anvil.clock import SystemClock
         from anvil.state.sqlite import SqliteBackend
@@ -3543,55 +3642,10 @@ class TestParsePrd:
             prd = b.get_prd()
             assert prd is not None
             assert prd.status.value == "draft"
+            assert prd.title == "MCP Test Project"
         finally:
             b.close()
 
-    def test_title_persisted_on_parse_and_follows_source_on_reparse(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Issue #177 — the MCP parse path stamps the parsed heading title on
-        prd.parsed, and a re-parse refreshes it from the source (mirrors the
-        CLI's TestPrdTitle so the hand-duplicated payload builders can't
-        silently drift apart)."""
-        state_dir = _init_state_dir(tmp_path)
-        _write_prd_file(state_dir)
-        monkeypatch.chdir(tmp_path)
-
-        async def run_parse() -> Any:
-            async with Client(mcp) as c:
-                return _data(await c.call_tool("parse_prd", {}))
-
-        assert _run(run_parse())["errors"] == []
-
-        from anvil.clock import SystemClock
-        from anvil.state.sqlite import SqliteBackend
-
-        def _stored_title() -> str:
-            b = SqliteBackend(
-                db_path=str(state_dir / "state.db"),
-                events_path=str(state_dir / "events.jsonl"),
-                clock=SystemClock(),
-            )
-            b.initialize()
-            try:
-                prd = b.get_prd()
-                assert prd is not None
-                return prd.title
-            finally:
-                b.close()
-
-        assert _stored_title() == "MCP Test Project"
-
-        # Rename the heading and re-parse: prd.revised must carry the NEW
-        # source title, not the stored one.
-        _write_prd_file(
-            state_dir,
-            _MINIMAL_PRD.replace(
-                "# Project: MCP Test Project", "# Project: Renamed MCP Project"
-            ),
-        )
-        assert _run(run_parse())["errors"] == []
-        assert _stored_title() == "Renamed MCP Project"
 
     def test_error_when_no_prd_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3772,6 +3826,7 @@ class TestParsePrd:
             assert named is not None
             assert named.id == "v0.2"
             assert named.is_default is False
+            assert named.title == "MCP Test Project"
             # The default PRD still resolves and stays the default.
             default = b.get_prd()
             assert default is not None
@@ -3781,6 +3836,368 @@ class TestParsePrd:
             assert len(v02_reqs) == 2
         finally:
             b.close()
+
+    def test_five_thousand_parse_errors_return_typed_bounded_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        malformed = (
+            "# Project: Diagnostic Ceiling\n\n"
+            "## Summary\n\nS\n\n## Goals\n\n- G\n\n"
+            "## Requirements\n\n- R\n\n## Features\n\n"
+            + "\n".join(f"### F-BAD-{index}: x" for index in range(5_000))
+        )
+        (state_dir / "prd.md").write_text(malformed, encoding="utf-8")
+        before = (state_dir / "events.jsonl").read_bytes()
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        response = _run(run())
+        assert response["error_count"] == 5_000
+        assert response["errors_shown"] == 20
+        assert response["errors_omitted"] == 4_980
+        assert response["errors_truncated"] is True
+        assert len(response["errors"]) == 20
+        assert len(json.dumps(response).encode("utf-8")) < 30_000
+        assert (state_dir / "events.jsonl").read_bytes() == before
+
+    def test_named_title_only_reparse_is_isolated_and_keeps_approval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MCP parse mirrors CLI title threading: a named title-only revision
+        carries the new title, retains approval, and leaves the default PRD's
+        title, lifecycle, revision, and timestamp unchanged."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        prds_dir = state_dir / "prds"
+        prds_dir.mkdir(exist_ok=True)
+        named_path = prds_dir / "v0.2.md"
+        named_path.write_text(_MINIMAL_PRD, encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        async def setup() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+                await c.call_tool("parse_prd", {"prd_id": "v0.2"})
+                await c.call_tool("review_prd", {"prd_id": "v0.2"})
+                await c.call_tool(
+                    "review_prd", {"prd_id": "v0.2", "approve": True}
+                )
+
+        _run(setup())
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            default_before = b.get_prd("default")
+        finally:
+            b.close()
+        assert default_before is not None
+
+        named_path.write_text(
+            _MINIMAL_PRD.replace(
+                "# Project: MCP Test Project",
+                "# Project: MCP Named Project Renamed",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        async def revise() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool("parse_prd", {"prd_id": "v0.2"})
+                )
+
+        resp = _run(revise())
+        assert resp["prd_status"] == "approved"
+
+        revised = _events_with_action(state_dir, "prd.revised")
+        assert len(revised) == 1
+        assert revised[0]["prd_id"] == "v0.2"
+        assert revised[0]["title"] == "MCP Named Project Renamed"
+        assert revised[0]["status"] == "approved"
+        assert revised[0]["requirements_added"] == []
+        assert revised[0]["requirements_superseded"] == []
+
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            default_after = b.get_prd("default")
+            named_after = b.get_prd("v0.2")
+        finally:
+            b.close()
+        assert default_after is not None
+        assert named_after is not None
+        assert (
+            default_after.title,
+            default_after.status,
+            default_after.revision,
+            default_after.updated_at,
+        ) == (
+            default_before.title,
+            default_before.status,
+            default_before.revision,
+            default_before.updated_at,
+        )
+        assert named_after.title == "MCP Named Project Renamed"
+        assert named_after.status.value == "approved"
+        assert named_after.revision == 2
+
+    @pytest.mark.parametrize(
+        ("unsafe_title", "expected_error"),
+        (
+            ("Unsafe\x1b[31mEscape", "unsafe control character"),
+            ("X" * 513, "512-byte UTF-8 limit"),
+        ),
+        ids=("terminal-control", "oversized"),
+    )
+    def test_invalid_title_reparse_is_bounded_and_mutation_free(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        unsafe_title: str,
+        expected_error: str,
+    ) -> None:
+        """MCP parse returns a typed bounded error for invalid title metadata
+        and leaves the approved projection and event lineage untouched."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def setup() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+                await c.call_tool("review_prd", {})
+                await c.call_tool("review_prd", {"approve": True})
+
+        _run(setup())
+        _write_prd_file(
+            state_dir,
+            _MINIMAL_PRD.replace(
+                "# Project: MCP Test Project", f"# Project: {unsafe_title}", 1
+            ),
+        )
+
+        async def revise() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        resp = _run(revise())
+        assert resp["errors"]
+        messages = " ".join(error["message"] for error in resp["errors"])
+        assert expected_error in messages
+        assert unsafe_title not in messages
+        assert len(messages) < 500
+        assert _events_with_action(state_dir, "prd.revised") == []
+
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            prd = b.get_prd("default")
+        finally:
+            b.close()
+        assert prd is not None
+        assert prd.title == "MCP Test Project"
+        assert prd.status.value == "approved"
+        assert prd.revision == 1
+
+    def test_title_reparse_rejects_concurrent_review_and_approval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The MCP producer includes the same lifecycle CAS as the CLI. A
+        deterministic review+approval interleaving leaves the approved row
+        intact and rejects the stale title revision cleanly."""
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def first_parse() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        _run(first_parse())
+
+        from anvil.clock import SystemClock
+        from anvil.state.models import EventDraft
+        from anvil.state.sqlite import SqliteBackend
+
+        real_append = SqliteBackend.append
+        interleaved = False
+
+        def approve_before_revision(self, draft):  # type: ignore[no-untyped-def]
+            nonlocal interleaved
+            if draft.action == "prd.revised" and not interleaved:
+                interleaved = True
+                project_id = draft.payload_json["project_id"]
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-reviewer",
+                        action="prd.reviewed",
+                        target_kind="prd",
+                        target_id=project_id,
+                        payload_json={
+                            "project_id": project_id,
+                            "reviewer": "concurrent-reviewer",
+                        },
+                    ),
+                )
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-approver",
+                        action="prd.approved",
+                        target_kind="prd",
+                        target_id=project_id,
+                        payload_json={
+                            "project_id": project_id,
+                            "approver": "concurrent-approver",
+                        },
+                    ),
+                )
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", approve_before_revision)
+        _write_prd_file(
+            state_dir,
+            _MINIMAL_PRD.replace(
+                "# Project: MCP Test Project",
+                "# Project: Stale MCP Rename",
+                1,
+            ),
+        )
+
+        async def revise() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        with pytest.raises(ToolError, match="lifecycle status changed"):
+            _run(revise())
+        assert _events_with_action(state_dir, "prd.revised") == []
+
+        b = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        b.initialize()
+        try:
+            prd = b.get_prd("default")
+        finally:
+            b.close()
+        assert prd is not None
+        assert prd.title == "MCP Test Project"
+        assert prd.status.value == "approved"
+        assert prd.revision == 1
+
+    def test_review_rejects_same_revision_lifecycle_drift(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def first_parse() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        _run(first_parse())
+        from anvil.clock import SystemClock
+        from anvil.state.models import EventDraft
+        from anvil.state.sqlite import SqliteBackend
+
+        real_append = SqliteBackend.append
+        interleaved = False
+
+        def approve_before_stale_review(self, draft):  # type: ignore[no-untyped-def]
+            nonlocal interleaved
+            if draft.action == "prd.reviewed" and not interleaved:
+                interleaved = True
+                assert draft.payload_json["expected_revision"] == 1
+                assert draft.payload_json["expected_status"] == "draft"
+                project_id = draft.payload_json["project_id"]
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-reviewer",
+                        action="prd.reviewed",
+                        target_kind="prd",
+                        target_id=project_id,
+                        payload_json={
+                            "project_id": project_id,
+                            "expected_revision": 1,
+                            "expected_status": "draft",
+                            "reviewer": "concurrent-reviewer",
+                        },
+                    ),
+                )
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-approver",
+                        action="prd.approved",
+                        target_kind="prd",
+                        target_id=project_id,
+                        payload_json={
+                            "project_id": project_id,
+                            "expected_revision": 1,
+                            "expected_status": "reviewed",
+                            "approver": "concurrent-approver",
+                        },
+                    ),
+                )
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", approve_before_stale_review)
+
+        async def review() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("review_prd", {})
+
+        with pytest.raises(ToolError, match="lifecycle changed") as exc_info:
+            _run(review())
+        assert len(str(exc_info.value).encode("utf-8")) <= 4096
+        assert len(_events_with_action(state_dir, "prd.reviewed")) == 1
+        assert len(_events_with_action(state_dir, "prd.approved")) == 1
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.status.value == "approved"
+        assert prd.revision == 1
 
     def test_reparse_emits_revised_with_diff_and_supersedes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3871,6 +4288,33 @@ class TestParsePrd:
 
         # No third revision was written — the rejected parse left the log alone.
         assert len(_events_with_action(state_dir, "prd.revised")) == 1
+
+    def test_retired_id_refusal_is_bounded_for_hostile_identifier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hostile_id = "R" + ("1" * 100_000)
+        state_dir = _init_state_dir(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("parse_prd", {}))
+
+        _write_prd_file(state_dir, _MINIMAL_PRD.replace("R001", hostile_id))
+        _run(parse())
+        _write_prd_file(state_dir, _MINIMAL_PRD_V2)
+        _run(parse())
+        before = (state_dir / "events.jsonl").read_bytes()
+        _write_prd_file(state_dir, _MINIMAL_PRD_READD.replace("R001", hostile_id))
+
+        with pytest.raises(ToolError) as exc_info:
+            _run(parse())
+        message = str(exc_info.value)
+        assert len(message.encode("utf-8")) <= 4096
+        assert hostile_id not in message
+        assert "<redacted count=1 utf8_bytes=" in message
+        assert "\n" not in message
+        assert (state_dir / "events.jsonl").read_bytes() == before
 
     def test_reparse_supersede_demotes_approved_prd_status_in_response(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

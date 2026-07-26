@@ -11,8 +11,14 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 
+import pytest
+
 from anvil.clock import FrozenClock
-from anvil.planning.template import ParseResult, parse_prd
+from anvil.planning.template import (
+    MAX_PRD_TITLE_UTF8_BYTES,
+    ParseResult,
+    parse_prd,
+)
 from anvil.state.models import DEFAULT_PRD_ID
 
 # ---------------------------------------------------------------------------
@@ -152,93 +158,6 @@ A summary.
 
 
 # ---------------------------------------------------------------------------
-# Project-heading title extraction (issue #177)
-# ---------------------------------------------------------------------------
-
-
-class TestProjectTitleExtraction:
-    """The # Project heading names the PRD: parse_prd stores it as PRD.title."""
-
-    def test_project_prefix_heading_yields_title(self) -> None:
-        """'# Project: Minimal Project' → title 'Minimal Project' (prefix stripped)."""
-        result = parse_prd(_MINIMAL_PRD)
-        assert result.errors == []
-        assert result.prd.title == "Minimal Project"
-
-    def test_bare_heading_yields_title(self) -> None:
-        """A heading without the 'Project:' prefix is the title verbatim."""
-        prd = _MINIMAL_PRD.replace(
-            "# Project: Minimal Project", "# Workbench Foundation"
-        )
-        result = parse_prd(prd)
-        assert result.errors == []
-        assert result.prd.title == "Workbench Foundation"
-
-    def test_project_prefix_is_case_insensitive(self) -> None:
-        """'# project: X' strips the prefix regardless of case."""
-        prd = _MINIMAL_PRD.replace(
-            "# Project: Minimal Project", "# PROJECT: Shouty Name"
-        )
-        result = parse_prd(prd)
-        assert result.errors == []
-        assert result.prd.title == "Shouty Name"
-
-    def test_named_prd_id_yields_same_title(self) -> None:
-        """Title extraction is identical for default and named PRD ids."""
-        result = parse_prd(_MINIMAL_PRD, prd_id="v0.2")
-        assert result.errors == []
-        assert result.prd.title == "Minimal Project"
-
-    def test_empty_project_name_is_parse_error(self) -> None:
-        """'# Project:' with no name → ParseError; title stays empty."""
-        prd = _MINIMAL_PRD.replace(
-            "# Project: Minimal Project", "# Project:"
-        )
-        result = parse_prd(prd)
-        assert result.prd.title == ""
-        assert any(
-            "Could not extract project name" in e.message for e in result.errors
-        )
-
-    def test_missing_heading_leaves_title_empty(self) -> None:
-        """No # Project heading at all → the existing missing-heading error,
-        and title stays empty (the parse never persists — errors exit 1)."""
-        prd = _MINIMAL_PRD.replace("# Project: Minimal Project\n", "")
-        result = parse_prd(prd)
-        assert result.prd.title == ""
-        assert any("# Project" in e.section for e in result.errors)
-
-    def test_first_heading_wins_over_fenced_code_comment(self) -> None:
-        """A `# comment` line inside a fenced code block (the splitter is
-        fence-blind) must not hijack the title."""
-        prd = _MINIMAL_PRD + (
-            "\n## Risks\n\n"
-            "```bash\n# install deps\nuv sync\n```\n"
-        )
-        result = parse_prd(prd)
-        assert result.errors == []
-        assert result.prd.title == "Minimal Project"
-
-    def test_first_heading_wins_over_trailing_h1(self) -> None:
-        """A trailing `# Appendix` H1 must not replace the title."""
-        prd = _MINIMAL_PRD + "\n# Appendix\n\nExtra notes.\n"
-        result = parse_prd(prd)
-        assert result.errors == []
-        assert result.prd.title == "Minimal Project"
-
-    def test_fenced_empty_project_heading_is_not_an_error(self) -> None:
-        """A literal `# Project:` line quoted inside a fence must not turn a
-        valid PRD into a parse error — the real first heading wins."""
-        prd = _MINIMAL_PRD + (
-            "\n## Open Questions\n\n"
-            "```markdown\n# Project:\n```\n"
-        )
-        result = parse_prd(prd)
-        assert result.errors == []
-        assert result.prd.title == "Minimal Project"
-
-
-# ---------------------------------------------------------------------------
 # Happy path — minimal valid PRD
 # ---------------------------------------------------------------------------
 
@@ -259,6 +178,364 @@ class TestHappyPath:
         result = parse_prd(_MINIMAL_PRD)
         assert not result.errors
         assert "minimal project" in result.prd.summary.lower()
+
+    def test_project_heading_populates_canonical_title(self) -> None:
+        """The documented Project prefix is removed from the PRD title."""
+        markdown = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# Project:   Example Project   ", 1
+        )
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Example Project"
+        assert "Example Project" not in result.prd.summary
+
+    def test_nonstandard_h1_is_deterministic_title(self) -> None:
+        """A valid nonstandard H1 remains usable as the canonical title."""
+        markdown = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# Release Readiness", 1
+        )
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Release Readiness"
+
+    @pytest.mark.parametrize(
+        "unsafe_title",
+        (
+            "Bell\x07Title",
+            "Escape\x1b[31mTitle",
+            "Delete\x7fTitle",
+            "Line\u2028Separator",
+            "Bidi\u202eOverride",
+            "Soft\u00adHyphen",
+        ),
+    )
+    def test_unsafe_title_controls_are_rejected_without_echo(
+        self, unsafe_title: str
+    ) -> None:
+        markdown = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", f"# Project: {unsafe_title}", 1
+        )
+        result = parse_prd(markdown)
+
+        title_errors = [e for e in result.errors if e.section == "# Project"]
+        assert len(title_errors) == 1
+        assert result.prd.title == ""
+        assert unsafe_title not in title_errors[0].message
+        assert len(title_errors[0].message) < 100
+
+    def test_title_utf8_byte_limit_has_exact_multibyte_boundary(self) -> None:
+        at_limit = "é" * (MAX_PRD_TITLE_UTF8_BYTES // 2)
+        valid = parse_prd(
+            _MINIMAL_PRD.replace(
+                "# Project: Minimal Project", f"# Project: {at_limit}", 1
+            )
+        )
+        assert not valid.errors
+        assert valid.prd.title == at_limit
+        assert len(valid.prd.title.encode("utf-8")) == MAX_PRD_TITLE_UTF8_BYTES
+
+        over_limit = at_limit + "é"
+        invalid = parse_prd(
+            _MINIMAL_PRD.replace(
+                "# Project: Minimal Project", f"# Project: {over_limit}", 1
+            )
+        )
+        assert any("512-byte UTF-8 limit" in e.message for e in invalid.errors)
+        assert invalid.prd.title == ""
+        assert all(over_limit not in e.message for e in invalid.errors)
+
+    def test_legitimate_unicode_joiners_and_inline_markdown_remain_valid(
+        self,
+    ) -> None:
+        title = "**Crème** مشروع 👩\u200d💻 क्\u200dष"
+        result = parse_prd(
+            _MINIMAL_PRD.replace(
+                "# Project: Minimal Project", f"# Project: {title}", 1
+            )
+        )
+
+        assert not result.errors
+        assert result.prd.title == title
+
+    def test_empty_project_label_is_rejected(self) -> None:
+        """The Project label alone is not a non-empty canonical title."""
+        markdown = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# Project:", 1
+        )
+        result = parse_prd(markdown)
+
+        assert any(error.section == "# Project" for error in result.errors)
+        assert result.prd.title == ""
+
+    def test_fenced_h1_does_not_replace_canonical_title(self) -> None:
+        """H1-like source examples inside Markdown fences are not headings."""
+        for opening_fence, closing_fence in (
+            ("```markdown", "```"),
+            ("~~~~markdown", "~~~~"),
+        ):
+            fenced_example = "\n".join(
+                (
+                    "A minimal project for testing.",
+                    "",
+                    opening_fence,
+                    "# Project: Example Inside Fence",
+                    closing_fence,
+                )
+            )
+            markdown = _MINIMAL_PRD.replace(
+                "A minimal project for testing.", fenced_example, 1
+            )
+
+            result = parse_prd(markdown)
+
+            assert not result.errors
+            assert result.prd.title == "Minimal Project"
+
+    @pytest.mark.parametrize(
+        "fenced_example",
+        (
+            "- {fence}markdown\n  # Project: List Impostor\n  {fence}",
+            "> {fence}markdown\n> # Project: Quote Impostor\n> {fence}",
+            "> - {fence}markdown\n>   # Project: Nested Impostor\n>   {fence}",
+            "- > {fence}markdown\n  > # Project: Reverse Nested\n  > {fence}",
+            "1. {fence}markdown\n   # Project: Ordered List\n   {fence}",
+        ),
+    )
+    def test_container_fenced_h1_is_not_a_root_project_heading(
+        self, fenced_example: str
+    ) -> None:
+        """CommonMark container nesting determines heading eligibility."""
+        markdown = (
+            fenced_example.format(fence=chr(96) * 3) + "\n\n" + _MINIMAL_PRD
+        )
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    @pytest.mark.parametrize(
+        "html_example",
+        (
+            "<div>\n# Project: Div Impostor\n</div>\n",
+            "<script>\n# Project: Script Impostor\n</script>",
+            "<?processing\n# Project: PI Impostor\n?>",
+            "<!DOCTYPE html\n# Project: Declaration Impostor\n>",
+            "<![CDATA[\n# Project: CDATA Impostor\n]]>",
+            '<x-widget data-note=">">\n# Project: Quoted Attribute Impostor\n',
+            "> <table>\n> # Project: Nested HTML Impostor\n> </table>\n>",
+        ),
+    )
+    def test_raw_html_block_h1_is_not_a_root_project_heading(
+        self, html_example: str
+    ) -> None:
+        """All CommonMark raw-HTML block families suppress contained H1 text."""
+        result = parse_prd(html_example + "\n\n" + _MINIMAL_PRD)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    def test_type7_html_does_not_interrupt_a_paragraph(self) -> None:
+        """A complete custom tag inside a paragraph does not hide the next H1."""
+        markdown = "paragraph\n<x-widget>\n" + _MINIMAL_PRD
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    def test_malformed_html_tag_does_not_hide_the_next_h1(self) -> None:
+        """An unterminated quoted attribute is paragraph text, not raw HTML."""
+        markdown = '<x-widget data-note="unterminated>\n' + _MINIMAL_PRD
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    @pytest.mark.parametrize(
+        "prefix",
+        (
+            "- # Project: List Heading",
+            "> # Project: Quote Heading",
+            "- > # Project: Nested Heading",
+            "Setext Heading\n==============",
+        ),
+    )
+    def test_non_root_or_non_atx_h1_is_ignored(self, prefix: str) -> None:
+        """Only a root-level ATX H1 can provide canonical metadata."""
+        result = parse_prd(prefix + "\n\n" + _MINIMAL_PRD)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    @pytest.mark.parametrize(
+        "prefix",
+        (
+            "-\t{fence}\n\t# Project: Tab List Impostor\n\t{fence}",
+            "-     {fence}\n      # Project: Five Space Impostor\n      {fence}",
+            "\t# Project: Tab Indented Code",
+        ),
+    )
+    def test_tab_stops_and_wide_list_padding_follow_commonmark(
+        self, prefix: str
+    ) -> None:
+        """Tokenizer tab stops and 5+ list padding cannot invent a root H1."""
+        markdown = prefix.format(fence=chr(96) * 3) + "\n\n" + _MINIMAL_PRD
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    def test_invalid_backtick_fence_info_does_not_hide_real_h1(self) -> None:
+        """Backticks in backtick-fence info make the opener invalid."""
+        markdown = "```markdown`invalid\n" + _MINIMAL_PRD
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    @pytest.mark.parametrize(
+        ("heading", "expected_title"),
+        (
+            ("# Project: No Indent", "No Indent"),
+            (" # Project: One Space", "One Space"),
+            ("  # Project: Two Spaces", "Two Spaces"),
+            ("   # Project: Three Spaces", "Three Spaces"),
+            ("#\tProject: Tab Delimiter", "Tab Delimiter"),
+            ("   #\tProject: Indented Tab", "Indented Tab"),
+        ),
+    )
+    def test_commonmark_h1_whitespace_forms(
+        self, heading: str, expected_title: str
+    ) -> None:
+        """CommonMark permits up to three leading spaces and a tab delimiter."""
+        markdown = _MINIMAL_PRD.replace("# Project: Minimal Project", heading, 1)
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == expected_title
+
+    def test_four_space_indented_line_is_not_h1(self) -> None:
+        """Four leading spaces make the line indented code, not an ATX H1."""
+        markdown = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "    # Project: Indented Code", 1
+        )
+
+        result = parse_prd(markdown)
+
+        assert any(error.section == "# Project" for error in result.errors)
+        assert result.prd.title == ""
+
+    def test_later_h1_does_not_replace_canonical_title(self) -> None:
+        """Only the first real document H1 supplies canonical metadata."""
+        markdown = f"{_MINIMAL_PRD}\n# Project: Later Appendix\n"
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    def test_project_heading_strips_optional_atx_closing_marker(self) -> None:
+        """Optional closing hashes are syntax while an attached hash is text."""
+        markdown = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# Project: Example Project ###   ", 1
+        )
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Example Project"
+
+        tab_closed = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# Project: Tab Closed ###\t", 1
+        )
+        tab_closed_result = parse_prd(tab_closed)
+
+        assert not tab_closed_result.errors
+        assert tab_closed_result.prd.title == "Tab Closed"
+
+        attached_hash = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", "# Project: Parser C#", 1
+        )
+        attached_hash_result = parse_prd(attached_hash)
+
+        assert not attached_hash_result.errors
+        assert attached_hash_result.prd.title == "Parser C#"
+
+    @pytest.mark.parametrize("literal_whitespace", ("\u00a0", "\u2003"))
+    def test_unicode_atx_trailing_whitespace_is_literal_title_content(
+        self, literal_whitespace: str
+    ) -> None:
+        """Only ASCII space/tab may close ATX hashes; Unicode spaces are text."""
+        heading = f"# Project: Example ###{literal_whitespace}"
+        markdown = _MINIMAL_PRD.replace("# Project: Minimal Project", heading, 1)
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == f"Example ###{literal_whitespace}"
+
+    @pytest.mark.parametrize("control_whitespace", ("\v", "\f", "\x1c"))
+    def test_control_whitespace_is_rejected_from_canonical_title(
+        self, control_whitespace: str
+    ) -> None:
+        """Control whitespace is not ATX closing syntax and the resulting
+        literal title is then rejected by the terminal-safe title policy."""
+        heading = f"# Project: Example ###{control_whitespace}"
+        markdown = _MINIMAL_PRD.replace("# Project: Minimal Project", heading, 1)
+
+        result = parse_prd(markdown)
+
+        assert result.prd.title == ""
+        assert any(
+            error.message == "Project title contains an unsafe control character."
+            for error in result.errors
+        )
+
+    @pytest.mark.parametrize("line_ending", ("\n", "\r\n", "\r"))
+    def test_commonmark_line_endings_preserve_title(
+        self, line_ending: str
+    ) -> None:
+        """LF, CRLF, and CR source lines map back to the same raw ATX H1."""
+        markdown = line_ending.join(_MINIMAL_PRD.split("\n"))
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
+
+    def test_title_preserves_raw_inline_markdown_and_model_dump_shape(self) -> None:
+        """Tokenization chooses the block; raw source still supplies metadata."""
+        raw_title = "Fish &amp; Chips *raw* [link](https://example.test)"
+        markdown = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", f"# Project: {raw_title}", 1
+        )
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == raw_title
+        assert "title" not in result.prd.model_dump()
+
+    def test_many_ineligible_h1_blocks_do_not_change_canonical_title(self) -> None:
+        """A large adversarial prefix remains deterministic and bounded."""
+        fence = chr(96) * 3
+        blocks = [
+            f"- {fence}md\n  # Project: Impostor {index}\n  {fence}"
+            for index in range(1_000)
+        ]
+        markdown = "\n".join(blocks) + "\n\n" + _MINIMAL_PRD
+
+        result = parse_prd(markdown)
+
+        assert not result.errors
+        assert result.prd.title == "Minimal Project"
 
     def test_parse_full_prd_quickstart(self) -> None:
         """Parse the quickstart example from docs/prd-template.md (fixture file).

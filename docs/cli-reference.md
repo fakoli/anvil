@@ -271,13 +271,15 @@ project.
 
 ### `anvil prd parse` { #prd-parse }
 
-**Synopsis:** Parse the managed default PRD source (or `--file PATH`) and store
-the result as a `prd.parsed` event. The resolver normally selects
+**Synopsis:** Parse the managed default or named PRD source (or `--file PATH`).
+A first parse emits a create-if-absent `prd.parsed` event; re-parsing an
+existing partition emits the non-destructive `prd.revised` event. The resolver
+normally selects
 `~/.anvil/workspaces/<key>/.anvil/prd.md`, shared by the repository's
 worktrees; `ANVIL_STATE_LAYOUT=local` opts into `<cwd>/.anvil/prd.md`. Calls
 the template parser, validates the required sections, and persists the full
-PRD payload (summary, goals, non-goals, requirements, acceptance criteria,
-risks, open questions, and typed assumptions).
+PRD payload (canonical title, summary, goals, non-goals, requirements,
+acceptance criteria, risks, open questions, and typed assumptions).
 
 **Flags:**
 
@@ -287,21 +289,31 @@ risks, open questions, and typed assumptions).
   `ANVIL_STATE_LAYOUT=local`).
 - `--prd ID` *(optional)* — named PRD identity; reads its portable managed
   source and scopes the parsed partition.
+- `--json` *(optional)* — emit one standard Anvil JSON envelope. Failure codes
+  include `not_found`, `read_error`, `invalid_encoding`, `parse_error`,
+  `invalid_revision`, and `event_rejected`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
 
-- `0` — PRD parsed and `prd.parsed` event recorded. Prints the count of
-  requirements, features, and tasks found plus the stable source identity
-  (`default`, the named ID, or `custom`), never an absolute path.
-- `1` — PRD file not found, unreadable, or contains parse errors (every error
-  is printed to stderr with `[section:line] message` formatting).
+- `0` — PRD parsed/revised and its event recorded. Human output prints the
+  requirement, feature, and task counts plus the stable source identity
+  (`default`, the named ID, or `custom`), never an absolute path. `--json`
+  returns those counts plus the PRD id, lifecycle status, source, and event
+  action.
+- `1` — PRD file not found, unreadable/non-UTF-8, contains parse errors, or its
+  optimistic create/revision precondition became stale. Human errors are
+  bounded and traceback-free; `--json` writes one typed envelope to stdout.
+  Public parser diagnostics show at most 20 entries (1,024 UTF-8 bytes per
+  message), escape terminal-active controls, and report total/shown/omitted
+  counts when the complete in-process error list is larger.
 
 **Example:**
 
 ```bash
 anvil prd parse
 anvil prd parse --file ./drafts/v2-prd.md
+anvil prd parse --prd v0.2 --json
 ```
 
 **See also:** [`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md);
@@ -372,7 +384,9 @@ anvil prd assess --prd v0.2 --json
 - `0` — transition recorded successfully.
 - `1` — no PRD in state (run `prd parse` first); or the PRD is in the wrong
   status for the requested transition (e.g. `--approve` invoked while the
-  PRD is still `draft`).
+  PRD is still `draft`); or a concurrent same-revision lifecycle transition
+  made the optimistic status precondition stale. Stale transitions refuse
+  atomically with a bounded traceback-free diagnostic.
 
 **Example:**
 
@@ -1496,7 +1510,10 @@ flag list; full prose treatment may follow in a later pass.
 **PRD authoring extras**
 
 - `anvil prd list` — List every PRD in the project (the multi-PRD entry
-  point), marking the default with `*` (`--json`).
+  point), marking the default with `*` (`--json`). Human output omits an empty
+  legacy title; JSON always includes `title` and returns `""` for such rows.
+  Listing is read-only and never backfills title data from source; re-run
+  `prd parse` explicitly to persist a canonical title.
 - `anvil prd find-decisions` — Scan a PRD for `[NEEDS DECISION]` markers,
   open questions, and missing acceptance-criteria/verification fields
   (`--file`, `--json`); read-only, always exits 0.

@@ -937,19 +937,21 @@ None — always returns a response.
 
 ### `parse_prd`
 
-Reads the managed default PRD source (or `file=` path), parses via
-`anvil.planning.template.parse_prd`, and emits `prd.parsed` on success. The
-resolver normally selects `~/.anvil/workspaces/<key>/.anvil/prd.md`, shared by
-the repository's worktrees; `ANVIL_STATE_LAYOUT=local` opts into
-`<cwd>/.anvil/prd.md`. Parse errors are returned in the response (not raised)
-so the caller can decide whether to fix and retry. Mirrors `anvil prd parse`.
+Reads the resolver-managed default or named PRD source, or an explicit `file=`
+path; parses via `anvil.planning.template.parse_prd`; and emits a
+create-if-absent `prd.parsed` or non-destructive `prd.revised` event on success.
+The resolver normally selects `~/.anvil/workspaces/<key>/.anvil/prd.md`, shared
+by the repository's worktrees; `ANVIL_STATE_LAYOUT=local` opts into
+`<cwd>/.anvil/prd.md`.
+Parse errors are returned in the response (not raised) so the caller can decide
+whether to fix and retry. Mirrors `anvil prd parse`.
 
 **Inputs**
 
 | Parameter | Type             | Required | Default                          |
 |-----------|------------------|----------|----------------------------------|
 | `file`    | `string \| null` | no       | managed source in resolver-selected state directory |
-| `prd_id`  | `string \| null` | no       | default PRD               |
+| `prd_id`  | `string \| null` | no       | default PRD                      |
 | `cwd`     | `string \| null` | no       | `Path.cwd()`                     |
 
 **Output**
@@ -961,18 +963,27 @@ so the caller can decide whether to fix and retry. Mirrors `anvil prd parse`.
   "feature_count": 1,
   "task_count": 2,
   "errors": [],
+  "error_count": 0,
+  "errors_shown": 0,
+  "errors_omitted": 0,
+  "errors_truncated": false,
+  "error_messages_truncated": 0,
   "prd_path": "default"
 }
 ```
 
 When `errors` is non-empty, no `prd.parsed` event is emitted (matching the CLI which exits 1
-before applying); the caller should fix the PRD and re-call.
+before applying); the caller should fix the PRD and re-call. Public diagnostics
+contain at most 20 sanitized entries and 1,024 UTF-8 bytes per message; the
+additive count fields distinguish a complete small list from a truncated one.
 
 **Failure modes**
 
 - `ToolError` — project not initialized.
 - `ToolError` — selected PRD source missing or not a verified regular file.
 - `ToolError` — selected PRD source exceeds the byte ceiling or is not UTF-8.
+- `ToolError` — a concurrent parse/review/approval made the optimistic event
+  precondition stale (the winning state is left unchanged).
 
 `prd_path` is retained as a compatibility field name, but its value is the
 stable source identity (`default`, a named PRD id, or `custom`), never a
@@ -1055,6 +1066,8 @@ and `prd review --approve`.
 
 - `ToolError` — no PRD found (run `parse_prd` first).
 - `ToolError` — wrong starting status for the requested transition.
+- `ToolError` — a concurrent same-revision lifecycle transition made the
+  revision/status precondition stale; the winning state remains unchanged.
 - `ToolError` — project not initialized.
 
 ---
@@ -1106,6 +1119,11 @@ default partition.
   "task_count": 2,
   "conflict_group_count": 0,
   "warnings": [],
+  "warning_count": 0,
+  "warnings_shown": 0,
+  "warnings_omitted": 0,
+  "warnings_truncated": false,
+  "warning_messages_truncated": 0,
   "llm_generated": false,
   "llm_provider": null,
   "pruned_task_ids": [],
@@ -1113,7 +1131,8 @@ default partition.
 }
 ```
 
-`warnings` mirrors the parse errors surfaced as warnings during plan (matching the CLI).
+`warnings` mirrors the bounded parse errors surfaced as warnings during plan
+(matching the CLI); the adjacent count fields disclose omitted diagnostics.
 `llm_generated` is `true` when this call drafted a `## Tasks` section via the LLM backstop
 and appended it to `prd.md`; `llm_provider` names the resolved provider in that case, else
 `null`. `pruned_task_ids` / `pruned_feature_ids` list any IDs deleted by the orphan-prune

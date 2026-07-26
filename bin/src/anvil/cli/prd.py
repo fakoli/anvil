@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 
 import typer
@@ -24,7 +25,7 @@ from anvil.cli._helpers import (
     selected_prd_source_path,
     validate_prd_id,
 )
-from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.cli._json import JSON_OPTION, emit_success, fail, fail_with
 from anvil.state.backend import EventRejected
 from anvil.state.models import EventDraft
 
@@ -33,6 +34,35 @@ prd_app = typer.Typer(
     help="PRD lifecycle commands: parse, assess, review, approve.",
     no_args_is_help=True,
 )
+
+_ALLOWED_TERMINAL_TITLE_FORMAT_CONTROLS = {"\u200c", "\u200d"}
+
+
+def _escape_legacy_title_for_terminal(title: str) -> str:
+    """Escape terminal-active legacy title code points without changing data.
+
+    New parses reject these characters, but old/imported event logs may already
+    contain them. Human output is a trust boundary; JSON and projection state
+    remain lossless and unchanged.
+    """
+    rendered: list[str] = []
+    for char in title:
+        category = unicodedata.category(char)
+        unsafe = category in {"Cc", "Cs", "Zl", "Zp"} or (
+            category == "Cf"
+            and char not in _ALLOWED_TERMINAL_TITLE_FORMAT_CONTROLS
+        )
+        if not unsafe:
+            rendered.append(char)
+            continue
+        codepoint = ord(char)
+        if codepoint <= 0xFF:
+            rendered.append(f"\\x{codepoint:02x}")
+        elif codepoint <= 0xFFFF:
+            rendered.append(f"\\u{codepoint:04x}")
+        else:
+            rendered.append(f"\\U{codepoint:08x}")
+    return "".join(rendered)
 
 @prd_app.command("parse")
 def prd_parse(
@@ -53,6 +83,7 @@ def prd_parse(
             "the default PRD. Ignored when --file is given."
         ),
     ),
+    json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
         "--cwd",
@@ -71,10 +102,11 @@ def prd_parse(
     On success, prints a summary of what was parsed.
     """
     from anvil.clock import SystemClock
+    from anvil.planning.diagnostics import format_parse_error, parse_diagnostic_report
     from anvil.planning.template import parse_prd
 
     state_dir = _resolve_state_dir(cwd)
-    _require_state_dir(state_dir)
+    _require_state_dir(state_dir, command="prd parse", json_output=json_output)
 
     # The parse-time prd_id controls id shape and the partition the event
     # writes into. ``--prd v0.2`` scopes to a named PRD; the default ('prd'
@@ -95,17 +127,49 @@ def prd_parse(
             source_identity = canonical_prd_id(parse_prd_id)
             source = ingest_prd_source_for_id(state_dir, parse_prd_id)
     except PrdSourceIngestError as exc:
-        suffix = f": {source_identity}" if source_identity is not None else ""
-        typer.echo(f"Error: {exc.message}{suffix}", err=True)
+        detail = f"{exc.message.rstrip('.')}."
+        if json_output:
+            code = "invalid_encoding" if exc.code == "source_invalid_utf8" else exc.code
+            fail("prd parse", detail, code=code)
+        suffix = f" Source: {source_identity}." if source_identity is not None else ""
+        typer.echo(f"Error: {detail}{suffix}", err=True)
         raise typer.Exit(code=1) from exc
     markdown = source.markdown
 
     result = parse_prd(markdown, prd_id=parse_prd_id)
 
     if result.errors:
-        for err in result.errors:
+        report = parse_diagnostic_report(result.errors)
+        if json_output:
+            fail_with(
+                "prd parse",
+                f"PRD parse failed with {len(result.errors)} error(s).",
+                code="parse_error",
+                extra={
+                    "errors": [
+                        {
+                            "section": err.section,
+                            "line": err.line,
+                            "message": err.message,
+                        }
+                        for err in report.entries
+                    ],
+                    "error_count": report.total_count,
+                    "errors_shown": report.shown_count,
+                    "errors_omitted": report.omitted_count,
+                    "errors_truncated": report.errors_truncated,
+                    "error_messages_truncated": report.messages_truncated,
+                },
+            )
+        for err in report.entries:
             typer.echo(
-                f"  Parse error [{err.section}:{err.line}]: {err.message}",
+                f"  Parse error {format_parse_error(err)}",
+                err=True,
+            )
+        if report.omitted_count:
+            typer.echo(
+                f"  ... showing {report.shown_count} of {report.total_count}; "
+                f"{report.omitted_count} omitted.",
                 err=True,
             )
         typer.echo(
@@ -117,6 +181,7 @@ def prd_parse(
 
     backend = _open_backend(state_dir)
     revised = False
+    effective_status = result.prd.status.value
     try:
         clock = SystemClock()
         now = clock.now()
@@ -142,9 +207,11 @@ def prd_parse(
         ]
 
         if existing_prd is None:
-            # FIRST parse of this prd_id → prd.parsed (destructive create).
+            # FIRST parse of this prd_id → create-if-absent prd.parsed.
             payload: dict[str, object] = {
                 "project_id": project_id,
+                "expected_absent": True,
+                "title": result.prd.title,
                 "status": result.prd.status.value,
                 "summary": result.prd.summary,
                 "goals": result.prd.goals,
@@ -154,23 +221,15 @@ def prd_parse(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                # The parsed heading title (guaranteed non-empty here — an
-                # empty/malformed heading is a ParseError that exits above).
-                # Stamped for default and named PRDs alike so `prd list`
-                # surfaces the same readable label for both. Safe to add to
-                # the default payload: ``title`` has been a PrdParsedPayload
-                # field since schema v7, and ``assumptions`` above is already
-                # stamped unconditionally (v16), so any older anvil that
-                # rejects this payload rejected it before this key existed.
-                "title": result.prd.title,
             }
 
             # Named PRD: stamp the partition so the backend writes ONLY this PRD's
             # rows (the prd.parsed handler scopes its DELETE/UPSERT by prd_id),
             # leaving other PRDs' requirements untouched. The default PRD omits
-            # prd_id / is_default / target_* so the payload defaults reproduce
-            # them (PrdParsedPayload defaults prd_id='default',
-            # is_default=True, target_*=None).
+            # only the partition identity keys (PrdParsedPayload defaults
+            # prd_id='default', is_default=True). New events carry canonical
+            # title metadata for both default and named PRDs; old events that
+            # omit title remain replay-compatible through the payload default.
             #
             # Gate on the RESOLVED parse_prd_id, not the raw ``--prd`` flag: the
             # reserved sentinels ``--prd default`` / ``--prd prd`` are legitimate
@@ -230,11 +289,18 @@ def prd_parse(
                 if rid in all_ids and rid not in live_by_id
             )
             if readded_retired:
-                ids = ", ".join(readded_retired)
+                from anvil.planning.diagnostics import format_identifier_summary
+
+                ids = format_identifier_summary(readded_retired)
+                message = (
+                    f"requirement id(s) {ids} were superseded in an earlier "
+                    "revision and cannot be re-added (ids are permanent "
+                    "lineage). Use a fresh id for the restored requirement."
+                )
+                if json_output:
+                    fail("prd parse", message, code="invalid_revision")
                 typer.echo(
-                    f"Error: requirement id(s) {ids} were superseded in an "
-                    "earlier revision and cannot be re-added (ids are permanent "
-                    "lineage). Use a fresh id for the restored requirement.",
+                    f"Error: {message}",
                     err=True,
                 )
                 raise typer.Exit(code=1)
@@ -261,10 +327,11 @@ def prd_parse(
                 "project_id": project_id,
                 "prd_id": stored_prd_id,
                 "revision": existing_prd.revision + 1,
+                "expected_status": existing_prd.status.value,
                 "is_default": existing_prd.is_default,
-                # Title follows the SOURCE on every parse (non-empty here — an
-                # empty/malformed heading is a ParseError that exits above), so
-                # renaming the heading and re-parsing updates the stored title.
+                # Title is parsed source metadata just like summary/goals. A
+                # title-only revision updates it while the status below stays
+                # anchored to the current lifecycle state.
                 "title": result.prd.title,
                 "target_version": existing_prd.target_version,
                 "target_tag": existing_prd.target_tag,
@@ -298,17 +365,35 @@ def prd_parse(
         try:
             backend.append(draft)
         except EventRejected as exc:
-            # The prd.revised gate (_check_prd_revised) can reject on PRD state —
-            # e.g. a concurrent re-parse off the same base computes the same
-            # revision number (revision != current+1). The old prd.parsed path
-            # never rejected on state, so without this guard the rejection would
-            # escape as a raw traceback. Surface it as a clean error + exit 1.
-            typer.echo(f"Error: PRD parse rejected: {exc}", err=True)
+            # Current create/revision events carry optimistic preconditions.
+            # A concurrent first parse, re-parse, review, or approval can make
+            # them stale; surface that domain rejection without a traceback.
+            message = f"PRD parse rejected: {exc}"
+            if json_output:
+                fail("prd parse", message, code="event_rejected")
+            typer.echo(f"Error: {message}", err=True)
             raise typer.Exit(code=1) from exc
+        persisted_prd = backend.get_prd(stored_prd_id)
+        if persisted_prd is not None:
+            effective_status = persisted_prd.status.value
     finally:
         backend.close()
 
     verb = "Revised" if revised else "Parsed"
+    if json_output:
+        emit_success(
+            "prd parse",
+            {
+                "prd_id": result.prd.id,
+                "action": "revised" if revised else "parsed",
+                "prd_status": effective_status,
+                "requirement_count": len(result.requirements),
+                "feature_count": len(result.features),
+                "task_count": len(result.tasks),
+                "prd_source": source_identity,
+            },
+        )
+        return
     typer.echo(
         f"{verb} {len(result.requirements)} requirements, "
         f"{len(result.features)} features, "
@@ -404,6 +489,11 @@ def prd_assess(
         assess_behavioral_readiness,
         findings_as_dicts,
     )
+    from anvil.planning.diagnostics import (
+        format_parse_error,
+        format_parse_error_summary,
+        parse_diagnostic_report,
+    )
     from anvil.planning.template import parse_prd
 
     command = "prd assess"
@@ -432,14 +522,22 @@ def prd_assess(
 
     result = parse_prd(markdown, prd_id=parse_prd_id)
     if result.errors:
-        message = f"PRD parse failed with {len(result.errors)} error(s): " + "; ".join(
-            f"[{error.section}:{error.line}] {error.message}" for error in result.errors
+        report = parse_diagnostic_report(result.errors)
+        message = (
+            f"PRD parse failed with {len(result.errors)} error(s): "
+            f"{format_parse_error_summary(result.errors)}"
         )
         if json_output:
             fail(command, message, code="parse_error")
-        for error in result.errors:
+        for error in report.entries:
             typer.echo(
-                f"  Parse error [{error.section}:{error.line}]: {error.message}",
+                f"  Parse error {format_parse_error(error)}",
+                err=True,
+            )
+        if report.omitted_count:
+            typer.echo(
+                f"  ... showing {report.shown_count} of {report.total_count}; "
+                f"{report.omitted_count} omitted.",
                 err=True,
             )
         typer.echo(f"Error: {message}", err=True)
@@ -557,9 +655,20 @@ def prd_review(
                 action="prd.approved",
                 target_kind="prd",
                 target_id=project_id,
-                payload_json=_scope({"project_id": project_id, "approver": reviewer}),
+                payload_json=_scope(
+                    {
+                        "project_id": project_id,
+                        "expected_revision": prd_model.revision,
+                        "expected_status": prd_model.status.value,
+                        "approver": reviewer,
+                    }
+                ),
             )
-            backend.append(draft)
+            try:
+                backend.append(draft)
+            except EventRejected as exc:
+                typer.echo(f"Error: PRD approval rejected: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             typer.echo(f"PRD approved by '{reviewer}'.")
         else:
             if prd_model.status.value != "draft":
@@ -578,10 +687,20 @@ def prd_review(
                 target_kind="prd",
                 target_id=project_id,
                 payload_json=_scope(
-                    {"project_id": project_id, "reviewer": reviewer, "notes": notes}
+                    {
+                        "project_id": project_id,
+                        "expected_revision": prd_model.revision,
+                        "expected_status": prd_model.status.value,
+                        "reviewer": reviewer,
+                        "notes": notes,
+                    }
                 ),
             )
-            backend.append(draft)
+            try:
+                backend.append(draft)
+            except EventRejected as exc:
+                typer.echo(f"Error: PRD review rejected: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             typer.echo(f"PRD reviewed by '{reviewer}'.")
             typer.echo("Run `anvil prd review --approve` to approve.")
     finally:
@@ -658,7 +777,8 @@ def prd_list(
         marker = "*" if p.is_default else " "
         target = p.target_version or p.target_tag
         suffix = f" -> {target}" if target else ""
-        title = f"  {p.title}" if p.title else ""
+        safe_title = _escape_legacy_title_for_terminal(p.title)
+        title = f"  {safe_title}" if safe_title else ""
         typer.echo(f"{marker} {p.id}  [{p.status.value} r{p.revision}]{suffix}{title}")
 
 
@@ -696,6 +816,11 @@ def prd_find_decisions(
         DecisionKind,
         UnresolvedDecision,
         find_unresolved_decisions,
+    )
+    from anvil.planning.diagnostics import (
+        format_parse_error,
+        format_parse_error_summary,
+        parse_diagnostic_report,
     )
     from anvil.planning.template import parse_prd
 
@@ -737,14 +862,19 @@ def prd_find_decisions(
             fail(
                 "prd find-decisions",
                 f"PRD parse failed with {len(result.errors)} error(s): "
-                + "; ".join(
-                    f"[{e.section}:{e.line}] {e.message}" for e in result.errors
-                ),
+                + format_parse_error_summary(result.errors),
                 code="parse_error",
             )
-        for err in result.errors:
+        report = parse_diagnostic_report(result.errors)
+        for err in report.entries:
             typer.echo(
-                f"  Parse error [{err.section}:{err.line}]: {err.message}",
+                f"  Parse error {format_parse_error(err)}",
+                err=True,
+            )
+        if report.omitted_count:
+            typer.echo(
+                f"  ... showing {report.shown_count} of {report.total_count}; "
+                f"{report.omitted_count} omitted.",
                 err=True,
             )
         typer.echo(

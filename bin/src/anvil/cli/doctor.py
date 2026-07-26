@@ -320,6 +320,11 @@ def _preflight_findings(
         return findings
 
     if parsed.errors:
+        from anvil.planning.diagnostics import (
+            bounded_parse_errors,
+            format_parse_error,
+        )
+
         findings.append(
             _Finding(
                 "prd_parse",
@@ -330,8 +335,8 @@ def _preflight_findings(
                     "path": str(prd_path),
                     "prd_id": prd_id,
                     "errors": [
-                        f"[{e.section}:{e.line}] {e.message}"
-                        for e in parsed.errors
+                        format_parse_error(e)
+                        for e in bounded_parse_errors(parsed.errors)
                     ],
                 },
             )

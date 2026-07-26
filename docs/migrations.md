@@ -30,6 +30,12 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v15     | Bundle result projection (issue #171) | Adds authoritative `last_result_at` timing for applied reviewed/integrated/merged/completed transitions. |
 | v16     | Behavior-first PRD readiness | `prds` adds `assumptions TEXT NOT NULL DEFAULT '[]'`, storing typed, stable PRD assumptions alongside the canonical PRD state. The additive default preserves the prior meaning for every existing PRD: no recorded assumptions. |
 
+Canonical PRD titles require no new schema migration: `prds.title` has existed
+since v7. Historical rows and legacy events that have no title remain `""`;
+Anvil never guesses from a PRD id or source file during migration or listing.
+An explicit `prd parse` reparse records the first canonical title as an audited
+`prd.revised` event.
+
 ## Execution bundles — v0-v10 → v11 auto-upgrade
 
 The v11 migration is additive. It creates three new tables and three indexes; it

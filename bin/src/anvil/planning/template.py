@@ -61,10 +61,12 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
+from markdown_it import MarkdownIt
 
 from anvil.state.models import (
     DEFAULT_PRD_ID,
@@ -95,6 +97,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AcceptanceClause",
+    "MAX_PRD_TITLE_UTF8_BYTES",
     "ParseError",
     "ParseResult",
     "parse_acceptance_grammar",
@@ -125,6 +128,15 @@ _DESCRIPTION_SHORT_THRESHOLD = DESCRIPTION_SHORT_THRESHOLD
 # bare deliberately limits the blast radius of prefixed ids to newly-named PRDs
 # (a `^T\d+` matcher in claims/skills/drift still matches the default PRD).
 DEFAULT_PARSE_PRD_ID = "prd"
+
+# Canonical titles are persisted and later rendered to terminals, JSON, and
+# provider payloads. Bound the encoded representation rather than Python code
+# points so storage/network costs are deterministic across scripts. Ordinary
+# Unicode (including RTL letters), combining marks, emoji, and inline Markdown
+# remains valid. Invisible Unicode format controls are rejected except ZWNJ and
+# ZWJ, which are required by legitimate scripts and emoji sequences.
+MAX_PRD_TITLE_UTF8_BYTES = 512
+_ALLOWED_TITLE_FORMAT_CONTROLS = {"\u200c", "\u200d"}
 
 # ---------------------------------------------------------------------------
 # Public data types
@@ -172,6 +184,30 @@ class AcceptanceClause(NamedTuple):
     text: str
     kind: str
     clauses: dict[str, str]
+
+
+def _canonical_title_error(title: str) -> str | None:
+    """Return a bounded validation message for unsafe canonical title text.
+
+    The message never includes author-controlled title bytes, so a rejected
+    escape/control sequence cannot reach terminal output through diagnostics.
+    """
+    try:
+        encoded = title.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return "Project title must contain valid Unicode scalar values."
+    if len(encoded) > MAX_PRD_TITLE_UTF8_BYTES:
+        return (
+            "Project title exceeds the "
+            f"{MAX_PRD_TITLE_UTF8_BYTES}-byte UTF-8 limit."
+        )
+    for char in title:
+        category = unicodedata.category(char)
+        if category in {"Cc", "Cs", "Zl", "Zp"}:
+            return "Project title contains an unsafe control character."
+        if category == "Cf" and char not in _ALLOWED_TITLE_FORMAT_CONTROLS:
+            return "Project title contains an unsafe Unicode format control."
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -359,38 +395,65 @@ def _is_malformed_id_prefix(raw_id: str, expected_letter: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _split_sections(lines: list[str]) -> dict[str, tuple[int, list[str]]]:
+_ATX_H1_RE = re.compile(r"^ {0,3}#(?:[ \t]+(?P<heading>.*?))?[ \t]*$")
+_ATX_CLOSING_SEQUENCE_RE = re.compile(r"(?:[ \t]+|^)#+[ \t]*$")
+_COMMONMARK = MarkdownIt("commonmark")
+
+
+def _root_atx_heading_lines(markdown: str) -> dict[int, int]:
+    """Map one-based source lines to root-level ATX heading levels.
+
+    CommonMark owns block recognition here: headings nested in containers or
+    hidden by fenced code/raw HTML never become eligible tokens. The source
+    line remains authoritative for inline title text so entity spelling and
+    other raw author input keep the parser's historical semantics.
+    """
+    headings: dict[int, int] = {}
+    for token in _COMMONMARK.parse(markdown):
+        if (
+            token.type == "heading_open"
+            and token.level == 0
+            and token.tag in {"h1", "h2"}
+            and token.markup in {"#", "##"}
+            and token.map is not None
+        ):
+            headings[token.map[0] + 1] = int(token.tag[1])
+    return headings
+
+
+def _split_sections(
+    lines: list[str], root_headings: dict[int, int]
+) -> dict[str, tuple[int, list[str]]]:
     """Split the document on ## headings.
 
     Returns a dict mapping normalised section name → (start_line, body_lines).
-    The special key "__project__" holds the # Project heading line.
+    The special key "__project__" holds the first real document H1. Headings
+    inside fenced code blocks remain body content, as do later H1s.
     """
     sections: dict[str, tuple[int, list[str]]] = {}
     current_name: str | None = None
     current_start: int = 0
     current_body: list[str] = []
-
-    def _store(name: str, start: int, body: list[str]) -> None:
-        # First # heading wins: the splitter is fence-blind, so a later
-        # top-level line (a trailing `# Appendix` H1, or a `# comment` inside
-        # a fenced code block) must not replace the PRD's title block — it
-        # would hijack the extracted title or, for a fenced `# Project:`
-        # line, turn a valid PRD into a parse error.
-        if name == "__project__" and name in sections:
-            return
-        sections[name] = (start, body)
+    project_seen = False
 
     for lineno, raw in enumerate(lines, start=1):
-        if raw.startswith("# ") and not raw.startswith("## "):
-            # Top-level heading — project title.
+        heading_level = root_headings.get(lineno)
+        if heading_level == 1:
+            # Only the first real top-level heading defines project metadata.
+            # Later H1s are document content and cannot replace it.
+            if project_seen:
+                if current_name is not None:
+                    current_body.append(raw)
+                continue
             if current_name is not None:
-                _store(current_name, current_start, current_body)
+                sections[current_name] = (current_start, current_body)
             current_name = "__project__"
             current_start = lineno
             current_body = [raw]
-        elif raw.startswith("## "):
+            project_seen = True
+        elif heading_level == 2 and raw.startswith("## "):
             if current_name is not None:
-                _store(current_name, current_start, current_body)
+                sections[current_name] = (current_start, current_body)
             heading = raw[3:].strip()
             current_name = heading.strip().lower().replace(" ", "_")
             current_start = lineno
@@ -400,7 +463,7 @@ def _split_sections(lines: list[str]) -> dict[str, tuple[int, list[str]]]:
                 current_body.append(raw)
 
     if current_name is not None:
-        _store(current_name, current_start, current_body)
+        sections[current_name] = (current_start, current_body)
 
     return sections
 
@@ -433,12 +496,6 @@ _RELEASE_FIELD_RE = re.compile(
 # "v0.2.0 (v0.2)". The parenthetical sets target_tag; the leading token sets
 # target_version.
 _RELEASE_TAG_RE = re.compile(r"^(.*?)\s*\(\s*(?:tag\s*:\s*)?([^)]+?)\s*\)\s*$")
-# The top-level PRD heading: ``# Project: <Name>`` (template form) or a bare
-# ``# <Name>``. The optional ``Project:`` prefix is boilerplate, not part of
-# the readable name, so it is stripped from the captured title.
-_PROJECT_TITLE_RE = re.compile(
-    r"^#\s+(?:project\s*:\s*)?(?P<title>.*)$", re.IGNORECASE
-)
 
 
 def _split_release_value(value: str) -> tuple[str | None, str | None]:
@@ -1796,16 +1853,16 @@ def parse_prd(
     # bottom of this function sees the cleaned text — never the raw PRD
     # markup with comments inside it.
     cleaned = _strip_html_comments(markdown)
-    lines = cleaned.splitlines()
+    # CommonMark recognizes only CRLF, CR, and LF as line endings. Python's
+    # splitlines() also consumes literal control and Unicode separators.
+    lines = re.split(r"\r\n?|\n", cleaned)
 
-    sections = _split_sections(lines)
+    sections = _split_sections(lines, _root_atx_heading_lines(cleaned))
 
     # --- Required: # Project heading ------------------------------------
-    # The heading names the PRD: ``# Project: <Name>`` (the template form) or a
-    # bare ``# <Name>``. The extracted name becomes ``PRD.title`` — the
-    # canonical human-readable label that ``prd list`` and API consumers
-    # surface. A heading that yields an empty name is a parse error, so a
-    # parse-persisted PRD always carries a non-empty title.
+    # Derive the canonical title once so downstream consumers do not need to
+    # re-parse Markdown.  The documented ``# Project: <Title>`` form drops the
+    # label; other valid H1 text remains a deterministic fallback title.
     title = ""
     proj_block = sections.get("__project__")
     if proj_block is None:
@@ -1818,8 +1875,13 @@ def parse_prd(
         )
     else:
         proj_line = proj_block[1][0] if proj_block[1] else ""
-        m_title = _PROJECT_TITLE_RE.match(proj_line.strip())
-        title = m_title.group("title").strip() if m_title else ""
+        heading_match = _ATX_H1_RE.fullmatch(proj_line)
+        if heading_match is not None:
+            heading_text = (heading_match.group("heading") or "").strip(" \t")
+            heading_text = _ATX_CLOSING_SEQUENCE_RE.sub("", heading_text).strip(" \t")
+            title = re.sub(
+                r"^Project:[ \t]*", "", heading_text, count=1, flags=re.IGNORECASE
+            ).strip(" \t")
         if not title:
             errors.append(
                 ParseError(
@@ -1831,6 +1893,20 @@ def parse_prd(
                     ),
                 )
             )
+        else:
+            title_error = _canonical_title_error(title)
+            if title_error is not None:
+                errors.append(
+                    ParseError(
+                        section="# Project",
+                        line=proj_block[0],
+                        message=title_error,
+                    )
+                )
+                # ParseResult may still be inspected after an error. Never
+                # carry rejected bytes in the partial model, even though the
+                # CLI/MCP already refuse to persist any errored parse.
+                title = ""
 
     # --- Required: ## Summary -------------------------------------------
     summary = ""

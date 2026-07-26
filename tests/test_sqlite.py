@@ -1622,11 +1622,16 @@ class TestHandlePrdParsed:
 
             prd = b.get_prd()
             assert prd is not None
+            # The fixture intentionally models a historical payload that
+            # predates title persistence. Its omitted title must remain a
+            # blank display value instead of being inferred during replay.
+            assert prd.title == ""
             assert prd.assumptions[0].requirement_ids == ["R001"]
 
             b.replay_from_empty(events_path)
             replayed = b.get_prd()
             assert replayed is not None
+            assert replayed.title == ""
             assert replayed.assumptions[0].statement == (
                 "Use the existing local store first."
             )
@@ -1824,8 +1829,9 @@ def _make_prd_revised_payload(
     superseded: list[dict[str, Any]] | None = None,
     unchanged: list[dict[str, Any]] | None = None,
     assumptions: list[dict[str, Any]] | None = None,
+    expected_status: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "project_id": "proj-1",
         "prd_id": prd_id,
         "revision": revision,
@@ -1841,6 +1847,9 @@ def _make_prd_revised_payload(
         "requirements_superseded": superseded or [],
         "requirements_unchanged": unchanged or [],
     }
+    if expected_status is not None:
+        payload["expected_status"] = expected_status
+    return payload
 
 
 def _requirements_lineage(db_path: str) -> dict[str, tuple[int | None, int | None]]:
@@ -2089,6 +2098,33 @@ class TestHandlePrdRevised:
         finally:
             b.close()
 
+    def test_overlapping_requirement_diff_is_rejected_before_append(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            events_path = tmp_path / "events.jsonl"
+            event_count = len(events_path.read_text(encoding="utf-8").splitlines())
+            with pytest.raises(EventRejected, match="unique and disjoint"):
+                _apply(
+                    b,
+                    "prd.revised",
+                    _make_prd_revised_payload(
+                        revision=2,
+                        superseded=[_req("R001", "v1 one")],
+                        unchanged=[_req("R001", "contradictory carry")],
+                    ),
+                )
+            assert (
+                len(events_path.read_text(encoding="utf-8").splitlines())
+                == event_count
+            )
+            assert {item.id for item in b.list_requirements()} == {"R001", "R002"}
+            assert b.get_prd().revision == 1
+        finally:
+            b.close()
+
     def test_stale_revision_is_rejected(self, tmp_path: Path) -> None:
         """revision must be exactly current+1 — a stale/skipped revision rejects."""
         b = _make_backend(tmp_path)
@@ -2102,6 +2138,247 @@ class TestHandlePrdRevised:
                         revision=3, added=[_req("R003", "skip")]
                     ),
                 )
+        finally:
+            b.close()
+
+    def test_current_first_parse_is_create_if_absent_atomically(
+        self, tmp_path: Path
+    ) -> None:
+        """A current first-parse payload cannot overwrite a PRD that appeared
+        after the producer's absence read; the rejected fact never enters the
+        authoritative event log."""
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            winner = _make_prd_parsed_payload(summary="Concurrent winner.")
+            winner["expected_absent"] = True
+            winner["title"] = "Concurrent Winner"
+            b.append(_make_event("prd.parsed", winner))
+
+            stale = _make_prd_parsed_payload(summary="Stale overwrite.")
+            stale["expected_absent"] = True
+            stale["title"] = "Stale Loser"
+            with pytest.raises(EventRejected, match="created after.*prepared"):
+                b.append(_make_event("prd.parsed", stale))
+
+            prd = b.get_prd("default")
+            assert prd is not None
+            assert prd.title == "Concurrent Winner"
+            assert prd.summary == "Concurrent winner."
+            assert [
+                event["action"]
+                for event in _read_jsonl(str(tmp_path / "events.jsonl"))
+            ].count("prd.parsed") == 1
+        finally:
+            b.close()
+
+    def test_stale_create_with_hostile_prd_id_is_bounded_and_atomic(
+        self, tmp_path: Path
+    ) -> None:
+        """A hostile partition id cannot amplify the stale-create refusal."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        hostile_id = "secret-" + ("x" * 100_000) + "\nsecond-line"
+        try:
+            _setup_project(b)
+            winner = _make_prd_parsed_payload(summary="Concurrent winner.")
+            winner.update(
+                prd_id=hostile_id,
+                expected_absent=True,
+                is_default=False,
+                title="Concurrent Winner",
+            )
+            b.append(_make_event("prd.parsed", winner))
+            before_log = events_path.read_bytes()
+            before = b.get_prd(hostile_id)
+
+            stale = _make_prd_parsed_payload(summary="Stale overwrite.")
+            stale.update(
+                prd_id=hostile_id,
+                expected_absent=True,
+                is_default=False,
+                title="Stale Loser",
+            )
+            with pytest.raises(EventRejected) as exc_info:
+                b.append(_make_event("prd.parsed", stale))
+
+            message = str(exc_info.value)
+            assert len(message.encode("utf-8")) <= 4096
+            assert "\n" not in message
+            assert hostile_id not in message
+            assert "<redacted type=str utf8_bytes=" in message
+            assert events_path.read_bytes() == before_log
+            after = b.get_prd(hostile_id)
+            assert before is not None and after is not None
+            assert after.model_dump() == before.model_dump()
+        finally:
+            b.close()
+
+    def test_expected_status_rejects_concurrent_lifecycle_drift_atomically(
+        self, tmp_path: Path
+    ) -> None:
+        """A revision prepared while draft cannot overwrite a review/approval
+        that lands before append. Revision is unchanged by lifecycle events, so
+        the explicit status CAS is required in addition to revision CAS."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            stale_revision = _make_prd_revised_payload(
+                revision=2,
+                status="draft",
+                expected_status="draft",
+                unchanged=[_req("R001", "v1 one"), _req("R002", "v1 two")],
+            )
+            _apply(
+                b,
+                "prd.reviewed",
+                {"project_id": "proj-1", "reviewer": "alice"},
+            )
+            _apply(
+                b,
+                "prd.approved",
+                {"project_id": "proj-1", "approver": "bob"},
+            )
+
+            with pytest.raises(
+                (EventRejected, TransactionAborted),
+                match="lifecycle status changed|observed 'draft'.*current 'approved'",
+            ):
+                _apply(b, "prd.revised", stale_revision)
+
+            prd = b.get_prd()
+            assert prd is not None
+            assert prd.status.value == "approved"
+            assert prd.revision == 1
+            assert {r.id for r in b.list_requirements()} == {"R001", "R002"}
+        finally:
+            b.close()
+
+    def test_review_status_cas_rejects_same_revision_drift_and_replay_is_monotonic(
+        self, tmp_path: Path
+    ) -> None:
+        """A stale draft review cannot demote same-revision approved state."""
+        b = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            self._parse_two_reqs(b)
+            stale = _make_event(
+                "prd.reviewed",
+                {
+                    "project_id": "proj-1",
+                    "expected_revision": 1,
+                    "expected_status": "draft",
+                    "reviewer": "stale-reviewer",
+                },
+            )
+            _apply(
+                b,
+                "prd.reviewed",
+                {
+                    "project_id": "proj-1",
+                    "expected_revision": 1,
+                    "expected_status": "draft",
+                    "reviewer": "current-reviewer",
+                },
+            )
+            _apply(
+                b,
+                "prd.approved",
+                {
+                    "project_id": "proj-1",
+                    "expected_revision": 1,
+                    "expected_status": "reviewed",
+                    "approver": "current-approver",
+                },
+            )
+            before_log = events_path.read_bytes()
+            with pytest.raises(EventRejected, match="lifecycle changed") as exc_info:
+                b.append(stale)
+            message = str(exc_info.value)
+            assert len(message.encode("utf-8")) <= 4096
+            assert "\n" not in message
+            assert events_path.read_bytes() == before_log
+            prd = b.get_prd()
+            assert prd is not None
+            assert prd.status.value == "approved"
+            assert prd.revision == 1
+
+            # Replay bypasses validation. Inject the rejected fact as a
+            # canonical next event to exercise the projector-side CAS.
+            events = _read_jsonl(str(events_path))
+            poisoned = Event(
+                id=f"E{len(events) + 1:06d}",
+                **stale.model_dump(),
+            )
+            with events_path.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(poisoned.model_dump_json() + "\n")
+            b.replay_from_empty(str(events_path))
+            replayed = b.get_prd()
+            assert replayed is not None
+            assert replayed.status.value == "approved"
+            assert replayed.revision == 1
+        finally:
+            b.close()
+
+    def test_expected_status_cannot_author_a_different_lifecycle_value(
+        self, tmp_path: Path
+    ) -> None:
+        """The CAS token also binds the status carried into the write path; a
+        caller cannot observe draft and use that token to mint approved."""
+        b = _make_backend(tmp_path)
+        try:
+            self._parse_two_reqs(b)
+            with pytest.raises(
+                (EventRejected, TransactionAborted),
+                match="payload status must match expected_status",
+            ):
+                _apply(
+                    b,
+                    "prd.revised",
+                    _make_prd_revised_payload(
+                        revision=2,
+                        status="approved",
+                        expected_status="draft",
+                        unchanged=[
+                            _req("R001", "v1 one"),
+                            _req("R002", "v1 two"),
+                        ],
+                    ),
+                )
+            prd = b.get_prd()
+            assert prd is not None
+            assert prd.status.value == "draft"
+            assert prd.revision == 1
+        finally:
+            b.close()
+
+    def test_legacy_revision_without_expected_status_replays_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """Historical prd.revised payloads omit expected_status. They remain
+        valid and replay to the same projection; only current producers opt in
+        to the lifecycle CAS."""
+        b = _make_backend(tmp_path)
+        events_path = str(tmp_path / "events.jsonl")
+        try:
+            self._parse_two_reqs(b)
+            legacy_payload = _make_prd_revised_payload(
+                revision=2,
+                unchanged=[_req("R001", "v1 one"), _req("R002", "v1 two")],
+            )
+            assert "expected_status" not in legacy_payload
+            assert "title" not in legacy_payload
+            _apply(b, "prd.revised", legacy_payload)
+            before = b.get_prd()
+            assert before is not None and before.revision == 2
+            assert before.title == ""
+
+            b.replay_from_empty(events_path)
+            after = b.get_prd()
+            assert after is not None
+            assert after.title == before.title == ""
+            assert after.status == before.status
+            assert after.revision == before.revision
         finally:
             b.close()
 
@@ -6420,6 +6697,32 @@ class TestPayloadValidation:
             "reviewer": "alice",
         })
         assert obj.reviewer == "alice"
+        assert obj.expected_status is None
+
+        current = p.PrdReviewedPayload.model_validate({
+            "project_id": "proj-1",
+            "expected_revision": 1,
+            "expected_status": "draft",
+            "reviewer": "alice",
+        })
+        assert current.expected_status == "draft"
+
+    def test_prd_lifecycle_expected_status_is_transition_typed(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        p = self._import_payload_models()
+        with pytest.raises(PydanticValidationError, match="expected_status"):
+            p.PrdReviewedPayload.model_validate({
+                "project_id": "proj-1",
+                "expected_status": "reviewed",
+                "reviewer": "alice",
+            })
+        with pytest.raises(PydanticValidationError, match="expected_status"):
+            p.PrdApprovedPayload.model_validate({
+                "project_id": "proj-1",
+                "expected_status": "draft",
+                "approver": "bob",
+            })
 
     def test_prd_revised_payload_validates_good(self) -> None:
         p = self._import_payload_models()
@@ -6427,6 +6730,7 @@ class TestPayloadValidation:
             "project_id": "proj-1",
             "prd_id": "default",
             "revision": 2,
+            "expected_status": "reviewed",
             "summary": "revised summary",
             "requirements_added": [{"id": "R002"}],
             "requirements_superseded": [{"id": "R001"}],
@@ -6434,6 +6738,7 @@ class TestPayloadValidation:
         })
         assert obj.project_id == "proj-1"
         assert obj.revision == 2
+        assert obj.expected_status == "reviewed"
         assert obj.requirements_added == [{"id": "R002"}]
         assert obj.requirements_superseded == [{"id": "R001"}]
 
@@ -6449,9 +6754,72 @@ class TestPayloadValidation:
         # is_default=False so a named-PRD revision never flips is_default 0→1
         # and breaks the ux_prds_default single-default invariant.
         assert obj.is_default is False
+        assert obj.expected_status is None
         assert obj.requirements_added == []
         assert obj.requirements_superseded == []
         assert obj.requirements_unchanged == []
+
+    @pytest.mark.parametrize(
+        ("payload_update", "detail"),
+        [
+            (
+                {
+                    "requirements_superseded": [{"id": "R001"}],
+                    "requirements_unchanged": [{"id": "R001"}],
+                },
+                "R001 appears in requirements_superseded, requirements_unchanged",
+            ),
+            (
+                {
+                    "requirements_added": [{"id": "R002"}, {"id": "R002"}],
+                },
+                "requirements_added repeats R002",
+            ),
+        ],
+    )
+    def test_prd_revised_payload_requires_disjoint_unique_requirement_diff(
+        self,
+        payload_update: dict[str, object],
+        detail: str,
+    ) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        p = self._import_payload_models()
+        payload: dict[str, object] = {
+            "project_id": "proj-1",
+            "revision": 2,
+            **payload_update,
+        }
+        with pytest.raises(PydanticValidationError, match=detail):
+            p.PrdRevisedPayload.model_validate(payload)
+
+    def test_prd_revised_payload_expected_status_is_typed(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        p = self._import_payload_models()
+        with pytest.raises(PydanticValidationError, match="expected_status"):
+            p.PrdRevisedPayload.model_validate({
+                "project_id": "proj-1",
+                "revision": 2,
+                "expected_status": "accepted",
+            })
+
+    def test_prd_parsed_expected_absence_is_true_or_legacy_none(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        p = self._import_payload_models()
+        current = p.PrdParsedPayload.model_validate({
+            "project_id": "proj-1",
+            "expected_absent": True,
+        })
+        legacy = p.PrdParsedPayload.model_validate({"project_id": "proj-1"})
+        assert current.expected_absent is True
+        assert legacy.expected_absent is None
+        with pytest.raises(PydanticValidationError, match="expected_absent"):
+            p.PrdParsedPayload.model_validate({
+                "project_id": "proj-1",
+                "expected_absent": False,
+            })
 
     def test_prd_revised_payload_missing_revision_rejects(self) -> None:
         """revision is required (no default); omitting it raises ValidationError.
@@ -8416,6 +8784,47 @@ class TestV7ToV8Migration:
             assert b.get_prd().revision == 1
         finally:
             b.close()
+
+    def test_v7_named_blank_title_survives_full_upgrade(self, tmp_path: Path) -> None:
+        """Historical blanks stay blank; migrations never infer display data."""
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        self._stand_up_v7_db(db_path, events_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO prds "
+                "(id, project_id, status, is_default, created_at, updated_at) "
+                "VALUES ('v0.2', 'proj-1', 'draft', 0, ?, ?)",
+                (_T0.isoformat(), _T0.isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        backend = SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        backend.initialize()
+        try:
+            named = backend.get_prd("v0.2")
+            assert named is not None
+            assert named.title == ""
+            assert named.revision == 1
+            assert named.is_default is False
+            assert {prd.id for prd in backend.list_prds()} == {"default", "v0.2"}
+        finally:
+            backend.close()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute(
+                "SELECT title FROM prds WHERE id = 'v0.2'"
+            ).fetchone()[0] == ""
+        finally:
+            conn.close()
 
     def test_v7_to_v8_is_idempotent(self, tmp_path: Path) -> None:
         """Re-running the v8 step on an already-v8 DB is a clean no-op (the ALTER

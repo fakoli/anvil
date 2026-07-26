@@ -81,6 +81,15 @@ replay sees both `claim.created` events. Resolution rule:
 - This is the existing reconciliation engine's job — it already detects and repairs
   drift between sources of truth; merged-branch claim conflicts become one more
   discrepancy kind.
+- PRD replay adds a causal projection rule above HLC ordering for current
+  optimistic payloads. Competing create-if-absent parses are first-writer-wins;
+  their lifecycle descendants remain bound to that winning content lineage.
+  A material revision dominates stale sibling title/lifecycle facts, while a
+  review or approval causally descended from the material revision may promote
+  it. Current review/approval facts bind both the content revision and observed
+  lifecycle status because those transitions do not increment revision. Every
+  event remains in the audit mirror even when its projection effect is
+  suppressed. Legacy unmarked payloads keep their historical behavior.
 
 The conflict-group and `check_conflicts` machinery is unchanged — it still prevents
 conflicting *local* claims at claim time; the reconciler handles the cross-branch case

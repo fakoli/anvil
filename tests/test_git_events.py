@@ -30,7 +30,10 @@ import os
 import re
 import shutil
 import sqlite3
+import time
+import tracemalloc
 from datetime import UTC, datetime, timedelta
+from itertools import permutations
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +43,7 @@ from typer.testing import CliRunner
 
 from anvil.cli import app
 from anvil.clock import FrozenClock
+from anvil.state.backend import EventRejected, TransactionAborted
 from anvil.state.hashing import canonical_payload_json, hash_event_id
 from anvil.state.models import Event, EventDraft
 from anvil.state.snapshot import serialize_state
@@ -117,6 +121,111 @@ def _task_payload(task_id: str = "T001") -> dict[str, Any]:
         "created_at": _T0.isoformat(),
         "updated_at": _T0.isoformat(),
     }
+
+
+def _prd_parsed_payload(
+    *,
+    prd_id: str = "default",
+    title: str = "Original PRD",
+    expected_absent: bool | None = True,
+    requirements: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "project_id": "proj-1",
+        "prd_id": prd_id,
+        "title": title,
+        "is_default": prd_id == "default",
+        "status": "draft",
+        "summary": "Git replay PRD.",
+        "goals": [],
+        "non_goals": [],
+        "requirements": requirements or [],
+        "acceptance_criteria": [],
+        "risks": [],
+        "open_questions": [],
+        "assumptions": [],
+    }
+    if expected_absent is not None:
+        payload["expected_absent"] = expected_absent
+    return payload
+
+
+def _prd_revised_payload(
+    *,
+    prd_id: str = "default",
+    revision: int = 2,
+    title: str = "Renamed PRD",
+    expected_status: str | None = "draft",
+    superseded: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "project_id": "proj-1",
+        "prd_id": prd_id,
+        "revision": revision,
+        "is_default": prd_id == "default",
+        "title": title,
+        "status": "draft",
+        "summary": "Git replay PRD.",
+        "goals": [],
+        "non_goals": [],
+        "acceptance_criteria": [],
+        "risks": [],
+        "open_questions": [],
+        "assumptions": [],
+        "requirements_added": [],
+        "requirements_superseded": superseded or [],
+        "requirements_unchanged": [],
+    }
+    if expected_status is not None:
+        payload["expected_status"] = expected_status
+    return payload
+
+
+def _seed_prd(b: SqliteBackend, *, prd_id: str = "default") -> None:
+    b.append(
+        _draft(
+            "project.created",
+            {
+                "id": "proj-1",
+                "name": "Git PRD",
+                "description": "",
+                "created_at": _T0.isoformat(),
+                "updated_at": _T0.isoformat(),
+            },
+        )
+    )
+    b.append(_draft("state.initialized", {}))
+    b.append(
+        _draft(
+            "prd.parsed",
+            _prd_parsed_payload(prd_id=prd_id),
+            target_kind="prd",
+            target_id=prd_id,
+        )
+    )
+
+
+def _handcrafted_git_event(
+    *,
+    event_id: str,
+    parent_event_id: str,
+    lamport: int,
+    action: str,
+    payload: dict[str, Any],
+    prd_id: str = "default",
+    timestamp_offset: int = 1,
+) -> str:
+    return json.dumps({
+        "timestamp": (_T0 + timedelta(seconds=timestamp_offset)).isoformat(),
+        "actor": "git-branch",
+        "action": action,
+        "target_kind": "prd",
+        "target_id": prd_id,
+        "payload_json": payload,
+        "id": event_id,
+        "parent_event_id": parent_event_id,
+        "lamport": lamport,
+    })
 
 
 def _claim_payload(
@@ -202,6 +311,29 @@ def _log_lines(state_dir: Path) -> list[dict[str, Any]]:
             if line.strip():
                 out.append(json.loads(line))
     return out
+
+
+def _append_external_initialized(events_path: Path, event_id: str) -> None:
+    """Append one valid Git event as a non-cooperating external writer."""
+    lines = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    tail = lines[-1]
+    event = {
+        "timestamp": (_T0 + timedelta(seconds=100)).isoformat(),
+        "actor": "external-writer",
+        "action": "state.initialized",
+        "target_kind": "project",
+        "target_id": "proj-1",
+        "payload_json": {},
+        "id": event_id,
+        "parent_event_id": tail["id"],
+        "lamport": max(int(line.get("lamport") or 0) for line in lines) + 1,
+    }
+    with events_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event, separators=(",", ":")) + "\n")
 
 
 def _events_table(state_dir: Path) -> list[tuple[str, int | None]]:
@@ -490,6 +622,514 @@ class TestGitReplayDedupe:
         assert len(rows) == 7
         assert [seq for _id, seq in rows] == list(range(1, 8))
 
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_conflicting_duplicate_id_fails_closed_in_every_file_order(
+        self, tmp_path: Path, reverse: bool
+    ) -> None:
+        """One id with unequal normalized event material is corruption.
+
+        Trusting the first physical occurrence would select a different title
+        when merge=union line order flips. Replay must instead reject both
+        permutations with the same deterministic error.
+        """
+        base = tmp_path / f"duplicate-conflict-base-{reverse}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        first = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(title="Duplicate A"),
+        )
+        second = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(title="Duplicate B"),
+        )
+        suffix = [second, first] if reverse else [first, second]
+        merged = tmp_path / f"duplicate-conflict-merged-{reverse}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + suffix) + "\n", encoding="utf-8"
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="git replay: conflicting duplicate event id 'E-aaaaaaaaaaaa'",
+        ):
+            _make_backend(merged)
+
+        bounded_dir = tmp_path / f"duplicate-conflict-bounded-{reverse}"
+        bounded_dir.mkdir()
+        bounded = _make_backend(bounded_dir)
+        try:
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "git bounded replay: conflicting duplicate event id "
+                    "'E-aaaaaaaaaaaa'"
+                ),
+            ):
+                bounded.replay_to_event_id(
+                    str(merged / "events.jsonl"), "E-aaaaaaaaaaaa"
+                )
+        finally:
+            bounded.close()
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_conflicting_duplicate_id_fails_closed_with_converged_projection(
+        self, tmp_path: Path, reverse: bool
+    ) -> None:
+        """Set-equal SQLite/log ids must not bypass duplicate-material checks."""
+        state_dir = tmp_path / f"duplicate-converged-{reverse}"
+        state_dir.mkdir()
+        backend = _make_backend(state_dir)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+
+        events_path = state_dir / "events.jsonl"
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+        parsed_index = next(
+            index
+            for index, line in enumerate(lines)
+            if json.loads(line)["action"] == "prd.parsed"
+        )
+        conflicting = json.loads(lines[parsed_index])
+        conflicting["payload_json"]["title"] = "Conflicting duplicate"
+        conflicting_line = json.dumps(conflicting, separators=(",", ":"))
+        if reverse:
+            merged = (
+                lines[:parsed_index]
+                + [conflicting_line, lines[parsed_index]]
+                + lines[parsed_index + 1 :]
+            )
+        else:
+            merged = lines + [conflicting_line]
+        events_path.write_text("\n".join(merged) + "\n", encoding="utf-8")
+
+        # The duplicate does not change the event-id set, so initialize takes
+        # the converged-projection path rather than rebuilding state.db.
+        with pytest.raises(
+            ValueError,
+            match=(
+                "git append parent scan: conflicting duplicate event id "
+                f"{conflicting['id']!r}"
+            ),
+        ):
+            _make_backend(state_dir)
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_identical_duplicate_remains_idempotent_with_converged_projection(
+        self, tmp_path: Path, reverse: bool
+    ) -> None:
+        state_dir = tmp_path / f"duplicate-identical-converged-{reverse}"
+        state_dir.mkdir()
+        backend = _make_backend(state_dir)
+        try:
+            _seed_prd(backend)
+            expected = _snap(backend)
+        finally:
+            backend.close()
+
+        events_path = state_dir / "events.jsonl"
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+        duplicate_index = next(
+            index
+            for index, line in enumerate(lines)
+            if json.loads(line)["action"] == "prd.parsed"
+        )
+        if reverse:
+            merged = (
+                lines[:duplicate_index]
+                + [lines[duplicate_index], lines[duplicate_index]]
+                + lines[duplicate_index + 1 :]
+            )
+        else:
+            merged = lines + [lines[duplicate_index]]
+        events_path.write_text("\n".join(merged) + "\n", encoding="utf-8")
+
+        reopened = _make_backend(state_dir)
+        try:
+            assert _snap(reopened) == expected
+        finally:
+            reopened.close()
+
+    def test_append_catch_up_rejects_conflicting_duplicate_id(
+        self, tmp_path: Path
+    ) -> None:
+        """An open writer must fail closed when external log drift forces a scan."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_prd(backend)
+            expected = _snap(backend)
+            events_path = tmp_path / "events.jsonl"
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+            parsed = next(
+                json.loads(line)
+                for line in lines
+                if json.loads(line)["action"] == "prd.parsed"
+            )
+            parsed["payload_json"]["title"] = "Conflicting duplicate"
+            parsed["lamport"] = backend._max_lamport + 1  # noqa: SLF001
+            lines.append(json.dumps(parsed, separators=(",", ":")))
+            events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "git append parent scan: conflicting duplicate event id "
+                    f"{parsed['id']!r}"
+                ),
+            ):
+                backend.append(
+                    _draft(
+                        "prd.revised",
+                        _prd_revised_payload(title="Live revision"),
+                        target_kind="prd",
+                        target_id="default",
+                    )
+                )
+            assert _snap(backend) == expected
+        finally:
+            backend.close()
+
+    def test_non_prd_append_rejects_external_conflicting_duplicate_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Every Git mutation validates external drift, not only PRD drafts."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_ready_task(backend)
+            expected = _snap(backend)
+            events_path = tmp_path / "events.jsonl"
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+            project = json.loads(lines[0])
+            project["payload_json"]["name"] = "Conflicting project"
+            project["lamport"] = backend._max_lamport + 1  # noqa: SLF001
+            lines.append(json.dumps(project, separators=(",", ":")))
+            events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            claim_id = "C-CONFLICT-GUARD"
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "git append parent scan: conflicting duplicate event id "
+                    f"{project['id']!r}"
+                ),
+            ):
+                backend.append(
+                    _draft(
+                        "claim.created",
+                        _claim_payload(claim_id),
+                        target_kind="claim",
+                        target_id=claim_id,
+                    )
+                )
+            assert _snap(backend) == expected
+            assert len(events_path.read_text(encoding="utf-8").splitlines()) == (
+                len(lines)
+            )
+        finally:
+            backend.close()
+
+    @pytest.mark.parametrize("rewrite_kind", ["payload", "parent"])
+    def test_reopen_rejects_single_same_id_material_rewrite(
+        self, tmp_path: Path, rewrite_kind: str
+    ) -> None:
+        """Set equality cannot bless a sole rewritten occurrence on reopen."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+
+        events_path = tmp_path / "events.jsonl"
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+        rewritten = json.loads(lines[0])
+        if rewrite_kind == "payload":
+            rewritten["payload_json"]["name"] = "Rewritten project"
+        else:
+            rewritten["parent_event_id"] = "E-deadbeefdead"
+        lines[0] = json.dumps(rewritten, separators=(",", ":"))
+        events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        with pytest.raises(
+            TransactionAborted,
+            match=(
+                "git projection convergence: event .* has different material "
+                "than the projected Git envelope"
+            ),
+        ):
+            _make_backend(tmp_path)
+
+    def test_non_prd_append_rejects_single_same_id_material_rewrite(
+        self, tmp_path: Path
+    ) -> None:
+        """A long-lived writer must not bless a sole rewritten log line."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_ready_task(backend)
+            events_path = tmp_path / "events.jsonl"
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+            rewritten = json.loads(lines[0])
+            rewritten["payload_json"]["name"] = "Rewritten project"
+            lines[0] = json.dumps(rewritten, separators=(",", ":"))
+            events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            claim_id = "C-REWRITE-GUARD"
+            with pytest.raises(
+                TransactionAborted,
+                match=(
+                    "git append integrity: event .* has different material "
+                    "than the projected Git envelope"
+                ),
+            ):
+                backend.append(
+                    _draft(
+                        "claim.created",
+                        _claim_payload(claim_id),
+                        target_kind="claim",
+                        target_id=claim_id,
+                    )
+                )
+            assert len(events_path.read_text(encoding="utf-8").splitlines()) == len(
+                lines
+            )
+        finally:
+            backend.close()
+
+    def test_append_detects_same_length_rewrite_with_restored_mtime(
+        self, tmp_path: Path
+    ) -> None:
+        """The unchanged-log fast path is content-authenticated, not metadata-only."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_ready_task(backend)
+            events_path = tmp_path / "events.jsonl"
+            stat = events_path.stat()
+            original = events_path.read_bytes()
+            rewritten = original.replace(
+                b'"name":"Git Events"', b'"name":"Bad Events"', 1
+            )
+            assert rewritten != original
+            assert len(rewritten) == len(original)
+            events_path.write_bytes(rewritten)
+            os.utime(events_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            after = events_path.stat()
+            assert after.st_size == stat.st_size
+            assert after.st_mtime_ns == stat.st_mtime_ns
+
+            claim_id = "C-METADATA-BYPASS"
+            with pytest.raises(
+                TransactionAborted,
+                match="git append integrity: event .* has different material",
+            ):
+                backend.append(
+                    _draft(
+                        "claim.created",
+                        _claim_payload(claim_id),
+                        target_kind="claim",
+                        target_id=claim_id,
+                    )
+                )
+            assert events_path.read_bytes() == rewritten
+        finally:
+            backend.close()
+
+    def test_append_rejects_log_rewrite_after_material_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-read rewrite cannot be cached as though it produced the snapshot."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_ready_task(backend)
+            events_path = tmp_path / "events.jsonl"
+            # Benign external drift forces the validator off its already-known
+            # signature without changing the event set or material.
+            with events_path.open("ab") as fh:
+                fh.write(b"\n")
+            validated_before = backend._git_validated_log_signature  # noqa: SLF001
+            original_reader = backend._read_git_events_ordered  # noqa: SLF001
+
+            def read_then_rewrite() -> list[Event]:
+                ordered = original_reader()
+                before = events_path.read_bytes()
+                after = before.replace(
+                    b'"name":"Git Events"', b'"name":"Bad Events"', 1
+                )
+                assert after != before
+                events_path.write_bytes(after)
+                return ordered
+
+            monkeypatch.setattr(
+                backend,
+                "_read_git_events_ordered",
+                read_then_rewrite,
+            )
+            claim_id = "C-POST-READ-REWRITE"
+            with pytest.raises(
+                TransactionAborted,
+                match="events.jsonl changed while its material was being validated",
+            ):
+                backend.append(
+                    _draft(
+                        "claim.created",
+                        _claim_payload(claim_id),
+                        target_kind="claim",
+                        target_id=claim_id,
+                    )
+                )
+            assert backend._git_validated_log_signature == validated_before  # noqa: SLF001
+            assert claim_id not in events_path.read_text(encoding="utf-8")
+
+            # The corrupt post-read bytes were not blessed into the cache: a
+            # stable second attempt reaches the persisted-material mismatch.
+            monkeypatch.setattr(
+                backend,
+                "_read_git_events_ordered",
+                original_reader,
+            )
+            with pytest.raises(
+                TransactionAborted,
+                match="git append integrity: event .* has different material",
+            ):
+                backend.append(
+                    _draft(
+                        "claim.created",
+                        _claim_payload(claim_id),
+                        target_kind="claim",
+                        target_id=claim_id,
+                    )
+                )
+        finally:
+            backend.close()
+
+    @pytest.mark.parametrize("new_event_first", [False, True])
+    def test_reopen_catch_up_rejects_same_id_rewrite_before_rebuild(
+        self, tmp_path: Path, new_event_first: bool
+    ) -> None:
+        """Log-ahead convergence validates old material before rebuilding."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+
+        events_path = tmp_path / "events.jsonl"
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+        rewritten = json.loads(lines[0])
+        rewritten["payload_json"]["name"] = "Rewritten before catch-up"
+        lines[0] = json.dumps(rewritten, separators=(",", ":"))
+        tail = json.loads(lines[-1])
+        merged_event = json.dumps(
+            {
+                "timestamp": (_T0 + timedelta(seconds=10)).isoformat(),
+                "actor": "merged-writer",
+                "action": "state.initialized",
+                "target_kind": "project",
+                "target_id": "proj-1",
+                "payload_json": {},
+                "id": "E-feedfacefeed",
+                "parent_event_id": tail["id"],
+                "lamport": int(tail["lamport"]) + 1,
+            },
+            separators=(",", ":"),
+        )
+        merged = [merged_event, *lines] if new_event_first else [*lines, merged_event]
+        events_path.write_text("\n".join(merged) + "\n", encoding="utf-8")
+
+        with pytest.raises(
+            TransactionAborted,
+            match=(
+                "git projection convergence: event .* has different material "
+                "than the projected Git envelope"
+            ),
+        ):
+            _make_backend(tmp_path)
+
+    def test_legacy_fingerprint_bootstrap_is_atomic_and_retryable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An interrupted first bootstrap leaves no partial permanent ledger."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+
+        with sqlite3.connect(str(tmp_path / "state.db")) as conn:
+            conn.execute("DROP TABLE git_event_material_state")
+            conn.execute("DROP TABLE git_event_material")
+
+        interrupted = SqliteBackend(
+            db_path=str(tmp_path / "state.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=FrozenClock(_T0),
+            events_storage="git",
+        )
+
+        def fail_after_first_insert(
+            conn: sqlite3.Connection, rows: list[tuple[str, str]]
+        ) -> None:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "INSERT INTO git_event_material (event_id, fingerprint) "
+                    "VALUES (?, ?)",
+                    rows[0],
+                )
+                raise RuntimeError("injected bootstrap interruption")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+
+        monkeypatch.setattr(
+            interrupted,
+            "_git_bootstrap_material_fingerprints",
+            fail_after_first_insert,
+        )
+        with pytest.raises(RuntimeError, match="injected bootstrap interruption"):
+            interrupted.initialize()
+        interrupted.close()
+
+        with sqlite3.connect(str(tmp_path / "state.db")) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM git_event_material").fetchone() == (
+                0,
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM git_event_material_state"
+            ).fetchone() == (0,)
+
+        retry = _make_backend(tmp_path)
+        try:
+            event_count = retry._require_conn().execute(  # noqa: SLF001
+                "SELECT COUNT(*) FROM events"
+            ).fetchone()[0]
+            assert tuple(
+                retry._require_conn().execute(  # noqa: SLF001
+                    "SELECT COUNT(*) FROM git_event_material"
+                ).fetchone()
+            ) == (event_count,)
+            assert tuple(
+                retry._require_conn().execute(  # noqa: SLF001
+                    "SELECT initialized FROM git_event_material_state "
+                    "WHERE singleton = 1"
+                ).fetchone()
+            ) == (1,)
+        finally:
+            retry.close()
+
     def test_torn_trailing_line_tolerated_interior_raises(
         self, tmp_path: Path
     ) -> None:
@@ -636,6 +1276,2798 @@ class TestGitReplayOrdering:
             "E-cccccccccccc",
             "E-dddddddddddd",
         ]
+
+
+class TestGitPrdLifecycleReplay:
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_current_orphan_revision_lineage_is_ignored_in_full_and_bounded_replay(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        """Marked content/lifecycle facts need an existing causal content parent."""
+        base = tmp_path / f"orphan-current-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        orphan_revision = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id="E-deadbeefdead",
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(revision=2, title="Orphan graft"),
+        )
+        orphan_review = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=5,
+            action="prd.reviewed",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 2,
+                "reviewer": "orphan-reviewer",
+            },
+        )
+        orphan_approval = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id="E-bbbbbbbbbbbb",
+            lamport=6,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 2,
+                "approver": "orphan-approver",
+            },
+        )
+        suffix = [orphan_revision, orphan_review, orphan_approval]
+        physical = list(reversed(suffix)) if reverse_physical_order else suffix
+        merged = tmp_path / f"orphan-current-merged-{reverse_physical_order}"
+        merged.mkdir()
+        events_path = merged / "events.jsonl"
+        events_path.write_text(
+            "\n".join(prefix + physical) + "\n",
+            encoding="utf-8",
+        )
+
+        replayed = _make_backend(merged)
+        try:
+            prd = replayed.get_prd("default")
+            assert prd is not None
+            assert prd.title == "Original PRD"
+            assert prd.revision == 1
+            assert prd.status.value == "draft"
+        finally:
+            replayed.close()
+
+        bounded_dir = tmp_path / f"orphan-current-bounded-{reverse_physical_order}"
+        bounded_dir.mkdir()
+        bounded = _make_backend(bounded_dir)
+        try:
+            bounded.replay_to_event_id(str(events_path), "E-cccccccccccc")
+            prd = bounded.get_prd("default")
+            assert prd is not None
+            assert prd.title == "Original PRD"
+            assert prd.revision == 1
+            assert prd.status.value == "draft"
+        finally:
+            bounded.close()
+
+    def test_transparent_ancestor_lifecycle_survives_material_replay(
+        self, tmp_path: Path
+    ) -> None:
+        """A causal title ancestor is history, not a losing fork sibling."""
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_prd(backend)
+            backend.append(
+                _draft(
+                    "prd.revised",
+                    _prd_revised_payload(revision=2, title="Transparent r2"),
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=2),
+                )
+            )
+            backend.append(
+                _draft(
+                    "prd.reviewed",
+                    {
+                        "project_id": "proj-1",
+                        "expected_revision": 2,
+                        "expected_status": "draft",
+                        "reviewer": "r2-reviewer",
+                    },
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=3),
+                )
+            )
+            backend.append(
+                _draft(
+                    "prd.approved",
+                    {
+                        "project_id": "proj-1",
+                        "expected_revision": 2,
+                        "expected_status": "reviewed",
+                        "approver": "r2-approver",
+                    },
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=4),
+                )
+            )
+            material_payload = _prd_revised_payload(
+                revision=3,
+                # A newer causal material revision may intentionally restore
+                # the semantic base's title; the older r2 overlay must not win.
+                title="Original PRD",
+                expected_status="approved",
+            )
+            material_payload["status"] = "approved"
+            material_payload["assumptions"] = [
+                {
+                    "id": "A001",
+                    "statement": "Material revision.",
+                    "rationale": "Exercises lifecycle-preserving replay.",
+                    "requirement_ids": [],
+                }
+            ]
+            backend.append(
+                _draft(
+                    "prd.revised",
+                    material_payload,
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=5),
+                )
+            )
+
+            expected = _snap(backend)
+            expected_reviews = [
+                tuple(row)
+                for row in backend._require_conn().execute(  # noqa: SLF001
+                    "SELECT reviewed_by FROM reviews ORDER BY reviewed_by"
+                )
+            ]
+            assert expected_reviews == [("r2-approver",)]
+
+            events_path = tmp_path / "events.jsonl"
+            backend.replay_from_empty(str(events_path))
+
+            assert _snap(backend) == expected
+            assert [
+                tuple(row)
+                for row in backend._require_conn().execute(  # noqa: SLF001
+                    "SELECT reviewed_by FROM reviews ORDER BY reviewed_by"
+                )
+            ] == expected_reviews
+        finally:
+            backend.close()
+
+    def test_material_revision_preserves_observed_base_approval_across_replay(
+        self, tmp_path: Path
+    ) -> None:
+        """A material CAS against approved r1 preserves its audited approval."""
+        backend = _make_backend(tmp_path)
+        _seed_prd(backend)
+        backend.append(
+            _draft(
+                "prd.reviewed",
+                {
+                    "project_id": "proj-1",
+                    "expected_revision": 1,
+                    "expected_status": "draft",
+                    "reviewer": "r1-reviewer",
+                },
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=2),
+            )
+        )
+        backend.append(
+            _draft(
+                "prd.approved",
+                {
+                    "project_id": "proj-1",
+                    "expected_revision": 1,
+                    "expected_status": "reviewed",
+                    "approver": "r1-approver",
+                },
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=3),
+            )
+        )
+        material_payload = _prd_revised_payload(
+            revision=2,
+            title="Approved material r2",
+            expected_status="approved",
+        )
+        material_payload["status"] = "approved"
+        material_payload["assumptions"] = [
+            {
+                "id": "A001",
+                "statement": "Material r2.",
+                "rationale": "Proves the observed approval survives replay.",
+                "requirement_ids": [],
+            }
+        ]
+        material = backend.append(
+            _draft(
+                "prd.revised",
+                material_payload,
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=4),
+            )
+        )
+        assert material is not None
+        expected = _snap(backend)
+        events_path = tmp_path / "events.jsonl"
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+        prefix, suffix = lines[:-3], lines[-3:]
+        backend.close()
+
+        reopened = _make_backend(tmp_path)
+        try:
+            assert _snap(reopened) == expected
+            assert [review.reviewed_by for review in reopened.list_reviews()] == [
+                "r1-approver"
+            ]
+            reopened.replay_from_empty(str(events_path))
+            assert _snap(reopened) == expected
+        finally:
+            reopened.close()
+
+        for index, physical_order in enumerate(permutations(suffix)):
+            merged = tmp_path / f"observed-approval-{index}"
+            merged.mkdir()
+            merged_events = merged / "events.jsonl"
+            merged_events.write_text(
+                "\n".join(prefix + list(physical_order)) + "\n",
+                encoding="utf-8",
+            )
+            replayed = _make_backend(merged)
+            try:
+                assert _snap(replayed) == expected
+                assert [review.reviewed_by for review in replayed.list_reviews()] == [
+                    "r1-approver"
+                ]
+            finally:
+                replayed.close()
+
+            bounded_dir = tmp_path / f"observed-approval-bounded-{index}"
+            bounded_dir.mkdir()
+            bounded = _make_backend(bounded_dir)
+            try:
+                bounded.replay_to_event_id(str(merged_events), material.id)
+                assert _snap(bounded) == expected
+            finally:
+                bounded.close()
+
+    @pytest.mark.parametrize("prd_id", ["default", "v0.2"])
+    @pytest.mark.parametrize("revision_sorts_after_approval", [False, True])
+    def test_current_non_material_revision_never_regresses_approval(
+        self,
+        tmp_path: Path,
+        prd_id: str,
+        revision_sorts_after_approval: bool,
+    ) -> None:
+        """Equal-Lamport branch facts converge for default and named PRDs.
+
+        The event-id tiebreak is exercised in both directions, and the JSONL
+        union itself is replayed in both file orders.
+        """
+        base = tmp_path / "base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend, prd_id=prd_id)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        if revision_sorts_after_approval:
+            approval_id, revision_id = "E-aaaaaaaaaaaa", "E-bbbbbbbbbbbb"
+        else:
+            revision_id, approval_id = "E-aaaaaaaaaaaa", "E-bbbbbbbbbbbb"
+        revision = _handcrafted_git_event(
+            event_id=revision_id,
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(prd_id=prd_id),
+            prd_id=prd_id,
+        )
+        approval = _handcrafted_git_event(
+            event_id=approval_id,
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "prd_id": prd_id,
+                "approver": "parallel-human",
+            },
+            prd_id=prd_id,
+        )
+
+        snapshots: list[str] = []
+        for index, suffix in enumerate(([revision, approval], [approval, revision])):
+            merged = tmp_path / f"merged-{index}"
+            merged.mkdir()
+            (merged / "events.jsonl").write_text(
+                "\n".join(prefix + suffix) + "\n", encoding="utf-8"
+            )
+            replayed = _make_backend(merged)
+            try:
+                prd = replayed.get_prd(prd_id)
+                assert prd is not None
+                assert prd.title == "Renamed PRD"
+                assert prd.revision == 2
+                assert prd.status.value == "approved"
+                snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert snapshots[0] == snapshots[1]
+
+    def test_legacy_revision_keeps_historical_payload_authority(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        approval = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.approved",
+            payload={"project_id": "proj-1", "approver": "parallel-human"},
+        )
+        legacy_revision = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(expected_status=None, title="Legacy Rename"),
+        )
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [legacy_revision, approval]) + "\n",
+            encoding="utf-8",
+        )
+        replayed = _make_backend(merged)
+        try:
+            prd = replayed.get_prd("default")
+            assert prd is not None
+            assert prd.title == "Legacy Rename"
+            assert prd.status.value == "draft"
+        finally:
+            replayed.close()
+
+    def test_material_revision_still_demotes_when_sorted_after_approval(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "base"
+        base.mkdir()
+        backend = _make_backend(base)
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Original requirement.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(requirements=[requirement]),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        approval = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.approved",
+            payload={"project_id": "proj-1", "approver": "parallel-human"},
+        )
+        material_revision = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(superseded=[requirement]),
+        )
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [material_revision, approval]) + "\n",
+            encoding="utf-8",
+        )
+        replayed = _make_backend(merged)
+        try:
+            prd = replayed.get_prd("default")
+            assert prd is not None
+            assert prd.status.value == "draft"
+            assert prd.revision == 2
+            assert replayed.list_requirements(prd_id="default") == []
+        finally:
+            replayed.close()
+
+    def test_current_first_parse_is_first_writer_wins_during_union_replay(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        winner = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=3,
+            action="prd.parsed",
+            payload=_prd_parsed_payload(title="First Winner"),
+        )
+        approval = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=4,
+            action="prd.approved",
+            payload={"project_id": "proj-1", "approver": "human"},
+        )
+        stale = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id=parent,
+            lamport=5,
+            action="prd.parsed",
+            payload=_prd_parsed_payload(title="Stale Loser"),
+        )
+        merged = tmp_path / "merged"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [stale, approval, winner]) + "\n",
+            encoding="utf-8",
+        )
+        replayed = _make_backend(merged)
+        try:
+            prd = replayed.get_prd("default")
+            assert prd is not None
+            assert prd.title == "First Winner"
+            assert prd.status.value == "approved"
+            assert prd.revision == 1
+        finally:
+            replayed.close()
+
+    @pytest.mark.parametrize("material_sorts_first", [False, True])
+    def test_material_revision_dominates_stale_title_revision_and_approval(
+        self, tmp_path: Path, material_sorts_first: bool
+    ) -> None:
+        """Sibling material content wins while the independent rename survives."""
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Original requirement.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        base = tmp_path / "base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+            # Replace the title-only seed with one carrying a live requirement.
+            # This is a legacy destructive refresh solely to keep the fixture
+            # compact; the forked events below all use current markers.
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(
+                        expected_absent=None, requirements=[requirement]
+                    ),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+            backend.append(
+                _draft(
+                    "prd.reviewed",
+                    {
+                        "project_id": "proj-1",
+                        "expected_revision": 1,
+                        "reviewer": "base-reviewer",
+                    },
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+            backend.append(
+                _draft(
+                    "prd.approved",
+                    {
+                        "project_id": "proj-1",
+                        "expected_revision": 1,
+                        "approver": "base-approver",
+                    },
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        material_id, title_id = (
+            ("E-aaaaaaaaaaaa", "E-bbbbbbbbbbbb")
+            if material_sorts_first
+            else ("E-bbbbbbbbbbbb", "E-aaaaaaaaaaaa")
+        )
+        material_payload = _prd_revised_payload(superseded=[requirement])
+        material_payload.update(status="approved", expected_status="approved")
+        material = _handcrafted_git_event(
+            event_id=material_id,
+            parent_event_id=parent,
+            lamport=7,
+            action="prd.revised",
+            payload=material_payload,
+        )
+        title_payload = _prd_revised_payload(title="Independent Rename")
+        title_payload.update(
+            status="approved",
+            expected_status="approved",
+            requirements_unchanged=[requirement],
+        )
+        title_revision = _handcrafted_git_event(
+            event_id=title_id,
+            parent_event_id=parent,
+            lamport=7,
+            action="prd.revised",
+            payload=title_payload,
+        )
+        stale_approval = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id=parent,
+            lamport=8,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 1,
+                "approver": "stale-approver",
+            },
+        )
+
+        snapshots: list[str] = []
+        for index, suffix in enumerate(
+            ([material, title_revision, stale_approval],
+             [stale_approval, title_revision, material])
+        ):
+            merged = tmp_path / f"material-title-{material_sorts_first}-{index}"
+            merged.mkdir()
+            (merged / "events.jsonl").write_text(
+                "\n".join(prefix + list(suffix)) + "\n", encoding="utf-8"
+            )
+            replayed = _make_backend(merged)
+            try:
+                prd = replayed.get_prd("default")
+                assert prd is not None
+                assert prd.title == "Independent Rename"
+                assert prd.revision == 2
+                assert prd.status.value == "draft"
+                assert replayed.list_requirements(prd_id="default") == []
+                snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert snapshots[0] == snapshots[1]
+
+    @pytest.mark.parametrize("material_sorts_first", [False, True])
+    def test_descendant_title_revision_outranks_older_sibling_overlay(
+        self, tmp_path: Path, material_sorts_first: bool
+    ) -> None:
+        """A rev-2 sibling rename must not overwrite a valid rev-3 rename.
+
+        The material rev-2 event owns content lineage, while its title-only
+        sibling contributes an overlay because it is skipped as competing
+        content. A title-only rev-3 descendant of the material winner is newer
+        causal state and must outrank that older overlay in every union-file
+        permutation and after a fresh replay.
+        """
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Original requirement.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        base = tmp_path / f"descendant-base-{material_sorts_first}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(requirements=[requirement]),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        material_id, title_id = (
+            ("E-aaaaaaaaaaaa", "E-bbbbbbbbbbbb")
+            if material_sorts_first
+            else ("E-bbbbbbbbbbbb", "E-aaaaaaaaaaaa")
+        )
+        material = _handcrafted_git_event(
+            event_id=material_id,
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(
+                title="Material Rev2",
+                superseded=[requirement],
+            ),
+        )
+        title_payload = _prd_revised_payload(title="Sibling Rev2")
+        title_payload["requirements_unchanged"] = [requirement]
+        title_revision = _handcrafted_git_event(
+            event_id=title_id,
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=title_payload,
+        )
+        descendant = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id=material_id,
+            lamport=5,
+            action="prd.revised",
+            payload=_prd_revised_payload(
+                revision=3,
+                title="Descendant Rev3",
+            ),
+        )
+        stale_descendant = _handcrafted_git_event(
+            event_id="E-dddddddddddd",
+            parent_event_id=title_id,
+            lamport=5,
+            action="prd.revised",
+            payload=_prd_revised_payload(
+                revision=3,
+                title="Stale Descendant Rev3",
+                superseded=[requirement],
+            ),
+        )
+
+        snapshots: list[str] = []
+        for index, suffix in enumerate(
+            permutations(
+                (material, title_revision, descendant, stale_descendant)
+            )
+        ):
+            merged = tmp_path / f"descendant-{material_sorts_first}-{index}"
+            merged.mkdir()
+            events_path = merged / "events.jsonl"
+            events_path.write_text(
+                "\n".join(prefix + list(suffix)) + "\n",
+                encoding="utf-8",
+            )
+            replayed = _make_backend(merged)
+            try:
+                for replay_again in (False, True):
+                    if replay_again:
+                        replayed.replay_from_empty(str(events_path))
+                    prd = replayed.get_prd("default")
+                    assert prd is not None
+                    assert prd.title == "Descendant Rev3"
+                    assert prd.revision == 3
+                    assert prd.status.value == "draft"
+                    assert replayed.list_requirements(prd_id="default") == []
+                    snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert len(set(snapshots)) == 1
+
+    @pytest.mark.parametrize("losing_title_is_file_tail", [False, True])
+    def test_append_after_union_uses_canonical_prd_content_parent(
+        self, tmp_path: Path, losing_title_is_file_tail: bool
+    ) -> None:
+        """A real append after union follows material state, not file order."""
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Original requirement.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        base = tmp_path / f"append-union-base-{losing_title_is_file_tail}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(requirements=[requirement]),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        material_id = "E-aaaaaaaaaaaa"
+        title_id = "E-bbbbbbbbbbbb"
+        material = _handcrafted_git_event(
+            event_id=material_id,
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(
+                title="Material Rev2",
+                superseded=[requirement],
+            ),
+        )
+        title_payload = _prd_revised_payload(title="Sibling Rev2")
+        title_payload["requirements_unchanged"] = [requirement]
+        title_revision = _handcrafted_git_event(
+            event_id=title_id,
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=title_payload,
+        )
+        suffix = (
+            [material, title_revision]
+            if losing_title_is_file_tail
+            else [title_revision, material]
+        )
+        merged = tmp_path / f"append-union-{losing_title_is_file_tail}"
+        merged.mkdir()
+        events_path = merged / "events.jsonl"
+        events_path.write_text(
+            "\n".join(prefix + suffix) + "\n",
+            encoding="utf-8",
+        )
+
+        replayed = _make_backend(merged)
+        try:
+            before = replayed.get_prd("default")
+            assert before is not None
+            assert before.title == "Sibling Rev2"
+            assert before.revision == 2
+            assert replayed.list_requirements(prd_id="default") == []
+
+            appended = replayed.append(
+                _draft(
+                    "prd.revised",
+                    _prd_revised_payload(
+                        revision=3,
+                        title="Appended Rev3",
+                    ),
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=2),
+                )
+            )
+            assert appended is not None
+            assert appended.parent_event_id == material_id
+            assert appended.lamport == 5
+            live = replayed.get_prd("default")
+            assert live is not None
+            assert live.title == "Appended Rev3"
+            assert live.revision == 3
+
+            log_before_stale = events_path.read_bytes()
+            with pytest.raises(EventRejected, match=r"current\+1"):
+                replayed.append(
+                    _draft(
+                        "prd.revised",
+                        _prd_revised_payload(
+                            revision=3,
+                            title="Stale Rev3",
+                        ),
+                        target_kind="prd",
+                        target_id="default",
+                        ts=_T0 + timedelta(seconds=3),
+                    )
+                )
+            assert events_path.read_bytes() == log_before_stale
+
+            expected = _snap(replayed)
+            for _ in range(2):
+                replayed.replay_from_empty(str(events_path))
+                current = replayed.get_prd("default")
+                assert current is not None
+                assert current.title == "Appended Rev3"
+                assert current.revision == 3
+                assert replayed.list_requirements(prd_id="default") == []
+                assert _snap(replayed) == expected
+        finally:
+            replayed.close()
+
+    @pytest.mark.parametrize("new_prd_id", ["default", "v0.2"])
+    @pytest.mark.parametrize("losing_other_prd_is_tail", [False, True])
+    def test_cross_prd_union_tail_cannot_poison_new_prd_lineage(
+        self,
+        tmp_path: Path,
+        new_prd_id: str,
+        losing_other_prd_is_tail: bool,
+    ) -> None:
+        """A losing B tail cannot suppress valid A content or lifecycle."""
+        other_prd_id = "v0.2" if new_prd_id == "default" else "default"
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Other PRD requirement.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        base = tmp_path / (
+            f"cross-prd-base-{new_prd_id}-{losing_other_prd_is_tail}"
+        )
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(
+                        prd_id=other_prd_id,
+                        title="Other Base",
+                        requirements=[requirement],
+                    ),
+                    target_kind="prd",
+                    target_id=other_prd_id,
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        material_id = "E-aaaaaaaaaaaa"
+        title_id = "E-bbbbbbbbbbbb"
+        material = _handcrafted_git_event(
+            event_id=material_id,
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(
+                prd_id=other_prd_id,
+                title="Other Material",
+                superseded=[requirement],
+            ),
+            prd_id=other_prd_id,
+        )
+        title_payload = _prd_revised_payload(
+            prd_id=other_prd_id,
+            title="Other Sibling Title",
+        )
+        title_payload["requirements_unchanged"] = [requirement]
+        title_revision = _handcrafted_git_event(
+            event_id=title_id,
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=title_payload,
+            prd_id=other_prd_id,
+        )
+        suffix = (
+            [material, title_revision]
+            if losing_other_prd_is_tail
+            else [title_revision, material]
+        )
+        merged = tmp_path / (
+            f"cross-prd-{new_prd_id}-{losing_other_prd_is_tail}"
+        )
+        merged.mkdir()
+        events_path = merged / "events.jsonl"
+        events_path.write_text(
+            "\n".join(prefix + suffix) + "\n",
+            encoding="utf-8",
+        )
+
+        replayed = _make_backend(merged)
+        try:
+            parsed = replayed.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(
+                        prd_id=new_prd_id,
+                        title="New Base",
+                        requirements=[],
+                    ),
+                    target_kind="prd",
+                    target_id=new_prd_id,
+                    ts=_T0 + timedelta(seconds=2),
+                )
+            )
+            assert parsed is not None
+            assert parsed.parent_event_id == (
+                title_id if losing_other_prd_is_tail else material_id
+            )
+            revised = replayed.append(
+                _draft(
+                    "prd.revised",
+                    _prd_revised_payload(
+                        prd_id=new_prd_id,
+                        revision=2,
+                        title="New Rev2",
+                    ),
+                    target_kind="prd",
+                    target_id=new_prd_id,
+                    ts=_T0 + timedelta(seconds=3),
+                )
+            )
+            assert revised is not None
+            assert revised.parent_event_id == parsed.id
+            reviewed = replayed.append(
+                _draft(
+                    "prd.reviewed",
+                    {
+                        "project_id": "proj-1",
+                        "prd_id": new_prd_id,
+                        "expected_revision": 2,
+                        "expected_status": "draft",
+                        "reviewer": "cross-prd-reviewer",
+                    },
+                    target_kind="prd",
+                    target_id=new_prd_id,
+                    ts=_T0 + timedelta(seconds=4),
+                )
+            )
+            approved = replayed.append(
+                _draft(
+                    "prd.approved",
+                    {
+                        "project_id": "proj-1",
+                        "prd_id": new_prd_id,
+                        "expected_revision": 2,
+                        "expected_status": "reviewed",
+                        "approver": "cross-prd-approver",
+                    },
+                    target_kind="prd",
+                    target_id=new_prd_id,
+                    ts=_T0 + timedelta(seconds=5),
+                )
+            )
+            assert reviewed is not None and approved is not None
+            assert reviewed.parent_event_id == revised.id
+            assert approved.parent_event_id == revised.id
+
+            current = replayed.get_prd(new_prd_id)
+            assert current is not None
+            assert current.title == "New Rev2"
+            assert current.revision == 2
+            assert current.status.value == "approved"
+            expected = _snap(replayed)
+            for _ in range(2):
+                replayed.replay_from_empty(str(events_path))
+                current = replayed.get_prd(new_prd_id)
+                assert current is not None
+                assert current.title == "New Rev2"
+                assert current.revision == 2
+                assert current.status.value == "approved"
+                assert _snap(replayed) == expected
+        finally:
+            replayed.close()
+
+    def test_prd_policy_memory_is_linear_for_deep_title_history(
+        self, tmp_path: Path
+    ) -> None:
+        """Deep histories must not retain a transitive ancestor set per event."""
+        backend = _make_backend(tmp_path)
+        events = [
+            Event(
+                id="E-000000000001",
+                parent_event_id=None,
+                lamport=1,
+                timestamp=_T0,
+                actor="scale",
+                action="prd.parsed",
+                target_kind="prd",
+                target_id="default",
+                payload_json=_prd_parsed_payload(title="Revision 1"),
+            )
+        ]
+        parent = events[0].id
+        for revision in range(2, 1501):
+            event = Event(
+                id=f"E-{revision:012x}",
+                parent_event_id=parent,
+                lamport=revision,
+                timestamp=_T0 + timedelta(microseconds=revision),
+                actor="scale",
+                action="prd.revised",
+                target_kind="prd",
+                target_id="default",
+                payload_json=_prd_revised_payload(
+                    revision=revision,
+                    title=f"Revision {revision}",
+                ),
+            )
+            events.append(event)
+            parent = event.id
+
+        tracemalloc.start()
+        try:
+            policy = backend._build_git_prd_replay_policy(events)  # noqa: SLF001
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+            backend.close()
+        assert policy.content_heads["default"] == (1500, parent)
+        # The rejected transitive-frozenset implementation measured >50 MiB
+        # for this 1,500-event chain. Keep ample platform headroom while still
+        # catching quadratic retention.
+        assert peak < 16 * 1024 * 1024
+
+    def test_prd_policy_scales_for_title_history_with_unchanged_requirement(
+        self, tmp_path: Path
+    ) -> None:
+        """A carried requirement must not trigger a full ancestor walk per edit."""
+        backend = _make_backend(tmp_path)
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Stable contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        events = [
+            Event(
+                id="E-000000000001",
+                parent_event_id=None,
+                lamport=1,
+                timestamp=_T0,
+                actor="scale",
+                action="prd.parsed",
+                target_kind="prd",
+                target_id="default",
+                payload_json=_prd_parsed_payload(
+                    title="Revision 1",
+                    requirements=[requirement],
+                ),
+            )
+        ]
+        parent = events[0].id
+        for revision in range(2, 5002):
+            payload = _prd_revised_payload(
+                revision=revision,
+                title=f"Revision {revision}",
+            )
+            payload["requirements_unchanged"] = [requirement]
+            event = Event(
+                id=f"E-{revision:012x}",
+                parent_event_id=parent,
+                lamport=revision,
+                timestamp=_T0 + timedelta(microseconds=revision),
+                actor="scale",
+                action="prd.revised",
+                target_kind="prd",
+                target_id="default",
+                payload_json=payload,
+            )
+            events.append(event)
+            parent = event.id
+
+        tracemalloc.start()
+        started = time.perf_counter()
+        try:
+            policy = backend._build_git_prd_replay_policy(events)  # noqa: SLF001
+            _current, peak = tracemalloc.get_traced_memory()
+            elapsed = time.perf_counter() - started
+        finally:
+            tracemalloc.stop()
+            backend.close()
+        assert policy.content_heads["default"] == (5001, parent)
+        assert peak < 24 * 1024 * 1024
+        assert elapsed < 10
+
+    def test_sibling_additive_revisions_choose_one_replay_lineage(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "additive-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Concurrent addition.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        first_payload = _prd_revised_payload(title="First Add")
+        first_payload["requirements_added"] = [requirement]
+        second_payload = _prd_revised_payload(title="Second Add")
+        second_payload["requirements_added"] = [requirement]
+        first = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=first_payload,
+        )
+        second = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=second_payload,
+        )
+
+        snapshots = []
+        for index, suffix in enumerate(([first, second], [second, first])):
+            merged = tmp_path / f"additive-merged-{index}"
+            merged.mkdir()
+            (merged / "events.jsonl").write_text(
+                "\n".join(prefix + suffix) + "\n", encoding="utf-8"
+            )
+            replayed = _make_backend(merged)
+            try:
+                prd = replayed.get_prd("default")
+                assert prd is not None
+                assert prd.title == "First Add"
+                assert prd.revision == 2
+                assert [r.id for r in replayed.list_requirements()] == ["R001"]
+                snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert snapshots[0] == snapshots[1]
+
+    def test_material_descendants_of_sibling_title_overlays_choose_one_lineage(
+        self, tmp_path: Path
+    ) -> None:
+        """Independent renames must not make later content edits mergeable."""
+        base = tmp_path / "title-descendant-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+
+        first_title = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(title="First Rename"),
+        )
+        second_title = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(title="Second Rename"),
+        )
+        first_requirement = {
+            "id": "R101",
+            "prd_section": "requirements",
+            "text": "First branch contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        second_requirement = {
+            "id": "R102",
+            "prd_section": "requirements",
+            "text": "Second branch contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        first_material_payload = _prd_revised_payload(
+            revision=3,
+            title="First Material",
+        )
+        first_material_payload["requirements_added"] = [first_requirement]
+        first_material = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=5,
+            action="prd.revised",
+            payload=first_material_payload,
+        )
+        second_material_payload = _prd_revised_payload(
+            revision=3,
+            title="Second Material",
+        )
+        second_material_payload["requirements_added"] = [second_requirement]
+        second_material = _handcrafted_git_event(
+            event_id="E-dddddddddddd",
+            parent_event_id="E-bbbbbbbbbbbb",
+            lamport=5,
+            action="prd.revised",
+            payload=second_material_payload,
+        )
+
+        snapshots: list[str] = []
+        events = (first_title, second_title, first_material, second_material)
+        for index, suffix in enumerate(permutations(events)):
+            merged = tmp_path / f"title-descendant-merged-{index}"
+            merged.mkdir()
+            events_path = merged / "events.jsonl"
+            events_path.write_text(
+                "\n".join(prefix + list(suffix)) + "\n",
+                encoding="utf-8",
+            )
+            replayed = _make_backend(merged)
+            try:
+                for _ in range(2):
+                    prd = replayed.get_prd("default")
+                    assert prd is not None
+                    assert prd.title == "First Material"
+                    assert prd.revision == 3
+                    assert [
+                        requirement.id
+                        for requirement in replayed.list_requirements(
+                            prd_id="default"
+                        )
+                    ] == ["R101"]
+                    snapshots.append(_snap(replayed))
+                    replayed.replay_from_empty(str(events_path))
+            finally:
+                replayed.close()
+        assert len(set(snapshots)) == 1
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_losing_material_descendant_cannot_overlay_when_sorted_before_parent(
+        self, tmp_path: Path, reverse: bool
+    ) -> None:
+        """Malformed causal clocks cannot synthesize content from two branches.
+
+        The losing branch's title-only child deliberately carries a lower
+        Lamport than its material parent. HLC replay therefore sees the child
+        first, but lineage resolution must still reject it after selecting the
+        competing material winner. Physical union order, bounded replay, a full
+        rebuild, and reopen must all converge on the same single branch.
+        """
+        base = tmp_path / f"causal-order-base-{reverse}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+
+        winning_requirement = {
+            "id": "R101",
+            "prd_section": "requirements",
+            "text": "Winning branch contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        losing_requirement = {
+            "id": "R102",
+            "prd_section": "requirements",
+            "text": "Losing branch contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        winning_payload = _prd_revised_payload(title="Winning Material")
+        winning_payload["requirements_added"] = [winning_requirement]
+        winner = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=5,
+            action="prd.revised",
+            payload=winning_payload,
+        )
+        losing_payload = _prd_revised_payload(title="Losing Material")
+        losing_payload["requirements_added"] = [losing_requirement]
+        loser = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=6,
+            action="prd.revised",
+            payload=losing_payload,
+        )
+        descendant_payload = _prd_revised_payload(
+            revision=3,
+            title="Losing Descendant Rename",
+        )
+        descendant_payload["requirements_unchanged"] = [losing_requirement]
+        losing_descendant = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id="E-bbbbbbbbbbbb",
+            lamport=4,
+            action="prd.revised",
+            payload=descendant_payload,
+        )
+
+        suffix = (
+            [loser, winner, losing_descendant]
+            if reverse
+            else [losing_descendant, winner, loser]
+        )
+        merged = tmp_path / f"causal-order-merged-{reverse}"
+        merged.mkdir()
+        events_path = merged / "events.jsonl"
+        events_path.write_text(
+            "\n".join(prefix + suffix) + "\n",
+            encoding="utf-8",
+        )
+
+        def assert_winning_projection(candidate: SqliteBackend) -> str:
+            prd = candidate.get_prd("default")
+            assert prd is not None
+            assert prd.title == "Winning Material"
+            assert prd.revision == 2
+            assert [
+                requirement.id
+                for requirement in candidate.list_requirements(prd_id="default")
+            ] == ["R101"]
+            return _snap(candidate)
+
+        replayed = _make_backend(merged)
+        try:
+            snapshots = [assert_winning_projection(replayed)]
+            replayed.replay_from_empty(str(events_path))
+            snapshots.append(assert_winning_projection(replayed))
+            replayed.replay_to_event_id(str(events_path), "E-bbbbbbbbbbbb")
+            snapshots.append(assert_winning_projection(replayed))
+        finally:
+            replayed.close()
+
+        reopened = _make_backend(merged)
+        try:
+            snapshots.append(assert_winning_projection(reopened))
+        finally:
+            reopened.close()
+        assert len(set(snapshots)) == 1
+
+    @pytest.mark.parametrize(
+        (
+            "first_material_lamport",
+            "second_material_lamport",
+            "expected_revision",
+            "expected_title",
+            "expected_requirement",
+            "winning_approver",
+            "losing_approver",
+        ),
+        (
+            (5, 10, 3, "Branch A Material", "R101", "branch-a-approver", "branch-b-approver"),
+            (10, 5, 2, "Branch A Rename", "R102", "branch-b-approver", "branch-a-approver"),
+        ),
+    )
+    def test_asymmetric_material_fork_keeps_one_lineage_and_its_lifecycle(
+        self,
+        tmp_path: Path,
+        first_material_lamport: int,
+        second_material_lamport: int,
+        expected_revision: int,
+        expected_title: str,
+        expected_requirement: str,
+        winning_approver: str,
+        losing_approver: str,
+    ) -> None:
+        """A transparent revision cannot make unequal material revisions merge.
+
+        Branch A renames at r2, then makes material r3 content and approves it.
+        Branch B works directly from r1, but reaches material r2 at a larger
+        Lamport after unrelated history. Both material events share the same
+        semantic content base and must compete even though their numeric
+        revisions differ. The losing branch's content and lifecycle must not
+        leak into the winning projection.
+        """
+        base = tmp_path / "asymmetric-material-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+
+        title_revision = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(revision=2, title="Branch A Rename"),
+        )
+        first_requirement = {
+            "id": "R101",
+            "prd_section": "requirements",
+            "text": "Branch A contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        first_payload = _prd_revised_payload(
+            revision=3,
+            title="Branch A Material",
+        )
+        first_payload["requirements_added"] = [first_requirement]
+        first_material = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=first_material_lamport,
+            action="prd.revised",
+            payload=first_payload,
+        )
+        first_review = _handcrafted_git_event(
+            event_id="E-dddddddddddd",
+            parent_event_id="E-bbbbbbbbbbbb",
+            lamport=first_material_lamport + 1,
+            action="prd.reviewed",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 3,
+                "expected_status": "draft",
+                "reviewer": "branch-a-reviewer",
+            },
+        )
+        first_approval = _handcrafted_git_event(
+            event_id="E-eeeeeeeeeeee",
+            parent_event_id="E-dddddddddddd",
+            lamport=first_material_lamport + 2,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 3,
+                "expected_status": "reviewed",
+                "approver": "branch-a-approver",
+            },
+        )
+
+        second_requirement = {
+            "id": "R102",
+            "prd_section": "requirements",
+            "text": "Branch B contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        second_payload = _prd_revised_payload(
+            revision=2,
+            title="Branch B Material",
+        )
+        second_payload["requirements_added"] = [second_requirement]
+        second_material = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id=parent,
+            lamport=second_material_lamport,
+            action="prd.revised",
+            payload=second_payload,
+        )
+        second_review = _handcrafted_git_event(
+            event_id="E-ffffffffffff",
+            parent_event_id="E-cccccccccccc",
+            lamport=second_material_lamport + 1,
+            action="prd.reviewed",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 2,
+                "expected_status": "draft",
+                "reviewer": "branch-b-reviewer",
+            },
+        )
+        second_approval = _handcrafted_git_event(
+            event_id="E-999999999999",
+            parent_event_id="E-ffffffffffff",
+            lamport=second_material_lamport + 2,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 2,
+                "expected_status": "reviewed",
+                "approver": "branch-b-approver",
+            },
+        )
+
+        snapshots: list[str] = []
+        content_events = (title_revision, first_material, second_material)
+        lifecycle_events = (
+            first_review,
+            first_approval,
+            second_review,
+            second_approval,
+        )
+        for index, content_order in enumerate(permutations(content_events)):
+            merged = tmp_path / f"asymmetric-material-merged-{index}"
+            merged.mkdir()
+            events_path = merged / "events.jsonl"
+            events_path.write_text(
+                "\n".join(prefix + list(content_order) + list(lifecycle_events))
+                + "\n",
+                encoding="utf-8",
+            )
+            replayed = _make_backend(merged)
+            try:
+                for _ in range(2):
+                    prd = replayed.get_prd("default")
+                    assert prd is not None
+                    assert prd.revision == expected_revision
+                    assert prd.title == expected_title
+                    assert prd.status.value == "approved"
+                    assert [
+                        requirement.id
+                        for requirement in replayed.list_requirements(
+                            prd_id="default"
+                        )
+                    ] == [expected_requirement]
+                    conn = replayed._require_conn()  # noqa: SLF001
+                    assert conn.execute(
+                        "SELECT 1 FROM reviews WHERE reviewed_by = ?",
+                        (winning_approver,),
+                    ).fetchone() is not None
+                    assert conn.execute(
+                        "SELECT 1 FROM reviews WHERE reviewed_by = ?",
+                        (losing_approver,),
+                    ).fetchone() is None
+                    snapshots.append(_snap(replayed))
+                    replayed.replay_from_empty(str(events_path))
+            finally:
+                replayed.close()
+        assert len(set(snapshots)) == 1
+
+    def test_asymmetric_material_fork_rejects_stale_base_lifecycle(
+        self, tmp_path: Path
+    ) -> None:
+        """A lifecycle sibling cannot bypass a transparent title ancestor."""
+        base = tmp_path / "asymmetric-lifecycle-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+
+        title_revision = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(revision=2, title="Transparent Rename"),
+        )
+        requirement = {
+            "id": "R101",
+            "prd_section": "requirements",
+            "text": "Material descendant contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        material_payload = _prd_revised_payload(
+            revision=3,
+            title="Material Descendant",
+        )
+        material_payload["requirements_added"] = [requirement]
+        material = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=5,
+            action="prd.revised",
+            payload=material_payload,
+        )
+        stale_review = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id=parent,
+            lamport=10,
+            action="prd.reviewed",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 1,
+                "expected_status": "draft",
+                "reviewer": "stale-base-reviewer",
+            },
+        )
+        stale_approval = _handcrafted_git_event(
+            event_id="E-dddddddddddd",
+            parent_event_id="E-cccccccccccc",
+            lamport=11,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 1,
+                "expected_status": "reviewed",
+                "approver": "stale-base-approver",
+            },
+        )
+
+        snapshots: list[str] = []
+        suffix = (title_revision, material, stale_review, stale_approval)
+        for index, physical_order in enumerate(permutations(suffix)):
+            merged = tmp_path / f"asymmetric-lifecycle-merged-{index}"
+            merged.mkdir()
+            events_path = merged / "events.jsonl"
+            events_path.write_text(
+                "\n".join(prefix + list(physical_order)) + "\n",
+                encoding="utf-8",
+            )
+            replayed = _make_backend(merged)
+            try:
+                prd = replayed.get_prd("default")
+                assert prd is not None
+                assert prd.revision == 3
+                assert prd.title == "Material Descendant"
+                assert prd.status.value == "draft"
+                assert [
+                    item.id
+                    for item in replayed.list_requirements(prd_id="default")
+                ] == ["R101"]
+                assert replayed._require_conn().execute(  # noqa: SLF001
+                    "SELECT 1 FROM reviews WHERE reviewed_by LIKE 'stale-base-%'"
+                ).fetchone() is None
+                snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert len(set(snapshots)) == 1
+
+    def test_material_descendants_of_sibling_noops_choose_one_lineage(
+        self, tmp_path: Path
+    ) -> None:
+        """No-op siblings cannot admit duplicate material descendants."""
+        base = tmp_path / "noop-descendant-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+
+        first_noop = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(title="Original PRD"),
+        )
+        second_noop = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(title="Original PRD"),
+        )
+        first_requirement = {
+            "id": "R201",
+            "prd_section": "requirements",
+            "text": "First branch contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        second_requirement = {
+            **first_requirement,
+            "text": "Second branch contract.",
+        }
+        first_material_payload = _prd_revised_payload(
+            revision=3,
+            title="First Material",
+        )
+        first_material_payload["requirements_added"] = [first_requirement]
+        first_material = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=5,
+            action="prd.revised",
+            payload=first_material_payload,
+        )
+        second_material_payload = _prd_revised_payload(
+            revision=3,
+            title="Second Material",
+        )
+        second_material_payload["requirements_added"] = [second_requirement]
+        second_material = _handcrafted_git_event(
+            event_id="E-dddddddddddd",
+            parent_event_id="E-bbbbbbbbbbbb",
+            lamport=5,
+            action="prd.revised",
+            payload=second_material_payload,
+        )
+
+        snapshots: list[str] = []
+        events = (first_noop, second_noop, first_material, second_material)
+        for index, suffix in enumerate(permutations(events)):
+            merged = tmp_path / f"noop-descendant-merged-{index}"
+            merged.mkdir()
+            events_path = merged / "events.jsonl"
+            events_path.write_text(
+                "\n".join(prefix + list(suffix)) + "\n",
+                encoding="utf-8",
+            )
+            replayed = _make_backend(merged)
+            try:
+                for _ in range(2):
+                    prd = replayed.get_prd("default")
+                    assert prd is not None
+                    assert prd.title == "First Material"
+                    assert prd.revision == 3
+                    assert [
+                        (requirement.id, requirement.text)
+                        for requirement in replayed.list_requirements(
+                            prd_id="default"
+                        )
+                    ] == [("R201", "First branch contract.")]
+                    snapshots.append(_snap(replayed))
+                    replayed.replay_from_empty(str(events_path))
+            finally:
+                replayed.close()
+        assert len(set(snapshots)) == 1
+
+    def test_sibling_requirement_edits_choose_one_replay_lineage(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "requirement-edit-base"
+        base.mkdir()
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Base contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(requirements=[requirement]),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+
+        sibling_events: list[str] = []
+        for event_id, title, text in (
+            ("E-aaaaaaaaaaaa", "First Edit", "First contract edit."),
+            ("E-bbbbbbbbbbbb", "Second Edit", "Second contract edit."),
+        ):
+            payload = _prd_revised_payload(title=title)
+            payload["requirements_unchanged"] = [{**requirement, "text": text}]
+            sibling_events.append(
+                _handcrafted_git_event(
+                    event_id=event_id,
+                    parent_event_id=parent,
+                    lamport=4,
+                    action="prd.revised",
+                    payload=payload,
+                )
+            )
+
+        snapshots: list[str] = []
+        for index, suffix in enumerate(
+            (sibling_events, list(reversed(sibling_events)))
+        ):
+            merged = tmp_path / f"requirement-edit-merged-{index}"
+            merged.mkdir()
+            (merged / "events.jsonl").write_text(
+                "\n".join(prefix + suffix) + "\n", encoding="utf-8"
+            )
+            replayed = _make_backend(merged)
+            try:
+                prd = replayed.get_prd("default")
+                assert prd is not None
+                assert prd.title == "First Edit"
+                assert prd.revision == 2
+                live = replayed.list_requirements(prd_id="default")
+                assert [(item.id, item.text) for item in live] == [
+                    ("R001", "First contract edit.")
+                ]
+                snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert snapshots[0] == snapshots[1]
+
+    def test_overlapping_requirement_diff_is_rejected_during_replay(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "overlapping-diff-base"
+        base.mkdir()
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Base contract.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(requirements=[requirement]),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        payload = _prd_revised_payload(superseded=[requirement])
+        payload["requirements_unchanged"] = [requirement]
+        overlapping = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=json.loads(prefix[-1])["id"],
+            lamport=4,
+            action="prd.revised",
+            payload=payload,
+        )
+        merged = tmp_path / "overlapping-diff-merged"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [overlapping]) + "\n", encoding="utf-8"
+        )
+
+        with pytest.raises(TransactionAborted, match="unique and disjoint"):
+            _make_backend(merged)
+
+    def test_sibling_summary_edits_choose_one_replay_lineage(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "summary-edit-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+
+        sibling_events: list[str] = []
+        for event_id, title, summary in (
+            ("E-aaaaaaaaaaaa", "First Summary", "First summary edit."),
+            ("E-bbbbbbbbbbbb", "Second Summary", "Second summary edit."),
+        ):
+            payload = _prd_revised_payload(title=title)
+            payload["summary"] = summary
+            sibling_events.append(
+                _handcrafted_git_event(
+                    event_id=event_id,
+                    parent_event_id=parent,
+                    lamport=4,
+                    action="prd.revised",
+                    payload=payload,
+                )
+            )
+
+        snapshots: list[str] = []
+        for index, suffix in enumerate(
+            (sibling_events, list(reversed(sibling_events)))
+        ):
+            merged = tmp_path / f"summary-edit-merged-{index}"
+            merged.mkdir()
+            (merged / "events.jsonl").write_text(
+                "\n".join(prefix + suffix) + "\n", encoding="utf-8"
+            )
+            replayed = _make_backend(merged)
+            try:
+                prd = replayed.get_prd("default")
+                assert prd is not None
+                assert prd.title == "First Summary"
+                assert prd.summary == "First summary edit."
+                assert prd.revision == 2
+                snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert snapshots[0] == snapshots[1]
+
+    def test_title_overlay_advances_updated_at(self, tmp_path: Path) -> None:
+        base = tmp_path / "overlay-time-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Added material.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        material_payload = _prd_revised_payload(title="Material")
+        material_payload["requirements_added"] = [requirement]
+        material = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=material_payload,
+            timestamp_offset=10,
+        )
+        title_only = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(title="Later Rename"),
+            timestamp_offset=20,
+        )
+        merged = tmp_path / "overlay-time-merged"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [material, title_only]) + "\n", encoding="utf-8"
+        )
+
+        replayed = _make_backend(merged)
+        try:
+            prd = replayed.get_prd("default")
+            assert prd is not None
+            assert prd.title == "Later Rename"
+            assert prd.updated_at == _T0 + timedelta(seconds=20)
+        finally:
+            replayed.close()
+
+    def test_title_overlay_canonicalizes_equivalent_requirement_shapes(
+        self, tmp_path: Path
+    ) -> None:
+        """Omitted Requirement defaults must equal their explicit form."""
+        base = tmp_path / "overlay-requirement-shape-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        minimal_requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Existing requirement.",
+        }
+        try:
+            _seed_prd(backend)
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(
+                        title="Base",
+                        expected_absent=None,
+                        requirements=[minimal_requirement],
+                    ),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        material_payload = _prd_revised_payload(
+            title="Base",
+            superseded=[minimal_requirement],
+        )
+        material = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=5,
+            action="prd.revised",
+            payload=material_payload,
+        )
+
+        title_payload = _prd_revised_payload(title="Concurrent Rename")
+        title_payload["requirements_unchanged"] = [
+            {
+                **minimal_requirement,
+                "source_paragraph": None,
+                "derived": False,
+            }
+        ]
+        title_only = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=5,
+            action="prd.revised",
+            payload=title_payload,
+        )
+
+        snapshots: list[str] = []
+        for index, suffix in enumerate(
+            ([material, title_only], [title_only, material])
+        ):
+            merged = tmp_path / f"overlay-requirement-shape-{index}"
+            merged.mkdir()
+            (merged / "events.jsonl").write_text(
+                "\n".join(prefix + suffix) + "\n", encoding="utf-8"
+            )
+            replayed = _make_backend(merged)
+            try:
+                prd = replayed.get_prd("default")
+                assert prd is not None
+                assert prd.title == "Concurrent Rename"
+                assert replayed.list_requirements(prd_id="default") == []
+                snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert snapshots[0] == snapshots[1]
+
+    def test_prd_policy_memory_is_linear_for_additive_requirement_history(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        events = [
+            Event(
+                id="E-000000000001",
+                parent_event_id=None,
+                lamport=1,
+                timestamp=_T0,
+                actor="scale",
+                action="prd.parsed",
+                target_kind="prd",
+                target_id="default",
+                payload_json=_prd_parsed_payload(),
+            )
+        ]
+        parent = events[0].id
+        for revision in range(2, 5002):
+            requirement = {
+                "id": f"R{revision:04d}",
+                "prd_section": "requirements",
+                "text": f"Requirement {revision}.",
+                "source_paragraph": None,
+                "derived": False,
+            }
+            payload = _prd_revised_payload(revision=revision)
+            payload["requirements_added"] = [requirement]
+            event = Event(
+                id=f"E-{revision:012x}",
+                parent_event_id=parent,
+                lamport=revision,
+                timestamp=_T0 + timedelta(microseconds=revision),
+                actor="scale",
+                action="prd.revised",
+                target_kind="prd",
+                target_id="default",
+                payload_json=payload,
+            )
+            events.append(event)
+            parent = event.id
+
+        tracemalloc.start()
+        started = time.perf_counter()
+        try:
+            policy = backend._build_git_prd_replay_policy(events)  # noqa: SLF001
+            _current, peak = tracemalloc.get_traced_memory()
+            elapsed = time.perf_counter() - started
+        finally:
+            tracemalloc.stop()
+            backend.close()
+        assert policy.content_heads["default"] == (5001, parent)
+        assert peak < 24 * 1024 * 1024
+        assert elapsed < 10
+
+    def test_prd_policy_scales_for_deep_material_lifecycle_history(
+        self, tmp_path: Path
+    ) -> None:
+        """Repeated material/review/approval history must avoid cubic walks."""
+        backend = _make_backend(tmp_path)
+        events = [
+            Event(
+                id="E-000000000001",
+                parent_event_id=None,
+                lamport=1,
+                timestamp=_T0,
+                actor="scale",
+                action="prd.parsed",
+                target_kind="prd",
+                target_id="default",
+                payload_json=_prd_parsed_payload(title="Revision 1"),
+            )
+        ]
+        parent = events[0].id
+        lamport = 1
+        for revision in range(2, 1202):
+            lamport += 1
+            revised = Event(
+                id=f"E-{lamport:012x}",
+                parent_event_id=parent,
+                lamport=lamport,
+                timestamp=_T0 + timedelta(microseconds=lamport),
+                actor="scale",
+                action="prd.revised",
+                target_kind="prd",
+                target_id="default",
+                payload_json=_prd_revised_payload(
+                    revision=revision,
+                    expected_status="approved" if revision > 2 else "draft",
+                    superseded=[{"id": f"R{revision:04d}"}],
+                ),
+            )
+            events.append(revised)
+            lamport += 1
+            reviewed = Event(
+                id=f"E-{lamport:012x}",
+                parent_event_id=revised.id,
+                lamport=lamport,
+                timestamp=_T0 + timedelta(microseconds=lamport),
+                actor="scale",
+                action="prd.reviewed",
+                target_kind="prd",
+                target_id="default",
+                payload_json={
+                    "project_id": "proj-1",
+                    "expected_revision": revision,
+                    "reviewer": "scale",
+                },
+            )
+            events.append(reviewed)
+            lamport += 1
+            approved = Event(
+                id=f"E-{lamport:012x}",
+                parent_event_id=reviewed.id,
+                lamport=lamport,
+                timestamp=_T0 + timedelta(microseconds=lamport),
+                actor="scale",
+                action="prd.approved",
+                target_kind="prd",
+                target_id="default",
+                payload_json={
+                    "project_id": "proj-1",
+                    "expected_revision": revision,
+                    "approver": "scale",
+                },
+            )
+            events.append(approved)
+            parent = approved.id
+
+        started = time.perf_counter()
+        try:
+            policy = backend._build_git_prd_replay_policy(events)  # noqa: SLF001
+        finally:
+            backend.close()
+        assert policy.content_heads["default"] == (1201, events[-3].id)
+        assert time.perf_counter() - started < 10
+
+    def test_cached_prd_head_avoids_full_log_scan_during_append(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A normal append hashes bytes but does not reparse/rebuild replay policy."""
+        source = tmp_path / "cached-head-source"
+        source.mkdir()
+        backend = _make_backend(source)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(title="Revision 1"),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+            for revision in range(2, 41):
+                backend.append(
+                    _draft(
+                        "prd.revised",
+                        _prd_revised_payload(
+                            revision=revision,
+                            title=f"Revision {revision}",
+                        ),
+                        target_kind="prd",
+                        target_id="default",
+                        ts=_T0 + timedelta(microseconds=revision),
+                    )
+                )
+        finally:
+            backend.close()
+
+        reopened = _make_backend(source)
+        try:
+            def forbidden_scan() -> list[Event]:
+                pytest.fail("cached append unexpectedly scanned the full Git log")
+
+            monkeypatch.setattr(reopened, "_read_git_events_ordered", forbidden_scan)
+            prior_head = reopened._git_prd_content_heads["default"][1]  # noqa: SLF001
+            appended = reopened.append(
+                _draft(
+                    "prd.revised",
+                    _prd_revised_payload(
+                        revision=41,
+                        title="Revision 41",
+                    ),
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(microseconds=41),
+                )
+            )
+            assert appended is not None
+            assert appended.parent_event_id == prior_head
+            assert reopened._git_prd_content_heads["default"] == (  # noqa: SLF001
+                41,
+                appended.id,
+            )
+            assert reopened.get_prd("default").revision == 41  # type: ignore[union-attr]
+        finally:
+            reopened.close()
+
+    def test_prd_parent_cycle_fails_closed_before_projection(
+        self, tmp_path: Path
+    ) -> None:
+        first = Event(
+            id="E-aaaaaaaaaaaa",
+            parent_event_id="E-bbbbbbbbbbbb",
+            lamport=1,
+            timestamp=_T0,
+            actor="cycle",
+            action="prd.parsed",
+            target_kind="prd",
+            target_id="default",
+            payload_json=_prd_parsed_payload(),
+        )
+        second = Event(
+            id="E-bbbbbbbbbbbb",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=2,
+            timestamp=_T0 + timedelta(seconds=1),
+            actor="cycle",
+            action="prd.revised",
+            target_kind="prd",
+            target_id="default",
+            payload_json=_prd_revised_payload(),
+        )
+        (tmp_path / "events.jsonl").write_text(
+            first.model_dump_json() + "\n" + second.model_dump_json() + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="parent_event_id cycle"):
+            _make_backend(tmp_path)
+
+    def test_newer_material_title_outranks_older_title_only_overlay(
+        self, tmp_path: Path
+    ) -> None:
+        """Sequential mixed revisions converge in either physical file order."""
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Original requirement.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        source = tmp_path / "mixed-title-source"
+        source.mkdir()
+        backend = _make_backend(source)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(requirements=[requirement]),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+            title_payload = _prd_revised_payload(title="Title Rev2")
+            title_payload["requirements_unchanged"] = [requirement]
+            title_revision = backend.append(
+                _draft(
+                    "prd.revised",
+                    title_payload,
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=2),
+                )
+            )
+            material_revision = backend.append(
+                _draft(
+                    "prd.revised",
+                    _prd_revised_payload(
+                        revision=3,
+                        title="Title Rev3 Material",
+                        superseded=[requirement],
+                    ),
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=3),
+                )
+            )
+            assert title_revision is not None and material_revision is not None
+            assert material_revision.parent_event_id == title_revision.id
+            live = backend.get_prd("default")
+            assert live is not None
+            assert live.title == "Title Rev3 Material"
+            assert live.revision == 3
+            expected = _snap(backend)
+        finally:
+            backend.close()
+
+        lines = (source / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        prefix, revisions = lines[:-2], lines[-2:]
+        for index, suffix in enumerate((revisions, list(reversed(revisions)))):
+            replay_dir = tmp_path / f"mixed-title-replay-{index}"
+            replay_dir.mkdir()
+            events_path = replay_dir / "events.jsonl"
+            events_path.write_text(
+                "\n".join(prefix + suffix) + "\n",
+                encoding="utf-8",
+            )
+            replayed = _make_backend(replay_dir)
+            try:
+                for _ in range(2):
+                    current = replayed.get_prd("default")
+                    assert current is not None
+                    assert current.title == "Title Rev3 Material"
+                    assert current.revision == 3
+                    assert replayed.list_requirements(prd_id="default") == []
+                    assert _snap(replayed) == expected
+                    replayed.replay_from_empty(str(events_path))
+            finally:
+                replayed.close()
+
+    def test_approval_descended_from_material_revision_promotes(
+        self, tmp_path: Path
+    ) -> None:
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Original requirement.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        base = tmp_path / "base-descendant"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(requirements=[requirement]),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        material = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(superseded=[requirement]),
+        )
+        title_payload = _prd_revised_payload(title="Reviewed Rename")
+        title_payload["requirements_unchanged"] = [requirement]
+        title_revision = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=title_payload,
+        )
+        review = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=5,
+            action="prd.reviewed",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 2,
+                "reviewer": "causal-reviewer",
+            },
+        )
+        approval = _handcrafted_git_event(
+            event_id="E-dddddddddddd",
+            parent_event_id="E-cccccccccccc",
+            lamport=6,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 2,
+                "approver": "causal-approver",
+            },
+        )
+        merged = tmp_path / "material-descendant"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [approval, title_revision, material, review]) + "\n",
+            encoding="utf-8",
+        )
+        replayed = _make_backend(merged)
+        try:
+            prd = replayed.get_prd("default")
+            assert prd is not None
+            assert prd.title == "Reviewed Rename"
+            assert prd.revision == 2
+            assert prd.status.value == "approved"
+            assert replayed.list_requirements(prd_id="default") == []
+            row = replayed._require_conn().execute(  # noqa: SLF001
+                "SELECT reviewed_by FROM reviews WHERE id = ?",
+                ("RV-E-dddddddddddd",),
+            ).fetchone()
+            assert row is not None and row[0] == "causal-approver"
+        finally:
+            replayed.close()
+
+    def test_lifecycle_revision_binding_rejects_stale_declared_revision(
+        self, tmp_path: Path
+    ) -> None:
+        """Causal descent cannot compensate for a stale revision precondition."""
+        base = tmp_path / "stale-lifecycle-base"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        material_payload = _prd_revised_payload(revision=2)
+        material_payload["assumptions"] = [
+            {
+                "id": "A001",
+                "statement": "Material revision.",
+                "rationale": "Makes the revision non-title-only.",
+                "requirement_ids": [],
+            }
+        ]
+        material = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=material_payload,
+        )
+        stale_review = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id="E-aaaaaaaaaaaa",
+            lamport=5,
+            action="prd.reviewed",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 1,
+                "reviewer": "stale-reviewer",
+            },
+        )
+        stale_approval = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id="E-bbbbbbbbbbbb",
+            lamport=6,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 1,
+                "approver": "stale-approver",
+            },
+        )
+        merged = tmp_path / "stale-lifecycle-replay"
+        merged.mkdir()
+        events_path = merged / "events.jsonl"
+        events_path.write_text(
+            "\n".join(prefix + [material, stale_review, stale_approval]) + "\n",
+            encoding="utf-8",
+        )
+
+        replayed = _make_backend(merged)
+        try:
+            prd = replayed.get_prd("default")
+            assert prd is not None
+            assert prd.revision == 2
+            assert prd.status.value == "draft"
+            assert replayed._require_conn().execute(  # noqa: SLF001
+                "SELECT 1 FROM reviews WHERE reviewed_by LIKE 'stale-%'"
+            ).fetchone() is None
+            replayed.replay_from_empty(str(events_path))
+            assert replayed.get_prd("default").status.value == "draft"
+        finally:
+            replayed.close()
+
+    def test_losing_current_first_parse_descendant_lifecycle_is_ignored(
+        self, tmp_path: Path
+    ) -> None:
+        base = tmp_path / "base-first-parse"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        winner = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=3,
+            action="prd.parsed",
+            payload=_prd_parsed_payload(title="Winning Content"),
+        )
+        loser = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=3,
+            action="prd.parsed",
+            payload=_prd_parsed_payload(title="Losing Content"),
+        )
+        review = _handcrafted_git_event(
+            event_id="E-cccccccccccc",
+            parent_event_id="E-bbbbbbbbbbbb",
+            lamport=4,
+            action="prd.reviewed",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 1,
+                "reviewer": "losing-reviewer",
+            },
+        )
+        approval = _handcrafted_git_event(
+            event_id="E-dddddddddddd",
+            parent_event_id="E-cccccccccccc",
+            lamport=5,
+            action="prd.approved",
+            payload={
+                "project_id": "proj-1",
+                "expected_revision": 1,
+                "approver": "losing-approver",
+            },
+        )
+        snapshots: list[str] = []
+        for index, suffix in enumerate(
+            ([winner, loser, review, approval], [approval, review, loser, winner])
+        ):
+            merged = tmp_path / f"first-parse-lineage-{index}"
+            merged.mkdir()
+            (merged / "events.jsonl").write_text(
+                "\n".join(prefix + list(suffix)) + "\n", encoding="utf-8"
+            )
+            replayed = _make_backend(merged)
+            try:
+                prd = replayed.get_prd("default")
+                assert prd is not None
+                assert prd.title == "Winning Content"
+                assert prd.status.value == "draft"
+                assert replayed._require_conn().execute(  # noqa: SLF001
+                    "SELECT 1 FROM reviews WHERE id = ?",
+                    ("RV-E-dddddddddddd",),
+                ).fetchone() is None
+                snapshots.append(_snap(replayed))
+            finally:
+                replayed.close()
+        assert snapshots[0] == snapshots[1]
+
+    def test_bounded_replay_policy_does_not_consult_future_material_revision(
+        self, tmp_path: Path
+    ) -> None:
+        requirement = {
+            "id": "R001",
+            "prd_section": "requirements",
+            "text": "Original requirement.",
+            "source_paragraph": None,
+            "derived": False,
+        }
+        base = tmp_path / "base-bounded-policy"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            backend.append(
+                _draft(
+                    "project.created",
+                    {
+                        "id": "proj-1",
+                        "name": "Git PRD",
+                        "description": "",
+                        "created_at": _T0.isoformat(),
+                        "updated_at": _T0.isoformat(),
+                    },
+                )
+            )
+            backend.append(_draft("state.initialized", {}))
+            backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(requirements=[requirement]),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        parent = json.loads(prefix[-1])["id"]
+        title_payload = _prd_revised_payload(title="Prefix Rename")
+        title_payload["requirements_unchanged"] = [requirement]
+        title_revision = _handcrafted_git_event(
+            event_id="E-aaaaaaaaaaaa",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=title_payload,
+        )
+        material = _handcrafted_git_event(
+            event_id="E-bbbbbbbbbbbb",
+            parent_event_id=parent,
+            lamport=4,
+            action="prd.revised",
+            payload=_prd_revised_payload(superseded=[requirement]),
+        )
+        merged = tmp_path / "bounded-policy"
+        merged.mkdir()
+        events_path = merged / "events.jsonl"
+        events_path.write_text(
+            "\n".join(prefix + [material, title_revision]) + "\n",
+            encoding="utf-8",
+        )
+        replayed = _make_backend(merged)
+        try:
+            replayed.replay_to_event_id(str(events_path), "E-aaaaaaaaaaaa")
+            prd = replayed.get_prd("default")
+            assert prd is not None
+            assert prd.title == "Prefix Rename"
+            assert prd.revision == 2
+            assert [
+                requirement.id
+                for requirement in replayed.list_requirements(prd_id="default")
+            ] == ["R001"]
+        finally:
+            replayed.close()
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +4248,98 @@ class TestDivergentMerge:
 
 
 class TestGitConvergenceOnInitialize:
+    def test_reopen_rejects_append_after_ordered_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Convergence never caches bytes appended after its ordered read."""
+        seeded = _make_backend(tmp_path)
+        try:
+            _seed_ready_task(seeded)
+        finally:
+            seeded.close()
+
+        events_path = tmp_path / "events.jsonl"
+        injected_id = "E-facefeedface"
+        reopening = SqliteBackend(
+            db_path=str(tmp_path / "state.db"),
+            events_path=str(events_path),
+            clock=FrozenClock(_T0),
+            events_storage="git",
+        )
+        original_reader = reopening._read_git_events_ordered  # noqa: SLF001
+
+        def read_then_append(*, context: str = "git append parent scan") -> list[Event]:
+            ordered = original_reader(context=context)
+            _append_external_initialized(events_path, injected_id)
+            return ordered
+
+        monkeypatch.setattr(
+            reopening,
+            "_read_git_events_ordered",
+            read_then_append,
+        )
+        with pytest.raises(
+            TransactionAborted,
+            match="events.jsonl changed while its material was being projected",
+        ):
+            reopening.initialize()
+        assert reopening._git_validated_log_signature is None  # noqa: SLF001
+        assert reopening._require_conn().execute(  # noqa: SLF001
+            "SELECT 1 FROM events WHERE id = ?", (injected_id,)
+        ).fetchone() is None
+        reopening.close()
+
+        converged = _make_backend(tmp_path)
+        try:
+            assert converged._require_conn().execute(  # noqa: SLF001
+                "SELECT 1 FROM events WHERE id = ?", (injected_id,)
+            ).fetchone() is not None
+        finally:
+            converged.close()
+
+    def test_replay_rejects_append_during_projection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Full replay caches only the source snapshot it actually projected."""
+        backend = _make_backend(tmp_path)
+        _seed_ready_task(backend)
+        events_path = tmp_path / "events.jsonl"
+        injected_id = "E-deadfeedbeef"
+        original_policy = backend._build_git_prd_replay_policy  # noqa: SLF001
+        injected = False
+
+        def policy_then_append(ordered: list[Event]) -> Any:
+            nonlocal injected
+            policy = original_policy(ordered)
+            if not injected:
+                injected = True
+                _append_external_initialized(events_path, injected_id)
+            return policy
+
+        monkeypatch.setattr(
+            backend,
+            "_build_git_prd_replay_policy",
+            policy_then_append,
+        )
+        with pytest.raises(
+            TransactionAborted,
+            match="events source changed while the projection was being rebuilt",
+        ):
+            backend.replay_from_empty(str(events_path))
+        assert backend._git_validated_log_signature is None  # noqa: SLF001
+        assert backend._require_conn().execute(  # noqa: SLF001
+            "SELECT 1 FROM events WHERE id = ?", (injected_id,)
+        ).fetchone() is None
+        backend.close()
+
+        converged = _make_backend(tmp_path)
+        try:
+            assert converged._require_conn().execute(  # noqa: SLF001
+                "SELECT 1 FROM events WHERE id = ?", (injected_id,)
+            ).fetchone() is not None
+        finally:
+            converged.close()
+
     def test_fresh_clone_builds_projection_from_log(self, tmp_path: Path) -> None:
         """events.jsonl present + no state.db (a clone) → initialize rebuilds."""
         src = tmp_path / "src"

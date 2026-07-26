@@ -608,7 +608,12 @@ Lineage columns already exist in the v7 DDL (Phase 0); this task only adds the m
 **Likely files:** bin/src/anvil/state/sqlite.py, tests/test_sqlite.py
 **Dependencies:** T022
 
-Under order-tolerant git replay two concurrent prd.revised for one prd_id could both claim revision N; replay is checks-free so a deterministic last-writer rule (by lamport,ts,id) must govern supersede marking to avoid double-marking.
+Under order-tolerant git replay two concurrent `prd.revised` events can both
+claim revision N. Current events resolve by causal content lineage: a material
+revision owns contract state and demotion, a true title-only sibling contributes
+only its deterministic title overlay, and only review/approval descendants of
+the winning material revision may promote it. Legacy payloads without the
+optimistic markers retain historical replay semantics.
 
 **Acceptance criteria:**
 

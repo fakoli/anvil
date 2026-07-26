@@ -43,6 +43,7 @@ def draft_prd_from_model(
     model: CodebaseModel,
     *,
     project_name: str,
+    requirement_start: int = 1,
 ) -> str:
     """Return draft PRD markdown describing *model* with a seed feature/task graph.
 
@@ -104,7 +105,7 @@ def draft_prd_from_model(
     # One requirement per selected component (so the PRD has structure the
     # review/decisions tooling can hang off).
     req_ids: list[str] = []
-    for idx, (name, _files) in enumerate(selected, start=1):
+    for idx, (name, _files) in enumerate(selected, start=requirement_start):
         rid = _slug_id("R", idx)
         req_ids.append(rid)
         lines.append(
@@ -113,9 +114,10 @@ def draft_prd_from_model(
         )
     if not req_ids:
         lines.append(
-            "- R001: Establish the initial project structure and conventions."
+            f"- {_slug_id('R', requirement_start)}: Establish the initial "
+            "project structure and conventions."
         )
-        req_ids.append("R001")
+        req_ids.append(_slug_id("R", requirement_start))
     lines.append("")
     lines.append("## Acceptance Criteria")
     lines.append("")

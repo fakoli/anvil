@@ -140,13 +140,17 @@ class PrdParsedPayload(_PrdSourcePayload):
     ``prd.parsed`` event (which never carried a ``prd_id`` key) deserialises
     into the default PRD partition — preserving replay equivalence. The
     identity/release fields (title/target_version/target_tag/is_default) also
-    default so old payloads validate unchanged.
+    default so old payloads validate unchanged. Current first-parse producers
+    set ``expected_absent=True``. The nullable default is intentional: old
+    ``prd.parsed`` events were destructive refreshes and must retain their
+    historical replay meaning.
     """
 
     model_config = _PRD_PAYLOAD_CONFIG
 
     project_id: str
     prd_id: str = DEFAULT_PRD_ID
+    expected_absent: Literal[True] | None = None
     title: str = ""
     target_version: str | None = None
     target_tag: str | None = None
@@ -191,6 +195,10 @@ class PrdRevisedPayload(_PrdSourcePayload):
     changes an assumption demotes an approved PRD back to ``draft``. A
     pure-additive revision with unchanged assumptions keeps the current status.
 
+    Current producers also carry ``expected_status`` as an optimistic
+    lifecycle precondition. It defaults to ``None`` solely so historical event
+    logs that predate the field remain valid and replay identically.
+
     ``extra='forbid'`` rejects unknown keys at dispatch. The ``list[Any]``
     requirement-diff fields hold raw requirement dicts that the handler
     validates via ``Requirement.model_validate`` (mirroring
@@ -202,6 +210,12 @@ class PrdRevisedPayload(_PrdSourcePayload):
     project_id: str
     prd_id: str = DEFAULT_PRD_ID
     revision: StrictInt = Field(ge=1)
+    # Optimistic lifecycle CAS for newly authored revision events. Historical
+    # events predate this field, so None preserves their replay semantics; the
+    # current CLI/MCP always populate the status they observed while building
+    # the revision. The backend checks it transactionally before writing so a
+    # concurrent review/approval cannot be overwritten by stale parse state.
+    expected_status: Literal["draft", "reviewed", "approved"] | None = None
     # Scalar PRD fields (mirror PrdParsedPayload) — describe the revised PRD row.
     title: str = ""
     target_version: str | None = None
@@ -242,6 +256,51 @@ class PrdRevisedPayload(_PrdSourcePayload):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_requirement_diff_partition(self) -> PrdRevisedPayload:
+        """Require requirement ids to form one unambiguous diff partition."""
+        owners: dict[str, list[str]] = {}
+        duplicate_ids: dict[str, set[str]] = {}
+        for field_name in (
+            "requirements_added",
+            "requirements_superseded",
+            "requirements_unchanged",
+        ):
+            seen: set[str] = set()
+            for raw_requirement in getattr(self, field_name):
+                if isinstance(raw_requirement, dict):
+                    requirement_id = raw_requirement.get("id")
+                else:
+                    requirement_id = getattr(raw_requirement, "id", None)
+                # Requirement shape validation remains centralized in the
+                # handler. This validator owns only partition ambiguity.
+                if not isinstance(requirement_id, str):
+                    continue
+                if requirement_id in seen:
+                    duplicate_ids.setdefault(field_name, set()).add(requirement_id)
+                    continue
+                seen.add(requirement_id)
+                owners.setdefault(requirement_id, []).append(field_name)
+
+        overlaps = {
+            requirement_id: field_names
+            for requirement_id, field_names in owners.items()
+            if len(field_names) > 1
+        }
+        if not duplicate_ids and not overlaps:
+            return self
+
+        details: list[str] = []
+        for field_name, requirement_ids in sorted(duplicate_ids.items()):
+            details.append(
+                f"{field_name} repeats {', '.join(sorted(requirement_ids))}"
+            )
+        for requirement_id, field_names in sorted(overlaps.items()):
+            details.append(f"{requirement_id} appears in {', '.join(field_names)}")
+        raise ValueError(
+            "requirement diff ids must be unique and disjoint: " + "; ".join(details)
+        )
+
 
 class PrdReviewedPayload(BaseModel):
     """Payload for 'prd.reviewed'.
@@ -255,6 +314,14 @@ class PrdReviewedPayload(BaseModel):
 
     project_id: str
     prd_id: str = DEFAULT_PRD_ID
+    # Current producers bind lifecycle facts to the content revision they
+    # reviewed.  Git replay also verifies the event's parent chain reaches the
+    # winning content lineage.  None preserves pre-field logs exactly.
+    expected_revision: int | None = Field(default=None, ge=1)
+    # Current producers also bind the lifecycle status observed alongside the
+    # revision. Review/approval do not increment revision, so revision alone
+    # cannot detect a same-revision transition. None preserves old event logs.
+    expected_status: Literal["draft"] | None = None
     reviewer: str
     notes: str | None = None
 
@@ -270,6 +337,8 @@ class PrdApprovedPayload(BaseModel):
 
     project_id: str
     prd_id: str = DEFAULT_PRD_ID
+    expected_revision: int | None = Field(default=None, ge=1)
+    expected_status: Literal["reviewed"] | None = None
     approver: str
 
 

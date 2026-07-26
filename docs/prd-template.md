@@ -224,12 +224,24 @@ parse fails cleanly and existing state in `state.db` is preserved — no silent 
 
 ### `# Project: <Project Name>` — H1
 
-The first line of the file. Sets the project display name stored on the `Project` entity.
+The first root-level ATX H1 in the document. It sets the canonical display title
+stored on the PRD. H1-looking text inside blockquotes, lists, fenced code, or raw
+HTML does not qualify.
 
 **Format**: `# Project: ` followed by a non-empty name string.
 
-**Parser behavior**: if this heading is absent or the name is empty, parse fails with
-`ParseError("missing required section: Project title")`.
+**Canonical-title policy**: the title is limited to 512 UTF-8 bytes. Ordinary
+Unicode—including RTL letters, combining marks, emoji, and the ZWNJ/ZWJ joiners
+needed by legitimate scripts and emoji sequences—is preserved, as is inline
+Markdown punctuation. C0/C1 terminal controls, DEL, surrogate code points,
+Unicode line/paragraph separators, and other invisible Unicode format controls
+(including bidi overrides and isolates) are rejected. These checks happen before
+any parse event is written; errors use bounded messages that never echo rejected
+title bytes, so existing PRD state and terminal output remain unchanged.
+
+**Parser behavior**: if this heading is absent, empty, oversized, or contains an
+unsafe control, parsing fails with a typed `ParseError` in the `# Project`
+section.
 
 ---
 
@@ -641,6 +653,12 @@ the missing section. The existing `state.db` content is preserved untouched.
 
 **Duplicate IDs**: a `ParseError` is raised naming the first conflicting ID. Existing
 state is preserved.
+
+**Diagnostic ceiling**: `ParseResult.errors` remains complete for in-process
+callers. CLI and MCP output is a bounded presentation: at most 20 sanitized
+entries, each message at most 1,024 UTF-8 bytes, with explicit shown/omitted
+metadata. This prevents malformed author input from producing unbounded or
+terminal-active output without hiding that more errors exist.
 
 **ID auto-assignment**: when a requirement bullet has no `RNNN:` prefix, the parser
 assigns the next available ID in document order. The assigned ID is recorded in

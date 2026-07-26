@@ -245,9 +245,9 @@ def seed_pipeline_from_prd(
 
     parsed = parse_prd(prd_text, prd_id="prd")
     if parsed.errors:
-        detail = "; ".join(
-            f"[{e.section}:{e.line}] {e.message}" for e in parsed.errors
-        )
+        from anvil.planning.diagnostics import format_parse_error_summary
+
+        detail = format_parse_error_summary(parsed.errors)
         raise SampleSeedError(
             "the PRD failed to parse "
             f"({len(parsed.errors)} error(s)): {detail}. "
@@ -256,66 +256,144 @@ def seed_pipeline_from_prd(
 
     project_id = backend.get_project().id  # type: ignore[union-attr]
 
-    # --- PRD lifecycle: parsed → reviewed → approved -----------------------
+    # --- PRD lifecycle: parsed/revised → reviewed → approved ---------------
     now = clock.now()
-    backend.append(
-        EventDraft(
-            timestamp=now,
-            actor=actor,
-            action="prd.parsed",
-            target_kind="prd",
-            target_id=project_id,
-            payload_json={
-                "project_id": project_id,
-                "status": parsed.prd.status.value,
-                "summary": parsed.prd.summary,
-                "goals": parsed.prd.goals,
-                "non_goals": parsed.prd.non_goals,
-                "requirements": [
-                    {
-                        "id": r.id,
-                        "prd_section": r.prd_section,
-                        "text": r.text,
-                        "source_paragraph": r.source_paragraph,
-                        "derived": r.derived,
-                    }
-                    for r in parsed.requirements
-                ],
-                "acceptance_criteria": parsed.prd.acceptance_criteria,
-                "risks": parsed.prd.risks,
-                "open_questions": parsed.prd.open_questions,
-                # The parsed heading title, mirroring `prd parse` (issue #177)
-                # — without it the seeded default PRD lists as untitled.
-                "title": parsed.prd.title,
-            },
+    stored_prd_id = parsed.prd.id
+    existing_prd = backend.get_prd(stored_prd_id)
+    new_requirements = [
+        {
+            "id": requirement.id,
+            "prd_section": requirement.prd_section,
+            "text": requirement.text,
+            "source_paragraph": requirement.source_paragraph,
+            "derived": requirement.derived,
+        }
+        for requirement in parsed.requirements
+    ]
+    common_payload: dict[str, object] = {
+        "project_id": project_id,
+        "title": parsed.prd.title,
+        "summary": parsed.prd.summary,
+        "goals": parsed.prd.goals,
+        "non_goals": parsed.prd.non_goals,
+        "acceptance_criteria": parsed.prd.acceptance_criteria,
+        "risks": parsed.prd.risks,
+        "open_questions": parsed.prd.open_questions,
+        "assumptions": [item.model_dump() for item in parsed.prd.assumptions],
+    }
+    if existing_prd is None:
+        content_action = "prd.parsed"
+        content_payload = {
+            **common_payload,
+            "expected_absent": True,
+            "status": parsed.prd.status.value,
+            "requirements": new_requirements,
+        }
+    else:
+        live_requirements = backend.list_requirements(prd_id=stored_prd_id)
+        all_requirements = backend.list_requirements(
+            prd_id=stored_prd_id, include_superseded=True
         )
-    )
-    now = clock.now()
-    backend.append(
-        EventDraft(
-            timestamp=now,
-            actor=actor,
-            action="prd.reviewed",
-            target_kind="prd",
-            target_id=project_id,
-            payload_json={
-                "project_id": project_id,
-                "reviewer": actor,
-                "notes": review_notes,
-            },
+        live_by_id = {item.id: item for item in live_requirements}
+        all_ids = {item.id for item in all_requirements}
+        new_by_id = {str(item["id"]): item for item in new_requirements}
+        readded_retired = sorted(
+            requirement_id
+            for requirement_id in new_by_id
+            if requirement_id in all_ids and requirement_id not in live_by_id
         )
-    )
-    now = clock.now()
-    backend.append(
-        EventDraft(
-            timestamp=now,
-            actor=actor,
-            action="prd.approved",
-            target_kind="prd",
-            target_id=project_id,
-            payload_json={"project_id": project_id, "approver": actor},
+        if readded_retired:
+            raise SampleSeedError(
+                "the PRD reuses retired requirement id(s): "
+                + ", ".join(readded_retired)
+                + ". Use fresh ids before re-seeding."
+            )
+        content_action = "prd.revised"
+        content_payload = {
+            **common_payload,
+            "prd_id": stored_prd_id,
+            "revision": existing_prd.revision + 1,
+            "expected_status": existing_prd.status.value,
+            "is_default": existing_prd.is_default,
+            "target_version": existing_prd.target_version,
+            "target_tag": existing_prd.target_tag,
+            "status": existing_prd.status.value,
+            "requirements_added": [
+                item for item in new_requirements if item["id"] not in all_ids
+            ],
+            "requirements_unchanged": [
+                new_by_id[requirement_id]
+                for requirement_id in live_by_id
+                if requirement_id in new_by_id
+            ],
+            "requirements_superseded": [
+                {
+                    "id": item.id,
+                    "prd_section": item.prd_section,
+                    "text": item.text,
+                    "source_paragraph": item.source_paragraph,
+                    "derived": item.derived,
+                }
+                for item in live_requirements
+                if item.id not in new_by_id
+            ],
+        }
+    from anvil.state.backend import EventRejected
+
+    try:
+        backend.append(
+            EventDraft(
+                timestamp=now,
+                actor=actor,
+                action=content_action,
+                target_kind="prd",
+                target_id=(
+                    project_id if content_action == "prd.parsed" else stored_prd_id
+                ),
+                payload_json=content_payload,
+            )
         )
-    )
+        current_prd = backend.get_prd(stored_prd_id)
+        if current_prd is None:
+            raise SampleSeedError("the PRD seed did not create projection state")
+        if current_prd.status.value == "draft":
+            now = clock.now()
+            backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=actor,
+                    action="prd.reviewed",
+                    target_kind="prd",
+                    target_id=project_id,
+                    payload_json={
+                        "project_id": project_id,
+                        "expected_revision": current_prd.revision,
+                        "expected_status": "draft",
+                        "reviewer": actor,
+                        "notes": review_notes,
+                    },
+                )
+            )
+            current_prd = backend.get_prd(stored_prd_id)
+        if current_prd is not None and current_prd.status.value == "reviewed":
+            now = clock.now()
+            backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=actor,
+                    action="prd.approved",
+                    target_kind="prd",
+                    target_id=project_id,
+                    payload_json={
+                        "project_id": project_id,
+                        "expected_revision": current_prd.revision,
+                        "expected_status": "reviewed",
+                        "approver": actor,
+                    },
+                )
+            )
+    except EventRejected as exc:
+        raise SampleSeedError(f"the PRD seed was rejected: {exc}") from None
 
     # --- Features + tasks: create → infer → promote to drafted -------------
     for feature in parsed.features:
