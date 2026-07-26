@@ -487,7 +487,11 @@ def _atomic_replace_prd(
                 pass
             except OSError:
                 pass
-        if temp_path is not None:
+        # On POSIX an exchange uses the staged temporary pathname as the
+        # capture name. A BaseException can land after the exchange but before
+        # the normal ``temp_path = None`` handoff below it; unlinking that
+        # alias would discard the only retained name for the displaced source.
+        if temp_path is not None and temp_path != captured_path:
             try:
                 temp_path.unlink()
             except FileNotFoundError:
