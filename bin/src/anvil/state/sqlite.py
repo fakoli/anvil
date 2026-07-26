@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 from pydantic import BaseModel
 
@@ -933,16 +933,12 @@ class SqliteBackend:
             conn = self._require_conn()
             last_event_id = 0
 
-            with open(events_path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-
-            for i, raw_line in enumerate(lines):
+            for i, raw_line, is_last in self._iter_event_log_lines(events_path):
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
 
                 # Determine if this is the last (possibly torn) line.
-                is_last = i == len(lines) - 1
 
                 try:
                     raw: dict[str, Any] = json.loads(stripped)
@@ -1759,15 +1755,11 @@ class SqliteBackend:
 
             conn = self._require_conn()
 
-            with open(events_path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-
             events_by_id: dict[str, Event] = {}
-            for i, raw_line in enumerate(lines):
+            for i, raw_line, is_last in self._iter_event_log_lines(events_path):
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
-                is_last = i == len(lines) - 1
                 try:
                     raw: dict[str, Any] = json.loads(stripped)
                     event = Event.model_validate(raw)
@@ -1895,15 +1887,10 @@ class SqliteBackend:
             last_event_id = 0
             found = False
 
-            with open(events_path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-
-            for i, raw_line in enumerate(lines):
+            for i, raw_line, is_last in self._iter_event_log_lines(events_path):
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
-
-                is_last = i == len(lines) - 1
 
                 try:
                     raw: dict[str, Any] = json.loads(stripped)
@@ -1993,15 +1980,11 @@ class SqliteBackend:
 
             conn = self._require_conn()
 
-            with open(events_path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-
             events_by_id: dict[str, Event] = {}
-            for i, raw_line in enumerate(lines):
+            for i, raw_line, is_last in self._iter_event_log_lines(events_path):
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
-                is_last = i == len(lines) - 1
                 try:
                     raw: dict[str, Any] = json.loads(stripped)
                     event = Event.model_validate(raw)
@@ -3641,6 +3624,25 @@ class SqliteBackend:
             return event_id, 0
         return None, 0
 
+    @staticmethod
+    def _iter_event_log_lines(
+        events_path: str,
+    ) -> Iterator[tuple[int, str, bool]]:
+        """Yield lines with a bounded, exact final-line marker.
+
+        Replay accepts damaged JSON only for the physical final line (a torn
+        append). One line of lookahead preserves that distinction without
+        holding the whole JSONL source in memory.
+        """
+        previous: tuple[int, str] | None = None
+        with open(events_path, encoding="utf-8") as fh:
+            for line_number, raw_line in enumerate(fh, start=1):
+                if previous is not None:
+                    yield previous[0], previous[1], False
+                previous = line_number, raw_line
+        if previous is not None:
+            yield previous[0], previous[1], True
+
     def _read_git_events_ordered(
         self, *, context: str = "git append parent scan"
     ) -> list[Event]:
@@ -3653,15 +3655,14 @@ class SqliteBackend:
         """
         if not os.path.exists(self._events_path):
             return []
-        with open(self._events_path, encoding="utf-8") as fh:
-            lines = fh.readlines()
 
         events_by_id: dict[str, Event] = {}
-        for index, raw_line in enumerate(lines):
+        for index, raw_line, is_last in self._iter_event_log_lines(
+            self._events_path
+        ):
             stripped = raw_line.strip()
             if not stripped:
                 continue
-            is_last = index == len(lines) - 1
             try:
                 raw: dict[str, Any] = json.loads(stripped)
                 event = Event.model_validate(raw)
@@ -3847,16 +3848,14 @@ class SqliteBackend:
         max_lamport = 0
         if not os.path.exists(self._events_path):
             return ids, max_lamport
-        with open(self._events_path, encoding="utf-8") as fh:
-            lines = fh.readlines()
-        for i, raw_line in enumerate(lines):
+        for i, raw_line, is_last in self._iter_event_log_lines(self._events_path):
             stripped = raw_line.strip()
             if not stripped:
                 continue
             try:
                 raw: dict[str, Any] = json.loads(stripped)
             except json.JSONDecodeError as exc:
-                if i == len(lines) - 1:
+                if is_last:
                     continue  # torn trailing line — same tolerance as replay
                 raise ValueError(
                     f"events log scan: malformed JSON on interior line {i + 1}: {exc}"
