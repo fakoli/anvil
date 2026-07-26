@@ -14,20 +14,72 @@ has one, so we can put a number on it.
 ```bash
 cd benchmarks
 uv run python run_benchmark.py                       # all 4 scenarios, 3 trials -> RESULTS.md
-uv run python run_benchmark.py --quick               # fast smoke (1 trial, fewer actors)
+uv run python run_benchmark.py --quick               # smoke: 1 trial, fewer actors, 120s/arm
 uv run python run_benchmark.py --scenarios overlapping_files,evidence_gaming
 uv run python run_benchmark.py --trials 5 --seed 7   # more trials / different seed
+uv run python run_benchmark.py --allow-invalid-results # report-only diagnostics (see below)
 uv run python run_benchmark.py --live                # (phase-2 stub) real subagents
 ```
 
 No third-party dependencies. The first run does a one-time `uv sync` of the
 `anvil` CLI into `bin/.venv`; thereafter it calls that console script directly.
-Results are written to `RESULTS.md` (regenerated each run).
+Results are written to `RESULTS.md` (regenerated each run). Publication reserves the
+target for the full invocation and atomically replaces the completed report; a
+concurrent invocation for the same target is refused instead of silently overwriting
+either artifact.
+
+### Result enforcement and report-only diagnostics
+
+The benchmark validates **every individual Anvil trial**, not only aggregate means.
+After a completed run it always writes the requested report and marks it `VALID` or
+`INVALID`. The default exit code is 1 when any selected Anvil trial has one of these
+conditions:
+
+- `completed_all != 1`;
+- `final_state_valid != 1`;
+- successful observed completions with persisted evidence do not cover every expected
+  task;
+- a failed Anvil completion command (`submit` or `apply`); or
+- an honest completion whose persisted submit/apply evidence gate is not valid.
+
+Markdown-control invalidity does not determine this gate: races and incomplete control
+runs are observations the benchmark is designed to measure. Anvil completion failures
+are recorded in the invalid report as bounded, single-line diagnostics with stable
+`phase`, `task`, `actor`, and `exit_code` fields; raw CLI output and tracebacks are not
+copied into the report.
+
+`--allow-invalid-results` is a narrow **report-only** opt-in. It may change exit 1 to
+exit 0 only after all selected scenarios ran and a report was successfully rendered,
+when the only failure is an invalid Anvil result described above. It does not mask
+argument or scenario-selection errors, setup or infrastructure failures, report-write
+failures, failed `next`/`claim` infrastructure calls, or unexpected runtime exceptions.
+Every requested scenario key must be known and unique; a mixed selection such as
+`overlapping_files,typo` is refused in full. The first trial resolves or syncs the Anvil
+binary inside fixture setup, so first-use preparation consumes that trial's budget. After
+all trials, a separately bounded version command must exit 0 with one canonical line.
+The harness also requires exact
+command envelopes and exact task/actor identity for successful claims. Crash recovery
+starts only after the dead-actor claim and its single-lease expiry are both confirmed
+against canonical state. Raw output from any failed boundary is never rendered.
+The per-trial active-work deadline covers first-use binary preparation, fixture setup,
+crash seeding, actor work, verification, completion, and final-state observation. Each
+setup/CLI subprocess receives only the remaining budget, and expiry is an infrastructure
+failure rather than a partial metric row. Containment then gets one shared, best-effort
+one-second cleanup allowance for child processes and one for worker threads. Native OS
+process creation and termination calls are not interruptible on every platform, so wall
+time can exceed those targets before Python regains control; the harness never launches
+an additional benchmark mutation after observing expiry. Trial counts and deadlines must
+be positive (and deadlines finite). The default active-work budget is 120 seconds per
+arm/trial in every mode. This keeps normal and `--quick` runs on one predictable policy
+while accommodating Windows process startup and the real multi-command Anvil setup,
+which do not reliably fit inside 60 seconds. An explicit `--deadline` always wins. These
+rules also apply when the report-only flag is present.
+CI intentionally omits the flag so its real `overlapping_files --quick` smoke fails closed.
 
 ### Committed results status
 
 The committed `RESULTS.md` currently holds **one scenario × one trial**:
-`overlapping_files`, seed 42, generated at anvil v0.0.8. The other three
+`overlapping_files`, seed 42, generated at anvil v0.6.0 (schema 16). The other three
 scenarios (`dependency_ordering`, `crash_recovery`, `evidence_gaming`) have
 **no committed numbers yet** — the default invocation above runs all
 4 scenarios × 3 trials and regenerates `RESULTS.md` in full. The `--live`
@@ -105,7 +157,7 @@ PY
 This is why anvil's `overlapping_files` collisions were low but not zero.
 **Fixed in v1.23.3:** the file-overlap *and* conflict-group re-checks now run inside the
 `BEGIN IMMEDIATE` claim transaction; `overlapping_files` collisions are now **0 across
-all trials**, guarded by `tests/test_claim_concurrency.py` (single-winner under 8 threads).
+all trials**, guarded by `tests/test_claims_concurrency.py` (single-winner under 8 threads).
 
 ### Finding #2 — CLI `claim` ignores `default_lease_minutes`
 

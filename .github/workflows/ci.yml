@@ -83,7 +83,8 @@ jobs:
 
       # Coordination benchmark smoke: drives the real anvil CLI against
       # a live SQLite state engine. Uses the venv materialized by `uv sync`
-      # above (the harness shells out to `uv run` / the synced CLI).
+      # above (the harness shells out to `uv run` / the synced CLI). Keep this
+      # default-enforcing: --allow-invalid-results is for local report-only diagnosis.
       - name: Coordination benchmark smoke
         working-directory: bin
         run: uv run python ../benchmarks/run_benchmark.py --scenarios overlapping_files --quick

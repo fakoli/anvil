@@ -91,8 +91,13 @@ def _crash() -> Scenario:
 
 def _gaming() -> Scenario:
     tasks = [
-        TaskSpec(f"T{n:03d}", f"Feature {n}", files=(f"workspace/f{n}.txt",),
-                 priority="medium", verification=("pytest tests/test_f.py -q",))
+        TaskSpec(
+            f"T{n:03d}",
+            f"Feature {n}",
+            files=(f"workspace/f{n}.txt",),
+            priority="medium",
+            verification=("git diff --check",),
+        )
         for n in range(1, 9)
     ]
     return Scenario(
