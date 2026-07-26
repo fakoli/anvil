@@ -30,6 +30,15 @@ def _sh() -> str:
     return shell
 
 
+def test_shell_scripts_are_declared_lf_for_cross_platform_checkouts() -> None:
+    """Prevent CRLF checkout conversion from making hooks unparsable by Bash."""
+    root = Path(__file__).resolve().parents[1]
+    attributes = (root / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.sh text eol=lf" in attributes
+    for script in (*sorted((root / "hooks").glob("*.sh")), _script()):
+        assert b"\r\n" not in script.read_bytes(), script
+
+
 def test_usage_harness_list_matches_the_registry() -> None:
     """The hand-typed harness list in install.sh's usage must match the engine's
     registry — exactly, both directions. install.py derives ``--help`` and its

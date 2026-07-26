@@ -1,0 +1,3 @@
+# Hooks and installers are executed by POSIX shells from Windows-mounted
+# worktrees as well as native Linux checkouts. Keep their working-tree form LF.
+*.sh text eol=lf
