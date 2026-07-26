@@ -489,9 +489,17 @@ def _atomic_replace_prd(
                 pass
         # On POSIX an exchange uses the staged temporary pathname as the
         # capture name. A BaseException can land after the exchange but before
-        # the normal ``temp_path = None`` handoff below it; unlinking that
-        # alias would discard the only retained name for the displaced source.
-        if temp_path is not None and temp_path != captured_path:
+        # the normal ``temp_path = None`` handoff below it. Retain that alias
+        # only when the original ownership claim no longer names ``path``;
+        # otherwise the exchange itself failed and this is ordinary staging
+        # debris that must be removed.
+        preserve_capture_alias = (
+            temp_path is not None
+            and temp_path == captured_path
+            and ownership_path is not None
+            and not _path_matches_claim(path, ownership_path, expected)
+        )
+        if temp_path is not None and not preserve_capture_alias:
             try:
                 temp_path.unlink()
             except FileNotFoundError:
