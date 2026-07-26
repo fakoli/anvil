@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel
 
