@@ -25,7 +25,7 @@ def compute(scenario, rows, completions, statuses, coord_name, crash_recovered=N
     """Return a flat metric dict for one trial.
 
     rows: list[(ts, actor, task, kind, target)] from the WorkLog
-    completions: list[{task, actor, gamed, evidence_valid}]
+    completions: list[{task, actor, gamed, completed, evidence_valid, failure}]
         (evidence_valid None means no evidence concept)
     statuses: task_id -> canonical status (fakoli) or {} (markdown)
     """
@@ -73,17 +73,52 @@ def compute(scenario, rows, completions, statuses, coord_name, crash_recovered=N
 
     # completion
     total = len(scenario.tasks)
+    expected_task_ids = {task.id for task in scenario.tasks}
     if coord_name == "anvil":
-        completed = sum(1 for s in statuses.values() if s in {"done", "accepted"})
+        observed_successful_task_ids = {
+            completion["task"]
+            for completion in completions
+            if (
+                completion["completed"] is True
+                and completion["evidence_valid"] is not None
+                and completion["failure"] is None
+            )
+        }
+        completion_observations_valid = int(
+            observed_successful_task_ids == expected_task_ids
+        )
+        completed_task_ids = {
+            task_id
+            for task_id, status in statuses.items()
+            if status in {"done", "accepted"}
+        }
+        completed_all = int(
+            set(statuses) == expected_task_ids
+            and completed_task_ids == expected_task_ids
+            and completion_observations_valid == 1
+        )
     else:
         completed = len({t for _ts, _a, t in dones})
-    completed_all = int(completed == total)
+        completed_all = int(completed == total)
+        completion_observations_valid = 1
 
     # evidence
     evidence_records = sum(1 for c in completions if c["evidence_valid"] is not None)
     gamed = [c for c in completions if c["gamed"]]
     detected = sum(1 for c in gamed if c["evidence_valid"] is False)
     gamed_detected_pct = round(100.0 * detected / len(gamed), 1) if gamed else 0.0
+    invalid_honest_evidence = sum(
+        1
+        for completion in completions
+        if (
+            not completion["gamed"]
+            and completion["completed"]
+            and completion["evidence_valid"] is not True
+        )
+    )
+    completion_failure_details = [
+        c["failure"].diagnostic for c in completions if c["failure"] is not None
+    ]
 
     final_state_valid = int(
         collisions == 0 and duplicate_completions == 0
@@ -95,9 +130,15 @@ def compute(scenario, rows, completions, statuses, coord_name, crash_recovered=N
         "duplicate_completions": duplicate_completions,
         "ordering_violations": ordering_violations,
         "completed_all": completed_all,
+        "completion_observations_valid": completion_observations_valid,
         "evidence_records": evidence_records,
         "gamed_detected_pct": gamed_detected_pct,
+        "invalid_honest_evidence": invalid_honest_evidence,
         "final_state_valid": final_state_valid,
+        "completion_failures": len(completion_failure_details),
+        # Detail is deliberately excluded from aggregate arithmetic below. It remains
+        # attached to the individual trial, which is the unit the validity gate checks.
+        "_completion_failure_details": completion_failure_details,
     }
     if crash_recovered is not None:
         m["recovered_after_crash"] = int(crash_recovered)
@@ -109,13 +150,21 @@ LOWER_BETTER = {
     "collisions", "duplicate_completions", "ordering_violations",
 }
 PCT = {"gamed_detected_pct"}
-BOOLISH = {"completed_all", "final_state_valid", "recovered_after_crash"}
+BOOLISH = {
+    "completed_all",
+    "completion_observations_valid",
+    "final_state_valid",
+    "recovered_after_crash",
+}
 
 
 def aggregate(trial_metrics: list[dict]) -> dict:
     """Mean each metric across trials (keeps the headline number stable under the
     inherent nondeterminism of real concurrency)."""
-    keys = set().union(*[m.keys() for m in trial_metrics]) if trial_metrics else set()
+    keys = (
+        {key for metrics in trial_metrics for key in metrics if not key.startswith("_")}
+        if trial_metrics else set()
+    )
     out = {}
     for k in keys:
         vals = [m[k] for m in trial_metrics if k in m]
