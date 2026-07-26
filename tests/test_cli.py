@@ -304,13 +304,14 @@ class TestInitWithSample:
         assert "anvil next" in result.output
 
     def test_init_with_sample_persists_prd_title(self, tmp_path: Path) -> None:
-        """Issue #177 — the seed pipeline's hand-built prd.parsed payload must
-        stamp the parsed heading title like `prd parse` does, so the seeded
-        default PRD does not list as untitled."""
+        """The seed pipeline persists the same parsed title as ``prd parse``."""
         assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
-        rj = self._run(["prd", "list", "--json"], tmp_path)
-        assert rj.exit_code == 0, rj.output
-        prds = json.loads(rj.output)["data"]["prds"]
+
+        result = self._run(["prd", "list", "--json"], tmp_path)
+        assert result.exit_code == 0, result.output
+        prds = json.loads(result.output)["data"]["prds"]
+
+        assert len(prds) == 1
         assert prds[0]["id"] == "default"
         assert prds[0]["title"] == "Markdown Link Checker"
 
@@ -1246,6 +1247,164 @@ A project without goals.
         result = _invoke_cmd(tmp_path, ["prd", "parse"])
         assert result.exit_code == 1
 
+    def test_non_utf8_source_has_bounded_human_and_json_errors_without_mutation(
+        self, tmp_path: Path
+    ) -> None:
+        """Malformed source bytes never escape as a codec traceback, and both
+        CLI surfaces leave the event log byte-identical."""
+        _do_init(tmp_path)
+        source = tmp_path / ".anvil" / "prd.md"
+        source.write_bytes(b"# Project: bad\n\xff\xfe\x80")
+        events = tmp_path / ".anvil" / "events.jsonl"
+        before = events.read_bytes()
+
+        human = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert human.exit_code == 1
+        assert "PRD source is not valid UTF-8." in human.output
+        assert "Traceback" not in human.output
+        assert "invalid start byte" not in human.output
+        assert len(human.output) < 200
+        assert events.read_bytes() == before
+
+        machine = _invoke_cmd(tmp_path, ["prd", "parse", "--json"])
+        assert machine.exit_code == 1
+        envelope = json.loads(machine.output)
+        assert envelope == {
+            "ok": False,
+            "command": "prd parse",
+            "error": {
+                "code": "invalid_encoding",
+                "message": "PRD source is not valid UTF-8.",
+            },
+        }
+        assert not machine.stderr
+        assert len(machine.output.splitlines()) == 1
+        assert events.read_bytes() == before
+
+    def test_five_thousand_parser_errors_are_bounded_on_human_and_json_surfaces(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        malformed = (
+            "# Project: Diagnostic Ceiling\n\n"
+            "## Summary\n\nS\n\n## Goals\n\n- G\n\n"
+            "## Requirements\n\n- R\n\n## Features\n\n"
+            + "\n".join(f"### F-BAD-{index}: x" for index in range(5_000))
+        )
+        _write_prd(tmp_path, malformed)
+        events = tmp_path / ".anvil" / "events.jsonl"
+        before = events.read_bytes()
+
+        human = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert human.exit_code == 1
+        assert human.output.count("Parse error [") == 20
+        assert "showing 20 of 5000; 4980 omitted" in human.output
+        assert len(human.output.encode("utf-8")) < 30_000
+        assert events.read_bytes() == before
+
+        machine = _invoke_cmd(tmp_path, ["prd", "parse", "--json"])
+        assert machine.exit_code == 1
+        envelope = json.loads(machine.output)
+        error = envelope["error"]
+        assert error["error_count"] == 5_000
+        assert error["errors_shown"] == 20
+        assert error["errors_omitted"] == 4_980
+        assert error["errors_truncated"] is True
+        assert len(error["errors"]) == 20
+        assert len(machine.output.encode("utf-8")) < 30_000
+        assert events.read_bytes() == before
+
+    def test_json_success_is_one_typed_envelope(self, tmp_path: Path) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+
+        result = _invoke_cmd(tmp_path, ["prd", "parse", "--json"])
+
+        assert result.exit_code == 0, result.output
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is True
+        assert envelope["command"] == "prd parse"
+        assert envelope["data"]["action"] == "parsed"
+        assert envelope["data"]["prd_id"] == "default"
+        assert envelope["data"]["requirement_count"] == 2
+        assert len(result.output.splitlines()) == 1
+
+    def test_first_parse_race_rejects_stale_payload_after_concurrent_approval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The absence precondition is checked under the append transaction,
+        after a producer has parsed but before its destructive create."""
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.models import EventDraft
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        real_append = SqliteBackend.append
+        interleaved = False
+
+        def create_and_approve_before_stale(self, draft):  # type: ignore[no-untyped-def]
+            nonlocal interleaved
+            if draft.action == "prd.parsed" and not interleaved:
+                interleaved = True
+                winner = dict(draft.payload_json)
+                winner["title"] = "Concurrent Winner"
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-parser",
+                        action="prd.parsed",
+                        target_kind="prd",
+                        target_id=draft.target_id,
+                        payload_json=winner,
+                    ),
+                )
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-reviewer",
+                        action="prd.reviewed",
+                        target_kind="prd",
+                        target_id=draft.target_id,
+                        payload_json={
+                            "project_id": draft.payload_json["project_id"],
+                            "reviewer": "concurrent-reviewer",
+                        },
+                    ),
+                )
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-approver",
+                        action="prd.approved",
+                        target_kind="prd",
+                        target_id=draft.target_id,
+                        payload_json={
+                            "project_id": draft.payload_json["project_id"],
+                            "approver": "concurrent-approver",
+                        },
+                    ),
+                )
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", create_and_approve_before_stale)
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+
+        assert result.exit_code == 1, result.output
+        assert "created after the first parse was prepared" in result.output
+        assert len(_events_of_action(tmp_path, "prd.parsed")) == 1
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.title == "Concurrent Winner"
+        assert prd.status.value == "approved"
+
 
 # ---------------------------------------------------------------------------
 # prd parse --prd (T016) — per-PRD source files and partitioned parsing
@@ -1380,6 +1539,7 @@ class TestPrdParseNamed:
         payload = _prd_parsed_payload(tmp_path)
         assert payload.get("prd_id") == "v0.2"
         assert payload.get("is_default") is False
+        assert payload["title"] == "CLI Named PRD"
         # Named PRD ids are prefixed (T015).
         assert [r["id"] for r in payload["requirements"]] == [
             "v0.2:R001",
@@ -1401,12 +1561,12 @@ class TestPrdParseNamed:
         finally:
             backend.close()
 
-    def test_no_flag_reads_default_prd_md_unchanged(
+    def test_no_flag_reads_default_prd_md_with_canonical_title(
         self, tmp_path: Path
     ) -> None:
         """Without --prd the command reads .anvil/prd.md and the prd.parsed
-        payload stays byte-identical (no prd_id/is_default keys → default
-        partition with bare ids)."""
+        payload carries canonical title metadata while retaining the implicit
+        default partition and bare requirement ids."""
         _do_init(tmp_path)
         _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
 
@@ -1416,9 +1576,10 @@ class TestPrdParseNamed:
         assert ".md" not in result.output
 
         payload = _prd_parsed_payload(tmp_path)
-        # Omitted entirely so the event matches the pre-multi-PRD golden.
+        # Partition identity remains implicit for compatibility with old logs.
         assert "prd_id" not in payload
         assert "is_default" not in payload
+        assert payload["title"] == "CLI Test Project"
         # Default PRD keeps bare requirement ids.
         assert [r["id"] for r in payload["requirements"]] == ["R001", "R002"]
 
@@ -1507,10 +1668,12 @@ class TestPrdParseNamed:
         assert ".md" not in result.output
 
         # The sentinel must take the no-stamp (default) branch, so the event
-        # omits prd_id/is_default exactly like a no-flag parse.
+        # omits prd_id/is_default exactly like a no-flag parse while still
+        # carrying newly derived title metadata.
         payload = _prd_parsed_payload(tmp_path)
         assert "prd_id" not in payload
         assert "is_default" not in payload
+        assert payload["title"] == "CLI Test Project"
         # Default PRD keeps bare requirement ids.
         assert [r["id"] for r in payload["requirements"]] == ["R001", "R002"]
 
@@ -1666,93 +1829,99 @@ class TestPrdList:
         assert prds[0]["is_default"] is True
         assert prds[0]["status"] == "draft"
 
-
-class TestPrdTitle:
-    """Issue #177 — the parsed heading title is persisted and surfaced."""
-
-    def test_named_prd_title_persisted_and_listed(self, tmp_path: Path) -> None:
-        """A named PRD's heading reaches the event payload, `prd list --json`,
-        and the human list output."""
-        _do_init(tmp_path)
+    def test_blank_legacy_named_title_requires_explicit_reparse(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
         _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
-        assert _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code == 0
 
-        payload = _prd_parsed_payload(tmp_path)
-        assert payload["title"] == "CLI Named PRD"
-
-        rj = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
-        assert rj.exit_code == 0, rj.output
-        prds = json.loads(rj.output)["data"]["prds"]
-        assert prds == [
-            {
-                "id": "v0.2",
-                "status": "draft",
-                "revision": 1,
-                "is_default": False,
-                "title": "CLI Named PRD",
-                "target_version": None,
-                "target_tag": None,
-            }
-        ]
-
-        text = _invoke_cmd(tmp_path, ["prd", "list"])
-        assert "CLI Named PRD" in text.output
-
-    def test_default_prd_title_persisted_and_listed(self, tmp_path: Path) -> None:
-        """The default PRD gets the same title treatment as named PRDs."""
-        _do_init(tmp_path)
-        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
-        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
-
-        payload = _prd_parsed_payload(tmp_path)
-        assert payload["title"] == "CLI Test Project"
-
-        rj = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
-        prds = json.loads(rj.output)["data"]["prds"]
-        assert prds[0]["id"] == "default"
-        assert prds[0]["title"] == "CLI Test Project"
-
-    def test_reparse_follows_renamed_heading(self, tmp_path: Path) -> None:
-        """Renaming the # Project heading and re-parsing updates the stored
-        title (title follows the source, not the first parse)."""
-        _do_init(tmp_path)
-        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
-        assert _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code == 0
-
-        renamed = _NAMED_PRD_CONTENT.replace(
-            "# Project: CLI Named PRD", "# Project: Renamed PRD"
+        human_before = _invoke_cmd(tmp_path, ["prd", "list"])
+        assert human_before.exit_code == 0
+        assert "  v0.2  [draft r1]\n" in human_before.output
+        assert "CLI Named PRD" not in human_before.output
+        json_before = json.loads(
+            _invoke_cmd(tmp_path, ["prd", "list", "--json"]).output
         )
-        _write_named_prd(tmp_path, "v0.2", renamed)
-        assert _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"]).exit_code == 0
+        named_before = next(
+            item for item in json_before["data"]["prds"] if item["id"] == "v0.2"
+        )
+        assert named_before["title"] == ""
 
-        rj = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
-        prds = json.loads(rj.output)["data"]["prds"]
-        assert prds == [
-            {
-                "id": "v0.2",
-                "status": "draft",
-                "revision": 2,
-                "is_default": False,
-                "title": "Renamed PRD",
-                "target_version": None,
-                "target_tag": None,
-            }
-        ]
+        reparsed = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+        assert reparsed.exit_code == 0, reparsed.output
+        revised = _events_of_action(tmp_path, "prd.revised")[-1]
+        assert revised["prd_id"] == "v0.2"
+        assert revised["revision"] == 2
+        assert revised["title"] == "CLI Named PRD"
 
-    def test_empty_heading_name_exits_1(self, tmp_path: Path) -> None:
-        """'# Project:' with no name is a parse error: exit 1, nothing persisted."""
+        json_after = json.loads(
+            _invoke_cmd(tmp_path, ["prd", "list", "--json"]).output
+        )
+        named_after = next(
+            item for item in json_after["data"]["prds"] if item["id"] == "v0.2"
+        )
+        human_after = _invoke_cmd(tmp_path, ["prd", "list"])
+        expected_line = (
+            f"  {named_after['id']}  "
+            f"[{named_after['status']} r{named_after['revision']}]  "
+            f"{named_after['title']}"
+        )
+        assert expected_line in human_after.output.splitlines()
+        assert named_after["title"] == "CLI Named PRD"
+
+    def test_human_list_escapes_legacy_terminal_controls_but_json_is_lossless(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stored legacy metadata is data, not terminal protocol. Sanitizing is
+        presentation-only and preserves ordinary Unicode, Markdown, and JSON."""
+        from anvil.cli._helpers import _open_backend
+        from anvil.clock import SystemClock
+        from anvil.state.models import EventDraft
+
         _do_init(tmp_path)
-        broken = _NAMED_PRD_CONTENT.replace(
-            "# Project: CLI Named PRD", "# Project:"
+        title = (
+            "**Crème** مشروع 👩\u200d💻 "
+            "ESC\x1b[31m OSC\x1b]8;;https://evil.invalid\x07link\x1b]8;;\x07 "
+            "CSI\u009b2J BIDI\u202e"
         )
-        _write_named_prd(tmp_path, "v0.2", broken)
-        result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
-        assert result.exit_code == 1
-        combined = result.output + (
-            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            project = backend.get_project()
+            assert project is not None
+            backend.append(
+                EventDraft(
+                    timestamp=SystemClock().now(),
+                    actor="legacy-import",
+                    action="prd.parsed",
+                    target_kind="prd",
+                    target_id=project.id,
+                    payload_json={
+                        "project_id": project.id,
+                        "title": title,
+                    },
+                )
+            )
+        finally:
+            backend.close()
+
+        monkeypatch.chdir(tmp_path)
+        human = runner.invoke(
+            app, ["prd", "list"], catch_exceptions=False, color=True
         )
-        assert "Could not extract project name" in combined
-        assert _prd_parsed_payload(tmp_path) == {}
+        assert human.exit_code == 0, human.output
+        assert "**Crème** مشروع 👩\u200d💻" in human.output
+        assert "\\x1b[31m" in human.output
+        assert "\\x1b]8;;https://evil.invalid\\x07link" in human.output
+        assert "\\x9b2J" in human.output
+        assert "\\u202e" in human.output
+        for terminal_active in ("\x1b", "\x07", "\u009b", "\u202e"):
+            assert terminal_active not in human.output
+
+        machine = runner.invoke(
+            app, ["prd", "list", "--json"], catch_exceptions=False, color=True
+        )
+        assert machine.exit_code == 0, machine.output
+        assert json.loads(machine.output)["data"]["prds"][0]["title"] == title
 
 
 class TestPrdReparse:
@@ -1851,6 +2020,220 @@ class TestPrdReparse:
         assert prd.status.value == "approved", (
             "pure-additive re-parse must NOT demote an approved PRD to draft"
         )
+
+    def test_title_only_default_reparse_updates_title_and_keeps_approved_status(
+        self, tmp_path: Path
+    ) -> None:
+        """A title-only default revision carries the newly parsed title in the
+        event and persisted row without treating metadata as a lifecycle
+        demotion trigger."""
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path, ["prd", "review", "--approve"]
+        ).exit_code == 0
+
+        revised_source = _MINIMAL_PRD_CONTENT.replace(
+            "# Project: CLI Test Project",
+            "# Project: Renamed CLI Test Project",
+            1,
+        )
+        _write_prd(tmp_path, revised_source)
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert result.exit_code == 0, result.output
+
+        revised = _events_of_action(tmp_path, "prd.revised")
+        assert len(revised) == 1
+        assert revised[0]["prd_id"] == "default"
+        assert revised[0]["title"] == "Renamed CLI Test Project"
+        assert revised[0]["status"] == "approved"
+        assert revised[0]["requirements_added"] == []
+        assert revised[0]["requirements_superseded"] == []
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.title == "Renamed CLI Test Project"
+        assert prd.revision == 2
+        assert prd.status.value == "approved"
+
+    @pytest.mark.parametrize(
+        ("unsafe_title", "expected_error", "forbidden_output"),
+        (
+            ("Unsafe\x07Bell", "unsafe control character", "\x07"),
+            ("X" * 513, "512-byte UTF-8 limit", None),
+        ),
+        ids=("terminal-control", "oversized"),
+    )
+    def test_invalid_title_reparse_is_bounded_and_mutation_free(
+        self,
+        tmp_path: Path,
+        unsafe_title: str,
+        expected_error: str,
+        forbidden_output: str | None,
+    ) -> None:
+        """Invalid canonical titles never enter events/state or terminal list
+        output. Diagnostics are bounded and do not echo author-controlled text."""
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path, ["prd", "review", "--approve"]
+        ).exit_code == 0
+
+        invalid = _MINIMAL_PRD_CONTENT.replace(
+            "# Project: CLI Test Project", f"# Project: {unsafe_title}", 1
+        )
+        _write_prd(tmp_path, invalid)
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert expected_error in combined
+        assert unsafe_title not in combined
+        assert len(combined) < 1000
+        if forbidden_output is not None:
+            assert forbidden_output not in combined
+        assert _events_of_action(tmp_path, "prd.revised") == []
+
+        listed = _invoke_cmd(tmp_path, ["prd", "list"])
+        assert listed.exit_code == 0, listed.output
+        assert "CLI Test Project" in listed.output
+        assert unsafe_title not in listed.output
+        if forbidden_output is not None:
+            assert forbidden_output not in listed.output
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.title == "CLI Test Project"
+        assert prd.status.value == "approved"
+        assert prd.revision == 1
+
+    def test_title_only_named_reparse_is_partition_isolated_and_replayable(
+        self, tmp_path: Path
+    ) -> None:
+        """A named title-only revision changes only that PRD. The default PRD's
+        identity, lifecycle, revision, and update timestamp remain untouched,
+        and replay reconstructs the same titles and statuses."""
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        assert _invoke_cmd(tmp_path, ["prd", "review"]).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path, ["prd", "review", "--approve"]
+        ).exit_code == 0
+
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        assert _invoke_cmd(
+            tmp_path, ["prd", "parse", "--prd", "v0.2"]
+        ).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path, ["prd", "review", "--prd", "v0.2"]
+        ).exit_code == 0
+        assert _invoke_cmd(
+            tmp_path,
+            ["prd", "review", "--approve", "--prd", "v0.2"],
+        ).exit_code == 0
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            default_before = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert default_before is not None
+
+        renamed = _NAMED_PRD_CONTENT.replace(
+            "# Project: CLI Named PRD",
+            "# Project: CLI Named PRD Renamed",
+            1,
+        )
+        _write_named_prd(tmp_path, "v0.2", renamed)
+        result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
+        assert result.exit_code == 0, result.output
+
+        revised = _events_of_action(tmp_path, "prd.revised")
+        assert len(revised) == 1
+        assert revised[0]["prd_id"] == "v0.2"
+        assert revised[0]["title"] == "CLI Named PRD Renamed"
+        assert revised[0]["status"] == "approved"
+        assert revised[0]["requirements_added"] == []
+        assert revised[0]["requirements_superseded"] == []
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            default_after = backend.get_prd("default")
+            named_after = backend.get_prd("v0.2")
+        finally:
+            backend.close()
+        assert default_after is not None
+        assert named_after is not None
+        assert (
+            default_after.title,
+            default_after.status,
+            default_after.revision,
+            default_after.updated_at,
+        ) == (
+            default_before.title,
+            default_before.status,
+            default_before.revision,
+            default_before.updated_at,
+        )
+        assert named_after.title == "CLI Named PRD Renamed"
+        assert named_after.status.value == "approved"
+        assert named_after.revision == 2
+
+        scratch_db = tmp_path / "scratch" / "title-replay.db"
+        replay = _invoke_cmd(
+            tmp_path,
+            [
+                "replay",
+                "--from-events",
+                str(tmp_path / ".anvil" / "events.jsonl"),
+                "--into",
+                str(scratch_db),
+            ],
+        )
+        assert replay.exit_code == 0, replay.output
+
+        conn = sqlite3.connect(str(scratch_db))
+        try:
+            replay_rows = {
+                row[0]: (row[1], row[2], row[3])
+                for row in conn.execute(
+                    "SELECT id, title, status, revision FROM prds"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert replay_rows == {
+            "default": (
+                default_after.title,
+                default_after.status.value,
+                default_after.revision,
+            ),
+            "v0.2": (
+                named_after.title,
+                named_after.status.value,
+                named_after.revision,
+            ),
+        }
 
     def test_reparse_named_prd_emits_revised_for_that_partition_only(
         self, tmp_path: Path
@@ -1971,6 +2354,26 @@ class TestPrdReparse:
         assert live == {"R002", "R003"}
         assert prd is not None and prd.revision == 2
 
+    def test_retired_id_refusal_is_bounded_for_hostile_identifier(
+        self, tmp_path: Path
+    ) -> None:
+        hostile_id = "R" + ("1" * 100_000)
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT.replace("R001", hostile_id))
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_V2)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        before = _events_text(tmp_path)
+
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_READD.replace("R001", hostile_id))
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        combined = result.output + getattr(result, "stderr", "")
+        assert result.exit_code == 1
+        assert len(combined.encode("utf-8")) <= 4096
+        assert hostile_id not in combined
+        assert "<redacted count=1 utf8_bytes=" in combined
+        assert _events_text(tmp_path) == before
+
     def test_reparse_eventrejected_is_clean_exit_not_traceback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2009,6 +2412,157 @@ class TestPrdReparse:
         assert "rejected" in combined.lower()
         assert "Traceback" not in combined
         assert "is not current+1" in combined
+
+    def test_title_reparse_rejects_concurrent_review_and_approval(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A title-only parse prepared from draft state must not overwrite a
+        review+approval interleaved immediately before its append. Lifecycle
+        transitions do not increment revision, so this proves the status CAS."""
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.models import EventDraft
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+
+        real_append = SqliteBackend.append
+        interleaved = False
+
+        def approve_before_revision(self, draft):  # type: ignore[no-untyped-def]
+            nonlocal interleaved
+            if draft.action == "prd.revised" and not interleaved:
+                interleaved = True
+                project_id = draft.payload_json["project_id"]
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-reviewer",
+                        action="prd.reviewed",
+                        target_kind="prd",
+                        target_id=project_id,
+                        payload_json={
+                            "project_id": project_id,
+                            "reviewer": "concurrent-reviewer",
+                        },
+                    ),
+                )
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-approver",
+                        action="prd.approved",
+                        target_kind="prd",
+                        target_id=project_id,
+                        payload_json={
+                            "project_id": project_id,
+                            "approver": "concurrent-approver",
+                        },
+                    ),
+                )
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", approve_before_revision)
+        renamed = _MINIMAL_PRD_CONTENT.replace(
+            "# Project: CLI Test Project",
+            "# Project: Stale CLI Rename",
+            1,
+        )
+        _write_prd(tmp_path, renamed)
+        result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert result.exit_code == 1, result.output
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert "lifecycle status changed" in combined
+        assert "Traceback" not in combined
+        assert _events_of_action(tmp_path, "prd.revised") == []
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.title == "CLI Test Project"
+        assert prd.status.value == "approved"
+        assert prd.revision == 1
+
+    def test_review_rejects_same_revision_lifecycle_drift(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLI review binds both revision and draft lifecycle status."""
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.models import EventDraft
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        real_append = SqliteBackend.append
+        interleaved = False
+
+        def approve_before_stale_review(self, draft):  # type: ignore[no-untyped-def]
+            nonlocal interleaved
+            if draft.action == "prd.reviewed" and not interleaved:
+                interleaved = True
+                assert draft.payload_json["expected_revision"] == 1
+                assert draft.payload_json["expected_status"] == "draft"
+                project_id = draft.payload_json["project_id"]
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-reviewer",
+                        action="prd.reviewed",
+                        target_kind="prd",
+                        target_id=project_id,
+                        payload_json={
+                            "project_id": project_id,
+                            "expected_revision": 1,
+                            "expected_status": "draft",
+                            "reviewer": "concurrent-reviewer",
+                        },
+                    ),
+                )
+                real_append(
+                    self,
+                    EventDraft(
+                        timestamp=draft.timestamp,
+                        actor="concurrent-approver",
+                        action="prd.approved",
+                        target_kind="prd",
+                        target_id=project_id,
+                        payload_json={
+                            "project_id": project_id,
+                            "expected_revision": 1,
+                            "expected_status": "reviewed",
+                            "approver": "concurrent-approver",
+                        },
+                    ),
+                )
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", approve_before_stale_review)
+        result = _invoke_cmd(tmp_path, ["prd", "review"])
+        combined = result.output + getattr(result, "stderr", "")
+        assert result.exit_code == 1
+        assert "lifecycle changed" in combined
+        assert "Traceback" not in combined
+        assert len(combined.encode("utf-8")) <= 4096
+        assert len(_events_of_action(tmp_path, "prd.reviewed")) == 1
+        assert len(_events_of_action(tmp_path, "prd.approved")) == 1
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd is not None
+        assert prd.status.value == "approved"
+        assert prd.revision == 1
 
 
 def _stand_up_v6_state_dir(state_dir: Path) -> None:

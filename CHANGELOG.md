@@ -8,16 +8,6 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
-- **PRD titles are parsed and persisted (#177).** `parse_prd` now extracts the
-  readable name from the `# Project: <Name>` heading (bare `# <Name>` also
-  works; the `Project:` prefix is stripped) and stores it as `PRD.title`, so
-  `anvil prd list`/`--json` surface a non-empty title for default and named
-  PRDs alike. Re-parsing after a heading rename updates the stored title, and
-  a heading with an empty name is now a parse error (exit 1) instead of
-  silently persisting an untitled PRD. The seed pipeline
-  (`init --with-sample` / `init --from-repo` / `scan`) stamps the title too,
-  and title extraction is first-heading-wins so a trailing `#` line or a
-  `# comment` inside a fenced code block cannot hijack the title.
 - **Named-PRD dependency recovery and bounded diagnostics (#181).** Legacy
   dependency upserts that omitted `prd_id` now recover during forward catch-up
   and full replay without renumbering events. Dependency validation and
@@ -25,6 +15,18 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   server logs, and audit output. Dependency batches use linear membership,
   reject more than 10,000 edges before state access, and check deep graphs
   without recursion failures.
+- **Canonical PRD titles are concurrency-, replay-, and terminal-safe.** Current
+  first parses use a transactional create-if-absent precondition; non-material
+  title revisions cannot regress a concurrently approved PRD during git-union
+  replay, while legacy events retain their historical meaning and material
+  revisions still demote. Review and approval events bind both content revision
+  and lifecycle status so a same-revision race cannot demote approved state.
+  Seeded PRDs created by `init --with-sample`, `init --from-repo`, or `scan`
+  persist the same canonical title as the normal parse path.
+  Human `prd list` output escapes terminal-active controls already present in
+  legacy state without changing JSON or replay. Malformed UTF-8 sources,
+  hostile stale-create partition IDs, and oversized retired-requirement IDs now
+  return bounded typed CLI (`--json` included) and MCP errors without mutation.
 
 ## [0.6.0] - 2026-07-19
 

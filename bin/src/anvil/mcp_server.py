@@ -2228,6 +2228,11 @@ class ParsePrdResponse(BaseModel):
     feature_count: int
     task_count: int
     errors: list[ParseErrorEntry]
+    error_count: int = 0
+    errors_shown: int = 0
+    errors_omitted: int = 0
+    errors_truncated: bool = False
+    error_messages_truncated: int = 0
     prd_path: str
 
 
@@ -2290,7 +2295,8 @@ def _ingest_planning_prd_source(
             source = ingest_prd_source_for_id(state_dir, parse_prd_id)
     except PrdSourceIngestError as exc:
         suffix = f": {source_identity}" if source_identity is not None else ""
-        raise ToolError(f"Cannot ingest PRD source{suffix}: {exc.message}") from exc
+        detail = f"{exc.message.rstrip('.')}."
+        raise ToolError(f"Cannot ingest PRD source{suffix}. {detail}") from exc
     assert source_identity is not None
     return parse_prd_id, source_identity, source
 
@@ -2308,6 +2314,7 @@ def assess_prd(
     planning, claiming, or autonomous execution.
     """
     from anvil.planning.behavioral_readiness import assess_behavioral_readiness
+    from anvil.planning.diagnostics import format_parse_error_summary
     from anvil.planning.template import parse_prd as _parse_prd_impl
 
     state_dir = _resolve_state_dir(cwd)
@@ -2326,10 +2333,7 @@ def assess_prd(
 
     result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
     if result.errors:
-        details = "; ".join(
-            f"[{error.section}:{error.line}] {error.message}"
-            for error in result.errors
-        )
+        details = format_parse_error_summary(result.errors)
         raise ToolError(
             f"PRD parse failed with {len(result.errors)} error(s): {details}"
         )
@@ -2369,13 +2373,13 @@ def parse_prd(
             ``--prd`` flag: a non-default id reads its portable collection
             source and stamps the partition into the prd.parsed event so only that PRD's
             rows are (re)written. ``None`` / 'default' / 'prd' keep the bare
-            ``.anvil/prd.md`` source + default partition, byte-identical to the
-            pre-multi-PRD event. Ignored for the source path when ``file`` is
-            given (but still honoured for the partition).
+            ``.anvil/prd.md`` source + default partition. Ignored for the source
+            path when ``file`` is given (but still honoured for the partition).
         cwd:  Project root. Defaults to Path.cwd().
     """
     from anvil.cli._helpers import _DEFAULT_PRD_IDS
     from anvil.clock import SystemClock
+    from anvil.planning.diagnostics import parse_diagnostic_report
     from anvil.planning.template import parse_prd as _parse_prd_impl
     from anvil.state.models import EventDraft
 
@@ -2402,9 +2406,10 @@ def parse_prd(
     # Surface errors in the response without short-circuiting the event.
     # When errors exist we skip emission (mirrors the CLI which exits 1
     # before applying); otherwise we emit prd.parsed exactly like the CLI.
+    diagnostics = parse_diagnostic_report(result.errors)
     errors_out = [
         ParseErrorEntry(section=e.section, line=e.line, message=e.message)
-        for e in result.errors
+        for e in diagnostics.entries
     ]
 
     if result.errors:
@@ -2414,6 +2419,11 @@ def parse_prd(
             feature_count=len(result.features),
             task_count=len(result.tasks),
             errors=errors_out,
+            error_count=diagnostics.total_count,
+            errors_shown=diagnostics.shown_count,
+            errors_omitted=diagnostics.omitted_count,
+            errors_truncated=diagnostics.errors_truncated,
+            error_messages_truncated=diagnostics.messages_truncated,
             prd_path=source_identity,
         )
 
@@ -2448,9 +2458,11 @@ def parse_prd(
         ]
 
         if existing_prd is None:
-            # FIRST parse → prd.parsed (destructive create). Mirrors cli/prd.py.
+            # FIRST parse → create-if-absent prd.parsed. Mirrors cli/prd.py.
             payload: dict[str, Any] = {
                 "project_id": project_id,
+                "expected_absent": True,
+                "title": result.prd.title,
                 "status": result.prd.status.value,
                 "summary": result.prd.summary,
                 "goals": result.prd.goals,
@@ -2460,32 +2472,33 @@ def parse_prd(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                # The parsed heading title (non-empty here — an empty/malformed
-                # heading is a parse error that aborts above). Stamped for
-                # default and named PRDs alike, mirroring cli/prd.py (see there
-                # for why adding it to the default payload is version-safe).
-                "title": result.prd.title,
             }
 
             # Named PRD: stamp the partition so the handler writes ONLY this PRD's
-            # rows. The default PRD omits prd_id / is_default / target_* so the
-            # payload defaults reproduce them. Gate on the RESOLVED
-            # parse_prd_id so the reserved 'default'/'prd' sentinels take the
-            # default (no-stamp) branch (see cli/prd.py for the invariant).
+            # rows. The default PRD omits only the partition identity keys; new
+            # events on both surfaces carry canonical title metadata, while the
+            # payload model's title default keeps old event logs replayable.
+            # Gate on the RESOLVED parse_prd_id so the reserved 'default'/'prd'
+            # sentinels take the default branch (see cli/prd.py).
             if not is_default_prd:
                 payload["prd_id"] = stored_prd_id
                 payload["is_default"] = False
                 payload["target_version"] = result.prd.target_version
                 payload["target_tag"] = result.prd.target_tag
 
-            backend.append(EventDraft(
-                timestamp=now,
-                actor="anvil-mcp",
-                action="prd.parsed",
-                target_kind="prd",
-                target_id=project_id,
-                payload_json=payload,
-            ))
+            from anvil.state.backend import EventRejected
+
+            try:
+                backend.append(EventDraft(
+                    timestamp=now,
+                    actor="anvil-mcp",
+                    action="prd.parsed",
+                    target_kind="prd",
+                    target_id=project_id,
+                    payload_json=payload,
+                ))
+            except EventRejected as exc:
+                raise ToolError(f"PRD parse rejected: {exc}") from None
         else:
             # RE-parse of an existing prd_id → prd.revised (non-destructive
             # supersede). Diff the freshly parsed requirements against the PRD's
@@ -2509,7 +2522,9 @@ def parse_prd(
                 if rid in all_ids and rid not in live_by_id
             )
             if readded_retired:
-                ids = ", ".join(readded_retired)
+                from anvil.planning.diagnostics import format_identifier_summary
+
+                ids = format_identifier_summary(readded_retired)
                 raise ToolError(
                     f"Requirement id(s) {ids} were superseded in an earlier "
                     "revision and cannot be re-added (ids are permanent "
@@ -2538,10 +2553,8 @@ def parse_prd(
                 "project_id": project_id,
                 "prd_id": stored_prd_id,
                 "revision": existing_prd.revision + 1,
+                "expected_status": existing_prd.status.value,
                 "is_default": existing_prd.is_default,
-                # Title follows the SOURCE on every parse (non-empty here — a
-                # bad heading is a parse error that aborts above; mirrors the
-                # CLI), so a heading rename propagates on re-parse.
                 "title": result.prd.title,
                 "target_version": existing_prd.target_version,
                 "target_tag": existing_prd.target_tag,
@@ -2680,7 +2693,12 @@ def review_prd(
             action = "prd.approved"
             to_status = "approved"
             payload: dict[str, Any] = _scope(
-                {"project_id": project_id, "approver": reviewer}
+                {
+                    "project_id": project_id,
+                    "expected_revision": prd.revision,
+                    "expected_status": prd.status.value,
+                    "approver": reviewer,
+                }
             )
         else:
             if from_status != "draft":
@@ -2694,6 +2712,8 @@ def review_prd(
             payload = _scope(
                 {
                     "project_id": project_id,
+                    "expected_revision": prd.revision,
+                    "expected_status": prd.status.value,
                     "reviewer": reviewer,
                     "notes": notes,
                 }
@@ -2736,6 +2756,11 @@ class PlanTasksResponse(BaseModel):
     task_count: int
     conflict_group_count: int
     warnings: list[ParseErrorEntry]
+    warning_count: int = 0
+    warnings_shown: int = 0
+    warnings_omitted: int = 0
+    warnings_truncated: bool = False
+    warning_messages_truncated: int = 0
     # LLM backstop signalling. ``llm_generated`` is True when this call drafted
     # a ``## Tasks`` section via the LLM and appended it to prd.md;
     # ``llm_provider`` is the resolved provider slug (else None).
@@ -2864,9 +2889,12 @@ def plan_tasks(
             )
 
     result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
+    from anvil.planning.diagnostics import parse_diagnostic_report
+
+    warning_report = parse_diagnostic_report(result.errors)
     warnings = [
         ParseErrorEntry(section=e.section, line=e.line, message=e.message)
-        for e in result.errors
+        for e in warning_report.entries
     ]
 
     # ------------------------------------------------------------------
@@ -3132,6 +3160,11 @@ def plan_tasks(
             task_count=len(result.tasks),
             conflict_group_count=len(inference_result.conflict_groups),
             warnings=warnings,
+            warning_count=warning_report.total_count,
+            warnings_shown=warning_report.shown_count,
+            warnings_omitted=warning_report.omitted_count,
+            warnings_truncated=warning_report.errors_truncated,
+            warning_messages_truncated=warning_report.messages_truncated,
             llm_generated=llm_generated,
             llm_provider=llm_provider,
             pruned_task_ids=pruned_task_ids,
@@ -3773,11 +3806,9 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
     # surfaced first so they can fix the structural problem before
     # interpreting the decision list.
     if result.errors:
-        error_summary = "; ".join(
-            f"[{e.section}:{e.line}] {e.message}" for e in result.errors[:5]
-        )
-        if len(result.errors) > 5:
-            error_summary += f"; (+{len(result.errors) - 5} more)"
+        from anvil.planning.diagnostics import format_parse_error_summary
+
+        error_summary = format_parse_error_summary(result.errors)
         raise ToolError(
             f"PRD parse failed with {len(result.errors)} error(s); "
             f"fix prd.md and call parse_prd before find_decisions. {error_summary}"

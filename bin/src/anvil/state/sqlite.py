@@ -65,6 +65,7 @@ from anvil.state.models import (
     ConflictGroup,
     Event,
     EventDraft,
+    EvidenceCategory,
     ExecutionBundle,
     Feature,
     PRDAssumption,
@@ -245,6 +246,48 @@ class ActionSpec(NamedTuple):
     write: _WriteFn
 
 
+class _GitPrdReplayPolicy(NamedTuple):
+    """Projection-only conflict decisions for one HLC-ordered git replay."""
+
+    skip_projection: frozenset[str]
+    title_overlays: dict[str, tuple[str, str]]
+    content_heads: dict[str, tuple[int, str]]
+
+
+class _ReplayContentSnapshot(NamedTuple):
+    """Compact persistent content view used by Git PRD replay policy."""
+
+    parent: _ReplayContentSnapshot | None
+    title: str
+    target_version: Any
+    target_tag: Any
+    summary: Any
+    goals: Any
+    non_goals: Any
+    acceptance_criteria: Any
+    risks: Any
+    open_questions: Any
+    assumptions: Any
+    requirements_xor: int
+    requirements_count: int
+    requirement_delta: dict[str, int | None]
+
+    def same_content_except_title(self, other: _ReplayContentSnapshot) -> bool:
+        return (
+            self.target_version == other.target_version
+            and self.target_tag == other.target_tag
+            and self.summary == other.summary
+            and self.goals == other.goals
+            and self.non_goals == other.non_goals
+            and self.acceptance_criteria == other.acceptance_criteria
+            and self.risks == other.risks
+            and self.open_questions == other.open_questions
+            and self.assumptions == other.assumptions
+            and self.requirements_count == other.requirements_count
+            and self.requirements_xor == other.requirements_xor
+        )
+
+
 def _idempotent_no_op(
     reason: str,
     *,
@@ -317,7 +360,9 @@ def _append_lock_acquire_nb(lock_fh: Any) -> None:
     no-op and callers fall back to the in-process lock alone.
     """
     if fcntl is not None:
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(  # type: ignore[attr-defined]
+            lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB  # type: ignore[attr-defined]
+        )
     elif msvcrt is not None:
         os.lseek(lock_fh.fileno(), _WIN_LOCK_OFFSET, os.SEEK_SET)
         msvcrt.locking(lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
@@ -327,7 +372,9 @@ def _append_lock_release(lock_fh: Any) -> None:
     """Release the lock taken by :func:`_append_lock_acquire_nb` (best effort)."""
     try:
         if fcntl is not None:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(  # type: ignore[attr-defined]
+                lock_fh.fileno(), fcntl.LOCK_UN  # type: ignore[attr-defined]
+            )
         elif msvcrt is not None:
             os.lseek(lock_fh.fileno(), _WIN_LOCK_OFFSET, os.SEEK_SET)
             msvcrt.locking(lock_fh.fileno(), msvcrt.LK_UNLCK, 1)
@@ -438,6 +485,22 @@ class SqliteBackend:
         # advanced on each append. The writer assigns max-seen + 1; ties across
         # writers are legal and broken deterministically at replay by (ts, id).
         self._max_lamport: int = 0
+        # Canonical projected PRD content heads, populated once during Git
+        # convergence/replay and advanced after successful live content
+        # appends. Values are (revision, event_id). This keeps causal-parent
+        # resolution O(1) instead of reparsing the Git log and rebuilding
+        # replay policy for every mutation.
+        self._git_prd_content_heads: dict[str, tuple[int, str]] = {}
+        # Identity of the Git event log after its last complete integrity scan.
+        # Every append compares this content-authenticated signature under the
+        # global flock. The unchanged path hashes bytes without parsing JSON;
+        # any external append/rewrite forces complete material validation.
+        self._git_validated_log_signature: tuple[int, int, int, int, str] | None = None
+        # True only for the one open on which the fingerprint ledger is first
+        # introduced to a legacy projection.  Once the table has existed, an
+        # empty/partial ledger is corruption rather than permission to bless
+        # the current log again.
+        self._git_material_ledger_needs_bootstrap: bool = False
         # In-process threading lock nested inside the flock for same-process
         # MCP + CLI thread safety. The outer flock serializes cross-process
         # appends. This is re-entrant because higher-level operations such as
@@ -593,6 +656,9 @@ class SqliteBackend:
         conn = self._require_conn()
 
         with self._append_lock():
+            if self._events_storage == "git":
+                self._validate_git_log_before_append()
+
             # ---- Phase 1: validation (read-only) ----
             action = draft.action
             dispatch = self._get_action_dispatch()
@@ -669,16 +735,44 @@ class SqliteBackend:
             # ---- Phase 2: id assignment ----
             if self._events_storage == "git":
                 # Git mode (v1.22.0): hash-chained id + Lamport counter. The
-                # chain parent is the last event in FILE order as seen by this
-                # writer — we hold the flock, so the tail is stable and covers
-                # appends by other processes since we opened. The Lamport value
-                # is max-seen + 1, where "seen" is the in-memory high-water
-                # mark (full-log scan at initialize()/replay) reconciled with
-                # the tail line. A merged-in INTERIOR line could in theory
-                # carry a higher lamport than both — harmless: replay breaks
-                # lamport ties deterministically by (ts, id), so the counter
-                # only needs to be a causal lower bound, not a global maximum.
-                parent_event_id, tail_lamport = self._scan_tail_envelope()
+                # generic chain parent remains the last event in FILE order as
+                # seen by this writer. Current PRD lifecycle/content events are
+                # different after a union merge: the physical tail may be a
+                # replay-losing sibling. Bind those events to the accepted
+                # content head for their observed revision so a valid live
+                # append remains on the same lineage during a fresh replay.
+                tail_event_id, tail_lamport = self._scan_tail_envelope()
+                parent_event_id = tail_event_id
+                observed_lamport = max(self._max_lamport, tail_lamport)
+                if self._uses_git_prd_causal_parent(materialized_draft):
+                    # A higher tail Lamport means another process appended
+                    # since this instance built its head cache. Refresh even
+                    # if the numeric PRD revision happens to match (a legacy
+                    # destructive parse can reset it to the same value).
+                    cached_parent = (
+                        None
+                        if tail_lamport > self._max_lamport
+                        else self._git_prd_cached_parent(materialized_draft)
+                    )
+                    if cached_parent is None:
+                        # A different writer may have advanced this PRD since
+                        # initialize(). Refresh only on cache/revision mismatch;
+                        # the normal append path performs no full event parse
+                        # or replay-policy rebuild while holding the flock.
+                        ordered = self._read_git_events_ordered()
+                        prd_policy = self._build_git_prd_replay_policy(ordered)
+                        self._git_prd_content_heads = dict(
+                            prd_policy.content_heads
+                        )
+                        cached_parent = self._git_prd_cached_parent(
+                            materialized_draft
+                        )
+                        observed_lamport = max(
+                            observed_lamport,
+                            *(event.lamport or 0 for event in ordered),
+                        )
+                    if cached_parent is not None:
+                        parent_event_id = cached_parent
                 event_id = hash_event_id(
                     parent_event_id=parent_event_id,
                     action=materialized_draft.action,
@@ -691,7 +785,7 @@ class SqliteBackend:
                 event = Event(
                     id=event_id,
                     parent_event_id=parent_event_id,
-                    lamport=max(self._max_lamport, tail_lamport) + 1,
+                    lamport=observed_lamport + 1,
                     **materialized_draft.model_dump(),
                 )
             else:
@@ -783,6 +877,10 @@ class SqliteBackend:
                     f"Transaction aborted for event {event_id!r} (log line remains): {exc}"
                 ) from exc
 
+            if self._events_storage == "git":
+                self._git_validated_log_signature = self._git_log_signature()
+                self._remember_git_prd_content_head(event)
+
         return event
 
     # ------------------------------------------------------------------
@@ -835,16 +933,12 @@ class SqliteBackend:
             conn = self._require_conn()
             last_event_id = 0
 
-            with open(events_path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-
-            for i, raw_line in enumerate(lines):
+            for i, raw_line, is_last in self._iter_event_log_lines(events_path):
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
 
                 # Determine if this is the last (possibly torn) line.
-                is_last = i == len(lines) - 1
 
                 try:
                     raw: dict[str, Any] = json.loads(stripped)
@@ -896,6 +990,711 @@ class SqliteBackend:
         finally:
             self._replaying = False
 
+    @staticmethod
+    def _git_event_order_key(event: Event) -> tuple[int, datetime.datetime, str]:
+        return (event.lamport or 0, event.timestamp, event.id)
+
+    @staticmethod
+    def _git_event_material(event: Event) -> str:
+        """Return normalized envelope material used to compare duplicate ids."""
+        return json.dumps(
+            event.model_dump(mode="json", exclude={"id"}),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def _git_event_fingerprint(cls, event: Event) -> str:
+        """Return a compact digest of the complete immutable Git envelope."""
+        return hashlib.sha256(cls._git_event_material(event).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _git_projection_material(event: Event) -> str:
+        """Return the event material retained by the legacy projection row."""
+        return json.dumps(
+            event.model_dump(
+                mode="json",
+                exclude={"id", "parent_event_id", "lamport"},
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _git_validate_projection_material(
+        self,
+        ordered: list[Event],
+        *,
+        context: str,
+    ) -> None:
+        """Validate log envelopes against their last projected fingerprints.
+
+        Event ids are hashes by convention, but a hand edit can retain an id
+        while changing the envelope.  The events table predates Git envelopes
+        and therefore cannot reconstruct ``parent_event_id`` or ``lamport``.
+        A companion fingerprint table preserves that immutable material across
+        reopen and lets every external-drift path reject a same-id rewrite.
+
+        A database first opened after this ledger was introduced has no stored
+        fingerprints.  For that one compatibility transition, compare every
+        field the legacy row *does* retain before seeding the complete digest.
+        Subsequent opens validate the full envelope, including parent/clock.
+        """
+        conn = self._require_conn()
+        stored = {
+            str(row[0]): str(row[1])
+            for row in conn.execute(
+                "SELECT event_id, fingerprint FROM git_event_material"
+            ).fetchall()
+        }
+        rows = {
+            str(row["id"]): row
+            for row in conn.execute(
+                "SELECT id, timestamp, actor, action, target_kind, target_id, "
+                "payload_json FROM events"
+            ).fetchall()
+        }
+        bootstrap_rows: list[tuple[str, str]] = []
+        for event in ordered:
+            row = rows.get(event.id)
+            if row is None:
+                continue
+            fingerprint = self._git_event_fingerprint(event)
+            prior = stored.get(event.id)
+            if prior is not None:
+                if prior != fingerprint:
+                    raise TransactionAborted(
+                        f"{context}: event {event.id!r} has different material "
+                        "than the projected Git envelope"
+                    )
+                continue
+
+            if not self._git_material_ledger_needs_bootstrap:
+                raise TransactionAborted(
+                    f"{context}: projected Git event {event.id!r} is missing "
+                    "its immutable material fingerprint"
+                )
+
+            projected = Event(
+                id=event.id,
+                timestamp=row["timestamp"],
+                actor=row["actor"],
+                action=row["action"],
+                target_kind=row["target_kind"],
+                target_id=row["target_id"],
+                payload_json=json.loads(row["payload_json"]),
+            )
+            if self._git_projection_material(projected) != self._git_projection_material(
+                event
+            ):
+                raise TransactionAborted(
+                    f"{context}: event {event.id!r} has different material "
+                    "than the legacy projection row"
+                )
+            bootstrap_rows.append((event.id, fingerprint))
+        if self._git_material_ledger_needs_bootstrap:
+            self._git_bootstrap_material_fingerprints(conn, bootstrap_rows)
+
+    def _git_bootstrap_material_fingerprints(
+        self,
+        conn: sqlite3.Connection,
+        rows: list[tuple[str, str]],
+    ) -> None:
+        """Seed legacy fingerprints and completion marker atomically."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                "INSERT OR IGNORE INTO git_event_material "
+                "(event_id, fingerprint) VALUES (?, ?)",
+                rows,
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO git_event_material_state "
+                "(singleton, initialized) VALUES (1, 1)"
+            )
+            conn.execute("COMMIT")
+        except BaseException:
+            self._safe_rollback(conn)
+            raise
+        self._git_material_ledger_needs_bootstrap = False
+
+    def _record_git_event_by_id(
+        self,
+        events_by_id: dict[str, Event],
+        event: Event,
+        *,
+        context: str,
+    ) -> bool:
+        """Record one Git event, rejecting an id with conflicting material.
+
+        Returns ``True`` when *event* is an identical duplicate and therefore
+        already represented in ``events_by_id``. Every Git-log reader that
+        deduplicates by id must use this boundary so a converged projection and
+        a fresh rebuild cannot disagree about whether a union log is corrupt.
+        """
+        existing = events_by_id.get(event.id)
+        if existing is None:
+            events_by_id[event.id] = event
+            return False
+        if self._git_event_material(existing) != self._git_event_material(event):
+            raise ValueError(
+                f"{context}: conflicting duplicate event id {event.id!r}"
+            )
+        return True
+
+    @staticmethod
+    def _git_prd_id(event: Event) -> str:
+        value = event.payload_json.get("prd_id", DEFAULT_PRD_ID)
+        return value if isinstance(value, str) else DEFAULT_PRD_ID
+
+    def _build_git_prd_replay_policy(
+        self, ordered: list[Event]
+    ) -> _GitPrdReplayPolicy:
+        """Resolve current PRD branch facts by causal lineage, not file order.
+
+        Historical payloads are deliberately outside this policy: current first
+        parses carry ``expected_absent=True``, current revisions carry
+        ``expected_status``, and current lifecycle events carry
+        ``expected_revision``.  Missing markers retain their original replay
+        semantics.
+        """
+        events_by_id = {event.id: event for event in ordered}
+        order_index = {event.id: index for index, event in enumerate(ordered)}
+
+        # Validate the parent graph once with linear auxiliary memory. The old
+        # per-event transitive frozenset cache retained O(N^2) ancestor ids for
+        # a linear history and was rebuilt under the append flock. A completed
+        # set plus one current path detects cycles without materializing any
+        # transitive closure; missing parents remain valid historical roots.
+        completed: set[str] = set()
+        for start_id in events_by_id:
+            if start_id in completed:
+                continue
+            path: list[str] = []
+            on_path: set[str] = set()
+            current_id: str | None = start_id
+            while current_id is not None and current_id in events_by_id:
+                if current_id in completed:
+                    break
+                if current_id in on_path:
+                    raise ValueError(
+                        "git PRD replay policy: parent_event_id cycle detected"
+                    )
+                path.append(current_id)
+                on_path.add(current_id)
+                current_id = events_by_id[current_id].parent_event_id
+            completed.update(path)
+
+        # Materialize the parent forest once. Euler intervals make causal
+        # ancestry checks O(1), and the DFS also records the nearest same-PRD
+        # content ancestor for every event. This replaces repeated parent walks
+        # that made long revision/review histories cubic.
+        children: dict[str, list[str]] = {event_id: [] for event_id in events_by_id}
+        roots: list[str] = []
+        for event_id, event in events_by_id.items():
+            parent_id = event.parent_event_id
+            if parent_id is None or parent_id not in events_by_id:
+                roots.append(event_id)
+            else:
+                children[parent_id].append(event_id)
+        roots.sort(key=order_index.__getitem__)
+        for child_ids in children.values():
+            child_ids.sort(key=order_index.__getitem__)
+
+        entry: dict[str, int] = {}
+        exit_: dict[str, int] = {}
+        nearest_content_id: dict[str, str | None] = {}
+        latest_content: dict[str, str] = {}
+        visit_index = 0
+        for root_id in roots:
+            stack: list[tuple[str, bool, str | None, str]] = [
+                (root_id, False, None, "")
+            ]
+            while stack:
+                event_id, leaving, previous_content, prd_id = stack.pop()
+                event = events_by_id[event_id]
+                if leaving:
+                    exit_[event_id] = visit_index
+                    if previous_content is None:
+                        latest_content.pop(prd_id, None)
+                    else:
+                        latest_content[prd_id] = previous_content
+                    continue
+                prd_id = self._git_prd_id(event)
+                nearest_content_id[event_id] = latest_content.get(prd_id)
+                entry[event_id] = visit_index
+                visit_index += 1
+                previous_content = latest_content.get(prd_id)
+                if event.action in {"prd.parsed", "prd.revised"}:
+                    latest_content[prd_id] = event_id
+                stack.append((event_id, True, previous_content, prd_id))
+                for child_id in reversed(children[event_id]):
+                    stack.append((child_id, False, None, ""))
+
+        def descends(event: Event, ancestor_id: str) -> bool:
+            if ancestor_id not in entry or event.id not in entry:
+                return False
+            return (
+                entry[ancestor_id] < entry[event.id]
+                and entry[event.id] < exit_[ancestor_id]
+            )
+
+        def nearest_content_ancestor(event: Event) -> Event | None:
+            ancestor_id = nearest_content_id.get(event.id)
+            return events_by_id.get(ancestor_id) if ancestor_id is not None else None
+
+        current_parses = [
+            event
+            for event in ordered
+            if event.action == "prd.parsed"
+            and event.payload_json.get("expected_absent") is True
+        ]
+        parse_winners: dict[str, str] = {}
+        losing_content: set[str] = set()
+        for event in current_parses:
+            prd_id = self._git_prd_id(event)
+            if prd_id in parse_winners:
+                losing_content.add(event.id)
+            else:
+                parse_winners[prd_id] = event.id
+
+        snapshot_cache: dict[str, _ReplayContentSnapshot] = {}
+
+        def requirement_hash(requirement: dict[str, Any]) -> int:
+            canonical_requirement = Requirement.model_validate(requirement).model_dump(
+                mode="json"
+            )
+            canonical = json.dumps(
+                canonical_requirement,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return int.from_bytes(hashlib.sha256(canonical).digest())
+
+        def prior_requirement_hash(
+            snapshot: _ReplayContentSnapshot | None, requirement_id: str
+        ) -> int | None:
+            current = snapshot
+            while current is not None:
+                if requirement_id in current.requirement_delta:
+                    return current.requirement_delta[requirement_id]
+                current = current.parent
+            return None
+
+        def current_requirement_hash(
+            delta: dict[str, int | None],
+            base: _ReplayContentSnapshot | None,
+            requirement_id: str,
+        ) -> int | None:
+            if requirement_id in delta:
+                return delta[requirement_id]
+            return prior_requirement_hash(base, requirement_id)
+
+        def content_snapshot(event: Event) -> _ReplayContentSnapshot:
+            pending: list[Event] = []
+            current: Event | None = event
+            while current is not None and current.id not in snapshot_cache:
+                pending.append(current)
+                if current.action == "prd.parsed":
+                    break
+                current = nearest_content_ancestor(current)
+            for item_event in reversed(pending):
+                payload = item_event.payload_json
+                requirement_delta: dict[str, int | None]
+                if item_event.action == "prd.parsed":
+                    requirements = {
+                        str(item.get("id")): item
+                        for item in payload.get("requirements", [])
+                        if isinstance(item, dict) and item.get("id") is not None
+                    }
+                    parsed_requirement_delta = {
+                        requirement_id: requirement_hash(requirement)
+                        for requirement_id, requirement in requirements.items()
+                    }
+                    requirement_delta = dict(parsed_requirement_delta)
+                    requirements_xor = 0
+                    for item_hash in parsed_requirement_delta.values():
+                        requirements_xor ^= item_hash
+                    requirements_count = len(requirement_delta)
+                    base_snapshot = None
+                else:
+                    base = nearest_content_ancestor(item_event)
+                    base_snapshot = (
+                        snapshot_cache.get(base.id) if base is not None else None
+                    )
+                    requirement_delta = {}
+                    requirements_xor = (
+                        base_snapshot.requirements_xor
+                        if base_snapshot is not None
+                        else 0
+                    )
+                    requirements_count = (
+                        base_snapshot.requirements_count
+                        if base_snapshot is not None
+                        else 0
+                    )
+
+                    for requirement in payload.get("requirements_superseded", []):
+                        if not isinstance(requirement, dict):
+                            continue
+                        requirement_id = str(requirement.get("id"))
+                        old_hash = current_requirement_hash(
+                            requirement_delta, base_snapshot, requirement_id
+                        )
+                        if old_hash is not None:
+                            requirements_xor ^= old_hash
+                            requirements_count -= 1
+                        requirement_delta[requirement_id] = None
+                    for key in ("requirements_unchanged", "requirements_added"):
+                        for requirement in payload.get(key, []):
+                            if (
+                                isinstance(requirement, dict)
+                                and requirement.get("id") is not None
+                            ):
+                                requirement_id = str(requirement["id"])
+                                is_addition = key == "requirements_added"
+                                old_hash = None
+                                if not is_addition:
+                                    old_hash = current_requirement_hash(
+                                        requirement_delta,
+                                        base_snapshot,
+                                        requirement_id,
+                                    )
+                                new_hash = requirement_hash(requirement)
+                                if old_hash is None:
+                                    requirements_count += 1
+                                else:
+                                    requirements_xor ^= old_hash
+                                requirements_xor ^= new_hash
+                                # Keep the hash carried by this event even when
+                                # it is semantically unchanged. Real producers
+                                # include every live requirement in
+                                # ``requirements_unchanged``; retaining those
+                                # compact hashes makes the next revision's
+                                # lookup O(1) instead of walking the complete
+                                # title-history lineage. This remains linear in
+                                # the requirement entries already present in
+                                # the event log and never copies full models.
+                                requirement_delta[requirement_id] = new_hash
+                snapshot_cache[item_event.id] = _ReplayContentSnapshot(
+                    parent=base_snapshot,
+                    title=str(payload.get("title", "")),
+                    target_version=payload.get("target_version"),
+                    target_tag=payload.get("target_tag"),
+                    summary=payload.get("summary", ""),
+                    goals=payload.get("goals", []),
+                    non_goals=payload.get("non_goals", []),
+                    acceptance_criteria=payload.get("acceptance_criteria", []),
+                    risks=payload.get("risks", []),
+                    open_questions=payload.get("open_questions", []),
+                    assumptions=payload.get("assumptions", []),
+                    requirements_xor=requirements_xor,
+                    requirements_count=requirements_count,
+                    requirement_delta=requirement_delta,
+                )
+            return snapshot_cache[event.id]
+
+        def is_material(event: Event, base: Event) -> bool:
+            current = content_snapshot(event)
+            previous = content_snapshot(base)
+            # Every semantic content change competes for the causal lineage.
+            # A requirement carried in ``requirements_unchanged`` may still
+            # edit its text/metadata, and the scalar/list PRD fields are also
+            # contract state.  Only a pure title change may merge as an
+            # independent overlay; an exact no-op is neither kind.
+            return not current.same_content_except_title(previous)
+
+        def is_title_only(event: Event, base: Event) -> bool:
+            current = content_snapshot(event)
+            previous = content_snapshot(base)
+            return (
+                current.title != previous.title
+                and current.same_content_except_title(previous)
+            )
+
+        canonical_content_base_cache: dict[str, Event] = {}
+
+        def canonical_content_base(event: Event) -> Event | None:
+            """Collapse non-material ancestors onto their shared content base.
+
+            Concurrent renames are independent overlays and exact no-ops add no
+            content at all. Material work descended from either still competes
+            for one content lineage. Cache the collapse so a deep transparent
+            history remains linear.
+            """
+            current = nearest_content_ancestor(event)
+            if current is None:
+                return None
+            transparent_path: list[Event] = []
+            while current.id not in canonical_content_base_cache:
+                parent = nearest_content_ancestor(current)
+                if parent is None or is_material(current, parent):
+                    canonical_content_base_cache[current.id] = current
+                    break
+                transparent_path.append(current)
+                current = parent
+            canonical = canonical_content_base_cache[current.id]
+            for transparent_event in transparent_path:
+                canonical_content_base_cache[transparent_event.id] = canonical
+            return canonical
+
+        current_revisions = [
+            event
+            for event in ordered
+            if event.action == "prd.revised"
+            and event.payload_json.get("expected_status") is not None
+        ]
+        groups: dict[tuple[str, str], list[Event]] = {}
+        invalid_current_content: set[str] = set()
+        for event in current_revisions:
+            base = canonical_content_base(event)
+            # Current producers opt into causal replay explicitly. Unlike
+            # unmarked historical events, they may not become synthetic roots:
+            # a missing/wrong-PRD parent would otherwise graft an unrelated
+            # revision onto whichever PRD row happened to project first.
+            if base is None or self._git_prd_id(base) != self._git_prd_id(event):
+                invalid_current_content.add(event.id)
+                continue
+            revision = event.payload_json.get("revision")
+            if not isinstance(revision, int):
+                continue
+            # Revision numbers count transparent title/no-op revisions as well
+            # as material ones. Two branches can therefore describe competing
+            # material descendants of the same semantic base as r2 and r3.
+            # Grouping by revision would admit both and splice their diffs into
+            # one projection. The canonical content base is the conflict key;
+            # the revision remains metadata for title-overlay ranking only.
+            key = (self._git_prd_id(event), base.id)
+            groups.setdefault(key, []).append(event)
+
+        skip: set[str] = set(losing_content | invalid_current_content)
+        losing_content.update(invalid_current_content)
+        active_material: list[Event] = []
+        # (revision, contribution kind, deterministic event order, title).
+        # A same-revision title-only sibling is the independent rename overlay
+        # and therefore outranks the material event's title; any accepted
+        # higher revision outranks both kinds from an older revision.
+        overlay_candidates: dict[str, tuple[int, int, int, str, str]] = {}
+        sorted_groups = sorted(
+            groups.items(),
+            # A malformed union can give a child a lower Lamport value than its
+            # parent. Resolve groups in causal/topological order anyway so a
+            # losing material parent is known before any transparent descendant
+            # can contribute a title overlay. Euler entry is independent of the
+            # physical union-file permutation and always visits parents first.
+            key=lambda item: (
+                min(entry[event.id] for event in item[1]),
+                item[0],
+            ),
+        )
+        for (prd_id, base_id), candidates in sorted_groups:
+            if base_id in losing_content:
+                skip.update(event.id for event in candidates)
+                losing_content.update(event.id for event in candidates)
+                continue
+            base = events_by_id[base_id]
+            material = [event for event in candidates if is_material(event, base)]
+            # Every accepted title-only group participates in the overlay
+            # ranking, not only a group that also contains a material sibling.
+            # A title-only descendant can be the next valid revision after a
+            # canonical material winner; omitting that group here allowed an
+            # older sibling overlay to overwrite the descendant in the final
+            # overlay pass. The losing-lineage guard above runs first, so a
+            # stale/unrelated descendant cannot enter this ranking.
+            title_changes = [
+                event for event in candidates if is_title_only(event, base)
+            ]
+            if title_changes:
+                selected = max(
+                    title_changes,
+                    key=lambda event: (
+                        int(event.payload_json["revision"]),
+                        order_index[event.id],
+                        str(event.payload_json.get("title", "")),
+                        event.timestamp.isoformat(),
+                    ),
+                )
+                title = str(selected.payload_json.get("title", ""))
+                selected_revision = int(selected.payload_json["revision"])
+                rank = (
+                    selected_revision,
+                    1,
+                    order_index[selected.id],
+                    title,
+                    selected.timestamp.isoformat(),
+                )
+                if rank > overlay_candidates.get(
+                    prd_id, (-1, -1, -1, "", "")
+                ):
+                    overlay_candidates[prd_id] = rank
+            if not material:
+                continue
+            canonical = min(material, key=self._git_event_order_key)
+            # The selected material revision owns the title at its revision
+            # even when it restores the semantic base's title. This lets a
+            # newer causal revision override an older title-only ancestor while
+            # preserving the same-revision sibling-overlay rule above.
+            title = str(canonical.payload_json.get("title", ""))
+            canonical_revision = int(canonical.payload_json["revision"])
+            rank = (
+                canonical_revision,
+                0,
+                order_index[canonical.id],
+                title,
+                canonical.timestamp.isoformat(),
+            )
+            if rank > overlay_candidates.get(prd_id, (-1, -1, -1, "", "")):
+                overlay_candidates[prd_id] = rank
+            active_material.append(canonical)
+            for candidate in candidates:
+                if candidate.id == canonical.id:
+                    continue
+                if descends(canonical, candidate.id):
+                    # A transparent revision on the causal path to the winner
+                    # is history, not a competing branch. It must project so
+                    # lifecycle facts between it and the material descendant
+                    # survive an exact replay. Only unrelated siblings and
+                    # their descendants belong to the losing lineage.
+                    continue
+                skip.add(candidate.id)
+                losing_content.add(candidate.id)
+
+        current_lifecycle = [
+            event
+            for event in ordered
+            if event.action in {"prd.reviewed", "prd.approved"}
+            and event.payload_json.get("expected_revision") is not None
+        ]
+        material_events_by_base: dict[tuple[str, str], list[Event]] = {}
+        for material_event in active_material:
+            # Match lifecycle siblings against the same semantic base used to
+            # resolve material conflicts. A material edit may descend through
+            # transparent title/no-op revisions; indexing it by only its
+            # immediate content parent would let a stale lifecycle fact on the
+            # pre-rename base promote the new material content.
+            base = canonical_content_base(material_event)
+            if base is not None:
+                material_events_by_base.setdefault(
+                    (self._git_prd_id(material_event), base.id), []
+                ).append(material_event)
+        for material_events in material_events_by_base.values():
+            material_events.sort(key=lambda item: entry[item.id])
+
+        lifecycle_status_rank = {"draft": 0, "reviewed": 1, "approved": 2}
+
+        def material_observed_lifecycle(
+            material_event: Event, lifecycle_event: Event
+        ) -> bool:
+            """Whether a winning material event attests this earlier transition."""
+            if self._git_event_order_key(lifecycle_event) >= self._git_event_order_key(
+                material_event
+            ):
+                return False
+            observed = material_event.payload_json.get("expected_status")
+            required = (
+                "reviewed"
+                if lifecycle_event.action == "prd.reviewed"
+                else "approved"
+            )
+            return (
+                isinstance(observed, str)
+                and lifecycle_status_rank.get(observed, -1)
+                >= lifecycle_status_rank[required]
+            )
+
+        for event in current_lifecycle:
+            prd_id = self._git_prd_id(event)
+            winning_parse = parse_winners.get(prd_id)
+            if winning_parse is not None and not descends(event, winning_parse):
+                skip.add(event.id)
+                continue
+            base = nearest_content_ancestor(event)
+            if base is None or base.id in losing_content or base.id in skip:
+                skip.add(event.id)
+                continue
+            expected_revision = event.payload_json.get("expected_revision")
+            base_revision = (
+                1 if base.action == "prd.parsed" else base.payload_json.get("revision")
+            )
+            if (
+                not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or not isinstance(base_revision, int)
+                or isinstance(base_revision, bool)
+                or expected_revision != base_revision
+            ):
+                skip.add(event.id)
+                continue
+            # Material revisions with this exact content base must all descend
+            # from a historical lifecycle fact. Otherwise the lifecycle event
+            # is a stale sibling and cannot promote the winning revision.
+            material_events = material_events_by_base.get((prd_id, base.id), [])
+            non_descendants = [
+                material_event
+                for material_event in material_events
+                if not descends(material_event, event.id)
+            ]
+            if non_descendants and not all(
+                material_observed_lifecycle(material_event, event)
+                for material_event in non_descendants
+            ):
+                skip.add(event.id)
+
+        content_heads: dict[str, tuple[int, str]] = {}
+        for event in ordered:
+            if event.id in skip:
+                continue
+            if event.action == "prd.parsed":
+                revision = 1
+            elif event.action == "prd.revised":
+                revision_raw = event.payload_json.get("revision")
+                if not isinstance(revision_raw, int) or isinstance(
+                    revision_raw, bool
+                ):
+                    continue
+                revision = revision_raw
+            else:
+                continue
+            # Replay applies accepted content in this exact order; assigning
+            # on every event reproduces the final projected owner even for
+            # historical destructive parses whose revision resets to one.
+            content_heads[self._git_prd_id(event)] = (revision, event.id)
+
+        return _GitPrdReplayPolicy(
+            skip_projection=frozenset(skip),
+            title_overlays={
+                prd_id: (rank[3], rank[4])
+                for prd_id, rank in overlay_candidates.items()
+            },
+            content_heads=content_heads,
+        )
+
+    @staticmethod
+    def _apply_git_prd_title_overlays(
+        conn: sqlite3.Connection, overlays: dict[str, tuple[str, str]]
+    ) -> None:
+        if not overlays:
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for prd_id, (title, timestamp) in overlays.items():
+                conn.execute(
+                    """
+                    UPDATE prds
+                       SET title = ?,
+                           updated_at = CASE
+                               WHEN updated_at IS NULL OR updated_at < ? THEN ?
+                               ELSE updated_at
+                           END
+                     WHERE id = ?
+                    """,
+                    (title, timestamp, timestamp, prd_id),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
     def _replay_from_empty_git(self, events_path: str) -> None:
         """Order-tolerant rebuild for ``events_storage: git`` (v1.22.0 Phase A).
 
@@ -922,6 +1721,9 @@ class SqliteBackend:
         final line may fail to parse (crash mid-append); interior damage
         raises — that is corruption, not a torn write.
         """
+        # A failed/unstable replay must never retain a signature from the
+        # projection that is about to be replaced.
+        self._git_validated_log_signature = None
         # Close and delete state.db (+ WAL/SHM sidecars), same as local replay.
         self.close()
         for suffix in ("", "-wal", "-shm"):
@@ -935,21 +1737,29 @@ class SqliteBackend:
         self._replaying = True
         try:
             self.initialize()
+            source_signature = self._git_path_signature(events_path)
 
             if not os.path.exists(events_path):
+                if source_signature != self._git_path_signature(events_path):
+                    raise TransactionAborted(
+                        "git replay integrity: events source changed while "
+                        "the projection was being rebuilt"
+                    )
+                if self._git_material_ledger_needs_bootstrap:
+                    self._git_bootstrap_material_fingerprints(
+                        self._require_conn(), []
+                    )
+                if os.path.abspath(events_path) == os.path.abspath(self._events_path):
+                    self._git_validated_log_signature = source_signature
                 return
 
             conn = self._require_conn()
 
-            with open(events_path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-
             events_by_id: dict[str, Event] = {}
-            for i, raw_line in enumerate(lines):
+            for i, raw_line, is_last in self._iter_event_log_lines(events_path):
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
-                is_last = i == len(lines) - 1
                 try:
                     raw: dict[str, Any] = json.loads(stripped)
                     event = Event.model_validate(raw)
@@ -967,12 +1777,16 @@ class SqliteBackend:
                     raise ValueError(
                         f"git replay: malformed event on interior line {i + 1}: {exc}"
                     ) from exc
-                if event.id in events_by_id:
-                    # merge=union duplicated this line — applying once is the
-                    # correct semantics by construction (spec Risks table).
+                if self._record_git_event_by_id(
+                    events_by_id,
+                    event,
+                    context="git replay",
+                ):
+                    # merge=union may duplicate one identical line, but an id
+                    # collision or corrupted union must not make replay depend
+                    # on whichever physical occurrence appeared first.
                     logger.debug("git replay: duplicate event %s skipped", event.id)
                     continue
-                events_by_id[event.id] = event
 
             # Hybrid-logical-clock order. A missing lamport (hand-edited or
             # not-yet-migrated line) sorts first as 0 rather than crashing
@@ -980,15 +1794,33 @@ class SqliteBackend:
             # datetime comparison is total.
             ordered = sorted(
                 events_by_id.values(),
-                key=lambda e: (e.lamport or 0, e.timestamp, e.id),
+                key=self._git_event_order_key,
             )
+            prd_policy = self._build_git_prd_replay_policy(ordered)
+            self._git_prd_content_heads = dict(prd_policy.content_heads)
 
             max_lamport = 0
             for seq, event in enumerate(ordered, start=1):
-                self._apply_write_only(conn, event, seq=seq)
+                self._apply_write_only(
+                    conn,
+                    event,
+                    seq=seq,
+                    skip_projection=event.id in prd_policy.skip_projection,
+                )
                 if event.lamport is not None and event.lamport > max_lamport:
                     max_lamport = event.lamport
+            self._apply_git_prd_title_overlays(conn, prd_policy.title_overlays)
             self._max_lamport = max_lamport
+            if self._git_material_ledger_needs_bootstrap:
+                self._git_bootstrap_material_fingerprints(conn, [])
+            signature_after = self._git_path_signature(events_path)
+            if source_signature != signature_after:
+                raise TransactionAborted(
+                    "git replay integrity: events source changed while "
+                    "the projection was being rebuilt"
+                )
+            if os.path.abspath(events_path) == os.path.abspath(self._events_path):
+                self._git_validated_log_signature = signature_after
         finally:
             self._replaying = False
 
@@ -1055,15 +1887,10 @@ class SqliteBackend:
             last_event_id = 0
             found = False
 
-            with open(events_path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-
-            for i, raw_line in enumerate(lines):
+            for i, raw_line, is_last in self._iter_event_log_lines(events_path):
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
-
-                is_last = i == len(lines) - 1
 
                 try:
                     raw: dict[str, Any] = json.loads(stripped)
@@ -1133,6 +1960,7 @@ class SqliteBackend:
         ``stop_after_event_id`` in HLC order. Raises ``ValueError`` if that id
         is absent from the log.
         """
+        self._git_validated_log_signature = None
         self.close()
         for suffix in ("", "-wal", "-shm"):
             path = self._db_path + suffix
@@ -1142,6 +1970,7 @@ class SqliteBackend:
         self._replaying = True
         try:
             self.initialize()
+            source_signature = self._git_path_signature(events_path)
 
             if not os.path.exists(events_path):
                 raise ValueError(
@@ -1151,15 +1980,11 @@ class SqliteBackend:
 
             conn = self._require_conn()
 
-            with open(events_path, encoding="utf-8") as fh:
-                lines = fh.readlines()
-
             events_by_id: dict[str, Event] = {}
-            for i, raw_line in enumerate(lines):
+            for i, raw_line, is_last in self._iter_event_log_lines(events_path):
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
-                is_last = i == len(lines) - 1
                 try:
                     raw: dict[str, Any] = json.loads(stripped)
                     event = Event.model_validate(raw)
@@ -1176,12 +2001,15 @@ class SqliteBackend:
                         f"git bounded replay: malformed event on interior line "
                         f"{i + 1}: {exc}"
                     ) from exc
-                if event.id in events_by_id:
+                if self._record_git_event_by_id(
+                    events_by_id,
+                    event,
+                    context="git bounded replay",
+                ):
                     logger.debug(
                         "git bounded replay: duplicate event %s skipped", event.id
                     )
                     continue
-                events_by_id[event.id] = event
 
             if stop_after_event_id not in events_by_id:
                 raise ValueError(
@@ -1191,17 +2019,36 @@ class SqliteBackend:
 
             ordered = sorted(
                 events_by_id.values(),
-                key=lambda e: (e.lamport or 0, e.timestamp, e.id),
+                key=self._git_event_order_key,
             )
+            stop_index = next(
+                index
+                for index, event in enumerate(ordered)
+                if event.id == stop_after_event_id
+            )
+            bounded_ordered = ordered[: stop_index + 1]
+            prd_policy = self._build_git_prd_replay_policy(bounded_ordered)
+            self._git_prd_content_heads = dict(prd_policy.content_heads)
 
             max_lamport = 0
-            for seq, event in enumerate(ordered, start=1):
-                self._apply_write_only(conn, event, seq=seq)
+            for seq, event in enumerate(bounded_ordered, start=1):
+                self._apply_write_only(
+                    conn,
+                    event,
+                    seq=seq,
+                    skip_projection=event.id in prd_policy.skip_projection,
+                )
                 if event.lamport is not None and event.lamport > max_lamport:
                     max_lamport = event.lamport
-                if event.id == stop_after_event_id:
-                    break
+            self._apply_git_prd_title_overlays(conn, prd_policy.title_overlays)
             self._max_lamport = max_lamport
+            if self._git_material_ledger_needs_bootstrap:
+                self._git_bootstrap_material_fingerprints(conn, [])
+            if source_signature != self._git_path_signature(events_path):
+                raise TransactionAborted(
+                    "git bounded replay integrity: events source changed while "
+                    "the projection was being rebuilt"
+                )
         finally:
             self._replaying = False
 
@@ -1795,8 +2642,8 @@ class SqliteBackend:
             timestamp=self._clock.now(),
             actor=actor,
             action="sync_mapping.upserted",
-            target_kind="task",
-            target_id=mapping.task_id,
+            target_kind=mapping.entity_kind,
+            target_id=(mapping.task_id or mapping.prd_id or DEFAULT_PRD_ID),
             payload_json=payload.model_dump(mode="json"),
         )
         result = self.append(draft)
@@ -1870,7 +2717,32 @@ class SqliteBackend:
                     ):
                         continue
                     raise
+            # Git event ids alone cannot prove that an existing line retained
+            # its immutable parent/clock/payload material.  Keep the digest in
+            # projection state so reopen and long-lived writers can detect a
+            # same-id rewrite before accepting any further mutation.  This is
+            # projection-only metadata, not a domain-schema revision.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS git_event_material (
+                    event_id TEXT PRIMARY KEY,
+                    fingerprint TEXT NOT NULL,
+                    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS git_event_material_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    initialized INTEGER NOT NULL CHECK (initialized = 1)
+                )
+                """
+            )
             conn.execute("COMMIT")
+            self._git_material_ledger_needs_bootstrap = conn.execute(
+                "SELECT 1 FROM git_event_material_state WHERE singleton = 1"
+            ).fetchone() is None
         except BaseException:
             # A non-swallowed DDL failure leaves the BEGIN open; roll it back so the
             # connection isn't left mid-transaction before propagating (review FIX 5).
@@ -2752,6 +3624,217 @@ class SqliteBackend:
             return event_id, 0
         return None, 0
 
+    @staticmethod
+    def _iter_event_log_lines(
+        events_path: str,
+    ) -> Iterator[tuple[int, str, bool]]:
+        """Yield lines with a bounded, exact final-line marker.
+
+        Replay accepts damaged JSON only for the physical final line (a torn
+        append). One line of lookahead preserves that distinction without
+        holding the whole JSONL source in memory.
+        """
+        previous: tuple[int, str] | None = None
+        with open(events_path, encoding="utf-8") as fh:
+            for line_number, raw_line in enumerate(fh, start=1):
+                if previous is not None:
+                    yield previous[0], previous[1], False
+                previous = line_number, raw_line
+        if previous is not None:
+            yield previous[0], previous[1], True
+
+    def _read_git_events_ordered(
+        self, *, context: str = "git append parent scan"
+    ) -> list[Event]:
+        """Read, deduplicate, and HLC-order the current Git event log.
+
+        This is the read-only half of Git replay, used under the append flock
+        when a current PRD event needs a causal parent. It intentionally uses
+        the same duplicate and torn-tail rules as ``_replay_from_empty_git``;
+        interior corruption fails before a new log line can be appended.
+        """
+        if not os.path.exists(self._events_path):
+            return []
+
+        events_by_id: dict[str, Event] = {}
+        for index, raw_line, is_last in self._iter_event_log_lines(
+            self._events_path
+        ):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                raw: dict[str, Any] = json.loads(stripped)
+                event = Event.model_validate(raw)
+            except Exception as exc:
+                if is_last:
+                    logger.debug(
+                        "git append parent scan: skipping torn trailing line "
+                        "(line %d): %s",
+                        index + 1,
+                        exc,
+                    )
+                    break
+                raise ValueError(
+                    "git append parent scan: malformed event on interior line "
+                    f"{index + 1}: {exc}"
+                ) from exc
+            if self._record_git_event_by_id(
+                events_by_id,
+                event,
+                context=context,
+            ):
+                logger.debug(
+                    "git append parent scan: duplicate event %s skipped", event.id
+                )
+        return sorted(events_by_id.values(), key=self._git_event_order_key)
+
+    @staticmethod
+    def _git_path_signature(
+        events_path: str,
+    ) -> tuple[int, int, int, int, str] | None:
+        """Return filesystem identity plus a digest of one event source.
+
+        Metadata alone is not authoritative: a same-length rewrite can restore
+        ``mtime`` and bypass validation.  Hashing is linear in bytes but avoids
+        JSON parsing on the unchanged path, preserving the cheapest safe fast
+        path available without a trusted filesystem change journal.
+        """
+        try:
+            stat = os.stat(events_path)
+        except FileNotFoundError:
+            return None
+        digest = hashlib.sha256()
+        try:
+            with open(events_path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except FileNotFoundError:
+            return None
+        return (
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            digest.hexdigest(),
+        )
+
+    def _git_log_signature(self) -> tuple[int, int, int, int, str] | None:
+        """Return the content-authenticated signature of ``events.jsonl``."""
+        return self._git_path_signature(self._events_path)
+
+    def _validate_git_log_before_append(self) -> None:
+        """Fail closed on externally changed Git logs before any mutation.
+
+        ``events.jsonl`` is guarded by the append flock for cooperating writers,
+        so an unchanged filesystem signature means the complete log material is
+        still the version already validated at initialize/replay or after this
+        instance's last successful append. External drift invalidates that proof:
+        rescan every event, reject conflicting duplicate ids, and refresh causal
+        heads plus the Lamport high-water mark before authoring another event.
+        """
+        signature_before = self._git_log_signature()
+        if signature_before == self._git_validated_log_signature:
+            return
+        ordered = self._read_git_events_ordered()
+        signature_after = self._git_log_signature()
+        if signature_before != signature_after:
+            raise TransactionAborted(
+                "git append integrity: events.jsonl changed while its material "
+                "was being validated; retry from a stable log snapshot"
+            )
+        self._git_validate_projection_material(
+            ordered,
+            context="git append integrity",
+        )
+        log_ids = {event.id for event in ordered}
+        table_ids = {
+            row[0]
+            for row in self._require_conn()
+            .execute("SELECT id FROM events")
+            .fetchall()
+        }
+        if log_ids != table_ids:
+            raise TransactionAborted(
+                "git append integrity: events.jsonl and the projection have "
+                "different event ids; reopen the backend to converge before "
+                "appending"
+            )
+        policy = self._build_git_prd_replay_policy(ordered)
+        self._git_prd_content_heads = dict(policy.content_heads)
+        self._max_lamport = max(
+            self._max_lamport,
+            max((event.lamport or 0 for event in ordered), default=0),
+        )
+        # Cache exactly the byte identity that produced ``ordered``. Never
+        # sample and cache a later, unvalidated version of the file.
+        self._git_validated_log_signature = signature_after
+
+    @staticmethod
+    def _uses_git_prd_causal_parent(draft: EventDraft) -> bool:
+        """Whether a newly authored PRD fact opts into causal replay policy."""
+        payload = draft.payload_json
+        if draft.action == "prd.revised":
+            return payload.get("expected_status") is not None
+        if draft.action in {"prd.reviewed", "prd.approved"}:
+            return payload.get("expected_revision") is not None
+        return False
+
+    @staticmethod
+    def _git_prd_observed_revision(
+        draft: EventDraft,
+    ) -> tuple[str, int] | None:
+        """Return (PRD id, revision observed by a current producer)."""
+        payload = draft.payload_json
+        prd_id_raw = payload.get("prd_id", DEFAULT_PRD_ID)
+        prd_id = prd_id_raw if isinstance(prd_id_raw, str) else DEFAULT_PRD_ID
+        if draft.action == "prd.revised":
+            revision_raw = payload.get("revision")
+            observed_revision = (
+                revision_raw - 1
+                if isinstance(revision_raw, int)
+                and not isinstance(revision_raw, bool)
+                else None
+            )
+        else:
+            expected_raw = payload.get("expected_revision")
+            observed_revision = (
+                expected_raw
+                if isinstance(expected_raw, int)
+                and not isinstance(expected_raw, bool)
+                else None
+            )
+        if observed_revision is None:
+            return None
+        return prd_id, observed_revision
+
+    def _git_prd_cached_parent(self, draft: EventDraft) -> str | None:
+        """Resolve a current append from the replay-built O(1) head cache."""
+        observed = self._git_prd_observed_revision(draft)
+        if observed is None:
+            return None
+        prd_id, revision = observed
+        cached = self._git_prd_content_heads.get(prd_id)
+        if cached is None or cached[0] != revision:
+            return None
+        return cached[1]
+
+    def _remember_git_prd_content_head(self, event: Event) -> None:
+        """Advance the head cache only after a successful live projection."""
+        if event.action == "prd.parsed":
+            revision = 1
+        elif event.action == "prd.revised":
+            revision_raw = event.payload_json.get("revision")
+            if not isinstance(revision_raw, int) or isinstance(revision_raw, bool):
+                return
+            revision = revision_raw
+        else:
+            return
+        self._git_prd_content_heads[self._git_prd_id(event)] = (
+            revision,
+            event.id,
+        )
+
     def _scan_log_ids_and_lamport(self) -> tuple[set[str], int]:
         """Full-log scan: every event id + the Lamport high-water mark (git mode).
 
@@ -2765,16 +3848,14 @@ class SqliteBackend:
         max_lamport = 0
         if not os.path.exists(self._events_path):
             return ids, max_lamport
-        with open(self._events_path, encoding="utf-8") as fh:
-            lines = fh.readlines()
-        for i, raw_line in enumerate(lines):
+        for i, raw_line, is_last in self._iter_event_log_lines(self._events_path):
             stripped = raw_line.strip()
             if not stripped:
                 continue
             try:
                 raw: dict[str, Any] = json.loads(stripped)
             except json.JSONDecodeError as exc:
-                if i == len(lines) - 1:
+                if is_last:
                     continue  # torn trailing line — same tolerance as replay
                 raise ValueError(
                     f"events log scan: malformed JSON on interior line {i + 1}: {exc}"
@@ -2803,14 +3884,40 @@ class SqliteBackend:
         the only sound convergence test once ``merge=union`` can splice
         events into the interior of the file.
         """
+        self._git_validated_log_signature = None
+        signature_before = self._git_log_signature()
         conn = self._require_conn()
-        log_ids, max_lamport = self._scan_log_ids_and_lamport()
-        self._max_lamport = max_lamport
+        scanned_ids, _scanned_lamport = self._scan_log_ids_and_lamport()
         table_ids = {
             row[0] for row in conn.execute("SELECT id FROM events").fetchall()
         }
+        ordered = self._read_git_events_ordered(
+            context=(
+                "git append parent scan"
+                if scanned_ids == table_ids
+                else "git replay"
+            )
+        )
+        self._git_validate_projection_material(
+            ordered,
+            context="git projection convergence",
+        )
+        log_ids = {event.id for event in ordered}
+        max_lamport = max((event.lamport or 0 for event in ordered), default=0)
+        self._max_lamport = max_lamport
         if log_ids != table_ids:
             self.replay_from_empty(self._events_path)
+            return
+        else:
+            policy = self._build_git_prd_replay_policy(ordered)
+            self._git_prd_content_heads = dict(policy.content_heads)
+        signature_after = self._git_log_signature()
+        if signature_before != signature_after:
+            raise TransactionAborted(
+                "git projection convergence: events.jsonl changed while "
+                "its material was being projected"
+            )
+        self._git_validated_log_signature = signature_after
 
     def _serialize_event_line(self, event: Event) -> str:
         """Serialize *event* to its newline-terminated JSONL line.
@@ -2906,6 +4013,7 @@ class SqliteBackend:
         event: Event,
         *,
         seq: int | None = None,
+        skip_projection: bool = False,
     ) -> None:
         """Apply a single event via ``_write_*`` only — no validation, no logging.
 
@@ -2941,7 +4049,8 @@ class SqliteBackend:
 
         try:
             conn.execute("BEGIN IMMEDIATE")
-            spec.write(conn, typed_payload, event)
+            if not skip_projection:
+                spec.write(conn, typed_payload, event)
             self._insert_event_row(conn, event, seq=seq)
             conn.execute("COMMIT")
         except sqlite3.OperationalError as exc:
@@ -3381,7 +4490,18 @@ class SqliteBackend:
         Was a validation guard inside the old handler (``raise
         TransactionAborted`` on an invalid Requirement); now rejects up front.
         """
-        _ = (conn, event)
+        _ = event
+        if payload.expected_absent is True:
+            existing = conn.execute(
+                "SELECT 1 FROM prds WHERE id = ?", (payload.prd_id,)
+            ).fetchone()
+            if existing is not None:
+                raise EventRejected(
+                    "prd.parsed: PRD was created after the first parse was "
+                    f"prepared (prd_id {_redacted_identifier(payload.prd_id)}); "
+                    "re-parse against "
+                    "current state"
+                )
         requirements = self._validate_requirement_payloads(
             payload.requirements,
             action="prd.parsed",
@@ -3437,7 +4557,7 @@ class SqliteBackend:
         payload: PrdParsedPayload,
         event: Event,
     ) -> None:
-        """Upsert PRD and destructively replace all requirements.
+        """Create a current PRD, or replay a legacy destructive refresh.
 
         Payload fields (all required):
             project_id (str)  — FK into projects table
@@ -3455,13 +4575,28 @@ class SqliteBackend:
         of requirement IDs (FK-style); the actual Requirement rows live in the
         ``requirements`` table.
 
-        Parsing is destructive: old Requirement rows are deleted and replaced
-        with the new set inside a SAVEPOINT so failure leaves no partial state.
+        Legacy payloads omit ``expected_absent`` and retain their historical
+        destructive semantics: old Requirement rows are deleted and replaced
+        with the new set inside a SAVEPOINT. Current payloads are guarded
+        create-if-absent facts, so the same body populates a previously absent
+        partition exactly once.
 
         Each Requirement was already validated by ``_check_prd_parsed``; the
         ``model_validate`` calls here are an infallible rebuild.
         """
-        _ = event
+        # New first-parse events are create-if-absent facts. Live appends are
+        # rejected by _check_prd_parsed when the producer's absence snapshot is
+        # stale. Replay intentionally skips checks, so make the write itself
+        # first-writer-wins as well: a union-merged competing first parse must
+        # not destructively replace a PRD (or an approval) that HLC order has
+        # already projected. Legacy events omit expected_absent and retain the
+        # historical destructive-refresh behaviour byte-for-byte.
+        if payload.expected_absent is True:
+            existing = conn.execute(
+                "SELECT 1 FROM prds WHERE id = ?", (payload.prd_id,)
+            ).fetchone()
+            if existing is not None:
+                return
         project_id: str = payload.project_id
         summary: str = payload.summary
         status: str = payload.status
@@ -3604,9 +4739,13 @@ class SqliteBackend:
            revision (e.g. two agents revising the same PRD off the same base)
            is rejected rather than silently mis-stamping lineage. The target
            PRD must exist; revising an unknown ``prd_id`` is rejected.
-        2. Every requirement dict in the added / superseded / unchanged diff
+        2. When ``expected_status`` is present, it must match both the status
+           carried by the event and the current row. This lifecycle CAS catches
+           review/approval drift that cannot be detected by revision alone.
+           ``None`` is accepted for replay compatibility with historical events.
+        3. Every requirement dict in the added / superseded / unchanged diff
            lists must be a valid Requirement (mirrors ``_check_prd_parsed``).
-        3. The diff must match the on-disk live set so the write applies
+        4. The diff must match the on-disk live set so the write applies
            cleanly and the status-demotion rule keys off a REAL change:
            - every ``requirements_superseded`` / ``requirements_unchanged`` id
              must currently be live (``revision_superseded IS NULL``) in this
@@ -3621,7 +4760,7 @@ class SqliteBackend:
         """
         _ = event
         row = conn.execute(
-            "SELECT revision FROM prds WHERE id = ?", (payload.prd_id,)
+            "SELECT revision, status FROM prds WHERE id = ?", (payload.prd_id,)
         ).fetchone()
         if row is None:
             raise EventRejected(
@@ -3633,6 +4772,25 @@ class SqliteBackend:
             raise EventRejected(
                 f"prd.revised: revision {payload.revision} is not current+1 "
                 f"(current revision is {current}, expected {current + 1})"
+            )
+        current_status = str(row[1])
+        if (
+            payload.expected_status is not None
+            and payload.status != payload.expected_status
+        ):
+            raise EventRejected(
+                "prd.revised: payload status must match expected_status for "
+                f"lifecycle CAS (status {payload.status!r}, expected_status "
+                f"{payload.expected_status!r})"
+            )
+        if (
+            payload.expected_status is not None
+            and payload.expected_status != current_status
+        ):
+            raise EventRejected(
+                "prd.revised: lifecycle status changed after the revision was "
+                f"prepared (observed {payload.expected_status!r}, current "
+                f"{current_status!r}); re-parse against current state"
             )
         requirements_added = self._validate_requirement_payloads(
             payload.requirements_added,
@@ -3748,7 +4906,7 @@ class SqliteBackend:
         ]
 
         current_assumptions_row = conn.execute(
-            "SELECT assumptions FROM prds WHERE id = ?",
+            "SELECT assumptions, status FROM prds WHERE id = ?",
             (prd_id,),
         ).fetchone()
         current_assumptions = (
@@ -3762,9 +4920,25 @@ class SqliteBackend:
 
         # Superseding/removing a requirement or changing an assumption is a
         # material product-contract change, so an approved PRD drops to draft.
+        #
+        # For a CURRENT revision event, a non-material edit is monotonic across
+        # git union replay: review/approval events may sort before or after the
+        # revision even when the two branches observed the same parent. Taking
+        # the furthest lifecycle state already projected prevents a title-only
+        # revision prepared from draft/reviewed from regressing an approval.
+        # Legacy events (expected_status=None) keep their old payload-authority
+        # semantics exactly, including historical demotions.
+        material_change = bool(
+            superseded_objects or revised_assumptions != current_assumptions
+        )
         status = payload.status
-        if superseded_objects or revised_assumptions != current_assumptions:
+        if material_change:
             status = "draft"
+        elif payload.expected_status is not None and current_assumptions_row is not None:
+            current_status = str(current_assumptions_row[1])
+            lifecycle_rank = {"draft": 0, "reviewed": 1, "approved": 2}
+            if lifecycle_rank.get(current_status, -1) > lifecycle_rank.get(status, -1):
+                status = current_status
 
         now = event.timestamp.isoformat()
 
@@ -3905,8 +5079,31 @@ class SqliteBackend:
         payload: PrdReviewedPayload,
         event: EventDraft,
     ) -> None:
-        """No state precondition — the UPDATE is scoped and side-effect-only."""
-        _ = (conn, payload, event)
+        """Bind current review events to the observed PRD content revision."""
+        _ = event
+        if payload.expected_revision is None and payload.expected_status is None:
+            return
+        row = conn.execute(
+            "SELECT revision, status FROM prds WHERE id = ?", (payload.prd_id,)
+        ).fetchone()
+        if payload.expected_revision is not None and (
+            row is None or int(row[0]) != payload.expected_revision
+        ):
+            current = "absent" if row is None else str(row[0])
+            raise EventRejected(
+                "prd.reviewed: PRD content changed after review was prepared "
+                f"(observed revision {payload.expected_revision}, current {current})"
+            )
+        if (
+            payload.expected_status is not None
+            and (row is None or str(row[1]) != payload.expected_status)
+        ):
+            current_status = "absent" if row is None else str(row[1])
+            raise EventRejected(
+                "prd.reviewed: PRD lifecycle changed after review was prepared "
+                f"(observed status {payload.expected_status!r}, "
+                f"current {current_status!r})"
+            )
 
     def _write_prd_reviewed(
         self,
@@ -3939,6 +5136,18 @@ class SqliteBackend:
         # Scope to project_id AND id so a multi-PRD project mutates only the
         # named PRD. Pre-v7 replay: prd_id='default' matches the single migrated
         # row, so the result is byte-identical to the old project_id-only UPDATE.
+        status_clause = (
+            "" if payload.expected_status is None else " AND status = ?"
+        )
+        parameters: tuple[Any, ...] = (
+            timestamp,
+            reviewer,
+            timestamp,
+            project_id,
+            prd_id,
+        )
+        if payload.expected_status is not None:
+            parameters += (payload.expected_status,)
         conn.execute(
             """
             UPDATE prds
@@ -3947,8 +5156,8 @@ class SqliteBackend:
                    last_reviewed_by = ?,
                    updated_at = ?
              WHERE project_id = ? AND id = ?
-            """,
-            (timestamp, reviewer, timestamp, project_id, prd_id),
+            """ + status_clause,
+            parameters,
         )
 
     def _check_prd_approved(
@@ -3957,8 +5166,31 @@ class SqliteBackend:
         payload: PrdApprovedPayload,
         event: EventDraft,
     ) -> None:
-        """No state precondition — scoped UPDATE plus an idempotent Review upsert."""
-        _ = (conn, payload, event)
+        """Bind current approval events to the observed PRD content revision."""
+        _ = event
+        if payload.expected_revision is None and payload.expected_status is None:
+            return
+        row = conn.execute(
+            "SELECT revision, status FROM prds WHERE id = ?", (payload.prd_id,)
+        ).fetchone()
+        if payload.expected_revision is not None and (
+            row is None or int(row[0]) != payload.expected_revision
+        ):
+            current = "absent" if row is None else str(row[0])
+            raise EventRejected(
+                "prd.approved: PRD content changed after approval was prepared "
+                f"(observed revision {payload.expected_revision}, current {current})"
+            )
+        if (
+            payload.expected_status is not None
+            and (row is None or str(row[1]) != payload.expected_status)
+        ):
+            current_status = "absent" if row is None else str(row[1])
+            raise EventRejected(
+                "prd.approved: PRD lifecycle changed after approval was prepared "
+                f"(observed status {payload.expected_status!r}, "
+                f"current {current_status!r})"
+            )
 
     def _write_prd_approved(
         self,
@@ -3983,6 +5215,17 @@ class SqliteBackend:
         approver: str = payload.approver
         event_id: str = event.id
         timestamp: str = event.timestamp.isoformat()
+
+        # Replay intentionally bypasses validation. Current events therefore
+        # enforce their lifecycle CAS in the projector too; a stale union-merged
+        # approval becomes an audit-only event and cannot create an approval row.
+        if payload.expected_status is not None:
+            current = conn.execute(
+                "SELECT status FROM prds WHERE project_id = ? AND id = ?",
+                (project_id, prd_id),
+            ).fetchone()
+            if current is None or str(current[0]) != payload.expected_status:
+                return
 
         # Scope to project_id AND id (see _write_prd_reviewed). Pre-v7 replay:
         # prd_id='default' matches the single migrated row → byte-identical.
@@ -8609,6 +9852,21 @@ class SqliteBackend:
                 "seq": seq,
             },
         )
+        if self._events_storage == "git":
+            fingerprint = self._git_event_fingerprint(event)
+            conn.execute(
+                "INSERT OR IGNORE INTO git_event_material "
+                "(event_id, fingerprint) VALUES (?, ?)",
+                (event.id, fingerprint),
+            )
+            row = conn.execute(
+                "SELECT fingerprint FROM git_event_material WHERE event_id = ?",
+                (event.id,),
+            ).fetchone()
+            if row is None or row[0] != fingerprint:
+                raise TransactionAborted(
+                    f"event projection: conflicting material for Git event {event.id!r}"
+                )
 
     # ------------------------------------------------------------------
     # Internal helpers — error handling
@@ -8799,7 +10057,9 @@ class SqliteBackend:
         proofs = TypeAdapter(list[_ProofArtifact]).validate_json(proofs_raw or "[]")
         # v9 evidence-contracts category is index 13 (appended last so the
         # pre-v9 indices stay stable); tolerate short rows like proofs does.
-        category = row[13] if len(row) > 13 and row[13] else "completion"
+        category = EvidenceCategory(
+            row[13] if len(row) > 13 and row[13] else "completion"
+        )
         return _Evidence(
             id=row[0],
             task_id=row[1],
