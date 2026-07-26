@@ -262,6 +262,21 @@ def _path_matches_claim(path: Path, claim: Path, expected: bytes) -> bool:
     return source is not None and source.source_bytes == expected
 
 
+def _path_still_has_claimed_bytes(path: Path, expected: bytes) -> bool:
+    """Return whether a cleanup target is still the unchanged claimed source.
+
+    This deliberately avoids PRD parsing: cleanup must remove a failed staging
+    file even when the existing source is syntactically incomplete. The bounded
+    byte comparison is not used as a State authorization boundary.
+    """
+    try:
+        with path.open("rb") as handle:
+            current = handle.read(len(expected) + 1)
+        return current == expected
+    except OSError:
+        return False
+
+
 def _read_claimed_prd_source(path: Path, claim: Path) -> IngestedPrdSource | None:
     """Return one bounded snapshot only while *path* still names *claim*.
 
@@ -493,11 +508,15 @@ def _atomic_replace_prd(
         # only when the original ownership claim no longer names ``path``;
         # otherwise the exchange itself failed and this is ordinary staging
         # debris that must be removed.
+        original_still_live = (
+            ownership_path is not None
+            and isinstance(expected, bytes)
+            and _path_still_has_claimed_bytes(path, expected)
+        )
         preserve_capture_alias = (
             temp_path is not None
             and temp_path == captured_path
-            and ownership_path is not None
-            and not _path_matches_claim(path, ownership_path, expected)
+            and not original_still_live
         )
         if temp_path is not None and not preserve_capture_alias:
             try:
