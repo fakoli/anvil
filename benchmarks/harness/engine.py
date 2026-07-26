@@ -47,11 +47,18 @@ if libc.prctl(36, 1, 0, 0, 0) != 0:
     raise SystemExit(126)
 
 stopping = False
+cleanup_requested = False
+status_fd = int(os.environ.get("ANVIL_SUBREAPER_STATUS_FD", "-1"))
 def stop(_signum, _frame):
     global stopping
     stopping = True
 
+def request_cleanup(_signum, _frame):
+    global cleanup_requested
+    cleanup_requested = True
+
 signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGUSR1, request_cleanup)
 child = subprocess.Popen(sys.argv[1:])
 returncode = None
 while returncode is None and not stopping:
@@ -59,6 +66,29 @@ while returncode is None and not stopping:
         returncode = child.wait(timeout=0.02)
     except subprocess.TimeoutExpired:
         pass
+
+if returncode is not None and status_fd >= 0:
+    try:
+        os.write(status_fd, b"1")
+    except OSError:
+        pass
+
+# Drop the supervisor's copies of the capture pipes now that the command has
+# exited. The parent can then distinguish harmless background descendants (EOF)
+# from descendants that inherited stdout/stderr (the readers remain blocked).
+if returncode is not None:
+    for fd in (1, 2):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+# The parent asks for normal descendant cleanup only after both capture streams
+# reached EOF. If a descendant inherited either capture pipe, defer cleanup until
+# the caller's active deadline so that condition remains a timeout rather than a
+# false successful result.
+while returncode is not None and not stopping and not cleanup_requested:
+    time.sleep(0.01)
 
 def descendants():
     parents = {}
@@ -103,6 +133,11 @@ while time.monotonic() < deadline:
 
 if descendants():
     raise SystemExit(126)
+if status_fd >= 0:
+    try:
+        os.close(status_fd)
+    except OSError:
+        pass
 if stopping:
     raise SystemExit(143)
 if returncode is None:
@@ -457,6 +492,8 @@ def _run_process_owned(
     if env is None:
         env = dict(os.environ)
     process_group: dict[str, object]
+    status_reader: int | None = None
+    status_writer: int | None = None
     if os.name == "nt":
         process_group = {
             "creationflags": (
@@ -472,18 +509,31 @@ def _run_process_owned(
                 err="process containment unavailable",
             )
         process_group = {"start_new_session": True}
+        status_reader, status_writer = os.pipe()
+        os.set_blocking(status_reader, False)
+        env = {**env, "ANVIL_SUBREAPER_STATUS_FD": str(status_writer)}
+        process_group["pass_fds"] = (status_writer,)
         cmd = [sys.executable, "-c", _LINUX_SUBREAPER, *cmd]
-    ownership.proc = _popen_owned(
-        ownership,
-        cmd,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        **process_group,
-    )
+    try:
+        ownership.proc = _popen_owned(
+            ownership,
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            **process_group,
+        )
+    finally:
+        if status_writer is not None:
+            os.close(status_writer)
     proc = ownership.proc
     assert proc is not None
+    # Unit-test fakes bypass the Linux supervisor entirely. Do not make their
+    # existing containment contract depend on its status-pipe handshake.
+    if status_reader is not None and not isinstance(proc, subprocess.Popen):
+        os.close(status_reader)
+        status_reader = None
     # Ownership starts at the Popen return, before any lock/Event/allocation that
     # tests or resource exhaustion can make fail with a BaseException.
     job_handle: int | None = None
@@ -533,6 +583,23 @@ def _run_process_owned(
 
     def _cleanup_remaining() -> float:
         return max(0.0, _shared_cleanup_deadline() - time.monotonic())
+
+    def _close_status_reader() -> None:
+        nonlocal status_reader
+        if status_reader is not None:
+            with contextlib.suppress(OSError):
+                os.close(status_reader)
+            status_reader = None
+
+    def _command_finished() -> bool:
+        if status_reader is None:
+            return False
+        try:
+            return bool(os.read(status_reader, 1))
+        except BlockingIOError:
+            return False
+        except OSError:
+            return False
 
     def _close_job_handle() -> None:
         nonlocal job_handle
@@ -622,6 +689,8 @@ def _run_process_owned(
             return _retry_close_job_handle()
         except Exception:
             return False
+        finally:
+            _close_status_reader()
 
     def _drain(stream, key: str) -> None:
         try:
@@ -676,6 +745,23 @@ def _run_process_owned(
         remaining = active_deadline - time.monotonic()
         timed_out = remaining <= 0
         if not timed_out:
+            # The Linux subreaper waits for this explicit handshake before it
+            # removes descendants after an otherwise-successful command. Doing
+            # so preserves the timeout contract for descendants that inherited
+            # stdout/stderr, while still cleaning background processes that did
+            # not retain either capture pipe.
+            if status_reader is not None:
+                command_finished = False
+                while proc.poll() is None and time.monotonic() < active_deadline:
+                    command_finished = command_finished or _command_finished()
+                    if command_finished and len(reader_finished_at) == len(readers):
+                        with contextlib.suppress(ProcessLookupError, PermissionError):
+                            os.kill(proc.pid, signal.SIGUSR1)
+                        break
+                    time.sleep(0.01)
+            remaining = active_deadline - time.monotonic()
+            timed_out = remaining <= 0
+        if not timed_out:
             try:
                 proc.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
@@ -705,6 +791,7 @@ def _run_process_owned(
         # remaining descendants. Thus a successful wait above is the containment
         # proof; there is no live process group left to clean up here.
         _close_job_handle()
+        _close_status_reader()
         return RunResult(
             code=proc.returncode,
             out=captured["out"].decode("utf-8", errors="replace"),
