@@ -12,9 +12,6 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-
-from anvil import __version__
-from anvil.cli.describe import API_VERSION, cli_command_contracts, cli_command_options
 from scripts.check_skill_cli_contract import (
     ALLOWLIST_PHANTOM,
     ContractError,
@@ -24,6 +21,9 @@ from scripts.check_skill_cli_contract import (
     load_manifest,
     validate_docs,
 )
+
+from anvil import __version__
+from anvil.cli.describe import API_VERSION, cli_command_contracts, cli_command_options
 
 _REPO = Path(__file__).resolve().parents[1]
 

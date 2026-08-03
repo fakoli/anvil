@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 import yaml
-
 from scripts import check_release_contract
 from scripts.check_skill_cli_contract import ContractError, contract_digest
 
@@ -181,6 +180,7 @@ def test_publish_oidc_job_is_minimal_and_all_actions_are_immutable() -> None:
     assert "run_benchmark.py --scenarios overlapping_files --quick" in text
     assert '--out "$RUNNER_TEMP/anvil-benchmark-results.md"' in text
     assert "mkdocs build --strict" in text
+    assert "(cd bin && uv run --locked ruff check ..)" in text
 
 
 def test_ci_release_contract_jobs_fetch_tags() -> None:

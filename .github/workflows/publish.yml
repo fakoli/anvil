@@ -52,7 +52,7 @@ jobs:
           _TYPER_FORCE_DISABLE_TERMINAL: "1"
         run: |
           uv sync --project bin --locked --extra custom
-          uv run --project bin --locked ruff check .
+          (cd bin && uv run --locked ruff check ..)
           uv run --project bin --locked pytest
           uv run --project bin --locked python benchmarks/run_benchmark.py --scenarios overlapping_files --quick --out "$RUNNER_TEMP/anvil-benchmark-results.md"
           uvx --with-requirements docs/requirements.txt mkdocs build --strict

@@ -142,7 +142,7 @@ def load_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
         nodes[joined] = {"kind": kind, "flags": flag_list}
     if "" not in nodes or nodes[""]["kind"] != "group":
         raise ContractError("manifest CLI contracts must contain the root group")
-    for path, node in nodes.items():
+    for path, _node in nodes.items():
         if not path:
             continue
         parts = path.split(" ")
