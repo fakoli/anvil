@@ -6,8 +6,17 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-03
+
 ### Fixed
 
+- **Release/skill compatibility is now fail-closed (#196).** Release checks
+  build and install the candidate wheel, validate every command and exact flag
+  cited by shipped skills, and compare the independently installed artifact to
+  a frozen per-version contract before PyPI publication. `anvil --version` and
+  `anvil describe` distinguish source checkouts from installed artifacts, and
+  named-PRD skills stop with actionable upgrade instructions when
+  `prd source-name` is unavailable instead of guessing or mutating state.
 - **Named-PRD dependency recovery and bounded diagnostics (#181).** Legacy
   dependency upserts that omitted `prd_id` now recover during forward catch-up
   and full replay without renumbering events. Dependency validation and

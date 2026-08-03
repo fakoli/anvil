@@ -40,7 +40,7 @@ The install registers five hooks, wires the MCP server, and makes the five plugi
 
 ```bash
 anvil --version
-# → anvil 0.6.0 (schema 16)
+# → anvil 0.6.1 (schema 16)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
@@ -338,6 +338,16 @@ anvil --version
 These tool-manager commands replace the executable environment. They do not
 open this project's `state.db`.
 
+Before resuming a skill-driven workflow, verify that the upgraded executable
+exposes the named-PRD capability required by current skills:
+
+```bash
+anvil prd source-name --help
+```
+
+A nonzero result means the active executable is still stale; do not infer a
+PRD filename or continue with a mutating command.
+
 ### Resolve and back up state with the upgraded CLI
 
 The target release provides `--path-only`, which resolves the state directory
@@ -464,7 +474,6 @@ the harness. Routine version recovery never requires deleting state; see
 [Migrations](../migrations.md) for the supported migration ladder.
 
 ### Uninstall or roll back
-
 - **Roll back a harness install**: `anvil install <harness> --rollback`
   restores every file `anvil install <harness> --write` modified from its
   backup and deletes anything anvil created (native installs also run the

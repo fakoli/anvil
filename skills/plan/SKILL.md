@@ -34,10 +34,12 @@ first. (The compact `prd-status:` token only appears under `anvil status
 --hook-format`, which the SessionStart hook consumes; you want the plain output
 here.)
 
-Commands used in this skill (all ship in 0.1.1):
+Requires `anvil-state >=0.6.1`:
 
 | Command | Purpose |
 |---|---|
+| `anvil prd list --json` | Select PRD |
+| `anvil prd source-name [--prd ID] --json` | Resolve source |
 | `anvil plan` | Generate features and tasks from the parsed PRD |
 | `anvil score [TASK_ID]` | Score tasks across six dimensions |
 | `anvil expand TASK_ID --use-llm` | Propose sub-tasks for an oversized task |
@@ -49,9 +51,42 @@ Commands used in this skill (all ship in 0.1.1):
 
 ## Workflow
 
+### Select the target PRD
+
+Run `anvil prd list --json` before resolving a filename. If exactly one PRD is
+present, retain its `prd_id`; otherwise ask which to plan. Keep it as `PRD_ID`.
+Omit `--prd` only for `default`; pass a named ID unchanged below.
+
+#### Required `prd source-name` capability preflight
+
+Before any branch that reads, backs up, edits, writes, or parses a PRD, resolve
+the actual `anvil` executable with the runtime's native lookup and run
+`anvil prd source-name --help`. Require exit 0; matching version text alone is
+not capability proof. Then run `anvil prd source-name [--prd <id>] --json` with
+the exact selected `PRD_ID` and require `ok: true` plus a non-empty
+`data.relative_name`.
+Retain that validated value as `PRD_RELATIVE`; it is the sole relative path for
+the selected PRD for the rest of this run. Do not resolve it again unless the
+selected PRD ID changes, in which case repeat this entire preflight.
+
+If the help probe is absent, run `anvil --version` and stop before changing
+anything. Report: "Cannot safely resolve the selected PRD. `<executable>`
+reports `<version>` but does not expose `anvil prd source-name`, required by
+this skill and shipped in `anvil-state >=0.6.1`. No PRD file or state was
+changed. Upgrade with `uv tool upgrade anvil-state`, refresh the Anvil plugin
+if applicable, restart the harness/MCP process, then verify `anvil --version`
+and `anvil prd source-name --help`. I will not infer a filename, parse, or
+delete state."
+
+If the capability exists but the resolver returns a typed state-root, identity,
+or legacy-source migration error, surface that exact error and stop. Do not
+mislabel it as version skew and do not construct a fallback filename.
+
 ### Step 0 — Scan for unresolved decisions (soft gate, v1.14.0)
 
-Before running `plan`, drive `anvil prd find-decisions` (or the `find_decisions` MCP tool) yourself. The planner's task generation is shaped by the PRD's requirements and features — if those still contain `[NEEDS DECISION]` markers or unresolved Open Questions, the generated task graph will inherit the ambiguity. Surfacing unresolved items before plan runs is cheap; after plan runs, the same ambiguities will land as task descriptions that need re-editing and re-planning.
+Before running `plan`, join the `Path:` directory from `anvil status` with the
+retained `PRD_RELATIVE`, then drive `anvil prd find-decisions --file "$PRD_FILE"`
+(or the MCP tool with that file) so decisions come from the selected PRD.
 
 If `find_decisions` returns empty, skip this step entirely — do not even mention it to the user. The soft gate only fires when there is something to decide.
 
@@ -64,7 +99,10 @@ If it returns non-empty, present the summary and ask:
 >
 > Want me to walk them as Q&A now, or proceed to `plan` without resolving? (resolve now / proceed anyway / show me the list)
 
-On `resolve now`, bridge to the `resolve-decisions` skill. After it returns, drive a fresh `prd parse` (resolution edits the markdown; state.db needs to catch up) and then continue with Step 1 below.
+On `resolve now`, bridge to the `resolve-decisions` skill. After it returns,
+drive a fresh `anvil prd parse [--prd <PRD_ID>]` with the same selected ID
+(resolution edits the markdown; state.db needs to catch up) and then continue
+with Step 1 below.
 
 On `proceed anyway`, continue to Step 1. The task graph will reflect the ambiguity — flag this back to the user inline ("noting we are planning against N unresolved decisions; the planner will treat any tasks that derive from unresolved items as proposed-pending"). The decisions will surface again at `review tasks` time, and the user can resolve them then.
 
@@ -79,7 +117,7 @@ The soft-gate design is deliberate: `find-decisions` non-empty does NOT block pl
 Invoke `anvil plan` yourself — via Bash, the MCP `plan_tasks` tool when available, or whichever execution primitive the runtime exposes:
 
 ```bash
-anvil plan           # add --prd <prd_id> to scope to one named release PRD
+anvil plan [--prd <PRD_ID>]  # omit only when PRD_ID is default
 ```
 
 Reads the parsed PRD from `state.db` and emits `feature.created` and `task.created` events. **Multi-PRD scoping:** `plan` (and its orphan-prune below) operates on the **selected PRD only** — pass `--prd <prd_id>` to plan a named release PRD; omit it for the default. Dependency inference and conflict-group detection run automatically — tasks that share `likely_files` entries are grouped into the same conflict group. **Read-only note:** conflict groups span **ALL PRDs**, not just the one you planned — `anvil next` will not route two file-overlapping tasks across PRDs into parallel claims, so a `v0.2` task colliding on a file with an active `default` claim stays blocked until that claim clears.
@@ -105,7 +143,8 @@ If the LLM call fails (no `ANTHROPIC_API_KEY`, network failure, malformed respon
 
 If you genuinely don't want LLM auto-gen for a specific call (e.g. on a CI machine without API keys), pass `--no-llm`. The CLI exits 1 with a clear "0 tasks generated; author them manually" message.
 
-**Pause and present the task list.** Run `anvil list` yourself and present titles, features, and priorities in chat:
+**Pause and present the task list.** Run `anvil list [--prd <PRD_ID>]` with the
+same selected ID and present titles, features, and priorities in chat:
 
 > Plan generated 3 features, 8 tasks. Here they are:
 > [list output]
@@ -143,7 +182,7 @@ The one-decision-per-turn rule still applies whenever the post-plan output surfa
 Once the user confirms the task list, invoke the scorer yourself:
 
 ```bash
-anvil score
+anvil score [--prd <PRD_ID>]
 ```
 
 Populates all six dimensions on each `Task`. The scorer is rule-based — no LLM required. Dimensions:
@@ -187,12 +226,12 @@ Two score signals still warrant explicit attention in chat (these are NOT auto-h
 anvil expand T001 --use-llm --format prd
 ```
 
-For each queued task: run the expand command, take the returned `### T00X.N` blocks, and apply them to the `## Tasks` section of the selected PRD file. Resolve that file by joining the `Path:` directory from `anvil status` with the portable relative name from `anvil prd source-name [--prd <id>]`; the stable `PRD source:` identity printed by parse is not a filesystem path. Drop or keep the parent block per the parser's behavior — confirm before removing. Then re-run the pipeline once at the end:
+For each queued task: run the expand command, take the returned `### T00X.N` blocks, and apply them to the `## Tasks` section of the selected PRD file. Resolve that file by joining the `Path:` directory from `anvil status` with the preflight's retained `PRD_RELATIVE`; the stable `PRD source:` identity printed by parse is not a filesystem path. Drop or keep the parent block per the parser's behavior — confirm before removing. Then re-run the pipeline once at the end:
 
 ```bash
-anvil prd parse
-anvil plan
-anvil score
+anvil prd parse [--prd <PRD_ID>]
+anvil plan [--prd <PRD_ID>]
+anvil score [--prd <PRD_ID>]
 ```
 
 **Skip auto-expansion only when the user opted out** — `auto_expand: false` in `.anvil/config.yaml` (the queue section will not even render), or an explicit instruction in chat ("don't split anything yet"). In the opt-out case, fall back to asking once: "N tasks scored at/above the expansion threshold — want me to expand them?"
@@ -257,9 +296,11 @@ Blocked 1 task(s):
   T004: Task 'T004' cannot move to 'reviewed': verification.commands (must be non-empty).
 ```
 
-For each blocked task, surface the exact missing field in chat — do not just report "blocked". Propose the fix inline, apply it to the PRD after confirmation (resolve the selected file by joining the `Path:` directory from `anvil status` with `anvil prd source-name [--prd <id>]`), re-parse, and re-run `review tasks` yourself. Do not retry without fixing the underlying gap — the gate will block on the same condition again.
+For each blocked task, surface the exact missing field in chat — do not just report "blocked". Propose the fix inline, apply it to the PRD after confirmation (resolve the selected file by joining the `Path:` directory from `anvil status` with the preflight's retained `PRD_RELATIVE`), re-parse, and re-run `review tasks` yourself. Do not retry without fixing the underlying gap — the gate will block on the same condition again.
 
-When the gate passes for every expected task, run `anvil list --status ready` yourself and present the queue:
+When the gate passes for every expected task, run
+`anvil list [--prd <PRD_ID>] --status ready` with the same selected ID and
+present the queue:
 
 > Review passed. Ready queue:
 > [list output]
@@ -269,12 +310,14 @@ When the gate passes for every expected task, run `anvil list --status ready` yo
 
 ### Step 5 — Verify the ready queue
 
-If `anvil list --status ready` returned non-empty in Step 4 and the user confirmed, the plan is complete — hand off into `/anvil:execute` by invoking that skill, not by listing CLI commands.
+If `anvil list [--prd <PRD_ID>] --status ready` returned non-empty in Step 4 and
+the user confirmed, the plan is complete — hand off into `/anvil:execute` by
+invoking that skill, not by listing CLI commands.
 
 If the ready list is empty after Step 4 succeeded, something blocked the gate. Diagnose inline:
 
 ```bash
-anvil list --status drafted
+anvil list [--prd <PRD_ID>] --status drafted
 ```
 
 Read every row, surface the failure reason, propose the fix in chat, apply it to `prd.md` after confirmation, then re-run the relevant pipeline steps yourself.
@@ -286,7 +329,7 @@ Read every row, surface the failure reason, propose the fix in chat, apply it to
 Run `anvil show TASK_ID` yourself whenever a task looks suspicious — a title that seems too broad, a `blast_radius` of 5 on something that should be isolated, or a dependency chain that creates a bottleneck:
 
 ```bash
-anvil show T003
+anvil show T003 [--prd <PRD_ID>]
 ```
 
 Surface the result inline. `anvil show` prints these sections: title, feature, status, priority, the six-dimension `Scores` breakdown (with an `Explanation` block), `Dependencies`, `Conflict Groups`, `Acceptance Criteria`, `Verification Commands`, `Likely Files`, `Active Claims`, and `Recent Events`. (The JSON form exposes the task's `likely_files` and `description` fields — note `likely_files`, not `expected_files`; `expected_files` is a claim-level field, not a task field.) These are planning issues that are far cheaper to fix before claiming than after.
@@ -323,8 +366,7 @@ Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Ru
 
 ## Command Reference
 
-Every command this skill names ships in 0.1.1. Notes on the LLM-augmented and
-adjacent commands:
+Requires `>=0.6.1` for `prd source-name`. Adjacent command notes:
 
 | Command | Notes |
 |---|---|

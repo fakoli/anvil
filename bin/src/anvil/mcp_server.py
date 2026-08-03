@@ -4380,12 +4380,13 @@ def _help_text() -> str:
     from reality. ``ANVIL_ROOT`` is documented here because the container
     image resolves project state through it (a bind-mounted host directory).
     """
-    from anvil import __version__
+    from anvil.build_identity import get_build_identity
     from anvil.cli.describe import mcp_tool_names
 
     tools = mcp_tool_names()
+    identity = get_build_identity()
     lines = [
-        f"anvil-mcp {__version__} — FastMCP (stdio) server",
+        f"anvil-mcp {identity.display_version} — FastMCP (stdio) server",
         "",
         _USAGE,
         "",
@@ -4435,9 +4436,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if any(a in ("-v", "--version") for a in args):
-        from anvil import __version__
+        from anvil.build_identity import get_build_identity
 
-        print(__version__)
+        print(get_build_identity().display_version)
         return 0
 
     # Reject unknown flags rather than silently ignoring them and starting the

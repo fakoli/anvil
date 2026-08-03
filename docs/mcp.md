@@ -1377,9 +1377,10 @@ the sibling of `anvil describe` and needs no initialized project.
 
 ### `describe_surface`
 
-Returns a machine-readable manifest of the anvil command surface: the CLI subcommands and
-MCP tool names this engine exposes, plus the engine version, schema version, and a stable
-`api_version` to pin against. Introspected live from the same builder the CLI `anvil
+Returns a machine-readable manifest of the anvil command surface: the CLI subcommands,
+their exact root/group/leaf long options, and the MCP tool names this engine exposes, plus build
+identity, engine version, schema version, and a stable `api_version` to pin against.
+Introspected live from the same builder the CLI `anvil
 describe` uses — the CLI and MCP surfaces can never disagree — so it never needs a project
 to be initialized. This tool is planning-gated (hidden from the wire unless
 `ANVIL_MCP_PLANNING=1`; see [Tool surface gating](#tool-surface-gating)), but the
@@ -1394,13 +1395,26 @@ None.
 
 ```json
 {
-  "api_version": "4",
-  "engine_version": "0.6.0",
+  "api_version": "5",
+  "engine_version": "0.6.1",
+  "display_version": "0.6.1",
+  "build_kind": "release_artifact",
+  "commit": "abcdef123456",
+  "tag": "v0.6.1",
+  "tag_distance": 0,
+  "dirty": false,
   "schema_version": 16,
   "envelope": "v1.24",
   "cli": {
-    "commands": ["apply", "..."],
-    "count": 67
+    "commands": ["apply", "...", "prd source-name", "..."],
+    "options": {"prd source-name": ["--cwd", "--json", "--prd"], "...": []},
+    "contracts": [
+      {"path": [], "kind": "group", "flags": ["--install-completion", "--show-completion", "--version"]},
+      {"path": ["prd"], "kind": "group", "flags": []},
+      {"path": ["prd", "source-name"], "kind": "command", "flags": ["--cwd", "--json", "--prd"]}
+    ],
+    "contract_count": 76,
+    "count": 68
   },
   "mcp": {
     "tools": ["claim_task", "..."],
@@ -1409,8 +1423,11 @@ None.
 }
 ```
 
-`cli.commands` and `mcp.tools` are both sorted for stable, diffable output. Grouped CLI
-commands render space-joined (e.g. `"prd parse"`) so the exact invocation path is visible.
+`cli.commands`, `cli.contracts`, and `mcp.tools` are sorted for stable, diffable output.
+Grouped CLI commands render space-joined (e.g. `"prd parse"`) so the exact invocation path
+is visible. Each contract records long options owned by that exact node; a group does not
+inherit options from its descendants. Short aliases such as `-V` are intentionally outside
+this skill/release contract.
 
 **Failure modes**
 

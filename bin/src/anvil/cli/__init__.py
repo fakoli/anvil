@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import typer
 
-from anvil import __version__
+from anvil.build_identity import get_build_identity
 from anvil.cli._helpers import SchemaDiagnosticGroup
 from anvil.cli.backup import backup, restore
 from anvil.cli.bundle import bundle_app
@@ -121,13 +121,16 @@ def main(
     """anvil — local-first project state engine."""
     if version:
         # Report engine version AND the SQLite schema version (T012): a host
-        # pinning behaviour needs both — ``__version__`` identifies the build,
+        # pinning behaviour needs both — the display version identifies the build,
         # ``schema N`` identifies the on-disk state format the engine speaks.
-        # The first token stays ``anvil {__version__}`` for backward
-        # compatibility with existing parsers / tests.
+        # Installed artifacts keep the traditional ``anvil X.Y.Z`` prefix;
+        # source checkouts append bounded Git provenance to that version.
         from anvil.state.schema import get_schema_version
 
-        typer.echo(f"anvil {__version__} (schema {get_schema_version()})")
+        identity = get_build_identity()
+        typer.echo(
+            f"anvil {identity.display_version} (schema {get_schema_version()})"
+        )
         raise typer.Exit()
 
 

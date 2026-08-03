@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -39,6 +41,12 @@ jobs:
           -k built_wheel_runs_at_declared_dependency_floors
           -q
 
+      - name: Validate installed wheel against shipped skill contract
+        run: >-
+          uv run --project bin --locked pytest
+          tests/test_release_artifact_contract.py
+          -q
+
   test:
     name: test (python 3.11)
     runs-on: ubuntu-latest
@@ -51,6 +59,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
