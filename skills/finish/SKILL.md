@@ -61,11 +61,17 @@ When multiple tasks are ready, apply them in dependency order: tasks with no dep
 Two reads, both layout-aware:
 
 ```bash
-anvil show TASK_ID
+anvil show TASK_ID --json
 anvil apply TASK_ID
 ```
 
-`anvil show TASK_ID` prints the task detail: title, feature, status, the six-dimension `Scores` (with an explanation block), `Dependencies`, `Conflict Groups`, `Acceptance Criteria`, `Verification Commands`, `Likely Files`, `Active Claims`, and `Recent Events` (where `evidence.submitted` confirms evidence was recorded). It does **not** print the evidence contents; for that, read the submission and the gate.
+The JSON `anvil show TASK_ID --json` response identifies the task's owning PRD
+at `data.task.prd_id`. Require a non-empty value and retain it as `TASK_PRD_ID`
+before any hold-flow resolver or PRD edit. `default` means omit `--prd`; pass a
+named owner unchanged to every scoped resolver and parse below. Do not infer
+ownership from the task ID, list ordering, or the currently active PRD.
+
+The show response also contains the task detail: title, feature, status, the six-dimension `Scores` (with an explanation block), `Dependencies`, `Conflict Groups`, `Acceptance Criteria`, `Verification Commands`, `Likely Files`, `Active Claims`, and `Recent Events` (where `evidence.submitted` confirms evidence was recorded). It does **not** print the evidence contents; for that, read the submission and the gate.
 
 `anvil apply TASK_ID` with no `--approve`/`--reject` flag is **review-only**: it reports the task is awaiting review and prints the evidence gate without changing anything:
 
@@ -122,11 +128,43 @@ Once the user supplies a reason, invoke `anvil apply T012 --reject --reason "<th
 
 #### On "hold" (3)
 
+#### Required `prd source-name` capability preflight
+
+Before any branch that reads, backs up, edits, writes, or parses a PRD, resolve
+the actual `anvil` executable with the runtime's native lookup and run
+`anvil prd source-name --help`. Require exit 0; matching version text alone is
+not capability proof. Then run `anvil prd source-name [--prd <id>] --json` with
+the exact retained `TASK_PRD_ID` and require `ok: true` plus a non-empty
+`data.relative_name`.
+Retain that validated value as `PRD_RELATIVE`; it is the sole relative path for
+the selected PRD for the rest of this hold flow. Do not resolve it again unless
+the selected PRD ID changes, in which case repeat this entire preflight.
+
+If the help probe is absent, run `anvil --version` and stop before changing
+anything. Report: "Cannot safely resolve the selected PRD. `<executable>`
+reports `<version>` but does not expose `anvil prd source-name`, required by
+this skill and shipped in `anvil-state >=0.6.1`. No PRD file or state was
+changed. Upgrade with `uv tool upgrade anvil-state`, refresh the Anvil plugin
+if applicable, restart the harness/MCP process, then verify `anvil --version`
+and `anvil prd source-name --help`. I will not infer a filename, parse, or
+delete state."
+
+If the capability exists but the resolver returns a typed state-root, identity,
+or legacy-source migration error, surface that exact error and stop. Do not
+mislabel it as version skew and do not construct a fallback filename.
+
 Do not invoke `apply` at all. Capture the open questions inline:
 
 > What context do we need before this can be dispositioned? I will add it to the task notes so the next review has the full picture.
 
-Once the user lists the open questions, record them. There is no CLI subcommand for editing a task's notes in place, so capture the context where the next reviewer will see it: join the `Path:` directory from `anvil status` with the portable relative name from `anvil prd source-name [--prd <id>]`, edit that PRD, re-run `anvil prd parse`, and coordinate with the next reviewer directly; drive that loop yourself. (PRD-level decision markers can be resolved with `anvil prd resolve-decision`; see `/anvil:resolve-decisions`.) Then loop back to Step 2.
+Once the user lists the open questions, record them. There is no CLI subcommand
+for editing a task's notes in place, so capture the context where the next
+reviewer will see it: join the `Path:` directory from `anvil status` with the
+preflight's retained `PRD_RELATIVE`, edit that PRD, re-run
+`anvil prd parse [--prd <TASK_PRD_ID>]` with the same owning ID, and coordinate with the next
+reviewer directly; drive that loop yourself. (PRD-level decision markers can be
+resolved with `anvil prd resolve-decision`; see `/anvil:resolve-decisions`.) Then
+loop back to Step 2.
 
 #### On "discard" (4)
 

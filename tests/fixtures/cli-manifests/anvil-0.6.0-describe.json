@@ -1,0 +1,55 @@
+{
+  "ok": true,
+  "command": "describe",
+  "data": {
+    "api_version": "4",
+    "engine_version": "0.6.0",
+    "schema_version": 16,
+    "envelope": "v1.24",
+    "cli": {
+      "commands": [],
+      "count": 0
+    },
+    "mcp": {
+      "tools": [
+        "apply_review_decision",
+        "assess_prd",
+        "check_conflicts",
+        "checkpoint_bundle",
+        "claim_bundle",
+        "claim_task",
+        "create_bundle",
+        "describe_surface",
+        "edit_dependencies",
+        "finalize_bundle_review",
+        "find_decisions",
+        "generate_bundle_packet",
+        "generate_work_packet",
+        "get_bundle",
+        "get_dependency_graph",
+        "get_next_task",
+        "get_project_status",
+        "get_project_summary",
+        "get_task",
+        "init_project",
+        "list_bundles",
+        "list_tasks",
+        "parse_prd",
+        "plan_tasks",
+        "reconcile_bundle",
+        "record_bundle_review",
+        "release_task",
+        "renew_claim",
+        "review_prd",
+        "review_tasks",
+        "score_tasks",
+        "submit_bundle_progress",
+        "submit_completion_evidence",
+        "submit_progress",
+        "supersede_bundle",
+        "update_task_status"
+      ],
+      "count": 36
+    }
+  }
+}

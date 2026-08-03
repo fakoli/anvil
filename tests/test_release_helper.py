@@ -7,6 +7,7 @@ fall out of sync with test_version_sync.py / test_install_manifests.py.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -63,6 +64,16 @@ def test_dry_run_updates_user_facing_docs() -> None:
     r = _dry_run("patch")
     for rel in _USER_DOCS:
         assert rel in r.stdout, f"release.py --dry-run skipped user-facing doc {rel}"
+
+
+def test_dry_run_names_the_required_frozen_contract() -> None:
+    r = _dry_run("patch")
+    assert r.returncode == 0, r.stderr
+    current = (_REPO / "bin" / "src" / "anvil" / "__init__.py").read_text()
+    match = re.search(r'__version__ = "(\d+)\.(\d+)\.(\d+)"', current)
+    assert match is not None
+    major, minor, patch = map(int, match.groups())
+    assert f"release-contracts/{major}.{minor}.{patch + 1}.json" in r.stdout
 
 
 def test_dry_run_writes_nothing(tmp_path: Path) -> None:

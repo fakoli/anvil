@@ -22,8 +22,19 @@ truth — also not checked here.
 from __future__ import annotations
 
 import json
+import runpy
+import subprocess
 import tomllib
 from pathlib import Path
+
+import pytest
+
+from anvil.build_identity import (
+    _checkout_root,
+    _embedded_identity,
+    _run_git,
+    _source_identity,
+)
 
 
 def _plugin_root() -> Path:
@@ -98,3 +109,183 @@ def test_version_is_semver_shaped() -> None:
             f"Each version component must be all digits; "
             f"got {part!r} in {anvil.__version__!r}"
         )
+
+
+def test_exact_release_checkout_remains_visibly_source_derived(tmp_path: Path) -> None:
+    def run_git(root: Path, *args: str) -> str | None:
+        assert root == tmp_path
+        if args == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path)
+        assert args[0] == "describe"
+        return "v0.6.1-0-gabcdef1"
+
+    identity = _source_identity("0.6.1", tmp_path, run_git=run_git)
+
+    assert identity.build_kind == "source_checkout"
+    assert identity.display_version == "0.6.1+0.gabcdef1"
+    assert identity.commit == "abcdef1"
+    assert identity.tag == "v0.6.1"
+    assert identity.tag_distance == 0
+    assert identity.dirty is False
+
+
+def test_ahead_or_dirty_checkout_has_visible_bounded_provenance(
+    tmp_path: Path,
+) -> None:
+    def run_git(root: Path, *args: str) -> str | None:
+        assert root == tmp_path
+        if args == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path)
+        assert args[0] == "describe"
+        return "v0.6.0-29-g9FE02C0-dirty"
+
+    identity = _source_identity("0.6.1", tmp_path, run_git=run_git)
+
+    assert identity.build_kind == "source_checkout"
+    assert identity.display_version == "0.6.1+29.g9fe02c0.dirty"
+    assert identity.commit == "9fe02c0"
+    assert identity.tag_distance == 29
+    assert identity.dirty is True
+
+
+def test_source_without_describe_metadata_never_claims_exact_release(
+    tmp_path: Path,
+) -> None:
+    def no_git_metadata(root: Path, *args: str) -> str | None:
+        assert root == tmp_path
+        return None
+
+    identity = _source_identity("0.6.1", tmp_path, run_git=no_git_metadata)
+
+    assert identity.build_kind == "source_unknown"
+    assert identity.display_version == "0.6.1+source.unknown"
+    assert identity.commit is None
+
+
+def test_source_archive_nested_in_another_repo_ignores_parent_git(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "extracted-anvil"
+
+    def parent_repo(root: Path, *args: str) -> str | None:
+        assert root == archive
+        assert args == ("rev-parse", "--show-toplevel")
+        return str(tmp_path)
+
+    identity = _source_identity("0.6.1", archive, run_git=parent_repo)
+
+    assert identity.build_kind == "source_unknown"
+    assert identity.commit is None
+
+
+def test_checkout_detection_requires_anvil_source_layout(tmp_path: Path) -> None:
+    package = tmp_path / "bin" / "src" / "anvil" / "build_identity.py"
+    package.parent.mkdir(parents=True)
+    package.write_text("", encoding="utf-8")
+    (tmp_path / "bin" / "pyproject.toml").write_text("", encoding="utf-8")
+    (tmp_path / "skills").mkdir()
+    assert _checkout_root(package) == tmp_path
+
+
+def test_repo_local_virtualenv_is_not_mistaken_for_source(tmp_path: Path) -> None:
+    package = tmp_path / ".venv" / "Lib" / "site-packages" / "anvil" / "__init__.py"
+    package.parent.mkdir(parents=True)
+    package.write_text("", encoding="utf-8")
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "pyproject.toml").write_text("", encoding="utf-8")
+    (tmp_path / "skills").mkdir()
+
+    assert _checkout_root(package) is None
+
+
+def test_git_identity_queries_reject_unbounded_or_multiline_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    outputs = iter(["a" * 257, "abc\ndef"])
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=next(outputs))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _run_git(tmp_path, "rev-parse", "HEAD") is None
+    assert _run_git(tmp_path, "rev-parse", "HEAD") is None
+
+
+def test_embedded_release_identity_requires_exact_consistent_metadata(
+    tmp_path: Path,
+) -> None:
+    identity_file = tmp_path / "_build_identity.json"
+    identity_file.write_text(
+        json.dumps(
+            {
+                "build_kind": "release_artifact",
+                "display_version": "0.6.1",
+                "commit": "abcdef123456",
+                "tag": "v0.6.1",
+                "tag_distance": 0,
+                "dirty": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    identity = _embedded_identity("0.6.1", identity_file)
+    assert identity is not None
+    assert identity.build_kind == "release_artifact"
+    assert identity.display_version == "0.6.1"
+
+    value = json.loads(identity_file.read_text(encoding="utf-8"))
+    value["dirty"] = True
+    identity_file.write_text(json.dumps(value), encoding="utf-8")
+    assert _embedded_identity("0.6.1", identity_file) is None
+
+
+def test_build_hook_requires_explicit_release_mode_for_plain_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = subprocess.run(
+        ["git", "init"], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    for args in (
+        ("config", "user.name", "Build Identity Test"),
+        ("config", "user.email", "build-identity@example.invalid"),
+    ):
+        result = subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+    (tmp_path / "tracked.txt").write_text("identity\n", encoding="utf-8")
+    for args in (("add", "."), ("commit", "-m", "identity"), ("tag", "v0.6.1")):
+        result = subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    hook = runpy.run_path(str(_plugin_root() / "bin" / "hatch_build.py"))
+    git_identity = hook["_git_identity"]
+    source = git_identity("0.6.1", tmp_path)
+    assert source["build_kind"] == "source_artifact"
+    assert source["display_version"].startswith("0.6.1+0.g")
+
+    monkeypatch.setenv("ANVIL_RELEASE_BUILD", "1")
+    release = git_identity("0.6.1", tmp_path)
+    assert release["build_kind"] == "release_artifact"
+    assert release["display_version"] == "0.6.1"
+
+    injected = tmp_path / "bin" / "src" / "anvil" / "injected.py"
+    injected.parent.mkdir(parents=True)
+    injected.write_text("# untracked package input\n", encoding="utf-8")
+    dirty = git_identity("0.6.1", tmp_path)
+    assert dirty["build_kind"] == "source_artifact"
+    assert dirty["dirty"] is True
+    assert dirty["display_version"].endswith(".dirty")

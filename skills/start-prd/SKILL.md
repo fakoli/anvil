@@ -22,10 +22,22 @@ Produce a parseable PRD from an unstructured prompt by interviewing the user one
 
 ## Prerequisites
 
-anvil must be initialized for this project. State lives in the HOME workspace by
-default (`~/.anvil/workspaces/<key>/.anvil/...`), not in an in-repo `.anvil/`, so
-detect init via the CLI rather than by looking for a local file. Confirm before
-proceeding:
+Before running `anvil status`, `anvil init`, or any other state command, resolve
+the actual `anvil` executable with the runtime's native lookup and run
+`anvil prd source-name --help`. Require exit 0; matching version text alone is
+not capability proof. If the help probe is absent, run `anvil --version` and
+stop before changing anything. Report: "Cannot safely resolve the selected PRD.
+`<executable>` reports `<version>` but does not expose
+`anvil prd source-name`, required by this skill and shipped in
+`anvil-state >=0.6.1`. No PRD file or state was changed. Upgrade with
+`uv tool upgrade anvil-state`, refresh the Anvil plugin if applicable, restart
+the harness/MCP process, then verify `anvil --version` and
+`anvil prd source-name --help`. I will not infer a filename, parse, or delete
+state."
+
+After that capability gate succeeds, confirm initialization through the CLI.
+State lives in the HOME workspace by default
+(`~/.anvil/workspaces/<key>/.anvil/...`), not in an in-repo `.anvil/`:
 
 ```bash
 anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
@@ -37,7 +49,7 @@ If it reports `MISSING`, run:
 anvil init --name "<project-name>"
 ```
 
-This skill writes a file; it does not require any `anvil` CLI subcommand to be available beyond `init`.
+The early gate ensures an older CLI cannot create state before the skill stops.
 
 ---
 
@@ -87,7 +99,29 @@ The answer populates `## Risks` and `## Open Questions`. If the user says "none"
 
 > Is this PRD scoped to a specific release or milestone (e.g. `v0.2.0`, optionally a tag)? A project can hold several release-scoped PRDs side by side. Leave blank for the single default PRD.
 
-A non-empty answer becomes the `**Release:**` field in the draft (the parser pulls it into `PRD.target_version` / `target_tag`). It does **not** auto-derive the `prd_id` — the parser takes `prd_id` only from the `--prd` flag, never from the Release text. Choose a short canonical `prd_id` (for Release `v0.2.0 (tag: v0.2)`, pick `v0.2`), ask `anvil prd source-name --prd <prd_id>` for its portable relative filename, and parse it with that **same** `--prd` value. A blank answer keeps the default PRD (no `**Release:**` line, portable name `prd.md`, parsed with no `--prd` flag).
+Choose the canonical ID before resolving any path. A non-empty answer becomes
+the `**Release:**` field in the draft (the parser pulls it into
+`PRD.target_version` / `target_tag`). It does **not** auto-derive the `prd_id` —
+the parser takes `prd_id` only from the `--prd` flag, never from the Release
+text. Choose a short canonical `prd_id` (for Release `v0.2.0 (tag: v0.2)`, pick
+`v0.2`). A blank answer selects the default PRD (no `**Release:**` line and no
+`--prd` flag).
+
+#### Required `prd source-name` resolver preflight
+
+Before any branch that reads, backs up, edits, writes, or parses a PRD, rerun
+`anvil prd source-name --help` with the executable proven in Prerequisites, then
+run `anvil prd source-name [--prd <id>] --json` with that exact selected ID.
+Require exit 0, `ok: true`, and a non-empty `data.relative_name`.
+Retain that validated value as `PRD_RELATIVE`; it is the sole relative path for
+the selected PRD for the rest of this run. Do not resolve it again unless the
+selected PRD ID changes, in which case repeat this entire preflight.
+
+If the capability exists but the resolver returns a typed state-root, identity,
+or legacy-source migration error, surface that exact error and stop. Do not
+mislabel it as version skew and do not construct a fallback filename.
+
+Use the same selected `prd_id` for the resolver and the later parse.
 
 **Stop at seven questions unless something material remains unclear.** Asking more questions than necessary fatigues the user and rarely improves the draft. If the answers are sparse, ask a single follow-up before moving to Step 2 — do not chain three more questions to "fix" thin input.
 
@@ -152,21 +186,21 @@ separate human approval step.
 
 **Show the draft to the user before writing.** Present the full proposed `prd.md` content inline (or as a fenced markdown block) and ask:
 
-> Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to the workspace (the per-PRD file formed from the `.anvil` directory `anvil status` echoes plus the portable relative name from `anvil prd source-name [--prd <id>]`).
+> Here is the PRD draft I assembled from your answers. Does this look right? Reply with edits or "looks good" to write it to the workspace (the per-PRD file formed from the `.anvil` directory `anvil status` echoes plus the preflight's retained `PRD_RELATIVE`).
 
 Wait for explicit approval. Apply any requested edits in-place and re-present until the user accepts.
 
 ### Step 3 — Write the PRD into the workspace
 
 The PRD does not live in an in-repo `.anvil/`, and its filename depends on the
-`prd_id` from Question 7 — **never hardcode it.** Resolve the layout-aware
+`prd_id` selected after Question 7 — **never hardcode it.** Resolve the layout-aware
 directory first: `anvil status` echoes a `Path:` line pointing at the active
 `.anvil` directory (in the HOME workspace by default). Capture the directory and
 ask the CLI for the portable relative name, then join them:
 
 ```bash
 ANVIL_DIR=$(anvil status | sed -n 's/^Path:[[:space:]]*//p')
-PRD_RELATIVE=$(anvil prd source-name) # add --prd <prd_id> for a named PRD
+# PRD_RELATIVE is the validated data.relative_name retained by the preflight.
 PRD_FILE="$ANVIL_DIR/$PRD_RELATIVE"
 ```
 
@@ -233,6 +267,7 @@ See `/anvil:plan` for the canonical anti-pattern statement on driving commands i
 ## Notes
 
 This is a skill, not a CLI command; there is no `anvil start-prd`. The
-six-question interview is pure markdown choreography, and everything it touches
-ships today: `anvil init`, `anvil status`, and `anvil prd parse`. Invoke it via
+seven-question interview is pure markdown choreography, and every CLI surface it
+uses ships today: `anvil init`, `anvil status`, `anvil prd source-name`, and
+`anvil prd parse`. Invoke it via
 `/anvil:start-prd`.

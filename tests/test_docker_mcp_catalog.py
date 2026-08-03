@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from anvil import __version__
+from anvil.build_identity import get_build_identity
 from anvil.cli.describe import mcp_tool_names
 from anvil.mcp_server import main
 
@@ -108,11 +108,11 @@ class TestEntryPointFlags:
         rc = main(["--version"])
         out = capsys.readouterr().out
         assert rc == 0
-        assert out.strip() == __version__
+        assert out.strip() == get_build_identity().display_version
 
     def test_short_version_flag(self, capsys: pytest.CaptureFixture[str]) -> None:
         assert main(["-v"]) == 0
-        assert capsys.readouterr().out.strip() == __version__
+        assert capsys.readouterr().out.strip() == get_build_identity().display_version
 
     def test_unknown_flag_fails_fast(self, capsys: pytest.CaptureFixture[str]) -> None:
         # A typo'd flag must NOT silently start the (blocking) server.

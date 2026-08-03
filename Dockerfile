@@ -43,6 +43,7 @@ RUN cd /app/bin && uv sync --frozen --no-dev --no-install-project
 
 # --- Source layer -----------------------------------------------------------
 COPY bin/src /app/bin/src
+COPY bin/hatch_build.py /app/bin/hatch_build.py
 
 # Now install the project itself against the cached dependency layer.
 RUN cd /app/bin && uv sync --frozen --no-dev

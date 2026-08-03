@@ -1,0 +1,38 @@
+{
+  "ok": true,
+  "command": "describe",
+  "data": {
+    "api_version": "4",
+    "engine_version": "0.6.0",
+    "cli": {
+      "commands": [
+        "prd assess",
+        "prd find-decisions",
+        "prd list",
+        "prd parse",
+        "prd resolve-decision",
+        "prd review"
+      ],
+      "options": {
+        "prd assess": ["--cwd", "--file", "--json", "--prd"],
+        "prd find-decisions": ["--cwd", "--file", "--json"],
+        "prd list": ["--cwd", "--json"],
+        "prd parse": ["--cwd", "--file", "--prd"],
+        "prd resolve-decision": ["--by", "--cwd", "--file", "--json", "--resolution"],
+        "prd review": ["--approve", "--cwd", "--notes", "--prd", "--reviewer"]
+      },
+      "contracts": [
+        {"path": [], "kind": "group", "flags": ["--version"]},
+        {"path": ["prd"], "kind": "group", "flags": []},
+        {"path": ["prd", "assess"], "kind": "command", "flags": ["--cwd", "--file", "--json", "--prd"]},
+        {"path": ["prd", "find-decisions"], "kind": "command", "flags": ["--cwd", "--file", "--json"]},
+        {"path": ["prd", "list"], "kind": "command", "flags": ["--cwd", "--json"]},
+        {"path": ["prd", "parse"], "kind": "command", "flags": ["--cwd", "--file", "--prd"]},
+        {"path": ["prd", "resolve-decision"], "kind": "command", "flags": ["--by", "--cwd", "--file", "--json", "--resolution"]},
+        {"path": ["prd", "review"], "kind": "command", "flags": ["--approve", "--cwd", "--notes", "--prd", "--reviewer"]}
+      ],
+      "contract_count": 8,
+      "count": 6
+    }
+  }
+}

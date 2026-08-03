@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -934,31 +935,56 @@ class TestVersion:
 # ---------------------------------------------------------------------------
 
 
-def _expected_cli_command_names() -> list[str]:
-    """Independently enumerate the live Typer app's leaf command paths.
+def _expected_cli_contracts() -> list[dict[str, object]]:
+    """Independently enumerate every live CLI node and its long options.
 
     Deliberately re-derived from the Typer app here (NOT via the describe
     module's own helper) so the drift assertion has a second, independent
     witness: if describe ever hand-maintained or stale-cached its list, this
     comparison would catch the divergence.
     """
-    import click
     from typer.main import get_command
 
     root = get_command(app)
 
-    def walk(group: click.Group, prefix: str) -> list[str]:
-        names: list[str] = []
-        for name, sub in group.commands.items():
-            full = f"{prefix}{name}"
-            if isinstance(sub, click.Group):
-                names.extend(walk(sub, full + " "))
-            else:
-                names.append(full)
-        return names
+    def walk(node: object, path: tuple[str, ...]) -> list[dict[str, object]]:
+        commands = getattr(node, "commands", None)
+        is_group = isinstance(commands, Mapping)
+        flags = {
+            option
+            for parameter in getattr(node, "params", ())
+            for option in (
+                *getattr(parameter, "opts", ()),
+                *getattr(parameter, "secondary_opts", ()),
+            )
+            if option.startswith("--")
+        }
+        contracts: list[dict[str, object]] = [
+            {
+                "path": list(path),
+                "kind": "group" if is_group else "command",
+                "flags": sorted(flags),
+            }
+        ]
+        if is_group:
+            for name in sorted(commands):
+                contracts.extend(walk(commands[name], path + (name,)))
+        return contracts
 
-    assert isinstance(root, click.Group)
-    return sorted(walk(root, ""))
+    assert isinstance(getattr(root, "commands", None), Mapping)
+    return walk(root, ())
+
+
+def _expected_cli_command_options() -> dict[str, list[str]]:
+    return {
+        " ".join(item["path"]): item["flags"]
+        for item in _expected_cli_contracts()
+        if item["kind"] == "command"
+    }
+
+
+def _expected_cli_command_names() -> list[str]:
+    return sorted(_expected_cli_command_options())
 
 
 def _expected_mcp_tool_names() -> list[str]:
@@ -986,9 +1012,21 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "4"
+        assert API_VERSION == "5"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
+        assert data["display_version"].startswith(__version__)
+        assert data["build_kind"] in {
+            "release_artifact",
+            "source_artifact",
+            "artifact_unknown",
+            "source_checkout",
+            "source_unknown",
+        }
+        assert data["commit"] is None or isinstance(data["commit"], str)
+        assert data["tag"] is None or data["tag"].startswith("v")
+        assert data["tag_distance"] is None or data["tag_distance"] >= 0
+        assert isinstance(data["dirty"], bool)
         assert data["schema_version"] == get_schema_version()
 
     def test_describe_works_without_a_project(self, tmp_path: Path) -> None:
@@ -1017,8 +1055,12 @@ class TestDescribe:
         expected = _expected_cli_command_names()
         assert described == expected
         assert data["cli"]["count"] == len(expected)
+        assert data["cli"]["options"] == _expected_cli_command_options()
+        assert data["cli"]["contracts"] == _expected_cli_contracts()
+        assert data["cli"]["contract_count"] == len(_expected_cli_contracts())
         # describe itself is part of the surface it reports.
         assert "describe" in described
+        assert "--prd" in data["cli"]["options"]["prd source-name"]
 
     def test_described_mcp_surface_matches_registered_tools(self) -> None:
         """The described MCP surface MUST equal the live FastMCP tool set."""
@@ -1050,6 +1092,8 @@ class TestDescribe:
         assert not result.stdout.strip().startswith("{")
         assert "CLI commands" in result.output
         assert "MCP tools" in result.output
+        assert "display_version:" in result.output
+        assert "dirty:" in result.output
 
     def test_mcp_describe_surface_matches_cli_describe(self) -> None:
         """The MCP describe_surface tool returns the IDENTICAL manifest the CLI

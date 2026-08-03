@@ -24,7 +24,22 @@ Write the contract that everything downstream depends on. The PRD is the single 
 
 ## Prerequisites
 
-The project must be initialized. State lives in the HOME workspace by default (`~/.anvil/workspaces/<key>/.anvil/...`), not in the repo, so check init through the CLI rather than a literal path:
+Before running `anvil status`, `anvil init`, or any other state command, resolve
+the actual `anvil` executable with the runtime's native lookup and run
+`anvil prd source-name --help`. Require exit 0; matching version text alone is
+not capability proof. If the help probe is absent, run `anvil --version` and
+stop before changing anything. Report: "Cannot safely resolve the selected PRD.
+`<executable>` reports `<version>` but does not expose
+`anvil prd source-name`, required by this skill and shipped in
+`anvil-state >=0.6.1`. No PRD file or state was changed. Upgrade with
+`uv tool upgrade anvil-state`, refresh the Anvil plugin if applicable, restart
+the harness/MCP process, then verify `anvil --version` and
+`anvil prd source-name --help`. I will not infer a filename, parse, or delete
+state."
+
+After that capability gate succeeds, confirm initialization through the CLI.
+State lives in the HOME workspace by default
+(`~/.anvil/workspaces/<key>/.anvil/...`), not in the repo:
 
 ```bash
 anvil status >/dev/null 2>&1 || echo "MISSING: run anvil init first"
@@ -56,11 +71,25 @@ The selected `<prd_id>` scopes everything below: its on-disk file, its overwrite
 
 ### Step 1 — Author or update the selected PRD
 
+#### Required `prd source-name` resolver preflight
+
+Before any branch that reads, backs up, edits, writes, or parses a PRD, rerun
+`anvil prd source-name --help` with the executable proven in Prerequisites, then
+run `anvil prd source-name [--prd <id>] --json` with the exact ID selected in
+Step 0. Require exit 0, `ok: true`, and a non-empty `data.relative_name`.
+Retain that validated value as `PRD_RELATIVE`; it is the sole relative path for
+the selected PRD for the rest of this run. Do not resolve it again unless the
+selected PRD ID changes, in which case repeat this entire preflight.
+
+If the capability exists but the resolver returns a typed state-root, identity,
+or legacy-source migration error, surface that exact error and stop. Do not
+mislabel it as version skew and do not construct a fallback filename.
+
 Drive this step inline. Check for an existing file before suggesting any edit — the subsequent `anvil prd parse` step (Step 2) rewrites the `Requirement`, `Feature`, and `Task` rows **in the selected PRD's partition** of `state.db` (the first parse of a PRD is a destructive create; a re-parse amends non-destructively — see "Revising a PRD" below).
 
 First resolve the PRD path from the CLI — never hardcode it. `anvil status`
-prints the active `.anvil` directory and `anvil prd source-name [--prd <id>]`
-prints the portable relative source name. Join those two values; this preserves
+prints the active `.anvil` directory. Join it with the preflight's retained
+`PRD_RELATIVE`; this preserves
 uppercase and Windows-reserved IDs without exposing an absolute path during
 parse. `anvil init` also echoes the default PRD location. Read the resolved file
 with whatever read primitive the runtime exposes (Bash, MCP filesystem tool).
@@ -230,7 +259,7 @@ A PRD is revisable: the FIRST parse of a `prd_id` emits a `prd.parsed` event, an
 
 Here is the safe sequence for a revision:
 
-1. Edit the selected PRD's file with the revised content (join the `Path:` directory from `anvil status` with the portable relative name from `anvil prd source-name [--prd <id>]`; never derive it from parse output). Before re-parsing, confirm the user intends to revise the existing `Requirement`/`Feature`/`Task` rows **in this PRD's partition**. Mirror the Step 1 confirm pattern: show the user a one-line summary (heading + line count) of the current PRD, and prompt `proceed / cancel / save-as-backup` before running `prd parse`. On `save-as-backup`, copy the file to `<name>.md.bak` in the same directory first.
+1. Edit the selected PRD's file with the revised content (join the `Path:` directory from `anvil status` with the preflight's retained `PRD_RELATIVE`; never derive it from parse output or resolve it again). Before re-parsing, confirm the user intends to revise the existing `Requirement`/`Feature`/`Task` rows **in this PRD's partition**. Mirror the Step 1 confirm pattern: show the user a one-line summary (heading + line count) of the current PRD, and prompt `proceed / cancel / save-as-backup` before running `prd parse`. On `save-as-backup`, copy the file to `<name>.md.bak` in the same directory first.
 2. Run `anvil prd parse` again (add `--prd <prd_id>` for a named PRD). A re-parse emits `prd.revised`, which amends the requirements in that PRD's partition — added rows are inserted, removed rows are superseded (lineage retained), unchanged rows are carried forward. It is an amend recorded in the event log, not a merge and not a destructive overwrite.
 3. Re-run `anvil prd review` if the changes are material (added/removed requirements, changed acceptance criteria, altered feature scope).
 4. Re-run `anvil prd review --approve` for significant scope changes. Minor editorial corrections (typo fixes, clarified wording, unchanged structure) do not require re-approval.
@@ -259,7 +288,7 @@ Avoid editing a task's acceptance criteria or scope while that task is `claimed`
 ## Common Pitfalls
 
 - **Parsing a thinking-out-loud draft.** `prd.md` is not a scratchpad. Parse only when the document is intended as a real spec. Parsing a half-formed draft seeds `state.db` with garbage requirements that downstream planning will dutifully score and promote.
-- **Approving without re-reading.** Read the full PRD before invoking `--approve`. Resolve its path by joining the `Path:` directory from `anvil status` with the portable relative name from `anvil prd source-name [--prd <id>]`; the stable `PRD source:` identity printed by parse is not a filesystem path. An approval event is permanent in `events.jsonl`. It cannot be undone without replaying from a snapshot.
+- **Approving without re-reading.** Read the full PRD before invoking `--approve`. Resolve its path by joining the `Path:` directory from `anvil status` with the preflight's retained `PRD_RELATIVE`; the stable `PRD source:` identity printed by parse is not a filesystem path. An approval event is permanent in `events.jsonl`. It cannot be undone without replaying from a snapshot.
 - **Skipping `## Non-Goals`.** The planner agent uses non-goals to bound task generation. Without them, tasks may sprawl into adjacent features. Even one item is better than none.
 - **Tasks without verification commands.** The `review tasks` gate (in the plan skill) requires at least one item under `**Verification:**`. Add shell commands — `pytest tests/test_foo.py`, `python -m mymodule --help` — so the gate does not block the entire queue.
 - **Re-parsing with active claims and no coordination.** This silently replaces task rows. Agents holding those tasks will find their task ID in an unexpected state on next heartbeat. Always check `anvil status` before re-parsing.
