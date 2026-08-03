@@ -6,6 +6,25 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-03
+
+### Added
+
+- **Safe version-skew recovery and upgrade verification (#180).** `anvil
+  status --path-only` resolves the state directory without opening or creating
+  its database, so operators can back up schema-v0, future-schema, or damaged
+  state before any normal backend initialization. The upgrade runbook now
+  verifies the active CLI, schema, harness integration, and live MCP identity
+  in Bash and PowerShell, with explicit and automatic migration paths.
+
+### Fixed
+
+- **Schema incompatibility now fails closed across every runtime boundary
+  (#180).** SQLite preflight, CLI commands and JSON envelopes, SessionStart
+  hooks, in-process MCP calls, and real stdio startup all return bounded,
+  redacted, direction-aware diagnostics without mutating future state, leaking
+  raw paths, recursing through cleanup, or hanging the host process.
+
 ## [0.6.1] - 2026-08-03
 
 ### Fixed

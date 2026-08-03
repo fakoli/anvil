@@ -40,7 +40,7 @@ The install registers five hooks, wires the MCP server, and makes the five plugi
 
 ```bash
 anvil --version
-# → anvil 0.6.1 (schema 16)
+# → anvil 0.6.2 (schema 16)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
