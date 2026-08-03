@@ -22,6 +22,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
+from anvil import __version__
 from anvil.state.rollup import BundleRollupEntry
 
 if TYPE_CHECKING:
@@ -31,7 +32,9 @@ if TYPE_CHECKING:
 # FastMCP instance
 # ---------------------------------------------------------------------------
 
-mcp: FastMCP = FastMCP("anvil")
+mcp: FastMCP = FastMCP("anvil", version=__version__)
+
+_MAX_MCP_SCHEMA_ERROR_BYTES = 4_096
 
 # ---------------------------------------------------------------------------
 # Planning vs execution surface split (audit item L2)
@@ -662,11 +665,17 @@ def _resolve_prd_id(backend: Any, prd_id: str | None = None) -> str:
 def _open_backend(state_dir: Path):  # type: ignore[return]
     """Open a fresh SqliteBackend for the given state_dir.
 
-    Raises ToolError if the state directory does not exist (project not
-    initialized). Caller must call backend.close() in a try/finally.
+    Raises ToolError if the project is uninitialized or its schema is
+    incompatible. Initialization failures close the constructed backend here;
+    successful callers must close the returned backend in a try/finally.
     """
+    from anvil.cli._helpers import (
+        BoundedSchemaProbe,
+        schema_diagnostic_from_exception,
+    )
     from anvil.clock import SystemClock
     from anvil.config import read_events_storage
+    from anvil.state.backend import SchemaMismatch
     from anvil.state.sqlite import SqliteBackend
 
     if not state_dir.exists():
@@ -676,16 +685,79 @@ def _open_backend(state_dir: Path):  # type: ignore[return]
         )
     db_path = str(state_dir / "state.db")
     events_path = str(state_dir / "events.jsonl")
-    backend = SqliteBackend(
-        db_path=db_path,
-        events_path=events_path,
-        clock=SystemClock(),
-        # v1.22.0: the storage mode decides the event-id format and the
-        # replay strategy, so it must be resolved BEFORE the backend opens —
-        # mirrors cli/_helpers._open_backend.
-        events_storage=read_events_storage(state_dir / "config.yaml"),
-    )
-    backend.initialize()
+    schema_probe = BoundedSchemaProbe()
+    backend = None
+    primary_failure = False
+
+    def close_backend_without_masking() -> None:
+        nonlocal backend
+        closing = backend
+        if closing is None:
+            return
+        # A cancellation can interrupt close before it releases the SQLite
+        # connection. Retain ownership and retry once; cleanup failures still
+        # must not replace the schema/probe failure that caused cleanup.
+        for _ in range(2):
+            try:
+                closing.close()
+                break
+            except BaseException:
+                continue
+        backend = None
+
+    def close_probe_after_interruption() -> BaseException | None:
+        first_failure: BaseException | None = None
+        # The first close can itself be interrupted before it reaches the
+        # worker. A second bounded attempt preserves the original failure while
+        # ensuring the worker and pipe handles still get a cleanup opportunity.
+        for _ in range(2):
+            try:
+                schema_probe.close()
+                return first_failure
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        return first_failure
+
+    try:
+        # Match the CLI boundary: compatibility wins over fallible config, and
+        # the same cumulative worker budget covers preflight plus initialize.
+        SqliteBackend.validate_schema_compatibility(schema_probe(db_path))
+        backend = SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=SystemClock(),
+            # v1.22.0: the storage mode decides the event-id format and the
+            # replay strategy, so it must be resolved BEFORE the backend opens.
+            events_storage=read_events_storage(state_dir / "config.yaml"),
+            schema_probe_fn=schema_probe,
+        )
+        backend.initialize()
+    except BaseException as exc:
+        primary_failure = True
+        close_backend_without_masking()
+        if isinstance(exc, SchemaMismatch):
+            diagnostic = schema_diagnostic_from_exception(exc)
+            message = json.dumps(
+                {"error": diagnostic.as_dict()},
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if len(message.encode("utf-8")) > _MAX_MCP_SCHEMA_ERROR_BYTES:
+                message = (
+                    '{"error":{"code":"schema_mismatch",'
+                    '"guidance":"Upgrade Anvil and restart the MCP server; '
+                    'do not delete state."}}'
+                )
+            raise ToolError(message) from None
+        raise
+    finally:
+        probe_failure = close_probe_after_interruption()
+        if probe_failure is not None:
+            close_backend_without_masking()
+            if not primary_failure:
+                raise probe_failure
     return backend
 
 

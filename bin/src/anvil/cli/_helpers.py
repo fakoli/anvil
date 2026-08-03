@@ -43,6 +43,8 @@ _PRDS_DIR_NAME = "prds"
 # unbounded allocation growth or UTF-8 decoding.
 MAX_PRD_SOURCE_BYTES_V1 = 2_097_152
 MAX_SCHEMA_DIAGNOSTIC_BYTES = 4_096
+MAX_SCHEMA_PROBE_RESPONSE_BYTES = 4_096
+MAX_SQLITE_SCHEMA_VERSION = 2_147_483_647
 SCHEMA_PROBE_TIMEOUT_SECONDS = 2.0
 _WINDOWS_RESERVED_PRD_STEMS = {
     "AUX",
@@ -1510,19 +1512,67 @@ class BoundedSchemaProbe:
         import subprocess
 
         process = self._process
-        self._process = None
         if process is None:
             return
-        if process.poll() is None:
-            process.terminate()
+
+        first_failure: BaseException | None = None
+
+        def remember(exc: BaseException) -> None:
+            nonlocal first_failure
+            if first_failure is None:
+                first_failure = exc
+
+        try:
+            alive = process.poll() is None
+        except BaseException as exc:
+            remember(exc)
+            alive = True
+
+        if alive:
+            try:
+                process.terminate()
+            except BaseException as exc:
+                remember(exc)
             try:
                 process.wait(timeout=1)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                try:
+                    process.kill()
+                except BaseException as exc:
+                    remember(exc)
+                try:
+                    process.wait(timeout=1)
+                except BaseException as exc:
+                    remember(exc)
+            except BaseException as exc:
+                # Cancellation may arrive before wait reaps the child. Escalate
+                # cleanup, then restore the cancellation after every resource
+                # has received a release attempt.
+                remember(exc)
+                try:
+                    process.kill()
+                except BaseException as kill_exc:
+                    remember(kill_exc)
+                try:
+                    process.wait(timeout=1)
+                except BaseException as wait_exc:
+                    remember(wait_exc)
         for stream in (process.stdin, process.stdout):
             if stream is not None:
-                stream.close()
+                try:
+                    stream.close()
+                except BaseException as exc:
+                    remember(exc)
+        self._process = None
+        if first_failure is not None:
+            raise first_failure
+
+    def _close_without_masking(self) -> None:
+        """Release probe resources without replacing an existing failure."""
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     def _start_worker(self) -> Any:
         import subprocess
@@ -1547,7 +1597,7 @@ class BoundedSchemaProbe:
         try:
             return self._call_worker(db_path)
         except BaseException:
-            self.close()
+            self._close_without_masking()
             raise
 
     def _call_worker(self, db_path: str | os.PathLike[str]) -> int:
@@ -1565,19 +1615,19 @@ class BoundedSchemaProbe:
         try:
             process = self._start_worker()
         except (OSError, ValueError):
-            self.close()
+            self._close_without_masking()
             raise SchemaProbeFailed("Database schema inspection failed.") from None
         self._remaining_seconds = max(
             0.0,
             self._remaining_seconds - (time.monotonic() - started),
         )
         if self._remaining_seconds <= 0:
-            self.close()
+            self._close_without_masking()
             raise SchemaProbeFailed(
                 "Database schema inspection exceeded the transport time bound."
             )
         if process.stdin is None or process.stdout is None:
-            self.close()
+            self._close_without_masking()
             raise SchemaProbeFailed("Database schema inspection failed.")
 
         request_errors: list[BaseException] = []
@@ -1597,7 +1647,7 @@ class BoundedSchemaProbe:
             writer.start()
             writer.join(self._remaining_seconds)
         except BaseException:
-            self.close()
+            self._close_without_masking()
             if writer.ident is not None:
                 writer.join(timeout=1)
             raise
@@ -1606,24 +1656,30 @@ class BoundedSchemaProbe:
             self._remaining_seconds - (time.monotonic() - started),
         )
         if writer.is_alive():
-            self.close()
+            self._close_without_masking()
             writer.join(timeout=1)
             raise SchemaProbeFailed(
                 "Database schema inspection exceeded the transport time bound."
             ) from None
         if request_errors:
-            self.close()
+            self._close_without_masking()
             raise SchemaProbeFailed("Database schema inspection failed.") from None
         if self._remaining_seconds <= 0:
-            self.close()
+            self._close_without_masking()
             raise SchemaProbeFailed(
                 "Database schema inspection exceeded the transport time bound."
             )
 
         response: list[str] = []
+        response_errors: list[BaseException] = []
 
         def read_response() -> None:
-            response.append(process.stdout.readline())
+            try:
+                response.append(
+                    process.stdout.readline(MAX_SCHEMA_PROBE_RESPONSE_BYTES + 1)
+                )
+            except BaseException as exc:  # transported to the caller thread
+                response_errors.append(exc)
 
         reader = threading.Thread(target=read_response, name="anvil-schema-response")
         started = time.monotonic()
@@ -1631,7 +1687,7 @@ class BoundedSchemaProbe:
             reader.start()
             reader.join(self._remaining_seconds)
         except BaseException:
-            self.close()
+            self._close_without_masking()
             if reader.ident is not None:
                 reader.join(timeout=1)
             raise
@@ -1640,58 +1696,76 @@ class BoundedSchemaProbe:
             self._remaining_seconds - (time.monotonic() - started),
         )
         if reader.is_alive():
-            self.close()
+            self._close_without_masking()
             reader.join(timeout=1)
             raise SchemaProbeFailed(
                 "Database schema inspection exceeded the transport time bound."
             ) from None
-        if not response or not response[0]:
-            self.close()
+        if response_errors or not response or not response[0]:
+            self._close_without_masking()
             raise SchemaProbeFailed("Database schema inspection failed.")
+        frame = response[0]
+        if (
+            not frame.endswith("\n")
+            or len(frame.encode("utf-8")) > MAX_SCHEMA_PROBE_RESPONSE_BYTES
+        ):
+            self._close_without_masking()
+            raise SchemaProbeFailed(
+                "Database schema inspection returned invalid data."
+            )
         try:
-            payload = json.loads(response[0])
+            payload = json.loads(frame)
         except (json.JSONDecodeError, TypeError):
-            self.close()
+            self._close_without_masking()
             raise SchemaProbeFailed(
                 "Database schema inspection returned invalid data."
             ) from None
-        if not isinstance(payload, dict) or set(payload) - {
-            "ok",
-            "version",
-            "code",
-            "actual",
-            "expected",
-            "direction",
-        }:
-            self.close()
+        if not isinstance(payload, dict):
+            self._close_without_masking()
             raise SchemaProbeFailed("Database schema inspection returned invalid data.")
-        if payload.get("ok") is True:
-            version = payload.get("version")
-            if isinstance(version, int) and not isinstance(version, bool):
-                return version
-            self.close()
+
+        def valid_schema_version(value: object) -> bool:
+            return (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and 0 <= value <= MAX_SQLITE_SCHEMA_VERSION
+            )
+
+        keys = set(payload)
+        if keys == {"ok", "version"} and payload["ok"] is True:
+            version = payload["version"]
+            if valid_schema_version(version):
+                return int(version)
+            self._close_without_masking()
             raise SchemaProbeFailed("Database schema inspection returned invalid data.")
-        if payload.get("ok") is not False:
-            self.close()
-            raise SchemaProbeFailed("Database schema inspection returned invalid data.")
-        if payload.get("code") == "schema_mismatch":
-            actual = payload.get("actual")
-            expected = payload.get("expected")
-            direction = payload.get("direction")
+        if (
+            keys == {"ok", "code"}
+            and payload["ok"] is False
+            and payload["code"] == "schema_probe_failed"
+        ):
+            self._close_without_masking()
+            raise SchemaProbeFailed("Database schema inspection failed.")
+        if keys == {"ok", "code", "actual", "expected", "direction"}:
+            actual = payload["actual"]
+            expected = payload["expected"]
+            direction = payload["direction"]
             if (
-                (actual is None or isinstance(actual, int))
-                and not isinstance(actual, bool)
-                and (expected is None or isinstance(expected, int))
-                and not isinstance(expected, bool)
-                and direction in {"newer", "older", None}
+                payload["ok"] is False
+                and payload["code"] == "schema_mismatch"
+                and valid_schema_version(actual)
+                and valid_schema_version(expected)
+                and (
+                    (direction == "newer" and actual > expected)
+                    or (direction == "older" and actual < expected)
+                )
             ):
-                self.close()
+                self._close_without_masking()
                 raise SchemaMismatch(
-                    actual=actual,
-                    expected=expected,
+                    actual=int(actual),
+                    expected=int(expected),
                     direction=direction,
                 )
-        self.close()
+        self._close_without_masking()
         raise SchemaProbeFailed("Database schema inspection failed.")
 
 

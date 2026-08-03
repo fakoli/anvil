@@ -34,6 +34,7 @@ from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 
+from anvil import __version__
 from anvil.mcp_server import mcp
 from anvil.planning._plan_helpers import (
     DEPENDENCY_BATCH_LIMIT_MESSAGE,
@@ -41,6 +42,7 @@ from anvil.planning._plan_helpers import (
     MAX_DEPENDENCY_EDGES_PER_BATCH,
 )
 from anvil.state.backend import EventRejected
+from anvil.state.schema import SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -373,6 +375,206 @@ _EXECUTION_TOOLS = {
     "checkpoint_bundle", "reconcile_bundle", "supersede_bundle",
 }
 _ALL_TOOLS = _PLANNING_TOOLS | _EXECUTION_TOOLS
+
+
+class TestMcpSchemaMismatch:
+    def test_initialize_metadata_reports_anvil_server_version(self) -> None:
+        async def run() -> str:
+            async with Client(mcp) as client:
+                return client.initialize_result.serverInfo.version
+
+        assert _run(run()) == __version__
+
+    def test_schema_mismatch_long_lived_client_detects_newer_database(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[list[Any], ToolError]:
+            async with Client(mcp) as client:
+                initial = _data(await client.call_tool("list_tasks", {}))
+                connection = sqlite3.connect(state_dir / "state.db")
+                try:
+                    connection.execute(
+                        f"PRAGMA user_version = {SCHEMA_VERSION + 1}"
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                try:
+                    await client.call_tool("list_tasks", {})
+                except ToolError as exc:
+                    return initial, exc
+                raise AssertionError("newer schema must fail closed")
+
+        initial, raised = _run(run())
+        assert initial == []
+        error = json.loads(str(raised))["error"]
+        assert error == {
+            "code": "schema_mismatch",
+            "database_schema": SCHEMA_VERSION + 1,
+            "direction": "newer",
+            "engine_version": __version__,
+            "guidance": (
+                "Upgrade anvil-state, then restart the CLI, harness, and MCP "
+                "server. Do not delete state."
+            ),
+            "remediation_code": "upgrade_engine",
+            "restart_required": True,
+            "supported_schema": SCHEMA_VERSION,
+        }
+        rendered = str(raised)
+        assert str(state_dir.resolve()) not in rendered
+        assert "Traceback" not in rendered
+        assert len(rendered.encode("utf-8")) <= 4_096
+
+    def test_schema_mismatch_repeated_failures_close_every_backend(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.state.sqlite as sqlite_module
+
+        state_dir = _init_state_dir(tmp_path)
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+            connection.commit()
+        finally:
+            connection.close()
+        monkeypatch.chdir(tmp_path)
+        real_backend = sqlite_module.SqliteBackend
+        instances: list[Any] = []
+
+        class TrackingBackend(real_backend):  # type: ignore[misc]
+            close_calls = 0
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                instances.append(self)
+
+            def close(self) -> None:
+                self.close_calls += 1
+                super().close()
+
+        monkeypatch.setattr(sqlite_module, "SqliteBackend", TrackingBackend)
+
+        async def run() -> list[str]:
+            errors: list[str] = []
+            async with Client(mcp) as client:
+                for _ in range(3):
+                    with pytest.raises(ToolError) as raised:
+                        await asyncio.wait_for(
+                            client.call_tool("list_tasks", {}), timeout=2
+                        )
+                    errors.append(str(raised.value))
+            return errors
+
+        errors = _run(run())
+        assert len(set(errors)) == 1
+        assert instances == []
+
+    @pytest.mark.parametrize("cleanup_error", [OSError, KeyboardInterrupt])
+    def test_schema_mismatch_after_backend_construction_closes_backend(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        cleanup_error: type[BaseException],
+    ) -> None:
+        import anvil.state.sqlite as sqlite_module
+        from anvil.state.backend import SchemaMismatch
+
+        _init_state_dir(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        real_backend = sqlite_module.SqliteBackend
+        instances: list[Any] = []
+
+        class TrackingBackend(real_backend):  # type: ignore[misc]
+            close_calls = 0
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                instances.append(self)
+
+            def initialize(self) -> None:
+                raise SchemaMismatch(
+                    actual=SCHEMA_VERSION + 1,
+                    expected=SCHEMA_VERSION,
+                    direction="newer",
+                )
+
+            def close(self) -> None:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise cleanup_error("injected close failure")
+                super().close()
+
+        monkeypatch.setattr(sqlite_module, "SqliteBackend", TrackingBackend)
+
+        async def run() -> str:
+            async with Client(mcp) as client:
+                with pytest.raises(ToolError) as raised:
+                    await client.call_tool("list_tasks", {})
+                return str(raised.value)
+
+        rendered = _run(run())
+        assert json.loads(rendered)["error"]["code"] == "schema_mismatch"
+        assert len(instances) == 1
+        assert instances[0].close_calls == 2
+        assert instances[0]._conn is None
+
+    @pytest.mark.parametrize("cleanup_error", [OSError, KeyboardInterrupt])
+    def test_probe_close_failure_closes_initialized_backend(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        cleanup_error: type[BaseException],
+    ) -> None:
+        import anvil.cli._helpers as helpers_module
+        import anvil.state.sqlite as sqlite_module
+        from anvil.mcp_server import _open_backend
+
+        state_dir = _init_state_dir(tmp_path)
+        real_probe = helpers_module.BoundedSchemaProbe
+        real_backend = sqlite_module.SqliteBackend
+        instances: list[Any] = []
+        probes: list[Any] = []
+
+        class FailingCloseProbe(real_probe):
+            close_interrupted = False
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                probes.append(self)
+
+            def close(self) -> None:
+                if self._process is not None and not self.close_interrupted:
+                    self.close_interrupted = True
+                    raise cleanup_error("injected probe close failure")
+                super().close()
+
+        class TrackingBackend(real_backend):  # type: ignore[misc]
+            close_calls = 0
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                instances.append(self)
+
+            def close(self) -> None:
+                self.close_calls += 1
+                super().close()
+
+        monkeypatch.setattr(helpers_module, "BoundedSchemaProbe", FailingCloseProbe)
+        monkeypatch.setattr(sqlite_module, "SqliteBackend", TrackingBackend)
+
+        with pytest.raises(cleanup_error, match="injected probe close failure"):
+            _open_backend(state_dir)
+
+        assert len(instances) == 1
+        assert instances[0].close_calls == 1
+        assert instances[0]._conn is None
+        assert len(probes) == 1
+        assert probes[0].close_interrupted
+        assert probes[0].closed
 
 
 class TestListTools:

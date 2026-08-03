@@ -14,9 +14,11 @@ def _inspect(path: str) -> dict[str, object]:
     try:
         version = read_db_schema_version(path)
     except SchemaMismatch as exc:
+        if getattr(exc, "code", None) != "schema_mismatch":
+            return {"ok": False, "code": "schema_probe_failed"}
         payload = {
             "ok": False,
-            "code": getattr(exc, "code", "schema_probe_failed"),
+            "code": "schema_mismatch",
             "actual": exc.actual,
             "expected": exc.expected,
             "direction": exc.direction,

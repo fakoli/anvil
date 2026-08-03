@@ -9648,7 +9648,7 @@ class TestUnifiedSchemaMismatchBoundary:
                 return None
 
         class FixedOutput:
-            def readline(self) -> str:
+            def readline(self, _size: int = -1) -> str:
                 return '{"ok":true,"version":16}\n'
 
             def close(self) -> None:
@@ -9712,6 +9712,350 @@ class TestUnifiedSchemaMismatchBoundary:
             thread.name != "anvil-schema-response"
             for thread in threading.enumerate()
         )
+
+    @pytest.mark.parametrize("cleanup_error", [OSError, KeyboardInterrupt])
+    def test_schema_probe_close_interruption_still_reaps_worker(
+        self, cleanup_error: type[BaseException]
+    ) -> None:
+        import subprocess
+
+        import anvil.cli._helpers as helpers
+
+        class Stream:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class InterruptedProcess:
+            def __init__(self) -> None:
+                self.stdin = Stream()
+                self.stdout = Stream()
+                self.returncode: int | None = None
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+                raise cleanup_error("injected terminate interruption")
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+                self.returncode = 1
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("probe", timeout)
+                return self.returncode
+
+        process = InterruptedProcess()
+        probe = helpers.BoundedSchemaProbe()
+        probe._process = process
+
+        with pytest.raises(cleanup_error, match="injected terminate interruption"):
+            probe.close()
+
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 1
+        assert process.returncode == 1
+        assert process.stdin.closed
+        assert process.stdout.closed
+        assert probe.closed
+
+    @pytest.mark.parametrize("cleanup_error", [OSError, KeyboardInterrupt])
+    def test_schema_mismatch_cleanup_interruption_preserves_mismatch(
+        self, tmp_path: Path, cleanup_error: type[BaseException]
+    ) -> None:
+        import subprocess
+
+        import anvil.cli._helpers as helpers
+        from anvil.state.backend import SchemaMismatch
+
+        class InputStream:
+            closed = False
+
+            def write(self, _request: str) -> int:
+                return 1
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                self.closed = True
+
+        class OutputStream:
+            closed = False
+
+            def readline(self, _size: int = -1) -> str:
+                return (
+                    '{"ok":false,"code":"schema_mismatch","actual":17,'
+                    '"expected":16,"direction":"newer"}\n'
+                )
+
+            def close(self) -> None:
+                self.closed = True
+
+        class InterruptedProcess:
+            def __init__(self) -> None:
+                self.stdin = InputStream()
+                self.stdout = OutputStream()
+                self.returncode: int | None = None
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+                raise cleanup_error("injected terminate interruption")
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+                self.returncode = 1
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("probe", timeout)
+                return self.returncode
+
+        process = InterruptedProcess()
+        probe = helpers.BoundedSchemaProbe()
+        probe._process = process
+
+        def fixed_worker() -> InterruptedProcess:
+            return process
+
+        probe._start_worker = fixed_worker  # type: ignore[method-assign]
+
+        with pytest.raises(SchemaMismatch) as raised:
+            probe(tmp_path / "state.db")
+
+        assert raised.value.actual == 17
+        assert raised.value.expected == 16
+        assert raised.value.direction == "newer"
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 1
+        assert process.stdin.closed
+        assert process.stdout.closed
+        assert probe.closed
+
+    def test_schema_probe_reader_failure_is_closed_and_silent(
+        self, tmp_path: Path
+    ) -> None:
+        import contextlib
+        import io
+
+        import anvil.cli._helpers as helpers
+        from anvil.state.backend import SchemaProbeFailed
+
+        marker = "SECRET_PATH_C:/private/backend.db"
+
+        class InputStream:
+            closed = False
+
+            def write(self, _request: str) -> int:
+                return 1
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FailingOutput:
+            closed = False
+
+            def readline(self, _size: int = -1) -> str:
+                raise OSError(marker)
+
+            def close(self) -> None:
+                self.closed = True
+
+        class Process:
+            def __init__(self) -> None:
+                self.stdin = InputStream()
+                self.stdout = FailingOutput()
+                self.returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.returncode = 1
+
+            def kill(self) -> None:
+                self.returncode = 1
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                self.returncode = 1
+                return self.returncode
+
+        process = Process()
+        probe = helpers.BoundedSchemaProbe()
+        probe._process = process
+
+        def fixed_worker() -> Process:
+            return process
+
+        probe._start_worker = fixed_worker  # type: ignore[method-assign]
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with pytest.raises(SchemaProbeFailed) as raised:
+                probe(tmp_path / "state.db")
+
+        assert marker not in str(raised.value)
+        assert marker not in stderr.getvalue()
+        assert "Traceback" not in stderr.getvalue()
+        assert process.stdin.closed
+        assert process.stdout.closed
+        assert probe.closed
+
+    @pytest.mark.parametrize(
+        "frame",
+        [
+            '{"ok":true,"version":16,"code":"schema_mismatch",'
+            '"actual":17,"expected":16,"direction":"newer"}\n',
+            '{"ok":true,"version":true}\n',
+            '{"ok":true,"version":-1}\n',
+            '{"ok":true,"version":2147483648}\n',
+            '{"ok":false,"code":"schema_mismatch","actual":16,'
+            '"expected":16,"direction":"newer"}\n',
+            '{"ok":false,"code":"schema_probe_failed","detail":"secret"}\n',
+        ],
+    )
+    def test_schema_probe_response_variants_are_exact(
+        self, tmp_path: Path, frame: str
+    ) -> None:
+        import anvil.cli._helpers as helpers
+        from anvil.state.backend import SchemaProbeFailed
+
+        class InputStream:
+            closed = False
+
+            def write(self, _request: str) -> int:
+                return 1
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                self.closed = True
+
+        class OutputStream:
+            closed = False
+            requested_size: int | None = None
+
+            def readline(self, size: int = -1) -> str:
+                self.requested_size = size
+                return frame[:size]
+
+            def close(self) -> None:
+                self.closed = True
+
+        class Process:
+            def __init__(self) -> None:
+                self.stdin = InputStream()
+                self.stdout = OutputStream()
+                self.returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.returncode = 1
+
+            def kill(self) -> None:
+                self.returncode = 1
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                self.returncode = 1
+                return self.returncode
+
+        process = Process()
+        probe = helpers.BoundedSchemaProbe()
+        probe._process = process
+
+        def fixed_worker() -> Process:
+            return process
+
+        probe._start_worker = fixed_worker  # type: ignore[method-assign]
+        with pytest.raises(SchemaProbeFailed):
+            probe(tmp_path / "state.db")
+
+        assert (
+            process.stdout.requested_size
+            == helpers.MAX_SCHEMA_PROBE_RESPONSE_BYTES + 1
+        )
+        assert process.stdin.closed
+        assert process.stdout.closed
+        assert probe.closed
+
+    def test_schema_probe_response_read_is_bounded(self, tmp_path: Path) -> None:
+        import anvil.cli._helpers as helpers
+        from anvil.state.backend import SchemaProbeFailed
+
+        class InputStream:
+            def write(self, _request: str) -> int:
+                return 1
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class OversizedOutput:
+            requested_size: int | None = None
+
+            def readline(self, size: int = -1) -> str:
+                self.requested_size = size
+                return "x" * size
+
+            def close(self) -> None:
+                return None
+
+        class Process:
+            def __init__(self) -> None:
+                self.stdin = InputStream()
+                self.stdout = OversizedOutput()
+                self.returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.returncode = 1
+
+            def kill(self) -> None:
+                self.returncode = 1
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                self.returncode = 1
+                return self.returncode
+
+        process = Process()
+        probe = helpers.BoundedSchemaProbe()
+        probe._process = process
+
+        def fixed_worker() -> Process:
+            return process
+
+        probe._start_worker = fixed_worker  # type: ignore[method-assign]
+        with pytest.raises(SchemaProbeFailed):
+            probe(tmp_path / "state.db")
+
+        assert (
+            process.stdout.requested_size
+            == helpers.MAX_SCHEMA_PROBE_RESPONSE_BYTES + 1
+        )
+        assert probe.closed
 
     @pytest.mark.parametrize(
         "target_name",
