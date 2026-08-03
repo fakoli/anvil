@@ -3028,9 +3028,11 @@ class SqliteBackend:
     def _check_schema_version(self, *, pre_ddl_version: int | None = None) -> None:
         """Raise SchemaMismatch if on-disk version is incompatible with SCHEMA_VERSION.
 
-        Auto-upgrade behaviour (Phase 8 SF-6, refined by P1-3; v4 added in
-        v1.22.0 for git-backed events Phase A; v5 added by T015 for
-        non-feature task types):
+        Auto-upgrade follows the ordered, idempotent ``_MIGRATIONS`` chain
+        through the current schema (v16). ``v0`` and ``v1`` are normalized to
+        the v2 baseline by current DDL before the explicit ladder runs. The
+        early historical transitions remain noteworthy because they repair
+        pre-existing tables that ``CREATE TABLE IF NOT EXISTS`` cannot alter:
 
         - ``v0 / v1 → v5``: ``sync_mappings`` never existed pre-v2, so the
           IF NOT EXISTS DDL created the current-shaped table from scratch;
@@ -3061,8 +3063,9 @@ class SqliteBackend:
         equal to SCHEMA_VERSION) and the migration branches would never
         fire.
 
-        Future gaps (e.g. a v5 db opened by code that expects v6) still
-        raise. See docs/migrations.md.
+        Every later step, v5→v6 through v15→v16, is represented by one
+        contiguous tuple in ``_MIGRATIONS``. Any gap between the on-disk version
+        and ``SCHEMA_VERSION`` fails closed. See docs/migrations.md.
         """
         conn = self._require_conn()
         # Use the pre-DDL version when provided (initialize path); fall back
@@ -3082,8 +3085,8 @@ class SqliteBackend:
         # ``from_version`` to ``from_version + 1`` and is idempotent
         # (duplicate-column tolerant) so a crash mid-migrate re-runs cleanly.
         # We apply every step whose ``from_version >= on_disk`` in order, then
-        # stamp ``user_version``. Adding a future v8 step is ONE new tuple —
-        # no literal version comparison to update.
+        # stamp ``user_version``. Adding the next schema step is ONE new tuple;
+        # no literal version comparison elsewhere needs updating.
         #
         # An older DB that is already past a given step (e.g. a v3 DB whose DDL
         # already grew current-shaped tables) still runs that step's helpers:
