@@ -76,6 +76,16 @@ def test_validator_catches_known_bugs(contract: dict[str, object]) -> None:
     for malformed in ("source_name", "Source-name"):
         finding = check_invocation(["anvil", "prd", malformed], contract)
         assert finding and "unknown subcommand" in finding[0]
+    assert check_invocation(["anvil", "submit", "[--fabricated]"], contract)
+
+    missing_optional = deepcopy(contract)
+    source_node = missing_optional["nodes"]["prd source-name"]  # type: ignore[index]
+    source_node["flags"].remove("--prd")  # type: ignore[index]
+    finding = check_invocation(
+        ["anvil", "prd", "source-name", "[--prd", "<id>]", "--json"],
+        missing_optional,
+    )
+    assert finding and "unknown flag --prd" in finding[0]
 
 
 def test_validator_accepts_real_commands(contract: dict[str, object]) -> None:

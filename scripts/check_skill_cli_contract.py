@@ -297,9 +297,10 @@ def check_invocation(tokens: list[str], contract: Mapping[str, Any]) -> list[str
 
     findings: list[str] = []
     for token in rest:
-        if token.startswith("[") or not token.startswith("--") or len(token) <= 2:
+        candidate = token.strip("[]")
+        if not candidate.startswith("--") or len(candidate) <= 2:
             continue
-        base = token.split("=", 1)[0]
+        base = candidate.split("=", 1)[0]
         for flag in base.split("/"):
             if flag.startswith("--") and flag not in valid:
                 findings.append(f"unknown flag {flag} for: anvil {joined}")
