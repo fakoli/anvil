@@ -355,6 +355,14 @@ def status(
             "(hooks must never fail the session)."
         ),
     ),
+    path_only: bool = typer.Option(  # noqa: B008
+        False,
+        "--path-only",
+        help=(
+            "Print the resolved state directory without opening state.db. "
+            "Works even when the database schema is incompatible."
+        ),
+    ),
     prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
@@ -371,6 +379,7 @@ def status(
     Default output is a human-readable multi-line summary.
     Pass --hook-format for the single-line compact format consumed by
     the SessionStart detect-state.sh hook.
+    Pass --path-only to resolve the state directory without opening the DB.
     With ``--json`` emits ``{"ok": true, "command": "status", "data": {...}}``
     carrying project, prd status, task counts, and active claim count; the
     not-initialized case is a ``{"ok": false, ...}`` envelope with exit 1.
@@ -381,13 +390,32 @@ def status(
     # "uninitialized" line with exit 0 instead of propagating the error.
     from anvil.cli._helpers import StateRootError
 
+    if path_only and hook_format:
+        message = "--path-only cannot be combined with --hook-format"
+        if json_output:
+            fail("status", message, code="bad_request")
+        raise typer.BadParameter(message)
+
     try:
         state_dir = _resolve_state_dir(cwd)
     except StateRootError:
         if hook_format:
             typer.echo("uninitialized")
             raise typer.Exit(code=0) from None
+        if json_output:
+            fail(
+                "status",
+                "Cannot resolve Anvil state directory. Fix ANVIL_ROOT or pass --cwd.",
+                code="invalid_state_root",
+            )
         raise
+
+    if path_only:
+        if json_output:
+            emit_success("status", {"path": str(state_dir)})
+        else:
+            typer.echo(state_dir)
+        return
 
     if not state_dir.exists():
         if json_output:

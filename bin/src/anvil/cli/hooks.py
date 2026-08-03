@@ -682,7 +682,13 @@ def _status_hook_line(cwd: Path | None) -> tuple[str, int]:
             # OptionInfo sentinel into resolve_prd_id(), which crashes on
             # ``.strip()`` and degrades SessionStart to "status check
             # unavailable" for every initialized project.
-            status(hook_format=True, prd=None, json_output=False, cwd=cwd)
+            status(
+                hook_format=True,
+                path_only=False,
+                prd=None,
+                json_output=False,
+                cwd=cwd,
+            )
     except typer.Exit as exc:
         code = int(exc.exit_code or 0)
     except SystemExit as exc:

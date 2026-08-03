@@ -198,6 +198,9 @@ Default output is a human-readable multi-line block (project name, id, path,
 initialised-at, PRD status, task counts by status, active claim count, sync
 configuration). Pass `--hook-format` for the single-line compact format
 consumed by the SessionStart `detect-state.sh` hook.
+Pass `--path-only` to print the absolute state-directory path without opening
+the database. It works for uninitialised projects and incompatible schemas and
+does not create state.
 
 **Flags:**
 
@@ -205,18 +208,26 @@ consumed by the SessionStart `detect-state.sh` hook.
   (e.g. `active-claims:0 ready-tasks:5 blockers:0 prd-status:approved`).
   Exits 0 even when `anvil` is not initialised — hooks must never
   fail the session.
-- `--cwd PATH` *(hidden)* — project directory to inspect. Defaults to cwd.
+- `--path-only` *(flag)* — resolve and print the absolute state-directory path
+  without opening or creating the database. Cannot be combined with
+  `--hook-format`.
+- `--json` *(flag)* — emit the standard machine-readable command envelope.
+- `--cwd PATH` — project directory to inspect. Defaults to cwd.
 
 **Exit codes:**
 
-- `0` — status printed successfully, **or** `--hook-format` was used on an
-  uninitialised project (prints the literal string `uninitialized`).
-- `1` — `.anvil/` does not exist and `--hook-format` was *not* passed.
+- `0` — status printed successfully; `--path-only` also exits 0 for an
+  uninitialised project, and `--hook-format` prints `uninitialized` and exits 0.
+- `1` — ordinary status could not open valid state, or a JSON request was
+  rejected (including `--path-only --hook-format --json`).
+- `2` — incompatible human-readable CLI flags, such as
+  `--path-only --hook-format`.
 
 **Example:**
 
 ```bash
 anvil status
+anvil status --path-only       # resolve state without opening its database
 anvil status --hook-format     # for SessionStart hooks
 ```
 

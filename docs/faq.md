@@ -174,6 +174,20 @@ welcome; open an issue describing your source format.
 See [`how-to/getting-started.md`](how-to/getting-started.md) and
 [`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md).
 
+### I upgraded Anvil, but SessionStart or MCP still reports the old version. What now?
+
+A harness can keep an already-running MCP process alive after the executable on
+disk is upgraded, and a plugin can be newer or older than the independently
+installed CLI on `PATH`. Do not delete `state.db` to repair that skew.
+
+Follow the [upgrade matrix and verification
+runbook](how-to/getting-started.md#upgrading-and-uninstalling): resolve the
+actual `anvil` and `anvil-mcp` executables, compare engine and database schema,
+refresh the harness plugin/config, fully restart the harness, and inspect the
+new MCP initialize `serverInfo.version`. If the database is newer than the
+engine, upgrade the stale engine/plugin and restart; preserve the state
+directory so the compatible engine can open it.
+
 ---
 
 ## Hooks, storage, and concurrency
@@ -254,19 +268,20 @@ See [`architecture.md` § Storage layout](architecture.md) and
 ### Can I inspect state with `sqlite3` or SQLite Browser?
 
 Yes. `state.db` is a standard SQLite file in WAL mode — any SQLite tool
-works. Find its path from `anvil status`'s `Path:` line (by default
+works. Resolve its path without opening the database (by default
 `~/.anvil/workspaces/<dir>-<hash8>/.anvil/state.db`, not a path inside
 your repo):
 
 ```bash
-STATE_DIR=$(anvil status | grep '^Path:' | awk '{print $2}')
+STATE_DIR=$(anvil status --path-only)
 sqlite3 "$STATE_DIR/state.db" .schema
 sqlite3 "$STATE_DIR/state.db" "SELECT id, status, title FROM tasks;"
 ```
 
-The schema is version 8; older databases are auto-upgraded via the
-additive v6 → v7 → v8 migration ladder (`anvil migrate state` — dry-run by
-default, `--yes` to apply — or automatically on open). Pydantic models in
+The engine's current schema version is reported by `anvil --version` (v16 in
+this release). Supported historical databases are auto-upgraded through the
+ordered, additive migration chain when the backend opens (`anvil migrate
+state` is dry-run by default; pass `--yes` to apply it deliberately). Pydantic models in
 [`bin/src/anvil/state/models.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/models.py)
 define every entity; the SQLite implementation lives in
 [`bin/src/anvil/state/sqlite.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/state/sqlite.py).
@@ -283,12 +298,12 @@ on every mutation being represented in the log).
 
 ### How do I back up `.anvil/`?
 
-Copy the state directory wholesale — find its path with `anvil status`
-(`Path:` line; by default `~/.anvil/workspaces/<dir>-<hash8>/.anvil/`, not
-a path inside your repo):
+Copy the state directory wholesale — resolve its path without opening the
+database (by default `~/.anvil/workspaces/<dir>-<hash8>/.anvil/`, not a path
+inside your repo):
 
 ```bash
-STATE_DIR=$(anvil status | grep '^Path:' | awk '{print $2}')
+STATE_DIR=$(anvil status --path-only)
 cp -R "$STATE_DIR" "/backup/location/anvil-$(date +%Y-%m-%d)"
 ```
 
@@ -320,7 +335,7 @@ previous question), or rebuild it directly from `events.jsonl` with the
 shipped `anvil replay` command. The fastest recovery path today:
 
 ```bash
-STATE_DIR=$(anvil status | grep '^Path:' | awk '{print $2}')
+STATE_DIR=$(anvil status --path-only)
 anvil replay --from-events "$STATE_DIR/events.jsonl" --into /tmp/state.db.rebuilt
 mv "$STATE_DIR/state.db" "$STATE_DIR/state.db.broken"   # keep the broken db for forensics
 rm -f "$STATE_DIR"/state.db-wal "$STATE_DIR"/state.db-shm

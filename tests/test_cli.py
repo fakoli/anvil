@@ -439,6 +439,70 @@ class TestStatusUninitialized:
         assert result.exit_code == 0
         assert "uninitialized" in result.output
 
+    def test_status_path_only_resolves_without_initializing(self, tmp_path: Path) -> None:
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, ["status", "--path-only"])
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 0
+        resolved = Path(result.output.strip())
+        assert resolved.is_absolute()
+        assert resolved.name == ".anvil"
+        assert not resolved.exists()
+
+    def test_status_path_only_invalid_root_keeps_json_contract(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        invalid_root = tmp_path / "missing-root"
+        monkeypatch.setenv("ANVIL_ROOT", str(invalid_root))
+
+        result = runner.invoke(app, ["status", "--path-only", "--json"])
+
+        assert result.exit_code == 1
+        assert not result.stderr
+        assert json.loads(result.stdout) == {
+            "ok": False,
+            "command": "status",
+            "error": {
+                "code": "invalid_state_root",
+                "message": (
+                    "Cannot resolve Anvil state directory. "
+                    "Fix ANVIL_ROOT or pass --cwd."
+                ),
+            },
+        }
+        assert str(invalid_root) not in result.stdout
+
+    def test_status_path_only_hook_conflict_precedes_root_resolution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        invalid_root = tmp_path / "missing-root"
+        monkeypatch.setenv("ANVIL_ROOT", str(invalid_root))
+
+        human = runner.invoke(app, ["status", "--path-only", "--hook-format"])
+        json_result = runner.invoke(
+            app,
+            ["status", "--path-only", "--hook-format", "--json"],
+        )
+
+        assert human.exit_code == 2
+        assert "cannot be combined" in human.output
+        assert "uninitialized" not in human.output
+        assert json_result.exit_code == 1
+        assert not json_result.stderr
+        assert json.loads(json_result.stdout) == {
+            "ok": False,
+            "command": "status",
+            "error": {
+                "code": "bad_request",
+                "message": "--path-only cannot be combined with --hook-format",
+            },
+        }
+        assert str(invalid_root) not in human.output + json_result.stdout
+
 
 # ---------------------------------------------------------------------------
 # status — initialized
@@ -555,6 +619,70 @@ class TestStatusInitialized:
         )
         assert result.exit_code == 0
         assert "CWD Test" in result.output
+
+    def test_status_path_only_does_not_open_future_schema(self, tmp_path: Path) -> None:
+        state_dir = _future_schema_project(tmp_path)
+        before = _recursive_file_manifest(state_dir)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            human = runner.invoke(app, ["status", "--path-only"])
+            json_result = runner.invoke(app, ["status", "--path-only", "--json"])
+        finally:
+            os.chdir(original_cwd)
+
+        assert human.exit_code == 0
+        assert Path(human.output.strip()) == state_dir
+        assert json_result.exit_code == 0
+        assert json.loads(json_result.output) == {
+            "ok": True,
+            "command": "status",
+            "data": {"path": str(state_dir)},
+        }
+        assert _recursive_file_manifest(state_dir) == before
+
+    def test_status_path_only_allows_backup_before_automatic_migration(
+        self, tmp_path: Path
+    ) -> None:
+        import shutil
+
+        from anvil.state.schema import SCHEMA_VERSION
+
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            initialized = runner.invoke(app, ["init", "--name", "Backup Order"])
+            assert initialized.exit_code == 0, initialized.output
+            state_path = runner.invoke(app, ["status", "--path-only"])
+            assert state_path.exit_code == 0
+            state_dir = Path(state_path.output.strip())
+            connection = sqlite3.connect(state_dir / "state.db")
+            try:
+                connection.execute("PRAGMA user_version = 0")
+                connection.commit()
+            finally:
+                connection.close()
+
+            backup_dir = tmp_path / "pre-upgrade-backup"
+            shutil.copytree(state_dir, backup_dir)
+            status_result = runner.invoke(app, ["status", "--json"])
+        finally:
+            os.chdir(original_cwd)
+
+        assert status_result.exit_code == 0, status_result.output
+        status_payload = json.loads(status_result.output)["data"]
+        assert status_payload["schema_version"] == SCHEMA_VERSION
+        assert status_payload["db_schema_version"] == 0
+        live = sqlite3.connect(state_dir / "state.db")
+        backup = sqlite3.connect(backup_dir / "state.db")
+        try:
+            assert live.execute("PRAGMA user_version").fetchone() == (
+                SCHEMA_VERSION,
+            )
+            assert backup.execute("PRAGMA user_version").fetchone() == (0,)
+        finally:
+            live.close()
+            backup.close()
 
 
 # ---------------------------------------------------------------------------
