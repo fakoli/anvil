@@ -246,14 +246,15 @@ def check_invocation(tokens: list[str], contract: Mapping[str, Any]) -> list[str
     if not rest:
         return []
     nodes = contract["nodes"]
-    if rest[0].startswith("--"):
+    if rest[0].strip("[]").startswith("--"):
         valid = set(nodes[""]["flags"])
         valid.add("--help")
         return [
             f"unknown root flag {flag} for: anvil"
             for token in rest
-            if token.startswith("--")
-            for flag in token.split("=", 1)[0].split("/")
+            for candidate in [token.strip("[]")]
+            if candidate.startswith("--")
+            for flag in candidate.split("=", 1)[0].split("/")
             if flag.startswith("--") and flag not in valid
         ]
     command = rest.pop(0)

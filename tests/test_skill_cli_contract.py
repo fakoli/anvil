@@ -90,7 +90,9 @@ def test_validator_catches_known_bugs(contract: dict[str, object]) -> None:
 
 def test_validator_accepts_real_commands(contract: dict[str, object]) -> None:
     assert check_invocation(["anvil", "--version"], contract) == []
+    assert check_invocation(["anvil", "[--version]"], contract) == []
     assert check_invocation(["anvil", "--fabricated-root-flag"], contract)
+    assert check_invocation(["anvil", "[--fabricated-root-flag]"], contract)
     assert check_invocation(["anvil", "prd", "review", "--approve"], contract) == []
     assert check_invocation(
         ["anvil", "submit", "T1", "--commands", "x", "--files-changed", "y"],
