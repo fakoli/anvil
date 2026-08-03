@@ -412,7 +412,7 @@ if ($status.ok) {
 ```
 
 `anvil --version` identifies the CLI engine and supported schema, for example
-`anvil 0.6.0 (schema 16)`. `schema_version` is that engine schema.
+`anvil 0.6.2 (schema 16)`. `schema_version` is that engine schema.
 `db_schema_version` (shown as `pre_open_database_schema`) is the database stamp
 observed before the backend opens. If the command succeeds with a lower
 pre-open value, that same call completed a supported migration; rerun the

@@ -37,6 +37,7 @@ _USER_DOCS = [
     "docs/how-to/getting-started.md",
     "docs/cli-reference.md",
     "docs/architecture.md",
+    "docs/mcp.md",
 ]
 
 

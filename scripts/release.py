@@ -174,13 +174,28 @@ def run(spec: str, date: str, dry_run: bool, verify: bool) -> int:
     ed.sub("README.md", rf"(badge/version-){old_q}(-)", rf"\g<1>{new}\g<2>", required=False)
     ed.sub("README.md", rf"(Beta — v){old_q}\b", rf"\g<1>{new}", required=False)
     ed.sub("README.md", rf"(Beta \(v){old_q}(\))", rf"\g<1>{new}\g<2>", required=False)
-    # `anvil X.Y.Z (schema N)` examples — bump BOTH the version and the schema
-    # number so the docs match `anvil --version` (the exact drift this fixes).
+    # Current-version examples may have been added on a feature branch before
+    # the release bump, so replace any semver on these designated current-doc
+    # surfaces rather than only the immediately preceding release.
+    semver = r"\d+\.\d+\.\d+"
     for rel in ("docs/how-to/getting-started.md", "docs/cli-reference.md"):
         ed.sub(
-            rel, rf"anvil {old_q} \(schema \d+\)",
+            rel, rf"anvil {semver} \(schema \d+\)",
             f"anvil {new} (schema {schema})", required=False,
         )
+    for key in ("engine_version", "display_version"):
+        ed.sub(
+            "docs/mcp.md",
+            rf'("{key}"\s*:\s*"){semver}(")',
+            rf"\g<1>{new}\g<2>",
+            required=False,
+        )
+    ed.sub(
+        "docs/mcp.md",
+        rf'("tag"\s*:\s*"v){semver}(")',
+        rf"\g<1>{new}\g<2>",
+        required=False,
+    )
     ed.sub("docs/architecture.md", rf"(\*\*v){old_q}(\*\*)", rf"\g<1>{new}\g<2>", required=False)
 
     # --- report ---
