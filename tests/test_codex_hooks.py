@@ -185,6 +185,21 @@ def test_dispatch_detect_state_renders_status_banner(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(hooks_mod, "_language_for_cwd", lambda cwd: "Python")
     monkeypatch.setattr(
         hooks_mod,
+        "_active_hook_identity",
+        lambda: hooks_mod._EngineIdentity("test-version", 16),
+    )
+    monkeypatch.setattr(
+        hooks_mod,
+        "_probe_plugin_manifest",
+        lambda: hooks_mod._InstallationProbe("ok", "test-version"),
+    )
+    monkeypatch.setattr(
+        hooks_mod,
+        "_probe_path_engine",
+        lambda: hooks_mod._InstallationProbe("ok", "test-version", 16),
+    )
+    monkeypatch.setattr(
+        hooks_mod,
         "_status_hook_line",
         lambda cwd: ("active-claims:1 ready-tasks:2 blockers:0 prd-status:approved", 0),
     )
