@@ -423,14 +423,18 @@ def status(
     try:
         db_schema_version = schema_probe(state_dir / "state.db")
         backend = _open_backend(state_dir, schema_probe=schema_probe)
-    except SchemaMismatch:
+    except SchemaMismatch as exc:
         if hook_format:
-            # Hook safety: never fail the session on a schema problem.
-            typer.echo("uninitialized")
+            # Hook safety: report the closed mismatch honestly but never fail
+            # SessionStart. The dispatcher enriches this record with install
+            # identities and component-specific remediation.
+            from anvil.cli._helpers import schema_diagnostic_from_exception
+
+            typer.echo(schema_diagnostic_from_exception(exc).hook_line())
             raise typer.Exit(code=0) from None
         # Every ordinary CLI surface, including JSON, uses the one root
-        # schema-diagnostic boundary. SessionStart remains nonblocking until
-        # T003 teaches the hook format to render this same closed DTO.
+        # schema-diagnostic boundary; hook format uses the same closed DTO
+        # above while preserving SessionStart's zero exit contract.
         raise
     try:
         project = backend.get_project()

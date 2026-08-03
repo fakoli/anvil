@@ -125,6 +125,20 @@ class SchemaDiagnostic:
             "bound; upgrade Anvil and restart the harness. Do not delete state."
         )
 
+    def hook_line(self) -> str:
+        """Return the compact closed record consumed by SessionStart."""
+        database = (
+            str(self.database_schema)
+            if self.database_schema is not None
+            else "unknown"
+        )
+        return (
+            f"{self.code} engine-version:{self.engine_version} "
+            f"supported-schema:{self.supported_schema} database-schema:{database} "
+            f"direction:{self.direction} remediation-code:{self.remediation_code} "
+            f"restart-required:{str(self.restart_required).lower()}"
+        )
+
 
 def schema_diagnostic_from_exception(exc: Exception) -> SchemaDiagnostic:
     """Translate a typed backend failure without retaining exception text."""

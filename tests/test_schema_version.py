@@ -526,14 +526,18 @@ def test_status_hook_format_unknown_schema_version_exits_zero(
 
     res = _invoke(tmp_path, ["status", "--hook-format"])
     assert res.exit_code == 0, res.output
-    assert res.output.strip() == "uninitialized"
+    line = res.output.strip()
+    assert line.startswith("schema_mismatch ")
+    assert "supported-schema:16" in line
+    assert "database-schema:99" in line
+    assert "prd-status:" not in line
 
 
 @pytest.mark.parametrize(
     ("arguments", "expected_code", "expected_output"),
     [
         (["status", "--json"], 1, "schema_probe_failed"),
-        (["status", "--hook-format"], 0, "uninitialized"),
+        (["status", "--hook-format"], 0, "schema_probe_failed"),
     ],
 )
 def test_status_translates_schema_probe_failure(
@@ -561,4 +565,4 @@ def test_status_translates_schema_probe_failure(
         envelope = json.loads(result.stdout)
         assert envelope["error"]["code"] == expected_output
     else:
-        assert result.output.strip() == expected_output
+        assert result.output.strip().startswith(expected_output + " ")
