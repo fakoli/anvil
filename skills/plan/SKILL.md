@@ -34,10 +34,12 @@ first. (The compact `prd-status:` token only appears under `anvil status
 --hook-format`, which the SessionStart hook consumes; you want the plain output
 here.)
 
-Commands used in this skill (all ship in 0.1.1):
+Requires `anvil-state >=0.6.1`:
 
 | Command | Purpose |
 |---|---|
+| `anvil prd list --json` | Select PRD |
+| `anvil prd source-name [--prd ID] --json` | Resolve source |
 | `anvil plan` | Generate features and tasks from the parsed PRD |
 | `anvil score [TASK_ID]` | Score tasks across six dimensions |
 | `anvil expand TASK_ID --use-llm` | Propose sub-tasks for an oversized task |
@@ -364,8 +366,7 @@ Ending this skill with a numbered list like "1. Run `score` 2. Expand T001 3. Ru
 
 ## Command Reference
 
-Every command this skill names ships in 0.1.1. Notes on the LLM-augmented and
-adjacent commands:
+Requires `>=0.6.1` for `prd source-name`. Adjacent command notes:
 
 | Command | Notes |
 |---|---|
