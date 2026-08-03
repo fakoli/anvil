@@ -20,7 +20,9 @@ import pytest
 from click.testing import Result
 from typer.testing import CliRunner
 
+from anvil import __version__
 from anvil.cli import app
+from anvil.state.schema import SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -31,8 +33,6 @@ runner = CliRunner()
 
 def _future_schema_project(tmp_path: Path) -> Path:
     """Initialize local state, then stamp a future schema out of band."""
-    from anvil.state.schema import SCHEMA_VERSION
-
     original_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
@@ -9608,9 +9608,9 @@ class TestUnifiedSchemaMismatchBoundary:
         )
         assert error == {
             "code": "schema_mismatch",
-            "engine_version": "0.6.0",
-            "supported_schema": 16,
-            "database_schema": 17,
+            "engine_version": __version__,
+            "supported_schema": SCHEMA_VERSION,
+            "database_schema": SCHEMA_VERSION + 1,
             "direction": "newer",
             "remediation_code": "upgrade_engine",
             "guidance": guidance,
