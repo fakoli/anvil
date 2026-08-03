@@ -194,6 +194,10 @@ def run(spec: str, date: str, dry_run: bool, verify: bool) -> int:
 
     if dry_run:
         print("\nDRY RUN — nothing written. Re-run without --dry-run to apply.")
+        print(
+            f"After applying: create and verify release-contracts/{new}.json "
+            "from the independently installed wheel."
+        )
         return 0
 
     if verify:
@@ -214,8 +218,11 @@ def run(spec: str, date: str, dry_run: bool, verify: bool) -> int:
         except subprocess.TimeoutExpired:
             print("  verification timed out — run the sync tests manually", file=sys.stderr)
 
-    print(f"\nrelease: v{new} staged. Next: review the diff, commit, tag v{new}, "
-          "and push per the repo's release steps.")
+    print(
+        f"\nrelease: v{new} staged. Next: create and verify "
+        f"release-contracts/{new}.json from the independently installed wheel, "
+        f"review the diff, commit, tag v{new}, and push per the repo's release steps."
+    )
     return 0
 
 

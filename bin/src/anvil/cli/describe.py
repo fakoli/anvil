@@ -43,16 +43,15 @@ works from any directory, even before ``init``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping
+from typing import Any
 
 import typer
 
 from anvil import __version__
+from anvil.build_identity import get_build_identity
 from anvil.cli._json import emit_success
 from anvil.state.schema import get_schema_version
-
-if TYPE_CHECKING:
-    import click
 
 __all__ = ["API_VERSION", "build_manifest", "describe"]
 
@@ -69,9 +68,10 @@ _COMMAND = "describe"
 # identical. Consumers pin on ``api_version``; ``engine_version`` tells them the
 # exact build.
 #
-# Bumped to "4" when ``prd assess`` and ``assess_prd`` were added (a command
-# and tool added to the surface are exactly the documented bump triggers).
-API_VERSION = "4"
+# Bumped to "5" when exact CLI node/flag contracts and build provenance were
+# added to the manifest. Consumers of the old shape must deliberately accept
+# the richer contract before treating it as compatible.
+API_VERSION = "5"
 
 
 def describe(
@@ -119,12 +119,27 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "1",
-          "engine_version": "1.28.0",
-          "schema_version": 4,
+          "api_version": "5",
+          "engine_version": "0.6.1",
+          "display_version": "0.6.1",
+          "schema_version": 16,
           "envelope": "v1.24",
-          "cli": {"commands": ["apply", ..., "prd parse", ...], "count": 29},
-          "mcp": {"tools": ["claim_task", ...], "count": 22}
+          "build_kind": "release_artifact",
+          "commit": "abcdef123456",
+          "tag": "v0.6.1",
+          "tag_distance": 0,
+          "dirty": false,
+          "cli": {
+            "commands": ["apply", ..., "prd parse", ...],
+            "options": {"prd parse": ["--file", "--prd", ...]},
+            "contracts": [
+              {"path": [], "kind": "group", "flags": ["--version"]},
+              ...
+            ],
+            "contract_count": 76,
+            "count": 68
+          },
+          "mcp": {"tools": ["claim_task", ...], "count": 36}
         }
 
     Both lists are sorted for stable, diffable output. ``cli.commands`` are leaf
@@ -133,17 +148,33 @@ def build_manifest() -> dict[str, Any]:
     """
     # Compute each list exactly once so ``count`` can never disagree with the
     # list it counts.
-    cli_commands = cli_command_names()
+    cli_contracts = cli_command_contracts()
+    cli_options = {
+        " ".join(item["path"]): item["flags"]
+        for item in cli_contracts
+        if item["kind"] == "command"
+    }
+    cli_commands = sorted(cli_options)
     mcp_tools = mcp_tool_names()
+    identity = get_build_identity()
     return {
         "api_version": API_VERSION,
         "engine_version": __version__,
+        "display_version": identity.display_version,
+        "build_kind": identity.build_kind,
+        "commit": identity.commit,
+        "tag": identity.tag,
+        "tag_distance": identity.tag_distance,
+        "dirty": identity.dirty,
         "schema_version": get_schema_version(),
         # The CLI/MCP wire contract these commands speak. v1.24 is the
         # ``{"ok", "command", "data"/"error"}`` envelope + ANVIL_ROOT.
         "envelope": "v1.24",
         "cli": {
             "commands": cli_commands,
+            "options": cli_options,
+            "contracts": cli_contracts,
+            "contract_count": len(cli_contracts),
             "count": len(cli_commands),
         },
         "mcp": {
@@ -162,27 +193,75 @@ def cli_command_names() -> list[str]:
     rendered as their full invocation path joined by spaces, e.g. ``prd parse``,
     ``sync github``. The root ``describe`` command itself is included.
     """
+    return sorted(cli_command_options())
+
+
+def cli_command_options() -> dict[str, list[str]]:
+    """Return sorted long-option names for every leaf CLI command.
+
+    The option inventory lets release tooling validate the exact command/flag
+    citations in shipped skills against a separately installed wheel.  It is
+    derived from the same Click tree as command discovery; no second manifest
+    is maintained by hand.
+    """
+
+    return {
+        " ".join(item["path"]): item["flags"]
+        for item in cli_command_contracts()
+        if item["kind"] == "command"
+    }
+
+
+def cli_command_contracts() -> list[dict[str, Any]]:
+    """Return exact long options for root, groups, and leaf commands.
+
+    Short aliases such as ``-V`` are intentionally outside this release
+    contract; shipped skills use stable, self-documenting long options.
+    """
+
     import click
-    from typer.main import get_command
 
-    from anvil.cli import app
+    context = click.get_current_context(silent=True)
+    root = context.find_root().command if context is not None else None
+    if not isinstance(getattr(root, "commands", None), Mapping):
+        from typer.main import get_command
 
-    root = get_command(app)
-    names = _walk_click_group(root, prefix="") if isinstance(root, click.Group) else []
-    return sorted(names)
+        from anvil.cli import app
+
+        root = get_command(app)
+    if not isinstance(getattr(root, "commands", None), Mapping):
+        return []
+    return _walk_click_contracts(root, path=())
 
 
-def _walk_click_group(group: click.Group, prefix: str) -> list[str]:
-    """Recursively collect leaf command paths under *group*."""
-    import click
+def _node_flags(node: Any) -> list[str]:
+    flags: set[str] = set()
+    for parameter in getattr(node, "params", ()):
+        primary = getattr(parameter, "opts", ())
+        secondary = getattr(parameter, "secondary_opts", ())
+        for option in (*primary, *secondary):
+            if isinstance(option, str) and option.startswith("--"):
+                flags.add(option)
+    return sorted(flags)
 
-    out: list[str] = []
-    for name, sub in group.commands.items():
-        full = f"{prefix}{name}"
-        if isinstance(sub, click.Group):
-            out.extend(_walk_click_group(sub, prefix=full + " "))
-        else:
-            out.append(full)
+
+def _walk_click_contracts(
+    node: Any, path: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """Recursively collect a stable, duplicate-detectable node contract."""
+
+    commands = getattr(node, "commands", None)
+    is_group = isinstance(commands, Mapping)
+    out: list[dict[str, Any]] = [
+        {
+            "path": list(path),
+            "kind": "group" if is_group else "command",
+            "flags": _node_flags(node),
+        }
+    ]
+    if is_group:
+        for name in sorted(commands):
+            out.extend(_walk_click_contracts(commands[name], path + (name,)))
     return out
 
 
@@ -243,6 +322,12 @@ def _print_human(manifest: dict[str, Any]) -> None:
     """Print a compact readable summary of the manifest."""
     typer.echo(f"anvil describe (api_version {manifest['api_version']})")
     typer.echo(f"  engine_version: {manifest['engine_version']}")
+    typer.echo(f"  display_version: {manifest['display_version']}")
+    typer.echo(f"  build_kind:     {manifest['build_kind']}")
+    typer.echo(f"  commit:         {manifest['commit'] or '-'}")
+    typer.echo(f"  tag:            {manifest['tag'] or '-'}")
+    typer.echo(f"  tag_distance:   {manifest['tag_distance']}")
+    typer.echo(f"  dirty:          {manifest['dirty']}")
     typer.echo(f"  schema_version: {manifest['schema_version']}")
     typer.echo(f"  envelope:       {manifest['envelope']}")
     typer.echo("")

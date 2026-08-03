@@ -40,7 +40,7 @@ The install registers five hooks, wires the MCP server, and makes the five plugi
 
 ```bash
 anvil --version
-# → anvil 0.6.0 (schema 16)
+# → anvil 0.6.1 (schema 16)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
@@ -306,11 +306,25 @@ The work packet under `.anvil/packets/T001.md` is the contract that drove the wo
 - **Upgrade the CLI + MCP server** (installed from PyPI): `uv tool upgrade
   anvil-state`. State on disk is untouched — `anvil` runs its schema
   migration automatically the next time it opens `state.db` if the new
-  version ships one.
+  version ships one. Confirm the executable and named-PRD capability before
+  resuming a skill-driven workflow:
+
+  ```powershell
+  Get-Command anvil | Select-Object -ExpandProperty Source
+  anvil --version
+  anvil prd source-name --help
+  ```
+
+  On POSIX shells, use `command -v anvil` for the first line. A nonzero
+  `source-name --help` result means the active executable is still stale; do
+  not infer a PRD filename or continue with a mutating command.
 - **Upgrade the Claude Code plugin**: `/plugin marketplace update` re-fetches
   the marketplace so the next `/plugin install`/session start picks up a new
-  published version. A version bump is required upstream for this to have
-  anything new to fetch — see the project's `CHANGELOG.md`.
+  published version. Restart the harness and MCP server after refreshing so
+  neither keeps an old skill or process in memory, then repeat `anvil
+  --version` and `anvil prd source-name --help`. A version bump is required
+  upstream for the marketplace to have anything new to fetch — see the
+  project's `CHANGELOG.md`.
 - **Roll back a harness install**: `anvil install <harness> --rollback`
   restores every file `anvil install <harness> --write` modified from its
   backup and deletes anything anvil created (native installs also run the

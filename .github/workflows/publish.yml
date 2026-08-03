@@ -1,43 +1,150 @@
 name: publish
 
-# Publish anvil-state to PyPI via Trusted Publishing (OIDC) — no API token stored.
-# Fires when a GitHub Release is published; the version is whatever is committed
-# (bump it via the release PR first, then cut the Release at that tag).
-# Manual runs are allowed too (workflow_dispatch) for re-publishing a failed upload.
+# Build and qualify without OIDC. A separate minimal job receives PyPI authority
+# only after the exact wheel + sdist bundle has passed every release check.
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_ref:
+        description: "Exact release tag to publish (for example v0.6.1)"
+        required: true
+        type: string
 
 jobs:
-  publish:
-    name: build + publish to PyPI
+  build:
+    name: build + qualify release artifacts
     runs-on: ubuntu-latest
-    # Only the canonical repo publishes (never a fork).
     if: github.repository == 'fakoli/anvil'
-    # Must match the PyPI Trusted Publisher "Environment name".
-    environment: pypi
     permissions:
-      id-token: write   # REQUIRED: lets the job mint the OIDC token PyPI trusts.
+      contents: read
+    env:
+      RELEASE_REF: ${{ github.event.release.tag_name || inputs.release_ref }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout exact release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.release_ref }}
+          fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081  # v5
         with:
           enable-cache: true
 
-      # The package lives in bin/ — build the sdist + wheel into bin/dist/.
-      - name: Build sdist + wheel
-        working-directory: bin
-        run: uv build
+      - name: Set up Python 3.11
+        run: uv python install 3.11
 
-      # Trusted publishing: the action exchanges the OIDC token for a short-lived
-      # PyPI credential. No username/password/token needed.
-      # Pinned to an immutable commit (not the moving release/v1 branch) since this
-      # step holds id-token: write — supply-chain hardening per the action's own
-      # guidance. Bump the SHA + comment together when updating.
+      - name: Verify exact tag, main ancestry, and synchronized metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(uv run --no-project --python 3.11 python -c 'import tomllib; print(tomllib.load(open("bin/pyproject.toml", "rb"))["project"]["version"])')
+          test "$RELEASE_REF" = "v$version"
+          test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$RELEASE_REF")"
+          test "$(git describe --tags --exact-match HEAD)" = "$RELEASE_REF"
+          git merge-base --is-ancestor "$RELEASE_REF^{commit}" origin/main
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Run full release gate
+        env:
+          _TYPER_FORCE_DISABLE_TERMINAL: "1"
+        run: |
+          uv sync --project bin --locked --extra custom
+          (cd bin && uv run --locked ruff check ..)
+          uv run --project bin --locked pytest
+          uv run --project bin --locked python benchmarks/run_benchmark.py --scenarios overlapping_files --quick --out "$RUNNER_TEMP/anvil-benchmark-results.md"
+          uvx --with-requirements docs/requirements.txt mkdocs build --strict
+
+      - name: Build exact wheel and sdist
+        working-directory: bin
+        env:
+          ANVIL_RELEASE_BUILD: "1"
+        run: |
+          test -z "$(git -C .. status --porcelain --untracked-files=all)"
+          uv build --sdist --wheel --out-dir dist
+
+      - name: Qualify wheel and sdist-derived wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${RELEASE_REF#v}
+          commit=$(git rev-parse --short=12 HEAD)
+          mapfile -t wheels < <(find bin/dist -maxdepth 1 -type f -name '*.whl')
+          mapfile -t sdists < <(find bin/dist -maxdepth 1 -type f -name '*.tar.gz')
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          wheel=${wheels[0]}
+          sdist=${sdists[0]}
+
+          temp_dir=$(mktemp -d)
+          trap 'rm -rf "$temp_dir"' EXIT
+          uv build "$sdist" --wheel --out-dir "$temp_dir/from-sdist"
+          mapfile -t rebuilt < <(find "$temp_dir/from-sdist" -type f -name '*.whl')
+          test "${#rebuilt[@]}" -eq 1
+
+          qualify() {
+            label=$1
+            candidate=$2
+            venv="$temp_dir/$label-venv"
+            project="$temp_dir/$label-project"
+            manifest="$temp_dir/$label-describe.json"
+            source_name="$temp_dir/$label-source-name.json"
+            uv venv "$venv" --python 3.11
+            uv pip install --python "$venv/bin/python" "$candidate"
+            mkdir "$project"
+            (
+              cd "$project"
+              env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV ANVIL_STATE_LAYOUT=local "$venv/bin/anvil" init --name "Release artifact smoke"
+              env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV ANVIL_STATE_LAYOUT=local "$venv/bin/anvil" describe --json > "$manifest"
+              env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV ANVIL_STATE_LAYOUT=local "$venv/bin/anvil" prd source-name --prd CON --json > "$source_name"
+            )
+            test "$("$venv/bin/anvil-mcp" --version)" = "$version"
+            uv run --no-project --python 3.11 python scripts/check_skill_cli_contract.py --manifest "$manifest" --repo-root . --expected-version "$version" --expected-api-version 5
+            uv run --no-project --python 3.11 python scripts/check_release_contract.py --manifest "$manifest" --repo-root . --expected-release-tag "$RELEASE_REF" --expected-commit "$commit"
+            uv run --no-project --python 3.11 python -c 'import json, pathlib, sys; p=json.load(open(sys.argv[1])); n=p["data"]["relative_name"]; assert p["ok"] is True and n and not pathlib.PurePath(n).is_absolute()' "$source_name"
+          }
+
+          qualify direct "$wheel"
+          qualify from-sdist "${rebuilt[0]}"
+          cmp "$temp_dir/direct-describe.json" "$temp_dir/from-sdist-describe.json"
+          find bin/dist -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 2
+
+      - name: Upload checksummed release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: pypi-release-${{ github.run_id }}
+          path: |
+            bin/dist/
+            SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: publish qualified bundle to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.repository == 'fakoli/anvil'
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download qualified release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: pypi-release-${{ github.run_id }}
+
+      - name: Verify upload set and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS
+          test "$(find bin/dist -maxdepth 1 -type f | wc -l)" -eq 2
+          test "$(find bin/dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find bin/dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         with:

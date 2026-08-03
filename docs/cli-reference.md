@@ -140,7 +140,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.0 (schema 16)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.1 (schema 16)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1500,8 +1500,11 @@ flag list; full prose treatment may follow in a later pass.
 **Self-description and cross-harness delivery**
 
 - `anvil describe` — Emit a machine-readable manifest of the CLI/MCP command
-  surface (engine version, schema version, every command/tool name)
-  (`--human`, `--json`); read-only, needs no project.
+  surface: release and source-build identity, schema/API versions, every
+  command/tool name, and the exact long options owned by the root, each group, and
+  each leaf command (`--human`, `--json`); read-only, needs no project. Release
+  tooling uses the node-level `cli.contracts` inventory to validate shipped
+  skill invocations against an independently installed wheel.
 - `anvil install <harness>` — Deliver anvil's MCP config and instructions to
   a target harness (codex/openclaw drive their own CLI; others get a merged
   MCP block) (`--write`, `--rollback`, `--root`, `--automations`,

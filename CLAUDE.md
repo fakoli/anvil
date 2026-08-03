@@ -40,13 +40,19 @@ can be inferred from the code, it does not belong here.
   untouched, and the root `marketplace.json` inherits its version from
   `plugin.json`. The pinned set lives in the script (and `tests/test_release_helper.py`
   guards it) — when a manifest is added there, add it in both places.
-- **Bump only when you publish, not per commit.** Claude Code pins plugin pickups
-  to the `version` string: an unchanged version means `/plugin marketplace update`
-  is a no-op and users keep running stale code, however many commits landed. So
-  bump the **patch** each time you *publish* — i.e. a backlog list is done and you
-  want folks to pick it up (`0.0.8 → 0.0.9`); reserve **minor/major** for bigger
-  releases. Day-to-day commits between publishes change no version file. To
-  publish, promote the `CHANGELOG.md` `## [Unreleased]` block to the new version.
+- **Bump only for a release candidate, not per commit — with one mandatory
+  compatibility exception.** Claude Code pins plugin pickups to the `version`
+  string: an unchanged version means `/plugin marketplace update` is a no-op and
+  users keep running stale code, however many commits landed. Day-to-day commits
+  therefore change no version file. But any change to a CLI command or flag that
+  a shipped skill requires must bump the candidate **patch version in the same
+  PR**, add `release-contracts/<version>.json`, and be published promptly after
+  approval; skill and CLI changes must never ship under different versions.
+  `tests/test_release_artifact_contract.py` builds and installs the wheel in a
+  clean environment, while `scripts/check_release_contract.py` prevents the
+  frozen contract of an existing version from being rewritten. Reserve
+  **minor/major** for bigger releases. To publish, promote the `CHANGELOG.md`
+  `## [Unreleased]` block to the new version.
 - **One PR per item.** Merge only after CI is green **and** the automated
   reviewer — **GitHub Copilot** — has landed and been addressed (fix real
   findings; reply on the ones you defer and record them in

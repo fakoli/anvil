@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "anvil-state"
-version = "0.6.0"
+version = "0.6.1"
 description = "Local-first project state engine: turn rough ideas and PRDs into reviewed, lockable, evidence-backed work packets that humans and AI agents can coordinate on without conflicts."
 # Build-root-local README. `../README.md` escaped the bin/ build root and broke
 # `uv build` (sdist->wheel: "Readme file does not exist: ../README.md"). This is
@@ -97,6 +97,9 @@ dev = [
 # importlib.resources, so a wheel MUST carry it — do not add an exclude that drops
 # _data. Guarded by tests/test_install_manifests.py::test_built_wheel_is_self_sufficient.
 packages = ["src/anvil"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.ruff]
 line-length = 100
