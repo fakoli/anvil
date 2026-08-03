@@ -548,10 +548,12 @@ def test_status_translates_schema_probe_failure(
 
     _init(tmp_path)
 
-    def fail_probe(_path: str | os.PathLike[str]) -> int:
+    def fail_probe(
+        _probe: object, _path: str | os.PathLike[str]
+    ) -> int:
         raise SchemaProbeFailed("Database schema probe refused safely.")
 
-    monkeypatch.setattr("anvil.state.sqlite.read_db_schema_version", fail_probe)
+    monkeypatch.setattr("anvil.cli._helpers.BoundedSchemaProbe.__call__", fail_probe)
     result = _invoke(tmp_path, arguments)
 
     assert result.exit_code == expected_code, result.output

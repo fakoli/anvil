@@ -28,6 +28,38 @@ from anvil.cli import app
 runner = CliRunner()
 
 
+def _future_schema_project(tmp_path: Path) -> Path:
+    """Initialize local state, then stamp a future schema out of band."""
+    from anvil.state.schema import SCHEMA_VERSION
+
+    original_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        initialized = runner.invoke(
+            app,
+            ["init", "--name", "Future Schema Project"],
+            catch_exceptions=False,
+        )
+    finally:
+        os.chdir(original_cwd)
+    assert initialized.exit_code == 0, initialized.output
+    state_dir = tmp_path / ".anvil"
+    connection = sqlite3.connect(state_dir / "state.db")
+    try:
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+        connection.commit()
+    finally:
+        connection.close()
+    return state_dir
+
+
+def _recursive_file_manifest(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file())
+    }
+
+
 # ---------------------------------------------------------------------------
 # init — happy path
 # ---------------------------------------------------------------------------
@@ -7700,10 +7732,7 @@ class TestDoctorHealthy:
 
 
 class TestDoctorUnhealthy:
-    """A project with an injected stale claim PLUS a schema mismatch.
-
-    T010 AC: doctor exits non-zero and BOTH findings are listed.
-    """
+    """Schema incompatibility aborts doctor before partial findings escape."""
 
     def test_doctor_stale_claim_and_schema_mismatch_human(
         self, tmp_path: Path
@@ -7715,12 +7744,12 @@ class TestDoctorUnhealthy:
 
         result = _invoke_cmd(tmp_path, ["doctor"])
         assert result.exit_code == 1, result.output
-        out = result.output
-        # Both findings present and flagged ERROR.
-        assert "[ERROR] state_db" in out
-        assert "[ERROR] claims" in out
-        assert "99" in out  # the mismatched schema version
-        assert "UNHEALTHY" in out
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 1
+        assert lines[0].startswith("Error: [schema_mismatch]")
+        assert "database schema 99 is newer" in lines[0]
+        assert "claims" not in lines[0]
+        assert str((tmp_path / ".anvil").resolve()) not in lines[0]
 
     def test_doctor_stale_claim_and_schema_mismatch_json(
         self, tmp_path: Path
@@ -7732,22 +7761,13 @@ class TestDoctorUnhealthy:
 
         result = _invoke_cmd(tmp_path, ["doctor", "--json"])
         assert result.exit_code == 1, result.output
-        env = _doctor_json(result)
-        assert env["ok"] is True  # the COMMAND succeeded; the project is unhealthy
-        assert env["data"]["healthy"] is False
-        assert env["data"]["worst_severity"] == "error"
-        errors = {
-            f["check"]
-            for f in env["data"]["findings"]
-            if f["severity"] == "error"
-        }
-        # BOTH the schema mismatch and the stale claim are listed as errors.
-        assert "state_db" in errors
-        assert "claims" in errors
-        claims = next(
-            f for f in env["data"]["findings"] if f["check"] == "claims"
-        )
-        assert claims["detail"]["stale"] == 1
+        env = json.loads(result.stdout)
+        assert env["ok"] is False
+        assert env["command"] == "doctor"
+        assert env["error"]["code"] == "schema_mismatch"
+        assert "data" not in env
+        assert "claims" not in result.stdout
+        assert str((tmp_path / ".anvil").resolve()) not in result.stdout
 
     def test_doctor_stale_claim_only_exits_nonzero(self, tmp_path: Path) -> None:
         """A stale claim alone (schema healthy) still fails the gate."""
@@ -9329,3 +9349,533 @@ class TestApplyIntentLinter:
         human = _invoke_cmd(tmp_path, ["apply", "T001"])
         assert "Intent check (advisory)" in human.output
         assert "candidate" in human.output
+
+
+class TestUnifiedSchemaMismatchBoundary:
+    """T002: every CLI family shares one closed schema diagnostic."""
+
+    _CASES = [
+        pytest.param(["status"], "status", id="status-read"),
+        pytest.param(["show", "T001"], "show", id="top-level-read"),
+        pytest.param(
+            ["claim", "T001", "--actor", "agent-x"],
+            "claim",
+            id="top-level-mutator",
+        ),
+        pytest.param(["prd", "list"], "prd list", id="prd-family"),
+        pytest.param(["review", "tasks"], "review tasks", id="review-family"),
+        pytest.param(["bundle", "list"], "bundle list", id="bundle-family"),
+        pytest.param(["doctor"], "doctor", id="doctor-family"),
+        pytest.param(
+            ["migrate", "state", "--yes"],
+            "migrate state",
+            id="migrate-family",
+        ),
+        pytest.param(["graph"], "graph", id="graph-read"),
+    ]
+
+    @pytest.mark.parametrize(("args", "expected_command"), _CASES)
+    def test_future_schema_human_is_one_bounded_closed_line(
+        self,
+        tmp_path: Path,
+        args: list[str],
+        expected_command: str,
+    ) -> None:
+        state_dir = _future_schema_project(tmp_path)
+        before = _recursive_file_manifest(state_dir)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, args)
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 1, (expected_command, result.output)
+        line = lines[0]
+        assert len(line.encode("utf-8")) <= 4_096
+        assert line.startswith("Error: [schema_mismatch]")
+        assert "Anvil " in line and "supports schema 16" in line
+        assert "database schema 17 is newer" in line
+        assert "Upgrade anvil-state" in line
+        assert "restart" in line
+        assert "Do not delete state" in line
+        assert str(state_dir.resolve()) not in line
+        assert _recursive_file_manifest(state_dir) == before
+
+    @pytest.mark.parametrize(("args", "expected_command"), _CASES)
+    def test_future_schema_json_is_one_closed_envelope_without_mutation(
+        self,
+        tmp_path: Path,
+        args: list[str],
+        expected_command: str,
+    ) -> None:
+        state_dir = _future_schema_project(tmp_path)
+        before = _recursive_file_manifest(state_dir)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, [*args, "--json"])
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 1
+        assert len(result.stdout.encode("utf-8")) <= 4_096
+        assert len(result.stdout.strip().splitlines()) == 1
+        assert not result.stderr
+        envelope = json.loads(result.stdout)
+        assert envelope["ok"] is False
+        assert envelope["command"] == expected_command
+        assert "data" not in envelope
+        error = envelope["error"]
+        guidance = (
+            "Upgrade anvil-state, then restart the CLI, harness, and MCP "
+            "server. Do not delete state."
+        )
+        assert error == {
+            "code": "schema_mismatch",
+            "engine_version": "0.6.0",
+            "supported_schema": 16,
+            "database_schema": 17,
+            "direction": "newer",
+            "remediation_code": "upgrade_engine",
+            "guidance": guidance,
+            "restart_required": True,
+            "message": guidance,
+        }
+        assert str(state_dir.resolve()) not in result.stdout
+        assert _recursive_file_manifest(state_dir) == before
+
+    def test_schema_mismatch_console_and_module_entrypoints_are_equivalent(
+        self, tmp_path: Path
+    ) -> None:
+        import shutil
+        import subprocess
+        import sys
+
+        _future_schema_project(tmp_path)
+        console = shutil.which("anvil")
+        assert console is not None
+        environment = {
+            **os.environ,
+            "ANVIL_ROOT": str(tmp_path),
+            "ANVIL_STATE_LAYOUT": "local",
+        }
+        invocations = (
+            [console, "status", "--json"],
+            [sys.executable, "-m", "anvil.cli", "status", "--json"],
+        )
+        results = [
+            subprocess.run(
+                command,
+                cwd=tmp_path,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            for command in invocations
+        ]
+        envelopes = [json.loads(result.stdout) for result in results]
+        assert [result.returncode for result in results] == [1, 1]
+        assert envelopes[0] == envelopes[1]
+        assert all(not result.stderr for result in results)
+        assert all("Traceback" not in result.stdout for result in results)
+
+    @pytest.mark.parametrize(
+        "config_text",
+        ["events_storage: [", "events_storage: invalid"],
+        ids=["malformed-yaml", "invalid-storage-mode"],
+    )
+    def test_future_schema_precedes_fallible_config_without_output_pollution(
+        self, tmp_path: Path, config_text: str
+    ) -> None:
+        state_dir = _future_schema_project(tmp_path)
+        (state_dir / "config.yaml").write_text(config_text, encoding="utf-8")
+        before = _recursive_file_manifest(state_dir)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, ["status", "--json"])
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 1
+        assert not result.stderr
+        assert len(result.stdout.strip().splitlines()) == 1
+        envelope = json.loads(result.stdout)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "schema_mismatch"
+        assert str(state_dir.resolve()) not in result.stdout
+        assert _recursive_file_manifest(state_dir) == before
+
+    @pytest.mark.parametrize(
+        "config_text",
+        ["events_storage: [", "events_storage: invalid"],
+        ids=["malformed-yaml", "invalid-storage-mode"],
+    )
+    def test_migrate_events_future_schema_precedes_fallible_config(
+        self, tmp_path: Path, config_text: str
+    ) -> None:
+        state_dir = _future_schema_project(tmp_path)
+        (state_dir / "config.yaml").write_text(config_text, encoding="utf-8")
+        before = _recursive_file_manifest(state_dir)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(
+                app,
+                ["migrate-events", "--to", "git"],
+            )
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 1
+        lines = [line for line in result.output.splitlines() if line.strip()]
+        assert len(lines) == 1
+        assert lines[0].startswith("Error: [schema_mismatch]")
+        assert str(state_dir.resolve()) not in result.output
+        assert _recursive_file_manifest(state_dir) == before
+
+    def test_migrate_events_reuses_one_cumulative_probe_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.cli._helpers as helpers
+
+        _do_init(tmp_path)
+        probes: list[helpers.BoundedSchemaProbe] = []
+        real_probe = helpers.BoundedSchemaProbe
+
+        def tracking_probe() -> helpers.BoundedSchemaProbe:
+            probe = real_probe()
+            probes.append(probe)
+            return probe
+
+        monkeypatch.setattr(helpers, "BoundedSchemaProbe", tracking_probe)
+        result = _invoke_cmd(tmp_path, ["migrate-events", "--to", "git"])
+
+        assert result.exit_code == 0, result.output
+        assert len(probes) == 1
+        assert probes[0].closed
+
+    def test_schema_mismatch_dto_refuses_hostile_over_limit_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil
+        from anvil.cli._helpers import schema_diagnostic_from_exception
+        from anvil.state.backend import SchemaMismatch
+
+        marker = "SECRET_PATH_C:/private/" + ("x" * 100_000)
+        monkeypatch.setattr(anvil, "__version__", marker)
+        diagnostic = schema_diagnostic_from_exception(
+            SchemaMismatch(
+                marker,
+                actual=17,
+                expected=16,
+                direction="newer",
+            )
+        )
+        payload = json.dumps(diagnostic.as_dict())
+        assert diagnostic.engine_version == "unknown"
+        assert marker not in payload
+        assert marker not in diagnostic.human_line()
+        assert len(payload.encode("utf-8")) <= 4_096
+        assert len(diagnostic.human_line().encode("utf-8")) <= 4_096
+
+    def test_schema_mismatch_probe_timeout_is_typed_and_bounded(
+        self, tmp_path: Path
+    ) -> None:
+        import threading
+        import time
+
+        import anvil.cli._helpers as helpers
+        from anvil.state.backend import SchemaProbeFailed
+
+        (tmp_path / "events.jsonl").touch()
+        probe = helpers.BoundedSchemaProbe(timeout_seconds=0.001)
+        started = time.monotonic()
+        with pytest.raises(SchemaProbeFailed):
+            helpers._open_backend(tmp_path, schema_probe=probe)
+        assert probe.closed
+        assert all(
+            thread.name != "anvil-schema-response"
+            for thread in threading.enumerate()
+        )
+        assert not (tmp_path / "state.db").exists()
+        assert time.monotonic() - started < 0.5
+
+    def test_schema_probe_worker_startup_consumes_cumulative_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+        import time
+
+        import anvil.cli._helpers as helpers
+        from anvil.state.backend import SchemaProbeFailed
+
+        original_popen = subprocess.Popen
+
+        def delayed_popen(*args: object, **kwargs: object) -> subprocess.Popen[str]:
+            time.sleep(0.05)
+            return original_popen(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", delayed_popen)
+        probe = helpers.BoundedSchemaProbe(timeout_seconds=0.01)
+        with pytest.raises(SchemaProbeFailed):
+            probe(tmp_path / "state.db")
+        assert probe.closed
+
+    def test_schema_probe_request_write_consumes_cumulative_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        import anvil.cli._helpers as helpers
+        from anvil.state.backend import SchemaProbeFailed
+
+        class SlowInput:
+            def write(self, _request: str) -> int:
+                time.sleep(0.05)
+                return 1
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FixedOutput:
+            def readline(self) -> str:
+                return '{"ok":true,"version":16}\n'
+
+            def close(self) -> None:
+                return None
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = SlowInput()
+                self.stdout = FixedOutput()
+                self.returncode: int | None = None
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.returncode = 1
+
+            def kill(self) -> None:
+                self.returncode = 1
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                self.returncode = 1
+                return self.returncode
+
+        process = FakeProcess()
+        probe = helpers.BoundedSchemaProbe(timeout_seconds=0.01)
+        probe._process = process
+        monkeypatch.setattr(probe, "_start_worker", lambda: process)
+
+        with pytest.raises(SchemaProbeFailed):
+            probe(tmp_path / "state.db")
+        assert probe.closed
+
+    def test_schema_probe_cancellation_reaps_worker_and_reader(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        import anvil.cli._helpers as helpers
+
+        original_join = threading.Thread.join
+        interrupted = False
+
+        def interrupt_once(
+            thread: threading.Thread, timeout: float | None = None
+        ) -> None:
+            nonlocal interrupted
+            if thread.name == "anvil-schema-response" and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            original_join(thread, timeout)
+
+        monkeypatch.setattr(threading.Thread, "join", interrupt_once)
+        probe = helpers.BoundedSchemaProbe()
+        with pytest.raises(KeyboardInterrupt):
+            probe(tmp_path / "state.db")
+        assert interrupted
+        assert probe.closed
+        assert all(
+            thread.name != "anvil-schema-response"
+            for thread in threading.enumerate()
+        )
+
+    @pytest.mark.parametrize(
+        "target_name",
+        ["anvil-schema-request", "anvil-schema-response"],
+    )
+    def test_schema_probe_start_cancellation_reaps_launched_thread(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        target_name: str,
+    ) -> None:
+        import threading
+
+        import anvil.cli._helpers as helpers
+
+        original_start = threading.Thread.start
+        interrupted = False
+
+        def interrupt_after_start(thread: threading.Thread) -> None:
+            nonlocal interrupted
+            original_start(thread)
+            if thread.name == target_name and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(threading.Thread, "start", interrupt_after_start)
+        probe = helpers.BoundedSchemaProbe()
+        with pytest.raises(KeyboardInterrupt):
+            probe(tmp_path / "state.db")
+        assert interrupted
+        assert probe.closed
+        assert all(
+            thread.name != target_name for thread in threading.enumerate()
+        )
+
+    def test_schema_mismatch_embedded_click_call_does_not_raise_system_exit(
+        self, tmp_path: Path
+    ) -> None:
+        from click.exceptions import Exit
+        from typer.main import get_command
+
+        _future_schema_project(tmp_path)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            with pytest.raises(Exit) as captured:
+                get_command(app).main(args=["status"], standalone_mode=False)
+        finally:
+            os.chdir(original_cwd)
+        assert captured.value.exit_code == 1
+
+    def test_schema_mismatch_migrate_apply_removes_backup_and_closes_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.cli.migrate as migrate_module
+        from anvil.state.backend import SchemaProbeFailed
+        from anvil.state.schema import SCHEMA_VERSION
+
+        state_dir = _future_schema_project(tmp_path)
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+            connection.commit()
+        finally:
+            connection.close()
+        before = _recursive_file_manifest(state_dir)
+        marker = "SECRET_PATH_C:/private/provider-token"
+
+        def fail_live_open(*_args: object, **_kwargs: object) -> None:
+            raise SchemaProbeFailed(marker)
+
+        monkeypatch.setattr(migrate_module, "_open_backend", fail_live_open)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, ["migrate", "state", "--yes", "--json"])
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.stdout)
+        assert envelope["ok"] is False
+        assert envelope["command"] == "migrate state"
+        assert envelope["error"]["code"] == "schema_probe_failed"
+        assert marker not in result.stdout
+        assert str(state_dir.resolve()) not in result.stdout
+        assert _recursive_file_manifest(state_dir) == before
+
+    def test_migrate_partial_backup_copy_is_removed_and_worker_reaped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.cli._helpers as helpers
+        import anvil.cli.migrate as migrate_module
+        from anvil.state.schema import SCHEMA_VERSION
+
+        state_dir = _future_schema_project(tmp_path)
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+            connection.commit()
+        finally:
+            connection.close()
+        before = _recursive_file_manifest(state_dir)
+        probes: list[helpers.BoundedSchemaProbe] = []
+        real_probe = helpers.BoundedSchemaProbe
+        real_copy = migrate_module.shutil.copy2
+
+        def tracking_probe() -> helpers.BoundedSchemaProbe:
+            probe = real_probe()
+            probes.append(probe)
+            return probe
+
+        def fail_after_copy(source: Path, destination: Path) -> None:
+            real_copy(source, destination)
+            raise OSError("injected backup copy failure")
+
+        monkeypatch.setattr(helpers, "BoundedSchemaProbe", tracking_probe)
+        monkeypatch.setattr(migrate_module.shutil, "copy2", fail_after_copy)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, ["migrate", "state", "--yes"])
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, OSError)
+        assert probes and all(probe.closed for probe in probes)
+        assert _recursive_file_manifest(state_dir) == before
+
+    def test_migrate_claim_preflight_failure_reaps_schema_worker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.cli._helpers as helpers
+        from anvil.state.schema import SCHEMA_VERSION
+
+        state_dir = _future_schema_project(tmp_path)
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+            connection.commit()
+        finally:
+            connection.close()
+        (state_dir / "config.yaml").write_text(
+            "events_storage: invalid", encoding="utf-8"
+        )
+        before = _recursive_file_manifest(state_dir)
+        probes: list[helpers.BoundedSchemaProbe] = []
+        real_probe = helpers.BoundedSchemaProbe
+
+        def tracking_probe() -> helpers.BoundedSchemaProbe:
+            probe = real_probe()
+            probes.append(probe)
+            return probe
+
+        monkeypatch.setattr(helpers, "BoundedSchemaProbe", tracking_probe)
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            result = runner.invoke(app, ["migrate", "state", "--yes"])
+        finally:
+            os.chdir(original_cwd)
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, ValueError)
+        assert probes and all(probe.closed for probe in probes)
+        assert _recursive_file_manifest(state_dir) == before

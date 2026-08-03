@@ -406,11 +406,12 @@ def status(
         )
         raise typer.Exit(code=1)
 
+    from anvil.cli._helpers import BoundedSchemaProbe
     from anvil.state.backend import SchemaMismatch
     from anvil.state.schema import get_schema_version
-    from anvil.state.sqlite import read_db_schema_version
 
     schema_version = get_schema_version()
+    schema_probe = BoundedSchemaProbe()
 
     # T007/B11 (MUST-FIX 2a): read the TRUE on-disk PRAGMA user_version BEFORE
     # the backend opens (open() migrates v0-v3 up and re-stamps it, masking
@@ -420,17 +421,17 @@ def status(
     # report that through the normal error path — a clean "Error: ..." line
     # (exit 1) or a {"ok": false, ...} envelope — NEVER a raw traceback.
     try:
-        db_schema_version = read_db_schema_version(str(state_dir / "state.db"))
-        backend = _open_backend(state_dir)
-    except SchemaMismatch as exc:
-        if json_output:
-            fail("status", str(exc), code=exc.code)
+        db_schema_version = schema_probe(state_dir / "state.db")
+        backend = _open_backend(state_dir, schema_probe=schema_probe)
+    except SchemaMismatch:
         if hook_format:
             # Hook safety: never fail the session on a schema problem.
             typer.echo("uninitialized")
             raise typer.Exit(code=0) from None
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=1) from None
+        # Every ordinary CLI surface, including JSON, uses the one root
+        # schema-diagnostic boundary. SessionStart remains nonblocking until
+        # T003 teaches the hook format to render this same closed DTO.
+        raise
     try:
         project = backend.get_project()
         # T021 audit (get_prd no-arg): default-only-correct. The flat

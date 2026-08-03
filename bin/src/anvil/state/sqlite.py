@@ -644,6 +644,8 @@ class SqliteBackend:
                    contention deadline. Defaults to ``time.monotonic`` — NOT
                    ``clock.now()``, which is wall-clock and would let an NTP
                    step stretch or shorten the 5 s timeout.
+    schema_probe_fn : optional transport-owned schema probe budget. ``None``
+                   keeps the backend's direct byte probe behavior.
 
     Lifecycle (SL1-RR-1 write-path)
     ---------------------------------
@@ -665,6 +667,7 @@ class SqliteBackend:
         events_storage: str = "local",
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
+        schema_probe_fn: Callable[[str | os.PathLike[str]], int] | None = None,
     ) -> None:
         self._db_path = db_path
         self._events_path = events_path
@@ -673,6 +676,7 @@ class SqliteBackend:
         self._events_storage = events_storage
         self._sleep_fn = sleep_fn
         self._monotonic_fn = monotonic_fn
+        self._schema_probe_fn = schema_probe_fn
         self._conn: sqlite3.Connection | None = None
         # In-memory monotonic counter; seeded from log max on initialize().
         # Incremented at log-append time inside the flock critical section.
@@ -714,7 +718,8 @@ class SqliteBackend:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _validate_probed_schema_version(self, on_disk: int) -> None:
+    @classmethod
+    def validate_schema_compatibility(cls, on_disk: int) -> None:
         """Refuse incompatible versions before opening live state for writes."""
         if on_disk == SCHEMA_VERSION:
             return
@@ -729,7 +734,7 @@ class SqliteBackend:
         # every later transition must have a contiguous migration step.  Check
         # the ladder before any live DDL so an accidental gap cannot partially
         # reshape an old database and only then fail.
-        available_steps = [from_version for from_version, _ in self._MIGRATIONS]
+        available_steps = [from_version for from_version, _ in cls._MIGRATIONS]
         required_steps = list(range(2, SCHEMA_VERSION))
         if available_steps != required_steps:
             raise SchemaMismatch(
@@ -738,14 +743,19 @@ class SqliteBackend:
                 direction="older",
             )
 
+    def _validate_probed_schema_version(self, on_disk: int) -> None:
+        """Instance adapter for the shared pre-construction validator."""
+        self.validate_schema_compatibility(on_disk)
+
     def initialize(self) -> None:
         """Serialize same-process probes without creating filesystem entries."""
+        schema_probe = self._schema_probe_fn or read_db_schema_version
         # If legacy/corrupt state has a database but no event log, establish
         # compatibility before creating the stable coordination token.  The
         # authoritative probe is repeated under the token below.
         if os.path.exists(self._db_path) and not os.path.exists(self._events_path):
             self._validate_probed_schema_version(
-                read_db_schema_version(self._db_path)
+                schema_probe(self._db_path)
             )
         with _schema_initialization_lock(self._db_path, self._events_path):
             self._initialize_under_lock()
@@ -788,8 +798,9 @@ class SqliteBackend:
         # outer OS lock is the linearization boundary shared by every Anvil
         # initializer; direct SQLite schema writes that bypass the state engine
         # are not a supported coordination path.
-        probed_version = read_db_schema_version(self._db_path)
-        confirmed_version = read_db_schema_version(self._db_path)
+        schema_probe = self._schema_probe_fn or read_db_schema_version
+        probed_version = schema_probe(self._db_path)
+        confirmed_version = schema_probe(self._db_path)
         if probed_version != confirmed_version:
             raise SchemaProbeFailed(
                 "Database schema changed during compatibility inspection; retry when idle."

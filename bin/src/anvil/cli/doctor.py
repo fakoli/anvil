@@ -595,10 +595,9 @@ def _check_state_db(state_dir: Path) -> tuple[_Finding, SqliteBackend | None]:
     probes. A migrated-on-open db (db_version < code_version) is healthy but
     reported with an ``info`` note so the user knows a migration ran.
     """
-    from anvil.cli._helpers import _open_backend
+    from anvil.cli._helpers import BoundedSchemaProbe, _open_backend
     from anvil.state.backend import SchemaMismatch
     from anvil.state.schema import get_schema_version
-    from anvil.state.sqlite import read_db_schema_version
 
     code_version = get_schema_version()
     db_path = state_dir / "state.db"
@@ -614,8 +613,11 @@ def _check_state_db(state_dir: Path) -> tuple[_Finding, SqliteBackend | None]:
             None,
         )
 
+    schema_probe = BoundedSchemaProbe()
     try:
-        db_version = read_db_schema_version(str(db_path))
+        db_version = schema_probe(db_path)
+    except SchemaMismatch:
+        raise
     except Exception as exc:  # noqa: BLE001 — any read failure is unreachable db
         return (
             _Finding(
@@ -628,21 +630,9 @@ def _check_state_db(state_dir: Path) -> tuple[_Finding, SqliteBackend | None]:
         )
 
     try:
-        backend = _open_backend(state_dir)
-    except SchemaMismatch as exc:
-        return (
-            _Finding(
-                "state_db",
-                _ERROR,
-                f"schema mismatch: {exc}",
-                {
-                    "db_path": str(db_path),
-                    "db_schema_version": db_version,
-                    "code_schema_version": code_version,
-                },
-            ),
-            None,
-        )
+        backend = _open_backend(state_dir, schema_probe=schema_probe)
+    except SchemaMismatch:
+        raise
     except Exception as exc:  # noqa: BLE001 — corrupt db, disk error, etc.
         return (
             _Finding(

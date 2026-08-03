@@ -15,12 +15,14 @@ import os
 import re
 import stat
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import click
 import typer
+from typer.core import TyperGroup
 
 if TYPE_CHECKING:
     from anvil.config import Config
@@ -40,6 +42,8 @@ _PRDS_DIR_NAME = "prds"
 # bounded ``limit + 1`` probe so an over-limit source is refused before
 # unbounded allocation growth or UTF-8 decoding.
 MAX_PRD_SOURCE_BYTES_V1 = 2_097_152
+MAX_SCHEMA_DIAGNOSTIC_BYTES = 4_096
+SCHEMA_PROBE_TIMEOUT_SECONDS = 2.0
 _WINDOWS_RESERVED_PRD_STEMS = {
     "AUX",
     "CLOCK$",
@@ -73,6 +77,174 @@ _ACTOR_FALLBACK = "agent"
 # and a project with several non-default PRDs is AMBIGUOUS — we error rather
 # than silently picking one, the whole point of a shared resolver.
 _PRD_ENV = "ANVIL_PRD"
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaDiagnostic:
+    """Closed, path-free schema failure shared by every public transport."""
+
+    code: str
+    engine_version: str
+    supported_schema: int
+    database_schema: int | None
+    direction: str
+    remediation_code: str
+    guidance: str
+    restart_required: bool
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "engine_version": self.engine_version,
+            "supported_schema": self.supported_schema,
+            "database_schema": self.database_schema,
+            "direction": self.direction,
+            "remediation_code": self.remediation_code,
+            "guidance": self.guidance,
+            "restart_required": self.restart_required,
+        }
+
+    def human_line(self) -> str:
+        database = (
+            str(self.database_schema)
+            if self.database_schema is not None
+            else "unknown"
+        )
+        line = (
+            f"Error: [{self.code}] Anvil {self.engine_version} supports schema "
+            f"{self.supported_schema}; database schema {database} is "
+            f"{self.direction}. {self.guidance}"
+        )
+        encoded = line.encode("utf-8")
+        if len(encoded) <= MAX_SCHEMA_DIAGNOSTIC_BYTES:
+            return line
+        # All fields above are closed and bounded, so this is a fail-closed
+        # invariant guard rather than a normal truncation path.
+        return (
+            "Error [schema_mismatch]: schema diagnostic exceeded its safety "
+            "bound; upgrade Anvil and restart the harness. Do not delete state."
+        )
+
+
+def schema_diagnostic_from_exception(exc: Exception) -> SchemaDiagnostic:
+    """Translate a typed backend failure without retaining exception text."""
+    from anvil import __version__
+    from anvil.state.schema import SCHEMA_VERSION
+
+    actual_raw = getattr(exc, "actual", None)
+    actual = (
+        actual_raw
+        if isinstance(actual_raw, int)
+        and not isinstance(actual_raw, bool)
+        and 0 <= actual_raw <= 0xFFFFFFFF
+        else None
+    )
+    direction_raw = getattr(exc, "direction", None)
+    if direction_raw in {"newer", "older"}:
+        direction = direction_raw
+    elif actual is not None:
+        direction = "newer" if actual > SCHEMA_VERSION else "older"
+    else:
+        direction = "unknown"
+
+    code_raw = getattr(exc, "code", None)
+    code = (
+        code_raw
+        if code_raw in {"schema_mismatch", "schema_probe_failed"}
+        else "schema_mismatch"
+    )
+    engine_version = str(__version__)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", engine_version):
+        engine_version = "unknown"
+
+    if code == "schema_probe_failed":
+        remediation_code = "retry_or_upgrade"
+        guidance = (
+            "Retry when state is idle; if it persists, upgrade anvil-state and "
+            "restart the CLI, harness, and MCP server. Do not delete state."
+        )
+    elif direction == "newer":
+        remediation_code = "upgrade_engine"
+        guidance = (
+            "Upgrade anvil-state, then restart the CLI, harness, and MCP server. "
+            "Do not delete state."
+        )
+    else:
+        remediation_code = "use_compatible_engine"
+        guidance = (
+            "Install an Anvil version with a supported migration path, then "
+            "restart the CLI, harness, and MCP server. Do not delete state."
+        )
+
+    diagnostic = SchemaDiagnostic(
+        code=code,
+        engine_version=engine_version,
+        supported_schema=SCHEMA_VERSION,
+        database_schema=actual,
+        direction=direction,
+        remediation_code=remediation_code,
+        guidance=guidance,
+        restart_required=True,
+    )
+    # The JSON representation is also closed and bounded. Refuse a programming
+    # error here rather than emitting a partially truncated contract.
+    serialized = json.dumps(diagnostic.as_dict(), ensure_ascii=True, separators=(",", ":"))
+    if len(serialized.encode("utf-8")) > MAX_SCHEMA_DIAGNOSTIC_BYTES:
+        raise RuntimeError("closed schema diagnostic exceeds its byte limit")
+    return diagnostic
+
+
+def _schema_command_name(args: Sequence[str]) -> str:
+    """Return a bounded command label without echoing option values."""
+    positional = [arg for arg in args if arg and not arg.startswith("-")]
+    if not positional:
+        return "anvil"
+    grouped = {"bundle", "hook", "migrate", "prd", "proof", "review", "sync"}
+    if positional[0] in grouped and len(positional) > 1:
+        return f"{positional[0]} {positional[1]}"
+    return positional[0][:128]
+
+
+class SchemaDiagnosticGroup(TyperGroup):
+    """One root exception boundary for every backend-opening CLI command."""
+
+    def main(
+        self,
+        args: Sequence[str] | None = None,
+        prog_name: str | None = None,
+        complete_var: str | None = None,
+        standalone_mode: bool = True,
+        windows_expand_args: bool = True,
+        **extra: Any,
+    ) -> Any:
+        import sys
+
+        raw_args = list(args) if args is not None else list(sys.argv[1:])
+        try:
+            return super().main(
+                args=raw_args,
+                prog_name=prog_name,
+                complete_var=complete_var,
+                standalone_mode=standalone_mode,
+                windows_expand_args=windows_expand_args,
+                **extra,
+            )
+        except Exception as exc:
+            from anvil.state.backend import SchemaMismatch
+
+            if not isinstance(exc, SchemaMismatch):
+                raise
+            diagnostic = schema_diagnostic_from_exception(exc)
+            command = _schema_command_name(raw_args)
+            if "--json" in raw_args:
+                from anvil.cli._json import emit_schema_failure
+
+                emit_schema_failure(command, diagnostic.as_dict())
+            else:
+                typer.echo(diagnostic.human_line(), err=True)
+            if standalone_mode:
+                raise SystemExit(1) from None
+            raise click.exceptions.Exit(1) from None
 
 
 # ---------------------------------------------------------------------------
@@ -1303,7 +1475,235 @@ def display_path(path: Path) -> str:
     return path.as_posix()
 
 
-def _open_backend(state_dir: Path) -> SqliteBackend:
+class BoundedSchemaProbe:
+    """Share one cumulative wait budget across an initialization sequence."""
+
+    def __init__(self, timeout_seconds: float | None = None) -> None:
+        self._process: Any = None
+        self._remaining_seconds = (
+            SCHEMA_PROBE_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+
+    @property
+    def closed(self) -> bool:
+        """Whether this probe owns no live worker process."""
+        return self._process is None or self._process.poll() is not None
+
+    def close(self) -> None:
+        """Terminate and reap the probe worker, including all pipe handles."""
+        import subprocess
+
+        process = self._process
+        self._process = None
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        for stream in (process.stdin, process.stdout):
+            if stream is not None:
+                stream.close()
+
+    def _start_worker(self) -> Any:
+        import subprocess
+        import sys
+
+        if not self.closed:
+            return self._process
+        self.close()
+        self._process = subprocess.Popen(
+            [sys.executable, "-m", "anvil.cli._schema_probe_worker"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return self._process
+
+    def __call__(self, db_path: str | os.PathLike[str]) -> int:
+        """Probe with a cleanup boundary that includes cancellation."""
+        try:
+            return self._call_worker(db_path)
+        except BaseException:
+            self.close()
+            raise
+
+    def _call_worker(self, db_path: str | os.PathLike[str]) -> int:
+        """Run one side-effect-free probe within the remaining wait budget."""
+        import threading
+        import time
+
+        from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
+
+        if self._remaining_seconds <= 0:
+            raise SchemaProbeFailed(
+                "Database schema inspection exceeded the transport time bound."
+            )
+        started = time.monotonic()
+        try:
+            process = self._start_worker()
+        except (OSError, ValueError):
+            self.close()
+            raise SchemaProbeFailed("Database schema inspection failed.") from None
+        self._remaining_seconds = max(
+            0.0,
+            self._remaining_seconds - (time.monotonic() - started),
+        )
+        if self._remaining_seconds <= 0:
+            self.close()
+            raise SchemaProbeFailed(
+                "Database schema inspection exceeded the transport time bound."
+            )
+        if process.stdin is None or process.stdout is None:
+            self.close()
+            raise SchemaProbeFailed("Database schema inspection failed.")
+
+        request_errors: list[BaseException] = []
+
+        def write_request() -> None:
+            try:
+                process.stdin.write(
+                    json.dumps({"path": os.fspath(db_path)}, ensure_ascii=True) + "\n"
+                )
+                process.stdin.flush()
+            except BaseException as exc:  # transported to the caller thread
+                request_errors.append(exc)
+
+        writer = threading.Thread(target=write_request, name="anvil-schema-request")
+        started = time.monotonic()
+        try:
+            writer.start()
+            writer.join(self._remaining_seconds)
+        except BaseException:
+            self.close()
+            if writer.ident is not None:
+                writer.join(timeout=1)
+            raise
+        self._remaining_seconds = max(
+            0.0,
+            self._remaining_seconds - (time.monotonic() - started),
+        )
+        if writer.is_alive():
+            self.close()
+            writer.join(timeout=1)
+            raise SchemaProbeFailed(
+                "Database schema inspection exceeded the transport time bound."
+            ) from None
+        if request_errors:
+            self.close()
+            raise SchemaProbeFailed("Database schema inspection failed.") from None
+        if self._remaining_seconds <= 0:
+            self.close()
+            raise SchemaProbeFailed(
+                "Database schema inspection exceeded the transport time bound."
+            )
+
+        response: list[str] = []
+
+        def read_response() -> None:
+            response.append(process.stdout.readline())
+
+        reader = threading.Thread(target=read_response, name="anvil-schema-response")
+        started = time.monotonic()
+        try:
+            reader.start()
+            reader.join(self._remaining_seconds)
+        except BaseException:
+            self.close()
+            if reader.ident is not None:
+                reader.join(timeout=1)
+            raise
+        self._remaining_seconds = max(
+            0.0,
+            self._remaining_seconds - (time.monotonic() - started),
+        )
+        if reader.is_alive():
+            self.close()
+            reader.join(timeout=1)
+            raise SchemaProbeFailed(
+                "Database schema inspection exceeded the transport time bound."
+            ) from None
+        if not response or not response[0]:
+            self.close()
+            raise SchemaProbeFailed("Database schema inspection failed.")
+        try:
+            payload = json.loads(response[0])
+        except (json.JSONDecodeError, TypeError):
+            self.close()
+            raise SchemaProbeFailed(
+                "Database schema inspection returned invalid data."
+            ) from None
+        if not isinstance(payload, dict) or set(payload) - {
+            "ok",
+            "version",
+            "code",
+            "actual",
+            "expected",
+            "direction",
+        }:
+            self.close()
+            raise SchemaProbeFailed("Database schema inspection returned invalid data.")
+        if payload.get("ok") is True:
+            version = payload.get("version")
+            if isinstance(version, int) and not isinstance(version, bool):
+                return version
+            self.close()
+            raise SchemaProbeFailed("Database schema inspection returned invalid data.")
+        if payload.get("ok") is not False:
+            self.close()
+            raise SchemaProbeFailed("Database schema inspection returned invalid data.")
+        if payload.get("code") == "schema_mismatch":
+            actual = payload.get("actual")
+            expected = payload.get("expected")
+            direction = payload.get("direction")
+            if (
+                (actual is None or isinstance(actual, int))
+                and not isinstance(actual, bool)
+                and (expected is None or isinstance(expected, int))
+                and not isinstance(expected, bool)
+                and direction in {"newer", "older", None}
+            ):
+                self.close()
+                raise SchemaMismatch(
+                    actual=actual,
+                    expected=expected,
+                    direction=direction,
+                )
+        self.close()
+        raise SchemaProbeFailed("Database schema inspection failed.")
+
+
+def _preflight_schema_compatibility(state_dir: Path) -> BoundedSchemaProbe:
+    """Validate schema and return the live probe with its remaining budget.
+
+    The caller must either pass the probe to :func:`_open_backend`, which
+    closes it, or close it on every earlier exit.
+    """
+    from anvil.state.sqlite import SqliteBackend as _SqliteBackend
+
+    schema_probe = BoundedSchemaProbe()
+    try:
+        version = schema_probe(state_dir / "state.db")
+        _SqliteBackend.validate_schema_compatibility(version)
+    except BaseException:
+        schema_probe.close()
+        raise
+    return schema_probe
+
+
+def _open_backend(
+    state_dir: Path,
+    *,
+    schema_probe: BoundedSchemaProbe | None = None,
+) -> SqliteBackend:
     """Instantiate a SqliteBackend, call initialize(), and return it.
 
     The caller is responsible for calling .close() when done — use a try/finally.
@@ -1320,16 +1720,24 @@ def _open_backend(state_dir: Path) -> SqliteBackend:
 
     db_path = str(state_dir / "state.db")
     events_path = str(state_dir / "events.jsonl")
-    backend = _SqliteBackend(
-        db_path=db_path,
-        events_path=events_path,
-        clock=SystemClock(),
-        # v1.22.0: the storage mode decides the event-id format and the
-        # replay strategy, so it must be resolved BEFORE the backend opens —
-        # not by whichever command happens to read config.yaml later.
-        events_storage=read_events_storage(state_dir / "config.yaml"),
-    )
-    backend.initialize()
+    bounded_probe = schema_probe or BoundedSchemaProbe()
+    try:
+        # Compatibility has precedence over every fallible config concern: a
+        # future database always reaches the one closed schema boundary, even
+        # when config.yaml is malformed or declares an invalid storage mode.
+        _SqliteBackend.validate_schema_compatibility(bounded_probe(db_path))
+        backend = _SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=SystemClock(),
+            # v1.22.0: the storage mode decides the event-id format and the
+            # replay strategy, so it must be resolved BEFORE the backend opens.
+            events_storage=read_events_storage(state_dir / "config.yaml"),
+            schema_probe_fn=bounded_probe,
+        )
+        backend.initialize()
+    finally:
+        bounded_probe.close()
     return backend
 
 
