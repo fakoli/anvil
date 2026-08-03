@@ -4284,10 +4284,15 @@ class TestGitConvergenceOnInitialize:
         ):
             reopening.initialize()
         assert reopening._git_validated_log_signature is None  # noqa: SLF001
-        assert reopening._require_conn().execute(  # noqa: SLF001
-            "SELECT 1 FROM events WHERE id = ?", (injected_id,)
-        ).fetchone() is None
-        reopening.close()
+        assert reopening._conn is None  # noqa: SLF001
+        read_only_uri = f"{(tmp_path / 'state.db').resolve().as_uri()}?mode=ro"
+        projection = sqlite3.connect(read_only_uri, uri=True)
+        try:
+            assert projection.execute(
+                "SELECT 1 FROM events WHERE id = ?", (injected_id,)
+            ).fetchone() is None
+        finally:
+            projection.close()
 
         converged = _make_backend(tmp_path)
         try:

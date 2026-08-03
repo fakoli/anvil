@@ -415,17 +415,16 @@ def status(
     # T007/B11 (MUST-FIX 2a): read the TRUE on-disk PRAGMA user_version BEFORE
     # the backend opens (open() migrates v0-v3 up and re-stamps it, masking
     # real drift). This standalone read makes drift (db < code) observable.
-    db_schema_version = read_db_schema_version(str(state_dir / "state.db"))
-
     # MUST-FIX 2: an un-migratable / unknown schema version (e.g. a db stamped
     # user_version=99) makes _open_backend() raise SchemaMismatch. status must
     # report that through the normal error path — a clean "Error: ..." line
     # (exit 1) or a {"ok": false, ...} envelope — NEVER a raw traceback.
     try:
+        db_schema_version = read_db_schema_version(str(state_dir / "state.db"))
         backend = _open_backend(state_dir)
     except SchemaMismatch as exc:
         if json_output:
-            fail("status", str(exc), code="schema_mismatch")
+            fail("status", str(exc), code=exc.code)
         if hook_format:
             # Hook safety: never fail the session on a schema problem.
             typer.echo("uninitialized")
