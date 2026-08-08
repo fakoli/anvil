@@ -31,6 +31,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   the single atomic evidence transition, legacy hook proofs remain supported,
   and descriptive `--output-file` content can no longer be mistaken for a typed
   proof. The public API contract advances to version 7.
+- **Atomic named-PRD dependency edits (#180).** CLI and MCP dependency batches
+  now select an explicit PRD, validate source ownership and the complete final
+  graph, and persist every edit in one replay-safe event and transaction. The
+  public API contract advances to version 8.
+- **Revision-bound PRD source provenance.** Parse and revision events now retain
+  exact bounded UTF-8 source bytes, digest, size, encoding, and revision across
+  CLI, MCP, migration, and events-only replay. Legacy rows remain explicitly
+  unavailable rather than receiving fabricated provenance; schema version is 18.
 
 ### Fixed
 
