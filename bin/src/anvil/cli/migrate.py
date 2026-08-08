@@ -37,6 +37,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.state.schema import SCHEMA_VERSION
 
 # The union merge driver is the whole point of the git layout: concurrent
 # appends on two branches union into one file, and the order-tolerant replay
@@ -72,6 +73,12 @@ migrate_app = typer.Typer(
         "to the current engine schema version (dry-run by default; --yes to apply)."
     ),
     no_args_is_help=True,
+)
+
+_MIGRATE_STATE_HELP = (
+    "Upgrade .anvil/state.db through every supported forward migration to "
+    f"the current engine schema (v{SCHEMA_VERSION}). Dry-run by default; "
+    "use --yes to apply."
 )
 
 
@@ -290,7 +297,7 @@ def migrate_events(
     typer.echo("Commit .anvil/events.jsonl and .anvil/.gitattributes.")
 
 
-@migrate_app.command("state")
+@migrate_app.command("state", help=_MIGRATE_STATE_HELP)
 def migrate_state(
     yes: bool = typer.Option(  # noqa: B008
         False,
@@ -301,9 +308,9 @@ def migrate_state(
 ) -> None:
     """Upgrade .anvil/state.db to the current engine schema version.
 
-    T009/F006. The ordered, idempotent forward migration branches (0/1→8, 2→8,
-    3→8, 4→8, 5→8, 6→8, 7→8) ALREADY live inside
-    ``SqliteBackend._check_schema_version`` and run automatically on
+    T009/F006. The ordered, idempotent forward migration chain covers every
+    supported on-disk predecessor through ``SCHEMA_VERSION``. It already lives
+    inside ``SqliteBackend._check_schema_version`` and runs automatically on
     ``initialize()``. This command promotes that in-init
     migration to an explicit, backed-up, dry-run-by-default operation — it does
     NOT add a new migration framework.
@@ -323,8 +330,6 @@ def migrate_state(
     """
     from anvil.cli._helpers import BoundedSchemaProbe
     from anvil.state.backend import SchemaMismatch
-    from anvil.state.schema import SCHEMA_VERSION
-
     command = "migrate state"
 
     state_dir = _resolve_state_dir(None)

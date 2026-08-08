@@ -556,6 +556,18 @@ def _snapshot_db(db_path: Path, events_path: Path) -> str:
 
 
 class TestMigrateState:
+    def test_help_tracks_current_schema_without_a_literal_migration_ceiling(
+        self,
+    ) -> None:
+        result = _migrate_runner.invoke(
+            app, ["migrate", "state", "--help"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 0, result.output
+        normalized = " ".join(result.output.split())
+        assert "every supported forward migration" in normalized
+        assert f"current engine schema (v{SCHEMA_VERSION})" in normalized
+
     def test_migrate_state_dry_run_is_default_and_writes_nothing(
         self, tmp_path: Path
     ) -> None:
