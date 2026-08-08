@@ -14,8 +14,8 @@ event line; the shell appends it verbatim.  These tests confirm:
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import shutil
 import subprocess
