@@ -4542,6 +4542,134 @@ class TestGetProjectStatus:
 
 
 class TestParsePrd:
+    def test_provenance_is_byte_identical_to_cli_for_same_revisions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        cli_root = tmp_path / "cli"
+        mcp_root = tmp_path / "mcp"
+        cli_root.mkdir()
+        mcp_root.mkdir()
+        cli_state = _init_state_dir(cli_root)
+        mcp_state = _init_state_dir(mcp_root)
+        sources = [
+            _MINIMAL_PRD.replace("MCP Test Project", "MCP Cafe\u0301 🚀")
+            .replace("\n", "\r\n")
+            .encode(),
+            _MINIMAL_PRD_V2.replace("MCP Test Project", "MCP Cafe\u0301 🚀")
+            .replace("\n", "\r\n")
+            .encode(),
+        ]
+
+        monkeypatch.chdir(cli_root)
+        for source_bytes in sources:
+            (cli_state / "prd.md").write_bytes(source_bytes)
+            result = CliRunner().invoke(
+                app,
+                ["prd", "parse", "--json"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0, result.output
+
+        (mcp_state / "prd.md").write_bytes(sources[0])
+
+        async def run_mcp() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {"cwd": str(mcp_root)})
+                (mcp_state / "prd.md").write_bytes(sources[1])
+                await c.call_tool("parse_prd", {"cwd": str(mcp_root)})
+
+        _run(run_mcp())
+
+        provenance_keys = (
+            "source_text",
+            "source_sha256",
+            "source_size_bytes",
+            "source_encoding",
+            "source_revision",
+            "provenance_state",
+            "content_available",
+        )
+        for action, revision, source_bytes in (
+            ("prd.parsed", 1, sources[0]),
+            ("prd.revised", 2, sources[1]),
+        ):
+            cli_payload = _events_with_action(cli_state, action)[0]
+            mcp_payload = _events_with_action(mcp_state, action)[0]
+            cli_provenance = {key: cli_payload[key] for key in provenance_keys}
+            mcp_provenance = {key: mcp_payload[key] for key in provenance_keys}
+            cli_bytes = json.dumps(
+                cli_provenance,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            mcp_bytes = json.dumps(
+                mcp_provenance,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            assert mcp_bytes == cli_bytes
+            assert mcp_payload["source_text"].encode() == source_bytes
+            assert mcp_payload["source_sha256"] == hashlib.sha256(
+                source_bytes
+            ).hexdigest()
+            assert mcp_payload["source_revision"] == revision
+
+    def test_provenance_ingest_failure_preserves_prior_state_without_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        _run(parse())
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            prd_before = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd_before is not None
+
+        (state_dir / "prd.md").write_bytes(b"# Project: private\n\xffSECRET")
+        with pytest.raises(ToolError) as excinfo:
+            _run(parse())
+        message = str(excinfo.value)
+        assert "valid UTF-8" in message
+        assert "invalid start byte" not in message
+        assert "SECRET" not in message
+        assert str(tmp_path) not in message
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            prd_after = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd_after == prd_before
+
     def test_non_utf8_source_is_bounded_typed_and_mutation_free(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

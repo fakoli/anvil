@@ -2691,7 +2691,7 @@ def _ingest_planning_prd_source(
     except PrdSourceIngestError as exc:
         suffix = f": {source_identity}" if source_identity is not None else ""
         detail = f"{exc.message.rstrip('.')}."
-        raise ToolError(f"Cannot ingest PRD source{suffix}. {detail}") from exc
+        raise ToolError(f"Cannot ingest PRD source{suffix}. {detail}") from None
     assert source_identity is not None
     return parse_prd_id, source_identity, source
 
@@ -2796,6 +2796,18 @@ def parse_prd(
     )
     markdown = source.markdown
 
+    def source_binding(revision: int) -> dict[str, object]:
+        """Bind this invocation's one exact source read to its PRD revision."""
+        return {
+            "source_text": source.markdown,
+            "source_sha256": source.source_sha256,
+            "source_size_bytes": source.source_size_bytes,
+            "source_encoding": source.source_encoding,
+            "source_revision": revision,
+            "provenance_state": "available",
+            "content_available": True,
+        }
+
     result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
 
     # Surface errors in the response without short-circuiting the event.
@@ -2867,6 +2879,7 @@ def parse_prd(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
+                **source_binding(1),
             }
 
             # Named PRD: stamp the partition so the handler writes ONLY this PRD's
@@ -2944,10 +2957,11 @@ def parse_prd(
                 if r.id not in new_by_id
             ]
 
+            new_revision = existing_prd.revision + 1
             revised_payload: dict[str, Any] = {
                 "project_id": project_id,
                 "prd_id": stored_prd_id,
-                "revision": existing_prd.revision + 1,
+                "revision": new_revision,
                 "expected_status": existing_prd.status.value,
                 "is_default": existing_prd.is_default,
                 "title": result.prd.title,
@@ -2968,6 +2982,7 @@ def parse_prd(
                 "requirements_added": requirements_added,
                 "requirements_superseded": requirements_superseded,
                 "requirements_unchanged": requirements_unchanged,
+                **source_binding(new_revision),
             }
 
             from anvil.state.backend import EventRejected
