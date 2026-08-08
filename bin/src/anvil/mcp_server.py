@@ -1856,9 +1856,11 @@ def submit_completion_evidence(
             )
 
         clock = SystemClock()
-        now = clock.now()
 
         claim_bound_proofs = ()
+        loaded_claim_proofs = []
+        proof_project = None
+        proof_project_root = None
         if command_proof_artifacts_base64:
             from anvil import signing
             from anvil.claims.command_proof_artifact import (
@@ -1897,28 +1899,21 @@ def submit_completion_evidence(
                         "command proof batch exceeds its byte limit",
                     )
                 trusted = signing.load_trust_list(_default_trust_path())
-                loaded = [
+                loaded_claim_proofs = [
                     load_claim_command_proof_base64(
                         artifact, trusted_issuers=trusted
                     )
                     for artifact in command_proof_artifacts_base64
                 ]
-                project = backend.get_project()
-                if project is None:
+                proof_project = backend.get_project()
+                proof_project_root = _resolve_project_dir(
+                    Path(cwd) if cwd else None
+                )
+                if proof_project is None:
                     raise ClaimCommandProofError(
                         "context_missing",
                         "command proof requires an initialized project",
                     )
-                claim_bound_proofs = verify_claim_command_proof_batch(
-                    loaded,
-                    claim=active_claim,
-                    task=task,
-                    project_id=project.id,
-                    project_root=_resolve_project_dir(Path(cwd) if cwd else None),
-                    actor=actor,
-                    declared_commands=commands_run,
-                    now=now,
-                )
             except ClaimCommandProofError as exc:
                 raise ToolError(
                     f"command_proof_error[{exc.code}]: {exc}"
@@ -1930,6 +1925,29 @@ def submit_completion_evidence(
         # the PostToolUse hook observed) into typed CommandProofs, so an
         # MCP-driven submit carries the same observed proofs as the CLI path.
         command_proofs = _read_command_proofs(state_dir, active_claim.id)
+
+        # Refresh after every artifact/buffer read, then revalidate the exact
+        # lease window immediately before drafting. SQLite repeats this check
+        # against its authoritative clock while holding the append lock.
+        now = clock.now()
+        if command_proof_artifacts_base64:
+            assert proof_project is not None
+            assert proof_project_root is not None
+            try:
+                claim_bound_proofs = verify_claim_command_proof_batch(
+                    loaded_claim_proofs,
+                    claim=active_claim,
+                    task=task,
+                    project_id=proof_project.id,
+                    project_root=proof_project_root,
+                    actor=actor,
+                    declared_commands=commands_run,
+                    now=now,
+                )
+            except ClaimCommandProofError as exc:
+                raise ToolError(
+                    f"command_proof_error[{exc.code}]: {exc}"
+                ) from exc
 
         draft = EventDraft(
             timestamp=now,

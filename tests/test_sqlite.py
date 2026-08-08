@@ -13635,6 +13635,43 @@ class TestClaimCommandProofState:
         finally:
             replay.close()
 
+    def test_append_lock_clock_rejects_artifact_io_lease_race(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock()
+        b = _make_backend(tmp_path, clock)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            raw = _make_evidence_payload()
+            raw["proofs"] = [proof]
+            # The adapter captured a valid-looking timestamp before artifact I/O.
+            stale_draft = _make_event(
+                "evidence.submitted",
+                raw,
+                target_kind="task",
+                target_id="T001",
+                actor="agent-alpha",
+                now=_T0 + timedelta(minutes=12),
+            )
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+
+            # Artifact loading stalls until the authoritative backend clock is
+            # beyond the persisted one-hour lease. The stale draft timestamp
+            # must not revive the claim inside the serialized append check.
+            clock.advance(hours=2)
+            with pytest.raises(EventRejected, match="exact active claim generation"):
+                b.append(stale_draft)
+
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+            task = b.get_task("T001")
+            assert task is not None and task.status.value == "claimed"
+        finally:
+            b.close()
+
     def test_payload_requires_one_declared_command_per_imported_proof(self) -> None:
         payload = _make_evidence_payload()
         payload["proofs"] = [

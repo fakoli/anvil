@@ -852,12 +852,14 @@ def submit(
         # Build a unique evidence ID with "EV" prefix (mirrors ClaimManager UUID pattern).
         evidence_id = "EV" + uuid.uuid4().hex[:8].upper()
 
-        now = clock.now()
-
         # T008: external/subagent proofs are accepted only through the strict,
         # claim-bound artifact boundary. Load and verify the entire batch before
         # constructing the single evidence event so one refusal imports nothing.
         claim_bound_proofs: tuple[ClaimCommandProof, ...] = ()
+        loaded_claim_proofs = []
+        proof_task = None
+        proof_project = None
+        proof_project_root = None
         if proof_files:
             from anvil import signing
             from anvil.claims.command_proof_artifact import (
@@ -886,31 +888,21 @@ def submit(
                             "command proof batch exceeds its byte limit",
                         )
                 trusted = signing.load_trust_list(_default_trust_path())
-                loaded = []
                 for proof_file in proof_files:
                     with proof_file.open("rb") as stream:
-                        loaded.append(
+                        loaded_claim_proofs.append(
                             load_claim_command_proof(
                                 stream, trusted_issuers=trusted
                             )
                         )
-                task = backend.get_task(task_id)
-                project = backend.get_project()
-                if task is None or project is None:
+                proof_task = backend.get_task(task_id)
+                proof_project = backend.get_project()
+                proof_project_root = _resolve_project_dir(cwd)
+                if proof_task is None or proof_project is None:
                     raise ClaimCommandProofError(
                         "context_missing",
                         "command proof requires an initialized project and task",
                     )
-                claim_bound_proofs = verify_claim_command_proof_batch(
-                    loaded,
-                    claim=task_claim,
-                    task=task,
-                    project_id=project.id,
-                    project_root=_resolve_project_dir(cwd),
-                    actor=resolved_actor,
-                    declared_commands=commands_list,
-                    now=now,
-                )
             except (OSError, ClaimCommandProofError) as exc:
                 code = str(getattr(exc, "code", "command_proof_error"))
                 if json_output:
@@ -922,6 +914,31 @@ def submit(
         # captured by the PostToolUse hook) into typed CommandProofs — the
         # observed proofs the gate trusts.
         command_proofs = _read_command_proofs(state_dir, task_claim.id)
+
+        # Refresh time only after all artifact and compatibility-buffer I/O.
+        # The backend repeats the lease check under its append lock; this early
+        # revalidation gives CLI callers a bounded command-proof refusal too.
+        now = clock.now()
+        if proof_files:
+            assert proof_task is not None
+            assert proof_project is not None
+            assert proof_project_root is not None
+            try:
+                claim_bound_proofs = verify_claim_command_proof_batch(
+                    loaded_claim_proofs,
+                    claim=task_claim,
+                    task=proof_task,
+                    project_id=proof_project.id,
+                    project_root=proof_project_root,
+                    actor=resolved_actor,
+                    declared_commands=commands_list,
+                    now=now,
+                )
+            except ClaimCommandProofError as exc:
+                if json_output:
+                    fail("submit", str(exc), code=str(exc.code))
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
         all_command_proofs = [*command_proofs, *claim_bound_proofs]
 
         # T007 — zero-proof mismatch warning: if verification-pattern commands

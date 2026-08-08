@@ -656,6 +656,79 @@ class TestTypedProofGateEndToEnd:
         finally:
             conn.close()
 
+    def test_expiry_during_artifact_load_refuses_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.clock as clock_module
+        from anvil.claims import command_proof_artifact
+
+        _init_git_repo(tmp_path)
+        task_id = _planned(tmp_path)
+        claim_result = _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test", "--json"]
+        )
+        claim = _json.loads(claim_result.stdout)["data"]["claim"]
+        artifact = _write_claim_command_artifact(
+            tmp_path, claim, _PLANNED_VERIFY_CMD
+        )
+        before_expiry = _dt.datetime.now(_dt.UTC) + _dt.timedelta(minutes=1)
+        expiry = before_expiry + _dt.timedelta(seconds=1)
+        after_expiry = expiry + _dt.timedelta(seconds=1)
+        conn = _sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
+        conn.execute(
+            "UPDATE claims SET lease_expires_at = ? WHERE id = ?",
+            (expiry.isoformat(), claim["id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        class AdvancingClock:
+            current = before_expiry
+
+            def now(self) -> _dt.datetime:
+                return self.current
+
+        real_loader = command_proof_artifact.load_claim_command_proof
+
+        def load_then_expire(*args, **kwargs):  # type: ignore[no-untyped-def]
+            loaded = real_loader(*args, **kwargs)
+            AdvancingClock.current = after_expiry
+            return loaded
+
+        monkeypatch.setattr(clock_module, "SystemClock", AdvancingClock)
+        monkeypatch.setattr(
+            command_proof_artifact, "load_claim_command_proof", load_then_expire
+        )
+        result = _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                _PLANNED_VERIFY_CMD,
+                "--files-changed",
+                "src/app/converter.py",
+                "--command-proof-file",
+                str(artifact),
+                "--actor",
+                "agent-test",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 1
+        assert _json.loads(result.stdout)["error"]["code"] == "claim_expired"
+        assert _status(tmp_path, task_id) == "claimed"
+        conn = _sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE task_id = ?", (task_id,)
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM claims WHERE id = ?", (claim["id"],)
+            ).fetchone()[0] == "active"
+        finally:
+            conn.close()
+
     @pytest.mark.parametrize("oversized_kind", ["item_count", "aggregate_bytes"])
     def test_adapter_refuses_oversized_batch_before_loading_or_mutating(
         self,

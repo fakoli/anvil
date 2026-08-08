@@ -10274,8 +10274,15 @@ class SqliteBackend:
         conn: sqlite3.Connection,
         payload: EvidenceSubmittedPayload,
         event: EventDraft | Event,
+        *,
+        authoritative_now: datetime.datetime | None = None,
     ) -> bool:
-        """Bind an imported batch to one exact active claim generation."""
+        """Bind an imported batch to one exact active claim generation.
+
+        ``authoritative_now`` is supplied only by the live append check while
+        the cross-process append lock is held. Replay deliberately omits it and
+        remains a deterministic function of the persisted event timestamp.
+        """
         imported = [
             proof for proof in payload.proofs if isinstance(proof, ClaimCommandProof)
         ]
@@ -10304,6 +10311,12 @@ class SqliteBackend:
             or row[8] is not None
         ):
             return False
+        if authoritative_now is not None and (
+            not isinstance(authoritative_now, datetime.datetime)
+            or authoritative_now.tzinfo is None
+            or authoritative_now.utcoffset() is None
+        ):
+            return False
         try:
             generation = int(row[4])
             context = ClaimAttestationContext.model_validate(json.loads(row[5]))
@@ -10312,6 +10325,11 @@ class SqliteBackend:
             )
             lease_expires_at = datetime.datetime.fromisoformat(
                 row[7].replace("Z", "+00:00")
+            )
+            live_now = (
+                authoritative_now.astimezone(datetime.UTC)
+                if authoritative_now is not None
+                else None
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
@@ -10342,6 +10360,7 @@ class SqliteBackend:
             or int(current_prd[0]) != context.prd_revision
             or not required_commands
             or event.timestamp >= lease_expires_at
+            or (live_now is not None and live_now >= lease_expires_at)
         ):
             return False
         for proof in imported:
@@ -10404,7 +10423,12 @@ class SqliteBackend:
             raise EventRejected("evidence.submitted: event target mismatch.")
         if event.actor != payload.submitted_by:
             raise EventRejected("evidence.submitted: event actor mismatch.")
-        if not self._claim_command_proof_batch_matches_claim(conn, payload, event):
+        if not self._claim_command_proof_batch_matches_claim(
+            conn,
+            payload,
+            event,
+            authoritative_now=self._clock.now(),
+        ):
             raise EventRejected(
                 "evidence.submitted: claim-bound command proof batch does not match "
                 "the exact active claim generation or durable proof material."
