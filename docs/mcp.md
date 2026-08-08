@@ -1423,7 +1423,7 @@ None.
 
 ```json
 {
-  "api_version": "5",
+  "api_version": "6",
   "engine_version": "0.6.3",
   "display_version": "0.6.3",
   "build_kind": "release_artifact",

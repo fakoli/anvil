@@ -14,7 +14,8 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   the next renewal consumes one accepted attestation atomically and reports its
   trust mode. Free-text progress remains audit-only, duplicate or stale
   evidence cannot extend a lease, and legacy/non-Git claims retain their prior
-  renewal behavior.
+  renewal behavior. The self-described public API contract advances to version
+  6 for the new CLI flag and MCP request/response fields.
 
 ## [0.6.3] - 2026-08-08
 
