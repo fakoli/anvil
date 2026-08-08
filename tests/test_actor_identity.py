@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import shlex
-from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +12,7 @@ from anvil.actors import (
     actor_identity_context,
     canonicalize_new_actor,
     continuation_context,
+    current_shell_kind,
     quote_actor_posix,
     quote_actor_powershell,
     render_actor_continuation,
@@ -64,6 +64,25 @@ def test_exact_resolution_distinguishes_absent_from_legacy_values() -> None:
     assert resolve_actor_input(None, env) == "  legacy\u0301  "
     assert resolve_actor_input("", env) == ""
     assert resolve_actor_input(None, {}) is None
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"MSYSTEM": "MINGW64"},
+        {"CYGWIN": "winsymlinks:native"},
+        {"OSTYPE": "msys"},
+        {"SHELL": "C:/Program Files/Git/usr/bin/bash.exe"},
+    ],
+)
+def test_windows_posix_shells_are_not_misidentified_as_powershell(
+    environment: dict[str, str],
+) -> None:
+    assert current_shell_kind(environment, os_name="nt") == "posix"
+
+
+def test_native_windows_defaults_to_powershell_guidance() -> None:
+    assert current_shell_kind({}, os_name="nt") == "powershell"
 
 
 def test_shell_quoting_and_structured_continuation_round_trip_exact_actor() -> None:
@@ -127,7 +146,11 @@ def test_bundle_continuation_quotes_metacharacter_id_for_current_shell(
     shell_name: str,
     quoted_bundle_id: str,
 ) -> None:
-    monkeypatch.setattr(_actor_output, "os", SimpleNamespace(name=shell_name))
+    monkeypatch.setattr(
+        _actor_output,
+        "current_shell_kind",
+        lambda: "powershell" if shell_name == "nt" else "posix",
+    )
 
     lines = _actor_output.bundle_continuation_lines(
         "B001; echo PWN" if shell_name == "posix" else "B001; Write-Output 'PWN'",

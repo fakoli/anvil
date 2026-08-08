@@ -7,7 +7,6 @@ notice, structured remedies, and platform-specific human rendering.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from anvil.actors import (
@@ -15,6 +14,7 @@ from anvil.actors import (
     actor_identity_context,
     bundle_continuation_context,
     continuation_context,
+    current_shell_kind,
     quote_posix_actor,
     quote_powershell_actor,
     safe_actor_for_human,
@@ -47,7 +47,11 @@ def bundle_continuation_data(bundle_id: str, actor: str) -> dict[str, Any]:
 
 
 def _quote_for_current_shell(value: str) -> str:
-    return quote_powershell_actor(value) if os.name == "nt" else quote_posix_actor(value)
+    return (
+        quote_powershell_actor(value)
+        if current_shell_kind() == "powershell"
+        else quote_posix_actor(value)
+    )
 
 
 def actor_flag_for_human(actor: str) -> str | None:
@@ -62,7 +66,7 @@ def actor_env_for_human(actor: str) -> str | None:
     if safe_actor_for_human(actor) is None:
         return None
     quoted = _quote_for_current_shell(actor)
-    if os.name == "nt":
+    if current_shell_kind() == "powershell":
         return f"$env:ANVIL_ACTOR = {quoted}"
     return f"export ANVIL_ACTOR={quoted}"
 

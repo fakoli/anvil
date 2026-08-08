@@ -22,6 +22,9 @@ ACTOR_AUTH_NOTICE = (
 )
 
 _ACTOR_ENV_VARS = ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR")
+_POSIX_WINDOWS_SHELLS = frozenset(
+    {"ash", "bash", "dash", "fish", "ksh", "sh", "zsh"}
+)
 _BIDI_CONTROLS = frozenset(
     {
         "\u061c",  # ARABIC LETTER MARK
@@ -42,6 +45,35 @@ _BIDI_CONTROLS = frozenset(
 
 class ActorIdentityError(ValueError):
     """A proposed new actor identity violates the public identity contract."""
+
+
+def current_shell_kind(
+    environ: Mapping[str, str] | None = None,
+    *,
+    os_name: str | None = None,
+) -> Literal["posix", "powershell"]:
+    """Infer the invoking shell for copy/paste guidance.
+
+    Windows does not imply PowerShell: Git Bash, MSYS2, and Cygwin launch the
+    same native Python executable with ``os.name == "nt"``. Their inherited
+    environment is the only portable signal available to a child process.
+    Structured JSON/MCP continuations remain the shell-free authority.
+    """
+    platform_name = os.name if os_name is None else os_name
+    if platform_name != "nt":
+        return "posix"
+
+    source = os.environ if environ is None else environ
+    if "MSYSTEM" in source or "CYGWIN" in source:
+        return "posix"
+    ostype = source.get("OSTYPE", "").casefold()
+    if "msys" in ostype or "cygwin" in ostype:
+        return "posix"
+    shell_name = source.get("SHELL", "").replace("\\", "/").rsplit("/", 1)[-1]
+    shell_name = shell_name.casefold().removesuffix(".exe")
+    if shell_name in _POSIX_WINDOWS_SHELLS:
+        return "posix"
+    return "powershell"
 
 
 def resolve_actor_input(

@@ -16,7 +16,6 @@ is responsible for collecting the inputs and writing the output to
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -24,6 +23,7 @@ from anvil.actors import (
     ACTOR_AUTH_NOTICE,
     actor_identity_context,
     continuation_context,
+    current_shell_kind,
     quote_posix_actor,
     quote_powershell_actor,
     safe_actor_for_human,
@@ -99,7 +99,7 @@ FAST_LANE_REQUIRED_EVIDENCE_MAX = 1
 
 
 def _packet_shell() -> Literal["posix", "powershell"]:
-    return "powershell" if os.name == "nt" else "posix"
+    return current_shell_kind()
 
 
 def _quote_packet_actor(

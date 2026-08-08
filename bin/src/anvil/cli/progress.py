@@ -13,6 +13,7 @@ from pathlib import Path
 
 import typer
 
+from anvil.actors import ActorIdentityError, canonicalize_new_actor
 from anvil.cli._actor_output import (
     actor_identity_data,
     actor_mismatch_data,
@@ -134,6 +135,14 @@ def progress(
             (claim for claim in backend.list_active_claims() if claim.task_id == task_id),
             None,
         )
+        if active_claim is None:
+            try:
+                resolved_actor = canonicalize_new_actor(resolved_actor)
+            except ActorIdentityError as exc:
+                if json_output:
+                    fail(_COMMAND, str(exc), code="actor_invalid")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
         if active_claim is not None and active_claim.claimed_by != resolved_actor:
             message = actor_mismatch_message(
                 owner=active_claim.claimed_by,

@@ -5000,6 +5000,29 @@ class TestRenewCommand:
 
 
 class TestProgressActorContinuity:
+    @pytest.mark.parametrize("actor", ["", "   "])
+    def test_unclaimed_progress_rejects_invalid_new_actor(
+        self, tmp_path: Path, actor: str
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["progress", task_id, "tests", "--actor", actor, "--json"],
+        )
+
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "actor_invalid"
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM events WHERE action='progress.noted' "
+                "AND target_id=?",
+                (task_id,),
+            ).fetchone()[0] == 0
+
     def test_progress_on_claimed_task_requires_exact_owner(self, tmp_path: Path) -> None:
         _do_init_and_plan(tmp_path, with_git=False)
         task_id = _get_first_ready_task_id(tmp_path)
