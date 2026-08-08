@@ -1335,8 +1335,8 @@ def claim_task(
             worktree_path=claim.worktree_path,
             expected_files=claim.expected_files,
             warnings=isolation_warnings,
-            actor_identity=actor_identity_data(claimed_by),
-            continuation=continuation_data(task_id, claim.id, claimed_by),
+            actor_identity=actor_identity_data(claim.claimed_by),
+            continuation=continuation_data(task_id, claim.id, claim.claimed_by),
         )
     finally:
         backend.close()

@@ -6542,6 +6542,38 @@ class TestRequireActor:
             ).fetchall()
         assert rows == [("T001", "caf\u00e9")]
 
+    def test_claim_task_returns_canonical_actor_in_usable_continuation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+            async with Client(mcp) as client:
+                claimed = _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "cafe\u0301"},
+                    )
+                )
+                continuation_actor = claimed["continuation"]["renew"]["argv"][-1]
+                renewed = _data(
+                    await client.call_tool(
+                        "renew_claim",
+                        {"task_id": "T001", "actor": continuation_actor},
+                    )
+                )
+                return claimed, renewed
+
+        claimed, renewed = _run(run())
+        assert claimed["claimed_by"] == "caf\u00e9"
+        assert claimed["actor_identity"]["actor"] == "caf\u00e9"
+        assert claimed["continuation"]["renew"]["argv"][-1] == "caf\u00e9"
+        assert renewed["actor_identity"]["actor"] == "caf\u00e9"
+
     @pytest.mark.parametrize("legacy_owner", ["", " \t "])
     def test_exact_legacy_owner_can_complete_every_mcp_lifecycle_lookup(
         self,
