@@ -4,7 +4,6 @@ import shlex
 
 import pytest
 
-from anvil.cli import _actor_output
 from anvil.actors import (
     ACTOR_AUTH_NOTICE,
     ActorIdentityError,
@@ -17,9 +16,10 @@ from anvil.actors import (
     quote_actor_powershell,
     render_actor_continuation,
     resolve_actor_input,
-    safe_actor_for_human,
     safe_actor_display,
+    safe_actor_for_human,
 )
+from anvil.cli import _actor_output
 
 
 def test_new_actor_is_nfc_normalized_without_narrowing_safe_text() -> None:

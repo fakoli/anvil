@@ -10,9 +10,10 @@ from typing import Any
 
 import pytest
 import yaml
-from anvil.cli.describe import API_VERSION
 from scripts import check_release_contract
 from scripts.check_skill_cli_contract import ContractError, contract_digest
+
+from anvil.cli.describe import API_VERSION
 
 
 def _manifest(version: str = "1.2.3") -> dict[str, Any]:
