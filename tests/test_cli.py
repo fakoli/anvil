@@ -10365,8 +10365,8 @@ class TestUnifiedSchemaMismatchBoundary:
         line = lines[0]
         assert len(line.encode("utf-8")) <= 4_096
         assert line.startswith("Error: [schema_mismatch]")
-        assert "Anvil " in line and "supports schema 16" in line
-        assert "database schema 17 is newer" in line
+        assert "Anvil " in line and f"supports schema {SCHEMA_VERSION}" in line
+        assert f"database schema {SCHEMA_VERSION + 1} is newer" in line
         assert "Upgrade anvil-state" in line
         assert "restart" in line
         assert "Do not delete state" in line
