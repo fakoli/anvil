@@ -2179,6 +2179,7 @@ def deps(
         "--actor",
         help="Actor recorded on the emitted events.",
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -2194,19 +2195,21 @@ def deps(
     when either ID is scoped and contains ``:``; ``SOURCE:TARGET`` remains an
     unambiguous shorthand only for unscoped IDs. The whole request is validated
     before mutation: unknown tasks, self-dependencies, or a resulting cycle
-    reject it with NO mutation. After validation, one ``task.created`` upsert is
-    appended per changed task (status is preserved). Those appends commit
-    separately, so a later append failure can leave earlier task changes
-    committed; successful multi-task persistence is not atomic.
+    reject it with NO mutation. ``--prd`` selects the owning PRD partition.
+    After planning, one dependency-batch event validates and commits every
+    changed task atomically under the state append lock. A no-op request emits
+    no event.
 
     With ``--json`` emits ``{"ok": true, "command": "deps", "data":
-    {"changed": [...], "added": [["S","T"], ...], "removed": [...]}}``. A
+    {"prd_id": "...", "changed": [...], "added": [["S","T"], ...],
+    "removed": [...]}}``. A
     rejected batch yields ``{"ok": false, ... "error": {"code": "cycle" |
     "unknown_task" | "self_loop" | "bad_request" | "event_rejected", ...}}``
     and exit 1. ``event_rejected`` uses fixed prose rather than exposing
     backend validation details. A request may contain at most 10,000 edges;
     larger batches fail before state access with ``bad_request``.
     """
+    from anvil.actors import ActorIdentityError, canonicalize_new_actor
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
         DEPENDENCY_BATCH_LIMIT_MESSAGE,
@@ -2217,6 +2220,7 @@ def deps(
         emit_batch_dep_events,
         parse_dep_edge,
         plan_batch_dep_edits,
+        validate_dep_source_owners,
     )
 
     add = add or []
@@ -2247,15 +2251,35 @@ def deps(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="deps", json_output=json_output)
 
+    try:
+        resolved_actor = canonicalize_new_actor(resolve_actor(actor))
+    except ActorIdentityError as exc:
+        if json_output:
+            fail("deps", str(exc), code="actor_invalid")
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
+        selected_prd_id = canonical_prd_id(resolve_prd_id(backend, prd))
+        if backend.get_prd(selected_prd_id) is None:
+            message = "selected PRD was not found in state. Run parse_prd first."
+            if json_output:
+                fail("deps", message, code="prd_not_found")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1)
         all_tasks = backend.list_tasks()
         tasks_by_id = {t.id: t for t in all_tasks}
 
         # Plan + validate the WHOLE batch before emitting anything. A raised
         # BatchDepError here means zero events were appended → no partial apply.
         try:
+            validate_dep_source_owners(
+                tasks_by_id,
+                edges,
+                prd_id=selected_prd_id,
+            )
             batch_plan = plan_batch_dep_edits(all_tasks, edges)
         except BatchDepError as exc:
             if json_output:
@@ -2266,7 +2290,12 @@ def deps(
         event_rejected = False
         try:
             changed = emit_batch_dep_events(
-                backend, tasks_by_id, batch_plan, actor=actor, clock=clock
+                backend,
+                tasks_by_id,
+                batch_plan,
+                prd_id=selected_prd_id,
+                actor=resolved_actor,
+                clock=clock,
             )
         except EventRejected:
             # Leave the exception context before emitting either CLI surface;
@@ -2289,6 +2318,7 @@ def deps(
         emit_success(
             "deps",
             {
+                "prd_id": selected_prd_id,
                 "changed": changed,
                 "added": [list(e) for e in batch_plan.added],
                 "removed": [list(e) for e in batch_plan.removed],
@@ -2298,7 +2328,8 @@ def deps(
 
     typer.echo(
         f"Applied {len(batch_plan.added)} add(s) and "
-        f"{len(batch_plan.removed)} remove(s) across {len(changed)} task(s)."
+        f"{len(batch_plan.removed)} remove(s) across {len(changed)} task(s) "
+        f"in PRD {selected_prd_id}."
     )
     if changed:
         typer.echo("Changed tasks: " + ", ".join(changed))

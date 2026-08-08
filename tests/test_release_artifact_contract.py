@@ -106,7 +106,7 @@ def _qualify_wheel(wheel: Path, root: Path) -> dict[str, Any]:
             "--expected-version",
             __version__,
             "--expected-api-version",
-            "7",
+            "8",
         ],
         cwd=root,
         env=clean_env,

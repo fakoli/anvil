@@ -415,14 +415,14 @@ only rewrites dependency lists, so no claim state is touched.
 
 `add` / `remove` are `[source, target]` pairs meaning *source depends on target*. The whole
 batch is validated up front before anything is written: any unknown task ID, self-dependency,
-or resulting cycle rejects the entire batch with no mutation. After validation,
-`edit_dependencies` emits a separate `task.created` upsert for each changed task. Those
-appends are committed separately, so a later append failure can leave earlier task changes
-committed; persistence is not yet whole-batch atomic. Task status is preserved because each
-upsert deliberately omits `status` from its write, so a claimed or in-progress task's
-dependency list can be edited without regressing its status. True persistence atomicity
-requires the planned single batch event with prior-dependency/graph-cursor revalidation.
-If an individual backend append is rejected, MCP returns the fixed ToolError
+or resulting cycle rejects the entire batch with no mutation. `prd_id` selects the source-task
+owner (or resolves the single/default PRD when omitted), and `cwd` selects the project root.
+Sources must belong to the selected PRD; dependency targets may belong to another PRD.
+After validation, one `task.dependencies_batch_edited` event carries every changed task and
+its exact prior ordered dependencies. State revalidates ownership, endpoints, stale
+preconditions, and the final graph while holding the append lock, then commits all edits
+together. A no-op request emits no event, and task status is never changed. If the atomic
+append is rejected, MCP returns the fixed ToolError
 `dependency update was rejected by state validation.`; the CLI returns the same message
 with JSON error code `event_rejected`. Backend validation details are not exposed.
 Malformed pairs, unknown tasks, self-loops, and cycles also return fixed, bounded
@@ -438,6 +438,8 @@ total `add` plus `remove` pairs, and cap+1 receives a fixed ToolError.
 | `actor`   | `string`                 | yes      |         |
 | `add`     | `list[list[string]] \| null` | no   | `null`  |
 | `remove`  | `list[list[string]] \| null` | no   | `null`  |
+| `prd_id`  | `string \| null`         | no       | single/default PRD |
+| `cwd`     | `string \| null`         | no       | server launch directory |
 
 At least one of `add` / `remove` must contain an edge, or the tool raises `ToolError`.
 
@@ -445,13 +447,15 @@ At least one of `add` / `remove` must contain an edge, or the tool raises `ToolE
 
 ```json
 {
+  "prd_id": "default",
   "changed": ["T003"],
   "added": [["T003", "T001"]],
   "removed": []
 }
 ```
 
-`changed` lists every task whose dependency set was actually mutated; `added` / `removed`
+`prd_id` is the resolved source-task owner. `changed` lists every task whose dependency set
+was actually mutated; `added` / `removed`
 are the `[source, target]` edges that took effect — no-op edges (e.g. re-adding an edge that
 already exists) are excluded from both.
 
@@ -460,23 +464,17 @@ already exists) are excluded from both.
 - `ToolError` — no edges supplied (both `add` and `remove` empty).
 - `ToolError` — malformed edge (not a 2-element `[source, target]` pair).
 - `ToolError` — unknown task referenced by an edge.
+- `ToolError` — a source task is outside the selected PRD.
 - `ToolError` — self-dependency (`source == target`).
 - `ToolError` — the batch would introduce a dependency cycle.
 - `ToolError` — state directory not found.
-- `ToolError` — an individual backend append was rejected. MCP returns the fixed message
+- `ToolError` — the atomic backend append was rejected. MCP returns the fixed message
   `dependency update was rejected by state validation.` without the raw backend reason;
   the CLI uses the same text and JSON error code `event_rejected`.
 
-When the rejected append is a legacy `task.created` ownership-recovery refusal, the
-backend exception text and its rejection line in `audit.jsonl` are each capped at 4096
-UTF-8 bytes. Raw actor, target, task/feature/owner identifiers, payload values, and
-Pydantic validation details are replaced by stable fingerprints. Repeating the same
-refused append produces the same refusal reason and fingerprints. The refused append
-adds nothing to `events.jsonl` and does not change the SQLite projection. When the audit
-destination is writable, each retry adds a new timestamped rejection line to
-`audit.jsonl`. An audit I/O failure is best-effort: it does not alter the stable refusal
-or permit state mutation. Any earlier per-task append that already committed remains
-committed.
+Dependency-batch refusals are bounded and do not expose raw payload or backend validation
+details. A rejected batch adds nothing to `events.jsonl` and leaves the complete dependency
+projection unchanged.
 
 **When to call**: when a planner agent needs to correct inferred dependencies (add a missing
 edge, drop a spurious one) before promoting tasks to `ready`, without hand-editing state.db.
@@ -1465,7 +1463,7 @@ None.
 
 ```json
 {
-  "api_version": "7",
+  "api_version": "8",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",

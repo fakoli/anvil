@@ -608,6 +608,7 @@ class EditDependenciesResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    prd_id: str
     changed: list[str]
     added: list[list[str]]
     removed: list[list[str]]
@@ -2194,16 +2195,19 @@ def edit_dependencies(
     actor: str,
     add: DependencyEdgesInput = None,
     remove: DependencyEdgesInput = None,
+    prd_id: str | None = None,
+    cwd: str | None = None,
 ) -> EditDependenciesResponse:
     """Apply dependency edits after whole-batch validation.
 
     ``add`` / ``remove`` are ``[source, target]`` pairs meaning *source depends
     on target*. The whole batch is validated up front: any unknown task,
     self-dependency, or cycle rejects the ENTIRE batch (ToolError) before any
-    mutation. Changed tasks are then emitted as separate backend appends, so a
-    later append failure can leave earlier changes committed. Task status is
-    preserved. Inputs are manually shape-checked before state access and a
-    request may contain at most 10,000 edges.
+    mutation. ``prd_id`` explicitly selects the owning PRD (or resolves the
+    single/default PRD when omitted). Changed tasks are persisted by one atomic
+    dependency-batch event; a no-op request emits no event. Inputs are manually
+    shape-checked before state access and a request may contain at most 10,000
+    edges. ``cwd`` selects the project root.
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
@@ -2216,6 +2220,7 @@ def edit_dependencies(
         DepEdge,
         emit_batch_dep_events,
         plan_batch_dep_edits,
+        validate_dep_source_owners,
     )
     from anvil.state.backend import EventRejected
 
@@ -2249,28 +2254,47 @@ def edit_dependencies(
         return out
 
     edges = _to_edges(add_pairs, "add") + _to_edges(remove_pairs, "remove")
+    actor = _require_actor(actor)
 
-    state_dir = _resolve_state_dir()
+    from anvil.cli._helpers import canonical_prd_id
+
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
+        selected_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+        if backend.get_prd(selected_prd_id) is None:
+            raise ToolError(
+                "selected PRD was not found in state. Call parse_prd first."
+            )
         all_tasks = backend.list_tasks()
         tasks_by_id = {t.id: t for t in all_tasks}
 
         # Validate the WHOLE batch before emitting anything — a raised
         # BatchDepError here means zero events were appended (no partial apply).
         try:
+            validate_dep_source_owners(
+                tasks_by_id,
+                edges,
+                prd_id=selected_prd_id,
+            )
             batch_plan = plan_batch_dep_edits(all_tasks, edges)
         except BatchDepError as exc:
             raise ToolError(exc.message) from None
 
         try:
             changed = emit_batch_dep_events(
-                backend, tasks_by_id, batch_plan, actor=actor, clock=clock
+                backend,
+                tasks_by_id,
+                batch_plan,
+                prd_id=selected_prd_id,
+                actor=actor,
+                clock=clock,
             )
         except EventRejected:
             raise ToolError(DEPENDENCY_EVENT_REJECTED_MESSAGE) from None
         return EditDependenciesResponse(
+            prd_id=selected_prd_id,
             changed=changed,
             added=[list(e) for e in batch_plan.added],
             removed=[list(e) for e in batch_plan.removed],

@@ -185,15 +185,21 @@ def _add_prd(
     conn.close()
 
 
-def _add_feature(state_dir: Path, feat_id: str = "F001", title: str = "Test Feature") -> None:
+def _add_feature(
+    state_dir: Path,
+    feat_id: str = "F001",
+    title: str = "Test Feature",
+    *,
+    prd_id: str = "default",
+) -> None:
     """Insert a feature row directly via SQLite."""
     db_path = str(state_dir / "state.db")
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT OR IGNORE INTO features "
-        "(id, title, description, status, requirements, tasks) "
-        "VALUES (?, ?, 'desc', 'proposed', '[]', '[]')",
-        (feat_id, title),
+        "(id, prd_id, title, description, status, requirements, tasks) "
+        "VALUES (?, ?, ?, 'desc', 'proposed', '[]', '[]')",
+        (feat_id, prd_id, title),
     )
     conn.commit()
     conn.close()
@@ -2823,8 +2829,9 @@ class TestSubmitCompletionEvidence:
     def test_non_git_hook_capture_returns_claim_bound_receipt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from anvil.cli import app
         from typer.testing import CliRunner
+
+        from anvil.cli import app
 
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
@@ -3428,6 +3435,133 @@ class TestEditDependencies:
         }
         assert tool.parameters["properties"]["add"] == expected
         assert tool.parameters["properties"]["remove"] == expected
+        optional_string = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        }
+        assert tool.parameters["properties"]["prd_id"] == optional_string
+        assert tool.parameters["properties"]["cwd"] == optional_string
+        assert tool.parameters["required"] == ["actor"]
+
+    def test_edit_dependencies_named_prd_batch_is_atomic_and_noop_emits_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
+        _add_prd(state_dir, prd_id="v0.2", is_default=0)
+        _add_feature(state_dir, "v0.2:F001", prd_id="v0.2")
+        for task_id in ("v0.2:T900", "v0.2:T901", "v0.2:T902"):
+            _add_task(
+                state_dir,
+                task_id=task_id,
+                feature_id="v0.2:F001",
+                prd_id="v0.2",
+            )
+        events_path = state_dir / "events.jsonl"
+        events_before = events_path.read_text(encoding="utf-8").splitlines()
+        request = {
+            "actor": "agent-x",
+            "prd_id": "v0.2",
+            "cwd": str(tmp_path),
+            "add": [
+                ["v0.2:T901", "v0.2:T900"],
+                ["v0.2:T902", "v0.2:T900"],
+            ],
+        }
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("edit_dependencies", request))
+
+        first = _run(run())
+        assert first == {
+            "prd_id": "v0.2",
+            "changed": ["v0.2:T901", "v0.2:T902"],
+            "added": [
+                ["v0.2:T901", "v0.2:T900"],
+                ["v0.2:T902", "v0.2:T900"],
+            ],
+            "removed": [],
+        }
+        events_after = events_path.read_text(encoding="utf-8").splitlines()
+        assert len(events_after) == len(events_before) + 1
+        event = json.loads(events_after[-1])
+        assert event["action"] == "task.dependencies_batch_edited"
+        assert event["target_kind"] == "prd"
+        assert event["target_id"] == "v0.2"
+
+        second = _run(run())
+        assert second["changed"] == []
+        assert events_path.read_text(encoding="utf-8").splitlines() == events_after
+
+    def test_edit_dependencies_named_prd_rejects_other_prd_source(
+        self, tmp_path: Path
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
+        _add_prd(state_dir, prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001")
+        _add_task(state_dir, task_id="T002")
+        events_before = (state_dir / "events.jsonl").read_bytes()
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "edit_dependencies",
+                    {
+                        "actor": "agent-x",
+                        "prd_id": "v0.2",
+                        "cwd": str(tmp_path),
+                        "add": [["T002", "T001"]],
+                    },
+                )
+
+        with pytest.raises(
+            ToolError,
+            match="dependency update source is outside the selected PRD",
+        ):
+            _run(run())
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+
+    def test_edit_dependencies_named_prd_allows_cross_prd_target(
+        self, tmp_path: Path
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
+        _add_prd(state_dir, prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_feature(state_dir, "v0.2:F001", prd_id="v0.2")
+        _add_task(state_dir, task_id="T001")
+        _add_task(
+            state_dir,
+            task_id="v0.2:T900",
+            feature_id="v0.2:F001",
+            prd_id="v0.2",
+        )
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool(
+                        "edit_dependencies",
+                        {
+                            "actor": "agent-x",
+                            "prd_id": "default",
+                            "cwd": str(tmp_path),
+                            "add": [["T001", "v0.2:T900"]],
+                        },
+                    )
+                )
+
+        response = _run(run())
+        assert response == {
+            "prd_id": "default",
+            "changed": ["T001"],
+            "added": [["T001", "v0.2:T900"]],
+            "removed": [],
+        }
+        assert _deps_of(state_dir, "T001") == ["v0.2:T900"]
 
     @pytest.mark.parametrize(
         ("add", "expected_message"),
@@ -3474,6 +3608,7 @@ class TestEditDependencies:
 
     def test_batch_add_applies_all_edges(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         for n in range(1, 6):
             _add_task(state_dir, task_id=f"T00{n}", status="ready")
@@ -3497,6 +3632,7 @@ class TestEditDependencies:
 
     def test_batch_cycle_rejected_no_partial_apply(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
@@ -3518,6 +3654,7 @@ class TestEditDependencies:
 
     def test_unknown_task_rejects_whole_batch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
@@ -3565,6 +3702,7 @@ class TestEditDependencies:
     ) -> None:
         """MCP never reflects attacker-sized edge or task values in ToolError."""
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         marker = f"SECRET_{case.upper()}_MCP_VALUE"
         hostile_id = marker + ("x" * 100_000)
@@ -3629,6 +3767,7 @@ class TestEditDependencies:
         import anvil.mcp_server as mcp_server
 
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         monkeypatch.chdir(tmp_path)
@@ -3676,6 +3815,7 @@ class TestEditDependencies:
     ) -> None:
         """Real stdio transport keeps ToolError and subprocess stderr bounded."""
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         marker = "SECRET_NON_STRING_STDIO"
@@ -3724,6 +3864,7 @@ class TestEditDependencies:
         import anvil.mcp_server as mcp_server
 
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
@@ -3779,6 +3920,7 @@ class TestEditDependencies:
             raise EventRejected(marker)
 
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")

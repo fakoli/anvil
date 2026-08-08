@@ -420,6 +420,63 @@ class TaskCreatedPayload(BaseModel):
     updated_at: str = ""
 
 
+_MAX_DEPENDENCY_BATCH_ENTRIES = 10_000
+
+
+class TaskDependencyEditPayload(BaseModel):
+    """One exact before/after dependency-set replacement in a batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: StrictStr = Field(min_length=1, max_length=512)
+    feature_id: StrictStr = Field(min_length=1, max_length=512)
+    expected_dependencies: list[StrictStr] = Field(
+        max_length=_MAX_DEPENDENCY_BATCH_ENTRIES
+    )
+    dependencies: list[StrictStr] = Field(max_length=_MAX_DEPENDENCY_BATCH_ENTRIES)
+
+    @field_validator("expected_dependencies", "dependencies")
+    @classmethod
+    def _validate_dependency_ids(cls, values: list[str]) -> list[str]:
+        if any(not value or len(value) > 512 for value in values):
+            raise ValueError("dependency ids must be non-empty and at most 512 characters")
+        return values
+
+    @model_validator(mode="after")
+    def _validate_final_dependencies(self) -> TaskDependencyEditPayload:
+        if self.task_id in self.dependencies:
+            raise ValueError("self-dependencies are not allowed")
+        if len(self.dependencies) != len(set(self.dependencies)):
+            raise ValueError("duplicate final dependencies are not allowed")
+        return self
+
+
+class TaskDependenciesBatchEditedPayload(BaseModel):
+    """Atomic dependency-graph edit scoped to one explicit PRD owner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    prd_id: StrictStr = Field(min_length=1, max_length=512)
+    edits: list[TaskDependencyEditPayload] = Field(
+        min_length=1,
+        max_length=_MAX_DEPENDENCY_BATCH_ENTRIES,
+    )
+
+    @model_validator(mode="after")
+    def _validate_batch(self) -> TaskDependenciesBatchEditedPayload:
+        task_ids = [edit.task_id for edit in self.edits]
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("dependency batch task ids must be unique")
+        references = sum(
+            len(edit.expected_dependencies) + len(edit.dependencies)
+            for edit in self.edits
+        )
+        if references > _MAX_DEPENDENCY_BATCH_ENTRIES:
+            raise ValueError("dependency batch exceeds the bounded reference limit")
+        return self
+
+
 class TaskScoredPayload(BaseModel):
     """Payload for 'task.scored'."""
 
@@ -1735,6 +1792,8 @@ __all__ = [
     "SyncReconciliationStartedPayload",
     "TaskAppliedPayload",
     "TaskCreatedPayload",
+    "TaskDependenciesBatchEditedPayload",
+    "TaskDependencyEditPayload",
     "TaskDeletedPayload",
     "TaskExpandedPayload",
     "TaskScoredPayload",

@@ -141,6 +141,7 @@ from anvil.state.payloads import (
     TaskAppliedPayload,
     TaskCreatedPayload,
     TaskDeletedPayload,
+    TaskDependenciesBatchEditedPayload,
     TaskExpandedPayload,
     TaskScoredPayload,
     TaskStatusChangedPayload,
@@ -4480,6 +4481,23 @@ class SqliteBackend:
         try:
             typed_payload = spec.payload_model.model_validate(event.payload_json)
         except Exception as exc:
+            if action == "task.dependencies_batch_edited":
+                expected_prd_id = event.payload_json.get("prd_id")
+                reason = (
+                    "dependency batch refused: code=invalid_payload "
+                    f"event_id={event.id} "
+                    "action=task.dependencies_batch_edited "
+                    "expected_prd="
+                    f"{self._dependency_batch_prd_label(expected_prd_id)} "
+                    "inferred_prd="
+                    f"{self._dependency_batch_prd_label(event.target_id)}"
+                )
+                encoded = reason.encode("utf-8", errors="replace")
+                if len(encoded) > _AUDIT_LINE_MAX_UTF8_BYTES:
+                    reason = encoded[: _AUDIT_LINE_MAX_UTF8_BYTES - 3].decode(
+                        "utf-8", errors="ignore"
+                    ) + "..."
+                raise TransactionAborted(reason) from None
             recovery_owner = self._task_created_recovery_owner(conn, event)
             if recovery_owner is not None:
                 refusal = self._task_created_recovery_refusal(
@@ -4691,6 +4709,11 @@ class SqliteBackend:
             ),
             "task.created": ActionSpec(
                 TaskCreatedPayload, self._check_task_created, self._write_task_created
+            ),
+            "task.dependencies_batch_edited": ActionSpec(
+                TaskDependenciesBatchEditedPayload,
+                self._check_task_dependencies_batch_edited,
+                self._write_task_dependencies_batch_edited,
             ),
             "task.scored": ActionSpec(
                 TaskScoredPayload, self._check_task_scored, self._write_task_scored
@@ -8735,6 +8758,191 @@ class SqliteBackend:
             raise EventRejected(
                 f"task.created: invalid Task payload: {exc}"
             ) from exc
+
+    @staticmethod
+    def _dependency_batch_has_cycle(dep_map: dict[str, list[str]]) -> bool:
+        """Return whether the complete post-edit dependency graph is cyclic."""
+        white, grey, black = 0, 1, 2
+        colour = {task_id: white for task_id in dep_map}
+        for start in sorted(dep_map):
+            if colour[start] != white:
+                continue
+            colour[start] = grey
+            stack: list[tuple[str, Iterator[str]]] = [
+                (start, iter(sorted(dep_map[start])))
+            ]
+            while stack:
+                node, edges = stack[-1]
+                try:
+                    dependency = next(edges)
+                except StopIteration:
+                    stack.pop()
+                    colour[node] = black
+                    continue
+                if dependency not in colour:
+                    continue
+                if colour[dependency] == grey:
+                    return True
+                if colour[dependency] == white:
+                    colour[dependency] = grey
+                    stack.append(
+                        (dependency, iter(sorted(dep_map[dependency])))
+                    )
+        return False
+
+    @staticmethod
+    def _dependency_batch_prd_label(value: Any) -> str:
+        if isinstance(value, str):
+            encoded = value.encode("utf-8", errors="replace")
+            if len(encoded) <= 512 and not any(ord(char) < 32 for char in value):
+                return json.dumps(value, ensure_ascii=False)
+        return _redacted_identifier(value)
+
+    def _dependency_batch_refusal(
+        self,
+        event: EventDraft | Event,
+        payload: TaskDependenciesBatchEditedPayload,
+        *,
+        code: str,
+        inferred_prd_id: Any = None,
+        replay: bool,
+    ) -> EventRejected | TransactionAborted:
+        """Build a bounded, payload-free live or replay refusal."""
+        event_id = getattr(event, "id", "pending")
+        reason = (
+            "dependency batch refused: "
+            f"code={code} event_id={event_id} "
+            "action=task.dependencies_batch_edited "
+            f"expected_prd={self._dependency_batch_prd_label(payload.prd_id)} "
+            f"inferred_prd={self._dependency_batch_prd_label(inferred_prd_id)}"
+        )
+        # The labels above are individually bounded, but keep the contract
+        # explicit if their formatting changes later.
+        encoded = reason.encode("utf-8", errors="replace")
+        if len(encoded) > _AUDIT_LINE_MAX_UTF8_BYTES:
+            reason = encoded[: _AUDIT_LINE_MAX_UTF8_BYTES - 3].decode(
+                "utf-8", errors="ignore"
+            ) + "..."
+        if replay:
+            return TransactionAborted(reason)
+        return EventRejected(reason)
+
+    def _validate_task_dependencies_batch(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskDependenciesBatchEditedPayload,
+        event: EventDraft | Event,
+        *,
+        replay: bool,
+    ) -> list[tuple[str, list[str]]]:
+        """Resolve ownership, stale preconditions, and the final graph."""
+
+        def reject(code: str, inferred: Any = None) -> None:
+            raise self._dependency_batch_refusal(
+                event,
+                payload,
+                code=code,
+                inferred_prd_id=inferred,
+                replay=replay,
+            )
+
+        if event.target_kind != "prd" or event.target_id != payload.prd_id:
+            reject("event_identity_mismatch", event.target_id)
+        if payload.schema_version != 1:
+            reject("schema_version")
+        if conn.execute(
+            "SELECT 1 FROM prds WHERE id = ?", (payload.prd_id,)
+        ).fetchone() is None:
+            reject("unknown_prd")
+
+        rows = conn.execute(
+            "SELECT id, feature_id, prd_id, dependencies FROM tasks"
+        ).fetchall()
+        task_rows = {str(row[0]): row for row in rows}
+        feature_rows = {
+            str(row[0]): str(row[1])
+            for row in conn.execute("SELECT id, prd_id FROM features").fetchall()
+        }
+        graph: dict[str, list[str]] = {}
+        for row in rows:
+            task_id = str(row[0])
+            try:
+                dependencies = json.loads(row[3])
+            except (TypeError, json.JSONDecodeError):
+                reject("stored_dependencies_invalid", row[2])
+            if not isinstance(dependencies, list) or not all(
+                isinstance(item, str) for item in dependencies
+            ):
+                reject("stored_dependencies_invalid", row[2])
+            graph[task_id] = dependencies
+
+        updates: list[tuple[str, list[str]]] = []
+        for edit in payload.edits:
+            row = task_rows.get(edit.task_id)
+            if row is None:
+                reject("unknown_task")
+            inferred_prd_id = str(row[2])
+            if inferred_prd_id != payload.prd_id:
+                reject("task_owner_mismatch", inferred_prd_id)
+            if str(row[1]) != edit.feature_id:
+                reject("task_feature_mismatch", inferred_prd_id)
+            feature_prd_id = feature_rows.get(edit.feature_id)
+            if feature_prd_id is None:
+                reject("unknown_feature")
+            if feature_prd_id != payload.prd_id:
+                reject("feature_owner_mismatch", feature_prd_id)
+            try:
+                current_dependencies = json.loads(row[3])
+            except (TypeError, json.JSONDecodeError):
+                reject("stored_dependencies_invalid", inferred_prd_id)
+            if current_dependencies != edit.expected_dependencies:
+                reject("stale_precondition", inferred_prd_id)
+            if edit.dependencies == edit.expected_dependencies:
+                reject("unchanged_edit", inferred_prd_id)
+            for dependency in edit.dependencies:
+                dependency_row = task_rows.get(dependency)
+                if dependency_row is None:
+                    reject("unknown_dependency", inferred_prd_id)
+            graph[edit.task_id] = list(edit.dependencies)
+            updates.append((edit.task_id, list(edit.dependencies)))
+
+        if self._dependency_batch_has_cycle(graph):
+            reject("cycle", payload.prd_id)
+        return updates
+
+    def _check_task_dependencies_batch_edited(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskDependenciesBatchEditedPayload,
+        event: EventDraft,
+    ) -> None:
+        self._validate_task_dependencies_batch(
+            conn, payload, event, replay=False
+        )
+
+    def _write_task_dependencies_batch_edited(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskDependenciesBatchEditedPayload,
+        event: Event,
+    ) -> None:
+        updates = self._validate_task_dependencies_batch(
+            conn, payload, event, replay=True
+        )
+        updated_at = event.timestamp.isoformat()
+        for task_id, dependencies in updates:
+            cursor = conn.execute(
+                "UPDATE tasks SET dependencies = ?, updated_at = ? "
+                "WHERE id = ? AND prd_id = ?",
+                (json.dumps(dependencies), updated_at, task_id, payload.prd_id),
+            )
+            if cursor.rowcount != 1:
+                raise self._dependency_batch_refusal(
+                    event,
+                    payload,
+                    code="projection_row_missing",
+                    replay=True,
+                )
 
     def _write_task_created(
         self,

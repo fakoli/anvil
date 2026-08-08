@@ -1174,7 +1174,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "7"
+        assert API_VERSION == "8"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -7441,6 +7441,139 @@ def _seed_two_prd_project(tmp_path: Path) -> str:
     finally:
         conn.close()
     return project_id
+
+
+class TestNamedPrdAtomicDeps:
+    """Dependency batches select one PRD and append once for all edits."""
+
+    def test_deps_named_prd_batch_is_atomic_and_noop_emits_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "INSERT INTO features "
+                "(id, prd_id, title, description, status, requirements, tasks) "
+                "VALUES ('v0.2:F001', 'v0.2', 'Named', 'desc', "
+                "'proposed', '[]', '[]')"
+            )
+            conn.execute(
+                "UPDATE tasks SET feature_id = 'v0.2:F001' "
+                "WHERE id = 'v0.2:T900'"
+            )
+            for task_id in ("v0.2:T901", "v0.2:T902"):
+                conn.execute(
+                    """INSERT INTO tasks
+                    (id, feature_id, prd_id, title, description, status, priority,
+                     dependencies, conflict_groups, scores, acceptance_criteria,
+                     implementation_notes, verification, likely_files,
+                     created_at, updated_at)
+                    VALUES (?, 'v0.2:F001', 'v0.2', ?, 'desc', 'ready', 'medium',
+                            '[]', '[]', '{}', '[]', '[]', '{}', '[]',
+                            '2026-01-01T00:00:00+00:00',
+                            '2026-01-01T00:00:00+00:00')""",
+                    (task_id, f"Task {task_id}"),
+                )
+            conn.commit()
+            events_before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        finally:
+            conn.close()
+
+        args = [
+            "deps",
+            "--prd",
+            "v0.2",
+            "--actor",
+            "agent-test",
+            "--add",
+            "v0.2:T901->v0.2:T900",
+            "--add",
+            "v0.2:T902->v0.2:T900",
+            "--json",
+        ]
+        first = _invoke_cmd(tmp_path, args)
+        assert first.exit_code == 0, first.output
+        data = json.loads(first.output)["data"]
+        assert data == {
+            "prd_id": "v0.2",
+            "changed": ["v0.2:T901", "v0.2:T902"],
+            "added": [
+                ["v0.2:T901", "v0.2:T900"],
+                ["v0.2:T902", "v0.2:T900"],
+            ],
+            "removed": [],
+        }
+
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (
+                events_before + 1
+            )
+            row = conn.execute(
+                "SELECT action, target_kind, target_id, payload_json "
+                "FROM events ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            assert row[:3] == (
+                "task.dependencies_batch_edited",
+                "prd",
+                "v0.2",
+            )
+            payload = json.loads(row[3])
+            assert [edit["task_id"] for edit in payload["edits"]] == [
+                "v0.2:T901",
+                "v0.2:T902",
+            ]
+        finally:
+            conn.close()
+
+        second = _invoke_cmd(tmp_path, args)
+        assert second.exit_code == 0, second.output
+        assert json.loads(second.output)["data"]["changed"] == []
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (
+                events_before + 1
+            )
+        finally:
+            conn.close()
+
+    def test_deps_named_prd_batch_allows_cross_prd_target(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "deps",
+                "--prd",
+                "default",
+                "--actor",
+                "agent-test",
+                "--add",
+                "T001->v0.2:T900",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"] == {
+            "prd_id": "default",
+            "changed": ["T001"],
+            "added": [["T001", "v0.2:T900"]],
+            "removed": [],
+        }
+        conn = sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
+        try:
+            assert json.loads(
+                conn.execute(
+                    "SELECT dependencies FROM tasks WHERE id = 'T001'"
+                ).fetchone()[0]
+            ) == ["v0.2:T900"]
+        finally:
+            conn.close()
 
 
 def _set_cross_prd_guard(tmp_path: Path, value: str) -> None:

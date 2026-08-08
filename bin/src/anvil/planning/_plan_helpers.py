@@ -45,6 +45,7 @@ __all__ = [
     "DEPENDENCY_EDGE_LIST_FORMAT_MESSAGE",
     "DEPENDENCY_PAIR_FORMAT_MESSAGE",
     "DEPENDENCY_SELF_LOOP_MESSAGE",
+    "DEPENDENCY_SOURCE_OWNER_MESSAGE",
     "DEPENDENCY_UNKNOWN_SOURCE_MESSAGE",
     "DEPENDENCY_UNKNOWN_TARGET_MESSAGE",
     "DepEdge",
@@ -57,6 +58,7 @@ __all__ = [
     "has_tasks_section",
     "parse_dep_edge",
     "plan_batch_dep_edits",
+    "validate_dep_source_owners",
 ]
 
 
@@ -297,6 +299,9 @@ DEPENDENCY_UNKNOWN_TARGET_MESSAGE = (
 )
 DEPENDENCY_SELF_LOOP_MESSAGE = (
     "self-dependency rejected: a task cannot depend on itself."
+)
+DEPENDENCY_SOURCE_OWNER_MESSAGE = (
+    "dependency update source is outside the selected PRD."
 )
 DEPENDENCY_CYCLE_MESSAGE = (
     "dependency cycle rejected: the resulting graph contains a cycle."
@@ -556,43 +561,67 @@ def emit_batch_dep_events(
     tasks_by_id: dict[str, Task],
     plan: BatchDepPlan,
     *,
+    prd_id: str,
     actor: str,
     clock: Clock,
 ) -> list[str]:
-    """Emit one ``task.created`` upsert per changed task in ``plan``.
+    """Append one atomic dependency-batch event for ``plan``.
 
-    The ``task.created`` upsert deliberately omits ``status`` from its SQL
-    ``ON CONFLICT DO UPDATE`` set, so re-emitting a task with a new
-    ``dependencies`` list updates *only* the dependency column (and
-    ``updated_at``) — it never regresses a claimed / in-progress task. This is
-    why the batch primitive reuses ``task.created`` rather than inventing a new
-    event type: dependency-only edits are exactly what that upsert already
-    supports safely.
+    Every changed task carries its exact prior ordered dependency list as a
+    stale-write precondition.  The state handler validates ownership, feature
+    ownership, endpoints, preconditions, and the final graph while holding the
+    append lock, then projects all edits together.  A no-op plan appends no
+    event.
 
-    Returns the list of task IDs that were upserted (== ``plan.new_dependencies``
-    keys, in their deterministic order).
+    Returns the changed task IDs in deterministic order.
     """
     from anvil.state.models import EventDraft
 
-    upserted: list[str] = []
-    for task_id, new_deps in plan.new_dependencies.items():
-        task = tasks_by_id[task_id]
-        now = clock.now()
-        task_data = task.model_dump(mode="json")
-        # Task.prd_id is intentionally excluded from model_dump() so legacy API
-        # snapshots stay byte-identical. Event payloads are different: prd_id is
-        # ownership-critical and must be carried explicitly for named PRDs.
-        task_data["prd_id"] = task.prd_id
-        task_data["dependencies"] = list(new_deps)
-        task_data["updated_at"] = now.isoformat()
-        draft = EventDraft(
-            timestamp=now,
-            actor=actor,
-            action="task.created",
-            target_kind="task",
-            target_id=task_id,
-            payload_json=task_data,
-        )
-        backend.append(draft)
-        upserted.append(task_id)
-    return upserted
+    changed = sorted(plan.new_dependencies)
+    if not changed:
+        return []
+
+    edits = [
+        {
+            "task_id": task_id,
+            "feature_id": tasks_by_id[task_id].feature_id,
+            "expected_dependencies": list(tasks_by_id[task_id].dependencies),
+            "dependencies": list(plan.new_dependencies[task_id]),
+        }
+        for task_id in changed
+    ]
+    draft = EventDraft(
+        timestamp=clock.now(),
+        actor=actor,
+        action="task.dependencies_batch_edited",
+        target_kind="prd",
+        target_id=prd_id,
+        payload_json={
+            "schema_version": 1,
+            "prd_id": prd_id,
+            "edits": edits,
+        },
+    )
+    backend.append(draft)
+    return changed
+
+
+def validate_dep_source_owners(
+    tasks_by_id: dict[str, Task],
+    edges: list[DepEdge],
+    *,
+    prd_id: str,
+) -> None:
+    """Reject a known source task not owned by the selected PRD.
+
+    Dependency targets are intentionally global: named PRDs may reference
+    tasks in another partition. Unknown endpoints remain the planner's concern.
+    Only the source task is mutated, so its ownership must match ``prd_id``.
+    """
+    for edge in edges:
+        task = tasks_by_id.get(edge.source)
+        if task is not None and task.prd_id != prd_id:
+            raise BatchDepError(
+                DEPENDENCY_SOURCE_OWNER_MESSAGE,
+                code="owner_mismatch",
+            )

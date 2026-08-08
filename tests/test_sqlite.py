@@ -14070,7 +14070,6 @@ class TestHookCommandProofState:
             assert b.list_evidence() == []
         finally:
             b.close()
-
     def test_historical_unattributed_event_replays_without_shape_drift(
         self, tmp_path: Path
     ) -> None:
@@ -14352,3 +14351,468 @@ class TestActorIdentityAtomicity:
             assert b.list_evidence() == []
         finally:
             b.close()
+
+
+# ---------------------------------------------------------------------------
+# T015.2 — one durable, atomic dependency batch
+# ---------------------------------------------------------------------------
+
+
+def _setup_named_dependency_graph(
+    backend: SqliteBackend,
+    *,
+    dependencies: dict[str, list[str]] | None = None,
+) -> None:
+    dependencies = dependencies or {}
+    _setup_project(backend)
+    backend.append(
+        _make_event(
+            "prd.parsed",
+            {**_make_prd_parsed_payload(), "prd_id": "named"},
+            target_kind="prd",
+            target_id="named",
+        )
+    )
+    backend.append(
+        _make_event(
+            "feature.created",
+            {**_make_feature_payload(feat_id="named:F001"), "prd_id": "named"},
+            target_kind="feature",
+            target_id="named:F001",
+        )
+    )
+    for task_id in ("named:T001", "named:T002", "named:T003"):
+        backend.append(
+            _make_event(
+                "task.created",
+                {
+                    **_make_task_payload(
+                        task_id=task_id, feature_id="named:F001"
+                    ),
+                    "prd_id": "named",
+                    "dependencies": dependencies.get(task_id, []),
+                },
+                target_kind="task",
+                target_id=task_id,
+            )
+        )
+
+
+def _dependency_edit(
+    task_id: str,
+    expected: list[str],
+    dependencies: list[str],
+) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "feature_id": "named:F001",
+        "expected_dependencies": expected,
+        "dependencies": dependencies,
+    }
+
+
+def _dependency_batch_draft(edits: list[dict[str, Any]]) -> EventDraft:
+    return _make_event(
+        "task.dependencies_batch_edited",
+        {"schema_version": 1, "prd_id": "named", "edits": edits},
+        target_kind="prd",
+        target_id="named",
+    )
+
+
+class TestDepsNamedBatchAtomicReplayCycleRace:
+    def test_breaks_cycle_and_adds_cross_prd_gate_atomically(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_named_dependency_graph(
+                backend,
+                dependencies={
+                    "named:T001": ["named:T002"],
+                    "named:T002": ["named:T001"],
+                },
+            )
+            backend.append(
+                _make_event(
+                    "feature.created",
+                    _make_feature_payload(feat_id="F-default"),
+                    target_kind="feature",
+                    target_id="F-default",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "task.created",
+                    _make_task_payload(task_id="T-default", feature_id="F-default"),
+                    target_kind="task",
+                    target_id="T-default",
+                )
+            )
+            backend.append(
+                _dependency_batch_draft(
+                    [
+                        _dependency_edit(
+                            "named:T001", ["named:T002"], ["T-default"]
+                        ),
+                        _dependency_edit("named:T002", ["named:T001"], []),
+                    ]
+                )
+            )
+            assert backend.get_task("named:T001").dependencies == ["T-default"]  # type: ignore[union-attr]
+            assert backend.get_task("named:T002").dependencies == []  # type: ignore[union-attr]
+            assert _read_jsonl(str(tmp_path / "events.jsonl"))[-1]["action"] == (
+                "task.dependencies_batch_edited"
+            )
+        finally:
+            backend.close()
+
+    def test_cycle_and_invalid_final_sets_reject_before_log(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_named_dependency_graph(backend)
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="code=cycle"):
+                backend.append(
+                    _dependency_batch_draft(
+                        [
+                            _dependency_edit("named:T001", [], ["named:T002"]),
+                            _dependency_edit("named:T002", [], ["named:T001"]),
+                        ]
+                    )
+                )
+            for invalid in (
+                ["named:T001"],
+                ["named:T002", "named:T002"],
+            ):
+                with pytest.raises(EventRejected, match="payload validation"):
+                    backend.append(
+                        _dependency_batch_draft(
+                            [_dependency_edit("named:T001", [], invalid)]
+                        )
+                    )
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert backend.get_task("named:T001").dependencies == []  # type: ignore[union-attr]
+        finally:
+            backend.close()
+
+    def test_stale_second_backend_refuses_before_log_mutation(
+        self, tmp_path: Path
+    ) -> None:
+        first = _make_backend(tmp_path)
+        _setup_named_dependency_graph(first)
+        second = SqliteBackend(
+            db_path=str(tmp_path / "state.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=_make_clock(),
+        )
+        second.initialize()
+        try:
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            first.append(
+                _dependency_batch_draft(
+                    [_dependency_edit("named:T001", [], ["named:T002"])]
+                )
+            )
+            with pytest.raises(EventRejected, match="code=stale_precondition"):
+                second.append(
+                    _dependency_batch_draft(
+                        [_dependency_edit("named:T001", [], ["named:T003"])]
+                    )
+                )
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before + 1
+            assert second.get_task("named:T001").dependencies == ["named:T002"]  # type: ignore[union-attr]
+        finally:
+            second.close()
+            first.close()
+
+    def test_source_prd_and_feature_ownership_are_authoritative(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_named_dependency_graph(backend)
+            backend.append(
+                _make_event(
+                    "feature.created",
+                    _make_feature_payload(feat_id="F-default"),
+                    target_kind="feature",
+                    target_id="F-default",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "task.created",
+                    _make_task_payload(task_id="T-default", feature_id="F-default"),
+                    target_kind="task",
+                    target_id="T-default",
+                )
+            )
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            edit = _dependency_edit("named:T001", [], ["named:T002"])
+            edit["feature_id"] = "wrong:F001"
+            with pytest.raises(EventRejected, match="task_feature_mismatch"):
+                backend.append(_dependency_batch_draft([edit]))
+            wrong_source = _dependency_edit("named:T001", [], ["named:T002"])
+            wrong_source["task_id"] = "T-default"
+            wrong_source["feature_id"] = "F-default"
+            with pytest.raises(EventRejected, match="task_owner_mismatch"):
+                backend.append(_dependency_batch_draft([wrong_source]))
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+        finally:
+            backend.close()
+
+    def test_mid_batch_sql_failure_rolls_back_and_catch_up_heals(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        _setup_named_dependency_graph(backend)
+        conn = backend._require_conn()  # noqa: SLF001
+        conn.execute(
+            "CREATE TRIGGER fail_second_dep_update "
+            "BEFORE UPDATE OF dependencies ON tasks "
+            "WHEN NEW.id = 'named:T002' "
+            "BEGIN SELECT RAISE(ABORT, 'injected dependency failure'); END"
+        )
+        with pytest.raises(TransactionAborted, match="log line remains"):
+            backend.append(
+                _dependency_batch_draft(
+                    [
+                        _dependency_edit("named:T001", [], ["named:T003"]),
+                        _dependency_edit("named:T002", [], ["named:T003"]),
+                    ]
+                )
+            )
+        assert backend.get_task("named:T001").dependencies == []  # type: ignore[union-attr]
+        assert backend.get_task("named:T002").dependencies == []  # type: ignore[union-attr]
+        conn.execute("DROP TRIGGER fail_second_dep_update")
+        backend.close()
+
+        healed = _make_backend(tmp_path)
+        try:
+            assert healed.get_task("named:T001").dependencies == ["named:T003"]  # type: ignore[union-attr]
+            assert healed.get_task("named:T002").dependencies == ["named:T003"]  # type: ignore[union-attr]
+        finally:
+            healed.close()
+
+    def test_replay_round_trip_and_bounded_invalid_diagnostic(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        backend = _make_backend(tmp_path)
+        _setup_named_dependency_graph(backend)
+        backend.append(
+            _dependency_batch_draft(
+                [_dependency_edit("named:T001", [], ["named:T002"])]
+            )
+        )
+        backend.close()
+
+        replay = SqliteBackend(
+            db_path=str(tmp_path / "replayed.db"),
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        replay.replay_from_empty(events_path)
+        try:
+            assert replay.get_task("named:T001").dependencies == ["named:T002"]  # type: ignore[union-attr]
+        finally:
+            replay.close()
+
+        raw_events = _read_jsonl(events_path)
+        raw_events[-1]["payload_json"]["edits"][0]["task_id"] = "missing:T999"
+        poisoned_path = tmp_path / "poisoned.jsonl"
+        poisoned_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in raw_events),
+            encoding="utf-8",
+        )
+        poisoned = SqliteBackend(
+            db_path=str(tmp_path / "poisoned.db"),
+            events_path=str(poisoned_path),
+            clock=_make_clock(),
+        )
+        with pytest.raises(TransactionAborted) as exc_info:
+            poisoned.replay_from_empty(str(poisoned_path))
+        diagnostic = str(exc_info.value)
+        assert "event_id=E000008" in diagnostic
+        assert "action=task.dependencies_batch_edited" in diagnostic
+        assert "expected_prd=\"named\"" in diagnostic
+        assert len(diagnostic.encode("utf-8")) <= 4096
+
+    def test_malformed_replay_error_is_bounded_and_payload_free(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        backend = _make_backend(tmp_path)
+        _setup_named_dependency_graph(backend)
+        backend.close()
+        raw_events = _read_jsonl(events_path)
+        raw_events.append(
+            Event(
+                id="E000008",
+                timestamp=_T0,
+                actor="test",
+                action="task.dependencies_batch_edited",
+                target_kind="prd",
+                target_id="named",
+                payload_json={
+                    "schema_version": 999,
+                    "prd_id": "named",
+                    "edits": [],
+                    "secret": "do-not-echo",
+                },
+            ).model_dump(mode="json")
+        )
+        poisoned_path = tmp_path / "malformed.jsonl"
+        poisoned_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in raw_events),
+            encoding="utf-8",
+        )
+        poisoned = SqliteBackend(
+            db_path=str(tmp_path / "malformed.db"),
+            events_path=str(poisoned_path),
+            clock=_make_clock(),
+        )
+        with pytest.raises(TransactionAborted) as exc_info:
+            poisoned.replay_from_empty(str(poisoned_path))
+        diagnostic = str(exc_info.value)
+        assert "code=invalid_payload" in diagnostic
+        assert "event_id=E000008" in diagnostic
+        assert "do-not-echo" not in diagnostic
+        assert len(diagnostic.encode("utf-8")) <= 4096
+
+    def test_exact_e005106_legacy_missing_prd_dependency_upsert_replays(
+        self, tmp_path: Path
+    ) -> None:
+        fixture_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "replay"
+            / "e005106-task-created.json"
+        )
+        fixture_text = fixture_path.read_text(encoding="utf-8").strip()
+        fixture_raw = json.loads(fixture_text)
+        exact_event = Event.model_validate(fixture_raw)
+        assert exact_event.id == "E005106"
+        assert exact_event.target_id == "autonomous-lifecycle-hardening:T009"
+        assert exact_event.payload_json["feature_id"] == (
+            "autonomous-lifecycle-hardening:F002"
+        )
+        assert "prd_id" not in exact_event.payload_json
+        assert exact_event.payload_json["dependencies"] == [
+            "autonomous-lifecycle-hardening:T008.1",
+            "provider-read-contracts:T007.2",
+        ]
+
+        state_dir = tmp_path / "forward"
+        state_dir.mkdir()
+        events_path = state_dir / "events.jsonl"
+        backend = _make_backend(state_dir)
+        try:
+            _setup_project(backend)
+            backend.append(
+                _make_event(
+                    "prd.parsed",
+                    {
+                        **_make_prd_parsed_payload(),
+                        "prd_id": "autonomous-lifecycle-hardening",
+                    },
+                    target_kind="prd",
+                    target_id="autonomous-lifecycle-hardening",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "feature.created",
+                    {
+                        **_make_feature_payload(
+                            feat_id="autonomous-lifecycle-hardening:F002"
+                        ),
+                        "prd_id": "autonomous-lifecycle-hardening",
+                    },
+                    target_kind="feature",
+                    target_id="autonomous-lifecycle-hardening:F002",
+                )
+            )
+            baseline_payload = dict(exact_event.payload_json)
+            baseline_payload["prd_id"] = "autonomous-lifecycle-hardening"
+            baseline_payload["dependencies"] = [
+                "autonomous-lifecycle-hardening:T008.1"
+            ]
+            baseline_payload["updated_at"] = baseline_payload["created_at"]
+            backend.append(
+                _make_event(
+                    "task.created",
+                    baseline_payload,
+                    target_kind="task",
+                    target_id="autonomous-lifecycle-hardening:T009",
+                )
+            )
+
+            # Reproduce a projection exactly one event behind E005106 without
+            # fabricating 5,100 unrelated events. The catch-up cursor is the
+            # max projected event id, so an audit-only E005105 is sufficient.
+            cursor_event = Event(
+                id="E005105",
+                timestamp=exact_event.timestamp,
+                actor="fixture",
+                action="state.initialized",
+                target_kind="project",
+                target_id="proj-1",
+                payload_json={},
+            )
+            backend._apply_write_only(  # noqa: SLF001
+                backend._require_conn(), cursor_event  # noqa: SLF001
+            )
+        finally:
+            backend.close()
+
+        with events_path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                cursor_event.model_dump_json(
+                    exclude={"parent_event_id", "lamport"}
+                )
+                + "\n"
+            )
+            stream.write(fixture_text + "\n")
+
+        healed = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(events_path),
+            clock=_make_clock(),
+        )
+        try:
+            healed.initialize()
+            caught_up = healed.get_task("autonomous-lifecycle-hardening:T009")
+            assert caught_up is not None
+            assert caught_up.prd_id == "autonomous-lifecycle-hardening"
+            assert caught_up.feature_id == "autonomous-lifecycle-hardening:F002"
+            assert caught_up.dependencies == [
+                "autonomous-lifecycle-hardening:T008.1",
+                "provider-read-contracts:T007.2",
+            ]
+        finally:
+            healed.close()
+
+        replayed = SqliteBackend(
+            db_path=str(state_dir / "replayed.db"),
+            events_path=str(events_path),
+            clock=_make_clock(),
+        )
+        try:
+            replayed.replay_from_empty(str(events_path))
+            rebuilt = replayed.get_task("autonomous-lifecycle-hardening:T009")
+            assert rebuilt is not None
+            assert rebuilt.prd_id == "autonomous-lifecycle-hardening"
+            assert rebuilt.feature_id == "autonomous-lifecycle-hardening:F002"
+            assert rebuilt.dependencies == [
+                "autonomous-lifecycle-hardening:T008.1",
+                "provider-read-contracts:T007.2",
+            ]
+            assert rebuilt.model_dump(mode="json") == caught_up.model_dump(
+                mode="json"
+            )
+        finally:
+            replayed.close()
