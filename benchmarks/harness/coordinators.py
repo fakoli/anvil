@@ -112,6 +112,10 @@ _CLAIM_ID_PATTERN = r"C[0-9A-F]{8}"
 _ACTOR_CAPTURE = r"[^'\r\n]+"
 _QUOTED_LIST_ITEM = r"(?:'(?:\\.|[^'\\\r\n])*'|\"(?:\\.|[^\"\\\r\n])*\")"
 _BOUNDED_LIST = rf"\[{_QUOTED_LIST_ITEM}(?:, {_QUOTED_LIST_ITEM})*\]"
+_GENERATION_RACE_RE = re.compile(
+    r"claim\.created: generation must equal the next authoritative task "
+    r"generation \([1-9][0-9]*\)\."
+)
 _CLAIM_CONTENTION_PATTERNS = {
     # The CLI's typed pre-claim overlap refusal.
     "conflict": (
@@ -209,6 +213,8 @@ def _claim_failure_is_contention(
     message = error.get("message")
     if code not in {"conflict", "claim_error"} or not isinstance(message, str):
         return False
+    if code == "claim_error" and _GENERATION_RACE_RE.fullmatch(message) is not None:
+        return True
     patterns = _CLAIM_CONTENTION_PATTERNS.get(code, ())
     for pattern in patterns:
         match = pattern.fullmatch(message)
@@ -430,7 +436,7 @@ def _record_verification_proofs(
     deadline: float,
 ) -> None:
     """Run requested commands and persist bounded observed proofs for submit."""
-    buffer_file = _claim_buffer_file(proj, claim_id)
+    prepared_commands: list[tuple[str, list[str]]] = []
     for command in commands:
         try:
             argv = _split_verification_command(command)
@@ -444,6 +450,67 @@ def _record_verification_proofs(
                 "benchmark coordination infrastructure failure: "
                 "phase=verification_command empty=refused"
             )
+        prepared_commands.append((command, argv))
+
+    try:
+        from anvil.clock import SystemClock
+        from anvil.state.models import (
+            HookCommandAttribution,
+            hook_command_semantic_digest,
+            task_snapshot_revision,
+        )
+        from anvil.state.sqlite import SqliteBackend
+
+        state_dir = proj.root / ".anvil"
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            claim = backend.get_claim(claim_id)
+            project = backend.get_project()
+            task = backend.get_task(claim.task_id) if claim is not None else None
+            prd = backend.get_prd_for_task(task) if task is not None else None
+        finally:
+            backend.close()
+        if (
+            claim is None
+            or claim.status != "active"
+            or claim.claimed_by != actor
+            or project is None
+            or task is None
+            or prd is None
+        ):
+            raise ValueError("claim attribution is unavailable")
+        context = claim.attestation_context
+        attribution = HookCommandAttribution(
+            project_id=project.id,
+            claim_id=claim.id,
+            generation=claim.generation,
+            claimed_by=claim.claimed_by,
+            task_id=claim.task_id,
+            task_revision=(
+                context.task_revision
+                if context is not None
+                else task_snapshot_revision(task)
+            ),
+            prd_id=context.prd_id if context is not None else prd.id,
+            prd_revision=(
+                context.prd_revision if context is not None else prd.revision
+            ),
+            repository_id=context.repository_id if context is not None else None,
+            claim_start_sha=context.claim_start_sha if context is not None else None,
+        )
+    except Exception:
+        raise CoordinationInfrastructureError(
+            "benchmark coordination infrastructure failure: "
+            "phase=verification_record attribution=unavailable"
+        ) from None
+
+    buffer_file = _claim_buffer_file(proj, claim_id)
+    for command, argv in prepared_commands:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise CoordinationInfrastructureError(
@@ -451,7 +518,7 @@ def _record_verification_proofs(
                 "phase=verification_command deadline=exceeded"
             )
         try:
-            result = engine.run_process(argv, proj.root, timeout=remaining)
+            result = engine.run_process(argv, proj.workspace, timeout=remaining)
         except Exception:
             raise CoordinationInfrastructureError(
                 "benchmark coordination infrastructure failure: "
@@ -459,15 +526,26 @@ def _record_verification_proofs(
             ) from None
         if result.code in {124, 125, 126}:
             _infrastructure_failure("verification_command", result)
+        captured_at = datetime.now(UTC)
+        output_sha256 = hashlib.sha256(
+            (result.out + result.err).encode("utf-8")
+        ).hexdigest()
         record = {
             "kind": "command",
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": captured_at.isoformat(),
             "command": command,
             "exit_code": result.code,
-            "output_sha256": hashlib.sha256(
-                (result.out + result.err).encode("utf-8")
-            ).hexdigest(),
+            "output_sha256": output_sha256,
             "actor": actor,
+            "claim_id": claim_id,
+            "attribution": attribution.model_dump(mode="json"),
+            "semantic_digest": hook_command_semantic_digest(
+                attribution=attribution,
+                command=command,
+                exit_code=result.code,
+                output_sha256=output_sha256,
+                captured_at=captured_at,
+            ),
         }
         try:
             with buffer_file.open("a", encoding="utf-8") as handle:
