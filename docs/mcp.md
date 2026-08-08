@@ -799,7 +799,8 @@ Atomically claims a planned bundle and creates member task authorizations. Input
 `bundle_id`, `actor`, optional `lease_minutes` (240), and optional `shared_tree` (false).
 Returns the bundle, coordinator claim, and isolation warnings. Under required worktree
 isolation, callers must use the Git-aware CLI claim path or explicitly opt into a shared
-tree.
+tree. The response also includes the exact coordinator identity and structured bundle
+renew, release, progress, and complete continuations; it never substitutes task submit.
 
 ### `generate_bundle_packet`
 

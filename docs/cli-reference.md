@@ -937,6 +937,8 @@ to one PRD.
 `anvil bundle claim B001` atomically creates the coordinator claim and member task
 authorizations. `--shared-tree` explicitly accepts a shared checkout; required worktree
 isolation otherwise directs callers to the top-level Git-aware bundle claim path.
+JSON output includes the exact coordinator identity plus structured renew, release,
+progress, and complete argv/environment continuations; no task-submit command is emitted.
 
 ### `anvil bundle renew` { #bundle-renew }
 
