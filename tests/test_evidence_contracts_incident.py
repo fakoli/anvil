@@ -275,7 +275,16 @@ class TestIncidentLifecycle:
         ).exit_code == 0
         assert _cli(
             tmp_path,
-            ["submit", "T001", "--commands", "echo ok", "--files-changed", "x.py"],
+            [
+                "submit",
+                "T001",
+                "--commands",
+                "echo ok",
+                "--files-changed",
+                "x.py",
+                "--actor",
+                "bench-agent",
+            ],
         ).exit_code == 0
 
     def test_incident_refused_then_corrected_approves(self, tmp_path: Path) -> None:

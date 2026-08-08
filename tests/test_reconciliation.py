@@ -84,11 +84,12 @@ def _make_event(
     target_kind: str,
     target_id: str,
     now: datetime = _T0,
+    actor: str = "test",
 ) -> EventDraft:
     """Return an EventDraft (SL1-RR-1: id is assigned by backend, event_id ignored)."""
     return EventDraft(
         timestamp=now,
-        actor="test",
+        actor=actor,
         action=action,
         target_kind=target_kind,
         target_id=target_id,
@@ -610,11 +611,12 @@ class TestStaleClaim:
                 "claim.released",
                 {
                     "claim_id": "C001",
-                    "released_by": "test",
+                    "released_by": "agent-test",
                     "release_reason": "manual",
                     "force": False,
                 },
-                event_id="E000006", target_kind="claim", target_id="C001",
+                actor="agent-test", event_id="E000006",
+                target_kind="claim", target_id="C001",
             ))
             engine = ReconciliationEngine(b, state_dir=tmp_path, clock=clock)
             report = engine.scan()

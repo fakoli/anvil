@@ -219,8 +219,8 @@ def test_bundle_workflow_guide_covers_required_recovery_paths() -> None:
     assert not missing, f"bundle workflow guide is missing topics: {missing}"
 
 
-def test_cli_reference_deps_states_separator_and_persistence_boundaries() -> None:
-    """The deps reference must not imply successful batch atomicity."""
+def test_cli_reference_deps_states_atomic_batch_contract() -> None:
+    """The deps reference must describe the current atomic batch contract."""
     text = _read(_docs() / "cli-reference.md")
     match = re.search(
         r"^- `anvil deps` — (.*?)(?=^\*\*Diagnostics and health\*\*)",
@@ -231,27 +231,25 @@ def test_cli_reference_deps_states_separator_and_persistence_boundaries() -> Non
     section = " ".join(match.group(1).split())
 
     required = {
-        "4096 UTF-8 bytes",
+        "10,000 total",
         "SOURCE->TARGET",
         "`event_rejected`",
         "adds nothing to `events.jsonl`",
         "scoped task ID contains `:`",
         "both IDs are unscoped",
-        "audit destination is writable",
-        "audit I/O failure is best-effort",
-        "new timestamped rejection line",
-        "separate backend append",
-        "stable fingerprints",
-        "later append failure",
-        "successful multi-task persistence is not atomic",
+        "one `task.dependencies_batch_edited` event",
+        "commits every edit together",
+        "A no-op batch emits no event",
+        "resolved `prd_id`",
+        "targets may belong to another PRD",
     }
     missing = sorted(marker for marker in required if marker not in section)
     assert not missing, f"`anvil deps` reference is missing contract text: {missing}"
-    assert "atomically" not in section
+    assert "atomic append" in section
 
 
-def test_mcp_edit_dependencies_states_recovery_diagnostic_contract() -> None:
-    """MCP docs must expose bounded/redacted refusal behavior precisely."""
+def test_mcp_edit_dependencies_states_atomic_batch_contract() -> None:
+    """MCP docs must expose atomic persistence and bounded refusal behavior."""
     text = _read(_docs() / "mcp.md")
     match = re.search(
         r"^### `edit_dependencies`\n(.*?)(?=^---$)",
@@ -262,16 +260,15 @@ def test_mcp_edit_dependencies_states_recovery_diagnostic_contract() -> None:
     section = " ".join(match.group(1).split())
 
     required = {
-        "4096 UTF-8 bytes",
+        "10,000 total",
         "`event_rejected`",
         "adds nothing to `events.jsonl`",
-        "new timestamped rejection line",
-        "same refusal reason and fingerprints",
-        "stable fingerprints",
+        "one `task.dependencies_batch_edited` event",
+        "commits all edits together",
+        "A no-op request emits no event",
         "without the raw backend reason",
-        "audit destination is writable",
-        "audit I/O failure is best-effort",
-        "does not alter the stable refusal or permit state mutation",
+        "Sources must belong to the selected PRD",
+        "targets may belong to another PRD",
     }
     missing = sorted(marker for marker in required if marker not in section)
     assert not missing, (
