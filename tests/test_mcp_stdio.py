@@ -14,7 +14,7 @@ from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 
-from anvil import __version__
+from anvil.build_identity import get_build_identity
 from anvil.clock import SystemClock
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import SqliteBackend
@@ -69,7 +69,7 @@ def test_real_stdio_schema_mismatch_is_bounded_stable_and_responsive(
         return version, errors
 
     version, errors = asyncio.run(run())
-    assert version == __version__
+    assert version == get_build_identity().display_version
     assert len(set(errors)) == 1
     payload = json.loads(errors[0])
     assert payload["error"]["code"] == "schema_mismatch"

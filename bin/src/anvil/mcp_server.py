@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
-from anvil import __version__
+from anvil.build_identity import get_build_identity
 from anvil.state.rollup import BundleRollupEntry
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 # FastMCP instance
 # ---------------------------------------------------------------------------
 
-mcp: FastMCP = FastMCP("anvil", version=__version__)
+mcp: FastMCP = FastMCP("anvil", version=get_build_identity().display_version)
 
 _MAX_MCP_SCHEMA_ERROR_BYTES = 4_096
 
