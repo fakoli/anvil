@@ -109,7 +109,7 @@ jobs:
           qualify direct "$wheel"
           qualify from-sdist "${rebuilt[0]}"
           cmp "$temp_dir/direct-describe.json" "$temp_dir/from-sdist-describe.json"
-          find bin/dist -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          printf '%s\0' "$wheel" "$sdist" | sort -z | xargs -0 sha256sum > SHA256SUMS
           test "$(wc -l < SHA256SUMS)" -eq 2
 
       - name: Upload checksummed release bundle
@@ -117,7 +117,8 @@ jobs:
         with:
           name: pypi-release-${{ github.run_id }}
           path: |
-            bin/dist/
+            bin/dist/*.whl
+            bin/dist/*.tar.gz
             SHA256SUMS
           if-no-files-found: error
           retention-days: 1
