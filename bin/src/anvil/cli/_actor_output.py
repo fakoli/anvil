@@ -127,15 +127,16 @@ def bundle_continuation_lines(bundle_id: str, actor: str) -> list[str]:
     """Render one safe human bundle lifecycle handoff for the current shell."""
     lines = actor_notice_lines(actor)
     actor_flag = actor_flag_for_human(actor)
-    if actor_flag is None:
+    if actor_flag is None or safe_actor_for_human(bundle_id) is None:
         lines.append("  Use the structured JSON/MCP bundle continuation argv.")
         return lines
+    quoted_bundle_id = _quote_for_current_shell(bundle_id)
     lines.extend(
         [
-            f"  Renew:    `anvil bundle renew {bundle_id} {actor_flag}`",
-            f"  Release:  `anvil bundle release {bundle_id} {actor_flag}`",
-            f"  Progress: `anvil bundle progress {bundle_id} PHASE {actor_flag}`",
-            f"  Complete: `anvil bundle complete {bundle_id} {actor_flag}`",
+            f"  Renew:    `anvil bundle renew {quoted_bundle_id} {actor_flag}`",
+            f"  Release:  `anvil bundle release {quoted_bundle_id} {actor_flag}`",
+            f"  Progress: `anvil bundle progress {quoted_bundle_id} PHASE {actor_flag}`",
+            f"  Complete: `anvil bundle complete {quoted_bundle_id} {actor_flag}`",
         ]
     )
     return lines

@@ -2298,8 +2298,9 @@ def test_top_level_bundle_claim_human_lists_complete_continuation(
 
     assert claimed.exit_code == 0, claimed.output
     assert "ANVIL_ACTOR" in claimed.output
-    assert "anvil bundle renew B001" in claimed.output
-    assert "anvil bundle release B001" in claimed.output
-    assert "anvil bundle progress B001" in claimed.output
-    assert "anvil bundle complete B001" in claimed.output
+    assert "anvil bundle renew " in claimed.output
+    assert "anvil bundle release " in claimed.output
+    assert "anvil bundle progress " in claimed.output
+    assert "anvil bundle complete " in claimed.output
+    assert "B001" in claimed.output
     assert "anvil submit B001" not in claimed.output

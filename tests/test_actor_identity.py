@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import shlex
+from types import SimpleNamespace
 
 import pytest
 
+from anvil.cli import _actor_output
 from anvil.actors import (
     ACTOR_AUTH_NOTICE,
     ActorIdentityError,
@@ -111,3 +113,34 @@ def test_structured_identity_and_lifecycle_context_never_use_shell_strings() -> 
     ]
     assert context["release"]["env"] == {"ANVIL_ACTOR": actor}
     assert context["submit"]["argv"][-1] == actor
+
+
+@pytest.mark.parametrize(
+    ("shell_name", "quoted_bundle_id"),
+    [
+        ("posix", "'B001; echo PWN'"),
+        ("nt", "'B001; Write-Output ''PWN'''"),
+    ],
+)
+def test_bundle_continuation_quotes_metacharacter_id_for_current_shell(
+    monkeypatch: pytest.MonkeyPatch,
+    shell_name: str,
+    quoted_bundle_id: str,
+) -> None:
+    monkeypatch.setattr(_actor_output, "os", SimpleNamespace(name=shell_name))
+
+    lines = _actor_output.bundle_continuation_lines(
+        "B001; echo PWN" if shell_name == "posix" else "B001; Write-Output 'PWN'",
+        "coordinator",
+    )
+
+    for action in ("renew", "release", "progress", "complete"):
+        rendered = next(line for line in lines if f"bundle {action}" in line)
+        assert f"bundle {action} {quoted_bundle_id}" in rendered
+
+
+def test_bundle_continuation_omits_unsafe_legacy_id_from_human_shell_text() -> None:
+    lines = _actor_output.bundle_continuation_lines("B001\x1bPWN", "coordinator")
+
+    assert all("\x1b" not in line for line in lines)
+    assert "structured JSON/MCP" in lines[-1]
