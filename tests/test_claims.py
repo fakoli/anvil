@@ -11,7 +11,9 @@ Design notes:
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,8 +26,10 @@ from anvil.claims.manager import (
     ClaimResult,
     ConflictWarning,
 )
+from anvil.claims.progress_attestation import load_progress_attestation
 from anvil.claims.stale import detect_and_release_stale
 from anvil.clock import FrozenClock
+from anvil.state.hashing import canonical_json_bytes
 from anvil.state.models import (
     ClaimStatus,
     EventDraft,
@@ -43,6 +47,28 @@ _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=_UTC)
 
 def _make_clock(dt: datetime = _T0) -> FrozenClock:
     return FrozenClock(dt)
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _make_git_repo(root: Path) -> Path:
+    root.mkdir()
+    _git(root, "init")
+    _git(root, "config", "user.email", "tests@example.invalid")
+    _git(root, "config", "user.name", "Anvil Tests")
+    (root / "src").mkdir()
+    (root / "src" / "feature.txt").write_bytes(b"before\n")
+    _git(root, "add", "--", "src/feature.txt")
+    _git(root, "commit", "-m", "initial")
+    return root
 
 
 def _make_backend(state_dir: Path, clock: FrozenClock | None = None) -> SqliteBackend:
@@ -1092,6 +1118,153 @@ class TestRenew:
             m_other = _make_manager(b, actor="agent-beta", clock=clock)
             with pytest.raises(ClaimError, match="agent-alpha|actor"):
                 m_other.renew(claim_id)
+        finally:
+            b.close()
+
+
+# ---------------------------------------------------------------------------
+# TestClaimProgressAttestationIntegration
+# ---------------------------------------------------------------------------
+
+
+class TestClaimProgressAttestationIntegration:
+    def _setup(
+        self, tmp_path: Path, clock: FrozenClock
+    ) -> tuple[SqliteBackend, Path]:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        b = _make_backend(state_dir, clock)
+        _setup_project(b)
+        _setup_prd(b)
+        conn = sqlite3.connect(str(state_dir / "state.db"))
+        _insert_feature_raw(conn)
+        _insert_task_raw(conn, task_id="T001", status="ready")
+        conn.close()
+        return b, state_dir
+
+    def test_git_claim_captures_generation_and_empty_scope_needs_attestation(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock(_T0)
+        repo = _make_git_repo(tmp_path / "repo")
+        b, _ = self._setup(tmp_path, clock)
+        try:
+            manager = ClaimManager(
+                b,
+                clock,
+                actor="agent-alpha",
+                default_lease_minutes=60,
+                project_root=repo,
+            )
+            first = manager.claim("T001", expected_files=[]).claim
+            assert first.generation == 1
+            assert first.attestation_context is not None
+            assert first.attestation_context.expected_paths == []
+
+            clock._current = _T0 + timedelta(minutes=30)  # type: ignore[attr-defined]
+            renewal = manager.renew_with_result(first.id)
+            assert renewal.renewed is False
+            assert renewal.progress_source == "none"
+            assert renewal.claim.lease_expires_at == first.lease_expires_at
+
+            manager.release(first.id)
+            second = manager.claim("T001", expected_files=[]).claim
+            assert second.generation == 2
+            assert second.attestation_context is not None
+        finally:
+            b.close()
+
+    def test_non_git_project_keeps_legacy_renewal_compatibility(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock(_T0)
+        plain_root = tmp_path / "plain"
+        plain_root.mkdir()
+        b, _ = self._setup(tmp_path, clock)
+        try:
+            manager = ClaimManager(
+                b,
+                clock,
+                actor="agent-alpha",
+                default_lease_minutes=60,
+                project_root=plain_root,
+            )
+            claim = manager.claim("T001", expected_files=[]).claim
+            assert claim.attestation_context is None
+
+            clock._current = _T0 + timedelta(minutes=30)  # type: ignore[attr-defined]
+            renewal = manager.renew_with_result(claim.id)
+            assert renewal.renewed is True
+            assert renewal.progress_source == "legacy_unmeasurable"
+            assert manager.renew(claim.id).id == claim.id
+        finally:
+            b.close()
+
+    def test_accepted_attestation_is_consumed_by_exactly_one_renewal(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock(_T0)
+        repo = _make_git_repo(tmp_path / "repo")
+        b, _ = self._setup(tmp_path, clock)
+        try:
+            manager = ClaimManager(
+                b,
+                clock,
+                actor="agent-alpha",
+                default_lease_minutes=60,
+                project_root=repo,
+            )
+            claim = manager.claim(
+                "T001", expected_files=["src\\feature.txt"]
+            ).claim
+            context = claim.attestation_context
+            assert context is not None
+            baseline = context.expected_paths[0]
+
+            content = b"after\n"
+            (repo / "src" / "feature.txt").write_bytes(content)
+            issued_at = _T0 + timedelta(seconds=30)
+            payload = {
+                "schema_version": 1,
+                "kind": "file",
+                "project_id": "proj-1",
+                "claim_id": claim.id,
+                "generation": claim.generation,
+                "task_id": claim.task_id,
+                "task_revision": context.task_revision,
+                "prd_id": context.prd_id,
+                "prd_revision": context.prd_revision,
+                "claimed_by": claim.claimed_by,
+                "repository_id": context.repository_id,
+                "claim_start_sha": context.claim_start_sha,
+                "commit_sha": context.claim_start_sha,
+                "path": baseline.path,
+                "prior_sha256": baseline.baseline_sha256,
+                "file_sha256": hashlib.sha256(content).hexdigest(),
+                "issued_at": issued_at.isoformat().replace("+00:00", "Z"),
+            }
+            loaded = load_progress_attestation(
+                canonical_json_bytes(
+                    {"envelope_id": "ENV-manager", "payload": payload}
+                )
+            )
+
+            clock._current = _T0 + timedelta(minutes=1)  # type: ignore[attr-defined]
+            accepted = manager.accept_progress_attestation(loaded)
+            assert accepted.semantic_digest == loaded.semantic_digest
+            assert accepted.consumed_by_event_id is None
+
+            renewal = manager.renew_with_result(claim.id)
+            assert renewal.renewed is True
+            assert renewal.progress_source == "attestation"
+            assert renewal.attestation_digest == loaded.semantic_digest
+            consumed = b.get_progress_attestation(loaded.semantic_digest)
+            assert consumed is not None
+            assert consumed.consumed_by_event_id is not None
+
+            second = manager.renew_with_result(claim.id)
+            assert second.renewed is False
+            assert second.progress_source == "none"
         finally:
             b.close()
 

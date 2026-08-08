@@ -20,10 +20,13 @@ We use a unified _data() helper that covers all four cases cleanly.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -51,6 +54,21 @@ from anvil.state.schema import SCHEMA_VERSION
 
 _UTC = UTC
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=_UTC)
+
+
+def _init_git_repo(root: Path) -> None:
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Anvil Tests"], cwd=root, check=True
+    )
+    (root / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True)
 
 # ---------------------------------------------------------------------------
 # Result accessor
@@ -1918,6 +1936,33 @@ class TestGetNextTask:
 # ===========================================================================
 
 class TestClaimTask:
+    def test_git_claim_exposes_attestation_context_and_continuation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "agent-x"},
+                    )
+                )
+
+        claim = _run(run())
+        assert claim["generation"] == 1
+        assert claim["attestation_context"]["claim_start_sha"]
+        assert claim["continuation"]["attest_progress"]["argv"][-4:-2] == [
+            "--attestation-file",
+            "<path>",
+        ]
+
     def test_happy_path_returns_claim_response(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
@@ -2237,6 +2282,131 @@ class TestGenerateWorkPacket:
 # ===========================================================================
 
 class TestSubmitProgress:
+    def test_attestation_is_accepted_and_consumed_by_next_renewal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+            async with Client(mcp) as client:
+                claim = _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {
+                            "task_id": "T001",
+                            "claimed_by": "agent-x",
+                            "expected_files": ["src/external.txt"],
+                        },
+                    )
+                )
+                context = claim["attestation_context"]
+                changed = tmp_path / "src" / "external.txt"
+                changed.parent.mkdir(parents=True)
+                changed.write_bytes(b"mcp external progress\n")
+                with sqlite3.connect(state_dir / "state.db") as conn:
+                    project_id = conn.execute(
+                        "SELECT id FROM projects LIMIT 1"
+                    ).fetchone()[0]
+                payload = {
+                    "schema_version": 1,
+                    "kind": "file",
+                    "project_id": project_id,
+                    "claim_id": claim["id"],
+                    "generation": claim["generation"],
+                    "task_id": "T001",
+                    "task_revision": context["task_revision"],
+                    "prd_id": context["prd_id"],
+                    "prd_revision": context["prd_revision"],
+                    "claimed_by": "agent-x",
+                    "repository_id": context["repository_id"],
+                    "claim_start_sha": context["claim_start_sha"],
+                    "commit_sha": context["claim_start_sha"],
+                    "path": "src/external.txt",
+                    "prior_sha256": None,
+                    "file_sha256": hashlib.sha256(changed.read_bytes()).hexdigest(),
+                    "issued_at": datetime.now(UTC).isoformat(),
+                }
+                raw = json.dumps(
+                    {"envelope_id": "mcp-progress-1", "payload": payload},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                accepted = _data(
+                    await client.call_tool(
+                        "submit_progress",
+                        {
+                            "task_id": "T001",
+                            "actor": "agent-x",
+                            "attestation_base64": base64.b64encode(raw).decode(),
+                            "cwd": str(tmp_path),
+                        },
+                    )
+                )
+                renewed = _data(
+                    await client.call_tool(
+                        "renew_claim", {"task_id": "T001", "actor": "agent-x"}
+                    )
+                )
+                return claim, accepted, renewed
+
+        claim, accepted, renewed = _run(run())
+        assert accepted["event_action"] == "progress.attested"
+        assert accepted["attestation"]["generation"] == claim["generation"]
+        assert renewed["renewed"] is True
+        assert renewed["progress"] == {
+            "source": "attestation",
+            "digest": accepted["attestation"]["digest"],
+            "generation": claim["generation"],
+            "trust_mode": "claim_owner_self_attested",
+        }
+
+    def test_attestation_input_is_strict_base64(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "submit_progress",
+                    {
+                        "task_id": "T001",
+                        "actor": "agent-x",
+                        "attestation_base64": "not base64!",
+                    },
+                )
+
+        with pytest.raises(ToolError, match="base64_invalid"):
+            _run(run())
+
+    def test_notes_remain_required_without_attestation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "submit_progress", {"task_id": "T001", "actor": "agent-x"}
+                )
+
+        with pytest.raises(ToolError, match="notes is required"):
+            _run(run())
+
     def test_happy_path_returns_recorded_true(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)

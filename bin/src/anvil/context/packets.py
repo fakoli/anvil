@@ -707,6 +707,13 @@ def _render_markdown(
                 "- The persisted actor is unsafe to render in shell text; use the "
                 "JSON packet's structured continuation fields."
             )
+        if active_claim is not None and active_claim.attestation_context is not None:
+            lines.append(
+                "- External progress must use a canonical claim-bound artifact via "
+                f"`anvil progress {task.id} <phase> --attestation-file <path> "
+                "--actor ...`; free-text progress never renews, and an accepted "
+                "attestation is consumed by the next renewal."
+            )
 
     if lightweight:
         if packet_actor is not None and safe_packet_actor is None:
@@ -812,7 +819,15 @@ def _render_json(
             active_claim.claimed_by
         )
         update_protocol["continuation"] = continuation_context(
-            task.id, active_claim.id, active_claim.claimed_by
+            task.id,
+            active_claim.id,
+            active_claim.claimed_by,
+            attestation_context=(
+                active_claim.attestation_context.model_dump(mode="json")
+                if active_claim.attestation_context is not None
+                else None
+            ),
+            generation=active_claim.generation,
         )
     if not lightweight:
         update_protocol["status_flow"] = (

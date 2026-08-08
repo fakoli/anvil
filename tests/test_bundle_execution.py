@@ -1190,6 +1190,41 @@ def test_replanned_bundle_can_acquire_a_new_claim_generation(tmp_path: Path) -> 
         backend.close()
 
 
+def test_bundle_member_generation_follows_prior_standalone_claim(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        # Historical standalone work can precede bundle planning. The internal
+        # member authorization must allocate generation 2, not collide with the
+        # v17 schema default for the earlier lifecycle.
+        conn = backend._require_conn()
+        conn.execute(
+            """INSERT INTO claims
+               (id, task_id, claimed_by, claim_type, status, expected_files,
+                generation, attestation_context, created_at, lease_expires_at,
+                last_heartbeat_at, released_at, release_reason)
+               VALUES ('C-OLD', 'release:T001', 'old-owner', 'task', 'released',
+                       '[]', 1, NULL, ?, ?, ?, ?, 'historical')""",
+            (
+                (_NOW - timedelta(days=1)).isoformat(),
+                (_NOW - timedelta(hours=23)).isoformat(),
+                (_NOW - timedelta(days=1)).isoformat(),
+                (_NOW - timedelta(hours=23)).isoformat(),
+            ),
+        )
+
+        claimed = _manager(backend, tmp_path).claim("B001")
+        child_id = claimed.claim.member_claim_ids["release:T001"]
+        child = backend.get_claim(child_id)
+        assert child is not None
+        assert child.generation == 2
+        assert child.attestation_context is None
+    finally:
+        backend.close()
+
+
 def test_expired_public_claim_cannot_be_renewed(tmp_path: Path) -> None:
     backend = _backend(tmp_path)
     try:

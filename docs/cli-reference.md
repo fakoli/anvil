@@ -1596,6 +1596,10 @@ flag list; full prose treatment may follow in a later pass.
 - `anvil progress <task> <phase>` — Record a structured progress phase
   (`build`, `tests`, …) as a `progress.noted` audit event; task status
   never changes and no claim is required (`--detail`, `--actor`, `--json`).
+  For a context-bearing active claim, `--attestation-file <path>` instead
+  verifies and records one canonical claim-bound progress artifact. An accepted
+  artifact reports its digest, generation, and trust mode and is consumed once
+  by the next renewal; free-text `progress.noted` events never authorize renewal.
   `anvil status` shows each active claim's latest phase, elapsed time, and
   lease-expiry countdown.
 - `anvil drift` — Report intent/state/filesystem-git divergence (orphan

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         BundleClaim,
         BundleReviewVerdict,
         Claim,
+        ClaimProgressAttestation,
         ConflictGroup,
         Event,
         EventDraft,
@@ -117,6 +118,26 @@ class Backend(Protocol):
 
     def get_claim(self, claim_id: str) -> Claim | None:
         """Return the Claim with the given ID, or None if not found."""
+        ...
+
+    def next_claim_generation(self, task_id: str) -> int:
+        """Return the proposed next per-task claim generation.
+
+        This read is advisory for event construction. ``append(claim.created)``
+        rechecks the value inside its serialized validation boundary.
+        """
+        ...
+
+    def get_progress_attestation(
+        self, semantic_digest: str
+    ) -> ClaimProgressAttestation | None:
+        """Return one persisted progress attestation by semantic digest."""
+        ...
+
+    def get_pending_progress_attestation(
+        self, claim_id: str, generation: int
+    ) -> ClaimProgressAttestation | None:
+        """Return the sole unconsumed, non-invalidated attestation, if any."""
         ...
 
     def get_bundle(self, bundle_id: str) -> ExecutionBundle | None:

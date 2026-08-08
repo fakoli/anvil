@@ -26,19 +26,24 @@ def actor_identity_data(actor: str) -> dict[str, Any]:
     return actor_identity_context(actor)
 
 
-def continuation_data(task_id: str, claim_id: str, actor: str) -> dict[str, Any]:
+def continuation_data(
+    task_id: str,
+    claim_id: str,
+    actor: str,
+    *,
+    attestation_context: dict[str, Any] | None = None,
+    generation: int | None = None,
+) -> dict[str, Any]:
     """Return structured argv/environment data for lifecycle continuation."""
-    context = dict(continuation_context(task_id, claim_id, actor))
-    context.setdefault(
-        "progress",
-        {
-            "actor": actor,
-            "argv": ["anvil", "progress", task_id, "<phase>", "--actor", actor],
-            "env": {"ANVIL_ACTOR": actor},
-            "identity_notice": ACTOR_AUTH_NOTICE,
-        },
+    return dict(
+        continuation_context(
+            task_id,
+            claim_id,
+            actor,
+            attestation_context=attestation_context,
+            generation=generation,
+        )
     )
-    return context
 
 
 def bundle_continuation_data(bundle_id: str, actor: str) -> dict[str, Any]:

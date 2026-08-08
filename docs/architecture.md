@@ -421,6 +421,9 @@ mechanisms layered together:
    (and the MCP `renew_claim` tool) extends the lease. Default lease is 240
    minutes (configurable via `.anvil/config.yaml`); the in-code
    default lives at [`claims/manager.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/manager.py).
+   A renewal requires new hook-observed file progress or a pending verified
+   claim-bound attestation. Accepted attestations are generation-bound and
+   consumed once; audit-only free-text progress does not extend a lease.
 3. **Stale-claim reaping.** Every mutating CLI command and every mutating
    MCP tool calls
    [`detect_and_release_stale()`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/claims/stale.py)

@@ -171,15 +171,45 @@ def continuation_context(
     task_id: str,
     claim_id: str,
     actor: str,
+    *,
+    attestation_context: Mapping[str, object] | None = None,
+    generation: int | None = None,
 ) -> dict[str, object]:
     """Return exact argv/env continuations for a newly acquired claim."""
-    return {
+    context: dict[str, object] = {
         "environment": {"ANVIL_ACTOR": actor},
         "renew": actor_continuation(actor, ["anvil", "renew", claim_id, "--actor", actor]),
         "release": actor_continuation(actor, ["anvil", "release", claim_id, "--actor", actor]),
+        "progress": actor_continuation(
+            actor, ["anvil", "progress", task_id, "<phase>", "--actor", actor]
+        ),
         "submit": actor_continuation(actor, ["anvil", "submit", task_id, "--actor", actor]),
         "identity_notice": ACTOR_AUTH_NOTICE,
     }
+    if attestation_context is not None:
+        context["attest_progress"] = actor_continuation(
+            actor,
+            [
+                "anvil",
+                "progress",
+                task_id,
+                "<phase>",
+                "--attestation-file",
+                "<path>",
+                "--actor",
+                actor,
+            ],
+        )
+        context["attestation"] = {
+            "claim_id": claim_id,
+            "generation": generation,
+            "context": dict(attestation_context),
+            "renewal_contract": (
+                "An accepted claim-bound attestation is consumed by the next "
+                "renewal; free-text progress notes never authorize renewal."
+            ),
+        }
+    return context
 
 
 def bundle_continuation_context(bundle_id: str, actor: str) -> dict[str, object]:

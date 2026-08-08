@@ -179,7 +179,11 @@ def claim(
         _reap_stale_claims(backend)
 
         manager = ClaimManager(
-            backend, clock, actor=resolved_actor, **lease_kwargs
+            backend,
+            clock,
+            actor=resolved_actor,
+            project_root=resolved_cwd,
+            **lease_kwargs,
         )
 
         if bundle_mode:
@@ -624,6 +628,11 @@ def claim(
     reported_branch = claim_obj.branch or (
         branch_result.branch if branch_result.created else None
     )
+    if claim_obj.attestation_context is None:
+        warnings.append(
+            "Progress attestation unavailable: this project is not an accessible "
+            "Git repository; legacy file-change renewal remains available."
+        )
 
     if json_output:
         emit_success(
@@ -635,7 +644,15 @@ def claim(
                 "warnings": warnings,
                 "actor_identity": actor_identity_data(claim_obj.claimed_by),
                 "continuation": continuation_data(
-                    task_id, claim_obj.id, claim_obj.claimed_by
+                    task_id,
+                    claim_obj.id,
+                    claim_obj.claimed_by,
+                    attestation_context=(
+                        claim_obj.attestation_context.model_dump(mode="json")
+                        if claim_obj.attestation_context is not None
+                        else None
+                    ),
+                    generation=claim_obj.generation,
                 ),
             },
         )
@@ -649,9 +666,20 @@ def claim(
         typer.echo(f"  Branch:      {reported_branch}")
     if worktree_path:
         typer.echo(f"  Worktree:    {worktree_path}")
+    if claim_obj.attestation_context is None:
+        typer.echo(
+            "Warning: progress attestation is unavailable because this project "
+            "is not an accessible Git repository."
+        )
     typer.echo("")
     for line in actor_notice_lines(claim_obj.claimed_by):
         typer.echo(line)
+    if claim_obj.attestation_context is not None:
+        typer.echo(
+            f"External progress: `anvil progress {task_id} PHASE "
+            "--attestation-file PATH --actor ...`; an accepted attestation "
+            "is consumed by the next renewal."
+        )
     actor_flag = actor_flag_for_human(claim_obj.claimed_by)
     if actor_flag is not None:
         typer.echo(
@@ -915,7 +943,8 @@ def renew(
                 json_output=json_output,
             )
         try:
-            updated = manager.renew(claim_id)
+            renewal = manager.renew_with_result(claim_id)
+            updated = renewal.claim
         except ClaimError as exc:
             if json_output:
                 fail("renew", str(exc), code="claim_error")
@@ -927,7 +956,13 @@ def renew(
     # B46 part 2 — renew() is a no-op (lease unchanged) when the claim shows no
     # progress since the last heartbeat. Detect that so we report it honestly
     # instead of announcing a fresh lease that was never granted.
-    extended = before is None or updated.lease_expires_at != before.lease_expires_at
+    extended = renewal.renewed
+    progress = {
+        "source": renewal.progress_source,
+        "digest": renewal.attestation_digest,
+        "generation": renewal.attestation_generation,
+        "trust_mode": renewal.attestation_trust_mode,
+    }
 
     if json_output:
         emit_success(
@@ -935,6 +970,7 @@ def renew(
             {
                 "claim": dump_model(updated),
                 "renewed": extended,
+                "progress": progress,
                 "actor_identity": actor_identity_data(resolved_actor),
             },
         )
@@ -944,6 +980,11 @@ def renew(
         typer.echo(f"Renewed claim '{claim_id}'.")
         typer.echo(f"  New lease until: {updated.lease_expires_at.isoformat()}")
         typer.echo(f"  Last heartbeat:  {updated.last_heartbeat_at.isoformat()}")
+        typer.echo(f"  Progress source: {renewal.progress_source}")
+        if renewal.attestation_digest is not None:
+            typer.echo(f"  Attestation:     {renewal.attestation_digest}")
+            typer.echo(f"  Generation:      {renewal.attestation_generation}")
+            typer.echo(f"  Trust mode:      {renewal.attestation_trust_mode}")
     else:
         typer.echo(f"Renew declined for '{claim_id}': no progress since last heartbeat.")
         typer.echo(f"  Lease still expires at: {updated.lease_expires_at.isoformat()}")

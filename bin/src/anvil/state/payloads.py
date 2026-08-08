@@ -41,6 +41,7 @@ from anvil.state.models import (
     BundleReviewVerdict,
     BundleStatus,
     BundleThroughputBudget,
+    ClaimAttestationContext,
     DelegatedAgentObservation,
     EvidenceCategory,
     PRDAssumption,
@@ -885,6 +886,10 @@ class ClaimCreatedPayload(BaseModel):
     worktree_path: str | None = None
     session_id: str | None = None
     expected_files: list[Any] = []
+    # v17 lifecycle binding.  Legacy events omit both fields; replay assigns a
+    # deterministic generation and leaves the context NULL (not attestable).
+    generation: StrictInt | None = Field(default=None, ge=1)
+    attestation_context: ClaimAttestationContext | None = None
     # Optional terminal-state fields — present when reading back a Claim
     # model that has already been released/staled (e.g. in replay scenarios
     # where the full Claim dict is passed as the event payload).
@@ -922,6 +927,30 @@ class ClaimRenewedPayload(BaseModel):
     last_heartbeat_at: str
     # Audit field emitted by ClaimManager.renew()
     renewed_by: str | None = None
+    # Present together only when this renewal consumes a previously persisted
+    # external progress attestation.  Absence preserves legacy/file-event renewals.
+    attestation_digest: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    attestation_generation: StrictInt | None = Field(default=None, ge=1)
+    attestation_trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ] | None = None
+
+    @model_validator(mode="after")
+    def _validate_attestation_consumption(self) -> ClaimRenewedPayload:
+        values = (
+            self.attestation_digest,
+            self.attestation_generation,
+            self.attestation_trust_mode,
+        )
+        if any(value is not None for value in values) and any(
+            value is None for value in values
+        ):
+            raise ValueError(
+                "attestation digest, generation, and trust mode must be supplied together"
+            )
+        return self
 
 
 class ClaimStalePayload(BaseModel):
@@ -1023,6 +1052,69 @@ class ProgressNotedPayload(BaseModel):
     # still rejects unknown keys.
     phase: str | None = None
     detail: str | None = None
+
+
+class ProgressAttestedPayload(BaseModel):
+    """Payload for ``progress.attested`` durable claim-bound evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    semantic_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    envelope_id: StrictStr | None = Field(default=None, max_length=255)
+    claim_id: StrictStr = Field(min_length=1)
+    task_id: StrictStr = Field(min_length=1)
+    claimed_by: StrictStr = Field(min_length=1)
+    generation: StrictInt = Field(ge=1)
+    repository_id: StrictStr = Field(min_length=1, max_length=512)
+    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    prd_id: StrictStr = Field(min_length=1, max_length=255)
+    prd_revision: StrictInt = Field(ge=1)
+    task_revision: StrictStr = Field(min_length=1, max_length=255)
+    kind: Literal["commit", "file"]
+    commit_sha: StrictStr | None = Field(
+        default=None, pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    )
+    changed_paths: list[StrictStr] = Field(default_factory=list)
+    path: StrictStr | None = Field(default=None, min_length=1, max_length=4096)
+    file_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    attested_at: str
+    recorded_at: str
+    trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ]
+    issuer_id: StrictStr | None = Field(default=None, max_length=255)
+
+    @field_validator("attested_at", "recorded_at")
+    @classmethod
+    def _validate_attestation_time(cls, value: str) -> str:
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("attestation timestamps must be ISO 8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("attestation timestamps must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_kind_and_issuer(self) -> ProgressAttestedPayload:
+        if self.kind == "commit":
+            if self.commit_sha is None or not self.changed_paths:
+                raise ValueError("commit attestation requires commit_sha and changed_paths")
+            if self.path is not None or self.file_sha256 is not None:
+                raise ValueError("commit attestation cannot carry file-only fields")
+        else:
+            if self.commit_sha is not None or self.changed_paths:
+                raise ValueError("file attestation cannot carry commit-only fields")
+            if self.path is None or self.file_sha256 is None:
+                raise ValueError("file attestation requires path and file_sha256")
+        if self.trust_mode == "configured_issuer_verified":
+            if self.issuer_id is None or not self.issuer_id.strip():
+                raise ValueError("issuer-verified attestation requires issuer_id")
+        elif self.issuer_id is not None:
+            raise ValueError("self-attested progress cannot declare issuer_id")
+        return self
 
 
 class SyncMappingUpsertedPayload(BaseModel):
@@ -1510,6 +1602,7 @@ __all__ = [
     "PrdReviewedPayload",
     "PrdRevisedPayload",
     "ProgressNotedPayload",
+    "ProgressAttestedPayload",
     "ProjectCreatedPayload",
     "StateInitializedPayload",
     "SyncAuditPayload",

@@ -665,9 +665,10 @@ def test_evidence_claim_pairing_refuses_before_log(
                         "evidence_id": "EV-invalid-pair",
                         "commands_run": ["pytest -q"],
                         "files_changed": [],
-                    },
-                    target_kind="task",
-                    target_id="release:T001",
+                        },
+                        target_kind="task",
+                        target_id="release:T001",
+                        actor="worker",
                 )
             )
         assert backend.get_latest_evidence("release:T001") is None
@@ -1260,6 +1261,7 @@ def test_replay_quarantines_same_task_divergent_claim_descendants(
                     payload,
                     target_kind="claim",
                     target_id="C-SAME",
+                    actor="loser",
                 )
             )
         assert _event_count(replay_root) == before
@@ -1436,7 +1438,7 @@ def test_v10_database_auto_migrates_to_current_without_losing_project(tmp_path: 
 
     migrated = _backend(tmp_path)
     try:
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 16
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 17
         assert migrated.get_project().name == "Before migration"  # type: ignore[union-attr]
         tables = {
             row[0]
@@ -1512,7 +1514,7 @@ def test_v12_review_schema_migrates_to_disposition_lineage(tmp_path: Path) -> No
             }
         assert "review_disposition_event_id" in bundle_columns
         assert "disposition_event_id" in review_columns
-        assert migrated.get_schema_version() == 16
+        assert migrated.get_schema_version() == 17
     finally:
         migrated.close()
 
@@ -1560,7 +1562,7 @@ def test_v12_review_schema_recovers_torn_table_rename(tmp_path: Path) -> None:
             ).fetchone()
         assert row == ("BR-OLD", "legacy-unbound")
         assert backup is None
-        assert migrated.get_schema_version() == 16
+        assert migrated.get_schema_version() == 17
     finally:
         migrated.close()
 
@@ -1591,7 +1593,7 @@ def test_v14_bundle_schema_migrates_to_result_projection(tmp_path: Path) -> None
         bundle = migrated.get_bundle("B001")
         assert bundle is not None
         assert bundle.last_result_at == projected_at
-        assert migrated.get_schema_version() == SCHEMA_VERSION == 16
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 17
     finally:
         migrated.close()
 

@@ -75,11 +75,14 @@ Version history
   the timestamp of the last applied reviewed/integrated/merged/completed result.
 - v16: typed PRD assumptions — canonical bounded assumptions are persisted on
   PRD projections and replay safely from old event logs that omit the field.
+- v17: claim-bound progress attestations — monotonic per-task claim generations,
+  immutable nullable claim attestation context, and semantic-digest keyed
+  consume-once progress projections.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 16
+SCHEMA_VERSION: int = 17
 
 
 def get_schema_version() -> int:
@@ -286,6 +289,8 @@ CREATE TABLE IF NOT EXISTS claims (
     session_id         TEXT,
     bundle_claim_id    TEXT REFERENCES bundle_claims(id) ON DELETE RESTRICT,
     expected_files     TEXT NOT NULL DEFAULT '[]',
+    generation         INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
+    attestation_context TEXT,
     created_at         TEXT NOT NULL,
     lease_expires_at   TEXT NOT NULL,
     last_heartbeat_at  TEXT NOT NULL,
@@ -294,6 +299,8 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 
 CREATE INDEX IF NOT EXISTS idx_claims_task_status ON claims (task_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_task_generation
+    ON claims (task_id, generation);
 
 -- Internal replay quarantine for divergent branches that reused one claim ID
 -- for different immutable creation facts. Claim child events lack a creation
@@ -304,6 +311,46 @@ CREATE TABLE IF NOT EXISTS claim_replay_lineages (
     creation_fingerprint  TEXT NOT NULL,
     collision_detected    INTEGER NOT NULL DEFAULT 0 CHECK (collision_detected IN (0, 1))
 );
+
+-- One immutable external progress fact, de-duplicated independently of its
+-- event envelope id.  Consumption and lease renewal occur in one transaction.
+CREATE TABLE IF NOT EXISTS claim_progress_attestations (
+    semantic_digest        TEXT PRIMARY KEY,
+    accepted_event_id      TEXT NOT NULL UNIQUE,
+    envelope_id            TEXT,
+    claim_id               TEXT NOT NULL REFERENCES claims(id) ON DELETE RESTRICT,
+    task_id                TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    claimed_by             TEXT NOT NULL,
+    generation             INTEGER NOT NULL CHECK (generation >= 1),
+    repository_id          TEXT NOT NULL,
+    claim_start_sha        TEXT NOT NULL,
+    prd_id                 TEXT NOT NULL,
+    prd_revision           INTEGER NOT NULL CHECK (prd_revision >= 1),
+    task_revision          TEXT NOT NULL,
+    kind                   TEXT NOT NULL CHECK (kind IN ('commit', 'file')),
+    commit_sha             TEXT,
+    changed_paths          TEXT NOT NULL DEFAULT '[]',
+    path                   TEXT,
+    file_sha256            TEXT,
+    attested_at            TEXT NOT NULL,
+    recorded_at            TEXT NOT NULL,
+    trust_mode             TEXT NOT NULL CHECK (
+        trust_mode IN ('claim_owner_self_attested', 'configured_issuer_verified')
+    ),
+    issuer_id              TEXT,
+    consumed_by_event_id   TEXT,
+    consumed_at            TEXT,
+    invalidated_by_event_id TEXT,
+    collision_detected      INTEGER NOT NULL DEFAULT 0
+        CHECK (collision_detected IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS idx_claim_progress_attestations_claim_generation
+    ON claim_progress_attestations (claim_id, generation);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_progress_attestations_pending
+    ON claim_progress_attestations (claim_id, generation)
+    WHERE consumed_by_event_id IS NULL AND invalidated_by_event_id IS NULL
+      AND collision_detected = 0;
 
 CREATE TABLE IF NOT EXISTS evidence (
     id                  TEXT PRIMARY KEY,
@@ -391,7 +438,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 16;
+PRAGMA user_version = 17;
 """
 
 

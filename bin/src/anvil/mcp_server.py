@@ -264,6 +264,8 @@ class ClaimResponse(BaseModel):
     warnings: list[str] = []
     actor_identity: dict[str, Any] = Field(default_factory=dict)
     continuation: dict[str, Any] = Field(default_factory=dict)
+    generation: int = 1
+    attestation_context: dict[str, Any] | None = None
 
 
 class ReleaseResponse(BaseModel):
@@ -274,6 +276,19 @@ class ReleaseResponse(BaseModel):
     released: bool
     claim_id: str
     actor_identity: dict[str, Any] = Field(default_factory=dict)
+
+
+class RenewProgressReceipt(BaseModel):
+    """The progress fact that authorized, or declined, one renewal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["attestation", "file_changed", "legacy_unmeasurable", "none"]
+    digest: str | None = None
+    generation: int | None = None
+    trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ] | None = None
 
 
 class RenewResponse(BaseModel):
@@ -288,6 +303,7 @@ class RenewResponse(BaseModel):
     # fresh lease.
     renewed: bool = True
     actor_identity: dict[str, Any] = Field(default_factory=dict)
+    progress: RenewProgressReceipt | None = None
 
 
 class WorkPacketResponse(BaseModel):
@@ -299,6 +315,20 @@ class WorkPacketResponse(BaseModel):
     content: Any  # str for markdown, dict for json
 
 
+class ProgressAttestationReceipt(BaseModel):
+    """Stable accepted-attestation receipt returned to MCP clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    digest: str
+    generation: int
+    trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ]
+    kind: Literal["commit", "file"]
+    issuer_id: str | None = None
+
+
 class ProgressResponse(BaseModel):
     """Result of submit_progress."""
 
@@ -306,6 +336,8 @@ class ProgressResponse(BaseModel):
 
     recorded: bool
     actor_identity: dict[str, Any] = Field(default_factory=dict)
+    event_action: str = "progress.noted"
+    attestation: ProgressAttestationReceipt | None = None
 
 
 class BundleReviewPolicyRecord(BaseModel):
@@ -1248,6 +1280,7 @@ def claim_task(
     expected_files: list[str] | None = None,
     lease_duration_seconds: int = 900,
     shared_tree: bool = False,
+    cwd: str | None = None,
 ) -> ClaimResponse:
     """Acquire an exclusive lease on task_id for claimed_by.
 
@@ -1264,7 +1297,7 @@ def claim_task(
     """
     # ClaimManager owns new-identity canonicalization. Passing the exact input
     # preserves actor_input for SQLite's locked normalized-collision check.
-    state_dir = _resolve_state_dir()
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
@@ -1274,7 +1307,7 @@ def claim_task(
 
         # worktree_isolation parity with the CLI (review finding: the policy
         # lived only in cli/claim.py, so MCP claims silently bypassed it).
-        from anvil.cli._helpers import _load_config_optional
+        from anvil.cli._helpers import _load_config_optional, _resolve_project_dir
 
         cfg = _load_config_optional(state_dir)
         isolation = cfg.worktree_isolation if cfg is not None else "advisory"
@@ -1316,6 +1349,7 @@ def claim_task(
             SystemClock(),
             actor=claimed_by,
             default_lease_minutes=lease_minutes,
+            project_root=_resolve_project_dir(Path(cwd) if cwd else None),
         )
 
         files = expected_files or []
@@ -1326,6 +1360,11 @@ def claim_task(
             raise ToolError(str(exc)) from exc
 
         claim = result.claim
+        if claim.attestation_context is None:
+            isolation_warnings.append(
+                "Progress attestation unavailable: this project is not an "
+                "accessible Git repository; legacy file-change renewal remains available."
+            )
         return ClaimResponse(
             id=claim.id,
             task_id=claim.task_id,
@@ -1336,7 +1375,23 @@ def claim_task(
             expected_files=claim.expected_files,
             warnings=isolation_warnings,
             actor_identity=actor_identity_data(claim.claimed_by),
-            continuation=continuation_data(task_id, claim.id, claim.claimed_by),
+            continuation=continuation_data(
+                task_id,
+                claim.id,
+                claim.claimed_by,
+                attestation_context=(
+                    claim.attestation_context.model_dump(mode="json")
+                    if claim.attestation_context is not None
+                    else None
+                ),
+                generation=claim.generation,
+            ),
+            generation=claim.generation,
+            attestation_context=(
+                claim.attestation_context.model_dump(mode="json")
+                if claim.attestation_context is not None
+                else None
+            ),
         )
     finally:
         backend.close()
@@ -1489,18 +1544,23 @@ def renew_claim(
         )
 
         try:
-            updated_claim = manager.renew(active_claim.id)
+            renewal = manager.renew_with_result(active_claim.id)
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
         # B46 part 2 — a no-progress renew is a no-op (lease unchanged). Surface
         # whether the lease actually advanced so an MCP client can tell a real
         # renewal from a declined one instead of trusting a stale expiry.
-        renewed = updated_claim.lease_expires_at != active_claim.lease_expires_at
         return RenewResponse(
-            lease_expires_at=updated_claim.lease_expires_at.isoformat(),
-            renewed=renewed,
+            lease_expires_at=renewal.claim.lease_expires_at.isoformat(),
+            renewed=renewal.renewed,
             actor_identity=actor_identity_data(actor),
+            progress={
+                "source": renewal.progress_source,
+                "digest": renewal.attestation_digest,
+                "generation": renewal.attestation_generation,
+                "trust_mode": renewal.attestation_trust_mode,
+            },
         )
     finally:
         backend.close()
@@ -1611,9 +1671,11 @@ def generate_work_packet(
 def submit_progress(
     task_id: str,
     actor: str,
-    notes: str,
+    notes: str | None = None,
     phase: str | None = None,
     detail: str | None = None,
+    attestation_base64: str | None = None,
+    cwd: str | None = None,
 ) -> ProgressResponse:
     """Record a progress note for task_id as a 'progress.noted' audit event.
     Does NOT change task status. Reaps stale claims first.
@@ -1623,7 +1685,7 @@ def submit_progress(
     read the latest phase back so operators can see where a long run is
     without asking. ``detail`` is free-text elaboration for the phase."""
     actor = _exact_lifecycle_actor(actor)
-    state_dir = _resolve_state_dir()
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.clock import SystemClock
@@ -1644,6 +1706,52 @@ def submit_progress(
             )
         if active_claim is None:
             actor = _require_actor(actor)
+
+        if attestation_base64 is not None:
+            from anvil import signing
+            from anvil.claims.manager import ClaimError, ClaimManager
+            from anvil.claims.progress_attestation import (
+                ProgressAttestationError,
+                load_progress_attestation_base64,
+            )
+            from anvil.cli._helpers import _resolve_project_dir
+            from anvil.cli.proof import _default_trust_path
+
+            try:
+                loaded = load_progress_attestation_base64(
+                    attestation_base64,
+                    trusted_issuers=signing.load_trust_list(_default_trust_path()),
+                )
+                if loaded.payload.task_id != task_id:
+                    raise ProgressAttestationError(
+                        "task_mismatch",
+                        "attestation task does not match the progress command",
+                    )
+                persisted = ClaimManager(
+                    backend,
+                    SystemClock(),
+                    actor=actor,
+                    project_root=_resolve_project_dir(Path(cwd) if cwd else None),
+                ).accept_progress_attestation(loaded)
+            except (ClaimError, ProgressAttestationError) as exc:
+                raise ToolError(
+                    f"progress_attestation_error[{getattr(exc, 'code', 'rejected')}]: {exc}"
+                ) from exc
+            return ProgressResponse(
+                recorded=True,
+                actor_identity=actor_identity_data(actor),
+                event_action="progress.attested",
+                attestation={
+                    "digest": persisted.semantic_digest,
+                    "generation": persisted.generation,
+                    "trust_mode": persisted.trust_mode,
+                    "kind": persisted.kind,
+                    "issuer_id": persisted.issuer_id,
+                },
+            )
+
+        if notes is None:
+            raise ToolError("notes is required when attestation_base64 is not provided")
 
         clock = SystemClock()
         now = clock.now()

@@ -94,6 +94,9 @@ __all__ = [
     "Requirement",
     "Feature",
     "Task",
+    "ClaimExpectedPathBaseline",
+    "ClaimAttestationContext",
+    "ClaimProgressAttestation",
     "Claim",
     "BundleClaim",
     "Evidence",
@@ -1280,6 +1283,109 @@ class ExecutionBundle(BaseModel):
         return data
 
 
+class ClaimExpectedPathBaseline(BaseModel):
+    """One canonical repo-relative claim path and its claim-start blob digest.
+
+    ``baseline_sha256`` is nullable because a task may legitimately be expected
+    to create a new file.  The immutable value object is captured before the
+    claim event is appended; replay never consults the working tree.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: StrictStr = Field(min_length=1, max_length=4096)
+    baseline_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class ClaimAttestationContext(BaseModel):
+    """Immutable Git/revision binding for external progress attestations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    repository_id: StrictStr = Field(min_length=1, max_length=512)
+    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    prd_id: StrictStr = Field(min_length=1, max_length=255)
+    prd_revision: StrictInt = Field(ge=1)
+    # Opaque canonical task-content revision supplied by the claim producer.
+    # Keeping this as a string allows a versioned semantic digest without
+    # coupling durable state to one task serializer.
+    task_revision: StrictStr = Field(min_length=1, max_length=255)
+    expected_paths: list[ClaimExpectedPathBaseline] = Field(default_factory=list)
+
+    @field_validator("expected_paths")
+    @classmethod
+    def _validate_unique_expected_paths(
+        cls, value: list[ClaimExpectedPathBaseline]
+    ) -> list[ClaimExpectedPathBaseline]:
+        paths = [entry.path for entry in value]
+        if len(paths) != len(set(paths)):
+            raise ValueError("attestation expected paths must be unique")
+        return value
+
+
+class ClaimProgressAttestation(BaseModel):
+    """Authoritative projection of one claim-bound progress attestation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    semantic_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    accepted_event_id: EventID
+    envelope_id: StrictStr | None = Field(default=None, max_length=255)
+    claim_id: ClaimID
+    task_id: TaskID
+    claimed_by: StrictStr = Field(min_length=1)
+    generation: StrictInt = Field(ge=1)
+    repository_id: StrictStr = Field(min_length=1, max_length=512)
+    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    prd_id: PRDID
+    prd_revision: StrictInt = Field(ge=1)
+    task_revision: StrictStr = Field(min_length=1, max_length=255)
+    kind: Literal["commit", "file"]
+    commit_sha: StrictStr | None = Field(
+        default=None, pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    )
+    changed_paths: list[StrictStr] = Field(default_factory=list)
+    path: StrictStr | None = Field(default=None, min_length=1, max_length=4096)
+    file_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    attested_at: datetime.datetime
+    recorded_at: datetime.datetime
+    trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ]
+    issuer_id: StrictStr | None = Field(default=None, max_length=255)
+    consumed_by_event_id: EventID | None = None
+    consumed_at: datetime.datetime | None = None
+    invalidated_by_event_id: EventID | None = None
+    collision_detected: StrictBool = False
+
+    @model_validator(mode="after")
+    def _validate_attestation_kind(self) -> ClaimProgressAttestation:
+        if self.kind == "commit":
+            if self.commit_sha is None or not self.changed_paths:
+                raise ValueError("commit attestation requires commit_sha and changed_paths")
+            if self.path is not None or self.file_sha256 is not None:
+                raise ValueError("commit attestation cannot carry file-only fields")
+        else:
+            if self.commit_sha is not None or self.changed_paths:
+                raise ValueError("file attestation cannot carry commit-only fields")
+            if self.path is None or self.file_sha256 is None:
+                raise ValueError("file attestation requires path and file_sha256")
+        return self
+
+    @field_validator("attested_at", "recorded_at", "consumed_at", mode="after")
+    @classmethod
+    def _validate_attestation_utc(
+        cls, value: datetime.datetime | None
+    ) -> datetime.datetime | None:
+        if value is None:
+            return None
+        return _require_utc(value, "attestation timestamp")
+
+
 class Claim(BaseModel):
     """An exclusive lease that an agent holds on a Task while working on it."""
 
@@ -1293,6 +1399,11 @@ class Claim(BaseModel):
     branch: str | None = None
     worktree_path: str | None = None
     expected_files: list[str] = Field(default_factory=list)
+    # Monotonic per-task lifecycle generation.  v17 migration deterministically
+    # assigns generations to legacy rows; only claims with an immutable context
+    # may accept external progress attestations.
+    generation: StrictInt = Field(default=1, ge=1)
+    attestation_context: ClaimAttestationContext | None = None
     # Internal authorization created atomically under one public bundle claim.
     # None preserves the legacy standalone-task claim shape.
     bundle_claim_id: str | None = None

@@ -6,6 +6,16 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **Claim-bound external progress attestations (#180).** Standalone Git-backed
+  claims now persist a generation and immutable repository/task/PRD context.
+  CLI and MCP callers can submit bounded canonical commit or file attestations;
+  the next renewal consumes one accepted attestation atomically and reports its
+  trust mode. Free-text progress remains audit-only, duplicate or stale
+  evidence cannot extend a lease, and legacy/non-Git claims retain their prior
+  renewal behavior.
+
 ## [0.6.3] - 2026-08-08
 
 ### Fixed

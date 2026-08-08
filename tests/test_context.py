@@ -130,6 +130,8 @@ def _make_claim(
     task_id: str = "T001",
     actor: str = "agent-alpha",
     now: datetime = _T0,
+    attestation_context: dict[str, object] | None = None,
+    generation: int = 1,
 ) -> Claim:
     return Claim(
         id=claim_id,
@@ -140,6 +142,8 @@ def _make_claim(
         branch="feat/t001-implement-the-thing",
         worktree_path=None,
         expected_files=["src/auth.py"],
+        generation=generation,
+        attestation_context=attestation_context,
         created_at=now,
         lease_expires_at=now + timedelta(hours=1),
         last_heartbeat_at=now,
@@ -190,6 +194,34 @@ def test_relevant_assumptions_include_global_and_feature_scope_only() -> None:
 
 
 class TestRenderPacket:
+    def test_attestation_context_adds_structured_and_human_continuation(self) -> None:
+        context = {
+            "repository_id": "a" * 64,
+            "claim_start_sha": "b" * 40,
+            "prd_id": "default",
+            "prd_revision": 2,
+            "task_revision": "c" * 64,
+            "expected_paths": [
+                {"path": "src/auth.py", "baseline_sha256": "d" * 64}
+            ],
+        }
+        packet = render_packet(
+            _make_task(),
+            active_claim=_make_claim(
+                attestation_context=context,
+                generation=3,
+            ),
+        )
+
+        assert "--attestation-file" in packet.markdown
+        continuation = packet.json_data["update_protocol"]["continuation"]
+        assert continuation["attest_progress"]["argv"][0:2] == ["anvil", "progress"]
+        assert continuation["attestation"]["generation"] == 3
+        assert continuation["attestation"]["context"] == context
+        assert "free-text progress notes never" in continuation["attestation"][
+            "renewal_contract"
+        ]
+
     def test_minimal_task_renders(self) -> None:
         """Task with no feature, no deps, no decisions, no claim → packet with
         title, status, acceptance criteria, and verification commands.

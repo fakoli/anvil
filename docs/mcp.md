@@ -501,6 +501,8 @@ created.
 | `claimed_by`             | `string`                | yes      |         |
 | `expected_files`         | `list[string] \| null`  | no       | `[]`    |
 | `lease_duration_seconds` | `int`                   | no       | `900`   |
+| `shared_tree`            | `bool`                  | no       | `false` |
+| `cwd`                    | `string \| null`        | no       | project root |
 
 `lease_duration_seconds` is converted to minutes (floor, minimum 1) before being passed
 to `ClaimManager`. The default 900 seconds gives a 15-minute MCP-side override — note that
@@ -518,11 +520,18 @@ and the project-level override is read from `.anvil/config.yaml`.
   "lease_expires_at": "2026-05-25T14:15:00+00:00",
   "branch": "agent/t012-implement-auth",
   "worktree_path": null,
-  "expected_files": ["src/auth/middleware.py", "tests/test_auth.py"]
+  "expected_files": ["src/auth/middleware.py", "tests/test_auth.py"],
+  "generation": 2,
+  "attestation_context": {"repository_id": "...", "claim_start_sha": "...", "expected_paths": [{"path": "src/auth/middleware.py", "baseline_sha256": "..."}]},
+  "continuation": {"attest_progress": {"argv": ["anvil", "progress", "T012", "<phase>", "--attestation-file", "<path>", "--actor", "agent-welder-1"]}}
 }
 ```
 
-`branch` and `worktree_path` are `null` when git ops are not configured.
+The immutable attestation context binds external progress to this claim generation,
+repository, PRD/task revisions, and canonical expected-path baselines. `branch` and
+`worktree_path` are `null` when git ops are not configured. In a non-Git project the
+claim still succeeds with `attestation_context: null` and an additive warning; legacy
+hook-observed file progress remains available.
 
 **Failure modes**
 
@@ -607,7 +616,8 @@ For a coordinator bundle lease, pass the bundle ID as `task_id` and set
 {
   "lease_expires_at": "2026-05-25T14:30:00+00:00",
   "renewed": true,
-  "actor_identity": {"actor": "agent-x", "authenticated": false, "notice": "..."}
+  "actor_identity": {"actor": "agent-x", "authenticated": false, "notice": "..."},
+  "progress": {"source": "attestation", "digest": "...", "generation": 2, "trust_mode": "configured_issuer_verified"}
 }
 ```
 
@@ -625,11 +635,15 @@ to re-enter the `ready` pool.
 
 ### `submit_progress`
 
-Records an in-progress note for a task without changing its status. Writes a
-`progress.noted` event to the JSONL audit log. It does not require a claim, but when the
-task has an active claim the exact owner must supply the progress actor.
+Records an in-progress note for a task without changing its status. With ordinary text it
+writes a `progress.noted` event to the JSONL audit log. It does not require a claim, but
+when the task has an active claim the exact owner must supply the progress actor.
 `phase` is an optional structured label ("build", "tests", "review-fixes", …)
 for the heartbeat bus; `detail` is free-text elaboration for the phase.
+Alternatively, pass strict canonical `attestation_base64` plus the project `cwd` to verify
+and record `progress.attested`. The receipt includes digest, generation, kind, and trust
+mode. The next renewal consumes that accepted artifact exactly once. Free-text notes never
+authorize renewal.
 
 **Inputs**
 
@@ -637,15 +651,19 @@ for the heartbeat bus; `detail` is free-text elaboration for the phase.
 |-----------|----------|----------|
 | `task_id` | `string` | yes      |
 | `actor`   | `string` | yes      |
-| `notes`   | `string` | yes      |
+| `notes`   | `string \| null` | unless no attestation |
 | `phase`   | `string` | no       |
 | `detail`  | `string` | no       |
+| `attestation_base64` | `string \| null` | no |
+| `cwd` | `string \| null` | no |
 
 **Output**
 
 ```json
 {
-  "recorded": true
+  "recorded": true,
+  "event_action": "progress.attested",
+  "attestation": {"digest": "...", "generation": 2, "kind": "commit", "trust_mode": "configured_issuer_verified"}
 }
 ```
 

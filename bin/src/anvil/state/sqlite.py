@@ -66,6 +66,8 @@ from anvil.state.models import (
     BundleReviewVerdict,
     BundleStatus,
     Claim,
+    ClaimAttestationContext,
+    ClaimProgressAttestation,
     ClaimStatus,
     ConflictGroup,
     Event,
@@ -110,6 +112,7 @@ from anvil.state.payloads import (
     PrdParsedPayload,
     PrdReviewedPayload,
     PrdRevisedPayload,
+    ProgressAttestedPayload,
     ProgressNotedPayload,
     ProjectCreatedPayload,
     StateInitializedPayload,
@@ -2457,6 +2460,39 @@ class SqliteBackend:
             return None
         return self._row_to_claim(row)
 
+    def next_claim_generation(self, task_id: str) -> int:
+        """Return the advisory next per-task generation for claim construction."""
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT COALESCE(MAX(generation), 0) + 1 FROM claims WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        return int(row[0])
+
+    def get_progress_attestation(
+        self, semantic_digest: str
+    ) -> ClaimProgressAttestation | None:
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT * FROM claim_progress_attestations WHERE semantic_digest = ?",
+            (semantic_digest,),
+        ).fetchone()
+        return None if row is None else self._row_to_progress_attestation(row)
+
+    def get_pending_progress_attestation(
+        self, claim_id: str, generation: int
+    ) -> ClaimProgressAttestation | None:
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT * FROM claim_progress_attestations "
+            "WHERE claim_id = ? AND generation = ? "
+            "AND consumed_by_event_id IS NULL "
+            "AND invalidated_by_event_id IS NULL "
+            "AND collision_detected = 0",
+            (claim_id, generation),
+        ).fetchone()
+        return None if row is None else self._row_to_progress_attestation(row)
+
     def list_active_claims(self) -> list[Claim]:
         """Return all claims with status == 'active'."""
         conn = self._require_conn()
@@ -2990,6 +3026,7 @@ class SqliteBackend:
                         "prd_id",
                         "is_default",
                         "disposition_event_id",
+                        "generation",
                     ):
                         continue
                     raise
@@ -3031,7 +3068,7 @@ class SqliteBackend:
         """Raise SchemaMismatch if on-disk version is incompatible with SCHEMA_VERSION.
 
         Auto-upgrade follows the ordered, idempotent ``_MIGRATIONS`` chain
-        through the current schema (v16). ``v0`` and ``v1`` are normalized to
+        through the current schema (v17). ``v0`` and ``v1`` are normalized to
         the v2 baseline by current DDL before the explicit ladder runs. The
         early historical transitions remain noteworthy because they repair
         pre-existing tables that ``CREATE TABLE IF NOT EXISTS`` cannot alter:
@@ -3065,7 +3102,7 @@ class SqliteBackend:
         equal to SCHEMA_VERSION) and the migration branches would never
         fire.
 
-        Every later step, v5→v6 through v15→v16, is represented by one
+        Every later step, v5→v6 through v16→v17, is represented by one
         contiguous tuple in ``_MIGRATIONS``. Any gap between the on-disk version
         and ``SCHEMA_VERSION`` fails closed. See docs/migrations.md.
         """
@@ -3663,6 +3700,80 @@ class SqliteBackend:
                 "ALTER TABLE prds ADD COLUMN assumptions TEXT NOT NULL DEFAULT '[]'"
             )
 
+    def _m_to_v17(self, conn: sqlite3.Connection) -> None:
+        """v16 -> v17: claim generations and consume-once attestations."""
+        claim_columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)")}
+        if "generation" not in claim_columns:
+            conn.execute(
+                "ALTER TABLE claims ADD COLUMN generation "
+                "INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1)"
+            )
+        if "attestation_context" not in claim_columns:
+            conn.execute("ALTER TABLE claims ADD COLUMN attestation_context TEXT")
+
+        # Legacy claims never carried an explicit generation.  Assign their
+        # lifecycle order deterministically without fabricating an attestation
+        # context; they remain fully usable for ordinary renew/release flows.
+        conn.execute(
+            """UPDATE claims AS current
+                  SET generation = (
+                      SELECT COUNT(*)
+                        FROM claims AS prior
+                       WHERE prior.task_id = current.task_id
+                         AND (
+                              prior.created_at < current.created_at
+                              OR (prior.created_at = current.created_at
+                                  AND prior.id <= current.id)
+                         )
+                  )"""
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_task_generation "
+            "ON claims (task_id, generation)"
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS claim_progress_attestations (
+                semantic_digest TEXT PRIMARY KEY,
+                accepted_event_id TEXT NOT NULL UNIQUE,
+                envelope_id TEXT,
+                claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE RESTRICT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+                claimed_by TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation >= 1),
+                repository_id TEXT NOT NULL,
+                claim_start_sha TEXT NOT NULL,
+                prd_id TEXT NOT NULL,
+                prd_revision INTEGER NOT NULL CHECK (prd_revision >= 1),
+                task_revision TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('commit', 'file')),
+                commit_sha TEXT,
+                changed_paths TEXT NOT NULL DEFAULT '[]',
+                path TEXT,
+                file_sha256 TEXT,
+                attested_at TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                trust_mode TEXT NOT NULL CHECK (
+                    trust_mode IN ('claim_owner_self_attested', 'configured_issuer_verified')
+                ),
+                issuer_id TEXT,
+                consumed_by_event_id TEXT,
+                consumed_at TEXT,
+                invalidated_by_event_id TEXT,
+                collision_detected INTEGER NOT NULL DEFAULT 0
+                    CHECK (collision_detected IN (0, 1))
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_claim_progress_attestations_claim_generation "
+            "ON claim_progress_attestations (claim_id, generation)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_progress_attestations_pending "
+            "ON claim_progress_attestations (claim_id, generation) "
+            "WHERE consumed_by_event_id IS NULL AND invalidated_by_event_id IS NULL "
+            "AND collision_detected = 0"
+        )
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -3678,6 +3789,7 @@ class SqliteBackend:
         (13, _m_to_v14),
         (14, _m_to_v15),
         (15, _m_to_v16),
+        (16, _m_to_v17),
     ]
 
     @staticmethod
@@ -4655,6 +4767,11 @@ class SqliteBackend:
                 self._check_progress_noted,
                 self._write_audit_only,
             ),
+            "progress.attested": ActionSpec(
+                ProgressAttestedPayload,
+                self._check_progress_attested,
+                self._write_progress_attested,
+            ),
             # Phase 8: sync_mappings table — external-system mirroring.
             "sync_mapping.upserted": ActionSpec(
                 SyncMappingUpsertedPayload,
@@ -4736,6 +4853,221 @@ class SqliteBackend:
             raise EventRejected(
                 "progress.noted: only the exact active claim owner may record progress."
             )
+
+    @staticmethod
+    def _progress_attestation_matches_claim(
+        conn: sqlite3.Connection,
+        payload: ProgressAttestedPayload,
+        event: EventDraft | Event,
+    ) -> bool:
+        """Return whether persisted state exactly authorizes this attestation.
+
+        This deliberately performs no Git or filesystem work.  The ingestion
+        service proves external material before append; this projection guard
+        binds that proof to authoritative lifecycle state and is replay-safe.
+        """
+        if (
+            event.target_kind != "claim"
+            or event.target_id != payload.claim_id
+            or event.actor != payload.claimed_by
+        ):
+            return False
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?",
+            (payload.claim_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != payload.task_id
+            or row[1] != payload.claimed_by
+            or row[2] != "active"
+            or row[3] is not None
+            or int(row[4]) != payload.generation
+            or row[5] is None
+            or row[8] is not None
+        ):
+            return False
+        try:
+            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            created_at = datetime.datetime.fromisoformat(row[6].replace("Z", "+00:00"))
+            attested_at = datetime.datetime.fromisoformat(
+                payload.attested_at.replace("Z", "+00:00")
+            )
+            recorded_at = datetime.datetime.fromisoformat(
+                payload.recorded_at.replace("Z", "+00:00")
+            )
+            lease_expires_at = datetime.datetime.fromisoformat(
+                row[7].replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if (
+            context.repository_id != payload.repository_id
+            or context.claim_start_sha != payload.claim_start_sha
+            or context.prd_id != payload.prd_id
+            or context.prd_revision != payload.prd_revision
+            or context.task_revision != payload.task_revision
+            or created_at > attested_at
+            or attested_at > recorded_at
+            or recorded_at != event.timestamp
+            or recorded_at >= lease_expires_at
+        ):
+            return False
+        current_prd = conn.execute(
+            "SELECT revision FROM prds WHERE id = ?", (context.prd_id,)
+        ).fetchone()
+        if current_prd is None or int(current_prd[0]) != context.prd_revision:
+            return False
+        expected = {entry.path for entry in context.expected_paths}
+        if payload.kind == "commit":
+            return bool(payload.changed_paths) and set(payload.changed_paths).issubset(
+                expected
+            )
+        return payload.path in expected
+
+    def _check_progress_attested(
+        self,
+        conn: sqlite3.Connection,
+        payload: ProgressAttestedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate one non-stackable attestation against a fresh DB snapshot."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not self._progress_attestation_matches_claim(conn, payload, event):
+                raise EventRejected(
+                    "progress.attested: exact active claim ownership or binding mismatch."
+                )
+            if conn.execute(
+                "SELECT 1 FROM claim_progress_attestations "
+                "WHERE semantic_digest = ?",
+                (payload.semantic_digest,),
+            ).fetchone() is not None:
+                raise EventRejected(
+                    "progress.attested: semantic digest was already recorded."
+                )
+            if conn.execute(
+                "SELECT 1 FROM claim_progress_attestations "
+                "WHERE claim_id = ? AND generation = ? AND collision_detected = 1",
+                (payload.claim_id, payload.generation),
+            ).fetchone() is not None:
+                raise EventRejected(
+                    "progress.attested: claim generation is quarantined."
+                )
+            if conn.execute(
+                "SELECT 1 FROM claim_progress_attestations "
+                "WHERE claim_id = ? AND generation = ? "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL AND collision_detected = 0",
+                (payload.claim_id, payload.generation),
+            ).fetchone() is not None:
+                raise EventRejected(
+                    "progress.attested: claim generation already has pending progress."
+                )
+        finally:
+            conn.execute("COMMIT")
+
+    def _write_progress_attested(
+        self,
+        conn: sqlite3.Connection,
+        payload: ProgressAttestedPayload,
+        event: Event,
+    ) -> None:
+        """Project an attestation once; quarantine divergent replay envelopes."""
+        existing = conn.execute(
+            "SELECT accepted_event_id FROM claim_progress_attestations "
+            "WHERE semantic_digest = ?",
+            (payload.semantic_digest,),
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != event.id:
+                conn.execute(
+                    "UPDATE claim_progress_attestations "
+                    "SET collision_detected = 1, "
+                    "invalidated_by_event_id = COALESCE(invalidated_by_event_id, ?) "
+                    "WHERE semantic_digest = ?",
+                    (event.id, payload.semantic_digest),
+                )
+            return
+
+        same_event = conn.execute(
+            "SELECT semantic_digest FROM claim_progress_attestations "
+            "WHERE accepted_event_id = ?",
+            (event.id,),
+        ).fetchone()
+        if same_event is not None:
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET collision_detected = 1, "
+                "invalidated_by_event_id = COALESCE(invalidated_by_event_id, ?) "
+                "WHERE semantic_digest = ?",
+                (event.id, same_event[0]),
+            )
+            return
+        if not self._progress_attestation_matches_claim(conn, payload, event):
+            return
+
+        if conn.execute(
+            "SELECT 1 FROM claim_progress_attestations "
+            "WHERE claim_id = ? AND generation = ? AND collision_detected = 1",
+            (payload.claim_id, payload.generation),
+        ).fetchone() is not None:
+            return
+
+        pending = conn.execute(
+            "SELECT semantic_digest FROM claim_progress_attestations "
+            "WHERE claim_id = ? AND generation = ? "
+            "AND consumed_by_event_id IS NULL "
+            "AND invalidated_by_event_id IS NULL AND collision_detected = 0",
+            (payload.claim_id, payload.generation),
+        ).fetchone()
+        if pending is not None:
+            # Merged/replayed branches attempted to stack two independently
+            # valid facts. Quarantine the generation rather than choose one.
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET collision_detected = 1, invalidated_by_event_id = ? "
+                "WHERE semantic_digest = ?",
+                (event.id, pending[0]),
+            )
+            return
+
+        conn.execute(
+            """INSERT INTO claim_progress_attestations
+               (semantic_digest, accepted_event_id, envelope_id, claim_id, task_id,
+                claimed_by, generation, repository_id, claim_start_sha, prd_id,
+                prd_revision, task_revision, kind, commit_sha, changed_paths,
+                path, file_sha256, attested_at, recorded_at, trust_mode, issuer_id,
+                consumed_by_event_id, consumed_at, invalidated_by_event_id,
+                collision_detected)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       NULL, NULL, NULL, 0)""",
+            (
+                payload.semantic_digest,
+                event.id,
+                payload.envelope_id,
+                payload.claim_id,
+                payload.task_id,
+                payload.claimed_by,
+                payload.generation,
+                payload.repository_id,
+                payload.claim_start_sha,
+                payload.prd_id,
+                payload.prd_revision,
+                payload.task_revision,
+                payload.kind,
+                payload.commit_sha,
+                json.dumps(payload.changed_paths, separators=(",", ":")),
+                payload.path,
+                payload.file_sha256,
+                payload.attested_at,
+                payload.recorded_at,
+                payload.trust_mode,
+                payload.issuer_id,
+            ),
+        )
 
     def _write_audit_only(
         self,
@@ -7645,9 +7977,13 @@ class SqliteBackend:
                 """INSERT INTO claims
                    (id, task_id, claimed_by, claim_type, status, branch,
                     worktree_path, session_id, bundle_claim_id, expected_files,
+                    generation, attestation_context,
                     created_at, lease_expires_at, last_heartbeat_at,
                     released_at, release_reason)
-                   VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+                   VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?,
+                           (SELECT COALESCE(MAX(generation), 0) + 1
+                              FROM claims WHERE task_id = ?),
+                           NULL, ?, ?, ?, NULL, NULL)""",
                 (
                     claim_id,
                     task_id,
@@ -7657,6 +7993,7 @@ class SqliteBackend:
                     payload.session_id,
                     payload.id,
                     likely_files_json or "[]",
+                    task_id,
                     payload.created_at.isoformat(),
                     payload.lease_expires_at.isoformat(),
                     payload.last_heartbeat_at.isoformat(),
@@ -8838,7 +9175,7 @@ class SqliteBackend:
         :class:`EventRejected` on any guard failure; performs no writes.
         """
         row = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (payload.task_id,)
+            "SELECT status, prd_id FROM tasks WHERE id = ?", (payload.task_id,)
         ).fetchone()
         if row is None:
             raise EventRejected(f"claim.created: task '{payload.task_id}' not found.")
@@ -8880,6 +9217,45 @@ class SqliteBackend:
         ).fetchone()
         if existing is not None:
             return
+
+        expected_generation = int(
+            conn.execute(
+                "SELECT COALESCE(MAX(generation), 0) + 1 "
+                "FROM claims WHERE task_id = ?",
+                (payload.task_id,),
+            ).fetchone()[0]
+        )
+        if (
+            payload.generation is not None
+            and payload.generation != expected_generation
+        ):
+            raise EventRejected(
+                "claim.created: generation must equal the next authoritative "
+                f"task generation ({expected_generation})."
+            )
+        if payload.generation is None and payload.attestation_context is not None:
+            raise EventRejected(
+                "claim.created: attestation context requires an explicit generation."
+            )
+
+        context = payload.attestation_context
+        if context is not None:
+            if payload.bundle_claim_id is not None:
+                raise EventRejected(
+                    "claim.created: bundle member claims cannot carry attestation context."
+                )
+            if context.prd_id != row[1]:
+                raise EventRejected("claim.created: attestation PRD binding mismatch.")
+            prd_row = conn.execute(
+                "SELECT revision FROM prds WHERE id = ?", (context.prd_id,)
+            ).fetchone()
+            if prd_row is None or int(prd_row[0]) != context.prd_revision:
+                raise EventRejected("claim.created: attestation PRD revision mismatch.")
+            context_paths = [entry.path for entry in context.expected_paths]
+            if context_paths != [str(path) for path in payload.expected_files]:
+                raise EventRejected(
+                    "claim.created: attestation paths must exactly bind expected_files."
+                )
 
         # Same-task race guard (TOCTOU): the status check above admits a
         # 'claimed' task so a replayed claim.created can still run its
@@ -9079,6 +9455,18 @@ class SqliteBackend:
         branch: str | None = payload.branch
         worktree_path: str | None = payload.worktree_path
         expected_files = payload.expected_files
+        generation = payload.generation
+        if generation is None:
+            # Legacy replay only: old events cannot attest, but their lifecycle
+            # still receives a deterministic per-task generation.
+            generation = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(generation), 0) + 1 "
+                    "FROM claims WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+        attestation_context = payload.attestation_context
         timestamp: str = event.timestamp.astimezone(datetime.UTC).isoformat()
 
         if event.target_kind != "claim" or event.target_id != claim_id:
@@ -9165,14 +9553,15 @@ class SqliteBackend:
 
         # INSERT OR IGNORE: idempotent on replay — duplicate claim.created events
         # (after crash mid-transaction) do not produce duplicate rows.
-        conn.execute(
+        inserted = conn.execute(
             """
             INSERT OR IGNORE INTO claims
                 (id, task_id, claimed_by, claim_type, status, branch,
-                 worktree_path, session_id, expected_files, created_at,
+                 worktree_path, session_id, expected_files, generation,
+                 attestation_context, created_at,
                  lease_expires_at, last_heartbeat_at, released_at, release_reason)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             """,
             (
                 claim_id,
@@ -9184,11 +9573,27 @@ class SqliteBackend:
                 worktree_path,
                 getattr(payload, "session_id", None),
                 json.dumps(expected_files),
+                generation,
+                (
+                    json.dumps(
+                        attestation_context.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if attestation_context is not None
+                    else None
+                ),
                 created_at,
                 lease_expires_at,
                 last_heartbeat_at,
             ),
         )
+        # Distinct Git branches can allocate different claim ids for the same
+        # task generation. The unique index makes the first replay-ordered
+        # lineage authoritative; the loser has no row, so descendants fail
+        # closed instead of aborting rebuild on a foreign-key insert below.
+        if inserted.rowcount != 1:
+            return
         conn.execute(
             "INSERT OR IGNORE INTO claim_replay_lineages "
             "(claim_id, creation_fingerprint) VALUES (?, ?)",
@@ -9294,7 +9699,8 @@ class SqliteBackend:
         """
         claim_id: str = payload.claim_id
         child_row = conn.execute(
-            "SELECT bundle_claim_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
+            "SELECT bundle_claim_id, claimed_by, generation FROM claims WHERE id = ?",
+            (claim_id,),
         ).fetchone()
         if (
             event.target_kind != "claim"
@@ -9312,7 +9718,7 @@ class SqliteBackend:
 
         target_status, status_guard = self._claim_release_target(force)
 
-        conn.execute(
+        released = conn.execute(
             f"""
             UPDATE claims
                SET status = ?,
@@ -9323,6 +9729,15 @@ class SqliteBackend:
             """,  # noqa: S608 — status_guard is a literal, not user input
             (target_status, timestamp, release_reason, claim_id),
         )
+        if released.rowcount == 1:
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET invalidated_by_event_id = ? "
+                "WHERE claim_id = ? AND generation = ? "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL",
+                (event.id, claim_id, child_row[2]),
+            )
 
         # Side-effect: return the task to 'ready'. Widened from the original
         # WHERE status='claimed' (which would TransactionAborted on tasks that
@@ -9360,29 +9775,60 @@ class SqliteBackend:
         active) interpreted from a 0-row UPDATE; both now reject up front.
         """
         claim_id: str = payload.claim_id
-        if event.target_kind != "claim" or event.target_id != claim_id:
-            raise EventRejected("claim.renewed: event target mismatch.")
-        if payload.renewed_by is None or event.actor != payload.renewed_by:
-            raise EventRejected("claim.renewed: event actor mismatch.")
-        self._reject_claim_replay_collision(conn, claim_id, "claim.renewed")
-        row = conn.execute(
-            "SELECT status, bundle_claim_id, claimed_by FROM claims WHERE id = ?",
-            (claim_id,),
-        ).fetchone()
-        if row is None:
-            raise EventRejected(f"claim.renewed: claim '{claim_id}' not found.")
-        if row[1] is not None:
-            raise EventRejected(
-                "claim.renewed: renew the public bundle coordinator claim instead."
-            )
-        if row[2] != payload.renewed_by:
-            raise EventRejected("claim.renewed: only the exact claim owner may renew.")
-        actual_status = row[0]
-        if actual_status != "active":
-            raise EventRejected(
-                f"claim.renewed: cannot renew claim '{claim_id}' "
-                f"with status '{actual_status}' (must be 'active')."
-            )
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if event.target_kind != "claim" or event.target_id != claim_id:
+                raise EventRejected("claim.renewed: event target mismatch.")
+            if payload.renewed_by is None or event.actor != payload.renewed_by:
+                raise EventRejected("claim.renewed: event actor mismatch.")
+            self._reject_claim_replay_collision(conn, claim_id, "claim.renewed")
+            row = conn.execute(
+                "SELECT status, bundle_claim_id, claimed_by, generation, "
+                "attestation_context FROM claims WHERE id = ?",
+                (claim_id,),
+            ).fetchone()
+            if row is None:
+                raise EventRejected(f"claim.renewed: claim '{claim_id}' not found.")
+            if row[1] is not None:
+                raise EventRejected(
+                    "claim.renewed: renew the public bundle coordinator claim instead."
+                )
+            if row[2] != payload.renewed_by:
+                raise EventRejected(
+                    "claim.renewed: only the exact claim owner may renew."
+                )
+            actual_status = row[0]
+            if actual_status != "active":
+                raise EventRejected(
+                    f"claim.renewed: cannot renew claim '{claim_id}' "
+                    f"with status '{actual_status}' (must be 'active')."
+                )
+            if payload.attestation_digest is not None:
+                if row[4] is None or row[3] != payload.attestation_generation:
+                    raise EventRejected(
+                        "claim.renewed: attestation generation or context mismatch."
+                    )
+                attestation = conn.execute(
+                    "SELECT trust_mode FROM claim_progress_attestations "
+                    "WHERE semantic_digest = ? AND claim_id = ? AND generation = ? "
+                    "AND claimed_by = ? AND consumed_by_event_id IS NULL "
+                    "AND invalidated_by_event_id IS NULL AND collision_detected = 0",
+                    (
+                        payload.attestation_digest,
+                        claim_id,
+                        payload.attestation_generation,
+                        payload.renewed_by,
+                    ),
+                ).fetchone()
+                if (
+                    attestation is None
+                    or attestation[0] != payload.attestation_trust_mode
+                ):
+                    raise EventRejected(
+                        "claim.renewed: pending attestation binding mismatch."
+                    )
+        finally:
+            conn.execute("COMMIT")
 
     def _write_claim_renewed(
         self,
@@ -9407,7 +9853,9 @@ class SqliteBackend:
         """
         claim_id: str = payload.claim_id
         child_row = conn.execute(
-            "SELECT bundle_claim_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
+            "SELECT bundle_claim_id, claimed_by, generation, attestation_context, status "
+            "FROM claims WHERE id = ?",
+            (claim_id,),
         ).fetchone()
         renewed_by = payload.renewed_by
         if (
@@ -9422,6 +9870,33 @@ class SqliteBackend:
             return
         lease_expires_at: str = payload.lease_expires_at
         last_heartbeat_at: str = payload.last_heartbeat_at
+
+        if payload.attestation_digest is not None:
+            if (
+                child_row[3] is None
+                or child_row[2] != payload.attestation_generation
+                or child_row[4] != "active"
+            ):
+                return
+            consumed = conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET consumed_by_event_id = ?, consumed_at = ? "
+                "WHERE semantic_digest = ? AND claim_id = ? AND generation = ? "
+                "AND claimed_by = ? AND trust_mode = ? "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL AND collision_detected = 0",
+                (
+                    event.id,
+                    last_heartbeat_at,
+                    payload.attestation_digest,
+                    claim_id,
+                    payload.attestation_generation,
+                    renewed_by,
+                    payload.attestation_trust_mode,
+                ),
+            )
+            if consumed.rowcount != 1:
+                return
 
         conn.execute(
             """
@@ -9492,7 +9967,7 @@ class SqliteBackend:
         """
         claim_id: str = payload.claim_id
         child_row = conn.execute(
-            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT bundle_claim_id, generation FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if child_row is not None and child_row[0] is not None:
             return
@@ -9500,7 +9975,7 @@ class SqliteBackend:
             return
         timestamp: str = event.timestamp.isoformat()
 
-        conn.execute(
+        staled = conn.execute(
             """
             UPDATE claims
                SET status = 'stale',
@@ -9511,6 +9986,15 @@ class SqliteBackend:
             """,
             (timestamp, claim_id),
         )
+        if staled.rowcount == 1 and child_row is not None:
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET invalidated_by_event_id = ? "
+                "WHERE claim_id = ? AND generation = ? "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL",
+                (event.id, claim_id, child_row[1]),
+            )
 
         # Side-effect: return the task to 'ready' if it is still in an
         # active-work status.  Tasks already at accepted/done/rejected are
@@ -9751,7 +10235,7 @@ class SqliteBackend:
         )
 
         # Auto-release the active claim.
-        conn.execute(
+        released = conn.execute(
             """
             UPDATE claims
                SET status = 'released',
@@ -9762,8 +10246,18 @@ class SqliteBackend:
             """,
             (timestamp, claim_id),
         )
+        if released.rowcount == 1:
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET invalidated_by_event_id = ? "
+                "WHERE claim_id = ? "
+                "AND generation = (SELECT generation FROM claims WHERE id = ?) "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL",
+                (event.id, claim_id, claim_id),
+            )
 
-        if conn.execute("SELECT changes()").fetchone()[0] == 0:
+        if released.rowcount == 0:
             # Claim already released or stale — idempotent; log warning to audit.jsonl
             # only during normal (non-replay) execution. During replay/catch-up the
             # audit line was already written on the first run; re-writing it would
@@ -10395,7 +10889,17 @@ class SqliteBackend:
         d = dict(row)
         if isinstance(d.get("expected_files"), str):
             d["expected_files"] = json.loads(d["expected_files"])
+        if isinstance(d.get("attestation_context"), str):
+            d["attestation_context"] = json.loads(d["attestation_context"])
         return Claim.model_validate(d)
+
+    @staticmethod
+    def _row_to_progress_attestation(row: Any) -> ClaimProgressAttestation:
+        d = dict(row)
+        if isinstance(d.get("changed_paths"), str):
+            d["changed_paths"] = json.loads(d["changed_paths"])
+        d["collision_detected"] = bool(d.get("collision_detected", 0))
+        return ClaimProgressAttestation.model_validate(d)
 
     @staticmethod
     def _row_to_review(row: Any) -> Review:

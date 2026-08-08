@@ -33,8 +33,8 @@ from anvil.state.backend import (
     TransactionAborted,
 )
 from anvil.state.models import ClaimStatus, Event, EventDraft
-from anvil.state.payloads import PrdParsedPayload
-from anvil.state.schema import SCHEMA_VERSION
+from anvil.state.payloads import PrdParsedPayload, ProgressAttestedPayload
+from anvil.state.schema import DDL, SCHEMA_VERSION
 from anvil.state.sqlite import (
     _FLOCK_BACKOFF_CAP_S,
     _FLOCK_BACKOFF_INITIAL_S,
@@ -1055,9 +1055,9 @@ class TestRowDeserialization:
             # Released claim (should not appear)
             conn.execute(
                 """INSERT INTO claims
-                (id, task_id, claimed_by, claim_type, status, expected_files,
+                (id, task_id, claimed_by, claim_type, status, expected_files, generation,
                  created_at, lease_expires_at, last_heartbeat_at)
-                VALUES ('C002', 'T001', 'agent-y', 'task', 'released', '[]', ?, ?, ?)""",
+                VALUES ('C002', 'T001', 'agent-y', 'task', 'released', '[]', 2, ?, ?, ?)""",
                 (_T0.isoformat(), expires, _T0.isoformat()),
             )
             conn.commit()
@@ -3188,6 +3188,7 @@ def _make_claim_payload(
     actor: str = "agent-alpha",
     expected_files: list[str] | None = None,
     now: datetime = _T0,
+    generation: int = 1,
 ) -> dict[str, Any]:
     """Build a valid claim.created payload (matches Claim.model_dump(mode='json'))."""
     return {
@@ -3199,11 +3200,64 @@ def _make_claim_payload(
         "branch": None,
         "worktree_path": None,
         "expected_files": expected_files or [],
+        "generation": generation,
         "created_at": now.isoformat(),
         "lease_expires_at": (now + timedelta(hours=1)).isoformat(),
         "last_heartbeat_at": now.isoformat(),
         "released_at": None,
         "release_reason": None,
+    }
+
+
+def _make_attestable_claim_payload(
+    *, claim_id: str = "C001", generation: int = 1
+) -> dict[str, Any]:
+    payload = _make_claim_payload(
+        claim_id=claim_id,
+        expected_files=["src/a.py"],
+        generation=generation,
+    )
+    payload["attestation_context"] = {
+        "repository_id": "repo:test",
+        "claim_start_sha": "a" * 40,
+        "prd_id": "default",
+        "prd_revision": 1,
+        "task_revision": "task-v1",
+        "expected_paths": [
+            {"path": "src/a.py", "baseline_sha256": "b" * 64}
+        ],
+    }
+    return payload
+
+
+def _make_progress_attested_payload(
+    *,
+    claim_id: str = "C001",
+    generation: int = 1,
+    digest: str = "d" * 64,
+    recorded_at: datetime = _T0 + timedelta(minutes=10),
+) -> dict[str, Any]:
+    return {
+        "semantic_digest": digest,
+        "envelope_id": "external-1",
+        "claim_id": claim_id,
+        "task_id": "T001",
+        "claimed_by": "agent-alpha",
+        "generation": generation,
+        "repository_id": "repo:test",
+        "claim_start_sha": "a" * 40,
+        "prd_id": "default",
+        "prd_revision": 1,
+        "task_revision": "task-v1",
+        "kind": "file",
+        "commit_sha": None,
+        "changed_paths": [],
+        "path": "src/a.py",
+        "file_sha256": "c" * 64,
+        "attested_at": recorded_at.isoformat(),
+        "recorded_at": recorded_at.isoformat(),
+        "trust_mode": "claim_owner_self_attested",
+        "issuer_id": None,
     }
 
 
@@ -6153,16 +6207,17 @@ class TestSchemaVersionPhase8:
     TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_sixteen(self) -> None:
-        """Typed PRD assumptions ship at SCHEMA_VERSION == 16
+    def test_schema_version_is_seventeen(self) -> None:
+        """Claim-bound progress attestations ship at SCHEMA_VERSION == 17
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
         v11 = execution bundles + ordered membership, issue #171;
         v12 = coordinator bundle claims; v13 = review dispositions;
         v14 = delivery lineage; v15 = authoritative result time, issue #171;
-        v16 = typed PRD assumptions)."""
-        assert SCHEMA_VERSION == 16
+        v16 = typed PRD assumptions; v17 = claim generations + attestations)."""
+        assert SCHEMA_VERSION == 17
+        assert f"PRAGMA user_version = {SCHEMA_VERSION};" in DDL
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -8689,7 +8744,7 @@ class TestV8ToV9Migration:
 
         b = _make_backend(tmp_path)  # initialize() runs the ladder
         try:
-            assert b.get_schema_version() == 16
+            assert b.get_schema_version() == 17
             task = b.get_task("T001")
             assert task is not None
             assert task.claims == []  # row preserved, backfilled to "no claims"
@@ -8868,7 +8923,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 16
+            assert b.get_schema_version() == SCHEMA_VERSION == 17
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.
@@ -9193,7 +9248,7 @@ def _setup_full_snapshot_backend(b: SqliteBackend) -> None:
     # task was returned to 'ready' by the release handler; re-claim it
     b.append(_make_event(
         "claim.created",
-        _make_claim_payload(claim_id="C002", task_id="T001"),
+        _make_claim_payload(claim_id="C002", task_id="T001", generation=2),
         event_id="E000012", target_kind="claim", target_id="C002",
     ))
 
@@ -12817,6 +12872,328 @@ class TestConflictGroupPersistence:
                     target_kind="conflict_group",
                     target_id="x",
                 )
+        finally:
+            b.close()
+
+
+class TestClaimProgressAttestationState:
+    def test_v16_migration_backfills_generations_without_fabricating_context(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = tmp_path / "state.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """CREATE TABLE claims (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                claimed_by TEXT NOT NULL,
+                claim_type TEXT NOT NULL DEFAULT 'task',
+                status TEXT NOT NULL DEFAULT 'active',
+                branch TEXT,
+                worktree_path TEXT,
+                session_id TEXT,
+                bundle_claim_id TEXT,
+                expected_files TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL,
+                last_heartbeat_at TEXT NOT NULL,
+                released_at TEXT,
+                release_reason TEXT
+            )"""
+        )
+        for claim_id, created_at in (
+            ("C002", _T0 + timedelta(minutes=1)),
+            ("C001", _T0),
+        ):
+            conn.execute(
+                """INSERT INTO claims
+                   (id, task_id, claimed_by, created_at, lease_expires_at,
+                    last_heartbeat_at)
+                   VALUES (?, 'T001', 'legacy', ?, ?, ?)""",
+                (
+                    claim_id,
+                    created_at.isoformat(),
+                    (created_at + timedelta(hours=1)).isoformat(),
+                    created_at.isoformat(),
+                ),
+            )
+        conn.execute("PRAGMA user_version = 16")
+        conn.commit()
+        conn.close()
+        (tmp_path / "events.jsonl").touch()
+
+        b = SqliteBackend(
+            db_path=str(db_path),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=_make_clock(),
+        )
+        b.initialize()
+        try:
+            assert b.get_schema_version() == 17
+            assert b.get_claim("C001").generation == 1  # type: ignore[union-attr]
+            assert b.get_claim("C002").generation == 2  # type: ignore[union-attr]
+            assert b.get_claim("C001").attestation_context is None  # type: ignore[union-attr]
+            assert b.next_claim_generation("T001") == 3
+        finally:
+            b.close()
+
+    def _claim(self, b: SqliteBackend) -> None:
+        _setup_claimable_task(b)
+        b.append(
+            _make_event(
+                "claim.created",
+                _make_attestable_claim_payload(),
+                target_kind="claim",
+                target_id="C001",
+            )
+        )
+
+    def _attest(self, b: SqliteBackend, *, recorded_at: datetime) -> Event:
+        result = b.append(
+            _make_event(
+                "progress.attested",
+                _make_progress_attested_payload(recorded_at=recorded_at),
+                target_kind="claim",
+                target_id="C001",
+                actor="agent-alpha",
+                now=recorded_at,
+            )
+        )
+        assert result is not None
+        return result
+
+    def test_attestation_is_consumed_with_renewal_atomically(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            pending = b.get_pending_progress_attestation("C001", 1)
+            assert pending is not None
+
+            heartbeat = _T0 + timedelta(minutes=20)
+            renewed = b.append(
+                _make_event(
+                    "claim.renewed",
+                    {
+                        "claim_id": "C001",
+                        "lease_expires_at": (_T0 + timedelta(hours=2)).isoformat(),
+                        "last_heartbeat_at": heartbeat.isoformat(),
+                        "renewed_by": "agent-alpha",
+                        "attestation_digest": "d" * 64,
+                        "attestation_generation": 1,
+                        "attestation_trust_mode": "claim_owner_self_attested",
+                    },
+                    target_kind="claim",
+                    target_id="C001",
+                    actor="agent-alpha",
+                    now=heartbeat,
+                )
+            )
+            assert renewed is not None
+            assert b.get_pending_progress_attestation("C001", 1) is None
+            stored = b.get_progress_attestation("d" * 64)
+            assert stored is not None
+            assert stored.consumed_by_event_id == renewed.id
+            assert b.get_claim("C001").last_heartbeat_at == heartbeat  # type: ignore[union-attr]
+
+            # A changed renewal event id cannot consume or extend the same fact.
+            with pytest.raises(EventRejected, match="pending attestation"):
+                b.append(
+                    _make_event(
+                        "claim.renewed",
+                        {
+                            "claim_id": "C001",
+                            "lease_expires_at": (_T0 + timedelta(hours=3)).isoformat(),
+                            "last_heartbeat_at": (
+                                _T0 + timedelta(minutes=30)
+                            ).isoformat(),
+                            "renewed_by": "agent-alpha",
+                            "attestation_digest": "d" * 64,
+                            "attestation_generation": 1,
+                            "attestation_trust_mode": "claim_owner_self_attested",
+                        },
+                        target_kind="claim",
+                        target_id="C001",
+                        actor="agent-alpha",
+                        now=_T0 + timedelta(minutes=30),
+                    )
+                )
+        finally:
+            b.close()
+
+    def test_release_invalidates_pending_attestation(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            released = b.append(
+                _make_event(
+                    "claim.released",
+                    {
+                        "claim_id": "C001",
+                        "released_by": "agent-alpha",
+                        "release_reason": "done",
+                    },
+                    target_kind="claim",
+                    target_id="C001",
+                    actor="agent-alpha",
+                    now=_T0 + timedelta(minutes=20),
+                )
+            )
+            assert released is not None
+            assert b.get_pending_progress_attestation("C001", 1) is None
+            stored = b.get_progress_attestation("d" * 64)
+            assert stored is not None
+            assert stored.invalidated_by_event_id == released.id
+        finally:
+            b.close()
+
+    def test_replay_writer_never_consumes_for_non_active_claim(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            conn = b._require_conn()
+            conn.execute("UPDATE claims SET status = 'released' WHERE id = 'C001'")
+            renewal_payload = {
+                "claim_id": "C001",
+                "lease_expires_at": (_T0 + timedelta(hours=2)).isoformat(),
+                "last_heartbeat_at": (_T0 + timedelta(minutes=20)).isoformat(),
+                "renewed_by": "agent-alpha",
+                "attestation_digest": "d" * 64,
+                "attestation_generation": 1,
+                "attestation_trust_mode": "claim_owner_self_attested",
+            }
+            typed = b._get_action_dispatch()[
+                "claim.renewed"
+            ].payload_model.model_validate(renewal_payload)
+            replayed = Event(
+                id="E999997",
+                timestamp=_T0 + timedelta(minutes=20),
+                actor="agent-alpha",
+                action="claim.renewed",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=renewal_payload,
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            b._write_claim_renewed(conn, typed, replayed)
+            conn.execute("COMMIT")
+            stored = b.get_progress_attestation("d" * 64)
+            assert stored is not None
+            assert stored.consumed_by_event_id is None
+            assert b.get_claim("C001").lease_expires_at == _T0 + timedelta(hours=1)  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+    def test_evidence_auto_release_invalidates_pending_attestation(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            submitted = b.append(
+                _make_event(
+                    "evidence.submitted",
+                    _make_evidence_payload(task_id="T001", claim_id="C001"),
+                    target_kind="task",
+                    target_id="T001",
+                    actor="agent-alpha",
+                    now=_T0 + timedelta(minutes=20),
+                )
+            )
+            assert submitted is not None
+            stored = b.get_progress_attestation("d" * 64)
+            assert stored is not None
+            assert stored.invalidated_by_event_id == submitted.id
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_expired_but_unreaped_claim_rejects_attestation(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(hours=2)
+            with pytest.raises(EventRejected, match="binding mismatch"):
+                self._attest(b, recorded_at=recorded_at)
+            assert b.get_progress_attestation("d" * 64) is None
+        finally:
+            b.close()
+
+    def test_changed_outer_event_id_quarantines_semantic_replay(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            accepted = self._attest(b, recorded_at=recorded_at)
+            payload = ProgressAttestedPayload.model_validate(
+                _make_progress_attested_payload(recorded_at=recorded_at)
+            )
+            duplicate = Event(
+                id="E999999",
+                timestamp=recorded_at,
+                actor="agent-alpha",
+                action="progress.attested",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=payload.model_dump(mode="json"),
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            b._write_progress_attested(conn, payload, duplicate)
+            conn.execute("COMMIT")
+
+            stored = b.get_progress_attestation("d" * 64)
+            assert stored is not None
+            assert stored.accepted_event_id == accepted.id
+            assert stored.collision_detected is True
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_replay_generation_collision_keeps_first_claim(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            first_payload = _make_claim_payload(claim_id="C001", generation=1)
+            first = b.append(
+                _make_event(
+                    "claim.created",
+                    first_payload,
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+            assert first is not None
+            losing_payload = _make_claim_payload(claim_id="C999", generation=1)
+            typed = b._get_action_dispatch()[
+                "claim.created"
+            ].payload_model.model_validate(losing_payload)
+            losing_event = Event(
+                id="E999998",
+                timestamp=_T0,
+                actor="test",
+                action="claim.created",
+                target_kind="claim",
+                target_id="C999",
+                payload_json=losing_payload,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            b._write_claim_created(conn, typed, losing_event)
+            conn.execute("COMMIT")
+            assert b.get_claim("C001") is not None
+            assert b.get_claim("C999") is None
         finally:
             b.close()
 

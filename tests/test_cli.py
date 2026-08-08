@@ -10,10 +10,12 @@ All tests run in isolated tmp directories.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -4539,6 +4541,135 @@ def _git_current_branch(tmp_path: Path) -> str:
 
 
 class TestClaimCommand:
+    def test_attestation_is_accepted_and_consumed_by_next_renewal(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        claimed = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "artifact-agent", "--json"]
+        )
+        assert claimed.exit_code == 0, claimed.output
+        claim = json.loads(claimed.output)["data"]["claim"]
+        context = claim["attestation_context"]
+        expected = context["expected_paths"][0]
+        changed = tmp_path / expected["path"]
+        changed.parent.mkdir(parents=True, exist_ok=True)
+        changed.write_bytes(b"externally produced progress\n")
+        file_digest = hashlib.sha256(changed.read_bytes()).hexdigest()
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            project_id = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()[0]
+        payload = {
+            "schema_version": 1,
+            "kind": "file",
+            "project_id": project_id,
+            "claim_id": claim["id"],
+            "generation": claim["generation"],
+            "task_id": task_id,
+            "task_revision": context["task_revision"],
+            "prd_id": context["prd_id"],
+            "prd_revision": context["prd_revision"],
+            "claimed_by": claim["claimed_by"],
+            "repository_id": context["repository_id"],
+            "claim_start_sha": context["claim_start_sha"],
+            "commit_sha": context["claim_start_sha"],
+            "path": expected["path"],
+            "prior_sha256": expected["baseline_sha256"],
+            "file_sha256": file_digest,
+            "issued_at": datetime.now(UTC).isoformat(),
+        }
+        artifact = tmp_path / "progress-attestation.json"
+        artifact.write_text(
+            json.dumps(
+                {"envelope_id": "cli-progress-1", "payload": payload},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+
+        accepted = _invoke_cmd(
+            tmp_path,
+            [
+                "progress",
+                task_id,
+                "external",
+                "--attestation-file",
+                str(artifact),
+                "--actor",
+                "artifact-agent",
+                "--json",
+            ],
+        )
+        assert accepted.exit_code == 0, accepted.output
+        receipt = json.loads(accepted.output)["data"]
+        assert receipt["event_action"] == "progress.attested"
+        assert receipt["attestation"]["digest"]
+        assert receipt["attestation"]["generation"] == claim["generation"]
+
+        renewed = _invoke_cmd(
+            tmp_path,
+            ["renew", claim["id"], "--actor", "artifact-agent", "--json"],
+        )
+        assert renewed.exit_code == 0, renewed.output
+        renewal = json.loads(renewed.output)["data"]
+        assert renewal["renewed"] is True
+        assert renewal["progress"] == {
+            "source": "attestation",
+            "digest": receipt["attestation"]["digest"],
+            "generation": claim["generation"],
+            "trust_mode": "claim_owner_self_attested",
+        }
+
+    def test_git_claim_exposes_attestation_context_and_continuation(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "attested-agent", "--json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        claim = data["claim"]
+        assert claim["generation"] == 1
+        assert claim["attestation_context"]["claim_start_sha"]
+        assert data["continuation"]["attest_progress"]["argv"][-4:-2] == [
+            "--attestation-file",
+            "<path>",
+        ]
+        assert data["continuation"]["attestation"]["context"] == claim[
+            "attestation_context"
+        ]
+
+    def test_free_text_progress_remains_progress_noted(self, tmp_path: Path) -> None:
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        claimed = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "note-agent", "--json"]
+        )
+        assert claimed.exit_code == 0, claimed.output
+
+        progress = _invoke_cmd(
+            tmp_path,
+            ["progress", task_id, "tests", "--actor", "note-agent", "--json"],
+        )
+
+        assert progress.exit_code == 0, progress.output
+        data = json.loads(progress.output)["data"]
+        assert data.get("event_action", "progress.noted") == "progress.noted"
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            actions = conn.execute(
+                "SELECT action FROM events WHERE target_id=? ORDER BY rowid", (task_id,)
+            ).fetchall()
+        assert ("progress.noted",) in actions
+        assert ("progress.attested",) not in actions
+
     @pytest.mark.slow
     def test_claim_happy_path_creates_lease_and_branch(self, tmp_path: Path) -> None:
         """Claim a ready task; command exits 0 and prints claim ID + branch."""

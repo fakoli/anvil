@@ -24,6 +24,7 @@ from anvil.cli._helpers import (
     StateRootError,
     _open_backend,
     _require_state_dir,
+    _resolve_project_dir,
     _resolve_state_dir,
     resolve_actor,
 )
@@ -48,6 +49,14 @@ def progress(
         False,
         "--bundle",
         help="Record coordinator progress for an execution bundle.",
+    ),
+    attestation_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--attestation-file",
+        help=(
+            "Canonical JSON claim-bound progress attestation. Accepted evidence "
+            "is consumed once by the next claim renewal; free-text notes never renew."
+        ),
     ),
     actor: str | None = typer.Option(  # noqa: B008
         None,
@@ -88,6 +97,18 @@ def progress(
         from anvil.state.models import EventDraft
 
         if bundle_mode:
+            if attestation_file is not None:
+                if json_output:
+                    fail(
+                        _COMMAND,
+                        "--attestation-file is supported only for standalone task claims.",
+                        code="bad_request",
+                    )
+                typer.echo(
+                    "Error: --attestation-file is supported only for standalone task claims.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
             from anvil.bundles.manager import BundleError, BundleManager
 
             try:
@@ -116,6 +137,69 @@ def progress(
                 )
                 return
             typer.echo(f"Progress recorded for bundle '{task_id}': {phase}")
+            for line in actor_notice_lines(resolved_actor):
+                typer.echo(line)
+            return
+
+        if attestation_file is not None:
+            from anvil import signing
+            from anvil.claims.manager import ClaimError, ClaimManager
+            from anvil.claims.progress_attestation import (
+                ProgressAttestationError,
+                load_progress_attestation,
+            )
+            from anvil.cli.proof import _default_trust_path
+
+            try:
+                trusted = signing.load_trust_list(_default_trust_path())
+                with attestation_file.open("rb") as stream:
+                    loaded = load_progress_attestation(stream, trusted_issuers=trusted)
+                if loaded.payload.task_id != task_id:
+                    raise ProgressAttestationError(
+                        "task_mismatch",
+                        "attestation task does not match the progress command",
+                    )
+                persisted = ClaimManager(
+                    backend,
+                    SystemClock(),
+                    actor=resolved_actor,
+                    project_root=_resolve_project_dir(cwd),
+                ).accept_progress_attestation(loaded)
+            except (OSError, ClaimError, ProgressAttestationError) as exc:
+                code = getattr(exc, "code", "progress_attestation_error")
+                if json_output:
+                    fail(_COMMAND, str(exc), code=str(code))
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+
+            attestation = {
+                "digest": persisted.semantic_digest,
+                "generation": persisted.generation,
+                "trust_mode": persisted.trust_mode,
+                "kind": persisted.kind,
+                "issuer_id": persisted.issuer_id,
+            }
+            if json_output:
+                emit_success(
+                    _COMMAND,
+                    {
+                        "task_id": task_id,
+                        "actor": resolved_actor,
+                        "phase": phase,
+                        "detail": detail,
+                        "recorded": True,
+                        "event_action": "progress.attested",
+                        "attestation": attestation,
+                        "actor_identity": actor_identity_data(resolved_actor),
+                    },
+                )
+                return
+            typer.echo(
+                f"Progress attestation accepted for '{task_id}': {persisted.semantic_digest}"
+            )
+            typer.echo(f"  Generation: {persisted.generation}")
+            typer.echo(f"  Trust mode: {persisted.trust_mode}")
+            typer.echo("  The next successful renewal consumes this attestation once.")
             for line in actor_notice_lines(resolved_actor):
                 typer.echo(line)
             return
