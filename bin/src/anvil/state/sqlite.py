@@ -25,18 +25,22 @@ try:
     import msvcrt  # Windows byte-range file locking (locking)
 except ImportError:  # POSIX: msvcrt is Windows-only.
     msvcrt = None  # type: ignore[assignment]
+import base64
 import datetime
 import hashlib
 import json
 import logging
+import ntpath
 import os
 import random
+import re
 import sqlite3
 import struct
 import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -44,6 +48,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel
 
+from anvil import signing
+from anvil.actors import canonicalize_new_actor
 from anvil.bundles.eligibility import analyze_bundle_graph
 from anvil.state.backend import (
     BackendError,  # noqa: F401
@@ -54,9 +60,18 @@ from anvil.state.backend import (
     StateLocked,
     TransactionAborted,
 )
-from anvil.state.hashing import hash_event_id
+from anvil.state.hashing import (
+    CanonicalJsonRefusal,
+    canonical_json_bytes,
+    canonical_node_budget_for_bytes,
+    domain_separated_sha256,
+    hash_event_id,
+)
 from anvil.state.models import (
     DEFAULT_PRD_ID,
+    MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
     PRD,
     TERMINAL_BUNDLE_STATUSES,
     BundleClaim,
@@ -64,7 +79,11 @@ from anvil.state.models import (
     BundleReviewVerdict,
     BundleStatus,
     Claim,
+    ClaimAttestationContext,
+    ClaimCommandProof,
+    ClaimProgressAttestation,
     ClaimStatus,
+    CommandProof,
     ConflictGroup,
     Event,
     EventDraft,
@@ -73,12 +92,17 @@ from anvil.state.models import (
     Feature,
     PRDAssumption,
     Project,
+    ProofKind,
     Requirement,
     Review,
     ReviewDecision,
     Score,
     SyncMapping,
     Task,
+    Verification,
+    claim_command_semantic_projection,
+    hook_command_semantic_digest,
+    task_snapshot_revision,
 )
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
@@ -108,6 +132,7 @@ from anvil.state.payloads import (
     PrdParsedPayload,
     PrdReviewedPayload,
     PrdRevisedPayload,
+    ProgressAttestedPayload,
     ProgressNotedPayload,
     ProjectCreatedPayload,
     StateInitializedPayload,
@@ -116,6 +141,7 @@ from anvil.state.payloads import (
     TaskAppliedPayload,
     TaskCreatedPayload,
     TaskDeletedPayload,
+    TaskDependenciesBatchEditedPayload,
     TaskExpandedPayload,
     TaskScoredPayload,
     TaskStatusChangedPayload,
@@ -124,6 +150,14 @@ from anvil.state.payloads import (
 from anvil.state.schema import DDL, SCHEMA_VERSION
 
 _AUDIT_LINE_MAX_UTF8_BYTES = 4096
+_PROGRESS_ATTESTATION_MAX_BYTES = 262_144
+_PROGRESS_SEMANTIC_DOMAIN = b"anvil.progress-attestation.v1\0"
+_COMMAND_PROOF_SEMANTIC_DOMAIN = b"anvil.command-proof.v1\0"
+_COMMAND_WINDOWS_RESERVED = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9\u00b9\u00b2\u00b3]|"
+    r"LPT[1-9\u00b9\u00b2\u00b3])(?:\..*)?$",
+    re.IGNORECASE,
+)
 _OWNERSHIP_RECOVERY_REFUSAL_PREFIX = "task.created ownership recovery refused:"
 _OWNERSHIP_RECOVERY_REFUSAL_MESSAGES = {
     "explicit_prd_mismatch": "explicit prd_id mismatch",
@@ -135,7 +169,36 @@ _OWNERSHIP_RECOVERY_REFUSAL_MESSAGES = {
     "stored_identity_mismatch": "stored task identity does not match owner",
     "invalid_task_payload": "recoverable Task payload is invalid",
     "not_dependency_only": "event is not a dependency-only upsert",
+    "live_omitted_prd": "legacy omitted prd_id is replay-only",
 }
+
+
+def _command_cwd_is_canonical(value: str) -> bool:
+    """Mirror the hostile-input verifier's portable cwd spelling contract."""
+    if value == ".":
+        return True
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    if (
+        not encoded
+        or len(encoded) > 4_096
+        or value.startswith(("/", "\\"))
+        or bool(ntpath.splitdrive(value)[0])
+        or "\\" in value
+        or any(char in value for char in '<>"|?*')
+        or any(ord(char) <= 31 or 127 <= ord(char) <= 159 for char in value)
+    ):
+        return False
+    parts = value.split("/")
+    return not any(
+        part in {"", ".", ".."}
+        or ":" in part
+        or part.endswith((".", " "))
+        or _COMMAND_WINDOWS_RESERVED.fullmatch(part)
+        for part in parts
+    )
 
 
 def _redacted_identifier(value: Any) -> str:
@@ -2455,6 +2518,39 @@ class SqliteBackend:
             return None
         return self._row_to_claim(row)
 
+    def next_claim_generation(self, task_id: str) -> int:
+        """Return the advisory next per-task generation for claim construction."""
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT COALESCE(MAX(generation), 0) + 1 FROM claims WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        return int(row[0])
+
+    def get_progress_attestation(
+        self, semantic_digest: str
+    ) -> ClaimProgressAttestation | None:
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT * FROM claim_progress_attestations WHERE semantic_digest = ?",
+            (semantic_digest,),
+        ).fetchone()
+        return None if row is None else self._row_to_progress_attestation(row)
+
+    def get_pending_progress_attestation(
+        self, claim_id: str, generation: int
+    ) -> ClaimProgressAttestation | None:
+        conn = self._require_conn()
+        row = conn.execute(
+            "SELECT * FROM claim_progress_attestations "
+            "WHERE claim_id = ? AND generation = ? "
+            "AND consumed_by_event_id IS NULL "
+            "AND invalidated_by_event_id IS NULL "
+            "AND collision_detected = 0",
+            (claim_id, generation),
+        ).fetchone()
+        return None if row is None else self._row_to_progress_attestation(row)
+
     def list_active_claims(self) -> list[Claim]:
         """Return all claims with status == 'active'."""
         conn = self._require_conn()
@@ -2654,7 +2750,7 @@ class SqliteBackend:
         """Return the Feature with the given ID, or None if not found."""
         conn = self._require_conn()
         row = conn.execute(
-            "SELECT id, title, description, status, requirements, tasks "
+            "SELECT id, prd_id, title, description, status, requirements, tasks "
             "FROM features WHERE id = ?",
             (feature_id,),
         ).fetchone()
@@ -2662,11 +2758,12 @@ class SqliteBackend:
             return None
         return Feature(
             id=row[0],
-            title=row[1],
-            description=row[2],
-            status=row[3],
-            requirements=json.loads(row[4] or "[]"),
-            tasks=json.loads(row[5] or "[]"),
+            prd_id=row[1],
+            title=row[2],
+            description=row[3],
+            status=row[4],
+            requirements=json.loads(row[5] or "[]"),
+            tasks=json.loads(row[6] or "[]"),
         )
 
     def list_features(self, *, prd_id: str | None = None) -> list[Feature]:
@@ -2680,18 +2777,19 @@ class SqliteBackend:
         where = "WHERE prd_id = ? " if prd_id is not None else ""
         params: tuple[str, ...] = (prd_id,) if prd_id is not None else ()
         rows = conn.execute(
-            "SELECT id, title, description, status, requirements, tasks "
+            "SELECT id, prd_id, title, description, status, requirements, tasks "
             f"FROM features {where}ORDER BY id",
             params,
         ).fetchall()
         return [
             Feature(
                 id=r[0],
-                title=r[1],
-                description=r[2],
-                status=r[3],
-                requirements=json.loads(r[4] or "[]"),
-                tasks=json.loads(r[5] or "[]"),
+                prd_id=r[1],
+                title=r[2],
+                description=r[3],
+                status=r[4],
+                requirements=json.loads(r[5] or "[]"),
+                tasks=json.loads(r[6] or "[]"),
             )
             for r in rows
         ]
@@ -2988,6 +3086,7 @@ class SqliteBackend:
                         "prd_id",
                         "is_default",
                         "disposition_event_id",
+                        "generation",
                     ):
                         continue
                     raise
@@ -3029,7 +3128,7 @@ class SqliteBackend:
         """Raise SchemaMismatch if on-disk version is incompatible with SCHEMA_VERSION.
 
         Auto-upgrade follows the ordered, idempotent ``_MIGRATIONS`` chain
-        through the current schema (v16). ``v0`` and ``v1`` are normalized to
+        through the current schema (v18). ``v0`` and ``v1`` are normalized to
         the v2 baseline by current DDL before the explicit ladder runs. The
         early historical transitions remain noteworthy because they repair
         pre-existing tables that ``CREATE TABLE IF NOT EXISTS`` cannot alter:
@@ -3063,7 +3162,7 @@ class SqliteBackend:
         equal to SCHEMA_VERSION) and the migration branches would never
         fire.
 
-        Every later step, v5→v6 through v15→v16, is represented by one
+        Every later step, v5→v6 through v16→v17, is represented by one
         contiguous tuple in ``_MIGRATIONS``. Any gap between the on-disk version
         and ``SCHEMA_VERSION`` fails closed. See docs/migrations.md.
         """
@@ -3661,6 +3760,132 @@ class SqliteBackend:
                 "ALTER TABLE prds ADD COLUMN assumptions TEXT NOT NULL DEFAULT '[]'"
             )
 
+    def _m_to_v17(self, conn: sqlite3.Connection) -> None:
+        """v16 -> v17: claim generations and consume-once attestations."""
+        claim_columns = {row[1] for row in conn.execute("PRAGMA table_info(claims)")}
+        if "generation" not in claim_columns:
+            conn.execute(
+                "ALTER TABLE claims ADD COLUMN generation "
+                "INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1)"
+            )
+        if "attestation_context" not in claim_columns:
+            conn.execute("ALTER TABLE claims ADD COLUMN attestation_context TEXT")
+
+        # Legacy claims never carried an explicit generation.  Assign their
+        # lifecycle order deterministically without fabricating an attestation
+        # context; they remain fully usable for ordinary renew/release flows.
+        conn.execute(
+            """UPDATE claims AS current
+                  SET generation = (
+                      SELECT COUNT(*)
+                        FROM claims AS prior
+                       WHERE prior.task_id = current.task_id
+                         AND (
+                              prior.created_at < current.created_at
+                              OR (prior.created_at = current.created_at
+                                  AND prior.id <= current.id)
+                         )
+                  )"""
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_task_generation "
+            "ON claims (task_id, generation)"
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS claim_progress_attestations (
+                semantic_digest TEXT PRIMARY KEY,
+                accepted_event_id TEXT NOT NULL UNIQUE,
+                envelope_id TEXT,
+                claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE RESTRICT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+                claimed_by TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK (generation >= 1),
+                repository_id TEXT NOT NULL,
+                claim_start_sha TEXT NOT NULL,
+                prd_id TEXT NOT NULL,
+                prd_revision INTEGER NOT NULL CHECK (prd_revision >= 1),
+                task_revision TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('commit', 'file')),
+                commit_sha TEXT,
+                changed_paths TEXT NOT NULL DEFAULT '[]',
+                path TEXT,
+                file_sha256 TEXT,
+                attested_at TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                trust_mode TEXT NOT NULL CHECK (
+                    trust_mode IN ('claim_owner_self_attested', 'configured_issuer_verified')
+                ),
+                issuer_id TEXT,
+                consumed_by_event_id TEXT,
+                consumed_at TEXT,
+                invalidated_by_event_id TEXT,
+                collision_detected INTEGER NOT NULL DEFAULT 0
+                    CHECK (collision_detected IN (0, 1))
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_claim_progress_attestations_claim_generation "
+            "ON claim_progress_attestations (claim_id, generation)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_claim_progress_attestations_pending "
+            "ON claim_progress_attestations (claim_id, generation) "
+            "WHERE consumed_by_event_id IS NULL AND invalidated_by_event_id IS NULL "
+            "AND collision_detected = 0"
+        )
+
+    def _m_to_v18(self, conn: sqlite3.Connection) -> None:
+        """v17 -> v18: persist exact revision-bound PRD source provenance."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(prds)")}
+            additions = (
+                ("source_bytes", "BLOB"),
+                ("source_sha256", "TEXT"),
+                (
+                    "source_size_bytes",
+                    "INTEGER CHECK (source_size_bytes IS NULL OR "
+                    "source_size_bytes BETWEEN 0 AND 2097152)",
+                ),
+                (
+                    "source_encoding",
+                    "TEXT CHECK (source_encoding IS NULL OR "
+                    "source_encoding = 'utf-8')",
+                ),
+                (
+                    "source_revision",
+                    "INTEGER CHECK (source_revision IS NULL OR "
+                    "source_revision >= 1)",
+                ),
+                (
+                    "provenance_state",
+                    "TEXT NOT NULL DEFAULT 'legacy_unbound' CHECK "
+                    "(provenance_state IN ('available', 'legacy_unbound'))",
+                ),
+                (
+                    "content_available",
+                    "INTEGER NOT NULL DEFAULT 0 CHECK "
+                    "(content_available IN (0, 1))",
+                ),
+            )
+            for column, definition in additions:
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE prds ADD COLUMN {column} {definition}")
+            # Every row crossing the v17 boundary predates authoritative
+            # provenance. Do not bless or retain any partially added/out-of-band
+            # source values: the only faithful migration is explicitly
+            # unavailable with the entire source tuple cleared.
+            conn.execute(
+                "UPDATE prds SET source_bytes = NULL, source_sha256 = NULL, "
+                "source_size_bytes = NULL, source_encoding = NULL, "
+                "source_revision = NULL, provenance_state = 'legacy_unbound', "
+                "content_available = 0"
+            )
+        except BaseException:
+            self._safe_rollback(conn)
+            raise
+        conn.execute("COMMIT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -3676,6 +3901,8 @@ class SqliteBackend:
         (13, _m_to_v14),
         (14, _m_to_v15),
         (15, _m_to_v16),
+        (16, _m_to_v17),
+        (17, _m_to_v18),
     ]
 
     @staticmethod
@@ -4310,6 +4537,23 @@ class SqliteBackend:
         try:
             typed_payload = spec.payload_model.model_validate(event.payload_json)
         except Exception as exc:
+            if action == "task.dependencies_batch_edited":
+                expected_prd_id = event.payload_json.get("prd_id")
+                reason = (
+                    "dependency batch refused: code=invalid_payload "
+                    f"event_id={event.id} "
+                    "action=task.dependencies_batch_edited "
+                    "expected_prd="
+                    f"{self._dependency_batch_prd_label(expected_prd_id)} "
+                    "inferred_prd="
+                    f"{self._dependency_batch_prd_label(event.target_id)}"
+                )
+                encoded = reason.encode("utf-8", errors="replace")
+                if len(encoded) > _AUDIT_LINE_MAX_UTF8_BYTES:
+                    reason = encoded[: _AUDIT_LINE_MAX_UTF8_BYTES - 3].decode(
+                        "utf-8", errors="ignore"
+                    ) + "..."
+                raise TransactionAborted(reason) from None
             recovery_owner = self._task_created_recovery_owner(conn, event)
             if recovery_owner is not None:
                 refusal = self._task_created_recovery_refusal(
@@ -4522,6 +4766,11 @@ class SqliteBackend:
             "task.created": ActionSpec(
                 TaskCreatedPayload, self._check_task_created, self._write_task_created
             ),
+            "task.dependencies_batch_edited": ActionSpec(
+                TaskDependenciesBatchEditedPayload,
+                self._check_task_dependencies_batch_edited,
+                self._write_task_dependencies_batch_edited,
+            ),
             "task.scored": ActionSpec(
                 TaskScoredPayload, self._check_task_scored, self._write_task_scored
             ),
@@ -4649,7 +4898,14 @@ class SqliteBackend:
             ),
             # Phase 6: MCP submit_progress — audit-only, no SQLite mutation.
             "progress.noted": ActionSpec(
-                ProgressNotedPayload, self._check_audit_only, self._write_audit_only
+                ProgressNotedPayload,
+                self._check_progress_noted,
+                self._write_audit_only,
+            ),
+            "progress.attested": ActionSpec(
+                ProgressAttestedPayload,
+                self._check_progress_attested,
+                self._write_progress_attested,
             ),
             # Phase 8: sync_mappings table — external-system mirroring.
             "sync_mapping.upserted": ActionSpec(
@@ -4708,6 +4964,364 @@ class SqliteBackend:
         could reject it, so this phase never raises.
         """
         _ = (conn, payload, event)
+
+    @staticmethod
+    def _check_progress_noted(
+        conn: sqlite3.Connection,
+        payload: ProgressNotedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Require exact owner continuity when a task currently has a claim."""
+        if event.target_kind != "task" or event.target_id != payload.task_id:
+            raise EventRejected("progress.noted: event target mismatch.")
+        if event.actor != payload.actor:
+            raise EventRejected("progress.noted: event actor mismatch.")
+        row = conn.execute(
+            "SELECT claimed_by FROM claims WHERE task_id = ? AND status = 'active' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (payload.task_id,),
+        ).fetchone()
+        # Preserve the historical audit-note contract for unclaimed tasks. Once
+        # a claim exists, however, only its exact persisted owner may report
+        # lifecycle progress.
+        if row is not None and row[0] != payload.actor:
+            raise EventRejected(
+                "progress.noted: only the exact active claim owner may record progress."
+            )
+
+    @staticmethod
+    def _progress_attestation_proof_is_valid(
+        payload: ProgressAttestedPayload,
+        *,
+        require_configured_trust: bool = False,
+    ) -> bool:
+        """Recompute durable evidence identity and issuer cryptography.
+
+        The live verifier owns Git/filesystem checks and configured trust-list
+        membership. This pure check makes both append and replay independently
+        reject altered semantic identities, projection fields, or signatures.
+        """
+        core = payload.evidence_core.model_dump(mode="json")
+        signed_payload = payload.signed_payload.model_dump(mode="json")
+        try:
+            digest = domain_separated_sha256(
+                _PROGRESS_SEMANTIC_DOMAIN,
+                core,
+                max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                max_nodes=canonical_node_budget_for_bytes(
+                    _PROGRESS_ATTESTATION_MAX_BYTES
+                ),
+                max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+            )
+            signed_bytes = canonical_json_bytes(
+                signed_payload,
+                max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                max_nodes=canonical_node_budget_for_bytes(
+                    _PROGRESS_ATTESTATION_MAX_BYTES
+                ),
+                max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+            )
+        except (CanonicalJsonRefusal, ValueError):
+            return False
+        if digest != payload.semantic_digest:
+            return False
+
+        flattened_match = (
+            core["claim_id"] == payload.claim_id
+            and core["task_id"] == payload.task_id
+            and core["claimed_by"] == payload.claimed_by
+            and core["generation"] == payload.generation
+            and core["repository_id"] == payload.repository_id
+            and core["claim_start_sha"] == payload.claim_start_sha
+            and core["prd_id"] == payload.prd_id
+            and core["prd_revision"] == payload.prd_revision
+            and core["task_revision"] == payload.task_revision
+            and core["kind"] == payload.kind
+        )
+        if not flattened_match:
+            return False
+        if payload.kind == "commit":
+            if (
+                payload.commit_sha != core["commit_sha"]
+                or payload.changed_paths != [core["path"]]
+                or payload.path is not None
+                or payload.file_sha256 is not None
+            ):
+                return False
+        elif (
+            core["commit_sha"] != payload.claim_start_sha
+            or payload.commit_sha is not None
+            or payload.changed_paths
+            or payload.path != core["path"]
+            or payload.file_sha256 != core["file_sha256"]
+        ):
+            return False
+
+        issuer = payload.issuer
+        if payload.trust_mode == "claim_owner_self_attested":
+            return issuer is None and payload.issuer_id is None
+        if issuer is None or payload.issuer_id is None:
+            return False
+        try:
+            genuine_id = signing.fingerprint(issuer.public_key)
+        except ValueError:
+            return False
+        cryptographically_valid = (
+            issuer.algorithm == "ed25519"
+            and issuer.signer_id == payload.issuer_id == genuine_id
+            and signing.verify(issuer.public_key, signed_bytes, issuer.signature)
+        )
+        if not cryptographically_valid or not require_configured_trust:
+            return cryptographically_valid
+        configured_path = os.environ.get("ANVIL_TRUST_LIST")
+        trust_path = (
+            Path(configured_path).expanduser()
+            if configured_path
+            else Path.home() / ".anvil" / "trust.txt"
+        )
+        return signing.is_trusted(
+            issuer.public_key, signing.load_trust_list(trust_path)
+        )
+
+    @staticmethod
+    def _progress_attestation_matches_claim(
+        conn: sqlite3.Connection,
+        payload: ProgressAttestedPayload,
+        event: EventDraft | Event,
+    ) -> bool:
+        """Return whether persisted state exactly authorizes this attestation.
+
+        This deliberately performs no Git or filesystem work.  The ingestion
+        service proves external material before append; this projection guard
+        binds that proof to authoritative lifecycle state and is replay-safe.
+        """
+        if (
+            not SqliteBackend._progress_attestation_proof_is_valid(
+                payload, require_configured_trust=True
+            )
+            or event.target_kind != "claim"
+            or event.target_id != payload.claim_id
+            or event.actor != payload.claimed_by
+        ):
+            return False
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?",
+            (payload.claim_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != payload.task_id
+            or row[1] != payload.claimed_by
+            or row[2] != "active"
+            or row[3] is not None
+            or int(row[4]) != payload.generation
+            or row[5] is None
+            or row[8] is not None
+        ):
+            return False
+        try:
+            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            created_at = datetime.datetime.fromisoformat(row[6].replace("Z", "+00:00"))
+            attested_at = datetime.datetime.fromisoformat(
+                payload.attested_at.replace("Z", "+00:00")
+            )
+            recorded_at = datetime.datetime.fromisoformat(
+                payload.recorded_at.replace("Z", "+00:00")
+            )
+            lease_expires_at = datetime.datetime.fromisoformat(
+                row[7].replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if (
+            context.repository_id != payload.repository_id
+            or context.claim_start_sha != payload.claim_start_sha
+            or context.prd_id != payload.prd_id
+            or context.prd_revision != payload.prd_revision
+            or context.task_revision != payload.task_revision
+            or created_at > attested_at
+            or attested_at > recorded_at
+            or recorded_at != event.timestamp
+            or recorded_at >= lease_expires_at
+        ):
+            return False
+        current_prd = conn.execute(
+            "SELECT revision FROM prds WHERE id = ?", (context.prd_id,)
+        ).fetchone()
+        if current_prd is None or int(current_prd[0]) != context.prd_revision:
+            return False
+        expected = {entry.path for entry in context.expected_paths}
+        baseline = {entry.path: entry.baseline_sha256 for entry in context.expected_paths}
+        core = payload.evidence_core
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        if (
+            project is None
+            or core.project_id != project[0]
+            or core.path not in expected
+            or core.prior_sha256 != baseline.get(core.path)
+        ):
+            return False
+        if payload.kind == "commit":
+            return payload.changed_paths == [core.path]
+        return payload.path == core.path
+
+    def _check_progress_attested(
+        self,
+        conn: sqlite3.Connection,
+        payload: ProgressAttestedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Validate one non-stackable attestation against a fresh DB snapshot."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not self._progress_attestation_proof_is_valid(
+                payload, require_configured_trust=True
+            ):
+                raise EventRejected(
+                    "progress.attested: evidence digest, signature, or configured "
+                    "issuer trust is invalid."
+                )
+            if not self._progress_attestation_matches_claim(conn, payload, event):
+                raise EventRejected(
+                    "progress.attested: exact active claim ownership or binding mismatch."
+                )
+            if conn.execute(
+                "SELECT 1 FROM claim_progress_attestations "
+                "WHERE semantic_digest = ?",
+                (payload.semantic_digest,),
+            ).fetchone() is not None:
+                raise EventRejected(
+                    "progress.attested: semantic digest was already recorded."
+                )
+            if conn.execute(
+                "SELECT 1 FROM claim_progress_attestations "
+                "WHERE claim_id = ? AND generation = ? AND collision_detected = 1",
+                (payload.claim_id, payload.generation),
+            ).fetchone() is not None:
+                raise EventRejected(
+                    "progress.attested: claim generation is quarantined."
+                )
+            if conn.execute(
+                "SELECT 1 FROM claim_progress_attestations "
+                "WHERE claim_id = ? AND generation = ? "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL AND collision_detected = 0",
+                (payload.claim_id, payload.generation),
+            ).fetchone() is not None:
+                raise EventRejected(
+                    "progress.attested: claim generation already has pending progress."
+                )
+        finally:
+            conn.execute("COMMIT")
+
+    def _write_progress_attested(
+        self,
+        conn: sqlite3.Connection,
+        payload: ProgressAttestedPayload,
+        event: Event,
+    ) -> None:
+        """Project an attestation once; quarantine divergent replay envelopes."""
+        if not self._progress_attestation_proof_is_valid(
+            payload, require_configured_trust=True
+        ):
+            raise EventRejected(
+                "progress.attested: replay evidence digest, signature, or "
+                "configured issuer trust is invalid."
+            )
+        existing = conn.execute(
+            "SELECT accepted_event_id FROM claim_progress_attestations "
+            "WHERE semantic_digest = ?",
+            (payload.semantic_digest,),
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != event.id:
+                conn.execute(
+                    "UPDATE claim_progress_attestations "
+                    "SET collision_detected = 1, "
+                    "invalidated_by_event_id = COALESCE(invalidated_by_event_id, ?) "
+                    "WHERE semantic_digest = ?",
+                    (event.id, payload.semantic_digest),
+                )
+            return
+
+        same_event = conn.execute(
+            "SELECT semantic_digest FROM claim_progress_attestations "
+            "WHERE accepted_event_id = ?",
+            (event.id,),
+        ).fetchone()
+        if same_event is not None:
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET collision_detected = 1, "
+                "invalidated_by_event_id = COALESCE(invalidated_by_event_id, ?) "
+                "WHERE semantic_digest = ?",
+                (event.id, same_event[0]),
+            )
+            return
+        if not self._progress_attestation_matches_claim(conn, payload, event):
+            return
+
+        if conn.execute(
+            "SELECT 1 FROM claim_progress_attestations "
+            "WHERE claim_id = ? AND generation = ? AND collision_detected = 1",
+            (payload.claim_id, payload.generation),
+        ).fetchone() is not None:
+            return
+
+        pending = conn.execute(
+            "SELECT semantic_digest FROM claim_progress_attestations "
+            "WHERE claim_id = ? AND generation = ? "
+            "AND consumed_by_event_id IS NULL "
+            "AND invalidated_by_event_id IS NULL AND collision_detected = 0",
+            (payload.claim_id, payload.generation),
+        ).fetchone()
+        if pending is not None:
+            # Merged/replayed branches attempted to stack two independently
+            # valid facts. Quarantine the generation rather than choose one.
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET collision_detected = 1, invalidated_by_event_id = ? "
+                "WHERE semantic_digest = ?",
+                (event.id, pending[0]),
+            )
+            return
+
+        conn.execute(
+            """INSERT INTO claim_progress_attestations
+               (semantic_digest, accepted_event_id, envelope_id, claim_id, task_id,
+                claimed_by, generation, repository_id, claim_start_sha, prd_id,
+                prd_revision, task_revision, kind, commit_sha, changed_paths,
+                path, file_sha256, attested_at, recorded_at, trust_mode, issuer_id,
+                consumed_by_event_id, consumed_at, invalidated_by_event_id,
+                collision_detected)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       NULL, NULL, NULL, 0)""",
+            (
+                payload.semantic_digest,
+                event.id,
+                payload.envelope_id,
+                payload.claim_id,
+                payload.task_id,
+                payload.claimed_by,
+                payload.generation,
+                payload.repository_id,
+                payload.claim_start_sha,
+                payload.prd_id,
+                payload.prd_revision,
+                payload.task_revision,
+                payload.kind,
+                payload.commit_sha,
+                json.dumps(payload.changed_paths, separators=(",", ":")),
+                payload.path,
+                payload.file_sha256,
+                payload.attested_at,
+                payload.recorded_at,
+                payload.trust_mode,
+                payload.issuer_id,
+            ),
+        )
 
     def _write_audit_only(
         self,
@@ -4894,6 +5508,8 @@ class SqliteBackend:
         # per-PRD re-parse clears and rewrites only its own partition.
         prd_id: str = payload.prd_id
 
+        source_values = self._prd_source_projection_values(payload)
+
         requirement_objects: list[Requirement] = [
             Requirement.model_validate(req_data) for req_data in requirements_raw
         ]
@@ -4925,9 +5541,13 @@ class SqliteBackend:
                  assumptions,
                  last_reviewed_at, last_reviewed_by,
                  target_version, target_tag,
-                 is_default, created_at, updated_at)
+                 is_default, revision,
+                 source_bytes, source_sha256, source_size_bytes,
+                 source_encoding, source_revision, provenance_state,
+                 content_available, created_at, updated_at)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 1,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
                 title = excluded.title,
@@ -4944,6 +5564,13 @@ class SqliteBackend:
                 last_reviewed_by = excluded.last_reviewed_by,
                 target_version = excluded.target_version,
                 target_tag = excluded.target_tag,
+                source_bytes = excluded.source_bytes,
+                source_sha256 = excluded.source_sha256,
+                source_size_bytes = excluded.source_size_bytes,
+                source_encoding = excluded.source_encoding,
+                source_revision = excluded.source_revision,
+                provenance_state = excluded.provenance_state,
+                content_available = excluded.content_available,
                 updated_at = excluded.updated_at
             """,
             (
@@ -4962,6 +5589,7 @@ class SqliteBackend:
                 payload.target_version,
                 payload.target_tag,
                 1 if payload.is_default else 0,
+                *source_values,
                 now,
                 now,
             ),
@@ -5000,6 +5628,26 @@ class SqliteBackend:
             conn.execute("RELEASE prd_requirements_replace")
             raise
         conn.execute("RELEASE prd_requirements_replace")
+
+    @staticmethod
+    def _prd_source_projection_values(
+        payload: PrdParsedPayload | PrdRevisedPayload,
+    ) -> tuple[bytes | None, str | None, int | None, str | None, int | None, str, int]:
+        """Return the complete validated source tuple for one PRD row."""
+        if payload.provenance_state == "legacy_unbound":
+            return (None, None, None, None, None, "legacy_unbound", 0)
+        # Payload validation has already proved this is present, strict UTF-8,
+        # within the fixed bound, and digest/size/revision consistent.
+        assert payload.source_text is not None
+        return (
+            payload.source_text.encode("utf-8", errors="strict"),
+            payload.source_sha256,
+            payload.source_size_bytes,
+            payload.source_encoding,
+            payload.source_revision,
+            "available",
+            1,
+        )
 
     def _check_prd_revised(
         self,
@@ -5171,6 +5819,7 @@ class SqliteBackend:
         """
         prd_id: str = payload.prd_id
         new_revision: int = payload.revision
+        source_values = self._prd_source_projection_values(payload)
 
         superseded_objects = [
             Requirement.model_validate(r) for r in payload.requirements_superseded
@@ -5241,6 +5890,13 @@ class SqliteBackend:
                        target_version = ?,
                        target_tag = ?,
                        revision = ?,
+                       source_bytes = ?,
+                       source_sha256 = ?,
+                       source_size_bytes = ?,
+                       source_encoding = ?,
+                       source_revision = ?,
+                       provenance_state = ?,
+                       content_available = ?,
                        updated_at = ?
                  WHERE id = ?
                 """,
@@ -5258,6 +5914,7 @@ class SqliteBackend:
                     payload.target_version,
                     payload.target_tag,
                     new_revision,
+                    *source_values,
                     now,
                     prd_id,
                 ),
@@ -5682,6 +6339,52 @@ class SqliteBackend:
             return False
         return SqliteBackend._event_schema_version(conn, row[0]) is None
 
+    @staticmethod
+    def _persisted_actor_ids(conn: sqlite3.Connection) -> set[str]:
+        """Return exact work-owner identities already present in state.
+
+        Claims are append-only history, while a planned bundle establishes its
+        coordinator before the coordinator claim exists.  Both therefore count
+        as an existing identity for legacy exact-match and NFC-collision rules.
+        """
+        rows = conn.execute(
+            "SELECT claimed_by FROM claims UNION SELECT coordinator FROM execution_bundles"
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    @classmethod
+    def _validate_new_actor_locked(
+        cls,
+        conn: sqlite3.Connection,
+        actor: str,
+        *,
+        action: str,
+        actor_input: str | None = None,
+    ) -> None:
+        """Validate a prospective identity under the current write snapshot."""
+        persisted_ids = cls._persisted_actor_ids(conn)
+        raw_actor = actor if actor_input is None else actor_input
+        try:
+            canonical = canonicalize_new_actor(raw_actor)
+        except ValueError as exc:
+            raise EventRejected(f"{action}: invalid actor identity: {exc}") from exc
+        if canonical != actor:
+            raise EventRejected(
+                f"{action}: persisted actor must equal the NFC-normalized input."
+            )
+        for persisted in persisted_ids:
+            try:
+                collision = unicodedata.normalize("NFC", persisted) == canonical
+            except UnicodeError:
+                collision = False
+            if collision and not (
+                persisted == canonical and raw_actor == canonical
+            ):
+                raise EventRejected(
+                    f"{action}: actor identity collides with an existing owner "
+                    "after NFC normalization."
+                )
+
     def _check_bundle_created(
         self,
         conn: sqlite3.Connection,
@@ -5706,6 +6409,7 @@ class SqliteBackend:
         try:
             bundle_data = payload.model_dump(mode="json")
             bundle_data.pop("schema_version", None)
+            bundle_data.pop("coordinator_input", None)
             # The log authority assigns the real creation_event_id only after
             # this pre-log check succeeds. A placeholder completes the state
             # model for relational validation without trusting caller input.
@@ -5722,6 +6426,12 @@ class SqliteBackend:
         # flock before any canonical log line is written.
         conn.execute("BEGIN IMMEDIATE")
         try:
+            self._validate_new_actor_locked(
+                conn,
+                bundle.coordinator,
+                action="bundle.created",
+                actor_input=payload.coordinator_input,
+            )
             self._validate_bundle_created_locked(conn, bundle)
         finally:
             conn.execute("COMMIT")
@@ -5805,6 +6515,7 @@ class SqliteBackend:
             return
         bundle_data = payload.model_dump(mode="json")
         bundle_data.pop("schema_version", None)
+        bundle_data.pop("coordinator_input", None)
         bundle_data["creation_event_id"] = event.id
         bundle = ExecutionBundle.model_validate(bundle_data)
         # Git-backed histories may contain two independently valid creations
@@ -7265,6 +7976,9 @@ class SqliteBackend:
             raise EventRejected("bundle.claimed: lease must expire in the future.")
         conn.execute("BEGIN IMMEDIATE")
         try:
+            self._validate_new_actor_locked(
+                conn, payload.claimed_by, action="bundle.claimed"
+            )
             row = conn.execute(
                 "SELECT creation_event_id, coordinator, status, throughput_budget, "
                 "created_at, updated_at "
@@ -7560,9 +8274,13 @@ class SqliteBackend:
                 """INSERT INTO claims
                    (id, task_id, claimed_by, claim_type, status, branch,
                     worktree_path, session_id, bundle_claim_id, expected_files,
+                    generation, attestation_context,
                     created_at, lease_expires_at, last_heartbeat_at,
                     released_at, release_reason)
-                   VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+                   VALUES (?, ?, ?, 'task', 'active', ?, ?, ?, ?, ?,
+                           (SELECT COALESCE(MAX(generation), 0) + 1
+                              FROM claims WHERE task_id = ?),
+                           NULL, ?, ?, ?, NULL, NULL)""",
                 (
                     claim_id,
                     task_id,
@@ -7572,6 +8290,7 @@ class SqliteBackend:
                     payload.session_id,
                     payload.id,
                     likely_files_json or "[]",
+                    task_id,
                     payload.created_at.isoformat(),
                     payload.lease_expires_at.isoformat(),
                     payload.last_heartbeat_at.isoformat(),
@@ -8125,6 +8844,17 @@ class SqliteBackend:
                 ) from None
             raise
         task_dict = self._normalize_task_payload(conn, payload_data, event)
+        recovery_owner = self._task_created_recovery_owner(conn, event)
+        if recovery_owner is not None:
+            # The normalization above deliberately preserves the exact legacy
+            # allowlist diagnostics. An otherwise valid omitted-PRD recovery
+            # shape is still replay/catch-up only and must never enter the live
+            # log through append().
+            raise self._task_created_recovery_refusal(
+                event,
+                owner_prd_id=recovery_owner,
+                code="live_omitted_prd",
+            )
         try:
             Task.model_validate(task_dict)
         except Exception as exc:
@@ -8138,6 +8868,191 @@ class SqliteBackend:
             raise EventRejected(
                 f"task.created: invalid Task payload: {exc}"
             ) from exc
+
+    @staticmethod
+    def _dependency_batch_has_cycle(dep_map: dict[str, list[str]]) -> bool:
+        """Return whether the complete post-edit dependency graph is cyclic."""
+        white, grey, black = 0, 1, 2
+        colour = {task_id: white for task_id in dep_map}
+        for start in sorted(dep_map):
+            if colour[start] != white:
+                continue
+            colour[start] = grey
+            stack: list[tuple[str, Iterator[str]]] = [
+                (start, iter(sorted(dep_map[start])))
+            ]
+            while stack:
+                node, edges = stack[-1]
+                try:
+                    dependency = next(edges)
+                except StopIteration:
+                    stack.pop()
+                    colour[node] = black
+                    continue
+                if dependency not in colour:
+                    continue
+                if colour[dependency] == grey:
+                    return True
+                if colour[dependency] == white:
+                    colour[dependency] = grey
+                    stack.append(
+                        (dependency, iter(sorted(dep_map[dependency])))
+                    )
+        return False
+
+    @staticmethod
+    def _dependency_batch_prd_label(value: Any) -> str:
+        if isinstance(value, str):
+            encoded = value.encode("utf-8", errors="replace")
+            if len(encoded) <= 512 and not any(ord(char) < 32 for char in value):
+                return json.dumps(value, ensure_ascii=False)
+        return _redacted_identifier(value)
+
+    def _dependency_batch_refusal(
+        self,
+        event: EventDraft | Event,
+        payload: TaskDependenciesBatchEditedPayload,
+        *,
+        code: str,
+        inferred_prd_id: Any = None,
+        replay: bool,
+    ) -> EventRejected | TransactionAborted:
+        """Build a bounded, payload-free live or replay refusal."""
+        event_id = getattr(event, "id", "pending")
+        reason = (
+            "dependency batch refused: "
+            f"code={code} event_id={event_id} "
+            "action=task.dependencies_batch_edited "
+            f"expected_prd={self._dependency_batch_prd_label(payload.prd_id)} "
+            f"inferred_prd={self._dependency_batch_prd_label(inferred_prd_id)}"
+        )
+        # The labels above are individually bounded, but keep the contract
+        # explicit if their formatting changes later.
+        encoded = reason.encode("utf-8", errors="replace")
+        if len(encoded) > _AUDIT_LINE_MAX_UTF8_BYTES:
+            reason = encoded[: _AUDIT_LINE_MAX_UTF8_BYTES - 3].decode(
+                "utf-8", errors="ignore"
+            ) + "..."
+        if replay:
+            return TransactionAborted(reason)
+        return EventRejected(reason)
+
+    def _validate_task_dependencies_batch(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskDependenciesBatchEditedPayload,
+        event: EventDraft | Event,
+        *,
+        replay: bool,
+    ) -> list[tuple[str, list[str]]]:
+        """Resolve ownership, stale preconditions, and the final graph."""
+
+        def reject(code: str, inferred: Any = None) -> None:
+            raise self._dependency_batch_refusal(
+                event,
+                payload,
+                code=code,
+                inferred_prd_id=inferred,
+                replay=replay,
+            )
+
+        if event.target_kind != "prd" or event.target_id != payload.prd_id:
+            reject("event_identity_mismatch", event.target_id)
+        if payload.schema_version != 1:
+            reject("schema_version")
+        if conn.execute(
+            "SELECT 1 FROM prds WHERE id = ?", (payload.prd_id,)
+        ).fetchone() is None:
+            reject("unknown_prd")
+
+        rows = conn.execute(
+            "SELECT id, feature_id, prd_id, dependencies FROM tasks"
+        ).fetchall()
+        task_rows = {str(row[0]): row for row in rows}
+        feature_rows = {
+            str(row[0]): str(row[1])
+            for row in conn.execute("SELECT id, prd_id FROM features").fetchall()
+        }
+        graph: dict[str, list[str]] = {}
+        for row in rows:
+            task_id = str(row[0])
+            try:
+                dependencies = json.loads(row[3])
+            except (TypeError, json.JSONDecodeError):
+                reject("stored_dependencies_invalid", row[2])
+            if not isinstance(dependencies, list) or not all(
+                isinstance(item, str) for item in dependencies
+            ):
+                reject("stored_dependencies_invalid", row[2])
+            graph[task_id] = dependencies
+
+        updates: list[tuple[str, list[str]]] = []
+        for edit in payload.edits:
+            row = task_rows.get(edit.task_id)
+            if row is None:
+                reject("unknown_task")
+            inferred_prd_id = str(row[2])
+            if inferred_prd_id != payload.prd_id:
+                reject("task_owner_mismatch", inferred_prd_id)
+            if str(row[1]) != edit.feature_id:
+                reject("task_feature_mismatch", inferred_prd_id)
+            feature_prd_id = feature_rows.get(edit.feature_id)
+            if feature_prd_id is None:
+                reject("unknown_feature")
+            if feature_prd_id != payload.prd_id:
+                reject("feature_owner_mismatch", feature_prd_id)
+            try:
+                current_dependencies = json.loads(row[3])
+            except (TypeError, json.JSONDecodeError):
+                reject("stored_dependencies_invalid", inferred_prd_id)
+            if current_dependencies != edit.expected_dependencies:
+                reject("stale_precondition", inferred_prd_id)
+            if edit.dependencies == edit.expected_dependencies:
+                reject("unchanged_edit", inferred_prd_id)
+            for dependency in edit.dependencies:
+                dependency_row = task_rows.get(dependency)
+                if dependency_row is None:
+                    reject("unknown_dependency", inferred_prd_id)
+            graph[edit.task_id] = list(edit.dependencies)
+            updates.append((edit.task_id, list(edit.dependencies)))
+
+        if self._dependency_batch_has_cycle(graph):
+            reject("cycle", payload.prd_id)
+        return updates
+
+    def _check_task_dependencies_batch_edited(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskDependenciesBatchEditedPayload,
+        event: EventDraft,
+    ) -> None:
+        self._validate_task_dependencies_batch(
+            conn, payload, event, replay=False
+        )
+
+    def _write_task_dependencies_batch_edited(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskDependenciesBatchEditedPayload,
+        event: Event,
+    ) -> None:
+        updates = self._validate_task_dependencies_batch(
+            conn, payload, event, replay=True
+        )
+        updated_at = event.timestamp.isoformat()
+        for task_id, dependencies in updates:
+            cursor = conn.execute(
+                "UPDATE tasks SET dependencies = ?, updated_at = ? "
+                "WHERE id = ? AND prd_id = ?",
+                (json.dumps(dependencies), updated_at, task_id, payload.prd_id),
+            )
+            if cursor.rowcount != 1:
+                raise self._dependency_batch_refusal(
+                    event,
+                    payload,
+                    code="projection_row_missing",
+                    replay=True,
+                )
 
     def _write_task_created(
         self,
@@ -8728,6 +9643,12 @@ class SqliteBackend:
         # refresh the read mark.
         conn.execute("BEGIN IMMEDIATE")
         try:
+            self._validate_new_actor_locked(
+                conn,
+                payload.claimed_by,
+                action="claim.created",
+                actor_input=payload.actor_input,
+            )
             self._validate_claim_created_locked(conn, payload)
         finally:
             # Release the write lock we took purely to refresh the snapshot.
@@ -8747,7 +9668,7 @@ class SqliteBackend:
         :class:`EventRejected` on any guard failure; performs no writes.
         """
         row = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (payload.task_id,)
+            "SELECT status, prd_id FROM tasks WHERE id = ?", (payload.task_id,)
         ).fetchone()
         if row is None:
             raise EventRejected(f"claim.created: task '{payload.task_id}' not found.")
@@ -8789,6 +9710,45 @@ class SqliteBackend:
         ).fetchone()
         if existing is not None:
             return
+
+        expected_generation = int(
+            conn.execute(
+                "SELECT COALESCE(MAX(generation), 0) + 1 "
+                "FROM claims WHERE task_id = ?",
+                (payload.task_id,),
+            ).fetchone()[0]
+        )
+        if (
+            payload.generation is not None
+            and payload.generation != expected_generation
+        ):
+            raise EventRejected(
+                "claim.created: generation must equal the next authoritative "
+                f"task generation ({expected_generation})."
+            )
+        if payload.generation is None and payload.attestation_context is not None:
+            raise EventRejected(
+                "claim.created: attestation context requires an explicit generation."
+            )
+
+        context = payload.attestation_context
+        if context is not None:
+            if payload.bundle_claim_id is not None:
+                raise EventRejected(
+                    "claim.created: bundle member claims cannot carry attestation context."
+                )
+            if context.prd_id != row[1]:
+                raise EventRejected("claim.created: attestation PRD binding mismatch.")
+            prd_row = conn.execute(
+                "SELECT revision FROM prds WHERE id = ?", (context.prd_id,)
+            ).fetchone()
+            if prd_row is None or int(prd_row[0]) != context.prd_revision:
+                raise EventRejected("claim.created: attestation PRD revision mismatch.")
+            context_paths = [entry.path for entry in context.expected_paths]
+            if context_paths != [str(path) for path in payload.expected_files]:
+                raise EventRejected(
+                    "claim.created: attestation paths must exactly bind expected_files."
+                )
 
         # Same-task race guard (TOCTOU): the status check above admits a
         # 'claimed' task so a replayed claim.created can still run its
@@ -8988,6 +9948,18 @@ class SqliteBackend:
         branch: str | None = payload.branch
         worktree_path: str | None = payload.worktree_path
         expected_files = payload.expected_files
+        generation = payload.generation
+        if generation is None:
+            # Legacy replay only: old events cannot attest, but their lifecycle
+            # still receives a deterministic per-task generation.
+            generation = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(generation), 0) + 1 "
+                    "FROM claims WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+        attestation_context = payload.attestation_context
         timestamp: str = event.timestamp.astimezone(datetime.UTC).isoformat()
 
         if event.target_kind != "claim" or event.target_id != claim_id:
@@ -9074,14 +10046,15 @@ class SqliteBackend:
 
         # INSERT OR IGNORE: idempotent on replay — duplicate claim.created events
         # (after crash mid-transaction) do not produce duplicate rows.
-        conn.execute(
+        inserted = conn.execute(
             """
             INSERT OR IGNORE INTO claims
                 (id, task_id, claimed_by, claim_type, status, branch,
-                 worktree_path, session_id, expected_files, created_at,
+                 worktree_path, session_id, expected_files, generation,
+                 attestation_context, created_at,
                  lease_expires_at, last_heartbeat_at, released_at, release_reason)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
             """,
             (
                 claim_id,
@@ -9093,11 +10066,27 @@ class SqliteBackend:
                 worktree_path,
                 getattr(payload, "session_id", None),
                 json.dumps(expected_files),
+                generation,
+                (
+                    json.dumps(
+                        attestation_context.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if attestation_context is not None
+                    else None
+                ),
                 created_at,
                 lease_expires_at,
                 last_heartbeat_at,
             ),
         )
+        # Distinct Git branches can allocate different claim ids for the same
+        # task generation. The unique index makes the first replay-ordered
+        # lineage authoritative; the loser has no row, so descendants fail
+        # closed instead of aborting rebuild on a foreign-key insert below.
+        if inserted.rowcount != 1:
+            return
         conn.execute(
             "INSERT OR IGNORE INTO claim_replay_lineages "
             "(claim_id, creation_fingerprint) VALUES (?, ?)",
@@ -9147,11 +10136,15 @@ class SqliteBackend:
         metadata so the prior tombstone is still emitted) for an already-terminal
         claim that the guard would not match.
         """
-        _ = event
         claim_id: str = payload.claim_id
+        if event.target_kind != "claim" or event.target_id != claim_id:
+            raise EventRejected("claim.released: event target mismatch.")
+        if event.actor != payload.released_by:
+            raise EventRejected("claim.released: event actor mismatch.")
         self._reject_claim_replay_collision(conn, claim_id, "claim.released")
         row = conn.execute(
-            "SELECT status, bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT status, bundle_claim_id, claimed_by FROM claims WHERE id = ?",
+            (claim_id,),
         ).fetchone()
         if row is None:
             raise EventRejected(f"claim.released: claim '{claim_id}' not found.")
@@ -9159,6 +10152,10 @@ class SqliteBackend:
             raise EventRejected(
                 "claim.released: bundle member authorizations are managed by "
                 "their coordinator claim."
+            )
+        if not payload.force and row[2] != payload.released_by:
+            raise EventRejected(
+                "claim.released: only the exact claim owner may release without force."
             )
         current_status = row[0]
         if payload.force:
@@ -9195,9 +10192,16 @@ class SqliteBackend:
         """
         claim_id: str = payload.claim_id
         child_row = conn.execute(
-            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT bundle_claim_id, claimed_by, generation FROM claims WHERE id = ?",
+            (claim_id,),
         ).fetchone()
-        if child_row is not None and child_row[0] is not None:
+        if (
+            event.target_kind != "claim"
+            or event.target_id != claim_id
+            or child_row is None
+            or child_row[0] is not None
+            or (not payload.force and child_row[1] != payload.released_by)
+        ):
             return
         if self._claim_replay_collision(conn, claim_id):
             return
@@ -9207,7 +10211,7 @@ class SqliteBackend:
 
         target_status, status_guard = self._claim_release_target(force)
 
-        conn.execute(
+        released = conn.execute(
             f"""
             UPDATE claims
                SET status = ?,
@@ -9218,6 +10222,15 @@ class SqliteBackend:
             """,  # noqa: S608 — status_guard is a literal, not user input
             (target_status, timestamp, release_reason, claim_id),
         )
+        if released.rowcount == 1:
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET invalidated_by_event_id = ? "
+                "WHERE claim_id = ? AND generation = ? "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL",
+                (event.id, claim_id, child_row[2]),
+            )
 
         # Side-effect: return the task to 'ready'. Widened from the original
         # WHERE status='claimed' (which would TransactionAborted on tasks that
@@ -9254,24 +10267,61 @@ class SqliteBackend:
         Was two validation guards in the old handler (claim not found; claim not
         active) interpreted from a 0-row UPDATE; both now reject up front.
         """
-        _ = event
         claim_id: str = payload.claim_id
-        self._reject_claim_replay_collision(conn, claim_id, "claim.renewed")
-        row = conn.execute(
-            "SELECT status, bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
-        ).fetchone()
-        if row is None:
-            raise EventRejected(f"claim.renewed: claim '{claim_id}' not found.")
-        if row[1] is not None:
-            raise EventRejected(
-                "claim.renewed: renew the public bundle coordinator claim instead."
-            )
-        actual_status = row[0]
-        if actual_status != "active":
-            raise EventRejected(
-                f"claim.renewed: cannot renew claim '{claim_id}' "
-                f"with status '{actual_status}' (must be 'active')."
-            )
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if event.target_kind != "claim" or event.target_id != claim_id:
+                raise EventRejected("claim.renewed: event target mismatch.")
+            if payload.renewed_by is None or event.actor != payload.renewed_by:
+                raise EventRejected("claim.renewed: event actor mismatch.")
+            self._reject_claim_replay_collision(conn, claim_id, "claim.renewed")
+            row = conn.execute(
+                "SELECT status, bundle_claim_id, claimed_by, generation, "
+                "attestation_context FROM claims WHERE id = ?",
+                (claim_id,),
+            ).fetchone()
+            if row is None:
+                raise EventRejected(f"claim.renewed: claim '{claim_id}' not found.")
+            if row[1] is not None:
+                raise EventRejected(
+                    "claim.renewed: renew the public bundle coordinator claim instead."
+                )
+            if row[2] != payload.renewed_by:
+                raise EventRejected(
+                    "claim.renewed: only the exact claim owner may renew."
+                )
+            actual_status = row[0]
+            if actual_status != "active":
+                raise EventRejected(
+                    f"claim.renewed: cannot renew claim '{claim_id}' "
+                    f"with status '{actual_status}' (must be 'active')."
+                )
+            if payload.attestation_digest is not None:
+                if row[4] is None or row[3] != payload.attestation_generation:
+                    raise EventRejected(
+                        "claim.renewed: attestation generation or context mismatch."
+                    )
+                attestation = conn.execute(
+                    "SELECT trust_mode FROM claim_progress_attestations "
+                    "WHERE semantic_digest = ? AND claim_id = ? AND generation = ? "
+                    "AND claimed_by = ? AND consumed_by_event_id IS NULL "
+                    "AND invalidated_by_event_id IS NULL AND collision_detected = 0",
+                    (
+                        payload.attestation_digest,
+                        claim_id,
+                        payload.attestation_generation,
+                        payload.renewed_by,
+                    ),
+                ).fetchone()
+                if (
+                    attestation is None
+                    or attestation[0] != payload.attestation_trust_mode
+                ):
+                    raise EventRejected(
+                        "claim.renewed: pending attestation binding mismatch."
+                    )
+        finally:
+            conn.execute("COMMIT")
 
     def _write_claim_renewed(
         self,
@@ -9296,15 +10346,50 @@ class SqliteBackend:
         """
         claim_id: str = payload.claim_id
         child_row = conn.execute(
-            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT bundle_claim_id, claimed_by, generation, attestation_context, status "
+            "FROM claims WHERE id = ?",
+            (claim_id,),
         ).fetchone()
-        if child_row is not None and child_row[0] is not None:
+        renewed_by = payload.renewed_by
+        if (
+            event.target_kind != "claim"
+            or event.target_id != claim_id
+            or child_row is None
+            or child_row[0] is not None
+            or (renewed_by is not None and child_row[1] != renewed_by)
+        ):
             return
         if self._claim_replay_collision(conn, claim_id):
             return
-        _ = event
         lease_expires_at: str = payload.lease_expires_at
         last_heartbeat_at: str = payload.last_heartbeat_at
+
+        if payload.attestation_digest is not None:
+            if (
+                child_row[3] is None
+                or child_row[2] != payload.attestation_generation
+                or child_row[4] != "active"
+            ):
+                return
+            consumed = conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET consumed_by_event_id = ?, consumed_at = ? "
+                "WHERE semantic_digest = ? AND claim_id = ? AND generation = ? "
+                "AND claimed_by = ? AND trust_mode = ? "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL AND collision_detected = 0",
+                (
+                    event.id,
+                    last_heartbeat_at,
+                    payload.attestation_digest,
+                    claim_id,
+                    payload.attestation_generation,
+                    renewed_by,
+                    payload.attestation_trust_mode,
+                ),
+            )
+            if consumed.rowcount != 1:
+                return
 
         conn.execute(
             """
@@ -9375,7 +10460,7 @@ class SqliteBackend:
         """
         claim_id: str = payload.claim_id
         child_row = conn.execute(
-            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT bundle_claim_id, generation FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if child_row is not None and child_row[0] is not None:
             return
@@ -9383,7 +10468,7 @@ class SqliteBackend:
             return
         timestamp: str = event.timestamp.isoformat()
 
-        conn.execute(
+        staled = conn.execute(
             """
             UPDATE claims
                SET status = 'stale',
@@ -9394,6 +10479,15 @@ class SqliteBackend:
             """,
             (timestamp, claim_id),
         )
+        if staled.rowcount == 1 and child_row is not None:
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET invalidated_by_event_id = ? "
+                "WHERE claim_id = ? AND generation = ? "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL",
+                (event.id, claim_id, child_row[1]),
+            )
 
         # Side-effect: return the task to 'ready' if it is still in an
         # active-work status.  Tasks already at accepted/done/rejected are
@@ -9419,6 +10513,395 @@ class SqliteBackend:
     # Phase 5 handlers — completion flow
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _claim_command_proof_material_is_valid(
+        proof: ClaimCommandProof, *, require_configured_trust: bool
+    ) -> bool:
+        """Recompute every durable command-proof identity and trust assertion."""
+        core = proof.evidence_core.model_dump(mode="json")
+        semantic_projection = claim_command_semantic_projection(proof.evidence_core)
+        try:
+            command_bytes = base64.b64decode(
+                proof.evidence_core.command_base64.encode("ascii"), validate=True
+            )
+            output_bytes = base64.b64decode(
+                proof.evidence_core.output_base64.encode("ascii"), validate=True
+            )
+            command = command_bytes.decode("utf-8", errors="strict")
+            semantic_digest = domain_separated_sha256(
+                _COMMAND_PROOF_SEMANTIC_DOMAIN,
+                semantic_projection,
+                max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                max_nodes=canonical_node_budget_for_bytes(
+                    _PROGRESS_ATTESTATION_MAX_BYTES
+                ),
+                max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+            )
+            ended_at = datetime.datetime.fromisoformat(
+                proof.evidence_core.ended_at.replace("Z", "+00:00")
+            )
+        except (CanonicalJsonRefusal, UnicodeError, ValueError):
+            return False
+        if not _command_cwd_is_canonical(proof.evidence_core.cwd_relative):
+            return False
+        if (
+            proof.evidence_core.exit_code != 0
+            or proof.exit_code != 0
+            or command != proof.command
+            or hashlib.sha256(output_bytes).hexdigest()
+            != proof.evidence_core.output_sha256
+            or proof.output_sha256 != proof.evidence_core.output_sha256
+            or proof.semantic_digest != semantic_digest
+            or proof.captured_at != ended_at
+        ):
+            return False
+        issuer = proof.issuer
+        if proof.trust_mode == "claim_owner_self_attested":
+            return issuer is None and proof.issuer_id is None
+        if issuer is None or proof.issuer_id is None:
+            return False
+        try:
+            genuine_id = signing.fingerprint(issuer.public_key)
+        except ValueError:
+            return False
+        cryptographically_valid = (
+            issuer.algorithm == "ed25519"
+            and issuer.signer_id == proof.issuer_id == genuine_id
+            and signing.verify(
+                issuer.public_key,
+                canonical_json_bytes(
+                    core,
+                    max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                    max_nodes=canonical_node_budget_for_bytes(
+                        _PROGRESS_ATTESTATION_MAX_BYTES
+                    ),
+                    max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                ),
+                issuer.signature,
+            )
+        )
+        if not cryptographically_valid or not require_configured_trust:
+            return cryptographically_valid
+        configured_path = os.environ.get("ANVIL_TRUST_LIST")
+        trust_path = (
+            Path(configured_path).expanduser()
+            if configured_path
+            else Path.home() / ".anvil" / "trust.txt"
+        )
+        return signing.is_trusted(
+            issuer.public_key, signing.load_trust_list(trust_path)
+        )
+
+    @staticmethod
+    def _hook_command_proof_material_is_valid(proof: CommandProof) -> bool:
+        """Recompute the integrity identity of one attributed hook proof."""
+        if proof.attribution is None or proof.semantic_digest is None:
+            return False
+        try:
+            expected = hook_command_semantic_digest(
+                attribution=proof.attribution,
+                command=proof.command,
+                exit_code=proof.exit_code,
+                output_sha256=proof.output_sha256,
+                captured_at=proof.captured_at,
+            )
+        except (CanonicalJsonRefusal, ValueError):
+            return False
+        return proof.semantic_digest == expected
+
+    def _hook_command_proof_batch_matches_claim(
+        self,
+        conn: sqlite3.Connection,
+        payload: EvidenceSubmittedPayload,
+        event: EventDraft | Event,
+        *,
+        authoritative_now: datetime.datetime | None = None,
+        allow_historical_unattributed: bool = False,
+    ) -> bool:
+        """Bind hook proofs to the exact active claim that produced them.
+
+        Pre-T008.1 events carried no attribution. Replay may retain that exact
+        historical all-unattributed shape, but live append never accepts it and
+        a mixed attributed/unattributed batch is never a compatibility shape.
+        """
+        proofs = [proof for proof in payload.proofs if isinstance(proof, CommandProof)]
+        if not proofs:
+            return True
+        attributed = [proof.attribution is not None for proof in proofs]
+        if not any(attributed):
+            return allow_historical_unattributed and all(
+                proof.semantic_digest is None for proof in proofs
+            )
+        if not all(attributed) or any(proof.semantic_digest is None for proof in proofs):
+            return False
+        if len(proofs) > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+            return False
+        try:
+            artifact_sizes = [
+                len(
+                    canonical_json_bytes(
+                        proof.model_dump(mode="json"),
+                        max_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                        max_nodes=canonical_node_budget_for_bytes(
+                            MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES
+                        ),
+                        max_string_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                    )
+                )
+                for proof in proofs
+            ]
+        except (CanonicalJsonRefusal, ValueError):
+            return False
+        if sum(artifact_sizes) > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
+            return False
+        digests = [proof.semantic_digest for proof in proofs]
+        if len(digests) != len(set(digests)):
+            return False
+        if (
+            event.target_kind != "task"
+            or event.target_id != payload.task_id
+            or event.actor != payload.submitted_by
+            or self._claim_replay_collision(conn, payload.claim_id)
+        ):
+            return False
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?",
+            (payload.claim_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != payload.task_id
+            or row[1] != payload.submitted_by
+            or row[2] != "active"
+            or row[3] is not None
+            or row[8] is not None
+        ):
+            return False
+        if authoritative_now is not None and (
+            not isinstance(authoritative_now, datetime.datetime)
+            or authoritative_now.tzinfo is None
+            or authoritative_now.utcoffset() is None
+        ):
+            return False
+        try:
+            generation = int(row[4])
+            context = (
+                ClaimAttestationContext.model_validate(json.loads(row[5]))
+                if row[5] is not None
+                else None
+            )
+            claim_created_at = datetime.datetime.fromisoformat(
+                row[6].replace("Z", "+00:00")
+            )
+            lease_expires_at = datetime.datetime.fromisoformat(
+                row[7].replace("Z", "+00:00")
+            )
+            event_time = event.timestamp.astimezone(datetime.UTC)
+            live_now = (
+                authoritative_now.astimezone(datetime.UTC)
+                if authoritative_now is not None
+                else None
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (payload.task_id,)
+        ).fetchone()
+        if task_row is None:
+            return False
+        try:
+            task = self._row_to_task(task_row, conn)
+            current_task_revision = task_snapshot_revision(task)
+        except (CanonicalJsonRefusal, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        current_prd = conn.execute(
+            "SELECT revision FROM prds WHERE id = ?", (task.prd_id,)
+        ).fetchone()
+        if (
+            project is None
+            or current_prd is None
+            or event_time >= lease_expires_at
+            or (live_now is not None and live_now >= lease_expires_at)
+            or (live_now is not None and event_time > live_now)
+        ):
+            return False
+        for proof in proofs:
+            attribution = proof.attribution
+            if attribution is None:
+                return False
+            captured_at = proof.captured_at.astimezone(datetime.UTC)
+            if (
+                not self._hook_command_proof_material_is_valid(proof)
+                or attribution.project_id != project[0]
+                or attribution.claim_id != payload.claim_id
+                or attribution.generation != generation
+                or attribution.claimed_by != payload.submitted_by
+                or attribution.task_id != payload.task_id
+                or (
+                    context is not None
+                    and (
+                        task.prd_id != context.prd_id
+                        or int(current_prd[0]) != context.prd_revision
+                        or attribution.task_revision != context.task_revision
+                        or attribution.prd_id != context.prd_id
+                        or attribution.prd_revision != context.prd_revision
+                        or attribution.repository_id != context.repository_id
+                        or attribution.claim_start_sha != context.claim_start_sha
+                    )
+                )
+                or (
+                    context is None
+                    and (
+                        attribution.task_revision != current_task_revision
+                        or attribution.prd_id != task.prd_id
+                        or attribution.prd_revision != int(current_prd[0])
+                        or attribution.repository_id is not None
+                        or attribution.claim_start_sha is not None
+                    )
+                )
+                or claim_created_at > captured_at
+                or captured_at > event_time
+                or captured_at >= lease_expires_at
+                or (live_now is not None and captured_at > live_now)
+            ):
+                return False
+        return True
+
+    @classmethod
+    def _claim_command_proof_batch_matches_claim(
+        cls,
+        conn: sqlite3.Connection,
+        payload: EvidenceSubmittedPayload,
+        event: EventDraft | Event,
+        *,
+        authoritative_now: datetime.datetime | None = None,
+    ) -> bool:
+        """Bind an imported batch to one exact active claim generation.
+
+        ``authoritative_now`` is supplied only by the live append check while
+        the cross-process append lock is held. Replay deliberately omits it and
+        remains a deterministic function of the persisted event timestamp.
+        """
+        imported = [
+            proof for proof in payload.proofs if isinstance(proof, ClaimCommandProof)
+        ]
+        if not imported:
+            return True
+        if (
+            event.target_kind != "task"
+            or event.target_id != payload.task_id
+            or event.actor != payload.submitted_by
+            or cls._claim_replay_collision(conn, payload.claim_id)
+        ):
+            return False
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?",
+            (payload.claim_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != payload.task_id
+            or row[1] != payload.submitted_by
+            or row[2] != "active"
+            or row[3] is not None
+            or row[5] is None
+            or row[8] is not None
+        ):
+            return False
+        if authoritative_now is not None and (
+            not isinstance(authoritative_now, datetime.datetime)
+            or authoritative_now.tzinfo is None
+            or authoritative_now.utcoffset() is None
+        ):
+            return False
+        try:
+            generation = int(row[4])
+            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            claim_created_at = datetime.datetime.fromisoformat(
+                row[6].replace("Z", "+00:00")
+            )
+            lease_expires_at = datetime.datetime.fromisoformat(
+                row[7].replace("Z", "+00:00")
+            )
+            event_time = event.timestamp.astimezone(datetime.UTC)
+            live_now = (
+                authoritative_now.astimezone(datetime.UTC)
+                if authoritative_now is not None
+                else None
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        task_binding = conn.execute(
+            "SELECT prd_id, verification FROM tasks WHERE id = ?", (payload.task_id,)
+        ).fetchone()
+        current_prd = conn.execute(
+            "SELECT revision FROM prds WHERE id = ?", (context.prd_id,)
+        ).fetchone()
+        if task_binding is None:
+            return False
+        try:
+            verification = Verification.model_validate(json.loads(task_binding[1]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        required_commands = {
+            requirement.command
+            for requirement in verification.required_proofs
+            if requirement.kind is ProofKind.command
+            and requirement.command is not None
+            and 0 in requirement.passing_exit_codes
+        }
+        if (
+            project is None
+            or task_binding[0] != context.prd_id
+            or current_prd is None
+            or int(current_prd[0]) != context.prd_revision
+            or not required_commands
+            or event_time >= lease_expires_at
+            or (live_now is not None and live_now >= lease_expires_at)
+            or (live_now is not None and event_time > live_now)
+        ):
+            return False
+        for proof in imported:
+            core = proof.evidence_core
+            try:
+                started_at = datetime.datetime.fromisoformat(
+                    core.started_at.replace("Z", "+00:00")
+                )
+                ended_at = datetime.datetime.fromisoformat(
+                    core.ended_at.replace("Z", "+00:00")
+                )
+            except ValueError:
+                return False
+            if (
+                not cls._claim_command_proof_material_is_valid(
+                    proof, require_configured_trust=True
+                )
+                or core.project_id != project[0]
+                or core.claim_id != payload.claim_id
+                or core.generation != generation
+                or core.claimed_by != payload.submitted_by
+                or core.task_id != payload.task_id
+                or core.task_revision != context.task_revision
+                or core.prd_id != context.prd_id
+                or core.prd_revision != context.prd_revision
+                or core.repository_id != context.repository_id
+                or core.claim_start_sha != context.claim_start_sha
+                or proof.command not in required_commands
+                or claim_created_at > started_at
+                or started_at > ended_at
+                or ended_at > event_time
+                or ended_at >= lease_expires_at
+                or (live_now is not None and ended_at > live_now)
+            ):
+                return False
+        return True
+
     def _check_evidence_submitted(
         self,
         conn: sqlite3.Connection,
@@ -9441,7 +10924,30 @@ class SqliteBackend:
         The claim auto-release branch (and its conditional warn log) is NOT a
         gate — it is a side effect of the write and stays there.
         """
-        _ = event
+        if event.target_kind != "task" or event.target_id != payload.task_id:
+            raise EventRejected("evidence.submitted: event target mismatch.")
+        if event.actor != payload.submitted_by:
+            raise EventRejected("evidence.submitted: event actor mismatch.")
+        if not self._claim_command_proof_batch_matches_claim(
+            conn,
+            payload,
+            event,
+            authoritative_now=self._clock.now(),
+        ):
+            raise EventRejected(
+                "evidence.submitted: claim-bound command proof batch does not match "
+                "the exact active claim generation or durable proof material."
+            )
+        if not self._hook_command_proof_batch_matches_claim(
+            conn,
+            payload,
+            event,
+            authoritative_now=self._clock.now(),
+        ):
+            raise EventRejected(
+                "evidence.submitted: hook command proof batch does not match the "
+                "exact active claim generation or durable attribution."
+            )
         # At least one proof is mandatory: a non-empty `commands_run`. An empty
         # `files_changed` is legitimate for a verification-only / check step that
         # runs commands but changes no files (B32) — the older rule forced a
@@ -9457,7 +10963,7 @@ class SqliteBackend:
         task_id: str = payload.task_id
 
         claim_row = conn.execute(
-            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT task_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if claim_row is None:
             raise EventRejected(
@@ -9467,6 +10973,10 @@ class SqliteBackend:
             raise EventRejected(
                 f"evidence.submitted: claim '{claim_id}' belongs to task "
                 f"'{claim_row[0]}', not '{task_id}'."
+            )
+        if claim_row[1] != payload.submitted_by:
+            raise EventRejected(
+                "evidence.submitted: only the exact claim owner may submit evidence."
             )
         active_bundle_child = conn.execute(
             "SELECT id FROM claims WHERE task_id = ? AND status = 'active' "
@@ -9549,14 +11059,34 @@ class SqliteBackend:
               claim was already released/stale; the conditional warn log records
               that — it is an audit side effect, not a rejection.
         """
+        imported = any(isinstance(proof, ClaimCommandProof) for proof in payload.proofs)
+        if imported and not self._claim_command_proof_batch_matches_claim(
+            conn, payload, event
+        ):
+            raise EventRejected(
+                "evidence.submitted: replay claim-bound command proof batch is invalid."
+            )
+        hooked = any(isinstance(proof, CommandProof) for proof in payload.proofs)
+        if hooked and not self._hook_command_proof_batch_matches_claim(
+            conn,
+            payload,
+            event,
+            allow_historical_unattributed=True,
+        ):
+            raise EventRejected(
+                "evidence.submitted: replay hook command proof batch is invalid."
+            )
         task_id: str = payload.task_id
         claim_id: str = payload.claim_id
         claim_row = conn.execute(
-            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT task_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if (
             claim_row is None
             or claim_row[0] != task_id
+            or claim_row[1] != payload.submitted_by
+            or event.target_kind != "task"
+            or event.target_id != task_id
             or self._claim_replay_collision(conn, claim_id)
         ):
             return
@@ -9624,7 +11154,7 @@ class SqliteBackend:
         )
 
         # Auto-release the active claim.
-        conn.execute(
+        released = conn.execute(
             """
             UPDATE claims
                SET status = 'released',
@@ -9635,8 +11165,18 @@ class SqliteBackend:
             """,
             (timestamp, claim_id),
         )
+        if released.rowcount == 1:
+            conn.execute(
+                "UPDATE claim_progress_attestations "
+                "SET invalidated_by_event_id = ? "
+                "WHERE claim_id = ? "
+                "AND generation = (SELECT generation FROM claims WHERE id = ?) "
+                "AND consumed_by_event_id IS NULL "
+                "AND invalidated_by_event_id IS NULL",
+                (event.id, claim_id, claim_id),
+            )
 
-        if conn.execute("SELECT changes()").fetchone()[0] == 0:
+        if released.rowcount == 0:
             # Claim already released or stale — idempotent; log warning to audit.jsonl
             # only during normal (non-replay) execution. During replay/catch-up the
             # audit line was already written on the first run; re-writing it would
@@ -10268,7 +11808,17 @@ class SqliteBackend:
         d = dict(row)
         if isinstance(d.get("expected_files"), str):
             d["expected_files"] = json.loads(d["expected_files"])
+        if isinstance(d.get("attestation_context"), str):
+            d["attestation_context"] = json.loads(d["attestation_context"])
         return Claim.model_validate(d)
+
+    @staticmethod
+    def _row_to_progress_attestation(row: Any) -> ClaimProgressAttestation:
+        d = dict(row)
+        if isinstance(d.get("changed_paths"), str):
+            d["changed_paths"] = json.loads(d["changed_paths"])
+        d["collision_detected"] = bool(d.get("collision_detected", 0))
+        return ClaimProgressAttestation.model_validate(d)
 
     @staticmethod
     def _row_to_review(row: Any) -> Review:
@@ -10383,6 +11933,10 @@ class SqliteBackend:
         # is_default is stored as INTEGER (0/1); coerce to bool for the model.
         if "is_default" in d and d["is_default"] is not None:
             d["is_default"] = bool(d["is_default"])
+        if d.get("source_bytes") is not None:
+            d["source_bytes"] = bytes(d["source_bytes"])
+        if "content_available" in d and d["content_available"] is not None:
+            d["content_available"] = bool(d["content_available"])
         # Review #13: created_at / updated_at are backfilled by the v6->v7
         # migration via COALESCE(last_reviewed_at, project.created_at), both of
         # which are stored as tz-aware UTC ISO strings — so the PRD field

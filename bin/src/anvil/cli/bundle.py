@@ -7,6 +7,12 @@ from pathlib import Path
 
 import typer
 
+from anvil.cli._actor_output import (
+    actor_identity_data,
+    bundle_continuation_data,
+    bundle_continuation_lines,
+    safe_actor_label,
+)
 from anvil.cli._helpers import (
     _open_backend,
     _reap_stale_claims,
@@ -15,7 +21,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
     resolve_actor,
 )
-from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
+from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
 
 bundle_app = typer.Typer(help="Create, inspect, review, and deliver execution bundles.")
 
@@ -67,7 +73,7 @@ def create_bundle(
     state_dir, backend = _state(cwd, command, json_output)
     del state_dir
     resolved_actor = resolve_actor(actor)
-    resolved_coordinator = (coordinator or resolved_actor).strip()
+    resolved_coordinator = coordinator if coordinator is not None else resolved_actor
     try:
         bundle = BundleCatalog(backend, SystemClock(), actor=resolved_actor).create(
             bundle_id,
@@ -93,7 +99,7 @@ def create_bundle(
         return
     typer.echo(f"Created bundle '{bundle.id}' ({bundle.status.value}).")
     typer.echo(f"  PRD:         {bundle.prd_id}")
-    typer.echo(f"  Coordinator: {bundle.coordinator}")
+    typer.echo(f"  Coordinator: {safe_actor_label(bundle.coordinator)}")
     typer.echo(f"  Members:     {', '.join(bundle.task_ids)}")
 
 
@@ -126,7 +132,10 @@ def show_bundle(
         emit_success(command, data)
         return
     typer.echo(f"Bundle {bundle.id}: {bundle.status.value}")
-    typer.echo(f"  PRD: {bundle.prd_id}; coordinator: {bundle.coordinator}")
+    typer.echo(
+        f"  PRD: {bundle.prd_id}; coordinator: "
+        f"{safe_actor_label(bundle.coordinator)}"
+    )
     typer.echo(f"  Members: {', '.join(bundle.task_ids)}")
     typer.echo(f"  Claim: {claim.id if claim else '(none)'}")
     typer.echo(f"  Reviews: {len(reviews)}")
@@ -157,7 +166,8 @@ def list_bundles(
         return
     for bundle in bundles:
         typer.echo(
-            f"{bundle.id}  {bundle.status.value}  coordinator={bundle.coordinator} "
+            f"{bundle.id}  {bundle.status.value}  "
+            f"coordinator={safe_actor_label(bundle.coordinator)} "
             f"members={len(bundle.task_ids)}"
         )
 
@@ -185,7 +195,7 @@ def claim_bundle(
     cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
 ) -> None:
     """Claim a bundle without Git side effects (use top-level claim for Git)."""
-    from anvil.bundles.manager import BundleError
+    from anvil.bundles.manager import BundleActorMismatch, BundleError
 
     command = "bundle claim"
     state_dir, backend = _state(cwd, command, json_output)
@@ -217,6 +227,15 @@ def claim_bundle(
         result = _manager(
             backend, state_dir, resolve_actor(actor), cwd=cwd
         ).claim(bundle_id)
+    except BundleActorMismatch as exc:
+        if json_output:
+            fail_with(
+                command,
+                str(exc),
+                code="actor_mismatch",
+                extra={"owner": exc.owner, "resolved_actor": exc.actual},
+            )
+        _fail(command, str(exc), json_output)
     except BundleError as exc:
         _fail(command, str(exc), json_output)
     finally:
@@ -228,12 +247,18 @@ def claim_bundle(
                 "bundle": dump_model(result.bundle),
                 "claim": dump_model(result.claim),
                 "warnings": warnings,
+                "actor_identity": actor_identity_data(result.claim.claimed_by),
+                "continuation": bundle_continuation_data(
+                    bundle_id, result.claim.claimed_by
+                ),
             },
         )
         return
     typer.echo(f"Claimed bundle '{bundle_id}' with coordinator claim {result.claim.id}.")
     for warning in warnings:
         typer.echo(f"  Warning: {warning}")
+    for line in bundle_continuation_lines(bundle_id, result.claim.claimed_by):
+        typer.echo(line)
 
 
 @bundle_app.command("renew")

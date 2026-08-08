@@ -19,6 +19,16 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from anvil.actors import (
+    ACTOR_AUTH_NOTICE,
+    actor_identity_context,
+    continuation_context,
+    current_shell_kind,
+    quote_posix_actor,
+    quote_powershell_actor,
+    safe_actor_for_human,
+)
+
 if TYPE_CHECKING:
     from anvil.config import Config
     from anvil.review.gates import DeferredFinding
@@ -86,6 +96,42 @@ LIGHTWEIGHT_BLAST_RADIUS_MAX = 2
 # ---------------------------------------------------------------------------
 
 FAST_LANE_REQUIRED_EVIDENCE_MAX = 1
+
+
+def _packet_shell() -> Literal["posix", "powershell"]:
+    return current_shell_kind()
+
+
+def _quote_packet_actor(
+    actor: str, shell: Literal["posix", "powershell"] | None = None
+) -> str:
+    selected = shell or _packet_shell()
+    return (
+        quote_powershell_actor(actor)
+        if selected == "powershell"
+        else quote_posix_actor(actor)
+    )
+
+
+def _packet_actor_env(actor: str) -> str:
+    quoted = _quote_packet_actor(actor)
+    if _packet_shell() == "powershell":
+        return f"$env:ANVIL_ACTOR = {quoted}"
+    return f"export ANVIL_ACTOR={quoted}"
+
+
+def _packet_hook_env(actor: str, claim_id: str) -> str:
+    actor_quoted = _quote_packet_actor(actor)
+    claim_quoted = _quote_packet_actor(claim_id)
+    if _packet_shell() == "powershell":
+        return (
+            f"$env:ANVIL_ACTOR = {actor_quoted}; "
+            f"$env:ANVIL_CLAIM_ID = {claim_quoted}"
+        )
+    return (
+        f"export ANVIL_ACTOR={actor_quoted} "
+        f"ANVIL_CLAIM_ID={claim_quoted}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +223,15 @@ def render_bundle_packet(
     internal_edges: list[dict[str, str]] = []
     open_external: list[str] = []
     member_json: list[dict[str, Any]] = []
+    coordinator_label = safe_actor_for_human(bundle.coordinator)
+    if coordinator_label is None:
+        coordinator_label = "<unsafe legacy actor; use JSON structured coordinator>"
     lines = [
         f"# Bundle {bundle.id}",
         "",
         f"**PRD:** {bundle.prd_id}",
         f"**Status:** {bundle.status.value}",
-        f"**Coordinator:** {bundle.coordinator}",
+        f"**Coordinator:** {coordinator_label}",
         f"**Branch:** {bundle.branch or '—'}",
         f"**Worktree:** {bundle.worktree_path or '—'}",
         "",
@@ -657,23 +706,76 @@ def _render_markdown(
     # keeps all three so a higher-stakes task documents the whole lifecycle.
     lines.append("## Update protocol")
     lines.append("")
+    packet_actor = active_claim.claimed_by if active_claim is not None else None
+    safe_packet_actor = (
+        safe_actor_for_human(packet_actor) if packet_actor is not None else None
+    )
+    if packet_actor is not None:
+        lines.append(f"- {ACTOR_AUTH_NOTICE}")
+        if safe_packet_actor is not None:
+            lines.append(
+                f"- Pin actor ({_packet_shell()}): `{_packet_actor_env(packet_actor)}`"
+            )
+            lines.append(
+                "- Pin hook attribution for this claim: "
+                f"`{_packet_hook_env(packet_actor, active_claim.id)}`"
+            )
+        else:
+            lines.append(
+                "- The persisted actor is unsafe to render in shell text; use the "
+                "JSON packet's structured continuation fields."
+            )
+        if active_claim is not None and active_claim.attestation_context is not None:
+            lines.append(
+                "- External progress must use a canonical claim-bound artifact via "
+                f"`anvil progress {task.id} <phase> --attestation-file <path> "
+                "--actor ...`; free-text progress never renews, and an accepted "
+                "attestation is consumed by the next renewal."
+            )
+
     if lightweight:
-        lines.append(
-            f"- On completion, submit evidence via"
-            f" `anvil submit {task.id}"
-            f" --commands ... --files-changed ...`"
-        )
+        if packet_actor is not None and safe_packet_actor is None:
+            lines.append(
+                "- On completion, use the JSON packet's structured submit argv."
+            )
+        else:
+            actor_suffix = (
+                f" --actor {_quote_packet_actor(packet_actor)}"
+                if packet_actor is not None
+                else ""
+            )
+            lines.append(
+                f"- On completion, submit evidence via"
+                f" `anvil submit {task.id}"
+                f" --commands ... --files-changed ...{actor_suffix}`"
+            )
     else:
         if active_claim is not None:
+            if safe_packet_actor is not None:
+                lines.append(
+                    f"- Heartbeat your claim every 5 minutes via"
+                    f" `anvil renew {active_claim.id}"
+                    f" --actor {_quote_packet_actor(packet_actor)}`"
+                )
+            else:
+                lines.append(
+                    "- Heartbeat through the JSON packet's structured renew argv."
+                )
+        if packet_actor is not None and safe_packet_actor is None:
             lines.append(
-                f"- Heartbeat your claim every 5 minutes via"
-                f" `anvil renew {active_claim.id}`"
+                "- On completion, use the JSON packet's structured submit argv."
             )
-        lines.append(
-            f"- On completion, submit evidence via"
-            f" `anvil submit {task.id}"
-            f" --commands ... --files-changed ...`"
-        )
+        else:
+            actor_suffix = (
+                f" --actor {_quote_packet_actor(packet_actor)}"
+                if packet_actor is not None
+                else ""
+            )
+            lines.append(
+                f"- On completion, submit evidence via"
+                f" `anvil submit {task.id}"
+                f" --commands ... --files-changed ...{actor_suffix}`"
+            )
         lines.append(
             "- Status will transition"
             " `claimed → in_progress → needs_review → accepted → done`"
@@ -719,18 +821,39 @@ def _render_json(
     # the markdown renderer applies — so an MCP consumer sees the identical
     # right-sized protocol. The full variant carries the status flow and (when
     # claimed) the renew command.
-    update_protocol: dict[str, str] = {
-        "submit_command": (
-            f"anvil submit {task.id} --commands ... --files-changed ..."
-        ),
-    }
+    actor_suffix = (
+        f" --actor {_quote_packet_actor(active_claim.claimed_by)}"
+        if active_claim is not None
+        and safe_actor_for_human(active_claim.claimed_by) is not None
+        else ""
+    )
+    update_protocol: dict[str, Any] = {}
+    if active_claim is None or actor_suffix:
+        update_protocol["submit_command"] = (
+            f"anvil submit {task.id} --commands ... --files-changed ...{actor_suffix}"
+        )
+    if active_claim is not None:
+        update_protocol["actor_identity"] = actor_identity_context(
+            active_claim.claimed_by
+        )
+        update_protocol["continuation"] = continuation_context(
+            task.id,
+            active_claim.id,
+            active_claim.claimed_by,
+            attestation_context=(
+                active_claim.attestation_context.model_dump(mode="json")
+                if active_claim.attestation_context is not None
+                else None
+            ),
+            generation=active_claim.generation,
+        )
     if not lightweight:
         update_protocol["status_flow"] = (
             "claimed → in_progress → needs_review → accepted → done"
         )
-        if active_claim is not None:
+        if active_claim is not None and actor_suffix:
             update_protocol["renew_command"] = (
-                f"anvil renew {active_claim.id}"
+                f"anvil renew {active_claim.id}{actor_suffix}"
             )
 
     # T020 — the right-sized required-evidence checklist the agent is shown.

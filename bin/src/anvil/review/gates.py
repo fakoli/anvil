@@ -20,6 +20,7 @@ from anvil.state.models import (
     AssertionProof,
     BundleReviewPolicy,
     BundleReviewVerdict,
+    ClaimCommandProof,
     CommandProof,
     DiffProof,
     Evidence,
@@ -37,6 +38,7 @@ __all__ = [
     "deferred_findings",
     "deferred_findings_for_files",
     "evidence_complete",
+    "evidence_missing_details",
     "BundleReviewGate",
     "evaluate_bundle_reviews",
 ]
@@ -562,12 +564,12 @@ def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
     Two requirement surfaces are checked, and BOTH must be satisfied:
 
     1. ``task.verification.required_proofs`` (SL-3 / B48) — typed. A ``command``
-       requirement is satisfied **only** by a :class:`CommandProof` whose
+       requirement is satisfied **only** by a legacy hook
+       :class:`CommandProof` or prevalidated :class:`ClaimCommandProof` whose
        ``exit_code`` is in ``passing_exit_codes``; an ``assertion`` proof can't
        impersonate a command, so free text in a description/output field can't
-       satisfy it. NOTE the authenticity of a CommandProof rests on a trusted
-       hook writer (output_sha256 is recorded, not re-verified) — see the TRUST
-       BOUNDARY note on the proof models and :func:`_proof_satisfies`.
+       satisfy it. Legacy hook authenticity remains bounded by the hook writer;
+       imported proofs cross the strict claim-bound verifier first.
     2. ``task.verification.required_evidence`` (legacy) — free-text substring
        heuristics over the descriptive ``Evidence`` string fields. Kept for
        back-compat; the planner emits typed ``required_proofs`` instead, so this
@@ -594,7 +596,23 @@ def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
         if not passed:
             typer.echo(f"Missing evidence: {missing}", err=True)
     """
-    missing: list[str] = []
+    legacy_missing, proof_missing = evidence_missing_details(task, evidence)
+    missing = list(dict.fromkeys([*legacy_missing, *proof_missing]))
+    return len(missing) == 0, missing
+
+
+def evidence_missing_details(
+    task: Task, evidence: Evidence
+) -> tuple[list[str], list[str]]:
+    """Return missing legacy evidence and typed proof labels separately.
+
+    The public submit surfaces use this additive detail to avoid telling an
+    operator that a missing typed command proof can be repaired with descriptive
+    ``--output-file`` text. ``evidence_complete`` retains its historical flat
+    tuple for existing callers.
+    """
+    legacy_missing: list[str] = []
+    proof_missing: list[str] = []
 
     # Legacy free-text path (dormant for engine-created tasks; kept for
     # back-compat). Substring heuristics over the descriptive string fields.
@@ -633,43 +651,41 @@ def evidence_complete(task: Task, evidence: Evidence) -> tuple[bool, list[str]]:
             )
 
         if not satisfied:
-            missing.append(item)
+            legacy_missing.append(item)
 
     # SL-3 / B48 typed path: each requirement is satisfied only by a matching
-    # typed proof — a command requirement needs a CommandProof whose exit_code is
-    # in the passing set, so free text in a description field can't satisfy it.
-    # (The proof's authenticity still rests on a trusted hook writer — TRUST
-    # BOUNDARY note on the proof models; output_sha256 is not re-verified here.)
+    # typed proof — a command requirement needs a legacy hook CommandProof or a
+    # prevalidated ClaimCommandProof whose exit_code is in the passing set, so
+    # free text in a description field can't satisfy it.
     for req in task.verification.required_proofs:
         if not _proof_satisfies(req, evidence.proofs):
-            missing.append(req.label)
+            proof_missing.append(req.label)
 
     # A legacy required_evidence string and a typed required_proofs label can
     # coincide; report each missing item once (order-preserving dedup) so the
     # reviewer doesn't see a confusing duplicate.
-    missing = list(dict.fromkeys(missing))
-    return len(missing) == 0, missing
+    return list(dict.fromkeys(legacy_missing)), list(dict.fromkeys(proof_missing))
 
 
 def _proof_satisfies(req: ProofRequirement, proofs: list[ProofArtifact]) -> bool:
     """True iff some proof in ``proofs`` satisfies the typed requirement ``req``.
 
     The discriminator (``req.kind``) selects the predicate. A ``command``
-    requirement is the load-bearing one: it matches only a :class:`CommandProof`
-    whose ``command`` equals the pinned command AND whose ``exit_code`` is in
+    requirement is the load-bearing one: it matches only a legacy
+    :class:`CommandProof` or prevalidated :class:`ClaimCommandProof` whose
+    ``command`` equals the pinned command AND whose ``exit_code`` is in
     ``passing_exit_codes``. There is no substring branch and no field-flattening
     fallback, so an :class:`AssertionProof` carrying the command text cannot
     satisfy it, and a recorded command that exited non-zero is correctly refused.
 
     Scope of the guarantee: this closes the "free text in a description field
     satisfies the gate" hole. It does NOT independently re-execute the command —
-    the CommandProof's authenticity rests on a trusted hook writer (see the TRUST
-    BOUNDARY note on the proof models). A harness in which the agent can write the
-    evidence buffer can still fabricate a passing CommandProof.
+    legacy CommandProof authenticity rests on the hook writer. ClaimCommandProof
+    authenticity and claim binding are established before durable append.
     """
     if req.kind is ProofKind.command:
         return any(
-            isinstance(p, CommandProof)
+            isinstance(p, (CommandProof, ClaimCommandProof))
             and p.command == req.command
             and p.exit_code in req.passing_exit_codes
             for p in proofs

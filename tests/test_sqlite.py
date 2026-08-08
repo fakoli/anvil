@@ -13,6 +13,7 @@ Coverage targets:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -24,7 +25,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from anvil import signing
 from anvil.clock import FrozenClock
 from anvil.state.backend import (
     EventRejected,
@@ -32,9 +35,23 @@ from anvil.state.backend import (
     StateLocked,
     TransactionAborted,
 )
-from anvil.state.models import Event, EventDraft
-from anvil.state.payloads import PrdParsedPayload
-from anvil.state.schema import SCHEMA_VERSION
+from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
+from anvil.state.models import (
+    ClaimCommandEvidenceCore,
+    ClaimStatus,
+    Event,
+    EventDraft,
+    HookCommandAttribution,
+    claim_command_semantic_projection,
+    hook_command_semantic_digest,
+    task_snapshot_revision,
+)
+from anvil.state.payloads import (
+    EvidenceSubmittedPayload,
+    PrdParsedPayload,
+    ProgressAttestedPayload,
+)
+from anvil.state.schema import DDL, SCHEMA_VERSION
 from anvil.state.sqlite import (
     _FLOCK_BACKOFF_CAP_S,
     _FLOCK_BACKOFF_INITIAL_S,
@@ -1055,9 +1072,9 @@ class TestRowDeserialization:
             # Released claim (should not appear)
             conn.execute(
                 """INSERT INTO claims
-                (id, task_id, claimed_by, claim_type, status, expected_files,
+                (id, task_id, claimed_by, claim_type, status, expected_files, generation,
                  created_at, lease_expires_at, last_heartbeat_at)
-                VALUES ('C002', 'T001', 'agent-y', 'task', 'released', '[]', ?, ?, ?)""",
+                VALUES ('C002', 'T001', 'agent-y', 'task', 'released', '[]', 2, ?, ?, ?)""",
                 (_T0.isoformat(), expires, _T0.isoformat()),
             )
             conn.commit()
@@ -1201,6 +1218,7 @@ def _make_task_payload(
     task_type: str | None = None,
     acceptance_criteria: list[str] | None = None,
     verification_commands: list[str] | None = None,
+    verification_required_proofs: list[dict[str, Any]] | None = None,
     likely_files: list[str] | None = None,
     now: datetime = _T0,
 ) -> dict[str, Any]:
@@ -1230,6 +1248,8 @@ def _make_task_payload(
     # (a payload that predates the field) is also exercised by callers.
     if task_type is not None:
         payload["task_type"] = task_type
+    if verification_required_proofs is not None:
+        payload["verification"]["required_proofs"] = verification_required_proofs
     return payload
 
 
@@ -1553,11 +1573,24 @@ def _make_event(
     target_kind: str = "prd",
     target_id: str = "proj-1",
     now: datetime = _T0,
+    actor: str | None = None,
 ) -> EventDraft:
     """Return an EventDraft (SL1-RR-1: id is ignored, assigned by backend)."""
+    if actor is None:
+        actor = str(
+            payload.get(
+                {
+                    "claim.released": "released_by",
+                    "claim.renewed": "renewed_by",
+                    "evidence.submitted": "submitted_by",
+                    "progress.noted": "actor",
+                }.get(action, ""),
+                "test",
+            )
+        )
     return EventDraft(
         timestamp=now,
-        actor="test",
+        actor=actor,
         action=action,
         target_kind=target_kind,
         target_id=target_id,
@@ -3175,6 +3208,7 @@ def _make_claim_payload(
     actor: str = "agent-alpha",
     expected_files: list[str] | None = None,
     now: datetime = _T0,
+    generation: int = 1,
 ) -> dict[str, Any]:
     """Build a valid claim.created payload (matches Claim.model_dump(mode='json'))."""
     return {
@@ -3186,6 +3220,7 @@ def _make_claim_payload(
         "branch": None,
         "worktree_path": None,
         "expected_files": expected_files or [],
+        "generation": generation,
         "created_at": now.isoformat(),
         "lease_expires_at": (now + timedelta(hours=1)).isoformat(),
         "last_heartbeat_at": now.isoformat(),
@@ -3194,7 +3229,217 @@ def _make_claim_payload(
     }
 
 
-def _setup_claimable_task(b: SqliteBackend, task_id: str = "T001") -> None:
+def _make_attestable_claim_payload(
+    *, claim_id: str = "C001", generation: int = 1
+) -> dict[str, Any]:
+    payload = _make_claim_payload(
+        claim_id=claim_id,
+        expected_files=["src/a.py"],
+        generation=generation,
+    )
+    payload["attestation_context"] = {
+        "repository_id": "e" * 64,
+        "claim_start_sha": "a" * 40,
+        "prd_id": "default",
+        "prd_revision": 1,
+        "task_revision": "f" * 64,
+        "expected_paths": [
+            {"path": "src/a.py", "baseline_sha256": "b" * 64}
+        ],
+    }
+    return payload
+
+
+def _make_progress_attested_payload(
+    *,
+    claim_id: str = "C001",
+    generation: int = 1,
+    digest: str | None = None,
+    recorded_at: datetime = _T0 + timedelta(minutes=10),
+) -> dict[str, Any]:
+    evidence_core = {
+        "schema_version": 1,
+        "kind": "file",
+        "project_id": "proj-1",
+        "claim_id": claim_id,
+        "generation": generation,
+        "task_id": "T001",
+        "task_revision": "f" * 64,
+        "prd_id": "default",
+        "prd_revision": 1,
+        "claimed_by": "agent-alpha",
+        "repository_id": "e" * 64,
+        "claim_start_sha": "a" * 40,
+        "commit_sha": "a" * 40,
+        "path": "src/a.py",
+        "prior_sha256": "b" * 64,
+        "file_sha256": "c" * 64,
+    }
+    semantic_digest = digest or domain_separated_sha256(
+        b"anvil.progress-attestation.v1\0", evidence_core
+    )
+    return {
+        "semantic_digest": semantic_digest,
+        "envelope_id": "external-1",
+        "claim_id": claim_id,
+        "task_id": "T001",
+        "claimed_by": "agent-alpha",
+        "generation": generation,
+        "repository_id": "e" * 64,
+        "claim_start_sha": "a" * 40,
+        "prd_id": "default",
+        "prd_revision": 1,
+        "task_revision": "f" * 64,
+        "kind": "file",
+        "commit_sha": None,
+        "changed_paths": [],
+        "path": "src/a.py",
+        "file_sha256": "c" * 64,
+        "attested_at": recorded_at.isoformat(),
+        "recorded_at": recorded_at.isoformat(),
+        "trust_mode": "claim_owner_self_attested",
+        "issuer_id": None,
+        "evidence_core": evidence_core,
+        "signed_payload": {**evidence_core, "issued_at": recorded_at.isoformat()},
+        "issuer": None,
+    }
+
+
+_PROGRESS_DIGEST = _make_progress_attested_payload()["semantic_digest"]
+
+
+def _make_claim_command_proof(
+    *,
+    generation: int = 1,
+    command: str = "pytest tests/ -v",
+    output: bytes = b"5 passed\n",
+    cwd_relative: str = ".",
+    cwd_identity: str = "1" * 64,
+    started_at: datetime = _T0 + timedelta(minutes=10),
+    ended_at: datetime = _T0 + timedelta(minutes=11),
+    digest: str | None = None,
+) -> dict[str, Any]:
+    command_base64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
+    output_base64 = base64.b64encode(output).decode("ascii")
+    output_sha256 = hashlib.sha256(output).hexdigest()
+    core = {
+        "schema_version": 1,
+        "project_id": "proj-1",
+        "claim_id": "C001",
+        "generation": generation,
+        "claimed_by": "agent-alpha",
+        "task_id": "T001",
+        "task_revision": "f" * 64,
+        "prd_id": "default",
+        "prd_revision": 1,
+        "repository_id": "e" * 64,
+        "claim_start_sha": "a" * 40,
+        "cwd_relative": cwd_relative,
+        "cwd_identity": cwd_identity,
+        "command_base64": command_base64,
+        "started_at": started_at.isoformat().replace("+00:00", "Z"),
+        "ended_at": ended_at.isoformat().replace("+00:00", "Z"),
+        "exit_code": 0,
+        "output_base64": output_base64,
+        "output_sha256": output_sha256,
+    }
+    return {
+        "kind": "claim_command",
+        "command": command,
+        "exit_code": 0,
+        "output_sha256": output_sha256,
+        "captured_at": ended_at.isoformat().replace("+00:00", "Z"),
+        "semantic_digest": digest
+        or domain_separated_sha256(
+            b"anvil.command-proof.v1\0",
+            claim_command_semantic_projection(
+                ClaimCommandEvidenceCore.model_validate(core)
+            ),
+        ),
+        "trust_mode": "claim_owner_self_attested",
+        "issuer_id": None,
+        "evidence_core": core,
+        "issuer": None,
+    }
+
+
+def _make_hook_command_proof(
+    *,
+    project_id: str = "proj-1",
+    claim_id: str = "C001",
+    generation: int = 1,
+    claimed_by: str = "agent-alpha",
+    task_id: str = "T001",
+    task_revision: str = "f" * 64,
+    prd_id: str = "default",
+    prd_revision: int = 1,
+    repository_id: str | None = "e" * 64,
+    claim_start_sha: str | None = "a" * 40,
+    command: str = "pytest tests/ -v",
+    exit_code: int = 0,
+    output_sha256: str = hashlib.sha256(b"5 passed\n").hexdigest(),
+    captured_at: datetime = _T0 + timedelta(minutes=11),
+    semantic_digest: str | None = None,
+) -> dict[str, Any]:
+    attribution = HookCommandAttribution(
+        project_id=project_id,
+        claim_id=claim_id,
+        generation=generation,
+        claimed_by=claimed_by,
+        task_id=task_id,
+        task_revision=task_revision,
+        prd_id=prd_id,
+        prd_revision=prd_revision,
+        repository_id=repository_id,
+        claim_start_sha=claim_start_sha,
+    )
+    return {
+        "kind": "command",
+        "command": command,
+        "exit_code": exit_code,
+        "output_sha256": output_sha256,
+        "captured_at": captured_at.isoformat().replace("+00:00", "Z"),
+        "attribution": attribution.model_dump(mode="json"),
+        "semantic_digest": semantic_digest
+        or hook_command_semantic_digest(
+            attribution=attribution,
+            command=command,
+            exit_code=exit_code,
+            output_sha256=output_sha256,
+            captured_at=captured_at,
+        ),
+    }
+
+
+def _configure_claim_command_proof_issuer(
+    proof: dict[str, Any], private_key: Ed25519PrivateKey
+) -> tuple[str, str]:
+    public_key = signing.public_key_to_hex(private_key.public_key())
+    signer_id = signing.fingerprint(public_key)
+    proof.update(
+        {
+            "trust_mode": "configured_issuer_verified",
+            "issuer_id": signer_id,
+            "issuer": {
+                "algorithm": "ed25519",
+                "signer_id": signer_id,
+                "public_key": public_key,
+                "signature": signing.sign(
+                    private_key,
+                    canonical_json_bytes(proof["evidence_core"]),
+                ),
+            },
+        }
+    )
+    return public_key, signer_id
+
+
+def _setup_claimable_task(
+    b: SqliteBackend,
+    task_id: str = "T001",
+    *,
+    verification_required_proofs: list[dict[str, Any]] | None = None,
+) -> None:
     """Apply the minimal event chain to produce a 'ready' task."""
     _setup_project(b)
     b.append(_make_event(
@@ -3233,7 +3478,10 @@ def _setup_claimable_task(b: SqliteBackend, task_id: str = "T001") -> None:
     ))
     b.append(_make_event(
         "task.created",
-        _make_task_payload(task_id=task_id),
+        _make_task_payload(
+            task_id=task_id,
+            verification_required_proofs=verification_required_proofs,
+        ),
         event_id="E000006", target_kind="task", target_id=task_id,
     ))
     # proposed → drafted → reviewed → ready
@@ -6140,16 +6388,18 @@ class TestSchemaVersionPhase8:
     TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_sixteen(self) -> None:
-        """Typed PRD assumptions ship at SCHEMA_VERSION == 16
+    def test_schema_version_is_eighteen(self) -> None:
+        """PRD source provenance persistence ships at SCHEMA_VERSION == 18
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
         v11 = execution bundles + ordered membership, issue #171;
         v12 = coordinator bundle claims; v13 = review dispositions;
         v14 = delivery lineage; v15 = authoritative result time, issue #171;
-        v16 = typed PRD assumptions)."""
-        assert SCHEMA_VERSION == 16
+        v16 = typed PRD assumptions; v17 = claim generations + attestations;
+        v18 = exact revision-bound PRD source provenance)."""
+        assert SCHEMA_VERSION == 18
+        assert f"PRAGMA user_version = {SCHEMA_VERSION};" in DDL
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
         self, tmp_path: Path
@@ -8676,7 +8926,7 @@ class TestV8ToV9Migration:
 
         b = _make_backend(tmp_path)  # initialize() runs the ladder
         try:
-            assert b.get_schema_version() == 16
+            assert b.get_schema_version() == SCHEMA_VERSION == 18
             task = b.get_task("T001")
             assert task is not None
             assert task.claims == []  # row preserved, backfilled to "no claims"
@@ -8855,7 +9105,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 16
+            assert b.get_schema_version() == SCHEMA_VERSION == 18
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.
@@ -9180,7 +9430,7 @@ def _setup_full_snapshot_backend(b: SqliteBackend) -> None:
     # task was returned to 'ready' by the release handler; re-claim it
     b.append(_make_event(
         "claim.created",
-        _make_claim_payload(claim_id="C002", task_id="T001"),
+        _make_claim_payload(claim_id="C002", task_id="T001", generation=2),
         event_id="E000012", target_kind="claim", target_id="C002",
     ))
 
@@ -9632,9 +9882,17 @@ def _make_draft(
     target_kind: str = "project",
     target_id: str = "proj-1",
     now: datetime = _T0,
-    actor: str = "test",
+    actor: str | None = None,
 ) -> EventDraft:
     """Build a minimal EventDraft for T4 tests."""
+    if actor is None:
+        identity_field = {
+            "claim.released": "released_by",
+            "claim.renewed": "renewed_by",
+            "evidence.submitted": "submitted_by",
+            "progress.noted": "actor",
+        }.get(action)
+        actor = str(payload.get(identity_field, "test")) if identity_field else "test"
     return EventDraft(
         timestamp=now,
         actor=actor,
@@ -12099,12 +12357,12 @@ class TestDecideApplyContract:
                                  target_kind="claim", target_id="C001"))
             # First release succeeds.
             b.append(_make_event("claim.released",
-                                 {"claim_id": "C001", "released_by": "agent",
+                                 {"claim_id": "C001", "released_by": "agent-alpha",
                                   "release_reason": "done", "force": False},
                                  target_kind="claim", target_id="C001"))
             # Second release is idempotent no-op.
             result = b.append(_make_event("claim.released",
-                                          {"claim_id": "C001", "released_by": "agent",
+                                          {"claim_id": "C001", "released_by": "agent-alpha",
                                            "release_reason": "done again", "force": False},
                                           target_kind="claim", target_id="C001"))
             assert result is None
@@ -12126,7 +12384,7 @@ class TestDecideApplyContract:
             b.append(_make_event("claim.created", _make_claim_payload(),
                                  target_kind="claim", target_id="C001"))
             b.append(_make_event("claim.released",
-                                 {"claim_id": "C001", "released_by": "agent",
+                                 {"claim_id": "C001", "released_by": "agent-alpha",
                                   "release_reason": "done", "force": False},
                                  target_kind="claim", target_id="C001"))
             with pytest.raises(EventRejected):
@@ -12148,7 +12406,8 @@ class TestDecideApplyContract:
             new_heartbeat = _T0.isoformat()
             b.append(_make_event("claim.renewed",
                                  {"claim_id": "C001", "lease_expires_at": new_expiry,
-                                  "last_heartbeat_at": new_heartbeat},
+                                  "last_heartbeat_at": new_heartbeat,
+                                  "renewed_by": "agent-alpha"},
                                  target_kind="claim", target_id="C001"))
             claim = b.get_claim("C001")
             assert claim is not None
@@ -12797,3 +13056,1807 @@ class TestConflictGroupPersistence:
                 )
         finally:
             b.close()
+
+
+class TestClaimProgressAttestationState:
+    def test_v16_migration_backfills_generations_without_fabricating_context(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = tmp_path / "state.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """CREATE TABLE claims (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                claimed_by TEXT NOT NULL,
+                claim_type TEXT NOT NULL DEFAULT 'task',
+                status TEXT NOT NULL DEFAULT 'active',
+                branch TEXT,
+                worktree_path TEXT,
+                session_id TEXT,
+                bundle_claim_id TEXT,
+                expected_files TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL,
+                last_heartbeat_at TEXT NOT NULL,
+                released_at TEXT,
+                release_reason TEXT
+            )"""
+        )
+        for claim_id, created_at in (
+            ("C002", _T0 + timedelta(minutes=1)),
+            ("C001", _T0),
+        ):
+            conn.execute(
+                """INSERT INTO claims
+                   (id, task_id, claimed_by, created_at, lease_expires_at,
+                    last_heartbeat_at)
+                   VALUES (?, 'T001', 'legacy', ?, ?, ?)""",
+                (
+                    claim_id,
+                    created_at.isoformat(),
+                    (created_at + timedelta(hours=1)).isoformat(),
+                    created_at.isoformat(),
+                ),
+            )
+        conn.execute("PRAGMA user_version = 16")
+        conn.commit()
+        conn.close()
+        (tmp_path / "events.jsonl").touch()
+
+        b = SqliteBackend(
+            db_path=str(db_path),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=_make_clock(),
+        )
+        b.initialize()
+        try:
+            assert b.get_schema_version() == SCHEMA_VERSION == 18
+            assert b.get_claim("C001").generation == 1  # type: ignore[union-attr]
+            assert b.get_claim("C002").generation == 2  # type: ignore[union-attr]
+            assert b.get_claim("C001").attestation_context is None  # type: ignore[union-attr]
+            assert b.next_claim_generation("T001") == 3
+        finally:
+            b.close()
+
+    def _claim(self, b: SqliteBackend) -> None:
+        _setup_claimable_task(b)
+        b.append(
+            _make_event(
+                "claim.created",
+                _make_attestable_claim_payload(),
+                target_kind="claim",
+                target_id="C001",
+            )
+        )
+
+    def _attest(self, b: SqliteBackend, *, recorded_at: datetime) -> Event:
+        result = b.append(
+            _make_event(
+                "progress.attested",
+                _make_progress_attested_payload(recorded_at=recorded_at),
+                target_kind="claim",
+                target_id="C001",
+                actor="agent-alpha",
+                now=recorded_at,
+            )
+        )
+        assert result is not None
+        return result
+
+    def test_attestation_is_consumed_with_renewal_atomically(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            pending = b.get_pending_progress_attestation("C001", 1)
+            assert pending is not None
+
+            heartbeat = _T0 + timedelta(minutes=20)
+            renewed = b.append(
+                _make_event(
+                    "claim.renewed",
+                    {
+                        "claim_id": "C001",
+                        "lease_expires_at": (_T0 + timedelta(hours=2)).isoformat(),
+                        "last_heartbeat_at": heartbeat.isoformat(),
+                        "renewed_by": "agent-alpha",
+                        "attestation_digest": _PROGRESS_DIGEST,
+                        "attestation_generation": 1,
+                        "attestation_trust_mode": "claim_owner_self_attested",
+                    },
+                    target_kind="claim",
+                    target_id="C001",
+                    actor="agent-alpha",
+                    now=heartbeat,
+                )
+            )
+            assert renewed is not None
+            assert b.get_pending_progress_attestation("C001", 1) is None
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert stored is not None
+            assert stored.consumed_by_event_id == renewed.id
+            assert b.get_claim("C001").last_heartbeat_at == heartbeat  # type: ignore[union-attr]
+
+            # A changed renewal event id cannot consume or extend the same fact.
+            with pytest.raises(EventRejected, match="pending attestation"):
+                b.append(
+                    _make_event(
+                        "claim.renewed",
+                        {
+                            "claim_id": "C001",
+                            "lease_expires_at": (_T0 + timedelta(hours=3)).isoformat(),
+                            "last_heartbeat_at": (
+                                _T0 + timedelta(minutes=30)
+                            ).isoformat(),
+                            "renewed_by": "agent-alpha",
+                            "attestation_digest": _PROGRESS_DIGEST,
+                            "attestation_generation": 1,
+                            "attestation_trust_mode": "claim_owner_self_attested",
+                        },
+                        target_kind="claim",
+                        target_id="C001",
+                        actor="agent-alpha",
+                        now=_T0 + timedelta(minutes=30),
+                    )
+                )
+        finally:
+            b.close()
+
+    def test_release_invalidates_pending_attestation(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            released = b.append(
+                _make_event(
+                    "claim.released",
+                    {
+                        "claim_id": "C001",
+                        "released_by": "agent-alpha",
+                        "release_reason": "done",
+                    },
+                    target_kind="claim",
+                    target_id="C001",
+                    actor="agent-alpha",
+                    now=_T0 + timedelta(minutes=20),
+                )
+            )
+            assert released is not None
+            assert b.get_pending_progress_attestation("C001", 1) is None
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert stored is not None
+            assert stored.invalidated_by_event_id == released.id
+        finally:
+            b.close()
+
+    def test_replay_writer_never_consumes_for_non_active_claim(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            conn = b._require_conn()
+            conn.execute("UPDATE claims SET status = 'released' WHERE id = 'C001'")
+            renewal_payload = {
+                "claim_id": "C001",
+                "lease_expires_at": (_T0 + timedelta(hours=2)).isoformat(),
+                "last_heartbeat_at": (_T0 + timedelta(minutes=20)).isoformat(),
+                "renewed_by": "agent-alpha",
+                "attestation_digest": _PROGRESS_DIGEST,
+                "attestation_generation": 1,
+                "attestation_trust_mode": "claim_owner_self_attested",
+            }
+            typed = b._get_action_dispatch()[
+                "claim.renewed"
+            ].payload_model.model_validate(renewal_payload)
+            replayed = Event(
+                id="E999997",
+                timestamp=_T0 + timedelta(minutes=20),
+                actor="agent-alpha",
+                action="claim.renewed",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=renewal_payload,
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            b._write_claim_renewed(conn, typed, replayed)
+            conn.execute("COMMIT")
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert stored is not None
+            assert stored.consumed_by_event_id is None
+            assert b.get_claim("C001").lease_expires_at == _T0 + timedelta(hours=1)  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+    def test_evidence_auto_release_invalidates_pending_attestation(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            submitted = b.append(
+                _make_event(
+                    "evidence.submitted",
+                    _make_evidence_payload(task_id="T001", claim_id="C001"),
+                    target_kind="task",
+                    target_id="T001",
+                    actor="agent-alpha",
+                    now=_T0 + timedelta(minutes=20),
+                )
+            )
+            assert submitted is not None
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert stored is not None
+            assert stored.invalidated_by_event_id == submitted.id
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_expired_but_unreaped_claim_rejects_attestation(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(hours=2)
+            with pytest.raises(EventRejected, match="binding mismatch"):
+                self._attest(b, recorded_at=recorded_at)
+            assert b.get_progress_attestation(_PROGRESS_DIGEST) is None
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize("forgery", ["digest", "issuer"])
+    def test_live_append_rejects_forged_attestation_proof(
+        self, tmp_path: Path, forgery: str
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            payload = _make_progress_attested_payload(recorded_at=recorded_at)
+            if forgery == "digest":
+                payload["semantic_digest"] = "0" * 64
+            else:
+                payload.update(
+                    {
+                        "trust_mode": "configured_issuer_verified",
+                        "issuer_id": "0" * 16,
+                        "issuer": {
+                            "algorithm": "ed25519",
+                            "signer_id": "0" * 16,
+                            "public_key": "1" * 64,
+                            "signature": "2" * 128,
+                        },
+                    }
+                )
+            with pytest.raises(EventRejected, match="digest|signature|issuer trust"):
+                b.append(
+                    _make_event(
+                        "progress.attested",
+                        payload,
+                        target_kind="claim",
+                        target_id="C001",
+                        actor="agent-alpha",
+                        now=recorded_at,
+                    )
+                )
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_live_append_accepts_cryptographically_bound_issuer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            payload = _make_progress_attested_payload(recorded_at=recorded_at)
+            private_key = Ed25519PrivateKey.generate()
+            public_key = signing.public_key_to_hex(private_key.public_key())
+            signer_id = signing.fingerprint(public_key)
+            trust_path = tmp_path / "trust.txt"
+            trust_path.write_text(public_key + "\n", encoding="utf-8")
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(trust_path))
+            payload.update(
+                {
+                    "trust_mode": "configured_issuer_verified",
+                    "issuer_id": signer_id,
+                    "issuer": {
+                        "algorithm": "ed25519",
+                        "signer_id": signer_id,
+                        "public_key": public_key,
+                        "signature": signing.sign(
+                            private_key,
+                            canonical_json_bytes(payload["signed_payload"]),
+                        ),
+                    },
+                }
+            )
+            accepted = b.append(
+                _make_event(
+                    "progress.attested",
+                    payload,
+                    target_kind="claim",
+                    target_id="C001",
+                    actor="agent-alpha",
+                    now=recorded_at,
+                )
+            )
+            assert accepted is not None
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert stored is not None
+            assert stored.trust_mode == "configured_issuer_verified"
+            assert stored.issuer_id == signer_id
+        finally:
+            b.close()
+
+    def test_live_append_rejects_valid_but_unconfigured_issuer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            payload = _make_progress_attested_payload(recorded_at=recorded_at)
+            private_key = Ed25519PrivateKey.generate()
+            public_key = signing.public_key_to_hex(private_key.public_key())
+            signer_id = signing.fingerprint(public_key)
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(tmp_path / "empty-trust.txt"))
+            payload.update(
+                {
+                    "trust_mode": "configured_issuer_verified",
+                    "issuer_id": signer_id,
+                    "issuer": {
+                        "algorithm": "ed25519",
+                        "signer_id": signer_id,
+                        "public_key": public_key,
+                        "signature": signing.sign(
+                            private_key,
+                            canonical_json_bytes(payload["signed_payload"]),
+                        ),
+                    },
+                }
+            )
+            with pytest.raises(EventRejected, match="configured issuer trust"):
+                b.append(
+                    _make_event(
+                        "progress.attested",
+                        payload,
+                        target_kind="claim",
+                        target_id="C001",
+                        actor="agent-alpha",
+                        now=recorded_at,
+                    )
+                )
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_replay_writer_rejects_forged_semantic_digest(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            raw = _make_progress_attested_payload(
+                recorded_at=recorded_at, digest="0" * 64
+            )
+            payload = ProgressAttestedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999996",
+                timestamp=recorded_at,
+                actor="agent-alpha",
+                action="progress.attested",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EventRejected, match="replay evidence digest"):
+                b._write_progress_attested(conn, payload, replayed)
+            conn.execute("ROLLBACK")
+            assert b.get_progress_attestation("0" * 64) is None
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_replay_writer_rejects_valid_but_unconfigured_issuer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            raw = _make_progress_attested_payload(recorded_at=recorded_at)
+            private_key = Ed25519PrivateKey.generate()
+            public_key = signing.public_key_to_hex(private_key.public_key())
+            signer_id = signing.fingerprint(public_key)
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(tmp_path / "empty-trust.txt"))
+            raw.update(
+                {
+                    "trust_mode": "configured_issuer_verified",
+                    "issuer_id": signer_id,
+                    "issuer": {
+                        "algorithm": "ed25519",
+                        "signer_id": signer_id,
+                        "public_key": public_key,
+                        "signature": signing.sign(
+                            private_key,
+                            canonical_json_bytes(raw["signed_payload"]),
+                        ),
+                    },
+                }
+            )
+            payload = ProgressAttestedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999995",
+                timestamp=recorded_at,
+                actor="agent-alpha",
+                action="progress.attested",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EventRejected, match="configured issuer trust"):
+                b._write_progress_attested(conn, payload, replayed)
+            conn.execute("ROLLBACK")
+            assert b.get_progress_attestation(_PROGRESS_DIGEST) is None
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_genuine_self_attestation_survives_deterministic_replay(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            original = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert original is not None
+        finally:
+            b.close()
+
+        replay = SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        replay.initialize()
+        try:
+            replay.replay_from_empty(events_path)
+            rebuilt = replay.get_progress_attestation(_PROGRESS_DIGEST)
+            assert rebuilt == original
+        finally:
+            replay.close()
+
+    def test_changed_outer_event_id_quarantines_semantic_replay(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            accepted = self._attest(b, recorded_at=recorded_at)
+            payload = ProgressAttestedPayload.model_validate(
+                _make_progress_attested_payload(recorded_at=recorded_at)
+            )
+            duplicate = Event(
+                id="E999999",
+                timestamp=recorded_at,
+                actor="agent-alpha",
+                action="progress.attested",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=payload.model_dump(mode="json"),
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            b._write_progress_attested(conn, payload, duplicate)
+            conn.execute("COMMIT")
+
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert stored is not None
+            assert stored.accepted_event_id == accepted.id
+            assert stored.collision_detected is True
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_replay_generation_collision_keeps_first_claim(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            first_payload = _make_claim_payload(claim_id="C001", generation=1)
+            first = b.append(
+                _make_event(
+                    "claim.created",
+                    first_payload,
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+            assert first is not None
+            losing_payload = _make_claim_payload(claim_id="C999", generation=1)
+            typed = b._get_action_dispatch()[
+                "claim.created"
+            ].payload_model.model_validate(losing_payload)
+            losing_event = Event(
+                id="E999998",
+                timestamp=_T0,
+                actor="test",
+                action="claim.created",
+                target_kind="claim",
+                target_id="C999",
+                payload_json=losing_payload,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            b._write_claim_created(conn, typed, losing_event)
+            conn.execute("COMMIT")
+            assert b.get_claim("C001") is not None
+            assert b.get_claim("C999") is None
+        finally:
+            b.close()
+
+
+class TestClaimCommandProofState:
+    def _claim(self, backend: SqliteBackend) -> None:
+        _setup_claimable_task(
+            backend,
+            verification_required_proofs=[
+                {
+                    "kind": "command",
+                    "command": "pytest tests/ -v",
+                    "passing_exit_codes": [0],
+                    "label": "tests pass",
+                }
+            ],
+        )
+        backend.append(
+            _make_event(
+                "claim.created",
+                _make_attestable_claim_payload(),
+                target_kind="claim",
+                target_id="C001",
+            )
+        )
+
+    def _submit(
+        self, backend: SqliteBackend, proofs: list[dict[str, Any]]
+    ) -> Event:
+        payload = _make_evidence_payload()
+        payload["proofs"] = proofs
+        payload["commands_run"] = [proof["command"] for proof in proofs]
+        clock = backend._clock  # noqa: SLF001 - exercise the live clock boundary
+        submit_time = _T0 + timedelta(minutes=12)
+        if isinstance(clock, FrozenClock) and clock.now() < submit_time:
+            clock.advance(seconds=(submit_time - clock.now()).total_seconds())
+        event = backend.append(
+            _make_event(
+                "evidence.submitted",
+                payload,
+                target_kind="task",
+                target_id="T001",
+                actor="agent-alpha",
+                now=submit_time,
+            )
+        )
+        assert event is not None
+        return event
+
+    def test_claim_bound_command_batch_is_persisted_and_replays(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            self._submit(b, [proof])
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            assert len(evidence.proofs) == 1
+            assert evidence.proofs[0].kind == "claim_command"
+            assert evidence.proofs[0].semantic_digest == proof["semantic_digest"]  # type: ignore[union-attr]
+            original = evidence.model_dump(mode="json")
+            assert b.get_claim("C001").status is ClaimStatus.released  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+        replay = SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        replay.initialize()
+        try:
+            replay.replay_from_empty(events_path)
+            rebuilt = replay.get_latest_evidence("T001")
+            assert rebuilt is not None
+            assert rebuilt.model_dump(mode="json") == original
+        finally:
+            replay.close()
+
+    def test_append_lock_clock_rejects_artifact_io_lease_race(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock()
+        b = _make_backend(tmp_path, clock)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            raw = _make_evidence_payload()
+            raw["proofs"] = [proof]
+            # The adapter captured a valid-looking timestamp before artifact I/O.
+            stale_draft = _make_event(
+                "evidence.submitted",
+                raw,
+                target_kind="task",
+                target_id="T001",
+                actor="agent-alpha",
+                now=_T0 + timedelta(minutes=12),
+            )
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+
+            # Artifact loading stalls until the authoritative backend clock is
+            # beyond the persisted one-hour lease. The stale draft timestamp
+            # must not revive the claim inside the serialized append check.
+            clock.advance(hours=2)
+            with pytest.raises(EventRejected, match="exact active claim generation"):
+                b.append(stale_draft)
+
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+            task = b.get_task("T001")
+            assert task is not None and task.status.value == "claimed"
+        finally:
+            b.close()
+
+    def test_append_lock_clock_rejects_future_draft_and_proof(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock()
+        b = _make_backend(tmp_path, clock)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof(
+                started_at=_T0 + timedelta(minutes=30),
+                ended_at=_T0 + timedelta(minutes=31),
+            )
+            raw = _make_evidence_payload()
+            raw["proofs"] = [proof]
+            future_draft = _make_event(
+                "evidence.submitted",
+                raw,
+                target_kind="task",
+                target_id="T001",
+                actor="agent-alpha",
+                now=_T0 + timedelta(minutes=32),
+            )
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+
+            with pytest.raises(EventRejected, match="exact active claim generation"):
+                b.append(future_draft)
+
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+            task = b.get_task("T001")
+            assert task is not None and task.status.value == "claimed"
+        finally:
+            b.close()
+
+    def test_payload_requires_one_declared_command_per_imported_proof(self) -> None:
+        payload = _make_evidence_payload()
+        payload["proofs"] = [
+            _make_claim_command_proof(),
+            _make_claim_command_proof(output=b"6 passed\n"),
+        ]
+        with pytest.raises(ValueError, match="one exact commands_run entry"):
+            EvidenceSubmittedPayload.model_validate(payload)
+
+    def test_cwd_display_aliases_share_one_semantic_digest(self) -> None:
+        first = _make_claim_command_proof(cwd_relative=".")
+        alias = _make_claim_command_proof(cwd_relative="src")
+        assert first["semantic_digest"] == alias["semantic_digest"]
+        payload = _make_evidence_payload(
+            commands_run=["pytest tests/ -v", "pytest tests/ -v"]
+        )
+        payload["proofs"] = [first, alias]
+        with pytest.raises(ValueError, match="duplicate digest"):
+            EvidenceSubmittedPayload.model_validate(payload)
+
+    def test_payload_rejects_timestamp_semantic_alias(self) -> None:
+        payload = _make_evidence_payload()
+        proof = _make_claim_command_proof()
+        proof["evidence_core"]["started_at"] = (_T0 + timedelta(minutes=10)).isoformat()
+        payload["proofs"] = [proof]
+        with pytest.raises(ValueError, match="canonical UTC spelling"):
+            EvidenceSubmittedPayload.model_validate(payload)
+
+    def test_configured_issuer_is_rechecked_and_persisted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            public_key, signer_id = _configure_claim_command_proof_issuer(
+                proof, Ed25519PrivateKey.generate()
+            )
+            trust_path = tmp_path / "trust.txt"
+            trust_path.write_text(public_key + "\n", encoding="utf-8")
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(trust_path))
+            self._submit(b, [proof])
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            stored = evidence.proofs[0]
+            assert stored.kind == "claim_command"
+            assert stored.trust_mode == "configured_issuer_verified"  # type: ignore[union-attr]
+            assert stored.issuer_id == signer_id  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+    def test_replay_writer_rejects_valid_but_unconfigured_issuer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            _configure_claim_command_proof_issuer(
+                proof, Ed25519PrivateKey.generate()
+            )
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(tmp_path / "empty-trust.txt"))
+            raw = _make_evidence_payload()
+            raw["proofs"] = [proof]
+            payload = EvidenceSubmittedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999994",
+                timestamp=_T0 + timedelta(minutes=12),
+                actor="agent-alpha",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EventRejected, match="replay claim-bound command proof"):
+                b._write_evidence_submitted(conn, payload, replayed)
+            conn.execute("ROLLBACK")
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+        finally:
+            b.close()
+
+    def test_replay_writer_rejects_legacy_cwd_spelling_digest(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            proof["semantic_digest"] = domain_separated_sha256(
+                b"anvil.command-proof.v1\0", proof["evidence_core"]
+            )
+            raw = _make_evidence_payload()
+            raw["proofs"] = [proof]
+            payload = EvidenceSubmittedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999993",
+                timestamp=_T0 + timedelta(minutes=12),
+                actor="agent-alpha",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EventRejected, match="replay claim-bound command proof"):
+                b._write_evidence_submitted(conn, payload, replayed)
+            conn.execute("ROLLBACK")
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize(
+        ("proof", "match"),
+        [
+            (_make_claim_command_proof(generation=2), "exact active claim generation"),
+            (
+                _make_claim_command_proof(cwd_relative="NUL", output=b"6 passed\n"),
+                "durable proof material",
+            ),
+            (_make_claim_command_proof(command="pytest -q"), "durable proof material"),
+            (
+                _make_claim_command_proof(digest="0" * 64),
+                "durable proof material",
+            ),
+        ],
+    )
+    def test_invalid_batch_rejects_atomically(
+        self, tmp_path: Path, proof: dict[str, Any], match: str
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match=match):
+                self._submit(b, [_make_claim_command_proof(), proof])
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+            assert b.get_task("T001").status.value == "claimed"  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+
+class TestHookCommandProofState:
+    def _claim(self, backend: SqliteBackend) -> None:
+        _setup_claimable_task(backend)
+        backend.append(
+            _make_event(
+                "claim.created",
+                _make_attestable_claim_payload(),
+                target_kind="claim",
+                target_id="C001",
+            )
+        )
+
+    def _submit(self, backend: SqliteBackend, proofs: list[dict[str, Any]]) -> Event:
+        raw = _make_evidence_payload()
+        raw["proofs"] = proofs
+        clock = backend._clock  # noqa: SLF001 - exercise append-lock clock
+        submit_time = _T0 + timedelta(minutes=12)
+        if isinstance(clock, FrozenClock) and clock.now() < submit_time:
+            clock.advance(seconds=(submit_time - clock.now()).total_seconds())
+        event = backend.append(
+            _make_event(
+                "evidence.submitted",
+                raw,
+                target_kind="task",
+                target_id="T001",
+                actor="agent-alpha",
+                now=submit_time,
+            )
+        )
+        assert event is not None
+        return event
+
+    def test_attributed_hook_proof_persists_and_replays(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_hook_command_proof()
+            self._submit(b, [proof])
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            stored = evidence.proofs[0]
+            assert stored.kind == "command"
+            assert stored.attribution is not None  # type: ignore[union-attr]
+            assert stored.attribution.claim_id == "C001"  # type: ignore[union-attr]
+            assert stored.semantic_digest == proof["semantic_digest"]  # type: ignore[union-attr]
+            original = evidence.model_dump(mode="json")
+
+            b.replay_from_empty(events_path)
+            rebuilt = b.get_latest_evidence("T001")
+            assert rebuilt is not None
+            assert rebuilt.model_dump(mode="json") == original
+        finally:
+            b.close()
+
+    def test_contextless_non_git_claim_uses_current_task_and_prd_revision(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            b.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(),
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+            task = b.get_task("T001")
+            assert task is not None
+            prd = b.get_prd(task.prd_id)
+            assert prd is not None
+            proof = _make_hook_command_proof(
+                task_revision=task_snapshot_revision(task),
+                prd_id=task.prd_id,
+                prd_revision=prd.revision,
+                repository_id=None,
+                claim_start_sha=None,
+            )
+            self._submit(b, [proof])
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            stored = evidence.proofs[0]
+            assert stored.attribution is not None  # type: ignore[union-attr]
+            assert stored.attribution.repository_id is None  # type: ignore[union-attr]
+
+            b.replay_from_empty(events_path)
+            rebuilt = b.get_latest_evidence("T001")
+            assert rebuilt is not None
+            assert rebuilt.model_dump(mode="json") == evidence.model_dump(mode="json")
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize(
+        "proof",
+        [
+            _make_hook_command_proof(generation=2),
+            _make_hook_command_proof(claimed_by="other-agent"),
+            _make_hook_command_proof(task_id="T999"),
+            _make_hook_command_proof(prd_revision=2),
+            _make_hook_command_proof(captured_at=_T0 + timedelta(minutes=20)),
+        ],
+    )
+    def test_wrong_attribution_rejects_before_log_append(
+        self, tmp_path: Path, proof: dict[str, Any]
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                self._submit(b, [proof])
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+            task = b.get_task("T001")
+            assert task is not None and task.status.value == "claimed"
+        finally:
+            b.close()
+
+    def test_live_unattributed_historical_shape_is_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            raw = _make_evidence_payload()
+            raw["proofs"] = [
+                {
+                    "kind": "command",
+                    "command": "pytest tests/ -v",
+                    "exit_code": 0,
+                    "output_sha256": hashlib.sha256(b"5 passed\n").hexdigest(),
+                    "captured_at": (_T0 + timedelta(minutes=11)).isoformat(),
+                }
+            ]
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                b.append(
+                    _make_event(
+                        "evidence.submitted",
+                        raw,
+                        target_kind="task",
+                        target_id="T001",
+                        actor="agent-alpha",
+                        now=_T0 + timedelta(minutes=12),
+                    )
+                )
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+        finally:
+            b.close()
+    def test_historical_unattributed_event_replays_without_shape_drift(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = tmp_path / "events.jsonl"
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            raw = _make_evidence_payload()
+            historical = {
+                "kind": "command",
+                "command": "pytest tests/ -v",
+                "exit_code": 0,
+                "output_sha256": hashlib.sha256(b"5 passed\n").hexdigest(),
+                "captured_at": (_T0 + timedelta(minutes=11))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            raw["proofs"] = [historical]
+            next_id = f"E{len(_read_jsonl(str(events_path))) + 1:06d}"
+            replayed = Event(
+                id=next_id,
+                timestamp=_T0 + timedelta(minutes=12),
+                actor="agent-alpha",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=raw,
+            )
+            with events_path.open("a", encoding="utf-8") as stream:
+                stream.write(replayed.model_dump_json(exclude_none=True) + "\n")
+
+            b.replay_from_empty(str(events_path))
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            assert evidence.proofs[0].model_dump(mode="json") == historical
+        finally:
+            b.close()
+
+    def test_replay_rejects_attributed_generation_mismatch(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            raw = _make_evidence_payload()
+            raw["proofs"] = [_make_hook_command_proof(generation=2)]
+            payload = EvidenceSubmittedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999992",
+                timestamp=_T0 + timedelta(minutes=12),
+                actor="agent-alpha",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EventRejected, match="replay hook command proof"):
+                b._write_evidence_submitted(conn, payload, replayed)
+            conn.execute("ROLLBACK")
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+        finally:
+            b.close()
+
+    def test_duplicate_attributed_digest_rejects_atomically(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_hook_command_proof()
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                self._submit(b, [proof, proof])
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+        finally:
+            b.close()
+
+    def test_attributed_hook_batch_count_is_bounded_before_append(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proofs = [
+                _make_hook_command_proof(
+                    captured_at=_T0
+                    + timedelta(minutes=11, microseconds=index)
+                )
+                for index in range(17)
+            ]
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                self._submit(b, proofs)
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+        finally:
+            b.close()
+
+    def test_attributed_hook_batch_canonical_bytes_are_bounded_before_append(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proofs = [
+                _make_hook_command_proof(command=("x" * 70_000) + str(index))
+                for index in range(16)
+            ]
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                self._submit(b, proofs)
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+        finally:
+            b.close()
+
+
+class TestActorIdentityAtomicity:
+    def test_replay_preserves_exact_legacy_owner_bytes(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "events.jsonl"
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            b.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(actor="normal-owner"),
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+            b.append(
+                _make_event(
+                    "claim.released",
+                    {
+                        "claim_id": "C001",
+                        "released_by": "normal-owner",
+                        "force": False,
+                    },
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+
+            legacy = "legacy\x01owner"
+            rows = _read_jsonl(str(events_path))
+            for row in rows:
+                if row["action"] == "claim.created":
+                    row["actor"] = legacy
+                    row["payload_json"]["claimed_by"] = legacy
+                elif row["action"] == "claim.released":
+                    row["actor"] = legacy
+                    row["payload_json"]["released_by"] = legacy
+            events_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+
+            b.replay_from_empty(str(events_path))
+            claim = b.get_claim("C001")
+            assert claim is not None
+            assert claim.claimed_by == legacy
+            assert claim.status is ClaimStatus.released
+        finally:
+            b.close()
+
+    def test_live_claim_rejects_normalized_collision_under_sqlite_lock(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            conn.execute(
+                """INSERT INTO claims
+                   (id, task_id, claimed_by, claim_type, status, expected_files,
+                    created_at, lease_expires_at, last_heartbeat_at)
+                   VALUES ('CLEGACY', 'T001', ?, 'task', 'released', '[]', ?, ?, ?)""",
+                (
+                    "cafe\u0301",
+                    _T0.isoformat(),
+                    (_T0 + timedelta(hours=1)).isoformat(),
+                    _T0.isoformat(),
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            payload = _make_claim_payload(claim_id="CNEW", actor="caf\u00e9")
+            payload["actor_input"] = "cafe\u0301"
+            with pytest.raises(EventRejected, match="collides"):
+                b.append(
+                    _make_event(
+                        "claim.created",
+                        payload,
+                        target_kind="claim",
+                        target_id="CNEW",
+                    )
+                )
+            assert b.get_claim("CNEW") is None
+        finally:
+            b.close()
+
+    def test_wrong_actor_lifecycle_events_fail_before_log_append(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            b.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(actor="owner"),
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+            attempts = [
+                (
+                    "claim.renewed",
+                    "claim",
+                    "C001",
+                    {
+                        "claim_id": "C001",
+                        "renewed_by": "other",
+                        "lease_expires_at": (_T0 + timedelta(hours=2)).isoformat(),
+                        "last_heartbeat_at": (_T0 + timedelta(minutes=1)).isoformat(),
+                    },
+                ),
+                (
+                    "claim.released",
+                    "claim",
+                    "C001",
+                    {"claim_id": "C001", "released_by": "other", "force": False},
+                ),
+                (
+                    "progress.noted",
+                    "task",
+                    "T001",
+                    {
+                        "task_id": "T001",
+                        "actor": "other",
+                        "notes": "spoof",
+                        "noted_at": _T0.isoformat(),
+                    },
+                ),
+                (
+                    "evidence.submitted",
+                    "task",
+                    "T001",
+                    {
+                        "task_id": "T001",
+                        "claim_id": "C001",
+                        "submitted_by": "other",
+                        "evidence_id": "EVOTHER",
+                        "commands_run": ["pytest -q"],
+                        "files_changed": [],
+                    },
+                ),
+            ]
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            for action, target_kind, target_id, payload in attempts:
+                with pytest.raises(EventRejected, match="exact|owner"):
+                    b.append(
+                        _make_event(
+                            action,
+                            payload,
+                            target_kind=target_kind,
+                            target_id=target_id,
+                            actor="other",
+                        )
+                    )
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+        finally:
+            b.close()
+
+
+# ---------------------------------------------------------------------------
+# T015.2 — one durable, atomic dependency batch
+# ---------------------------------------------------------------------------
+
+
+def _setup_named_dependency_graph(
+    backend: SqliteBackend,
+    *,
+    dependencies: dict[str, list[str]] | None = None,
+) -> None:
+    dependencies = dependencies or {}
+    _setup_project(backend)
+    backend.append(
+        _make_event(
+            "prd.parsed",
+            {**_make_prd_parsed_payload(), "prd_id": "named"},
+            target_kind="prd",
+            target_id="named",
+        )
+    )
+    backend.append(
+        _make_event(
+            "feature.created",
+            {**_make_feature_payload(feat_id="named:F001"), "prd_id": "named"},
+            target_kind="feature",
+            target_id="named:F001",
+        )
+    )
+    for task_id in ("named:T001", "named:T002", "named:T003"):
+        backend.append(
+            _make_event(
+                "task.created",
+                {
+                    **_make_task_payload(
+                        task_id=task_id, feature_id="named:F001"
+                    ),
+                    "prd_id": "named",
+                    "dependencies": dependencies.get(task_id, []),
+                },
+                target_kind="task",
+                target_id=task_id,
+            )
+        )
+
+
+def _dependency_edit(
+    task_id: str,
+    expected: list[str],
+    dependencies: list[str],
+) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "feature_id": "named:F001",
+        "expected_dependencies": expected,
+        "dependencies": dependencies,
+    }
+
+
+def _dependency_batch_draft(edits: list[dict[str, Any]]) -> EventDraft:
+    return _make_event(
+        "task.dependencies_batch_edited",
+        {"schema_version": 1, "prd_id": "named", "edits": edits},
+        target_kind="prd",
+        target_id="named",
+    )
+
+
+def _exact_e005106_event() -> tuple[Event, str]:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "replay"
+        / "e005106-task-created.json"
+    )
+    fixture_text = fixture_path.read_text(encoding="utf-8").strip()
+    return Event.model_validate(json.loads(fixture_text)), fixture_text
+
+
+def _setup_exact_e005106_baseline(
+    backend: SqliteBackend,
+    exact_event: Event,
+) -> None:
+    _setup_project(backend)
+    backend.append(
+        _make_event(
+            "prd.parsed",
+            {
+                **_make_prd_parsed_payload(),
+                "prd_id": "autonomous-lifecycle-hardening",
+            },
+            target_kind="prd",
+            target_id="autonomous-lifecycle-hardening",
+        )
+    )
+    backend.append(
+        _make_event(
+            "feature.created",
+            {
+                **_make_feature_payload(
+                    feat_id="autonomous-lifecycle-hardening:F002"
+                ),
+                "prd_id": "autonomous-lifecycle-hardening",
+            },
+            target_kind="feature",
+            target_id="autonomous-lifecycle-hardening:F002",
+        )
+    )
+    baseline_payload = dict(exact_event.payload_json)
+    baseline_payload["prd_id"] = "autonomous-lifecycle-hardening"
+    baseline_payload["dependencies"] = ["autonomous-lifecycle-hardening:T008.1"]
+    baseline_payload["updated_at"] = baseline_payload["created_at"]
+    backend.append(
+        _make_event(
+            "task.created",
+            baseline_payload,
+            target_kind="task",
+            target_id="autonomous-lifecycle-hardening:T009",
+        )
+    )
+
+
+class TestDepsNamedBatchAtomicReplayCycleRace:
+    def test_breaks_cycle_and_adds_cross_prd_gate_atomically(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_named_dependency_graph(
+                backend,
+                dependencies={
+                    "named:T001": ["named:T002"],
+                    "named:T002": ["named:T001"],
+                },
+            )
+            backend.append(
+                _make_event(
+                    "feature.created",
+                    _make_feature_payload(feat_id="F-default"),
+                    target_kind="feature",
+                    target_id="F-default",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "task.created",
+                    _make_task_payload(task_id="T-default", feature_id="F-default"),
+                    target_kind="task",
+                    target_id="T-default",
+                )
+            )
+            backend.append(
+                _dependency_batch_draft(
+                    [
+                        _dependency_edit(
+                            "named:T001", ["named:T002"], ["T-default"]
+                        ),
+                        _dependency_edit("named:T002", ["named:T001"], []),
+                    ]
+                )
+            )
+            assert backend.get_task("named:T001").dependencies == ["T-default"]  # type: ignore[union-attr]
+            assert backend.get_task("named:T002").dependencies == []  # type: ignore[union-attr]
+            assert _read_jsonl(str(tmp_path / "events.jsonl"))[-1]["action"] == (
+                "task.dependencies_batch_edited"
+            )
+        finally:
+            backend.close()
+
+    def test_cycle_and_invalid_final_sets_reject_before_log(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_named_dependency_graph(backend)
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="code=cycle"):
+                backend.append(
+                    _dependency_batch_draft(
+                        [
+                            _dependency_edit("named:T001", [], ["named:T002"]),
+                            _dependency_edit("named:T002", [], ["named:T001"]),
+                        ]
+                    )
+                )
+            for invalid in (
+                ["named:T001"],
+                ["named:T002", "named:T002"],
+            ):
+                with pytest.raises(EventRejected, match="payload validation"):
+                    backend.append(
+                        _dependency_batch_draft(
+                            [_dependency_edit("named:T001", [], invalid)]
+                        )
+                    )
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert backend.get_task("named:T001").dependencies == []  # type: ignore[union-attr]
+        finally:
+            backend.close()
+
+    def test_stale_second_backend_refuses_before_log_mutation(
+        self, tmp_path: Path
+    ) -> None:
+        first = _make_backend(tmp_path)
+        _setup_named_dependency_graph(first)
+        second = SqliteBackend(
+            db_path=str(tmp_path / "state.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=_make_clock(),
+        )
+        second.initialize()
+        try:
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            first.append(
+                _dependency_batch_draft(
+                    [_dependency_edit("named:T001", [], ["named:T002"])]
+                )
+            )
+            with pytest.raises(EventRejected, match="code=stale_precondition"):
+                second.append(
+                    _dependency_batch_draft(
+                        [_dependency_edit("named:T001", [], ["named:T003"])]
+                    )
+                )
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before + 1
+            assert second.get_task("named:T001").dependencies == ["named:T002"]  # type: ignore[union-attr]
+        finally:
+            second.close()
+            first.close()
+
+    def test_source_prd_and_feature_ownership_are_authoritative(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_named_dependency_graph(backend)
+            backend.append(
+                _make_event(
+                    "feature.created",
+                    _make_feature_payload(feat_id="F-default"),
+                    target_kind="feature",
+                    target_id="F-default",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "task.created",
+                    _make_task_payload(task_id="T-default", feature_id="F-default"),
+                    target_kind="task",
+                    target_id="T-default",
+                )
+            )
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            edit = _dependency_edit("named:T001", [], ["named:T002"])
+            edit["feature_id"] = "wrong:F001"
+            with pytest.raises(EventRejected, match="task_feature_mismatch"):
+                backend.append(_dependency_batch_draft([edit]))
+            wrong_source = _dependency_edit("named:T001", [], ["named:T002"])
+            wrong_source["task_id"] = "T-default"
+            wrong_source["feature_id"] = "F-default"
+            with pytest.raises(EventRejected, match="task_owner_mismatch"):
+                backend.append(_dependency_batch_draft([wrong_source]))
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+        finally:
+            backend.close()
+
+    def test_mid_batch_sql_failure_rolls_back_and_catch_up_heals(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        _setup_named_dependency_graph(backend)
+        conn = backend._require_conn()  # noqa: SLF001
+        conn.execute(
+            "CREATE TRIGGER fail_second_dep_update "
+            "BEFORE UPDATE OF dependencies ON tasks "
+            "WHEN NEW.id = 'named:T002' "
+            "BEGIN SELECT RAISE(ABORT, 'injected dependency failure'); END"
+        )
+        with pytest.raises(TransactionAborted, match="log line remains"):
+            backend.append(
+                _dependency_batch_draft(
+                    [
+                        _dependency_edit("named:T001", [], ["named:T003"]),
+                        _dependency_edit("named:T002", [], ["named:T003"]),
+                    ]
+                )
+            )
+        assert backend.get_task("named:T001").dependencies == []  # type: ignore[union-attr]
+        assert backend.get_task("named:T002").dependencies == []  # type: ignore[union-attr]
+        conn.execute("DROP TRIGGER fail_second_dep_update")
+        backend.close()
+
+        healed = _make_backend(tmp_path)
+        try:
+            assert healed.get_task("named:T001").dependencies == ["named:T003"]  # type: ignore[union-attr]
+            assert healed.get_task("named:T002").dependencies == ["named:T003"]  # type: ignore[union-attr]
+        finally:
+            healed.close()
+
+    def test_replay_round_trip_and_bounded_invalid_diagnostic(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        backend = _make_backend(tmp_path)
+        _setup_named_dependency_graph(backend)
+        backend.append(
+            _dependency_batch_draft(
+                [_dependency_edit("named:T001", [], ["named:T002"])]
+            )
+        )
+        backend.close()
+
+        replay = SqliteBackend(
+            db_path=str(tmp_path / "replayed.db"),
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        replay.replay_from_empty(events_path)
+        try:
+            assert replay.get_task("named:T001").dependencies == ["named:T002"]  # type: ignore[union-attr]
+        finally:
+            replay.close()
+
+        raw_events = _read_jsonl(events_path)
+        raw_events[-1]["payload_json"]["edits"][0]["task_id"] = "missing:T999"
+        poisoned_path = tmp_path / "poisoned.jsonl"
+        poisoned_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in raw_events),
+            encoding="utf-8",
+        )
+        poisoned = SqliteBackend(
+            db_path=str(tmp_path / "poisoned.db"),
+            events_path=str(poisoned_path),
+            clock=_make_clock(),
+        )
+        with pytest.raises(TransactionAborted) as exc_info:
+            poisoned.replay_from_empty(str(poisoned_path))
+        diagnostic = str(exc_info.value)
+        assert "event_id=E000008" in diagnostic
+        assert "action=task.dependencies_batch_edited" in diagnostic
+        assert "expected_prd=\"named\"" in diagnostic
+        assert len(diagnostic.encode("utf-8")) <= 4096
+
+    def test_malformed_replay_error_is_bounded_and_payload_free(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        backend = _make_backend(tmp_path)
+        _setup_named_dependency_graph(backend)
+        backend.close()
+        raw_events = _read_jsonl(events_path)
+        raw_events.append(
+            Event(
+                id="E000008",
+                timestamp=_T0,
+                actor="test",
+                action="task.dependencies_batch_edited",
+                target_kind="prd",
+                target_id="named",
+                payload_json={
+                    "schema_version": 999,
+                    "prd_id": "named",
+                    "edits": [],
+                    "secret": "do-not-echo",
+                },
+            ).model_dump(mode="json")
+        )
+        poisoned_path = tmp_path / "malformed.jsonl"
+        poisoned_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in raw_events),
+            encoding="utf-8",
+        )
+        poisoned = SqliteBackend(
+            db_path=str(tmp_path / "malformed.db"),
+            events_path=str(poisoned_path),
+            clock=_make_clock(),
+        )
+        with pytest.raises(TransactionAborted) as exc_info:
+            poisoned.replay_from_empty(str(poisoned_path))
+        diagnostic = str(exc_info.value)
+        assert "code=invalid_payload" in diagnostic
+        assert "event_id=E000008" in diagnostic
+        assert "do-not-echo" not in diagnostic
+        assert len(diagnostic.encode("utf-8")) <= 4096
+
+    def test_exact_e005106_legacy_missing_prd_dependency_upsert_replays(
+        self, tmp_path: Path
+    ) -> None:
+        exact_event, fixture_text = _exact_e005106_event()
+        assert exact_event.id == "E005106"
+        assert exact_event.target_id == "autonomous-lifecycle-hardening:T009"
+        assert exact_event.payload_json["feature_id"] == (
+            "autonomous-lifecycle-hardening:F002"
+        )
+        assert "prd_id" not in exact_event.payload_json
+        assert exact_event.payload_json["dependencies"] == [
+            "autonomous-lifecycle-hardening:T008.1",
+            "provider-read-contracts:T007.2",
+        ]
+
+        state_dir = tmp_path / "forward"
+        state_dir.mkdir()
+        events_path = state_dir / "events.jsonl"
+        backend = _make_backend(state_dir)
+        try:
+            _setup_exact_e005106_baseline(backend, exact_event)
+
+            # Reproduce a projection exactly one event behind E005106 without
+            # fabricating 5,100 unrelated events. The catch-up cursor is the
+            # max projected event id, so an audit-only E005105 is sufficient.
+            cursor_event = Event(
+                id="E005105",
+                timestamp=exact_event.timestamp,
+                actor="fixture",
+                action="state.initialized",
+                target_kind="project",
+                target_id="proj-1",
+                payload_json={},
+            )
+            backend._apply_write_only(  # noqa: SLF001
+                backend._require_conn(), cursor_event  # noqa: SLF001
+            )
+        finally:
+            backend.close()
+
+        with events_path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                cursor_event.model_dump_json(
+                    exclude={"parent_event_id", "lamport"}
+                )
+                + "\n"
+            )
+            stream.write(fixture_text + "\n")
+
+        healed = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(events_path),
+            clock=_make_clock(),
+        )
+        try:
+            healed.initialize()
+            caught_up = healed.get_task("autonomous-lifecycle-hardening:T009")
+            assert caught_up is not None
+            assert caught_up.prd_id == "autonomous-lifecycle-hardening"
+            assert caught_up.feature_id == "autonomous-lifecycle-hardening:F002"
+            assert caught_up.dependencies == [
+                "autonomous-lifecycle-hardening:T008.1",
+                "provider-read-contracts:T007.2",
+            ]
+        finally:
+            healed.close()
+
+        replayed = SqliteBackend(
+            db_path=str(state_dir / "replayed.db"),
+            events_path=str(events_path),
+            clock=_make_clock(),
+        )
+        try:
+            replayed.replay_from_empty(str(events_path))
+            rebuilt = replayed.get_task("autonomous-lifecycle-hardening:T009")
+            assert rebuilt is not None
+            assert rebuilt.prd_id == "autonomous-lifecycle-hardening"
+            assert rebuilt.feature_id == "autonomous-lifecycle-hardening:F002"
+            assert rebuilt.dependencies == [
+                "autonomous-lifecycle-hardening:T008.1",
+                "provider-read-contracts:T007.2",
+            ]
+            assert rebuilt.model_dump(mode="json") == caught_up.model_dump(
+                mode="json"
+            )
+        finally:
+            replayed.close()
+
+    def test_exact_e005106_shape_is_replay_only_on_live_append(
+        self, tmp_path: Path
+    ) -> None:
+        exact_event, _ = _exact_e005106_event()
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_exact_e005106_baseline(backend, exact_event)
+            events_path = tmp_path / "events.jsonl"
+            before_log = events_path.read_bytes()
+            before_task = backend.get_task(
+                "autonomous-lifecycle-hardening:T009"
+            )
+            assert before_task is not None
+            before_projection = before_task.model_dump(mode="json")
+            live_draft = EventDraft(
+                timestamp=exact_event.timestamp,
+                actor=exact_event.actor,
+                action=exact_event.action,
+                target_kind=exact_event.target_kind,
+                target_id=exact_event.target_id,
+                payload_json=exact_event.payload_json,
+            )
+
+            with pytest.raises(EventRejected, match="code=live_omitted_prd"):
+                backend.append(live_draft)
+
+            assert events_path.read_bytes() == before_log
+            after_task = backend.get_task(
+                "autonomous-lifecycle-hardening:T009"
+            )
+            assert after_task is not None
+            assert after_task.model_dump(mode="json") == before_projection
+        finally:
+            backend.close()

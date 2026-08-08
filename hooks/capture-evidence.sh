@@ -56,7 +56,7 @@ fi
 # ACTOR/EXIT_CODE/TIMESTAMP, plus a ready-to-append EVIDENCE_LINE so the
 # fallback path needs no second interpreter spawn.
 ASSIGNMENTS=$(HOOK_PAYLOAD="$PAYLOAD" python3 - <<'PYEOF' 2>/dev/null
-import os, json, datetime, shlex
+import os, json, datetime, hashlib, shlex
 
 MAX_EXCERPT = 4000
 
@@ -75,20 +75,29 @@ try:
     exit_code  = tr.get('exit_code')
     stdout_raw = tr.get('stdout') or ''
     stderr_raw = tr.get('stderr') or ''
-    actor      = d.get('session_id') or ''
+    actor      = os.environ.get('ANVIL_ACTOR', d.get('session_id') or '')
 
     try:
-        exit_code_int = int(exit_code) if exit_code is not None else 0
+        if type(exit_code) is not int:
+            raise ValueError
+        exit_code_int = exit_code
+        valid_exit_code = True
     except (ValueError, TypeError):
-        exit_code_int = 0
+        exit_code_int = -1
+        valid_exit_code = False
 
     # tz-aware UTC (utcnow() was deprecated in 3.12, removed in 3.13).
     ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    is_verification = int(any(p in command for p in VERIFICATION_PATTERNS))
+    is_verification = int(
+        valid_exit_code and any(p in command for p in VERIFICATION_PATTERNS)
+    )
 
     stdout_ex = stdout_raw[:MAX_EXCERPT]
     stderr_ex = stderr_raw[:MAX_EXCERPT]
+    output_sha256 = hashlib.sha256(
+        (stdout_raw + stderr_raw).encode('utf-8')
+    ).hexdigest()
 
     # Pre-build the JSON evidence line so the fallback path needs no second spawn.
     record = {
@@ -98,7 +107,8 @@ try:
         'stdout_excerpt': stdout_ex,
         'stderr_excerpt': stderr_ex,
         'actor':          actor,
-        'note':           'orphan — no active claim found at capture time; pass this file via: anvil submit TASK_ID --output-file <THIS_FILE>',
+        'output_sha256':  output_sha256,
+        'note':           'orphan — no active claim found at capture time; --output-file can attach it only as a descriptive excerpt and cannot satisfy required_proofs; rerun under an explicit claim or import a claim-bound command-proof artifact',
     }
     evidence_line = json.dumps(record)
 
@@ -106,6 +116,7 @@ try:
     emit('EXIT_CODE',      str(exit_code_int))
     emit('STDOUT_EXCERPT', stdout_ex)
     emit('STDERR_EXCERPT', stderr_ex)
+    emit('OUTPUT_SHA256', output_sha256)
     emit('ACTOR',          actor)
     emit('TIMESTAMP',      ts)
     emit('IS_VERIFICATION', str(is_verification))
@@ -115,7 +126,7 @@ except Exception:
     # fires and the hook exits 0 cleanly.
     for name in ('COMMAND', 'EXIT_CODE', 'STDOUT_EXCERPT',
                  'STDERR_EXCERPT', 'ACTOR', 'TIMESTAMP', 'IS_VERIFICATION',
-                 'EVIDENCE_LINE'):
+                 'OUTPUT_SHA256', 'EVIDENCE_LINE'):
         print(f"{name}=''")
 PYEOF
 )
@@ -147,8 +158,9 @@ fi
 #     --stdout-file PATH --stderr-file PATH \
 #     --actor ACTOR
 #
-# The hook passes --stdout-file / --stderr-file (temp files) rather than
-# inlining content because excerpts can be multi-line and avoid quoting issues.
+# The hook transports only bounded excerpts through temp files and passes the
+# digest computed from the full payload separately. This avoids command-line
+# size limits without weakening the full-output hash contract.
 
 CLI="${CLAUDE_PLUGIN_ROOT:-/nonexistent}/bin/anvil"
 
@@ -165,6 +177,7 @@ if [ -x "$CLI" ]; then
       --exit-code "${EXIT_CODE:-0}" \
       --stdout-file "$STDOUT_TMP" \
       --stderr-file "$STDERR_TMP" \
+      --output-sha256 "$OUTPUT_SHA256" \
       --actor "${ACTOR:-unknown}" \
       >/dev/null 2>&1
     CLI_EXIT=$?
@@ -187,8 +200,10 @@ fi
 #
 # Active-claim lookup from shell would require shelling out to the CLI again
 # (or reading state.db directly, which we must never do).  For Phase 5 we
-# always write to orphan.json so no evidence is lost.  The user can attach
-# orphan evidence to a claim later via `anvil submit --output-file`.
+# always write to orphan.json so no output is lost.  The user can attach that
+# output later via `anvil submit --output-file`, but it remains descriptive and
+# cannot satisfy typed required_proofs. Rerun under an explicit claim or import
+# a claim-bound command-proof artifact for the gate.
 #
 # When the CLI subcommand (guido Wave 2) is wired, it will:
 #   1. Look up the active claim for --actor in state.db.

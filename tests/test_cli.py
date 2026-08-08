@@ -10,10 +10,12 @@ All tests run in isolated tmp directories.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1172,7 +1174,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "5"
+        assert API_VERSION == "8"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -1415,6 +1417,48 @@ class TestPrdParse:
         assert "Parsed" in result.output or "parsed" in result.output.lower()
         assert "2" in result.output  # 2 requirements
 
+    def test_prd_parse_custom_source_uses_one_ingestion_without_persisting_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.cli._helpers import IngestedPrdSource, _open_backend
+
+        _do_init(tmp_path)
+        source_bytes = _MINIMAL_PRD_CONTENT.encode("utf-8")
+        ingested = IngestedPrdSource(
+            source_bytes=source_bytes,
+            markdown=source_bytes.decode("utf-8"),
+            source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+            source_size_bytes=len(source_bytes),
+        )
+        missing_custom_path = tmp_path / "private" / "never-reread.md"
+        observed: list[Path] = []
+
+        def ingest_once(path: Path) -> IngestedPrdSource:
+            observed.append(path)
+            return ingested
+
+        monkeypatch.setattr("anvil.cli.prd.ingest_prd_source", ingest_once)
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "parse", "--file", str(missing_custom_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert observed == [missing_custom_path]
+        payload = _prd_parsed_payload(tmp_path)
+        _assert_source_provenance(payload, source_bytes, 1)
+        assert str(missing_custom_path) not in json.dumps(payload)
+        assert not any("path" in key.lower() for key in payload)
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            persisted = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert persisted is not None
+        assert persisted.source_bytes == source_bytes
+        assert persisted.source_revision == persisted.revision == 1
+
     def test_prd_parse_missing_required_section(self, tmp_path: Path) -> None:
         """PRD without ## Goals → exit 1, error mentions missing section."""
         _do_init(tmp_path)
@@ -1650,6 +1694,20 @@ def _prd_parsed_payload(tmp_path: Path) -> dict:  # type: ignore[type-arg]
     return payload
 
 
+def _assert_source_provenance(
+    payload: Mapping[str, object], source_bytes: bytes, revision: int
+) -> None:
+    source_text = payload["source_text"]
+    assert isinstance(source_text, str)
+    assert source_text.encode("utf-8") == source_bytes
+    assert payload["source_sha256"] == hashlib.sha256(source_bytes).hexdigest()
+    assert payload["source_size_bytes"] == len(source_bytes)
+    assert payload["source_encoding"] == "utf-8"
+    assert payload["source_revision"] == revision
+    assert payload["provenance_state"] == "available"
+    assert payload["content_available"] is True
+
+
 class TestPrdSourcePath:
     def test_default_prd_id_maps_to_bare_prd_md(self) -> None:
         """prd_source_path returns <state_dir>/prd.md for the default PRD."""
@@ -1733,6 +1791,7 @@ class TestPrdParseNamed:
         prd.parsed event carrying prd_id='v0.2'."""
         _do_init(tmp_path)
         _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        source_bytes = (tmp_path / ".anvil" / "prds" / "v0.2.md").read_bytes()
 
         result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
         assert result.exit_code == 0, f"named parse failed: {result.output}"
@@ -1744,6 +1803,7 @@ class TestPrdParseNamed:
         assert payload.get("prd_id") == "v0.2"
         assert payload.get("is_default") is False
         assert payload["title"] == "CLI Named PRD"
+        _assert_source_provenance(payload, source_bytes, 1)
         # Named PRD ids are prefixed (T015).
         assert [r["id"] for r in payload["requirements"]] == [
             "v0.2:R001",
@@ -1773,6 +1833,7 @@ class TestPrdParseNamed:
         default partition and bare requirement ids."""
         _do_init(tmp_path)
         _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        source_bytes = (tmp_path / ".anvil" / "prd.md").read_bytes()
 
         result = _invoke_cmd(tmp_path, ["prd", "parse"])
         assert result.exit_code == 0, f"prd parse failed: {result.output}"
@@ -1784,6 +1845,7 @@ class TestPrdParseNamed:
         assert "prd_id" not in payload
         assert "is_default" not in payload
         assert payload["title"] == "CLI Test Project"
+        _assert_source_provenance(payload, source_bytes, 1)
         # Default PRD keeps bare requirement ids.
         assert [r["id"] for r in payload["requirements"]] == ["R001", "R002"]
 
@@ -2148,6 +2210,7 @@ class TestPrdReparse:
 
         # Re-parse the SAME (default) prd_id with an edited PRD.
         _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_V2)
+        revised_source_bytes = (tmp_path / ".anvil" / "prd.md").read_bytes()
         second = _invoke_cmd(tmp_path, ["prd", "parse"])
         assert second.exit_code == 0, f"re-parse failed: {second.output}"
         assert "Revised" in second.output
@@ -2161,6 +2224,7 @@ class TestPrdReparse:
         payload = revised[0]
         assert payload["prd_id"] == "default"
         assert payload["revision"] == 2
+        _assert_source_provenance(payload, revised_source_bytes, 2)
         added = {r["id"] for r in payload["requirements_added"]}
         superseded = {r["id"] for r in payload["requirements_superseded"]}
         unchanged = {r["id"] for r in payload["requirements_unchanged"]}
@@ -2187,6 +2251,81 @@ class TestPrdReparse:
         assert live == {"R002", "R003"}
         assert full == {"R001": 2, "R002": None, "R003": None}, full
         assert prd is not None and prd.revision == 2
+        assert prd.source_bytes == revised_source_bytes
+        assert prd.source_revision == 2
+
+    def test_prd_revision_concurrency_keeps_source_bindings_invocation_local(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.cli.prd as prd_module
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+
+        stale_path = tmp_path / "stale-revision.md"
+        stale_path.write_bytes(_MINIMAL_PRD_CONTENT_V2.encode("utf-8"))
+        stale_source = stale_path.read_bytes()
+        winner_path = tmp_path / "winner-revision.md"
+        winner_path.write_bytes(
+            _MINIMAL_PRD_CONTENT_V2.replace(
+                "A project for CLI testing, revised.",
+                "The concurrent winner's independently ingested revision.",
+            ).encode("utf-8")
+        )
+        winner_source = winner_path.read_bytes()
+        real_append = SqliteBackend.append
+        stale_payload: dict[str, object] | None = None
+        winner_log: bytes | None = None
+        winner_projection: tuple[int, bytes | None] | None = None
+        interleaved = False
+
+        def append_winner_first(self, draft):  # type: ignore[no-untyped-def]
+            nonlocal interleaved, stale_payload, winner_log, winner_projection
+            if draft.action == "prd.revised" and not interleaved:
+                interleaved = True
+                stale_payload = dict(draft.payload_json)
+                # A second complete CLI parse runs after the stale invocation
+                # prepared its draft but before that draft reaches append.
+                prd_module.prd_parse(
+                    file=winner_path,
+                    prd="default",
+                    json_output=False,
+                    cwd=tmp_path,
+                )
+                winner_log = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
+                current = self.get_prd("default")
+                assert current is not None
+                winner_projection = (current.revision, current.source_bytes)
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", append_winner_first)
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "parse", "--file", str(stale_path), "--prd", "default"],
+        )
+
+        assert result.exit_code == 1
+        assert stale_payload is not None
+        _assert_source_provenance(stale_payload, stale_source, 2)
+        revised = _events_of_action(tmp_path, "prd.revised")
+        assert len(revised) == 1
+        _assert_source_provenance(revised[0], winner_source, 2)
+        assert winner_log is not None
+        assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == winner_log
+        assert winner_projection == (2, winner_source)
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            persisted = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert persisted is not None
+        assert persisted.revision == persisted.source_revision == 2
+        assert persisted.source_bytes == winner_source
+        assert (persisted.revision, persisted.source_bytes) == winner_projection
 
     def test_reparse_pure_additive_keeps_approved_status(self, tmp_path: Path) -> None:
         """A PURE-ADDITIVE re-parse (nothing superseded) must KEEP the PRD's
@@ -4539,6 +4678,135 @@ def _git_current_branch(tmp_path: Path) -> str:
 
 
 class TestClaimCommand:
+    def test_attestation_is_accepted_and_consumed_by_next_renewal(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        claimed = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "artifact-agent", "--json"]
+        )
+        assert claimed.exit_code == 0, claimed.output
+        claim = json.loads(claimed.output)["data"]["claim"]
+        context = claim["attestation_context"]
+        expected = context["expected_paths"][0]
+        changed = tmp_path / expected["path"]
+        changed.parent.mkdir(parents=True, exist_ok=True)
+        changed.write_bytes(b"externally produced progress\n")
+        file_digest = hashlib.sha256(changed.read_bytes()).hexdigest()
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            project_id = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()[0]
+        payload = {
+            "schema_version": 1,
+            "kind": "file",
+            "project_id": project_id,
+            "claim_id": claim["id"],
+            "generation": claim["generation"],
+            "task_id": task_id,
+            "task_revision": context["task_revision"],
+            "prd_id": context["prd_id"],
+            "prd_revision": context["prd_revision"],
+            "claimed_by": claim["claimed_by"],
+            "repository_id": context["repository_id"],
+            "claim_start_sha": context["claim_start_sha"],
+            "commit_sha": context["claim_start_sha"],
+            "path": expected["path"],
+            "prior_sha256": expected["baseline_sha256"],
+            "file_sha256": file_digest,
+            "issued_at": datetime.now(UTC).isoformat(),
+        }
+        artifact = tmp_path / "progress-attestation.json"
+        artifact.write_text(
+            json.dumps(
+                {"envelope_id": "cli-progress-1", "payload": payload},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+
+        accepted = _invoke_cmd(
+            tmp_path,
+            [
+                "progress",
+                task_id,
+                "external",
+                "--attestation-file",
+                str(artifact),
+                "--actor",
+                "artifact-agent",
+                "--json",
+            ],
+        )
+        assert accepted.exit_code == 0, accepted.output
+        receipt = json.loads(accepted.output)["data"]
+        assert receipt["event_action"] == "progress.attested"
+        assert receipt["attestation"]["digest"]
+        assert receipt["attestation"]["generation"] == claim["generation"]
+
+        renewed = _invoke_cmd(
+            tmp_path,
+            ["renew", claim["id"], "--actor", "artifact-agent", "--json"],
+        )
+        assert renewed.exit_code == 0, renewed.output
+        renewal = json.loads(renewed.output)["data"]
+        assert renewal["renewed"] is True
+        assert renewal["progress"] == {
+            "source": "attestation",
+            "digest": receipt["attestation"]["digest"],
+            "generation": claim["generation"],
+            "trust_mode": "claim_owner_self_attested",
+        }
+
+    def test_git_claim_exposes_attestation_context_and_continuation(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "attested-agent", "--json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        claim = data["claim"]
+        assert claim["generation"] == 1
+        assert claim["attestation_context"]["claim_start_sha"]
+        assert data["continuation"]["attest_progress"]["argv"][-4:-2] == [
+            "--attestation-file",
+            "<path>",
+        ]
+        assert data["continuation"]["attestation"]["context"] == claim[
+            "attestation_context"
+        ]
+
+    def test_free_text_progress_remains_progress_noted(self, tmp_path: Path) -> None:
+        _do_init_and_plan(tmp_path, with_git=True)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        claimed = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "note-agent", "--json"]
+        )
+        assert claimed.exit_code == 0, claimed.output
+
+        progress = _invoke_cmd(
+            tmp_path,
+            ["progress", task_id, "tests", "--actor", "note-agent", "--json"],
+        )
+
+        assert progress.exit_code == 0, progress.output
+        data = json.loads(progress.output)["data"]
+        assert data.get("event_action", "progress.noted") == "progress.noted"
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            actions = conn.execute(
+                "SELECT action FROM events WHERE target_id=? ORDER BY rowid", (task_id,)
+            ).fetchall()
+        assert ("progress.noted",) in actions
+        assert ("progress.attested",) not in actions
+
     @pytest.mark.slow
     def test_claim_happy_path_creates_lease_and_branch(self, tmp_path: Path) -> None:
         """Claim a ready task; command exits 0 and prints claim ID + branch."""
@@ -4562,6 +4830,71 @@ class TestClaimCommand:
         # The branch warning may be in output or stderr depending on Typer's mix
         combined = result.output + (result.stderr if hasattr(result, "stderr") and result.stderr else "")
         assert "Warning" in combined or "Claimed" in result.output
+
+    def test_claim_returns_actor_continuation_and_auth_notice(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        actor = "Å O'Brien; $(echo inert)"
+
+        human = _invoke_cmd(tmp_path, ["claim", task_id, "--actor", actor])
+        assert human.exit_code == 0, human.output
+        assert "ANVIL_ACTOR" in human.output
+        assert "ANVIL_CLAIM_ID" in human.output
+        assert "--actor" in human.output
+        assert "not cryptographic authentication" in human.output
+
+        # Release with the exact structured continuation, then claim again in
+        # JSON mode so both surfaces are exercised without a double claim.
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            claim_id = conn.execute(
+                "SELECT id FROM claims WHERE task_id=? AND status='active'", (task_id,)
+            ).fetchone()[0]
+        assert _invoke_cmd(
+            tmp_path, ["release", claim_id, "--actor", actor]
+        ).exit_code == 0
+        result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", actor, "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["actor_identity"]["actor"] == actor
+        assert data["actor_identity"]["authenticated"] is False
+        assert data["continuation"]["environment"] == {"ANVIL_ACTOR": actor}
+        assert data["continuation"]["hook_environment"] == {
+            "ANVIL_ACTOR": actor,
+            "ANVIL_CLAIM_ID": data["claim"]["id"],
+        }
+        assert data["continuation"]["renew"]["argv"][-2:] == ["--actor", actor]
+        assert data["continuation"]["progress"]["argv"][-2:] == ["--actor", actor]
+
+    def test_claim_continuation_uses_persisted_nfc_actor(self, tmp_path: Path) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        raw_actor = "Cafe\u0301 worker"
+        persisted_actor = "Café worker"
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", raw_actor, "--json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["claim"]["claimed_by"] == persisted_actor
+        assert data["actor_identity"]["actor"] == persisted_actor
+        assert data["continuation"]["environment"] == {
+            "ANVIL_ACTOR": persisted_actor
+        }
+        assert data["continuation"]["hook_environment"] == {
+            "ANVIL_ACTOR": persisted_actor,
+            "ANVIL_CLAIM_ID": data["claim"]["id"],
+        }
+        release_argv = data["continuation"]["release"]["argv"]
+        released = _invoke_cmd(tmp_path, release_argv[1:])
+        assert released.exit_code == 0, released.output
 
     def test_claim_refuses_unready_task(self, tmp_path: Path) -> None:
         """Claiming a task not in 'ready' status exits non-zero."""
@@ -4890,6 +5223,22 @@ class TestReleaseCommand:
         )
         assert result.exit_code == 0, f"release --force failed: {result.output}"
 
+    def test_release_wrong_actor_returns_exact_json_remedies(self, tmp_path: Path) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        claim_id = self._claim_task(tmp_path, task_id)
+        result = _invoke_cmd(
+            tmp_path,
+            ["release", claim_id, "--actor", "wrong", "--json"],
+        )
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "actor_mismatch"
+        assert error["owner"] == "agent-test"
+        assert error["remedies"]["actor_argv"] == ["--actor", "agent-test"]
+        assert error["authenticated"] is False
+
 
 # ---------------------------------------------------------------------------
 # Phase 4 — renew command
@@ -4925,6 +5274,54 @@ class TestRenewCommand:
 
         # New lease should be present in output (some time string)
         assert old_expiry[:10] in result.output or "lease" in result.output.lower()
+
+
+class TestProgressActorContinuity:
+    @pytest.mark.parametrize("actor", ["", "   "])
+    def test_unclaimed_progress_rejects_invalid_new_actor(
+        self, tmp_path: Path, actor: str
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["progress", task_id, "tests", "--actor", actor, "--json"],
+        )
+
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "actor_invalid"
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM events WHERE action='progress.noted' "
+                "AND target_id=?",
+                (task_id,),
+            ).fetchone()[0] == 0
+
+    def test_progress_on_claimed_task_requires_exact_owner(self, tmp_path: Path) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        assert _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "owner"]
+        ).exit_code == 0
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["progress", task_id, "tests", "--actor", "other", "--json"],
+        )
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "actor_mismatch"
+        assert error["owner"] == "owner"
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM events WHERE action='progress.noted' "
+                "AND target_id=?",
+                (task_id,),
+            ).fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -5740,7 +6137,7 @@ class TestHookCaptureEvidence:
 class TestCaptureEvidenceByClaim:
     def _init_and_claim(self, tmp_path: Path, actor: str) -> str:
         """Full setup through a claim held by `actor`; returns the task id."""
-        _do_init_and_plan(tmp_path, with_git=False)
+        _do_init_and_plan(tmp_path, with_git=True)
         task_id = _get_first_ready_task_id(tmp_path)
         assert task_id is not None
         assert _invoke_cmd(
@@ -5748,81 +6145,145 @@ class TestCaptureEvidenceByClaim:
         ).exit_code == 0
         return task_id
 
+    def _claim_id(self, tmp_path: Path, task_id: str) -> str:
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            row = conn.execute(
+                "SELECT id FROM claims WHERE task_id=? AND status='active'",
+                (task_id,),
+            ).fetchone()
+        assert row is not None
+        return str(row[0])
+
     def _buffer_dir(self, tmp_path: Path) -> Path:
         return tmp_path / ".anvil" / ".evidence-buffer"
 
-    def test_single_claim_captures_regardless_of_actor(
-        self, tmp_path: Path
+    def test_single_claim_without_explicit_hook_pin_is_orphaned(
+        self, tmp_path: Path,
     ) -> None:
-        """T007 AC1: a claim made with an explicit --actor different from the
-        session actor STILL accumulates CommandProofs — the retro incident."""
+        """Ambient database shape never chooses a claim for hook evidence."""
         self._init_and_claim(tmp_path, actor="claude-opus-retro")
         result = _invoke_cmd(
             tmp_path,
             ["hook", "capture-evidence", "--command", "pytest -q",
-             "--exit-code", "0", "--actor", "session-alice"],
+             "--exit-code", "0", "--actor", "claude-opus-retro"],
         )
         assert result.exit_code == 0
         buffers = list(self._buffer_dir(tmp_path).glob("C*.json"))
-        assert len(buffers) == 1, "proof did not attach to the single active claim"
-        assert (self._buffer_dir(tmp_path) / "orphan.json").exists() is False
-        assert "pytest" in buffers[0].read_text(encoding="utf-8")
+        assert buffers == []
+        assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
 
-    def test_two_claims_disambiguate_by_actor_else_orphan(
-        self, tmp_path: Path
+    def test_exact_claim_owner_hook_pin_writes_attributed_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """T007 AC2: with two active claims by different actors, an exact
-        actor match attaches to the right claim; an unmatched session actor
-        falls back to orphan (never cross-attached)."""
-        _do_init_and_plan(tmp_path, with_git=False)
-        # Claim two independent ready tasks as different actors.
-        ready = _invoke_cmd(tmp_path, ["list", "--status", "ready", "--json"])
-        ids = [t["id"] for t in json.loads(ready.output.strip().splitlines()[-1])["data"]["tasks"]]
-        assert len(ids) >= 2, "need two ready tasks for this test"
-        assert _invoke_cmd(
-            tmp_path, ["claim", ids[0], "--actor", "actor-a", "--force"]
-        ).exit_code == 0
-        assert _invoke_cmd(
-            tmp_path, ["claim", ids[1], "--actor", "actor-b", "--force"]
-        ).exit_code == 0
-
-        # Exact actor match → attaches to actor-a's claim only.
+        task_id = self._init_and_claim(tmp_path, actor="actor-a")
+        claim_id = self._claim_id(tmp_path, task_id)
+        monkeypatch.setenv("ANVIL_ACTOR", "actor-a")
+        monkeypatch.setenv("ANVIL_CLAIM_ID", claim_id)
         assert _invoke_cmd(
             tmp_path,
             ["hook", "capture-evidence", "--command", "pytest -q",
              "--exit-code", "0", "--actor", "actor-a"],
         ).exit_code == 0
-        claim_buffers = sorted(b.name for b in self._buffer_dir(tmp_path).glob("C*.json"))
-        assert len(claim_buffers) == 1
+        record = json.loads(
+            (self._buffer_dir(tmp_path) / f"{claim_id}.json")
+            .read_text(encoding="utf-8")
+            .splitlines()[0]
+        )
+        assert record["claim_id"] == claim_id
+        assert record["attribution"]["claimed_by"] == "actor-a"
+        assert record["attribution"]["task_id"] == task_id
+        assert len(record["semantic_digest"]) == 64
 
-        # Unmatched session actor with two claims → orphan (ambiguous).
+    def test_stale_or_wrong_owner_hook_pin_is_orphaned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        task_id = self._init_and_claim(tmp_path, actor="actor-a")
+        claim_id = self._claim_id(tmp_path, task_id)
+        monkeypatch.setenv("ANVIL_CLAIM_ID", claim_id)
         assert _invoke_cmd(
             tmp_path,
             ["hook", "capture-evidence", "--command", "pytest -q",
-             "--exit-code", "0", "--actor", "actor-nobody"],
+             "--exit-code", "0", "--actor", "actor-b"],
+        ).exit_code == 0
+        assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
+        monkeypatch.setenv("ANVIL_CLAIM_ID", "C-stale")
+        assert _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "actor-a"],
+        ).exit_code == 0
+        assert len(
+            (self._buffer_dir(tmp_path) / "orphan.json")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ) == 2
+
+    def test_path_shaped_persisted_claim_id_cannot_escape_buffer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        task_id = self._init_and_claim(tmp_path, actor="actor-a")
+        claim_id = self._claim_id(tmp_path, task_id)
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            conn.execute("UPDATE claims SET id='../escaped' WHERE id=?", (claim_id,))
+            conn.commit()
+        monkeypatch.setenv("ANVIL_ACTOR", "actor-a")
+        monkeypatch.setenv("ANVIL_CLAIM_ID", "../escaped")
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "actor-a"],
+        )
+
+        assert result.exit_code == 0
+        assert not (tmp_path / ".anvil" / "escaped.json").exists()
+        assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
+
+    def test_persisted_session_mismatch_is_orphaned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ANVIL_SESSION_ID", "session-owner")
+        task_id = self._init_and_claim(tmp_path, actor="actor-a")
+        monkeypatch.setenv("ANVIL_CLAIM_ID", self._claim_id(tmp_path, task_id))
+        monkeypatch.setenv("ANVIL_SESSION_ID", "session-sibling")
+
+        assert _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "actor-a"],
         ).exit_code == 0
         assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
 
-    def test_submit_zero_proof_mismatch_warns(self, tmp_path: Path) -> None:
-        """T007 AC3: submit with verification commands but zero attached
-        proofs prints the mismatch warning naming both identities."""
+    def test_submit_wrong_actor_refuses_before_evidence_append(
+        self, tmp_path: Path
+    ) -> None:
+        """T006: a foreign actor cannot submit another owner's claim."""
         task_id = self._init_and_claim(tmp_path, actor="claude-opus-retro")
-        # No capture-evidence run → buffer empty.
         result = _invoke_cmd(
             tmp_path,
             ["submit", task_id, "--commands", "pytest -q",
-             "--files-changed", "x.py", "--actor", "session-bob"],
+             "--files-changed", "x.py", "--actor", "session-bob", "--json"],
         )
-        assert result.exit_code == 0
-        assert "zero typed proofs attached" in result.output
-        assert "claude-opus-retro" in result.output
-        assert "session-bob" in result.output
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "actor_mismatch"
+        assert error["owner"] == "claude-opus-retro"
+        assert error["remedies"]["environment"] == {
+            "ANVIL_ACTOR": "claude-opus-retro"
+        }
+        assert _get_task_status(tmp_path, task_id) == "claimed"
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE task_id=?", (task_id,)
+            ).fetchone()[0] == 0
 
     def test_submit_with_attached_proof_prints_no_warning(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """T007 AC3 (converse): a real attached proof → no warning."""
         task_id = self._init_and_claim(tmp_path, actor="proof-agent")
+        monkeypatch.setenv("ANVIL_ACTOR", "proof-agent")
+        monkeypatch.setenv("ANVIL_CLAIM_ID", self._claim_id(tmp_path, task_id))
         assert _invoke_cmd(
             tmp_path,
             ["hook", "capture-evidence", "--command", "pytest -q",
@@ -5844,7 +6305,7 @@ class TestCaptureEvidenceByClaim:
         result = _invoke_cmd(
             tmp_path,
             ["submit", task_id, "--commands", "echo done",
-             "--files-changed", "x.py", "--actor", "session-bob"],
+             "--files-changed", "x.py", "--actor", "claude-opus-retro"],
         )
         assert result.exit_code == 0
         assert "zero typed proofs attached" not in result.output
@@ -7117,6 +7578,139 @@ def _seed_two_prd_project(tmp_path: Path) -> str:
     finally:
         conn.close()
     return project_id
+
+
+class TestNamedPrdAtomicDeps:
+    """Dependency batches select one PRD and append once for all edits."""
+
+    def test_deps_named_prd_batch_is_atomic_and_noop_emits_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "INSERT INTO features "
+                "(id, prd_id, title, description, status, requirements, tasks) "
+                "VALUES ('v0.2:F001', 'v0.2', 'Named', 'desc', "
+                "'proposed', '[]', '[]')"
+            )
+            conn.execute(
+                "UPDATE tasks SET feature_id = 'v0.2:F001' "
+                "WHERE id = 'v0.2:T900'"
+            )
+            for task_id in ("v0.2:T901", "v0.2:T902"):
+                conn.execute(
+                    """INSERT INTO tasks
+                    (id, feature_id, prd_id, title, description, status, priority,
+                     dependencies, conflict_groups, scores, acceptance_criteria,
+                     implementation_notes, verification, likely_files,
+                     created_at, updated_at)
+                    VALUES (?, 'v0.2:F001', 'v0.2', ?, 'desc', 'ready', 'medium',
+                            '[]', '[]', '{}', '[]', '[]', '{}', '[]',
+                            '2026-01-01T00:00:00+00:00',
+                            '2026-01-01T00:00:00+00:00')""",
+                    (task_id, f"Task {task_id}"),
+                )
+            conn.commit()
+            events_before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        finally:
+            conn.close()
+
+        args = [
+            "deps",
+            "--prd",
+            "v0.2",
+            "--actor",
+            "agent-test",
+            "--add",
+            "v0.2:T901->v0.2:T900",
+            "--add",
+            "v0.2:T902->v0.2:T900",
+            "--json",
+        ]
+        first = _invoke_cmd(tmp_path, args)
+        assert first.exit_code == 0, first.output
+        data = json.loads(first.output)["data"]
+        assert data == {
+            "prd_id": "v0.2",
+            "changed": ["v0.2:T901", "v0.2:T902"],
+            "added": [
+                ["v0.2:T901", "v0.2:T900"],
+                ["v0.2:T902", "v0.2:T900"],
+            ],
+            "removed": [],
+        }
+
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (
+                events_before + 1
+            )
+            row = conn.execute(
+                "SELECT action, target_kind, target_id, payload_json "
+                "FROM events ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            assert row[:3] == (
+                "task.dependencies_batch_edited",
+                "prd",
+                "v0.2",
+            )
+            payload = json.loads(row[3])
+            assert [edit["task_id"] for edit in payload["edits"]] == [
+                "v0.2:T901",
+                "v0.2:T902",
+            ]
+        finally:
+            conn.close()
+
+        second = _invoke_cmd(tmp_path, args)
+        assert second.exit_code == 0, second.output
+        assert json.loads(second.output)["data"]["changed"] == []
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == (
+                events_before + 1
+            )
+        finally:
+            conn.close()
+
+    def test_deps_named_prd_batch_allows_cross_prd_target(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "deps",
+                "--prd",
+                "default",
+                "--actor",
+                "agent-test",
+                "--add",
+                "T001->v0.2:T900",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"] == {
+            "prd_id": "default",
+            "changed": ["T001"],
+            "added": [["T001", "v0.2:T900"]],
+            "removed": [],
+        }
+        conn = sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
+        try:
+            assert json.loads(
+                conn.execute(
+                    "SELECT dependencies FROM tasks WHERE id = 'T001'"
+                ).fetchone()[0]
+            ) == ["v0.2:T900"]
+        finally:
+            conn.close()
 
 
 def _set_cross_prd_guard(tmp_path: Path, value: str) -> None:
@@ -8657,6 +9251,7 @@ class TestApplyMergeCheck:
                 "submit", task_id,
                 "--commands", "echo merged-ok",
                 "--files-changed", "README.md",
+                "--actor", "amc-agent",
             ],
         )
         assert submit_result.exit_code == 0, submit_result.output
@@ -9129,7 +9724,7 @@ class TestApplyClaimGate:
         submit_result = _invoke_cmd(
             tmp_path,
             ["submit", task_id, "--commands", "echo ok",
-             "--files-changed", "x.py"],
+             "--files-changed", "x.py", "--actor", "cg-agent"],
         )
         assert submit_result.exit_code == 0, submit_result.output
 
@@ -9267,7 +9862,8 @@ class TestSubmitCategory:
         result = _invoke_cmd(
             tmp_path,
             ["submit", "T001", "--category", "diagnostic",
-             "--commands", "echo ok", "--files-changed", "x.py", "--json"],
+             "--commands", "echo ok", "--files-changed", "x.py",
+             "--actor", "cat-agent", "--json"],
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.output.strip().splitlines()[-1])["data"]
@@ -9293,7 +9889,7 @@ class TestSubmitCategory:
         result = _invoke_cmd(
             tmp_path,
             ["submit", "T001", "--commands", "echo ok",
-             "--files-changed", "x.py"],
+             "--files-changed", "x.py", "--actor", "cat-agent"],
         )
         assert result.exit_code == 0, result.output
         approved = _invoke_cmd(
@@ -9311,7 +9907,8 @@ class TestSubmitCategory:
         result = _invoke_cmd(
             tmp_path,
             ["submit", "T001", "--category", "blocked",
-             "--commands", "echo ok", "--files-changed", "x.py"],
+             "--commands", "echo ok", "--files-changed", "x.py",
+             "--actor", "cat-agent"],
         )
         assert result.exit_code == 0, result.output
         assert "blocked submission always refuses" in result.output
@@ -9330,7 +9927,8 @@ class TestSubmitCategory:
         result = _invoke_cmd(
             tmp_path,
             ["submit", "T002", "--category", "blocked",
-             "--commands", "echo ok", "--files-changed", "x.py", "--json"],
+             "--commands", "echo ok", "--files-changed", "x.py",
+             "--actor", "cat-agent", "--json"],
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.output.strip().splitlines()[-1])["data"]
@@ -9471,7 +10069,7 @@ class TestApplyIntentLinter:
         assert _invoke_cmd(
             tmp_path,
             ["submit", task_id, "--commands", "echo ok",
-             "--files-changed", "x.py"],
+             "--files-changed", "x.py", "--actor", "intent-agent"],
         ).exit_code == 0
 
     def test_incident_shape_warns(self, tmp_path: Path) -> None:

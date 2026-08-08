@@ -111,6 +111,7 @@ nav:
       - FAQ: faq.md
   - How-to guides:
       - Claiming & shipping a task: how-to/claiming-and-shipping-a-task.md
+      - Attesting external progress: how-to/attesting-external-progress.md
       - Driving the anvil loop: how-to/drive-the-anvil-loop.md
       - Coordinating a milestone bundle: how-to/coordinating-a-bundle.md
       - Using anvil on any harness: how-to/using-anvil-on-any-harness.md

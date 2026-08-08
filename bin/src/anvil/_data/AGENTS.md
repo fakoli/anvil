@@ -62,7 +62,7 @@ anvil apply T001           # apply the review verdict
 | Release claim | `release_task` | `anvil release <id>` |
 | Renew claim lease | `renew_claim` | `anvil renew <id>` |
 | Work packet | `generate_work_packet` | `anvil packet <id>` |
-| Submit progress | `submit_progress` | (MCP-only; no CLI flag) |
+| Submit progress | `submit_progress` | `anvil progress <id> <phase>` |
 | Submit evidence | `submit_completion_evidence` | `anvil submit <id> --commands … --files-changed …` |
 | Update task status | `update_task_status` | (via claim/submit/apply flow) |
 | File-conflict check | `check_conflicts` | `anvil conflicts` |

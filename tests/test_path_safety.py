@@ -9,9 +9,11 @@ character.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from anvil.naming import safe_path_component
+from anvil.naming import safe_path_component, task_claim_buffer_path
 
 # The exact hostile set the sanitizer must eliminate: Windows-reserved plus a
 # couple of C0 control characters.
@@ -68,3 +70,12 @@ def test_result_is_a_single_path_component() -> None:
     # No path separators may remain — the result must be one component.
     out = safe_path_component("some/nested:T001")
     assert "/" not in out and "\\" not in out
+
+
+def test_task_claim_buffer_path_accepts_only_generated_claim_ids(tmp_path: Path) -> None:
+    buffer_dir = tmp_path / ".evidence-buffer"
+    assert task_claim_buffer_path(buffer_dir, "C12AB34EF") == (
+        buffer_dir / "C12AB34EF.json"
+    )
+    for unsafe in ("../escaped", r"..\escaped", "C123", "C12ab34ef", "C:ads"):
+        assert task_claim_buffer_path(buffer_dir, unsafe) is None

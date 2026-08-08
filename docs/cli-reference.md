@@ -140,7 +140,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.3 (schema 16)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 18)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -742,8 +742,10 @@ worktree at `../wt-<task_id>/`.
 - `--force` *(flag)* — override the pre-claim conflict warnings. Without
   `--force`, file overlap or group conflicts cause the command to exit 1
   after listing every conflicting claim.
-- `--actor TEXT` *(optional)* — claim actor; defaults to `$USER` or
-  `agent`.
+- `--actor TEXT` *(optional)* — local audit actor. Precedence: explicit flag >
+  `ANVIL_ACTOR` > legacy `ANVIL_GATE_ACTOR` > derived local identity. Claim
+  output includes structured continuation argv/environment data. Actor identity
+  is not cryptographic authentication.
 - `--lease FLOAT` *(optional)* — lease duration in minutes for this claim.
   Overrides `default_lease_minutes` from config. Lease precedence: this flag
   > project `config.yaml` > global `config.yaml` > built-in `240` (see
@@ -793,8 +795,8 @@ Emits a `claim.released` event with the optional reason.
   actor. Without `--force`, releasing someone else's claim fails.
 - `--reason TEXT` *(optional)* — human-readable reason for the release
   (recorded on the event).
-- `--actor TEXT` *(optional)* — actor identity; defaults to `$USER` or
-  `agent`.
+- `--actor TEXT` *(optional)* — actor identity under claim's precedence. Without
+  `--force`, it must exactly match the persisted owner.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -824,8 +826,8 @@ to prevent the stale-claim reaper from reclaiming the task mid-flight.
 
 **Flags:**
 
-- `--actor TEXT` *(optional)* — actor identity; defaults to `$USER` or
-  `agent`.
+- `--actor TEXT` *(optional)* — actor identity under claim's precedence; it must
+  exactly match the persisted owner.
 - `--lease FLOAT` *(optional)* — lease extension in minutes. Overrides
   `default_lease_minutes` from config (same precedence as
   [`claim --lease`](#claim)).
@@ -935,6 +937,8 @@ to one PRD.
 `anvil bundle claim B001` atomically creates the coordinator claim and member task
 authorizations. `--shared-tree` explicitly accepts a shared checkout; required worktree
 isolation otherwise directs callers to the top-level Git-aware bundle claim path.
+JSON output includes the exact coordinator identity plus structured renew, release,
+progress, and complete argv/environment continuations; no task-submit command is emitted.
 
 ### `anvil bundle renew` { #bundle-renew }
 
@@ -1022,8 +1026,8 @@ semantics.
 active claim and transitions the task to `needs_review`. Emits an
 `evidence.submitted` event with the commands run, files changed, optional
 output excerpt (truncated to 8000 chars), PR url, commit SHA, and known
-limitations. Prints a gate summary indicating whether the recorded evidence
-satisfies the task's `required_evidence`.
+limitations. Prints separate gate diagnostics for descriptive
+`required_evidence` and typed `required_proofs`.
 
 **Positional arguments:**
 
@@ -1043,7 +1047,17 @@ satisfies the task's `required_evidence`.
   [`anvil apply`](#apply).
 - `--output-file PATH` *(optional)* — path to a file whose content is used
   as the output excerpt (read with `errors="replace"`, truncated to 8000
-  chars).
+  chars). Descriptive only: it never creates a typed command proof or
+  satisfies `required_proofs`.
+- `--command-proof-file PATH` *(optional, repeatable)* — import a bounded,
+  versioned claim-bound command-proof artifact. Every artifact in the batch
+  must match the explicit active claim, exact actor, generation, task/PRD
+  revision, repository and canonical cwd, and one exact `--commands` value.
+  Validation is all-or-nothing before evidence is recorded. For signed proofs,
+  current issuer membership in `ANVIL_TRUST_LIST` or `~/.anvil/trust.txt` is
+  required at append and replay; preserve and restore that trust configuration
+  with state or replay fails closed. Self-attested replay is trust-list
+  independent.
 - `--pr-url TEXT` *(optional)* — pull request URL.
 - `--commit-sha TEXT` *(optional)* — commit SHA associated with this
   submission.
@@ -1052,8 +1066,9 @@ satisfies the task's `required_evidence`.
   files. Required when the task's `verification.required_evidence` includes
   an item matching "screenshot" (the gate checks `evidence.screenshots` is
   non-empty). Default: `[]`.
-- `--actor TEXT` *(optional)* — actor submitting evidence; defaults to
-  `$USER` or `agent`.
+- `--actor TEXT` *(optional)* — actor submitting evidence under claim's
+  precedence. An active claim requires its exact owner; mismatch refuses before
+  evidence is appended.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -1062,6 +1077,13 @@ satisfies the task's `required_evidence`.
   summary may report INCOMPLETE without changing the exit code (gate
   feedback is informational; the human reviewer decides at `apply` time).
 - `1` — no active claim found for `TASK_ID` (run `claim` first).
+
+With `--json`, additive proof receipts are returned as
+`claim_bound_command_proofs` and `hook_command_proofs`. Hook receipts include
+the exact claim ID, generation, actor, and semantic digest. Missing typed command
+requirements are listed in `missing_claim_bound_proofs`; descriptive legacy
+gaps remain separate in `missing_legacy_evidence` while the historical
+`evidence_gate` envelope is preserved.
 
 **Example:**
 
@@ -1085,8 +1107,8 @@ anvil submit T002 \
 
 **See also:** [`anvil claim`](#claim) for the prior step;
 [`anvil apply`](#apply) for human review;
-[`docs/evidence-buffer.md`](evidence-buffer.md) for the hook-captured
-evidence buffer that feeds `--output-file`.
+[`docs/evidence-buffer.md`](evidence-buffer.md) for the hook-captured evidence
+buffer, descriptive `--output-file` behavior, and claim-bound proof import.
 
 ### `anvil apply` { #apply }
 
@@ -1460,12 +1482,16 @@ anvil hook record-file-change \
 
 ### `anvil hook capture-evidence` { #hook-capture-evidence }
 
-**Synopsis:** Used by `hooks/capture-evidence.sh` (PostToolUse on Bash).
-Appends a JSON record of the bash command (command string, exit code,
-stdout excerpt, stderr excerpt, actor, timestamp) to
-`.anvil/.evidence-buffer/<CLAIM_ID>.json`. If no active claim is found
-for the actor, writes to `.evidence-buffer/orphan.json` with a recovery hint.
-Stdout/stderr excerpts are truncated to 4000 chars each.
+**Synopsis:** Used by the shell-free PostToolUse dispatcher and the legacy
+`hooks/capture-evidence.sh` wrapper. Appends an attributed JSON record of the
+command, exit code, output digest/excerpts, actor, claim identity, and timestamp
+to `.anvil/.evidence-buffer/<CLAIM_ID>.json`. The process must carry the work
+packet's exact `ANVIL_CLAIM_ID` and `ANVIL_ACTOR`; the active claim owner and
+persisted session must match. Missing, stale, or mismatched context writes only
+to `.evidence-buffer/orphan.json`. Stdout/stderr excerpts are truncated to 4000
+chars each, while the digest covers full output. Git claims bind their immutable
+repository context; non-Git claims bind the current task/PRD snapshot and omit
+repository identity.
 
 **Flags:**
 
@@ -1482,7 +1508,7 @@ Stdout/stderr excerpts are truncated to 4000 chars each.
 
 - `0` — always. Errors are silently swallowed.
 
-**Example (from `hooks/capture-evidence.sh`):**
+**Example (legacy wrapper; the shipped manifest dispatches directly):**
 
 ```bash
 anvil hook capture-evidence \
@@ -1493,8 +1519,13 @@ anvil hook capture-evidence \
   --actor "$SESSION_ID"
 ```
 
+`ANVIL_CLAIM_ID` is intentionally inherited rather than accepted as a command
+option: callers cannot select a claim by adding an untrusted argv value. The
+subcommand resolves the persisted active claim and derives all durable
+attribution from state.
+
 **See also:** [`docs/evidence-buffer.md`](evidence-buffer.md) for the buffer
-format and how `submit --output-file` consumes it;
+format, descriptive output attachment, and claim-bound proof import;
 `hooks/capture-evidence.sh`.
 
 ---
@@ -1547,10 +1578,15 @@ flag list; full prose treatment may follow in a later pass.
   self-loop. Use repeatable `--add SOURCE->TARGET` / `--remove SOURCE->TARGET`;
   the arrow form is required when either scoped task ID contains `:`. The
   `SOURCE:TARGET` shorthand remains supported only where both IDs are unscoped
-  and the separator is unambiguous. After prevalidation, each changed task is
-  persisted through a separate backend append. A later append failure can
-  therefore leave earlier task changes committed; successful multi-task
-  persistence is not atomic. If the backend refuses an individual append,
+  and the separator is unambiguous. Select the source-task owner with
+  `--prd <id>` (or `ANVIL_PRD`; a single/default PRD resolves when omitted).
+  Sources must belong to that PRD; targets may belong to another PRD. After
+  prevalidation, one `task.dependencies_batch_edited` event carries every
+  changed task plus its exact prior ordered dependencies. State revalidates
+  ownership, endpoints, stale preconditions, and the final graph under the
+  append lock, then commits every edit together. A no-op batch emits no event.
+  JSON success includes the resolved `prd_id` with `changed`, `added`, and
+  `removed`. If the backend refuses the atomic append,
   `deps --json` returns the fixed `event_rejected` message `dependency update
   was rejected by state validation.`; human output uses the same text. Neither
   surface exposes the raw backend reason. Malformed edges, unknown tasks,
@@ -1559,18 +1595,9 @@ flag list; full prose treatment may follow in a later pass.
   is capped at 10,000 total `--add` plus `--remove` edges; cap+1 is rejected
   with fixed `bad_request` output before state access.
 
-  Ownership-recovery refusals have an additional diagnostic contract. When a
-  legacy missing-`prd_id` `task.created` upsert cannot be safely recovered, the
-  backend exception text and its rejection line in `audit.jsonl` are each
-  capped at 4096 UTF-8 bytes. Raw actor, target, task/feature/owner identifiers,
-  payload values, and Pydantic validation details are replaced by stable
-  fingerprints. Retrying the same refused append produces the same refusal
-  reason and fingerprints; the refused append adds nothing to `events.jsonl`
-  and does not change the SQLite projection. When the audit destination is
-  writable, each retry adds a new timestamped rejection line to `audit.jsonl`.
-  An audit I/O failure is best-effort: it does not alter the stable refusal or
-  permit state mutation. Any earlier per-task append that already committed
-  remains committed.
+  Dependency-batch refusals are bounded and do not expose raw payload or
+  backend validation details. A rejected batch adds nothing to `events.jsonl`
+  and leaves the complete dependency projection unchanged.
 
 **Diagnostics and health** (read-only)
 
@@ -1591,6 +1618,12 @@ flag list; full prose treatment may follow in a later pass.
 - `anvil progress <task> <phase>` — Record a structured progress phase
   (`build`, `tests`, …) as a `progress.noted` audit event; task status
   never changes and no claim is required (`--detail`, `--actor`, `--json`).
+  For a context-bearing active claim, `--attestation-file <path>` instead
+  verifies and records one canonical claim-bound progress artifact. An accepted
+  artifact reports its digest, generation, and trust mode and is consumed once
+  by the next renewal; free-text `progress.noted` events never authorize renewal.
+  See [Attesting progress from an external writer](how-to/attesting-external-progress.md)
+  for the exact canonical envelope and a reproducible generator.
   `anvil status` shows each active claim's latest phase, elapsed time, and
   lease-expiry countdown.
 - `anvil drift` — Report intent/state/filesystem-git divergence (orphan

@@ -136,6 +136,18 @@ def prd_parse(
         raise typer.Exit(code=1) from exc
     markdown = source.markdown
 
+    def source_binding(revision: int) -> dict[str, object]:
+        """Bind this invocation's one exact source read to its PRD revision."""
+        return {
+            "source_text": source.markdown,
+            "source_sha256": source.source_sha256,
+            "source_size_bytes": source.source_size_bytes,
+            "source_encoding": source.source_encoding,
+            "source_revision": revision,
+            "provenance_state": "available",
+            "content_available": True,
+        }
+
     result = parse_prd(markdown, prd_id=parse_prd_id)
 
     if result.errors:
@@ -221,6 +233,7 @@ def prd_parse(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
+                **source_binding(1),
             }
 
             # Named PRD: stamp the partition so the backend writes ONLY this PRD's
@@ -323,10 +336,12 @@ def prd_parse(
                 if r.id not in new_by_id
             ]
 
+            new_revision = existing_prd.revision + 1
+
             revised_payload: dict[str, object] = {
                 "project_id": project_id,
                 "prd_id": stored_prd_id,
-                "revision": existing_prd.revision + 1,
+                "revision": new_revision,
                 "expected_status": existing_prd.status.value,
                 "is_default": existing_prd.is_default,
                 # Title is parsed source metadata just like summary/goals. A
@@ -351,6 +366,7 @@ def prd_parse(
                 "requirements_added": requirements_added,
                 "requirements_superseded": requirements_superseded,
                 "requirements_unchanged": requirements_unchanged,
+                **source_binding(new_revision),
             }
 
             draft = EventDraft(

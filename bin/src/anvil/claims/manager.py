@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import datetime
 import logging
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anvil.clock import Clock
@@ -42,7 +44,9 @@ from anvil.state.models import (
 
 if TYPE_CHECKING:
     from anvil.claims.metrics import AcceptRateMetrics
+    from anvil.claims.progress_attestation import LoadedProgressAttestation
     from anvil.state.backend import Backend
+    from anvil.state.models import ClaimProgressAttestation
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +103,18 @@ class ClaimResult:
     task: Task
     branch: str | None  # set by git_ops integration; None at this layer
     worktree_path: str | None
+
+
+@dataclass(frozen=True)
+class RenewResult:
+    """A lease-renewal result plus the progress fact that authorized it."""
+
+    claim: Claim
+    renewed: bool
+    progress_source: str
+    attestation_digest: str | None = None
+    attestation_generation: int | None = None
+    attestation_trust_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +178,7 @@ class ClaimManager:
         default_lease_minutes: float = 240,
         default_heartbeat_minutes: float = 5,
         max_claim_age_minutes: float | None = None,
+        project_root: Path | None = None,
     ) -> None:
         self._backend = backend
         self._clock = clock
@@ -175,6 +192,7 @@ class ClaimManager:
         self._session_id = session_discriminator()
         self._default_lease = default_lease_minutes
         self._default_heartbeat = default_heartbeat_minutes
+        self._project_root = project_root
         # B46: a wedged agent that keeps heartbeating must still lose its claim
         # eventually. ``renew()`` refuses once a claim is older than this, so the
         # lease then expires and the stale reaper takes it. None -> 4x the lease.
@@ -183,6 +201,36 @@ class ClaimManager:
             if max_claim_age_minutes is not None
             else default_lease_minutes * self.DEFAULT_MAX_CLAIM_AGE_MULTIPLIER
         )
+
+    def _actor_for_new_claim(self) -> tuple[str, str | None]:
+        """Return a validated NFC identity for a newly created claim.
+
+        Exact legacy identities remain usable for lifecycle lookup, but every
+        new claim must satisfy the current identity contract. SQLite repeats
+        the validation and collision check under its append lock.
+        """
+        existing = {claim.claimed_by for claim in self._backend.list_claims()}
+        existing.update(bundle.coordinator for bundle in self._backend.list_bundles())
+        from anvil.actors import canonicalize_new_actor
+
+        try:
+            candidate = canonicalize_new_actor(self._actor)
+        except ValueError as exc:
+            raise ClaimError(f"Invalid actor identity: {exc}") from exc
+        for persisted in existing:
+            try:
+                collision = unicodedata.normalize("NFC", persisted) == candidate
+            except UnicodeError:
+                collision = False
+            if collision and not (
+                persisted == candidate and self._actor == candidate
+            ):
+                raise ClaimError(
+                    "Actor identity collides with an existing owner after NFC "
+                    "normalization; use the exact persisted owner or choose a "
+                    "distinct actor."
+                )
+        return candidate, self._actor if candidate != self._actor else None
 
     # ------------------------------------------------------------------
     # Main flow
@@ -521,6 +569,10 @@ class ClaimManager:
                 f"Task '{task_id}' cannot be claimed: no PRD found. "
                 "Parse and review the PRD before claiming tasks."
             )
+        # Actor identity creation is part of the serialized claim operation.
+        # Exact persisted owners bypass the new-id policy; all new identities
+        # are canonicalized before any Claim/Event model is built.
+        self._actor, actor_input = self._actor_for_new_claim()
         now = self._clock.now()
         # Build a temporary Claim shell for the transition gate check.
         # The transition only uses claim for context in error messages; the
@@ -615,6 +667,50 @@ class ClaimManager:
 
         # All gates passed — generate IDs and timestamps.
         claim_id = self._generate_claim_id()
+        generation = (
+            self._backend.next_claim_generation(task_id)
+            if claim_type == ClaimType.task
+            else 1
+        )
+        attestation_context: dict[str, object] | None = None
+        if self._project_root is not None and claim_type == ClaimType.task:
+            from anvil.claims.progress_attestation import (
+                ProgressAttestationError,
+                capture_claim_progress_context,
+            )
+
+            project = self._backend.get_project()
+            if project is None:
+                raise ClaimError(
+                    "Cannot capture progress-attestation context: project not found."
+                )
+            try:
+                context = capture_claim_progress_context(
+                    self._project_root,
+                    project_id=project.id,
+                    claim_id=claim_id,
+                    claim_generation=generation,
+                    task_id=task_id,
+                    task_snapshot=task,
+                    prd_id=prd.id,
+                    prd_revision=prd.revision,
+                    actor=self._actor,
+                    claim_created_at=now,
+                    expected_paths=files,
+                )
+            except ProgressAttestationError as exc:
+                if exc.code in {
+                    "repository_unavailable",
+                    "git_unavailable",
+                }:
+                    context = None
+                else:
+                    raise ClaimError(
+                        f"Cannot capture progress-attestation context ({exc.code}): {exc}"
+                    ) from exc
+            if context is not None:
+                files = [entry.path for entry in context.expected_paths]
+                attestation_context = context.context_dict()
         claim = self._build_claim_model(
             claim_id=claim_id,
             task_id=task_id,
@@ -622,6 +718,8 @@ class ClaimManager:
             claim_type=claim_type,
             now=now,
             branch=branch,
+            generation=generation,
+            attestation_context=attestation_context,
         )
 
         # Emit claim.created event.
@@ -638,6 +736,8 @@ class ClaimManager:
         # the payload dict directly.
         claim_payload = claim.model_dump(mode="json")
         claim_payload["force"] = force
+        if actor_input is not None:
+            claim_payload["actor_input"] = actor_input
         claim_draft = EventDraft(
             timestamp=now,
             actor=self._actor,
@@ -784,12 +884,12 @@ class ClaimManager:
         by file path, not task id, which is why this looks them up per expected
         file rather than by task.
 
-        A claim that declared NO ``expected_files`` cannot be assessed this way,
-        so it is treated as progressing (conservative: never no-op a claim we
-        cannot measure).
+        A legacy claim that declared NO ``expected_files`` cannot be assessed
+        this way, so it remains permissive. A new context-bearing claim has an
+        explicit scope and requires an attestation even when that scope is empty.
         """
         if not claim.expected_files:
-            return True
+            return claim.attestation_context is None
         since = claim.last_heartbeat_at
         if since.tzinfo is None:
             since = since.replace(tzinfo=datetime.UTC)
@@ -806,7 +906,89 @@ class ClaimManager:
                     return True
         return False
 
+    def accept_progress_attestation(
+        self,
+        loaded: LoadedProgressAttestation,
+        *,
+        project_root: Path | None = None,
+    ) -> ClaimProgressAttestation:
+        """Verify and persist one claim-bound external progress attestation."""
+        from anvil.claims.progress_attestation import (
+            ClaimProgressContext,
+            ProgressAttestationError,
+            verify_progress_attestation,
+        )
+
+        payload = loaded.payload
+        claim = self._backend.get_claim(payload.claim_id)
+        if claim is None:
+            raise ProgressAttestationError(
+                "claim_not_found", "attestation claim was not found"
+            )
+        if claim.claimed_by != self._actor:
+            raise ProgressAttestationError(
+                "actor_mismatch", "only the exact active claim owner may attest progress"
+            )
+        if claim.attestation_context is None:
+            raise ProgressAttestationError(
+                "context_missing", "claim has no progress-attestation context"
+            )
+        project = self._backend.get_project()
+        if project is None:
+            raise ProgressAttestationError(
+                "project_not_found", "attestation project was not found"
+            )
+        root = project_root or self._project_root
+        if root is None:
+            raise ProgressAttestationError(
+                "project_root_missing", "project root is required for attestation"
+            )
+        context = ClaimProgressContext.from_context_dict(
+            claim.attestation_context.model_dump(mode="json"),
+            project_id=project.id,
+            claim_id=claim.id,
+            generation=claim.generation,
+            task_id=claim.task_id,
+            claimed_by=claim.claimed_by,
+            claim_created_at=claim.created_at,
+        )
+        now = self._clock.now()
+        verified = verify_progress_attestation(
+            loaded,
+            context,
+            project_root=root,
+            now=now,
+            claim_status=claim.status.value,
+            lease_expires_at=claim.lease_expires_at,
+            released_at=claim.released_at,
+        )
+        try:
+            self._backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=self._actor,
+                    action="progress.attested",
+                    target_kind="claim",
+                    target_id=claim.id,
+                    payload_json=verified.model_dump(),
+                )
+            )
+        except BackendError as exc:
+            raise ProgressAttestationError("attestation_rejected", str(exc)) from exc
+        persisted = self._backend.get_progress_attestation(
+            verified.loaded.semantic_digest
+        )
+        if persisted is None:  # pragma: no cover - backend contract violation
+            raise ProgressAttestationError(
+                "attestation_not_persisted", "accepted attestation was not persisted"
+            )
+        return persisted
+
     def renew(self, claim_id: str) -> Claim:
+        """Compatibility wrapper returning only the updated Claim model."""
+        return self.renew_with_result(claim_id).claim
+
+    def renew_with_result(self, claim_id: str) -> RenewResult:
         """Heartbeat a claim — extend the lease and record last_heartbeat_at.
 
         Gates:
@@ -820,9 +1002,9 @@ class ClaimManager:
             leaves the lease unchanged (no raise), so a wedged-but-heartbeating
             agent's lease still expires and the stale reaper reclaims the task.
 
-        Emits claim.renewed event. Returns the updated Claim as a model
-        (the Backend's handler persists the change; we return the locally-updated
-        version for the caller's convenience).
+        Emits claim.renewed when progress permits it. Returns a RenewResult
+        describing whether the lease changed and which progress fact authorized
+        the extension.
 
         Event payload (for welder's SQL handler):
 
@@ -838,7 +1020,7 @@ class ClaimManager:
             claim_id: ID of the Claim to renew.
 
         Returns:
-            The locally-updated Claim model (status, lease, heartbeat updated).
+            The renewal result and locally-updated Claim model.
 
         Raises:
             ClaimError: If claim not found, actor mismatch, non-active status,
@@ -909,43 +1091,75 @@ class ClaimManager:
                 "stops a stuck agent from holding a lease forever."
             )
 
-        # B46 part 2 — progress-gated heartbeat. A renew with no forward progress
-        # (no file_changed on an expected file since the last heartbeat) is a
-        # NO-OP: the lease is NOT extended, so a busy-but-useless agent that keeps
-        # heartbeating still loses the claim when the lease expires and the stale
-        # reaper reclaims it. Must not raise (the PostToolUse heartbeat stays
-        # quiet) and must not advance last_heartbeat_at, so the progress window
-        # accumulates until the next real change — return the claim unchanged.
-        if not self._has_progress_since(claim):
-            return claim
+        # Prefer a persisted external attestation. Its digest is carried on the
+        # renewal event so SQLite can consume it in the same transaction that
+        # extends the lease. If there is no attestation, retain the existing
+        # hook-based file progress behavior (and legacy empty-scope behavior).
+        pending = None
+        if claim.attestation_context is not None:
+            pending = self._backend.get_pending_progress_attestation(
+                claim.id, claim.generation
+            )
+
+        if pending is not None:
+            progress_source = "attestation"
+        elif self._has_progress_since(claim):
+            progress_source = (
+                "legacy_unmeasurable" if not claim.expected_files else "file_changed"
+            )
+        else:
+            return RenewResult(
+                claim=claim,
+                renewed=False,
+                progress_source="none",
+            )
 
         new_expires = now + datetime.timedelta(minutes=self._default_lease)
 
         # Emit claim.renewed event.
         # append() may return None for an idempotent no-op (already-renewed
         # with same expiry) — treat as success; the lease is already extended.
+        payload: dict[str, object] = {
+            "claim_id": claim_id,
+            "renewed_by": self._actor,
+            "last_heartbeat_at": now.isoformat(),
+            "lease_expires_at": new_expires.isoformat(),
+        }
+        if pending is not None:
+            payload.update(
+                {
+                    "attestation_digest": pending.semantic_digest,
+                    "attestation_generation": pending.generation,
+                    "attestation_trust_mode": pending.trust_mode,
+                }
+            )
         renew_draft = EventDraft(
             timestamp=now,
             actor=self._actor,
             action="claim.renewed",
             target_kind="claim",
             target_id=claim_id,
-            payload_json={
-                "claim_id": claim_id,
-                "renewed_by": self._actor,
-                "last_heartbeat_at": now.isoformat(),
-                "lease_expires_at": new_expires.isoformat(),
-            },
+            payload_json=payload,
         )
-        self._backend.append(renew_draft)
+        try:
+            self._backend.append(renew_draft)
+        except BackendError as exc:
+            raise ClaimError(f"Cannot renew claim '{claim_id}': {exc}") from exc
 
         # Return the locally-updated Claim model so callers don't need an
         # extra get_claim() round-trip.
-        return claim.model_copy(
-            update={
-                "last_heartbeat_at": now,
-                "lease_expires_at": new_expires,
-            }
+        updated = claim.model_copy(
+            update={"last_heartbeat_at": now, "lease_expires_at": new_expires}
+        )
+        return RenewResult(
+            claim=updated,
+            renewed=True,
+            progress_source=progress_source,
+            attestation_digest=(
+                pending.semantic_digest if pending is not None else None
+            ),
+            attestation_generation=(pending.generation if pending is not None else None),
+            attestation_trust_mode=(pending.trust_mode if pending is not None else None),
         )
 
     def check_conflicts(
@@ -1029,6 +1243,8 @@ class ClaimManager:
         claim_type: ClaimType,
         now: datetime.datetime,
         branch: str | None = None,
+        generation: int = 1,
+        attestation_context: dict[str, object] | None = None,
     ) -> Claim:
         """Construct a Claim Pydantic model from the current timestamp and params."""
         lease_expires = now + datetime.timedelta(minutes=self._default_lease)
@@ -1042,6 +1258,8 @@ class ClaimManager:
             worktree_path=None,
             session_id=self._session_id,
             expected_files=expected_files,
+            generation=generation,
+            attestation_context=attestation_context,
             created_at=now,
             lease_expires_at=lease_expires,
             last_heartbeat_at=now,

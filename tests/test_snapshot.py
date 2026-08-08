@@ -48,13 +48,14 @@ def _event(
     payload: dict[str, Any],
     *,
     event_id: str = "unused",
+    actor: str = "test",
     target_kind: str = "task",
     target_id: str = "T001",
 ) -> EventDraft:
     """Return an EventDraft (SL1-RR-1: id is assigned by backend, event_id ignored)."""
     return EventDraft(
         timestamp=_T0,
-        actor="test",
+        actor=actor,
         action=action,
         target_kind=target_kind,
         target_id=target_id,
@@ -205,7 +206,7 @@ def _build_populated_backend(state_dir: Path) -> SqliteBackend:
             "screenshots": [],
             "known_limitations": None,
         },
-        event_id=next(eid), target_id="T001",
+        event_id=next(eid), actor="agent-alpha", target_id="T001",
     ))
     applied_event_id = next(eid)
     b.append(_event(

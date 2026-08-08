@@ -29,6 +29,8 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v14     | Bundle delivery lineage (issue #171) | Adds a named `superseded_by` bundle reference while retaining checkpoint and reconciliation history. |
 | v15     | Bundle result projection (issue #171) | Adds authoritative `last_result_at` timing for applied reviewed/integrated/merged/completed transitions. |
 | v16     | Behavior-first PRD readiness | `prds` adds `assumptions TEXT NOT NULL DEFAULT '[]'`, storing typed, stable PRD assumptions alongside the canonical PRD state. The additive default preserves the prior meaning for every existing PRD: no recorded assumptions. |
+| v17     | Claim-bound progress attestations | `claims` adds monotonic `generation` and nullable immutable `attestation_context`; `claim_progress_attestations` records one pending, consumed, invalidated, or quarantined progress fact per claim generation. Legacy claims receive deterministic generations and remain unattestable when their context is NULL. |
+| v18     | Revision-bound PRD source provenance | `prds` adds exact source bytes plus digest, size, UTF-8 encoding, source revision, and explicit availability fields. Existing rows retain their lifecycle and ownership state but migrate as `legacy_unbound` with no fabricated source or digest. |
 
 Canonical PRD titles require no new schema migration: `prds.title` has existed
 since v7. Historical rows and legacy events that have no title remain `""`;
@@ -103,6 +105,30 @@ additive JSON projection of the typed assumptions captured in newer
 `prd.parsed` and `prd.revised` events. Older event payloads omit this optional
 field and are interpreted as `[]`, so replay preserves their historical
 meaning without rewriting the audit log.
+
+## Claim-bound progress attestations — v16 → v17 auto-upgrade
+
+The v17 migration adds `claims.generation`, nullable
+`claims.attestation_context`, and the `claim_progress_attestations` projection.
+Existing claims are assigned deterministic per-task generations ordered by
+creation time and claim ID. Their context remains NULL, so their historical
+renewal behavior is preserved and external attestations cannot be attached
+retroactively. New Git-backed standalone claims capture immutable repository,
+task, PRD, and expected-path context for one-use progress attestations.
+
+## Revision-bound PRD source provenance — v17 → v18 auto-upgrade
+
+The v18 migration adds nullable exact-source columns to `prds` together with
+explicit provenance and content-availability flags. Every pre-v18 PRD is marked
+`legacy_unbound`: its source bytes, digest, size, encoding, and source revision
+remain NULL. Anvil does not guess provenance from the current filesystem or
+fabricate a digest for historical state.
+
+PRD lifecycle, revision, feature ownership, task state, claims, and evidence
+are otherwise preserved. New provenance-bearing `prd.parsed` and `prd.revised`
+events update the complete source tuple in the same projection transaction as
+the corresponding PRD revision. Because exact PRD source bytes can be stored in
+`state.db`, treat database backups as containing the authored PRD content.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
@@ -203,13 +229,13 @@ migrate the backend. For operators who want the migration to be deliberate,
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
 every supported historical version through the current `SCHEMA_VERSION`
-(currently v16, including the final v15→v16 step) that already lives in
+(currently v18, including the final v17→v18 step) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v16
+Schema migration  : v3 -> v18
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -217,7 +243,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v16.
+Migrated state.db v3 -> v18.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 

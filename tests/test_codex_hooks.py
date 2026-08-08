@@ -25,6 +25,18 @@ hooks_mod = sys.modules["anvil.cli.hooks"]
 runner = CliRunner()
 
 
+def test_stop_gate_help_matches_runtime_actor_precedence() -> None:
+    result = runner.invoke(app, ["hook", "stop-gate", "--help"])
+
+    assert result.exit_code == 0, result.output
+    normalized = " ".join(result.output.split())
+    precedence = normalized[normalized.index("Precedence:") :]
+    assert precedence.index("--actor") < precedence.index("ANVIL_ACTOR")
+    assert precedence.index("ANVIL_ACTOR") < precedence.index("ANVIL_GATE_ACTOR")
+    assert precedence.index("ANVIL_GATE_ACTOR") < precedence.index("derived local")
+    assert "or 'agent'" not in normalized
+
+
 def test_dispatch_check_claim_extracts_payload(tmp_path, monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: True)
@@ -178,6 +190,37 @@ def test_dispatch_capture_evidence_ignores_non_verification_command(
         catch_exceptions=False,
     )
     assert r.exit_code == 0
+    assert calls == []
+
+
+def test_dispatch_capture_evidence_never_infers_passing_exit_code(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: True)
+    monkeypatch.setattr(
+        hooks_mod,
+        "hook_capture_evidence",
+        lambda **kwargs: calls.append("capture"),
+    )
+    for response in (
+        {"stdout": "ok"},
+        {"exit_code": "not-an-int"},
+        {"exit_code": "0"},
+        {"exit_code": 0.5},
+    ):
+        payload = {
+            "tool_input": {"command": "pytest -q"},
+            "tool_response": response,
+            "session_id": "sess-2",
+        }
+        result = runner.invoke(
+            app,
+            ["hook", "dispatch", "capture-evidence", "--cwd", str(tmp_path)],
+            input=json.dumps(payload),
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
     assert calls == []
 
 

@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from anvil.actors import ActorIdentityError, canonicalize_new_actor
 from anvil.bundles.eligibility import analyze_bundle_graph
 from anvil.clock import Clock
 from anvil.context.packets import (
@@ -30,6 +31,18 @@ from anvil.state.schema import SCHEMA_VERSION
 
 class BundleError(Exception):
     """A coordinator bundle operation failed its gate."""
+
+
+class BundleActorMismatch(BundleError):
+    """Exact coordinator mismatch whose identifiers require structured output."""
+
+    def __init__(self, *, bundle_id: str, owner: str, actual: str) -> None:
+        self.bundle_id = bundle_id
+        self.owner = owner
+        self.actual = actual
+        super().__init__(
+            f"Bundle '{bundle_id}' belongs to a different persisted coordinator."
+        )
 
 
 @dataclass(frozen=True)
@@ -125,13 +138,18 @@ class BundleManager:
 
     def preflight(self, bundle_id: str) -> ExecutionBundle:
         """Read-only claimability check used before any Git side effect."""
+        try:
+            self._actor = canonicalize_new_actor(self._actor)
+        except ActorIdentityError as exc:
+            raise BundleError(f"Invalid coordinator identity: {exc}") from exc
         bundle = self._backend.get_bundle(bundle_id)
         if bundle is None:
             raise BundleError(f"Bundle '{bundle_id}' not found.")
         if bundle.coordinator != self._actor:
-            raise BundleError(
-                f"Bundle '{bundle_id}' coordinator is '{bundle.coordinator}', "
-                f"not '{self._actor}'."
+            raise BundleActorMismatch(
+                bundle_id=bundle_id,
+                owner=bundle.coordinator,
+                actual=self._actor,
             )
         if bundle.status is not BundleStatus.planned:
             raise BundleError(

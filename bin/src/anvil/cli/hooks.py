@@ -6,6 +6,7 @@ Internal helpers invoked by the plugin's bash hooks.
 from __future__ import annotations
 
 import contextlib
+import datetime
 import io
 import json
 import logging
@@ -20,13 +21,20 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
+if TYPE_CHECKING:
+    from anvil.state.models import Claim
+
+from anvil.actors import ACTOR_AUTH_NOTICE
+from anvil.cli._actor_output import actor_flag_for_human, safe_actor_label
 from anvil.cli._helpers import (
     _resolve_state_dir,
     resolve_actor,
 )
+from anvil.naming import session_discriminator, task_claim_buffer_path
 
 hook_app = typer.Typer(
     name="hook",
@@ -613,6 +621,11 @@ def _payload_file_path(payload: dict[str, object]) -> str:
 
 
 def _payload_actor(payload: dict[str, object], default: str = "unknown") -> str:
+    # A claim-time ANVIL_ACTOR pin is the lifecycle continuation contract and
+    # must beat a harness-specific payload session proxy. Preserve the proxy
+    # fallback for unpinned legacy installs.
+    if any(name in os.environ for name in ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR")):
+        return resolve_actor()
     value = payload.get("session_id")
     actor = str(value).strip() if value is not None else ""
     return actor or default
@@ -790,10 +803,12 @@ def _dispatch_capture_evidence(payload: dict[str, object], cwd: Path | None) -> 
     command = str(tool_input.get("command") or "")
     if not command or not any(pattern in command for pattern in _VERIFICATION_PATTERNS):
         return
-    try:
-        exit_code = int(tool_response.get("exit_code") or 0)
-    except (TypeError, ValueError):
-        exit_code = 0
+    raw_exit_code = tool_response.get("exit_code")
+    # JSON exit status is an integer contract.  In particular, do not let
+    # ``int(0.5)`` turn malformed tool output into a passing observation.
+    if type(raw_exit_code) is not int:
+        return
+    exit_code = raw_exit_code
 
     tmp_paths: list[Path] = []
     try:
@@ -919,7 +934,8 @@ def hook_check_claim(
                     typer.echo(
                         f"[anvil:check-claim] WARNING: file '{file}' is "
                         f"in the scope of claim '{active_claim.id}' owned by "
-                        f"'{active_claim.claimed_by}', not '{actor}'.",
+                        f"{safe_actor_label(active_claim.claimed_by)}, not "
+                        f"{safe_actor_label(actor)}. {ACTOR_AUTH_NOTICE}",
                         err=True,
                     )
     except SystemExit:
@@ -991,25 +1007,29 @@ def hook_record_file_change(
     raise typer.Exit(code=0)
 
 
-def _resolve_capture_claim(active_claims: list, actor: str) -> str | None:
-    """Pick the claim a captured proof belongs to (evidence-contracts:T007).
+def _resolve_capture_claim(
+    claim: Claim | None,
+    actor: str,
+    session_id: str | None,
+    captured_at: datetime.datetime,
+) -> Claim | None:
+    """Resolve only an explicitly pinned active claim owned by ``actor``.
 
-    The retro incident: a claim made with an explicit ``--actor`` different
-    from the session-derived actor never accumulated CommandProofs, because
-    the hook required ``claimed_by == actor`` — silently disabling the
-    strongest audit feature anvil has. Now a single active claim OWNS every
-    capture regardless of actor; with several, an exact actor match
-    disambiguates; anything still ambiguous falls back to the orphan buffer
-    (never cross-attach a proof to the wrong claim).
+    Hook observations are never attributed from ambient database shape.  The
+    work packet supplies ``ANVIL_CLAIM_ID`` and ``ANVIL_ACTOR``; a missing,
+    stale, or wrong-owner pin stays descriptive orphan data.
     """
-    if not active_claims:
+    if claim is None:
         return None
-    if len(active_claims) == 1:
-        return active_claims[0].id
-    actor_matches = [c for c in active_claims if c.claimed_by == actor]
-    if len(actor_matches) == 1:
-        return actor_matches[0].id
-    return None  # zero or ambiguous actor matches among many claims → orphan
+    return (
+        claim
+        if claim.status.value == "active"
+        and claim.released_at is None
+        and claim.lease_expires_at > captured_at
+        and claim.claimed_by == actor
+        and (claim.session_id is None or claim.session_id == session_id)
+        else None
+    )
 
 
 @hook_app.command("capture-evidence")
@@ -1025,6 +1045,12 @@ def hook_capture_evidence(
         None,
         "--stderr-file",
         help="Path to a temp file containing the command's stderr.",
+    ),
+    output_sha256: str | None = typer.Option(  # noqa: B008
+        None,
+        "--output-sha256",
+        help="SHA-256 of the full stdout+stderr, computed before excerpting.",
+        hidden=True,
     ),
     actor: str = typer.Option(..., "--actor", help="Session actor / session_id."),  # noqa: B008
     cwd: Path | None = typer.Option(  # noqa: B008
@@ -1042,8 +1068,6 @@ def hook_capture_evidence(
     """
     # All failures are silently swallowed — hook must never break the session.
     try:
-        import datetime
-
         state_dir = _resolve_state_dir(cwd)
         if not state_dir.exists():
             raise typer.Exit(code=0)
@@ -1068,9 +1092,12 @@ def hook_capture_evidence(
             except OSError:
                 pass
 
-        output_sha256 = hashlib.sha256(
-            (stdout_raw + stderr_raw).encode("utf-8")
-        ).hexdigest()
+        if output_sha256 is None:
+            output_sha256 = hashlib.sha256(
+                (stdout_raw + stderr_raw).encode("utf-8")
+            ).hexdigest()
+        elif re.fullmatch(r"[0-9a-f]{64}", output_sha256) is None:
+            raise ValueError("output SHA-256 must be 64 lowercase hex characters")
 
         # Build the evidence record — a CommandProof-shaped buffer line that
         # ``anvil submit`` reconciles into Evidence.proofs. ``kind`` +
@@ -1091,7 +1118,10 @@ def hook_capture_evidence(
         buffer_dir = state_dir / ".evidence-buffer"
         buffer_dir.mkdir(exist_ok=True)
 
-        claim_id: str | None = None
+        matched_claim = None
+        project = None
+        task = None
+        prd = None
         try:
             from anvil.clock import SystemClock as _SystemClock
             from anvil.state.sqlite import SqliteBackend as _SqliteBackend
@@ -1105,25 +1135,97 @@ def hook_capture_evidence(
             )
             _backend.initialize()
             try:
-                claim_id = _resolve_capture_claim(
-                    list(_backend.list_active_claims()), actor
+                pinned_claim_id = os.environ.get("ANVIL_CLAIM_ID")
+                pinned_claim = (
+                    _backend.get_claim(pinned_claim_id)
+                    if pinned_claim_id is not None
+                    and task_claim_buffer_path(buffer_dir, pinned_claim_id) is not None
+                    else None
                 )
+                matched_claim = _resolve_capture_claim(
+                    pinned_claim,
+                    actor,
+                    session_discriminator(),
+                    now,
+                )
+                project = _backend.get_project()
+                if matched_claim is not None:
+                    task = _backend.get_task(matched_claim.task_id)
+                    prd = (
+                        _backend.get_prd_for_task(task)
+                        if task is not None
+                        else None
+                    )
             finally:
                 _backend.close()
         except Exception:  # noqa: BLE001
             pass  # if the DB is unavailable, fall through to orphan
 
-        if claim_id is not None:
-            buffer_file = buffer_dir / f"{claim_id}.json"
+        context = (
+            matched_claim.attestation_context
+            if matched_claim is not None
+            else None
+        )
+        if (
+            matched_claim is not None
+            and project is not None
+            and (context is not None or (task is not None and prd is not None))
+        ):
+            from anvil.state.models import (
+                HookCommandAttribution,
+                hook_command_semantic_digest,
+                task_snapshot_revision,
+            )
+
+            attribution = HookCommandAttribution(
+                project_id=project.id,
+                claim_id=matched_claim.id,
+                generation=matched_claim.generation,
+                claimed_by=matched_claim.claimed_by,
+                task_id=matched_claim.task_id,
+                task_revision=(
+                    context.task_revision
+                    if context is not None
+                    else task_snapshot_revision(task)
+                ),
+                prd_id=context.prd_id if context is not None else prd.id,
+                prd_revision=(
+                    context.prd_revision if context is not None else prd.revision
+                ),
+                repository_id=(
+                    context.repository_id if context is not None else None
+                ),
+                claim_start_sha=(
+                    context.claim_start_sha if context is not None else None
+                ),
+            )
+            semantic_digest = hook_command_semantic_digest(
+                attribution=attribution,
+                command=command,
+                exit_code=exit_code,
+                output_sha256=output_sha256,
+                captured_at=now,
+            )
+            record.update(
+                {
+                    "claim_id": matched_claim.id,
+                    "attribution": attribution.model_dump(mode="json"),
+                    "semantic_digest": semantic_digest,
+                }
+            )
+            buffer_file = task_claim_buffer_path(buffer_dir, matched_claim.id)
+            if buffer_file is None:
+                raise ValueError("claim id is not eligible for hook capture")
         else:
-            # No active claim found — write to orphan buffer. Recovery path
-            # uses the existing `submit --output-file` flag; the previously-
-            # referenced `evidence attach` subcommand did not exist (Critic-2
-            # flagged that following the error message produced Typer's
-            # "No such command 'evidence'" error).
+            # No active claim found — write to orphan buffer. Keep the
+            # diagnostic actionable without implying that a descriptive
+            # output excerpt is a typed command proof.
             record["note"] = (
-                "orphan — no active claim found at capture time; "
-                "pass this file via: anvil submit TASK_ID --output-file <THIS_FILE>"
+                "orphan — no exact active claim/owner/session hook pin with "
+                "valid task context was found at capture time; "
+                "--output-file can attach it only as a descriptive excerpt and "
+                "cannot satisfy required_proofs; rerun under an explicit claim "
+                "or import a claim-bound command-proof artifact"
             )
             buffer_file = buffer_dir / "orphan.json"
 
@@ -1144,7 +1246,10 @@ def hook_stop_gate(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor whose active claims to gate. Defaults to $ANVIL_GATE_ACTOR or 'agent'.",
+        help=(
+            "Actor whose active claims to gate. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1244,11 +1349,17 @@ def _warn_expiring_leases(
         marker = markers_dir / f"lease-warn-{claim.id}"
         if remaining < warn_minutes:
             if not marker.exists():
+                actor_flag = actor_flag_for_human(claim.claimed_by)
+                remedy = (
+                    f"'anvil renew {claim.id} {actor_flag}'"
+                    if actor_flag is not None
+                    else "the structured MCP renew_claim tool"
+                )
                 typer.echo(
                     f"[anvil:lease] WARNING: claim {claim.id} "
                     f"(task {claim.task_id}) lease expires in "
-                    f"{max(remaining, 0):.0f}m — commit progress or run "
-                    f"'anvil renew {claim.id}'.",
+                    f"{max(remaining, 0):.0f}m — commit progress or use "
+                    f"{remedy}. {ACTOR_AUTH_NOTICE}",
                     err=True,
                 )
                 markers_dir.mkdir(parents=True, exist_ok=True)
@@ -1262,7 +1373,10 @@ def hook_heartbeat(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor whose claim lease(s) to renew (default $ANVIL_GATE_ACTOR or 'agent').",
+        help=(
+            "Actor whose claim lease(s) to renew. Precedence: --actor > "
+            "ANVIL_ACTOR > ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     cwd: Path | None = typer.Option(  # noqa: B008
         None,

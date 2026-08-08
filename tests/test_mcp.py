@@ -20,10 +20,13 @@ We use a unified _data() helper that covers all four cases cleanly.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -51,6 +54,21 @@ from anvil.state.schema import SCHEMA_VERSION
 
 _UTC = UTC
 _T0 = datetime(2026, 5, 24, 18, 0, 0, tzinfo=_UTC)
+
+
+def _init_git_repo(root: Path) -> None:
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Anvil Tests"], cwd=root, check=True
+    )
+    (root / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True)
 
 # ---------------------------------------------------------------------------
 # Result accessor
@@ -167,15 +185,21 @@ def _add_prd(
     conn.close()
 
 
-def _add_feature(state_dir: Path, feat_id: str = "F001", title: str = "Test Feature") -> None:
+def _add_feature(
+    state_dir: Path,
+    feat_id: str = "F001",
+    title: str = "Test Feature",
+    *,
+    prd_id: str = "default",
+) -> None:
     """Insert a feature row directly via SQLite."""
     db_path = str(state_dir / "state.db")
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT OR IGNORE INTO features "
-        "(id, title, description, status, requirements, tasks) "
-        "VALUES (?, ?, 'desc', 'proposed', '[]', '[]')",
-        (feat_id, title),
+        "(id, prd_id, title, description, status, requirements, tasks) "
+        "VALUES (?, ?, ?, 'desc', 'proposed', '[]', '[]')",
+        (feat_id, prd_id, title),
     )
     conn.commit()
     conn.close()
@@ -286,6 +310,83 @@ def _set_required_evidence(
     )
     conn.commit()
     conn.close()
+
+
+def _set_required_command_proof(
+    state_dir: Path, task_id: str, command: str
+) -> None:
+    db_path = str(state_dir / "state.db")
+    conn = sqlite3.connect(db_path)
+    verification_json = json.dumps(
+        {
+            "commands": [command],
+            "manual_steps": [],
+            "required_evidence": [],
+            "required_proofs": [
+                {
+                    "kind": "command",
+                    "command": command,
+                    "passing_exit_codes": [0],
+                    "label": "tests pass",
+                }
+            ],
+        }
+    )
+    conn.execute(
+        "UPDATE tasks SET verification = ? WHERE id = ?",
+        (verification_json, task_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _claim_command_artifact_base64(
+    state_dir: Path, claim: dict[str, Any], command: str
+) -> str:
+    from anvil.claims.command_proof_artifact import claim_command_cwd_identity
+    from anvil.state.hashing import canonical_json_bytes
+
+    conn = sqlite3.connect(str(state_dir / "state.db"))
+    created_raw = conn.execute(
+        "SELECT created_at FROM claims WHERE id = ?", (claim["id"],)
+    ).fetchone()[0]
+    conn.close()
+    created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+    ended = datetime.now(UTC)
+    context = claim["attestation_context"]
+    output = b"1 passed\n"
+    cwd_identity = claim_command_cwd_identity(
+        state_dir.parent,
+        context["repository_id"],
+        ".",
+    )
+    payload = {
+        "schema_version": 1,
+        "project_id": "proj-test",
+        "claim_id": claim["id"],
+        "generation": claim["generation"],
+        "claimed_by": claim["claimed_by"],
+        "task_id": claim["task_id"],
+        "task_revision": context["task_revision"],
+        "prd_id": context["prd_id"],
+        "prd_revision": context["prd_revision"],
+        "repository_id": context["repository_id"],
+        "claim_start_sha": context["claim_start_sha"],
+        "cwd_relative": ".",
+        "cwd_identity": cwd_identity,
+        "command_base64": base64.b64encode(command.encode()).decode(),
+        "started_at": created.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "ended_at": ended.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "exit_code": 0,
+        "output_base64": base64.b64encode(output).decode(),
+        "output_sha256": hashlib.sha256(output).hexdigest(),
+    }
+    raw = canonical_json_bytes(
+        {"envelope_id": "ENV-MCP-1", "payload": payload},
+        max_bytes=262_144,
+        max_string_bytes=262_144,
+    )
+    return base64.b64encode(raw).decode()
 
 
 def _add_evidence(
@@ -941,10 +1042,57 @@ class TestBundleTools:
         assert superseded["bundle"]["superseded_by"] == "B001"
         assert claimed["bundle"]["status"] == "active"
         assert set(claimed["claim"]["member_claim_ids"]) == {"T001", "T002"}
+        assert claimed["actor_identity"]["actor"] == "coordinator"
+        continuation = claimed["continuation"]
+        assert continuation["renew"]["argv"][:4] == [
+            "anvil", "bundle", "renew", "B001",
+        ]
+        assert continuation["release"]["argv"][:4] == [
+            "anvil", "bundle", "release", "B001",
+        ]
+        assert continuation["progress"]["argv"][:4] == [
+            "anvil", "bundle", "progress", "B001",
+        ]
+        assert continuation["complete"]["argv"][:4] == [
+            "anvil", "bundle", "complete", "B001",
+        ]
+        assert "submit" not in continuation
         assert packet["format"] == "json"
         assert packet["content"]["bundle"]["id"] == "B001"
         assert progress["recorded"] is True
         assert progress["bundle"]["status"] == "active"
+
+    def test_create_bundle_preserves_raw_coordinator_for_nfc_collision_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001"],
+                        "coordinator": "caf\u00e9",
+                        "actor": "planner",
+                    },
+                )
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B002",
+                        "prd_id": "default",
+                        "task_ids": ["T002"],
+                        "coordinator": "cafe\u0301",
+                        "actor": "planner",
+                    },
+                )
+
+        with pytest.raises(ToolError, match="collides"):
+            _run(run())
 
     def test_existing_renew_release_tools_dispatch_bundle_ids(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1010,6 +1158,94 @@ class TestBundleTools:
         assert renewed["renewed"] is True
         assert released["released"] is True
         assert released["claim_id"].startswith("BC")
+
+    @pytest.mark.parametrize("legacy_owner", ["Cafe\u0301", "legacy\nowner"])
+    def test_exact_legacy_bundle_owner_can_continue_over_mcp(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_owner: str,
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def create_and_claim() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                    },
+                )
+                await client.call_tool(
+                    "claim_bundle",
+                    {"bundle_id": "B001", "actor": "coordinator"},
+                )
+
+        _run(create_and_claim())
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            conn.execute(
+                "UPDATE execution_bundles SET coordinator = ? WHERE id = 'B001'",
+                (legacy_owner,),
+            )
+            conn.execute(
+                "UPDATE bundle_claims SET claimed_by = ? WHERE bundle_id = 'B001'",
+                (legacy_owner,),
+            )
+            conn.execute(
+                "UPDATE claims SET claimed_by = ? WHERE bundle_claim_id IS NOT NULL",
+                (legacy_owner,),
+            )
+
+        async def continue_lifecycle() -> tuple[Any, Any, Any, Any]:
+            async with Client(mcp) as client:
+                packet = _data(
+                    await client.call_tool(
+                        "generate_bundle_packet",
+                        {"bundle_id": "B001", "actor": legacy_owner, "format": "json"},
+                    )
+                )
+                progress = _data(
+                    await client.call_tool(
+                        "submit_bundle_progress",
+                        {
+                            "bundle_id": "B001",
+                            "actor": legacy_owner,
+                            "phase": "legacy exact lookup",
+                        },
+                    )
+                )
+                renewed = _data(
+                    await client.call_tool(
+                        "renew_claim",
+                        {
+                            "task_id": "B001",
+                            "actor": legacy_owner,
+                            "target_kind": "bundle",
+                        },
+                    )
+                )
+                released = _data(
+                    await client.call_tool(
+                        "release_task",
+                        {
+                            "task_id": "B001",
+                            "actor": legacy_owner,
+                            "target_kind": "bundle",
+                        },
+                    )
+                )
+                return packet, progress, renewed, released
+
+        packet, progress, renewed, released = _run(continue_lifecycle())
+        assert packet["content"]["bundle"]["coordinator"] == legacy_owner
+        assert progress["recorded"] is True
+        assert renewed["actor_identity"]["actor"] == legacy_owner
+        assert released["actor_identity"]["actor"] == legacy_owner
 
     def test_failed_bundle_completion_does_not_append_progress(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1783,6 +2019,33 @@ class TestGetNextTask:
 # ===========================================================================
 
 class TestClaimTask:
+    def test_git_claim_exposes_attestation_context_and_continuation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "agent-x"},
+                    )
+                )
+
+        claim = _run(run())
+        assert claim["generation"] == 1
+        assert claim["attestation_context"]["claim_start_sha"]
+        assert claim["continuation"]["attest_progress"]["argv"][-4:-2] == [
+            "--attestation-file",
+            "<path>",
+        ]
+
     def test_happy_path_returns_claim_response(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
@@ -1804,6 +2067,15 @@ class TestClaimTask:
         assert "id" in claim
         assert "lease_expires_at" in claim
         assert claim["expected_files"] == ["src/foo.py"]
+        assert claim["actor_identity"]["actor"] == "agent-x"
+        assert claim["actor_identity"]["authenticated"] is False
+        assert "not cryptographic authentication" in claim["actor_identity"]["notice"]
+        assert claim["continuation"]["environment"] == {"ANVIL_ACTOR": "agent-x"}
+        assert claim["continuation"]["hook_environment"] == {
+            "ANVIL_ACTOR": "agent-x",
+            "ANVIL_CLAIM_ID": claim["id"],
+        }
+        assert claim["continuation"]["renew"]["argv"][-2:] == ["--actor", "agent-x"]
 
     def test_error_when_prd_is_draft(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Gate: owning PRD in 'draft' status → ToolError.
@@ -2097,6 +2369,131 @@ class TestGenerateWorkPacket:
 # ===========================================================================
 
 class TestSubmitProgress:
+    def test_attestation_is_accepted_and_consumed_by_next_renewal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+            async with Client(mcp) as client:
+                claim = _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {
+                            "task_id": "T001",
+                            "claimed_by": "agent-x",
+                            "expected_files": ["src/external.txt"],
+                        },
+                    )
+                )
+                context = claim["attestation_context"]
+                changed = tmp_path / "src" / "external.txt"
+                changed.parent.mkdir(parents=True)
+                changed.write_bytes(b"mcp external progress\n")
+                with sqlite3.connect(state_dir / "state.db") as conn:
+                    project_id = conn.execute(
+                        "SELECT id FROM projects LIMIT 1"
+                    ).fetchone()[0]
+                payload = {
+                    "schema_version": 1,
+                    "kind": "file",
+                    "project_id": project_id,
+                    "claim_id": claim["id"],
+                    "generation": claim["generation"],
+                    "task_id": "T001",
+                    "task_revision": context["task_revision"],
+                    "prd_id": context["prd_id"],
+                    "prd_revision": context["prd_revision"],
+                    "claimed_by": "agent-x",
+                    "repository_id": context["repository_id"],
+                    "claim_start_sha": context["claim_start_sha"],
+                    "commit_sha": context["claim_start_sha"],
+                    "path": "src/external.txt",
+                    "prior_sha256": None,
+                    "file_sha256": hashlib.sha256(changed.read_bytes()).hexdigest(),
+                    "issued_at": datetime.now(UTC).isoformat(),
+                }
+                raw = json.dumps(
+                    {"envelope_id": "mcp-progress-1", "payload": payload},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                accepted = _data(
+                    await client.call_tool(
+                        "submit_progress",
+                        {
+                            "task_id": "T001",
+                            "actor": "agent-x",
+                            "attestation_base64": base64.b64encode(raw).decode(),
+                            "cwd": str(tmp_path),
+                        },
+                    )
+                )
+                renewed = _data(
+                    await client.call_tool(
+                        "renew_claim", {"task_id": "T001", "actor": "agent-x"}
+                    )
+                )
+                return claim, accepted, renewed
+
+        claim, accepted, renewed = _run(run())
+        assert accepted["event_action"] == "progress.attested"
+        assert accepted["attestation"]["generation"] == claim["generation"]
+        assert renewed["renewed"] is True
+        assert renewed["progress"] == {
+            "source": "attestation",
+            "digest": accepted["attestation"]["digest"],
+            "generation": claim["generation"],
+            "trust_mode": "claim_owner_self_attested",
+        }
+
+    def test_attestation_input_is_strict_base64(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "submit_progress",
+                    {
+                        "task_id": "T001",
+                        "actor": "agent-x",
+                        "attestation_base64": "not base64!",
+                    },
+                )
+
+        with pytest.raises(ToolError, match="base64_invalid"):
+            _run(run())
+
+    def test_notes_remain_required_without_attestation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "submit_progress", {"task_id": "T001", "actor": "agent-x"}
+                )
+
+        with pytest.raises(ToolError, match="notes is required"):
+            _run(run())
+
     def test_happy_path_returns_recorded_true(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
@@ -2204,12 +2601,306 @@ class TestSubmitProgress:
         with pytest.raises(ToolError, match="not found|NOPE"):
             _run(run())
 
+    def test_claimed_task_refuses_progress_from_foreign_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="T001", claimed_by="owner"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "submit_progress",
+                    {"task_id": "T001", "actor": "other", "notes": "nope"},
+                )
+
+        with pytest.raises(ToolError, match="actor_mismatch|claim owner"):
+            _run(run())
+        events = (state_dir / "events.jsonl").read_text(encoding="utf-8")
+        assert "progress.noted" not in events
+
 
 # ===========================================================================
 # Tool 10: submit_completion_evidence
 # ===========================================================================
 
 class TestSubmitCompletionEvidence:
+    def test_expiry_during_artifact_decode_refuses_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.clock as clock_module
+        from anvil.claims import command_proof_artifact
+
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        command = "pytest -q"
+        _set_required_command_proof(state_dir, "T001", command)
+        monkeypatch.chdir(tmp_path)
+
+        async def claim_task() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "agent-x"},
+                    )
+                )
+
+        claim = _run(claim_task())
+        artifact = _claim_command_artifact_base64(state_dir, claim, command)
+        before_expiry = datetime.now(UTC) + timedelta(minutes=1)
+        expiry = before_expiry + timedelta(seconds=1)
+        after_expiry = expiry + timedelta(seconds=1)
+        conn = sqlite3.connect(str(state_dir / "state.db"))
+        conn.execute(
+            "UPDATE claims SET lease_expires_at = ? WHERE id = ?",
+            (expiry.isoformat(), claim["id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        class AdvancingClock:
+            current = before_expiry
+
+            def now(self) -> datetime:
+                return self.current
+
+        real_loader = command_proof_artifact.load_claim_command_proof_base64
+
+        def load_then_expire(*args, **kwargs):  # type: ignore[no-untyped-def]
+            loaded = real_loader(*args, **kwargs)
+            AdvancingClock.current = after_expiry
+            return loaded
+
+        monkeypatch.setattr(clock_module, "SystemClock", AdvancingClock)
+        monkeypatch.setattr(
+            command_proof_artifact,
+            "load_claim_command_proof_base64",
+            load_then_expire,
+        )
+
+        async def submit() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "submit_completion_evidence",
+                    {
+                        "task_id": "T001",
+                        "actor": "agent-x",
+                        "commands_run": [command],
+                        "files_changed": ["src/foo.py"],
+                        "command_proof_artifacts_base64": [artifact],
+                        "cwd": str(tmp_path),
+                    },
+                )
+
+        with pytest.raises(ToolError, match=r"command_proof_error\[claim_expired\]"):
+            _run(submit())
+        assert _task_status(state_dir, "T001") == "claimed"
+        conn = sqlite3.connect(str(state_dir / "state.db"))
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE task_id = 'T001'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM claims WHERE id = ?", (claim["id"],)
+            ).fetchone()[0] == "active"
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize("oversized_kind", ["item_count", "aggregate_bytes"])
+    def test_adapter_refuses_oversized_proof_batch_before_decode_or_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        oversized_kind: str,
+    ) -> None:
+        from anvil.claims import command_proof_artifact
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="in_progress")
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x"
+        )
+        monkeypatch.chdir(tmp_path)
+        calls = 0
+
+        def forbidden_loader(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            raise AssertionError("base64 artifact loader must not run")
+
+        monkeypatch.setattr(
+            command_proof_artifact,
+            "load_claim_command_proof_base64",
+            forbidden_loader,
+        )
+        artifacts = (
+            ["e30="] * 17
+            if oversized_kind == "item_count"
+            else ["A" * 800_000, "A" * 800_000]
+        )
+
+        async def submit() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "submit_completion_evidence",
+                    {
+                        "task_id": "T001",
+                        "actor": "agent-x",
+                        "commands_run": ["pytest -q"],
+                        "files_changed": ["src/foo.py"],
+                        "command_proof_artifacts_base64": artifacts,
+                        "cwd": str(tmp_path),
+                    },
+                )
+
+        with pytest.raises(ToolError, match=r"command_proof_error\[batch_"):
+            _run(submit())
+        assert calls == 0
+        assert _task_status(state_dir, "T001") == "in_progress"
+        conn = sqlite3.connect(str(state_dir / "state.db"))
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE task_id = 'T001'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM claims WHERE id = 'C001'"
+            ).fetchone()[0] == "active"
+        finally:
+            conn.close()
+
+    def test_claim_bound_command_proof_import_returns_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        command = "pytest -q"
+        _set_required_command_proof(state_dir, "T001", command)
+        monkeypatch.chdir(tmp_path)
+
+        async def claim_task() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "agent-x"},
+                    )
+                )
+
+        claim = _run(claim_task())
+        artifact = _claim_command_artifact_base64(state_dir, claim, command)
+
+        async def submit() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "submit_completion_evidence",
+                        {
+                            "task_id": "T001",
+                            "actor": "agent-x",
+                            "commands_run": [command],
+                            "files_changed": ["src/foo.py"],
+                            "command_proof_artifacts_base64": [artifact],
+                            "cwd": str(tmp_path),
+                        },
+                    )
+                )
+
+        response = _run(submit())
+        assert response["missing_claim_bound_proofs"] == []
+        assert response["hook_command_proofs"] == []
+        receipt = response["claim_bound_command_proofs"][0]
+        assert receipt["generation"] == 1
+        assert receipt["trust_mode"] == "claim_owner_self_attested"
+        assert receipt["command"] == command
+
+    def test_non_git_hook_capture_returns_claim_bound_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        command = "pytest -q"
+        _set_required_command_proof(state_dir, "T001", command)
+        monkeypatch.chdir(tmp_path)
+
+        async def claim_task() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "agent-x"},
+                    )
+                )
+
+        claim = _run(claim_task())
+        assert claim["attestation_context"] is None
+        monkeypatch.setenv("ANVIL_CLAIM_ID", claim["id"])
+        stdout_file = tmp_path / "stdout.txt"
+        stderr_file = tmp_path / "stderr.txt"
+        stdout_file.write_text("1 passed\n", encoding="utf-8")
+        stderr_file.write_text("", encoding="utf-8")
+        capture = CliRunner().invoke(
+            app,
+            [
+                "hook",
+                "capture-evidence",
+                "--command",
+                command,
+                "--exit-code",
+                "0",
+                "--stdout-file",
+                str(stdout_file),
+                "--stderr-file",
+                str(stderr_file),
+                "--actor",
+                "agent-x",
+            ],
+            catch_exceptions=False,
+        )
+        assert capture.exit_code == 0, capture.output
+
+        async def submit() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "submit_completion_evidence",
+                        {
+                            "task_id": "T001",
+                            "actor": "agent-x",
+                            "commands_run": [command],
+                            "files_changed": ["src/foo.py"],
+                            "cwd": str(tmp_path),
+                        },
+                    )
+                )
+
+        response = _run(submit())
+        receipt = response["hook_command_proofs"][0]
+        assert receipt["source"] == "hook_claim_bound"
+        assert receipt["claim_id"] == claim["id"]
+        assert receipt["generation"] == claim["generation"]
+        assert receipt["actor"] == "agent-x"
+        assert len(receipt["semantic_digest"]) == 64
+        assert response["missing_claim_bound_proofs"] == []
+
     def test_happy_path_transitions_task_to_needs_review(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
@@ -2231,6 +2922,8 @@ class TestSubmitCompletionEvidence:
         assert "evidence_id" in resp
         assert resp["evidence_id"].startswith("EV")
         assert resp["task_status"] == "needs_review"
+        assert resp["claim_bound_command_proofs"] == []
+        assert resp["hook_command_proofs"] == []
 
     def test_error_when_no_active_claim(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Must have an active claim before submitting evidence."""
@@ -2742,6 +3435,133 @@ class TestEditDependencies:
         }
         assert tool.parameters["properties"]["add"] == expected
         assert tool.parameters["properties"]["remove"] == expected
+        optional_string = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        }
+        assert tool.parameters["properties"]["prd_id"] == optional_string
+        assert tool.parameters["properties"]["cwd"] == optional_string
+        assert tool.parameters["required"] == ["actor"]
+
+    def test_edit_dependencies_named_prd_batch_is_atomic_and_noop_emits_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
+        _add_prd(state_dir, prd_id="v0.2", is_default=0)
+        _add_feature(state_dir, "v0.2:F001", prd_id="v0.2")
+        for task_id in ("v0.2:T900", "v0.2:T901", "v0.2:T902"):
+            _add_task(
+                state_dir,
+                task_id=task_id,
+                feature_id="v0.2:F001",
+                prd_id="v0.2",
+            )
+        events_path = state_dir / "events.jsonl"
+        events_before = events_path.read_text(encoding="utf-8").splitlines()
+        request = {
+            "actor": "agent-x",
+            "prd_id": "v0.2",
+            "cwd": str(tmp_path),
+            "add": [
+                ["v0.2:T901", "v0.2:T900"],
+                ["v0.2:T902", "v0.2:T900"],
+            ],
+        }
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("edit_dependencies", request))
+
+        first = _run(run())
+        assert first == {
+            "prd_id": "v0.2",
+            "changed": ["v0.2:T901", "v0.2:T902"],
+            "added": [
+                ["v0.2:T901", "v0.2:T900"],
+                ["v0.2:T902", "v0.2:T900"],
+            ],
+            "removed": [],
+        }
+        events_after = events_path.read_text(encoding="utf-8").splitlines()
+        assert len(events_after) == len(events_before) + 1
+        event = json.loads(events_after[-1])
+        assert event["action"] == "task.dependencies_batch_edited"
+        assert event["target_kind"] == "prd"
+        assert event["target_id"] == "v0.2"
+
+        second = _run(run())
+        assert second["changed"] == []
+        assert events_path.read_text(encoding="utf-8").splitlines() == events_after
+
+    def test_edit_dependencies_named_prd_rejects_other_prd_source(
+        self, tmp_path: Path
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
+        _add_prd(state_dir, prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001")
+        _add_task(state_dir, task_id="T002")
+        events_before = (state_dir / "events.jsonl").read_bytes()
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "edit_dependencies",
+                    {
+                        "actor": "agent-x",
+                        "prd_id": "v0.2",
+                        "cwd": str(tmp_path),
+                        "add": [["T002", "T001"]],
+                    },
+                )
+
+        with pytest.raises(
+            ToolError,
+            match="dependency update source is outside the selected PRD",
+        ):
+            _run(run())
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+
+    def test_edit_dependencies_named_prd_allows_cross_prd_target(
+        self, tmp_path: Path
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
+        _add_prd(state_dir, prd_id="v0.2", is_default=0)
+        _add_feature(state_dir)
+        _add_feature(state_dir, "v0.2:F001", prd_id="v0.2")
+        _add_task(state_dir, task_id="T001")
+        _add_task(
+            state_dir,
+            task_id="v0.2:T900",
+            feature_id="v0.2:F001",
+            prd_id="v0.2",
+        )
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool(
+                        "edit_dependencies",
+                        {
+                            "actor": "agent-x",
+                            "prd_id": "default",
+                            "cwd": str(tmp_path),
+                            "add": [["T001", "v0.2:T900"]],
+                        },
+                    )
+                )
+
+        response = _run(run())
+        assert response == {
+            "prd_id": "default",
+            "changed": ["T001"],
+            "added": [["T001", "v0.2:T900"]],
+            "removed": [],
+        }
+        assert _deps_of(state_dir, "T001") == ["v0.2:T900"]
 
     @pytest.mark.parametrize(
         ("add", "expected_message"),
@@ -2788,6 +3608,7 @@ class TestEditDependencies:
 
     def test_batch_add_applies_all_edges(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         for n in range(1, 6):
             _add_task(state_dir, task_id=f"T00{n}", status="ready")
@@ -2811,6 +3632,7 @@ class TestEditDependencies:
 
     def test_batch_cycle_rejected_no_partial_apply(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
@@ -2832,6 +3654,7 @@ class TestEditDependencies:
 
     def test_unknown_task_rejects_whole_batch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
@@ -2879,6 +3702,7 @@ class TestEditDependencies:
     ) -> None:
         """MCP never reflects attacker-sized edge or task values in ToolError."""
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         marker = f"SECRET_{case.upper()}_MCP_VALUE"
         hostile_id = marker + ("x" * 100_000)
@@ -2943,6 +3767,7 @@ class TestEditDependencies:
         import anvil.mcp_server as mcp_server
 
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         monkeypatch.chdir(tmp_path)
@@ -2990,6 +3815,7 @@ class TestEditDependencies:
     ) -> None:
         """Real stdio transport keeps ToolError and subprocess stderr bounded."""
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         marker = "SECRET_NON_STRING_STDIO"
@@ -3038,6 +3864,7 @@ class TestEditDependencies:
         import anvil.mcp_server as mcp_server
 
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
@@ -3093,6 +3920,7 @@ class TestEditDependencies:
             raise EventRejected(marker)
 
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="ready")
         _add_task(state_dir, task_id="T002", status="ready")
@@ -3714,6 +4542,134 @@ class TestGetProjectStatus:
 
 
 class TestParsePrd:
+    def test_provenance_is_byte_identical_to_cli_for_same_revisions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        cli_root = tmp_path / "cli"
+        mcp_root = tmp_path / "mcp"
+        cli_root.mkdir()
+        mcp_root.mkdir()
+        cli_state = _init_state_dir(cli_root)
+        mcp_state = _init_state_dir(mcp_root)
+        sources = [
+            _MINIMAL_PRD.replace("MCP Test Project", "MCP Cafe\u0301 🚀")
+            .replace("\n", "\r\n")
+            .encode(),
+            _MINIMAL_PRD_V2.replace("MCP Test Project", "MCP Cafe\u0301 🚀")
+            .replace("\n", "\r\n")
+            .encode(),
+        ]
+
+        monkeypatch.chdir(cli_root)
+        for source_bytes in sources:
+            (cli_state / "prd.md").write_bytes(source_bytes)
+            result = CliRunner().invoke(
+                app,
+                ["prd", "parse", "--json"],
+                catch_exceptions=False,
+            )
+            assert result.exit_code == 0, result.output
+
+        (mcp_state / "prd.md").write_bytes(sources[0])
+
+        async def run_mcp() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {"cwd": str(mcp_root)})
+                (mcp_state / "prd.md").write_bytes(sources[1])
+                await c.call_tool("parse_prd", {"cwd": str(mcp_root)})
+
+        _run(run_mcp())
+
+        provenance_keys = (
+            "source_text",
+            "source_sha256",
+            "source_size_bytes",
+            "source_encoding",
+            "source_revision",
+            "provenance_state",
+            "content_available",
+        )
+        for action, revision, source_bytes in (
+            ("prd.parsed", 1, sources[0]),
+            ("prd.revised", 2, sources[1]),
+        ):
+            cli_payload = _events_with_action(cli_state, action)[0]
+            mcp_payload = _events_with_action(mcp_state, action)[0]
+            cli_provenance = {key: cli_payload[key] for key in provenance_keys}
+            mcp_provenance = {key: mcp_payload[key] for key in provenance_keys}
+            cli_bytes = json.dumps(
+                cli_provenance,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            mcp_bytes = json.dumps(
+                mcp_provenance,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            assert mcp_bytes == cli_bytes
+            assert mcp_payload["source_text"].encode() == source_bytes
+            assert mcp_payload["source_sha256"] == hashlib.sha256(
+                source_bytes
+            ).hexdigest()
+            assert mcp_payload["source_revision"] == revision
+
+    def test_provenance_ingest_failure_preserves_prior_state_without_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        _run(parse())
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            prd_before = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd_before is not None
+
+        (state_dir / "prd.md").write_bytes(b"# Project: private\n\xffSECRET")
+        with pytest.raises(ToolError) as excinfo:
+            _run(parse())
+        message = str(excinfo.value)
+        assert "valid UTF-8" in message
+        assert "invalid start byte" not in message
+        assert "SECRET" not in message
+        assert str(tmp_path) not in message
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            prd_after = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert prd_after == prd_before
+
     def test_non_utf8_source_is_bounded_typed_and_mutation_free(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -6296,11 +7252,16 @@ class TestPlanTasksOrphanPrune:
 
 class TestRequireActor:
     """Each mutating tool that records an actor must reject empty or
-    whitespace-only actor values before touching the backend.
+    whitespace-only actor values before appending a mutation.
 
     Covers: claim_task (claimed_by), release_task, renew_claim,
     submit_progress, submit_completion_evidence, update_task_status.
     """
+
+    def test_preserves_leading_and_trailing_spaces_for_exact_lookup(self) -> None:
+        from anvil.mcp_server import _require_actor
+
+        assert _require_actor(" actor ") == " actor "
 
     # -----------------------------------------------------------------------
     # claim_task — uses `claimed_by` as the actor field
@@ -6343,6 +7304,145 @@ class TestRequireActor:
 
         with pytest.raises(ToolError, match="actor|empty|whitespace"):
             _run(run())
+
+    def test_claim_task_preserves_raw_actor_for_nfc_collision_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_task(state_dir, task_id="T002", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "claim_task",
+                    {"task_id": "T001", "claimed_by": "caf\u00e9"},
+                )
+                await client.call_tool(
+                    "claim_task",
+                    {"task_id": "T002", "claimed_by": "cafe\u0301"},
+                )
+
+        with pytest.raises(ToolError, match="collides"):
+            _run(run())
+
+        with sqlite3.connect(state_dir / "state.db") as conn:
+            rows = conn.execute(
+                "SELECT task_id, claimed_by FROM claims ORDER BY task_id"
+            ).fetchall()
+        assert rows == [("T001", "caf\u00e9")]
+
+    def test_claim_task_returns_canonical_actor_in_usable_continuation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[dict[str, Any], dict[str, Any]]:
+            async with Client(mcp) as client:
+                claimed = _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "cafe\u0301"},
+                    )
+                )
+                continuation_actor = claimed["continuation"]["renew"]["argv"][-1]
+                renewed = _data(
+                    await client.call_tool(
+                        "renew_claim",
+                        {"task_id": "T001", "actor": continuation_actor},
+                    )
+                )
+                return claimed, renewed
+
+        claimed, renewed = _run(run())
+        assert claimed["claimed_by"] == "caf\u00e9"
+        assert claimed["actor_identity"]["actor"] == "caf\u00e9"
+        assert claimed["continuation"]["renew"]["argv"][-1] == "caf\u00e9"
+        assert renewed["actor_identity"]["actor"] == "caf\u00e9"
+
+    @pytest.mark.parametrize("legacy_owner", ["", " \t "])
+    def test_exact_legacy_owner_can_complete_every_mcp_lifecycle_lookup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_owner: str,
+    ) -> None:
+        """T006 regression: creation rejects these values, but persisted legacy
+        owners remain exactly addressable by renew/release/progress/submit."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        for task_id, status in (
+            ("TREL", "claimed"),
+            ("TREN", "claimed"),
+            ("TPRO", "claimed"),
+            ("TSUB", "in_progress"),
+        ):
+            _add_task(state_dir, task_id=task_id, status=status)
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="TREL", claimed_by=legacy_owner
+        )
+        _add_active_claim(
+            state_dir,
+            claim_id="C002",
+            task_id="TREN",
+            claimed_by=legacy_owner,
+            minutes_until_expiry=30,
+        )
+        _add_active_claim(
+            state_dir, claim_id="C003", task_id="TPRO", claimed_by=legacy_owner
+        )
+        _add_active_claim(
+            state_dir, claim_id="C004", task_id="TSUB", claimed_by=legacy_owner
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[dict[str, Any], ...]:
+            async with Client(mcp) as c:
+                renewed = _data(
+                    await c.call_tool(
+                        "renew_claim", {"task_id": "TREN", "actor": legacy_owner}
+                    )
+                )
+                progressed = _data(
+                    await c.call_tool(
+                        "submit_progress",
+                        {
+                            "task_id": "TPRO",
+                            "actor": legacy_owner,
+                            "notes": "legacy exact lookup",
+                        },
+                    )
+                )
+                released = _data(
+                    await c.call_tool(
+                        "release_task", {"task_id": "TREL", "actor": legacy_owner}
+                    )
+                )
+                submitted = _data(
+                    await c.call_tool(
+                        "submit_completion_evidence",
+                        {
+                            "task_id": "TSUB",
+                            "actor": legacy_owner,
+                            "commands_run": ["pytest -q"],
+                            "files_changed": ["src/legacy.py"],
+                        },
+                    )
+                )
+                return renewed, progressed, released, submitted
+
+        renewed, progressed, released, submitted = _run(run())
+        assert renewed["actor_identity"]["actor"] == legacy_owner
+        assert progressed["recorded"] is True
+        assert released["released"] is True
+        assert submitted["task_status"] == "needs_review"
 
     # -----------------------------------------------------------------------
     # release_task

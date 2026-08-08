@@ -152,7 +152,8 @@ silent.
 **Payload extraction.** The script parses stdin JSON for:
 - `.tool_input.path` (Edit, Write) or `.tool_input.notebook_path`
   (NotebookEdit) — the file being modified.
-- `.session_id` — used as the actor proxy.
+- `.session_id` — used as the actor proxy only when neither `ANVIL_ACTOR` nor
+  legacy `ANVIL_GATE_ACTOR` is pinned. A pinned lifecycle actor wins.
 
 **Skip conditions (silent).** The script exits 0 with no output when any of
 the following hold:
@@ -220,10 +221,13 @@ tracks adding `flock` to harden concurrent appends.
 
 **Purpose.** After every Bash tool call, check whether the command matches
 a verification pattern (substring match against a hardcoded set). If yes,
-capture `stdout` / `stderr` / `exit_code` into the active claim's evidence
-buffer at `.anvil/.evidence-buffer/<claim-id>.json`. If no claim is
-held by the actor, the record lands in `orphan.json` and can be re-attached
-later via `anvil submit TASK_ID --output-file <FILE>`.
+capture `stdout` / `stderr` / `exit_code` into the explicitly pinned claim's
+evidence buffer at `.anvil/.evidence-buffer/<claim-id>.json`. The work packet
+supplies `ANVIL_CLAIM_ID` and `ANVIL_ACTOR`; the active claim, exact owner, and
+persisted session (when present) must all match. Otherwise the record lands in
+`orphan.json`. It can be preserved
+later with `anvil submit TASK_ID --output-file <FILE>` only as a descriptive
+excerpt; that flag cannot satisfy typed `required_proofs`.
 
 **Verification matcher (hardcoded, substring match).**
 - `pytest`
@@ -238,7 +242,14 @@ active task's `verification.commands` field — Phase 6+ moves the matcher
 to config. Commands that don't match any pattern are silently dropped (the
 hook exits 0 without writing).
 
-**Payload extraction.** A single `python3` round-trip parses
+**Default dispatcher.** The shipped manifest calls the shell-free Python
+dispatcher directly. It consumes the hook payload, preserves full output for
+the digest, and refuses to infer a passing result when `exit_code` is missing
+or is any JSON type other than an integer. The remaining details in this
+section describe the legacy shell
+wrapper retained for existing installations.
+
+**Legacy-wrapper payload extraction.** A single `python3` round-trip parses
 `.tool_input.command`, `.tool_response.exit_code`, `.tool_response.stdout`,
 `.tool_response.stderr`, and `.session_id`. The script previously spawned
 seven python processes for this; the consolidation to one was a
@@ -246,21 +257,28 @@ hook-perf-budget fix flagged by the hook-critic agent (see the script
 header comments).
 
 **Truncation.** Both `stdout` and `stderr` are truncated to 4000
-characters in the captured record. See
-[`docs/evidence-buffer.md`](evidence-buffer.md) for the full record
-schema and the `submit --output-file` recovery path.
+characters in the captured record. The legacy wrapper computes the digest over
+the full strings first, then transports only the bounded excerpts and digest to
+the CLI. See
+[`docs/evidence-buffer.md`](evidence-buffer.md) for the full record schema,
+the descriptive `submit --output-file` path, and claim-bound proof import.
 
 **Two-tier write strategy.**
 1. **Preferred path.** Shell out to `anvil hook capture-evidence
    --command CMD --exit-code N --stdout-file F --stderr-file F --actor
-   ACTOR`. The subcommand looks up the actor's active claim in `state.db`
-   and writes the record to `<claim-id>.json` (or `orphan.json` if no
-   active claim exists for that actor).
+   ACTOR` (the wrapper also supplies its hidden full-output digest). The
+   subcommand resolves only the exact active claim named by the
+   inherited `ANVIL_CLAIM_ID`, then checks the exact owner and persisted
+   session before writing an attributed record. It never chooses a sole or
+   actor-only active claim. Non-Git claims bind the current task and owning PRD
+   snapshot; Git claims retain their immutable repository binding.
 2. **Direct-write fallback.** If the CLI is absent, returns non-zero, or
    `mktemp` fails, a second `python3` call writes the record directly to
    `orphan.json`. The fallback cannot reach `state.db` from shell cheaply
-   enough to honour the <200ms budget, so it always writes to orphan; the
-   user re-attaches it later via `submit --output-file`.
+   enough to honour the <200ms budget, so it always writes to orphan. The
+   user may attach it later via `submit --output-file` as descriptive output,
+   but must rerun under a claim or import a valid claim-bound artifact to
+   satisfy typed proof requirements.
 
 **Side effects.** Appends one line to `.anvil/.evidence-buffer/<claim-id>.json`
 or `.anvil/.evidence-buffer/orphan.json`.
@@ -284,6 +302,10 @@ identity `anvil claim` used (`resolve_actor`: explicit arg > `$ANVIL_ACTOR` >
 `$ANVIL_GATE_ACTOR` > derived `$USER`/fingerprint/`"agent"` + session
 discriminator) so the heartbeat renews the lease the current session actually
 holds instead of a different actor's.
+
+All hook actor values are local coordination/audit attribution, not
+cryptographic authentication. Lease and gate continuation messages carry the
+exact owner through safely quoted `--actor` guidance or structured MCP fields.
 
 **Skip conditions (silent).** Exits 0 with no output when:
 - No anvil state exists anywhere (`.anvil/`, `bin/.anvil/`, or the HOME
@@ -348,14 +370,13 @@ add it to the matcher.
 Checks:
 - Run a command whose string contains one of the matcher substrings.
   `uv run pytest` matches (`pytest` substring). `make test` does not.
-- Confirm the actor has an active claim. Without one, the record lands in
-  `.anvil/.evidence-buffer/orphan.json` rather than the
-  per-claim file.
+- Apply the packet's structured `hook_environment` in the tool process. A
+  missing/stale `ANVIL_CLAIM_ID`, wrong `ANVIL_ACTOR`, or sibling session sends
+  the record to `.anvil/.evidence-buffer/orphan.json`.
 - Inspect `.anvil/.evidence-buffer/` for any `*.json` files.
 - For recovery from `orphan.json`, see
-  [`docs/evidence-buffer.md`](evidence-buffer.md) and use
-  `anvil submit TASK_ID --output-file
-  .anvil/.evidence-buffer/orphan.json`.
+  [`docs/evidence-buffer.md`](evidence-buffer.md). `--output-file` preserves
+  the text only; it does not create a typed proof.
 
 ### A hook is too slow
 
@@ -396,9 +417,8 @@ existing levers above are the supported workflow today.
 ## See also
 
 - [`architecture.md` → Hooks](architecture.md#hooks-5) — architectural placement of the hook layer.
-- [`evidence-buffer.md`](evidence-buffer.md) — the record schema, the
-  consume-and-rotate lifecycle, and the `submit --output-file` recovery
-  path used by `capture-evidence.sh`.
+- [`evidence-buffer.md`](evidence-buffer.md) — the record schema, lifecycle,
+  descriptive `submit --output-file` behavior, and claim-bound proof import.
 - [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) — the source of truth for
   event-to-script wiring.
 - [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py) —

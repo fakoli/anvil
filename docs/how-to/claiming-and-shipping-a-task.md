@@ -78,7 +78,10 @@ Claimed task 'T012' as 'alice'.
   Lease until: 2026-05-25T15:23:00+00:00
   Branch:      agent/t012-wire-submit-progress-evidence-buffer-flush
 
-Run `anvil renew C9F3A210` to extend the lease before it expires.
+  Actor:        'alice'
+  Actor identity is local coordination and audit attribution, not cryptographic authentication.
+  Pin for continuation: `export ANVIL_ACTOR=alice`
+Run `anvil renew C9F3A210 --actor alice` to extend the lease before it expires.
 ```
 
 ### Claim flags
@@ -87,13 +90,13 @@ Run `anvil renew C9F3A210` to extend the lease before it expires.
 |---|---|
 | `--worktree` | Also create a git worktree at `../wt-<task_id>/` so you can work on multiple claims in parallel without checkout-thrash. Skipped (with a stderr warning) if the working tree is dirty. |
 | `--force` | Override file-overlap and conflict-group warnings; the conflict event is still logged. Use sparingly. |
-| `--actor <name>` | Identity recorded on the claim. Defaults to `$USER`, then `agent`. |
+| `--actor <name>` | Local audit identity recorded on the claim. Precedence is explicit `--actor` > `ANVIL_ACTOR` > legacy `ANVIL_GATE_ACTOR` > derived `$USER`/signing fingerprint/`agent` plus a session discriminator. It is not cryptographic authentication. Claim output returns exact structured continuation argv/environment data. |
 | `--lease <minutes>` | Lease duration for this claim, overriding `default_lease_minutes` from project/global `config.yaml` (precedence: this flag > project config > global config > built-in default of `240`). |
 | `--branch <name>` | Attach the claim to an existing or caller-named branch instead of the generated `agent/<task_id>-<slug>` name. The branch is checked out if it exists, created otherwise, and the name is recorded on the claim. |
 
 ### What the claim records
 
-The `Claim` row carries `expected_files` (copied from `task.likely_files`), `claimed_by`, `lease_expires_at` (now + default lease), `last_heartbeat_at`, and `status="active"`. The `expected_files` list is what the `check-claim.sh` PreToolUse hook uses to warn when an Edit/Write targets a file outside the recorded scope.
+The `Claim` row carries `expected_files` (copied from `task.likely_files`), `claimed_by`, `lease_expires_at` (now + default lease), `last_heartbeat_at`, and `status="active"`. Git-backed claims also carry a monotonic generation and immutable attestation context for external progress. The `expected_files` list is what the `check-claim.sh` PreToolUse hook uses to warn when an Edit/Write targets a file outside the recorded scope.
 
 ### Git is not required
 
@@ -120,7 +123,10 @@ Sections in the markdown packet:
 - **Decisions affecting this task** — pre-filtered to ones that reference this task.
 - **Verification** — the commands, required-evidence list, and manual steps the gate will check against on apply.
 - **Active claim** — claim ID, lease expiry, branch, worktree (when a claim is held).
-- **Update protocol** — the exact `renew` and `submit` commands for this claim.
+- **Update protocol** — the exact `renew` and `submit` commands plus a
+  `hook_environment` containing `ANVIL_ACTOR` and `ANVIL_CLAIM_ID` for this
+  claim. Apply that environment in the process that invokes tools; absent or
+  mismatched hook context is deliberately orphaned rather than guessed.
 
 ### Two formats
 
@@ -138,7 +144,15 @@ Switch to the agent branch and edit the files in scope. Three hooks fire during 
 
 - **`check-claim.sh` (PreToolUse on Edit/Write/NotebookEdit)** — warns to stderr if the file you are about to edit is outside the claim's `expected_files`. Non-blocking by hook contract.
 - **`record-file-change.sh` (PostToolUse on Edit/Write/NotebookEdit)** — records the change against the active claim for orphan detection.
-- **`capture-evidence.sh` (PostToolUse on Bash)** — when the command matches a verification pattern (`pytest`, `npm test`, `cargo test`, `ruff`, `mypy`, ...) the output is buffered against the active claim. The buffer is consumed by `submit` and is documented in [`../evidence-buffer.md`](../evidence-buffer.md).
+- **`capture-evidence` dispatcher (PostToolUse on Bash)** — when the command
+  matches a verification pattern (`pytest`, `npm test`, `cargo test`, `ruff`,
+  `mypy`, ...) and the packet's hook environment exactly matches the active
+  claim owner/session, the output is buffered with claim-bound attribution.
+  Git claims use immutable repository context; non-Git claims bind the current
+  task/PRD snapshot and omit repository identity.
+  The legacy `capture-evidence.sh` wrapper delegates to this path. Missing or
+  stale context lands in `orphan.json`; see
+  [`../evidence-buffer.md`](../evidence-buffer.md).
 
 The first file change auto-transitions the task `claimed → in_progress`.
 
@@ -147,7 +161,7 @@ The first file change auto-transitions the task `claimed → in_progress`.
 A claim's lease expires after `default_lease_minutes` (the `ClaimManager` ships with `240` as the in-code default; the project-level override lives in `.anvil/config.yaml`). Renew it before expiry:
 
 ```bash
-anvil renew C9F3A210
+anvil renew C9F3A210 --actor alice
 ```
 
 Sample output:
@@ -158,7 +172,12 @@ Renewed claim 'C9F3A210'.
   Last heartbeat:  2026-05-25T15:23:00+00:00
 ```
 
-The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes`. Only the owning actor can renew an active claim — `renew` fails with `ClaimError` on actor mismatch or non-active status. Pass `renew C9F3A210 --lease <minutes>` to extend by a different duration than `default_lease_minutes` for this renewal.
+The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes` only when new hook-observed file progress or a pending verified attestation authorizes it. Only the exact persisted owner can renew an active claim. A mismatch refuses with the owner and structured `--actor` / `ANVIL_ACTOR` remedies. Pin `ANVIL_ACTOR` in the agent-loop environment, or carry the claim output's actor argument on each command. Pass `renew C9F3A210 --lease <minutes>` to override the renewal duration.
+
+When work is produced outside Anvil's hooks, follow [Attesting progress from an
+external writer](attesting-external-progress.md) to construct the exact `file`
+or `commit` envelope. An accepted artifact is consumed by one renewal;
+free-text progress notes never extend the lease.
 
 ### What happens if you do not renew
 
@@ -192,11 +211,12 @@ anvil submit T012 \
 | `--commands` | yes | Verification command that was run (e.g. `pytest tests/`). Repeatable — pass `--commands` once per command so a command containing a comma survives intact. |
 | `--files-changed` | yes | File path modified. Repeatable — pass `--files-changed` once per path. |
 | `--output-file` | no | Path to a file whose contents are read (truncated to 8000 chars) and stored as the output excerpt. |
+| `--command-proof-file` | no | Repeatable path to a bounded claim-bound typed command-proof artifact. The whole batch is validated before submission and each proof command must exactly match one `--commands` value. |
 | `--pr-url` | no | Pull request URL — checked by the evidence gate when `required_evidence` mentions "PR" or "pull request". |
 | `--commit-sha` | no | Commit SHA pinned to this submission. |
 | `--known-limitations` | no | Free-text caveats. Checked by the evidence-gate fallback when a required-evidence item does not match any structured field. |
 | `--screenshots` | no | Comma-separated paths to screenshot files — required when `required_evidence` mentions "screenshot" (the gate checks `evidence.screenshots` is non-empty). |
-| `--actor` | no | Submitting actor; defaults to `$USER`, then `agent`. |
+| `--actor` | no | Submitting actor under the same precedence as claim. When a claim is active, the exact persisted owner is required; foreign submission refuses before evidence is appended. |
 
 Back-compat: passing `--commands` (or `--files-changed`) exactly once still
 splits that single value on commas, so the older
@@ -204,7 +224,23 @@ splits that single value on commas, so the older
 repeatable form above is canonical and is the only form that survives a
 value with an embedded comma intact.
 
+`--output-file` is descriptive only. A log containing `exit: 0` does not
+become a typed proof and cannot satisfy `verification.required_proofs`.
+Use the hook-captured per-claim buffer or import a valid artifact with
+`--command-proof-file`. Imported artifacts are reported as
+`claim_owner_self_attested` unless their configured issuer signature verifies;
+they are never described as independently executed by Anvil.
+
+For `configured_issuer_verified` proofs, both the live append and later replay
+revalidate the issuer against `ANVIL_TRUST_LIST` or the default
+`~/.anvil/trust.txt`. Back up and restore that trust list with Anvil state, and
+retain the signing public key or fingerprint: missing or changed membership
+fails closed and aborts replay. `claim_owner_self_attested` replay is independent
+of the external trust list.
+
 `submit` locates the active claim for the task (one per task at most), constructs an `Evidence` row with a fresh ID (`EV` + 8 hex), emits an `evidence.submitted` event, and the backend handler atomically:
+
+Actor identity is local audit attribution, not cryptographic authentication. It prevents accidental cross-agent lifecycle mutation; it is not an authorization boundary.
 
 1. Inserts the `Evidence` row.
 2. Transitions the task `in_progress → needs_review`.
@@ -223,7 +259,7 @@ Run `anvil apply T012` when ready for human review.
 Evidence gate: PASSED — all required evidence present.
 ```
 
-If `task.verification.required_evidence` is unsatisfied you get:
+If descriptive `task.verification.required_evidence` is unsatisfied you get:
 
 ```text
 Evidence gate: INCOMPLETE — missing items for required_evidence:
@@ -232,6 +268,11 @@ Evidence gate: INCOMPLETE — missing items for required_evidence:
 ```
 
 Re-run `submit` with the missing flag (`--commands` for test output, `--pr-url` for PR link, etc.). Each `submit` creates a new `Evidence` row; the latest one is what `apply` reviews.
+
+Missing typed requirements are reported separately as
+`missing_claim_bound_proofs`. Supply a matching hook-observed proof or a valid
+claim-bound artifact; adding the expected words to `--output-file` cannot repair
+that gate.
 
 ### How the evidence gate matches
 

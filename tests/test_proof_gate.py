@@ -12,23 +12,27 @@ and ``anvil submit`` reconciles them into ``Evidence.proofs``.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import json
 from pathlib import Path
 
 from anvil.cli.packet_apply import _read_command_proofs
-from anvil.review.gates import evidence_complete
+from anvil.review.gates import evidence_complete, evidence_missing_details
 from anvil.state.models import (
     AssertionProof,
+    ClaimCommandProof,
     CommandProof,
     DiffProof,
     Evidence,
+    HookCommandAttribution,
     LinkProof,
     ProofKind,
     ProofRequirement,
     Task,
     Verification,
+    hook_command_semantic_digest,
 )
 
 _UTC = datetime.UTC
@@ -69,6 +73,48 @@ def _cmd_proof(command: str, exit_code: int) -> CommandProof:
     )
 
 
+def _claim_cmd_proof(command: str) -> ClaimCommandProof:
+    command_b64 = base64.b64encode(command.encode()).decode()
+    output_b64 = base64.b64encode(b"passed\n").decode()
+    output_hash = hashlib.sha256(b"passed\n").hexdigest()
+    return ClaimCommandProof.model_validate(
+        {
+            "kind": "claim_command",
+            "command": command,
+            "exit_code": 0,
+            "output_sha256": output_hash,
+            "captured_at": _NOW.isoformat(),
+            "semantic_digest": "b" * 64,
+            "trust_mode": "claim_owner_self_attested",
+            "issuer_id": None,
+            "evidence_core": {
+                "schema_version": 1,
+                "project_id": "P1",
+                "claim_id": "C1",
+                "generation": 1,
+                "claimed_by": "agent",
+                "task_id": "T1",
+                "task_revision": "c" * 64,
+                "prd_id": "default",
+                "prd_revision": 1,
+                "repository_id": "d" * 64,
+                "claim_start_sha": "e" * 40,
+                "cwd_relative": ".",
+                "cwd_identity": "f" * 64,
+                "command_base64": command_b64,
+                "started_at": (_NOW - datetime.timedelta(seconds=1))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "ended_at": _NOW.isoformat().replace("+00:00", "Z"),
+                "exit_code": 0,
+                "output_base64": output_b64,
+                "output_sha256": output_hash,
+            },
+            "issuer": None,
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # The non-gameable command requirement
 # ---------------------------------------------------------------------------
@@ -86,6 +132,15 @@ def test_passing_command_proof_satisfies_requirement() -> None:
     passed, missing = evidence_complete(
         _task(required_proofs=[_CMD_REQ]),
         _evidence(proofs=[_cmd_proof(_PYTEST, 0)]),
+    )
+    assert passed is True
+    assert missing == []
+
+
+def test_claim_bound_command_proof_satisfies_requirement() -> None:
+    passed, missing = evidence_complete(
+        _task(required_proofs=[_CMD_REQ]),
+        _evidence(proofs=[_claim_cmd_proof(_PYTEST)]),
     )
     assert passed is True
     assert missing == []
@@ -185,6 +240,13 @@ def test_missing_items_are_deduplicated_across_both_surfaces() -> None:
     assert missing == ["run tests"]  # deduped, not ["run tests", "run tests"]
 
 
+def test_missing_details_keep_descriptive_and_typed_gaps_separate() -> None:
+    task = _task(required_proofs=[_CMD_REQ], required_evidence=["screenshots"])
+    legacy, typed = evidence_missing_details(task, _evidence())
+    assert legacy == ["screenshots"]
+    assert typed == ["tests pass"]
+
+
 def test_command_requirement_without_command_is_rejected_at_construction() -> None:
     """A command-kind ProofRequirement with no command can never be satisfied,
     so it is refused at construction rather than failing silently."""
@@ -206,26 +268,51 @@ def _write_buffer(state_dir: Path, claim_id: str, records: list) -> None:
     (buf / f"{claim_id}.json").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _command_record(command: str, exit_code: int) -> dict:
+def _command_record(
+    command: str, exit_code: int, *, claim_id: str = "C00000001"
+) -> dict:
+    output_sha256 = hashlib.sha256(b"out").hexdigest()
+    attribution = HookCommandAttribution(
+        project_id="P1",
+        claim_id=claim_id,
+        generation=1,
+        claimed_by="agent",
+        task_id="T1",
+        task_revision="a" * 64,
+        prd_id="PRD-1",
+        prd_revision=1,
+        repository_id="b" * 64,
+        claim_start_sha="c" * 40,
+    )
+    semantic_digest = hook_command_semantic_digest(
+        attribution=attribution,
+        command=command,
+        exit_code=exit_code,
+        output_sha256=output_sha256,
+        captured_at=_NOW,
+    )
     return {
         "kind": "command",
         "timestamp": _NOW.isoformat(),
         "command": command,
         "exit_code": exit_code,
-        "output_sha256": hashlib.sha256(b"out").hexdigest(),
+        "output_sha256": output_sha256,
         "stdout_excerpt": "out",
         "stderr_excerpt": "",
         "actor": "agent",
+        "claim_id": claim_id,
+        "attribution": attribution.model_dump(mode="json"),
+        "semantic_digest": semantic_digest,
     }
 
 
 def test_read_command_proofs_parses_valid_records(tmp_path: Path) -> None:
     _write_buffer(
         tmp_path,
-        "C1",
+        "C00000001",
         [_command_record("uv run pytest -q", 0), _command_record("make build", 2)],
     )
-    proofs = _read_command_proofs(tmp_path, "C1")
+    proofs = _read_command_proofs(tmp_path, "C00000001")
     assert [(p.command, p.exit_code) for p in proofs] == [
         ("uv run pytest -q", 0),
         ("make build", 2),
@@ -234,8 +321,7 @@ def test_read_command_proofs_parses_valid_records(tmp_path: Path) -> None:
 
 
 def test_read_command_proofs_skips_partial_and_malformed(tmp_path: Path) -> None:
-    """A pre-SL-3 record (no output_sha256) or a torn line is skipped, never
-    fatal — submit must still succeed."""
+    """Historical unattributed and torn lines are skipped, never fatal."""
     partial = {
         "command": "old",
         "exit_code": 0,
@@ -243,12 +329,23 @@ def test_read_command_proofs_skips_partial_and_malformed(tmp_path: Path) -> None
     }  # no output_sha256
     _write_buffer(
         tmp_path,
-        "C1",
+        "C00000001",
         [_command_record("uv run pytest -q", 0), partial, "{not json"],
     )
-    proofs = _read_command_proofs(tmp_path, "C1")
+    proofs = _read_command_proofs(tmp_path, "C00000001")
     assert len(proofs) == 1
     assert proofs[0].command == "uv run pytest -q"
+
+
+def test_read_command_proofs_skips_cross_claim_and_tampered_records(
+    tmp_path: Path,
+) -> None:
+    wrong_claim = _command_record("pytest wrong", 0, claim_id="C00000002")
+    tampered = _command_record("pytest original", 0)
+    tampered["command"] = "pytest tampered"
+    _write_buffer(tmp_path, "C00000001", [wrong_claim, tampered, "[]"])
+
+    assert _read_command_proofs(tmp_path, "C00000001") == []
 
 
 def test_read_command_proofs_missing_buffer_is_empty(tmp_path: Path) -> None:

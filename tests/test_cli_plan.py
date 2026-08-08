@@ -516,6 +516,10 @@ def _seed_dep_tasks(tmp_path: Path, ids_with_deps: list[tuple[str, list[str]]]) 
     db_path = tmp_path / ".anvil" / "state.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
+        "INSERT OR REPLACE INTO prds (id, project_id, status, is_default) "
+        "SELECT 'default', id, 'reviewed', 1 FROM projects LIMIT 1"
+    )
+    conn.execute(
         "INSERT OR IGNORE INTO features "
         "(id, title, description, status, requirements, tasks) "
         "VALUES ('F001', 'Deps Feature', 'desc', 'proposed', '[]', '[]')"
@@ -566,8 +570,8 @@ def _status_of(tmp_path: Path, task_id: str) -> str:
 class TestBatchDepsApply:
     """A validated request can apply many dependency edges in one invocation."""
 
-    def test_named_prd_is_explicit_in_dependency_upsert_payload(self) -> None:
-        """Dependency upserts preserve named-PRD ownership in the event log."""
+    def test_named_prd_is_explicit_in_atomic_dependency_payload(self) -> None:
+        """The atomic event carries selected ownership and stale preconditions."""
         now = datetime(2026, 7, 21, tzinfo=UTC)
         task = Task(
             id="named:T002",
@@ -596,13 +600,28 @@ class TestBatchDepsApply:
                 added=[(task.id, "named:T001")],
                 removed=[],
             ),
+            prd_id="named",
             actor="test",
             clock=FrozenClock(now),
         )
 
         assert changed == [task.id]
-        assert backend.drafts[0].payload_json["prd_id"] == "named"
-        assert backend.drafts[0].payload_json["dependencies"] == ["named:T001"]
+        draft = backend.drafts[0]
+        assert draft.action == "task.dependencies_batch_edited"
+        assert draft.target_kind == "prd"
+        assert draft.target_id == "named"
+        assert draft.payload_json == {
+            "schema_version": 1,
+            "prd_id": "named",
+            "edits": [
+                {
+                    "task_id": "named:T002",
+                    "feature_id": "named:F001",
+                    "expected_dependencies": [],
+                    "dependencies": ["named:T001"],
+                }
+            ],
+        }
 
     def test_batch_deps_applies_ten_validated_edges(self, tmp_path: Path) -> None:
         """Ten add-edges across many tasks land in a single `deps` invocation."""
@@ -620,6 +639,7 @@ class TestBatchDepsApply:
         envelope = json.loads(result.output)
         assert envelope["ok"] is True
         assert envelope["command"] == "deps"
+        assert envelope["data"]["prd_id"] == "default"
         # All 10 edges added; 10 tasks (T002..T011) changed.
         assert len(envelope["data"]["added"]) == 10
         assert len(envelope["data"]["changed"]) == 10
@@ -896,6 +916,12 @@ class TestBatchDepsCycleRejected:
 
 class TestBatchDepsValidation:
     """Edge-spec parsing and empty-batch guards."""
+
+    def test_batch_deps_help_exposes_named_prd_selector(self) -> None:
+        result = runner.invoke(app, ["deps", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--prd" in result.output
+        assert "ANVIL_PRD" in result.output
 
     def test_batch_deps_no_edges_errors(self, tmp_path: Path) -> None:
         """`deps` with neither --add nor --remove is a usage error."""

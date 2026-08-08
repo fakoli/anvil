@@ -8,6 +8,18 @@ from typing import Any
 
 import typer
 
+from anvil.cli._actor_output import (
+    actor_flag_for_human,
+    actor_identity_data,
+    actor_mismatch_data,
+    actor_mismatch_message,
+    actor_notice_lines,
+    bundle_continuation_data,
+    bundle_continuation_lines,
+    continuation_data,
+    hook_env_for_human,
+    safe_actor_label,
+)
 from anvil.cli._helpers import (
     PRD_OPTION,
     _lease_manager_kwargs,
@@ -21,7 +33,27 @@ from anvil.cli._helpers import (
     resolve_actor,
     resolve_prd_id,
 )
-from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
+from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
+
+
+def _refuse_actor_mismatch(
+    command: str,
+    *,
+    owner: str,
+    actual: str,
+    action: str,
+    json_output: bool,
+) -> None:
+    message = actor_mismatch_message(owner=owner, actual=actual, action=action)
+    if json_output:
+        fail_with(
+            command,
+            message,
+            code="actor_mismatch",
+            extra=actor_mismatch_data(owner=owner, actual=actual),
+        )
+    typer.echo(f"Error: {message}", err=True)
+    raise typer.Exit(code=1)
 
 # ---------------------------------------------------------------------------
 # claim subcommand
@@ -63,7 +95,10 @@ def claim(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Claim actor; defaults to $USER or 'agent'.",
+        help=(
+            "Claim actor. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     lease_minutes: float | None = typer.Option(  # noqa: B008
         None,
@@ -145,11 +180,19 @@ def claim(
         _reap_stale_claims(backend)
 
         manager = ClaimManager(
-            backend, clock, actor=resolved_actor, **lease_kwargs
+            backend,
+            clock,
+            actor=resolved_actor,
+            project_root=resolved_cwd,
+            **lease_kwargs,
         )
 
         if bundle_mode:
-            from anvil.bundles.manager import BundleError, BundleManager
+            from anvil.bundles.manager import (
+                BundleActorMismatch,
+                BundleError,
+                BundleManager,
+            )
 
             execution_bundle = backend.get_bundle(task_id)
             if execution_bundle is None:
@@ -166,6 +209,16 @@ def claim(
             )
             try:
                 bundle_manager.preflight(task_id)
+            except BundleActorMismatch as exc:
+                if json_output:
+                    fail_with(
+                        "claim",
+                        str(exc),
+                        code="actor_mismatch",
+                        extra={"owner": exc.owner, "resolved_actor": exc.actual},
+                    )
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             except BundleError as exc:
                 if json_output:
                     fail("claim", str(exc), code="bundle_claim_error")
@@ -244,15 +297,26 @@ def claim(
                         "branch": recorded_branch,
                         "worktree": worktree_path,
                         "warnings": warnings,
+                        "actor_identity": actor_identity_data(
+                            bundle_result.claim.claimed_by
+                        ),
+                        "continuation": bundle_continuation_data(
+                            task_id, bundle_result.claim.claimed_by
+                        ),
                     },
                 )
                 return
             typer.echo(
-                f"Claimed bundle '{task_id}' as '{resolved_actor}' with "
+                f"Claimed bundle '{task_id}' as "
+                f"{safe_actor_label(bundle_result.claim.claimed_by)} with "
                 f"coordinator claim {bundle_result.claim.id}."
             )
             typer.echo(f"  Branch: {recorded_branch or '—'}")
             typer.echo(f"  Worktree: {worktree_path or '—'}")
+            for line in bundle_continuation_lines(
+                task_id, bundle_result.claim.claimed_by
+            ):
+                typer.echo(line)
             return
 
         # Gate: task must exist.
@@ -323,7 +387,7 @@ def claim(
             )
             for c in conflicts:
                 typer.echo(
-                    f"  Claim {c.other_claim_id} by '{c.other_actor}': "
+                    f"  Claim {c.other_claim_id} by {safe_actor_label(c.other_actor)}: "
                     f"overlapping files: {c.overlapping_files}",
                     err=True,
                 )
@@ -415,7 +479,8 @@ def claim(
                 ]
                 if shared_active:
                     others = ", ".join(
-                        f"{c.task_id} ({c.claimed_by})" for c in shared_active[:4]
+                        f"{c.task_id} ({safe_actor_label(c.claimed_by)})"
+                        for c in shared_active[:4]
                     )
                     note = (
                         f"{len(shared_active)} other active claim(s) share this "
@@ -564,6 +629,11 @@ def claim(
     reported_branch = claim_obj.branch or (
         branch_result.branch if branch_result.created else None
     )
+    if claim_obj.attestation_context is None:
+        warnings.append(
+            "Progress attestation unavailable: this project is not an accessible "
+            "Git repository; legacy file-change renewal remains available."
+        )
 
     if json_output:
         emit_success(
@@ -573,22 +643,57 @@ def claim(
                 "branch": reported_branch,
                 "worktree": worktree_path,
                 "warnings": warnings,
+                "actor_identity": actor_identity_data(claim_obj.claimed_by),
+                "continuation": continuation_data(
+                    task_id,
+                    claim_obj.id,
+                    claim_obj.claimed_by,
+                    attestation_context=(
+                        claim_obj.attestation_context.model_dump(mode="json")
+                        if claim_obj.attestation_context is not None
+                        else None
+                    ),
+                    generation=claim_obj.generation,
+                ),
             },
         )
         return
 
     # Confirmation output.
-    typer.echo(f"Claimed task '{task_id}' as '{resolved_actor}'.")
+    typer.echo(f"Claimed task '{task_id}' as {safe_actor_label(claim_obj.claimed_by)}.")
     typer.echo(f"  Claim ID:    {claim_obj.id}")
     typer.echo(f"  Lease until: {claim_obj.lease_expires_at.isoformat()}")
     if reported_branch:
         typer.echo(f"  Branch:      {reported_branch}")
     if worktree_path:
         typer.echo(f"  Worktree:    {worktree_path}")
+    if claim_obj.attestation_context is None:
+        typer.echo(
+            "Warning: progress attestation is unavailable because this project "
+            "is not an accessible Git repository."
+        )
     typer.echo("")
-    typer.echo(
-        f"Run `anvil renew {claim_obj.id}` to extend the lease before it expires."
-    )
+    for line in actor_notice_lines(claim_obj.claimed_by):
+        typer.echo(line)
+    hook_env = hook_env_for_human(claim_obj.claimed_by, claim_obj.id)
+    if hook_env is not None:
+        typer.echo(f"  Pin hook attribution: `{hook_env}`")
+    else:
+        typer.echo("  Use JSON/MCP structured hook_environment for hook attribution.")
+    if claim_obj.attestation_context is not None:
+        typer.echo(
+            f"External progress: `anvil progress {task_id} PHASE "
+            "--attestation-file PATH --actor ...`; an accepted attestation "
+            "is consumed by the next renewal."
+        )
+    actor_flag = actor_flag_for_human(claim_obj.claimed_by)
+    if actor_flag is not None:
+        typer.echo(
+            f"Run `anvil renew {claim_obj.id} {actor_flag}` to extend the lease "
+            "before it expires."
+        )
+    else:
+        typer.echo("Use the structured JSON/MCP renew argv to extend this lease.")
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +716,10 @@ def release(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor identity; defaults to $USER or 'agent'.",
+        help=(
+            "Actor identity. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
@@ -645,6 +753,14 @@ def release(
             None,
         )
         if bundle_claim is not None:
+            if not force and bundle_claim.claimed_by != resolved_actor:
+                _refuse_actor_mismatch(
+                    "release",
+                    owner=bundle_claim.claimed_by,
+                    actual=resolved_actor,
+                    action="Release",
+                    json_output=json_output,
+                )
             from anvil.bundles.manager import BundleError, BundleManager
 
             try:
@@ -662,13 +778,31 @@ def release(
             if json_output:
                 emit_success(
                     "release",
-                    {"claim_id": claim_id, "released": True, "reason": reason},
+                    {
+                        "claim_id": claim_id,
+                        "released": True,
+                        "reason": reason,
+                        "actor_identity": actor_identity_data(resolved_actor),
+                    },
                 )
                 return
             typer.echo(f"Released bundle claim '{claim_id}'.")
             return
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)
+        existing_claim = backend.get_claim(claim_id)
+        if (
+            existing_claim is not None
+            and not force
+            and existing_claim.claimed_by != resolved_actor
+        ):
+            _refuse_actor_mismatch(
+                "release",
+                owner=existing_claim.claimed_by,
+                actual=resolved_actor,
+                action="Release",
+                json_output=json_output,
+            )
         try:
             manager.release(claim_id, force=force, reason=reason)
         except ClaimError as exc:
@@ -682,13 +816,20 @@ def release(
     if json_output:
         emit_success(
             "release",
-            {"claim_id": claim_id, "released": True, "reason": reason},
+            {
+                "claim_id": claim_id,
+                "released": True,
+                "reason": reason,
+                "actor_identity": actor_identity_data(resolved_actor),
+            },
         )
         return
 
     typer.echo(f"Released claim '{claim_id}'.")
     if reason:
         typer.echo(f"  Reason: {reason}")
+    for line in actor_notice_lines(resolved_actor):
+        typer.echo(line)
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +842,10 @@ def renew(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor identity; defaults to $USER or 'agent'.",
+        help=(
+            "Actor identity. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     lease_minutes: float | None = typer.Option(  # noqa: B008
         None,
@@ -755,6 +899,14 @@ def renew(
             None,
         )
         if bundle_claim is not None:
+            if bundle_claim.claimed_by != resolved_actor:
+                _refuse_actor_mismatch(
+                    "renew",
+                    owner=bundle_claim.claimed_by,
+                    actual=resolved_actor,
+                    action="Renewal",
+                    json_output=json_output,
+                )
             from anvil.bundles.manager import BundleError, BundleManager
 
             try:
@@ -771,7 +923,14 @@ def renew(
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             if json_output:
-                emit_success("renew", {"claim": dump_model(updated), "renewed": True})
+                emit_success(
+                    "renew",
+                    {
+                        "claim": dump_model(updated),
+                        "renewed": True,
+                        "actor_identity": actor_identity_data(resolved_actor),
+                    },
+                )
                 return
             typer.echo(f"Renewed bundle claim '{claim_id}'.")
             typer.echo(f"  New lease until: {updated.lease_expires_at.isoformat()}")
@@ -781,8 +940,17 @@ def renew(
             backend, clock, actor=resolved_actor, **lease_kwargs
         )
         before = backend.get_claim(claim_id)
+        if before is not None and before.claimed_by != resolved_actor:
+            _refuse_actor_mismatch(
+                "renew",
+                owner=before.claimed_by,
+                actual=resolved_actor,
+                action="Renewal",
+                json_output=json_output,
+            )
         try:
-            updated = manager.renew(claim_id)
+            renewal = manager.renew_with_result(claim_id)
+            updated = renewal.claim
         except ClaimError as exc:
             if json_output:
                 fail("renew", str(exc), code="claim_error")
@@ -794,20 +962,41 @@ def renew(
     # B46 part 2 — renew() is a no-op (lease unchanged) when the claim shows no
     # progress since the last heartbeat. Detect that so we report it honestly
     # instead of announcing a fresh lease that was never granted.
-    extended = before is None or updated.lease_expires_at != before.lease_expires_at
+    extended = renewal.renewed
+    progress = {
+        "source": renewal.progress_source,
+        "digest": renewal.attestation_digest,
+        "generation": renewal.attestation_generation,
+        "trust_mode": renewal.attestation_trust_mode,
+    }
 
     if json_output:
-        emit_success("renew", {"claim": dump_model(updated), "renewed": extended})
+        emit_success(
+            "renew",
+            {
+                "claim": dump_model(updated),
+                "renewed": extended,
+                "progress": progress,
+                "actor_identity": actor_identity_data(resolved_actor),
+            },
+        )
         return
 
     if extended:
         typer.echo(f"Renewed claim '{claim_id}'.")
         typer.echo(f"  New lease until: {updated.lease_expires_at.isoformat()}")
         typer.echo(f"  Last heartbeat:  {updated.last_heartbeat_at.isoformat()}")
+        typer.echo(f"  Progress source: {renewal.progress_source}")
+        if renewal.attestation_digest is not None:
+            typer.echo(f"  Attestation:     {renewal.attestation_digest}")
+            typer.echo(f"  Generation:      {renewal.attestation_generation}")
+            typer.echo(f"  Trust mode:      {renewal.attestation_trust_mode}")
     else:
         typer.echo(f"Renew declined for '{claim_id}': no progress since last heartbeat.")
         typer.echo(f"  Lease still expires at: {updated.lease_expires_at.isoformat()}")
         typer.echo("  Change a file among the claim's expected files, or release and re-claim.")
+    for line in actor_notice_lines(resolved_actor):
+        typer.echo(line)
 
 
 # ---------------------------------------------------------------------------
@@ -963,7 +1152,9 @@ def next(  # noqa: A001
                 return
             if selected is not None:
                 typer.echo(f"Next recommended bundle: {selected.bundle_id}")
-                typer.echo(f"  Coordinator: {selected.coordinator}")
+                typer.echo(
+                    f"  Coordinator: {safe_actor_label(selected.coordinator)}"
+                )
                 typer.echo(
                     "  Throughput: "
                     f"tasks={selected.throughput['tasks']}/"
@@ -979,9 +1170,17 @@ def next(  # noqa: A001
             typer.echo("No claimable execution bundles available.")
             for entry in rollups:
                 for refusal in entry.refusals:
+                    detail = refusal["detail"]
+                    remediation = refusal["remediation"]
+                    if refusal["code"] == "coordinator":
+                        coordinator = safe_actor_label(entry.coordinator)
+                        detail = f"coordinator is {coordinator}; caller differs."
+                        remediation = (
+                            f"Run as {coordinator} or assign a replacement bundle."
+                        )
                     typer.echo(
                         f"  {entry.bundle_id} [{refusal['code']}]: "
-                        f"{refusal['detail']} Remediation: {refusal['remediation']}"
+                        f"{detail} Remediation: {remediation}"
                     )
             return
         scoped_ready_tasks = (
@@ -1096,7 +1295,7 @@ def next(  # noqa: A001
             )
         elif withheld_reason == "actor_below_floor":
             typer.echo(
-                f"No work offered: actor '{resolved_actor}' is below the "
+                f"No work offered: actor {safe_actor_label(resolved_actor)} is below the "
                 "accept-rate floor. Let current work clear review first."
             )
         elif withheld_reason == "risk_ceiling":
@@ -1119,7 +1318,8 @@ def next(  # noqa: A001
     for warning in conflict_warnings:
         typer.echo(
             f"  Conflict warning: files {', '.join(warning['files'])} overlap "
-            f"active claim {warning['claim_id']} ({warning['actor']})."
+            f"active claim {warning['claim_id']} "
+            f"({safe_actor_label(str(warning['actor']))})."
         )
     typer.echo("")
     typer.echo(f"Run `anvil claim {task.id}` to acquire the lease.")

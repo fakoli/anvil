@@ -6,6 +6,48 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-08-08
+
+### Added
+
+- **Explicit lifecycle actor continuity (#180).** Claim, renewal, release,
+  progress, submission, bundle, hook, work-packet, and MCP surfaces now carry
+  one canonical actor identity with shell-safe continuation data. New actor
+  identifiers are NFC-normalized and bounded, exact legacy owners remain
+  addressable, normalized aliases cannot collide, and the local actor field is
+  clearly identified as audit attribution rather than authentication.
+- **Claim-bound external progress attestations (#180).** Standalone Git-backed
+  claims now persist a generation and immutable repository/task/PRD context.
+  CLI and MCP callers can submit bounded canonical commit or file attestations;
+  the next renewal consumes one accepted attestation atomically and reports its
+  trust mode. Free-text progress remains audit-only, duplicate or stale
+  evidence cannot extend a lease, and legacy/non-Git claims retain their prior
+  renewal behavior. This introduced public API contract version 6 for the new
+  CLI flag and MCP request/response fields.
+- **Claim-bound typed command-proof import (#180).** CLI and MCP evidence
+  submission can now import bounded canonical command artifacts that bind exact
+  command and output bytes to the active actor, claim generation, repository,
+  working directory, task, and PRD revision. Mixed or stale batches fail before
+  the single atomic evidence transition, legacy hook proofs remain supported,
+  and descriptive `--output-file` content can no longer be mistaken for a typed
+  proof. The public API contract advances to version 7.
+- **Atomic named-PRD dependency edits (#180).** CLI and MCP dependency batches
+  now select an explicit PRD, validate source ownership and the complete final
+  graph, and persist every edit in one replay-safe event and transaction. The
+  public API contract advances to version 8.
+- **Revision-bound PRD source provenance.** Parse and revision events now retain
+  exact bounded UTF-8 source bytes, digest, size, encoding, and revision across
+  CLI, MCP, migration, and events-only replay. Legacy rows remain explicitly
+  unavailable rather than receiving fabricated provenance; schema version is 18.
+
+### Fixed
+
+- **Claim-isolated hook command capture (#180).** Hook-observed command proofs
+  now require an explicit claim pin and retain digest-covered actor, generation,
+  task, PRD, and repository attribution. Unscoped, stale, wrong-owner, or
+  wrong-session captures stay in the orphan buffer instead of being inferred
+  from the sole active claim or an actor-only match.
+
 ## [0.6.3] - 2026-08-08
 
 ### Fixed

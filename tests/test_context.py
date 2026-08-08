@@ -11,9 +11,13 @@ Coverage targets (>= 85%):
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
+import anvil.context.packets as packets
 from anvil.config import Config
 from anvil.context.packets import (
     FAST_LANE_REQUIRED_EVIDENCE_MAX,
@@ -126,6 +130,8 @@ def _make_claim(
     task_id: str = "T001",
     actor: str = "agent-alpha",
     now: datetime = _T0,
+    attestation_context: dict[str, object] | None = None,
+    generation: int = 1,
 ) -> Claim:
     return Claim(
         id=claim_id,
@@ -136,6 +142,8 @@ def _make_claim(
         branch="feat/t001-implement-the-thing",
         worktree_path=None,
         expected_files=["src/auth.py"],
+        generation=generation,
+        attestation_context=attestation_context,
         created_at=now,
         lease_expires_at=now + timedelta(hours=1),
         last_heartbeat_at=now,
@@ -186,6 +194,34 @@ def test_relevant_assumptions_include_global_and_feature_scope_only() -> None:
 
 
 class TestRenderPacket:
+    def test_attestation_context_adds_structured_and_human_continuation(self) -> None:
+        context = {
+            "repository_id": "a" * 64,
+            "claim_start_sha": "b" * 40,
+            "prd_id": "default",
+            "prd_revision": 2,
+            "task_revision": "c" * 64,
+            "expected_paths": [
+                {"path": "src/auth.py", "baseline_sha256": "d" * 64}
+            ],
+        }
+        packet = render_packet(
+            _make_task(),
+            active_claim=_make_claim(
+                attestation_context=context,
+                generation=3,
+            ),
+        )
+
+        assert "--attestation-file" in packet.markdown
+        continuation = packet.json_data["update_protocol"]["continuation"]
+        assert continuation["attest_progress"]["argv"][0:2] == ["anvil", "progress"]
+        assert continuation["attestation"]["generation"] == 3
+        assert continuation["attestation"]["context"] == context
+        assert "free-text progress notes never" in continuation["attestation"][
+            "renewal_contract"
+        ]
+
     def test_minimal_task_renders(self) -> None:
         """Task with no feature, no deps, no decisions, no claim → packet with
         title, status, acceptance criteria, and verification commands.
@@ -495,6 +531,20 @@ class TestRenderPacketJSON:
         up = packet.json_data["update_protocol"]
         assert "renew_command" in up
         assert "C001" in up["renew_command"]
+        assert "--actor" in up["renew_command"]
+        assert "agent-alpha" in up["renew_command"]
+        assert up["actor_identity"]["authenticated"] is False
+        assert up["continuation"]["environment"] == {
+            "ANVIL_ACTOR": "agent-alpha"
+        }
+        assert up["continuation"]["hook_environment"] == {
+            "ANVIL_ACTOR": "agent-alpha",
+            "ANVIL_CLAIM_ID": "C001",
+        }
+        assert up["continuation"]["submit"]["argv"][-2:] == [
+            "--actor",
+            "agent-alpha",
+        ]
 
     def test_json_update_protocol_no_renew_command_when_no_claim(self) -> None:
         """Without a claim, update_protocol does not have 'renew_command'."""
@@ -502,6 +552,46 @@ class TestRenderPacketJSON:
         packet = render_packet(task)
         up = packet.json_data["update_protocol"]
         assert "renew_command" not in up
+
+    @pytest.mark.parametrize("shell", ["posix", "powershell"])
+    def test_legacy_shell_commands_quote_actor_for_current_platform(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        shell: str,
+    ) -> None:
+        actor = "O'Brien $HOME; Write-Output nope"
+        monkeypatch.setattr(packets, "_packet_shell", lambda: shell)
+
+        packet = render_packet(_make_task(), active_claim=_make_claim(actor=actor))
+        protocol = packet.json_data["update_protocol"]
+        submit = protocol["submit_command"]
+        renew = protocol["renew_command"]
+
+        if shell == "powershell":
+            quoted = "'O''Brien $HOME; Write-Output nope'"
+            assert f"--actor {quoted}" in submit
+            assert f"--actor {quoted}" in renew
+            assert f"$env:ANVIL_ACTOR = {quoted}" in packet.markdown
+            assert "$env:ANVIL_CLAIM_ID = 'C001'" in packet.markdown
+        else:
+            quoted = packets.quote_posix_actor(actor)
+            assert f"--actor {quoted}" in submit
+            assert f"--actor {quoted}" in renew
+            assert shlex.split(quoted) == [actor]
+            assert f"export ANVIL_ACTOR={quoted}" in packet.markdown
+            assert "ANVIL_CLAIM_ID=C001" in packet.markdown
+
+    def test_unsafe_legacy_actor_uses_only_structured_continuation(self) -> None:
+        actor = "legacy\nowner"
+        packet = render_packet(_make_task(), active_claim=_make_claim(actor=actor))
+        protocol = packet.json_data["update_protocol"]
+
+        assert "submit_command" not in protocol
+        assert "renew_command" not in protocol
+        assert protocol["actor_identity"]["actor"] == actor
+        assert protocol["continuation"]["submit"]["argv"][-1] == actor
+        assert actor not in packet.markdown
+        assert "structured submit argv" in packet.markdown
 
     def test_json_decisions_list_correct_length(self) -> None:
         """json_data['decisions'] has one entry per decision passed in."""

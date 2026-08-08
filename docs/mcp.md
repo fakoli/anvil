@@ -415,14 +415,14 @@ only rewrites dependency lists, so no claim state is touched.
 
 `add` / `remove` are `[source, target]` pairs meaning *source depends on target*. The whole
 batch is validated up front before anything is written: any unknown task ID, self-dependency,
-or resulting cycle rejects the entire batch with no mutation. After validation,
-`edit_dependencies` emits a separate `task.created` upsert for each changed task. Those
-appends are committed separately, so a later append failure can leave earlier task changes
-committed; persistence is not yet whole-batch atomic. Task status is preserved because each
-upsert deliberately omits `status` from its write, so a claimed or in-progress task's
-dependency list can be edited without regressing its status. True persistence atomicity
-requires the planned single batch event with prior-dependency/graph-cursor revalidation.
-If an individual backend append is rejected, MCP returns the fixed ToolError
+or resulting cycle rejects the entire batch with no mutation. `prd_id` selects the source-task
+owner (or resolves the single/default PRD when omitted), and `cwd` selects the project root.
+Sources must belong to the selected PRD; dependency targets may belong to another PRD.
+After validation, one `task.dependencies_batch_edited` event carries every changed task and
+its exact prior ordered dependencies. State revalidates ownership, endpoints, stale
+preconditions, and the final graph while holding the append lock, then commits all edits
+together. A no-op request emits no event, and task status is never changed. If the atomic
+append is rejected, MCP returns the fixed ToolError
 `dependency update was rejected by state validation.`; the CLI returns the same message
 with JSON error code `event_rejected`. Backend validation details are not exposed.
 Malformed pairs, unknown tasks, self-loops, and cycles also return fixed, bounded
@@ -438,6 +438,8 @@ total `add` plus `remove` pairs, and cap+1 receives a fixed ToolError.
 | `actor`   | `string`                 | yes      |         |
 | `add`     | `list[list[string]] \| null` | no   | `null`  |
 | `remove`  | `list[list[string]] \| null` | no   | `null`  |
+| `prd_id`  | `string \| null`         | no       | single/default PRD |
+| `cwd`     | `string \| null`         | no       | server launch directory |
 
 At least one of `add` / `remove` must contain an edge, or the tool raises `ToolError`.
 
@@ -445,13 +447,15 @@ At least one of `add` / `remove` must contain an edge, or the tool raises `ToolE
 
 ```json
 {
+  "prd_id": "default",
   "changed": ["T003"],
   "added": [["T003", "T001"]],
   "removed": []
 }
 ```
 
-`changed` lists every task whose dependency set was actually mutated; `added` / `removed`
+`prd_id` is the resolved source-task owner. `changed` lists every task whose dependency set
+was actually mutated; `added` / `removed`
 are the `[source, target]` edges that took effect — no-op edges (e.g. re-adding an edge that
 already exists) are excluded from both.
 
@@ -460,23 +464,17 @@ already exists) are excluded from both.
 - `ToolError` — no edges supplied (both `add` and `remove` empty).
 - `ToolError` — malformed edge (not a 2-element `[source, target]` pair).
 - `ToolError` — unknown task referenced by an edge.
+- `ToolError` — a source task is outside the selected PRD.
 - `ToolError` — self-dependency (`source == target`).
 - `ToolError` — the batch would introduce a dependency cycle.
 - `ToolError` — state directory not found.
-- `ToolError` — an individual backend append was rejected. MCP returns the fixed message
+- `ToolError` — the atomic backend append was rejected. MCP returns the fixed message
   `dependency update was rejected by state validation.` without the raw backend reason;
   the CLI uses the same text and JSON error code `event_rejected`.
 
-When the rejected append is a legacy `task.created` ownership-recovery refusal, the
-backend exception text and its rejection line in `audit.jsonl` are each capped at 4096
-UTF-8 bytes. Raw actor, target, task/feature/owner identifiers, payload values, and
-Pydantic validation details are replaced by stable fingerprints. Repeating the same
-refused append produces the same refusal reason and fingerprints. The refused append
-adds nothing to `events.jsonl` and does not change the SQLite projection. When the audit
-destination is writable, each retry adds a new timestamped rejection line to
-`audit.jsonl`. An audit I/O failure is best-effort: it does not alter the stable refusal
-or permit state mutation. Any earlier per-task append that already committed remains
-committed.
+Dependency-batch refusals are bounded and do not expose raw payload or backend validation
+details. A rejected batch adds nothing to `events.jsonl` and leaves the complete dependency
+projection unchanged.
 
 **When to call**: when a planner agent needs to correct inferred dependencies (add a missing
 edge, drop a spurious one) before promoting tasks to `ready`, without hand-editing state.db.
@@ -501,6 +499,8 @@ created.
 | `claimed_by`             | `string`                | yes      |         |
 | `expected_files`         | `list[string] \| null`  | no       | `[]`    |
 | `lease_duration_seconds` | `int`                   | no       | `900`   |
+| `shared_tree`            | `bool`                  | no       | `false` |
+| `cwd`                    | `string \| null`        | no       | project root |
 
 `lease_duration_seconds` is converted to minutes (floor, minimum 1) before being passed
 to `ClaimManager`. The default 900 seconds gives a 15-minute MCP-side override — note that
@@ -518,11 +518,18 @@ and the project-level override is read from `.anvil/config.yaml`.
   "lease_expires_at": "2026-05-25T14:15:00+00:00",
   "branch": "agent/t012-implement-auth",
   "worktree_path": null,
-  "expected_files": ["src/auth/middleware.py", "tests/test_auth.py"]
+  "expected_files": ["src/auth/middleware.py", "tests/test_auth.py"],
+  "generation": 2,
+  "attestation_context": {"repository_id": "...", "claim_start_sha": "...", "expected_paths": [{"path": "src/auth/middleware.py", "baseline_sha256": "..."}]},
+  "continuation": {"attest_progress": {"argv": ["anvil", "progress", "T012", "<phase>", "--attestation-file", "<path>", "--actor", "agent-welder-1"]}}
 }
 ```
 
-`branch` and `worktree_path` are `null` when git ops are not configured.
+The immutable attestation context binds external progress to this claim generation,
+repository, PRD/task revisions, and canonical expected-path baselines. `branch` and
+`worktree_path` are `null` when git ops are not configured. In a non-Git project the
+claim still succeeds with `attestation_context: null` and an additive warning; legacy
+hook-observed file progress remains available.
 
 **Failure modes**
 
@@ -537,9 +544,12 @@ the agent has checked conflicts.
 
 ### `release_task`
 
-Releases the active claim on a task held by `actor`. The claim is located by task ID; the
-actor string does not need to match (the lookup finds the active claim regardless of who
-holds it). Stale-claim reaping runs first.
+Releases the active claim on a task held by `actor`. The claim is located by task ID, then
+the exact persisted owner must match `actor`; a mismatch refuses with structured owner and
+`ANVIL_ACTOR` / actor-argument remedies. Stale-claim reaping runs first.
+
+Actor values on MCP lifecycle tools are local coordination and audit attribution, not
+cryptographic authentication.
 
 **Inputs**
 
@@ -560,7 +570,8 @@ released accidentally.
 ```json
 {
   "released": true,
-  "claim_id": "C001"
+  "claim_id": "C001",
+  "actor_identity": {"actor": "agent-x", "authenticated": false, "notice": "..."}
 }
 ```
 
@@ -601,7 +612,10 @@ For a coordinator bundle lease, pass the bundle ID as `task_id` and set
 
 ```json
 {
-  "lease_expires_at": "2026-05-25T14:30:00+00:00"
+  "lease_expires_at": "2026-05-25T14:30:00+00:00",
+  "renewed": true,
+  "actor_identity": {"actor": "agent-x", "authenticated": false, "notice": "..."},
+  "progress": {"source": "attestation", "digest": "...", "generation": 2, "trust_mode": "configured_issuer_verified"}
 }
 ```
 
@@ -619,10 +633,17 @@ to re-enter the `ready` pool.
 
 ### `submit_progress`
 
-Records an in-progress note for a task without changing its status. Writes a
-`progress.noted` event to the JSONL audit log. Does not require an active claim.
+Records an in-progress note for a task without changing its status. With ordinary text it
+writes a `progress.noted` event to the JSONL audit log. It does not require a claim, but
+when the task has an active claim the exact owner must supply the progress actor.
 `phase` is an optional structured label ("build", "tests", "review-fixes", …)
 for the heartbeat bus; `detail` is free-text elaboration for the phase.
+Alternatively, pass strict canonical `attestation_base64` plus the project `cwd` to verify
+and record `progress.attested`. The receipt includes digest, generation, kind, and trust
+mode. The next renewal consumes that accepted artifact exactly once. Free-text notes never
+authorize renewal.
+See [Attesting progress from an external writer](how-to/attesting-external-progress.md)
+for both payload kinds, canonical bytes, signing/trust rules, and base64 encoding.
 
 **Inputs**
 
@@ -630,15 +651,19 @@ for the heartbeat bus; `detail` is free-text elaboration for the phase.
 |-----------|----------|----------|
 | `task_id` | `string` | yes      |
 | `actor`   | `string` | yes      |
-| `notes`   | `string` | yes      |
+| `notes`   | `string \| null` | unless no attestation |
 | `phase`   | `string` | no       |
 | `detail`  | `string` | no       |
+| `attestation_base64` | `string \| null` | no |
+| `cwd` | `string \| null` | no |
 
 **Output**
 
 ```json
 {
-  "recorded": true
+  "recorded": true,
+  "event_action": "progress.attested",
+  "attestation": {"digest": "...", "generation": 2, "kind": "commit", "trust_mode": "configured_issuer_verified"}
 }
 ```
 
@@ -671,12 +696,33 @@ Submits completion evidence for a task. Requires an active claim. Emits an
 | `pr_url`         | `string \| null`        | no       | `null`  |
 | `commit_sha`     | `string \| null`        | no       | `null`  |
 | `category`       | `string \| null`        | no       | `null`  |
+| `command_proof_artifacts_base64` | `list[string] \| null` | no | `null` |
+| `cwd`            | `string \| null`        | no       | `null`  |
 
 `category` (evidence contracts, issue #153) is the evidence role —
 `completion` (the default when omitted), `diagnostic`, `blocked`,
 `advisory`, or `promotion_quality`. `diagnostic`/`advisory` evidence can
 never satisfy a completion claim; an invalid value raises `ToolError`
 (`invalid_category`). Mirrors `anvil submit --category`.
+
+`command_proof_artifacts_base64` contains canonical base64 encodings of
+canonical JSON claim-bound command-proof envelopes. The entire batch is loaded
+and verified before the single evidence event is appended. Every artifact must
+match the explicit claim owner, claim ID and generation, task/PRD revision,
+repository and canonical `cwd`, and one exact `commands_run` value. One invalid,
+duplicate, stale, oversized, nonzero, or mismatched artifact refuses the whole
+submission. These artifacts attest reported bytes; Anvil does not execute the
+command. Unsigned artifacts are reported as `claim_owner_self_attested`; only a
+valid configured issuer is reported as `configured_issuer_verified`.
+Configured-issuer membership is revalidated from `ANVIL_TRUST_LIST` or
+`~/.anvil/trust.txt` both at live append and during event-log replay. Operators
+must back up and restore the effective trust list with state and retain each
+signing public key or fingerprint; missing or changed membership fails closed
+and aborts append or replay. Self-attested proof replay does not depend on the
+external trust list.
+
+`output_excerpt` is descriptive only. Text such as `exit: 0` in that field does
+not create a typed command proof or satisfy `required_proofs`.
 
 **Output**
 
@@ -688,12 +734,33 @@ never satisfy a completion claim; an invalid value raises `ToolError`
     "id": "T014",
     "title": "Implement the converter",
     "priority": "high"
-  }
+  },
+  "claim_bound_command_proofs": [
+    {
+      "digest": "…",
+      "generation": 1,
+      "trust_mode": "claim_owner_self_attested",
+      "issuer_id": null,
+      "command": "pytest -q",
+      "output_sha256": "…"
+    }
+  ],
+  "hook_command_proofs": [],
+  "missing_claim_bound_proofs": [],
+  "missing_legacy_evidence": []
 }
 ```
 
 `evidence_id` is an `"EV"` prefix followed by 8 uppercase hex characters, generated at
 call time.
+
+The four proof fields are additive receipts. `claim_bound_command_proofs`
+describes validated imports without echoing their bounded output bytes;
+`hook_command_proofs` identifies exact-claim hook captures and returns their
+`claim_id`, `generation`, `actor`, `semantic_digest`, and
+`source: "hook_claim_bound"` audit metadata;
+`missing_claim_bound_proofs` and `missing_legacy_evidence` keep typed proof gaps
+distinct from descriptive evidence gaps.
 
 `next_ready` names the next claimable task now that this one has left the active set —
 respecting dependencies, active claims, conflict groups, and file-conflict exclusions
@@ -792,7 +859,8 @@ Atomically claims a planned bundle and creates member task authorizations. Input
 `bundle_id`, `actor`, optional `lease_minutes` (240), and optional `shared_tree` (false).
 Returns the bundle, coordinator claim, and isolation warnings. Under required worktree
 isolation, callers must use the Git-aware CLI claim path or explicitly opt into a shared
-tree.
+tree. The response also includes the exact coordinator identity and structured bundle
+renew, release, progress, and complete continuations; it never substitutes task submit.
 
 ### `generate_bundle_packet`
 
@@ -1395,15 +1463,15 @@ None.
 
 ```json
 {
-  "api_version": "5",
-  "engine_version": "0.6.3",
-  "display_version": "0.6.3",
+  "api_version": "8",
+  "engine_version": "0.6.4",
+  "display_version": "0.6.4",
   "build_kind": "release_artifact",
   "commit": "abcdef123456",
-  "tag": "v0.6.3",
+  "tag": "v0.6.4",
   "tag_distance": 0,
   "dirty": false,
-  "schema_version": 16,
+  "schema_version": 18,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "...", "prd source-name", "..."],
@@ -1448,7 +1516,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":17,"direction":"newer","engine_version":"0.6.3","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":16}}
+{"error":{"code":"schema_mismatch","database_schema":19,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":18}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh

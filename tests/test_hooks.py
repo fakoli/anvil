@@ -20,6 +20,34 @@ from anvil.state.schema import SCHEMA_VERSION
 runner = CliRunner()
 
 
+def test_orphan_capture_guidance_does_not_claim_output_file_is_typed_proof() -> None:
+    root = Path(__file__).resolve().parents[1]
+    sources = [
+        (root / "bin/src/anvil/cli/hooks.py").read_text(encoding="utf-8"),
+        (root / "hooks/capture-evidence.sh").read_text(encoding="utf-8"),
+    ]
+    for source in sources:
+        assert "pass this file via: anvil submit" not in source
+        assert "cannot satisfy required_proofs" in source
+
+
+def test_payload_actor_prefers_pinned_lifecycle_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANVIL_ACTOR", "pinned-owner")
+    monkeypatch.setenv("ANVIL_GATE_ACTOR", "legacy-owner")
+    assert hooks._payload_actor({"session_id": "harness-session"}) == "pinned-owner"
+
+
+def test_payload_actor_preserves_whitespace_only_legacy_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANVIL_ACTOR", "   ")
+    monkeypatch.delenv("ANVIL_GATE_ACTOR", raising=False)
+
+    assert hooks._payload_actor({"session_id": "harness-session"}) == "   "
+
+
 class _RecordingInput(io.BytesIO):
     def __init__(self) -> None:
         super().__init__()

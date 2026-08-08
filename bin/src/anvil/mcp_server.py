@@ -23,6 +23,12 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 from anvil.build_identity import get_build_identity
+from anvil.cli._actor_output import (
+    actor_identity_data,
+    actor_mismatch_data,
+    bundle_continuation_data,
+    continuation_data,
+)
 from anvil.state.rollup import BundleRollupEntry
 
 if TYPE_CHECKING:
@@ -256,6 +262,10 @@ class ClaimResponse(BaseModel):
     # Advisory notes (e.g. the worktree_isolation shared-checkout warning);
     # additive with a default so existing readers are unaffected.
     warnings: list[str] = []
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+    continuation: dict[str, Any] = Field(default_factory=dict)
+    generation: int = 1
+    attestation_context: dict[str, Any] | None = None
 
 
 class ReleaseResponse(BaseModel):
@@ -265,6 +275,20 @@ class ReleaseResponse(BaseModel):
 
     released: bool
     claim_id: str
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+
+
+class RenewProgressReceipt(BaseModel):
+    """The progress fact that authorized, or declined, one renewal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["attestation", "file_changed", "legacy_unmeasurable", "none"]
+    digest: str | None = None
+    generation: int | None = None
+    trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ] | None = None
 
 
 class RenewResponse(BaseModel):
@@ -278,6 +302,8 @@ class RenewResponse(BaseModel):
     # unchanged, possibly-imminent expiry — the client should not treat it as a
     # fresh lease.
     renewed: bool = True
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+    progress: RenewProgressReceipt | None = None
 
 
 class WorkPacketResponse(BaseModel):
@@ -289,12 +315,29 @@ class WorkPacketResponse(BaseModel):
     content: Any  # str for markdown, dict for json
 
 
+class ProgressAttestationReceipt(BaseModel):
+    """Stable accepted-attestation receipt returned to MCP clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    digest: str
+    generation: int
+    trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ]
+    kind: Literal["commit", "file"]
+    issuer_id: str | None = None
+
+
 class ProgressResponse(BaseModel):
     """Result of submit_progress."""
 
     model_config = ConfigDict(extra="forbid")
 
     recorded: bool
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+    event_action: str = "progress.noted"
+    attestation: ProgressAttestationReceipt | None = None
 
 
 class BundleReviewPolicyRecord(BaseModel):
@@ -418,6 +461,8 @@ class BundleClaimResponse(BaseModel):
     bundle: BundleRecord
     claim: BundleClaimRecord
     warnings: list[str] = Field(default_factory=list)
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+    continuation: dict[str, Any] = Field(default_factory=dict)
 
 
 class BundleReviewGateResponse(BaseModel):
@@ -487,6 +532,11 @@ class EvidenceResponse(BaseModel):
     # T014: name the next claimable task (deps/claims/conflict-group/file-overlap
     # aware) so the agent can chain work; null when none is available.
     next_ready: NextReadyTask | None = None
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+    claim_bound_command_proofs: list[dict[str, Any]] = Field(default_factory=list)
+    hook_command_proofs: list[dict[str, Any]] = Field(default_factory=list)
+    missing_claim_bound_proofs: list[str] = Field(default_factory=list)
+    missing_legacy_evidence: list[str] = Field(default_factory=list)
 
 
 class ConflictEntry(BaseModel):
@@ -558,6 +608,7 @@ class EditDependenciesResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    prd_id: str
     changed: list[str]
     added: list[list[str]]
     removed: list[list[str]]
@@ -589,24 +640,34 @@ _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
 
 
 def _require_actor(actor: str) -> str:
-    """Strip leading/trailing whitespace and raise ToolError when empty.
+    """Validate and NFC-canonicalize a newly introduced audit identity."""
+    from anvil.actors import ActorIdentityError, canonicalize_new_actor
 
-    An empty or whitespace-only actor would write a blank ``actor`` field into
-    every audit event emitted by the tool, making the audit trail useless for
-    attribution. Raise early so the caller gets a clear error rather than a
-    silent blank entry in the event log.
+    try:
+        return canonicalize_new_actor(actor)
+    except ActorIdentityError as exc:
+        raise ToolError(str(exc)) from exc
 
-    Returns the stripped actor string on success so callers can write::
 
-        actor = _require_actor(actor)
+def _exact_lifecycle_actor(actor: str) -> str:
+    """Return a persisted lifecycle owner exactly, including legacy-invalid IDs.
+
+    Renew/release/progress/submit compare this byte-for-byte with the active
+    claim before appending anything.  Validation belongs only to creation: a
+    historical empty, whitespace, non-NFC, or control-bearing owner must remain
+    addressable without being silently rewritten or orphaned.
     """
-    stripped = actor.strip()
-    if not stripped:
-        raise ToolError(
-            "actor must not be empty or whitespace — "
-            "pass the agent or user identity for audit-trail attribution."
-        )
-    return stripped
+    return actor
+
+
+def _actor_mismatch_tool_error(*, owner: str, actual: str, action: str) -> ToolError:
+    """Return an exact but JSON-escaped MCP ownership refusal."""
+    detail = {
+        "code": "actor_mismatch",
+        "message": f"Only the claim owner may {action}.",
+        **actor_mismatch_data(owner=owner, actual=actual),
+    }
+    return ToolError(json.dumps(detail, ensure_ascii=True, separators=(",", ":")))
 
 
 def _resolve_state_dir(cwd: str | None = None) -> Path:
@@ -1224,6 +1285,7 @@ def claim_task(
     expected_files: list[str] | None = None,
     lease_duration_seconds: int = 900,
     shared_tree: bool = False,
+    cwd: str | None = None,
 ) -> ClaimResponse:
     """Acquire an exclusive lease on task_id for claimed_by.
 
@@ -1238,8 +1300,9 @@ def claim_task(
     (read-only/docs work). Under ``advisory`` a shared-checkout collision
     warning is returned in the response.
     """
-    claimed_by = _require_actor(claimed_by)
-    state_dir = _resolve_state_dir()
+    # ClaimManager owns new-identity canonicalization. Passing the exact input
+    # preserves actor_input for SQLite's locked normalized-collision check.
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
@@ -1249,7 +1312,7 @@ def claim_task(
 
         # worktree_isolation parity with the CLI (review finding: the policy
         # lived only in cli/claim.py, so MCP claims silently bypassed it).
-        from anvil.cli._helpers import _load_config_optional
+        from anvil.cli._helpers import _load_config_optional, _resolve_project_dir
 
         cfg = _load_config_optional(state_dir)
         isolation = cfg.worktree_isolation if cfg is not None else "advisory"
@@ -1291,6 +1354,7 @@ def claim_task(
             SystemClock(),
             actor=claimed_by,
             default_lease_minutes=lease_minutes,
+            project_root=_resolve_project_dir(Path(cwd) if cwd else None),
         )
 
         files = expected_files or []
@@ -1301,6 +1365,11 @@ def claim_task(
             raise ToolError(str(exc)) from exc
 
         claim = result.claim
+        if claim.attestation_context is None:
+            isolation_warnings.append(
+                "Progress attestation unavailable: this project is not an "
+                "accessible Git repository; legacy file-change renewal remains available."
+            )
         return ClaimResponse(
             id=claim.id,
             task_id=claim.task_id,
@@ -1310,6 +1379,24 @@ def claim_task(
             worktree_path=claim.worktree_path,
             expected_files=claim.expected_files,
             warnings=isolation_warnings,
+            actor_identity=actor_identity_data(claim.claimed_by),
+            continuation=continuation_data(
+                task_id,
+                claim.id,
+                claim.claimed_by,
+                attestation_context=(
+                    claim.attestation_context.model_dump(mode="json")
+                    if claim.attestation_context is not None
+                    else None
+                ),
+                generation=claim.generation,
+            ),
+            generation=claim.generation,
+            attestation_context=(
+                claim.attestation_context.model_dump(mode="json")
+                if claim.attestation_context is not None
+                else None
+            ),
         )
     finally:
         backend.close()
@@ -1329,7 +1416,7 @@ def release_task(
     cwd: str | None = None,
 ) -> ReleaseResponse:
     """Release a task claim, or an explicit target_kind=bundle coordinator claim."""
-    actor = _require_actor(actor)
+    actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
@@ -1350,13 +1437,22 @@ def release_task(
                 )
             except BundleError as exc:
                 raise ToolError(f"bundle_error: {exc}") from exc
-            return ReleaseResponse(released=True, claim_id=claim.id)
+            return ReleaseResponse(
+                released=True,
+                claim_id=claim.id,
+                actor_identity=actor_identity_data(actor),
+            )
 
         active_claim = _find_active_claim_for_task(backend, task_id)
         if active_claim is None:
             raise ToolError(
                 f"No active claim found for task '{task_id}'. "
                 "The task may already be released or was never claimed.",
+            )
+
+        if active_claim.claimed_by != actor:
+            raise _actor_mismatch_tool_error(
+                owner=active_claim.claimed_by, actual=actor, action="release the claim"
             )
 
         manager = ClaimManager(
@@ -1370,7 +1466,11 @@ def release_task(
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
-        return ReleaseResponse(released=True, claim_id=active_claim.id)
+        return ReleaseResponse(
+            released=True,
+            claim_id=active_claim.id,
+            actor_identity=actor_identity_data(actor),
+        )
     finally:
         backend.close()
 
@@ -1389,7 +1489,7 @@ def renew_claim(
     cwd: str | None = None,
 ) -> RenewResponse:
     """Renew a task claim, or an explicit target_kind=bundle coordinator claim."""
-    actor = _require_actor(actor)
+    actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
@@ -1425,6 +1525,7 @@ def renew_claim(
             return RenewResponse(
                 lease_expires_at=updated.lease_expires_at.isoformat(),
                 renewed=updated.lease_expires_at != claim.lease_expires_at,
+                actor_identity=actor_identity_data(actor),
             )
 
         active_claim = _find_active_claim_for_task(backend, task_id)
@@ -1432,6 +1533,11 @@ def renew_claim(
             raise ToolError(
                 f"No active claim found for task '{task_id}'. "
                 "The task may have been released or its lease may have expired.",
+            )
+
+        if active_claim.claimed_by != actor:
+            raise _actor_mismatch_tool_error(
+                owner=active_claim.claimed_by, actual=actor, action="renew the claim"
             )
 
         lease_minutes = max(1, extend_seconds // 60)
@@ -1443,17 +1549,23 @@ def renew_claim(
         )
 
         try:
-            updated_claim = manager.renew(active_claim.id)
+            renewal = manager.renew_with_result(active_claim.id)
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
         # B46 part 2 — a no-progress renew is a no-op (lease unchanged). Surface
         # whether the lease actually advanced so an MCP client can tell a real
         # renewal from a declined one instead of trusting a stale expiry.
-        renewed = updated_claim.lease_expires_at != active_claim.lease_expires_at
         return RenewResponse(
-            lease_expires_at=updated_claim.lease_expires_at.isoformat(),
-            renewed=renewed,
+            lease_expires_at=renewal.claim.lease_expires_at.isoformat(),
+            renewed=renewal.renewed,
+            actor_identity=actor_identity_data(actor),
+            progress={
+                "source": renewal.progress_source,
+                "digest": renewal.attestation_digest,
+                "generation": renewal.attestation_generation,
+                "trust_mode": renewal.attestation_trust_mode,
+            },
         )
     finally:
         backend.close()
@@ -1564,9 +1676,11 @@ def generate_work_packet(
 def submit_progress(
     task_id: str,
     actor: str,
-    notes: str,
+    notes: str | None = None,
     phase: str | None = None,
     detail: str | None = None,
+    attestation_base64: str | None = None,
+    cwd: str | None = None,
 ) -> ProgressResponse:
     """Record a progress note for task_id as a 'progress.noted' audit event.
     Does NOT change task status. Reaps stale claims first.
@@ -1575,8 +1689,8 @@ def submit_progress(
     "tests", "review-fixes", ...) for the heartbeat bus — status surfaces
     read the latest phase back so operators can see where a long run is
     without asking. ``detail`` is free-text elaboration for the phase."""
-    actor = _require_actor(actor)
-    state_dir = _resolve_state_dir()
+    actor = _exact_lifecycle_actor(actor)
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.clock import SystemClock
@@ -1587,6 +1701,62 @@ def submit_progress(
         task = backend.get_task(task_id)
         if task is None:
             raise ToolError(f"Task '{task_id}' not found.")
+
+        active_claim = _find_active_claim_for_task(backend, task_id)
+        if active_claim is not None and active_claim.claimed_by != actor:
+            raise _actor_mismatch_tool_error(
+                owner=active_claim.claimed_by,
+                actual=actor,
+                action="record progress for the claim",
+            )
+        if active_claim is None:
+            actor = _require_actor(actor)
+
+        if attestation_base64 is not None:
+            from anvil import signing
+            from anvil.claims.manager import ClaimError, ClaimManager
+            from anvil.claims.progress_attestation import (
+                ProgressAttestationError,
+                load_progress_attestation_base64,
+            )
+            from anvil.cli._helpers import _resolve_project_dir
+            from anvil.cli.proof import _default_trust_path
+
+            try:
+                loaded = load_progress_attestation_base64(
+                    attestation_base64,
+                    trusted_issuers=signing.load_trust_list(_default_trust_path()),
+                )
+                if loaded.payload.task_id != task_id:
+                    raise ProgressAttestationError(
+                        "task_mismatch",
+                        "attestation task does not match the progress command",
+                    )
+                persisted = ClaimManager(
+                    backend,
+                    SystemClock(),
+                    actor=actor,
+                    project_root=_resolve_project_dir(Path(cwd) if cwd else None),
+                ).accept_progress_attestation(loaded)
+            except (ClaimError, ProgressAttestationError) as exc:
+                raise ToolError(
+                    f"progress_attestation_error[{getattr(exc, 'code', 'rejected')}]: {exc}"
+                ) from exc
+            return ProgressResponse(
+                recorded=True,
+                actor_identity=actor_identity_data(actor),
+                event_action="progress.attested",
+                attestation={
+                    "digest": persisted.semantic_digest,
+                    "generation": persisted.generation,
+                    "trust_mode": persisted.trust_mode,
+                    "kind": persisted.kind,
+                    "issuer_id": persisted.issuer_id,
+                },
+            )
+
+        if notes is None:
+            raise ToolError("notes is required when attestation_base64 is not provided")
 
         clock = SystemClock()
         now = clock.now()
@@ -1613,7 +1783,9 @@ def submit_progress(
             },
         )
         backend.append(draft)
-        return ProgressResponse(recorded=True)
+        return ProgressResponse(
+            recorded=True, actor_identity=actor_identity_data(actor)
+        )
     finally:
         backend.close()
 
@@ -1633,6 +1805,8 @@ def submit_completion_evidence(
     pr_url: str | None = None,
     commit_sha: str | None = None,
     category: str | None = None,
+    command_proof_artifacts_base64: list[str] | None = None,
+    cwd: str | None = None,
 ) -> EvidenceResponse:
     """Submit completion evidence for task_id (requires an active claim held by
     actor). Auto-releases the claim and moves the task to needs_review; names
@@ -1650,8 +1824,8 @@ def submit_completion_evidence(
                 f"invalid_category: {category!r} is not a valid evidence "
                 f"category; valid values: {', '.join(valid)}."
             )
-    actor = _require_actor(actor)
-    state_dir = _resolve_state_dir()
+    actor = _exact_lifecycle_actor(actor)
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.cli.packet_apply import _read_command_proofs
@@ -1676,19 +1850,105 @@ def submit_completion_evidence(
         # Without this guard any MCP caller can force-complete another agent's
         # claim by passing a different actor name (caught by critic-PR#45-P1).
         if active_claim.claimed_by != actor:
-            raise ToolError(
-                f"Task '{task_id}' is claimed by '{active_claim.claimed_by}', "
-                f"not '{actor}'. Only the claim owner may submit completion evidence.",
+            raise _actor_mismatch_tool_error(
+                owner=active_claim.claimed_by,
+                actual=actor,
+                action="submit completion evidence",
             )
 
-        evidence_id = "EV" + uuid.uuid4().hex[:8].upper()
         clock = SystemClock()
-        now = clock.now()
+
+        claim_bound_proofs = ()
+        loaded_claim_proofs = []
+        proof_project = None
+        proof_project_root = None
+        if command_proof_artifacts_base64:
+            from anvil import signing
+            from anvil.claims.command_proof_artifact import (
+                ClaimCommandProofError,
+                load_claim_command_proof_base64,
+                verify_claim_command_proof_batch,
+            )
+            from anvil.cli._helpers import _resolve_project_dir
+            from anvil.cli.proof import _default_trust_path
+            from anvil.state.models import (
+                MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+                MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
+            )
+
+            try:
+                # Bound the public list before decoding any element. The
+                # conservative encoded cap permits base64 padding for every
+                # allowed item; exact decoded aggregate size is rechecked by
+                # verify_claim_command_proof_batch and the state handler.
+                artifact_count = len(command_proof_artifacts_base64)
+                if artifact_count > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+                    raise ClaimCommandProofError(
+                        "batch_size",
+                        "command proof batch is outside limits",
+                    )
+                max_encoded_batch = (
+                    (MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES + 2 * artifact_count + 2)
+                    // 3
+                ) * 4
+                if (
+                    sum(len(artifact) for artifact in command_proof_artifacts_base64)
+                    > max_encoded_batch
+                ):
+                    raise ClaimCommandProofError(
+                        "batch_too_large",
+                        "command proof batch exceeds its byte limit",
+                    )
+                trusted = signing.load_trust_list(_default_trust_path())
+                loaded_claim_proofs = [
+                    load_claim_command_proof_base64(
+                        artifact, trusted_issuers=trusted
+                    )
+                    for artifact in command_proof_artifacts_base64
+                ]
+                proof_project = backend.get_project()
+                proof_project_root = _resolve_project_dir(
+                    Path(cwd) if cwd else None
+                )
+                if proof_project is None:
+                    raise ClaimCommandProofError(
+                        "context_missing",
+                        "command proof requires an initialized project",
+                    )
+            except ClaimCommandProofError as exc:
+                raise ToolError(
+                    f"command_proof_error[{exc.code}]: {exc}"
+                ) from exc
+
+        evidence_id = "EV" + uuid.uuid4().hex[:8].upper()
 
         # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
         # the PostToolUse hook observed) into typed CommandProofs, so an
         # MCP-driven submit carries the same observed proofs as the CLI path.
         command_proofs = _read_command_proofs(state_dir, active_claim.id)
+
+        # Refresh after every artifact/buffer read, then revalidate the exact
+        # lease window immediately before drafting. SQLite repeats this check
+        # against its authoritative clock while holding the append lock.
+        now = clock.now()
+        if command_proof_artifacts_base64:
+            assert proof_project is not None
+            assert proof_project_root is not None
+            try:
+                claim_bound_proofs = verify_claim_command_proof_batch(
+                    loaded_claim_proofs,
+                    claim=active_claim,
+                    task=task,
+                    project_id=proof_project.id,
+                    project_root=proof_project_root,
+                    actor=actor,
+                    declared_commands=commands_run,
+                    now=now,
+                )
+            except ClaimCommandProofError as exc:
+                raise ToolError(
+                    f"command_proof_error[{exc.code}]: {exc}"
+                ) from exc
 
         draft = EventDraft(
             timestamp=now,
@@ -1714,7 +1974,10 @@ def submit_completion_evidence(
                 "commit_sha": commit_sha,
                 "screenshots": [],
                 "known_limitations": None,
-                "proofs": [p.model_dump(mode="json") for p in command_proofs],
+                "proofs": [
+                    p.model_dump(mode="json")
+                    for p in [*command_proofs, *claim_bound_proofs]
+                ],
             },
         )
 
@@ -1725,6 +1988,15 @@ def submit_completion_evidence(
 
         fresh_task = backend.get_task(task_id)
         task_status = fresh_task.status.value if fresh_task is not None else "needs_review"
+        missing_claim_bound_proofs: list[str] = []
+        missing_legacy_evidence: list[str] = []
+        evidence_obj = backend.get_latest_evidence(task_id)
+        if fresh_task is not None and evidence_obj is not None:
+            from anvil.review.gates import evidence_missing_details
+
+            missing_legacy_evidence, missing_claim_bound_proofs = (
+                evidence_missing_details(fresh_task, evidence_obj)
+            )
 
         # T014: name the next claimable task now that this one has left the
         # active set. The submitting actor's own (now-released) claim is
@@ -1739,6 +2011,34 @@ def submit_completion_evidence(
             evidence_id=evidence_id,
             task_status=task_status,
             next_ready=next_ready,
+            actor_identity=actor_identity_data(actor),
+            claim_bound_command_proofs=[
+                {
+                    "digest": proof.semantic_digest,
+                    "generation": proof.evidence_core.generation,
+                    "trust_mode": proof.trust_mode,
+                    "issuer_id": proof.issuer_id,
+                    "command": proof.command,
+                    "output_sha256": proof.output_sha256,
+                }
+                for proof in claim_bound_proofs
+            ],
+            hook_command_proofs=[
+                {
+                    "command": proof.command,
+                    "exit_code": proof.exit_code,
+                    "output_sha256": proof.output_sha256,
+                    "captured_at": proof.captured_at.isoformat(),
+                    "source": "hook_claim_bound",
+                    "claim_id": proof.attribution.claim_id,
+                    "generation": proof.attribution.generation,
+                    "semantic_digest": proof.semantic_digest,
+                    "actor": proof.attribution.claimed_by,
+                }
+                for proof in command_proofs
+            ],
+            missing_claim_bound_proofs=missing_claim_bound_proofs,
+            missing_legacy_evidence=missing_legacy_evidence,
         )
     finally:
         backend.close()
@@ -1895,16 +2195,19 @@ def edit_dependencies(
     actor: str,
     add: DependencyEdgesInput = None,
     remove: DependencyEdgesInput = None,
+    prd_id: str | None = None,
+    cwd: str | None = None,
 ) -> EditDependenciesResponse:
     """Apply dependency edits after whole-batch validation.
 
     ``add`` / ``remove`` are ``[source, target]`` pairs meaning *source depends
     on target*. The whole batch is validated up front: any unknown task,
     self-dependency, or cycle rejects the ENTIRE batch (ToolError) before any
-    mutation. Changed tasks are then emitted as separate backend appends, so a
-    later append failure can leave earlier changes committed. Task status is
-    preserved. Inputs are manually shape-checked before state access and a
-    request may contain at most 10,000 edges.
+    mutation. ``prd_id`` explicitly selects the owning PRD (or resolves the
+    single/default PRD when omitted). Changed tasks are persisted by one atomic
+    dependency-batch event; a no-op request emits no event. Inputs are manually
+    shape-checked before state access and a request may contain at most 10,000
+    edges. ``cwd`` selects the project root.
     """
     from anvil.clock import SystemClock
     from anvil.planning._plan_helpers import (
@@ -1917,6 +2220,7 @@ def edit_dependencies(
         DepEdge,
         emit_batch_dep_events,
         plan_batch_dep_edits,
+        validate_dep_source_owners,
     )
     from anvil.state.backend import EventRejected
 
@@ -1950,28 +2254,47 @@ def edit_dependencies(
         return out
 
     edges = _to_edges(add_pairs, "add") + _to_edges(remove_pairs, "remove")
+    actor = _require_actor(actor)
 
-    state_dir = _resolve_state_dir()
+    from anvil.cli._helpers import canonical_prd_id
+
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
+        selected_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+        if backend.get_prd(selected_prd_id) is None:
+            raise ToolError(
+                "selected PRD was not found in state. Call parse_prd first."
+            )
         all_tasks = backend.list_tasks()
         tasks_by_id = {t.id: t for t in all_tasks}
 
         # Validate the WHOLE batch before emitting anything — a raised
         # BatchDepError here means zero events were appended (no partial apply).
         try:
+            validate_dep_source_owners(
+                tasks_by_id,
+                edges,
+                prd_id=selected_prd_id,
+            )
             batch_plan = plan_batch_dep_edits(all_tasks, edges)
         except BatchDepError as exc:
             raise ToolError(exc.message) from None
 
         try:
             changed = emit_batch_dep_events(
-                backend, tasks_by_id, batch_plan, actor=actor, clock=clock
+                backend,
+                tasks_by_id,
+                batch_plan,
+                prd_id=selected_prd_id,
+                actor=actor,
+                clock=clock,
             )
         except EventRejected:
             raise ToolError(DEPENDENCY_EVENT_REJECTED_MESSAGE) from None
         return EditDependenciesResponse(
+            prd_id=selected_prd_id,
             changed=changed,
             added=[list(e) for e in batch_plan.added],
             removed=[list(e) for e in batch_plan.removed],
@@ -2368,7 +2691,7 @@ def _ingest_planning_prd_source(
     except PrdSourceIngestError as exc:
         suffix = f": {source_identity}" if source_identity is not None else ""
         detail = f"{exc.message.rstrip('.')}."
-        raise ToolError(f"Cannot ingest PRD source{suffix}. {detail}") from exc
+        raise ToolError(f"Cannot ingest PRD source{suffix}. {detail}") from None
     assert source_identity is not None
     return parse_prd_id, source_identity, source
 
@@ -2473,6 +2796,18 @@ def parse_prd(
     )
     markdown = source.markdown
 
+    def source_binding(revision: int) -> dict[str, object]:
+        """Bind this invocation's one exact source read to its PRD revision."""
+        return {
+            "source_text": source.markdown,
+            "source_sha256": source.source_sha256,
+            "source_size_bytes": source.source_size_bytes,
+            "source_encoding": source.source_encoding,
+            "source_revision": revision,
+            "provenance_state": "available",
+            "content_available": True,
+        }
+
     result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
 
     # Surface errors in the response without short-circuiting the event.
@@ -2544,6 +2879,7 @@ def parse_prd(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
+                **source_binding(1),
             }
 
             # Named PRD: stamp the partition so the handler writes ONLY this PRD's
@@ -2621,10 +2957,11 @@ def parse_prd(
                 if r.id not in new_by_id
             ]
 
+            new_revision = existing_prd.revision + 1
             revised_payload: dict[str, Any] = {
                 "project_id": project_id,
                 "prd_id": stored_prd_id,
-                "revision": existing_prd.revision + 1,
+                "revision": new_revision,
                 "expected_status": existing_prd.status.value,
                 "is_default": existing_prd.is_default,
                 "title": result.prd.title,
@@ -2645,6 +2982,7 @@ def parse_prd(
                 "requirements_added": requirements_added,
                 "requirements_superseded": requirements_superseded,
                 "requirements_unchanged": requirements_unchanged,
+                **source_binding(new_revision),
             }
 
             from anvil.state.backend import EventRejected
@@ -3957,6 +4295,8 @@ def _bundle_manager(
     actor: str,
     lease_minutes: float = 240,
     cwd: str | None = None,
+    *,
+    new_claim: bool = False,
 ):
     from anvil.bundles.manager import BundleManager
     from anvil.cli._helpers import _resolve_project_root
@@ -3965,7 +4305,11 @@ def _bundle_manager(
     return BundleManager(
         backend,
         SystemClock(),
-        actor=_require_actor(actor),
+        actor=(
+            _require_actor(actor)
+            if new_claim
+            else _exact_lifecycle_actor(actor)
+        ),
         project_root=_resolve_project_root(Path(cwd) if cwd else None),
         lease_minutes=lease_minutes,
     )
@@ -4000,7 +4344,10 @@ def create_bundle(
                 bundle_id,
                 prd_id=prd_id,
                 task_ids=task_ids,
-                coordinator=_require_actor(coordinator),
+                # Preserve the exact caller spelling so BundleCatalog can pass
+                # it through to SQLite's locked NFC-collision check. The
+                # catalog canonicalizes the persisted coordinator itself.
+                coordinator=coordinator,
                 review_policy=BundleReviewPolicy(
                     max_reviews=max_reviews,
                     max_rereviews=max_rereviews,
@@ -4103,6 +4450,7 @@ def claim_bundle(
                 actor,
                 lease_minutes=lease_minutes,
                 cwd=cwd,
+                new_claim=True,
             ).claim(bundle_id)
         except (BundleError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
@@ -4110,6 +4458,10 @@ def claim_bundle(
             bundle=_bundle_record(result.bundle),
             claim=_bundle_claim_record(result.claim),
             warnings=warnings,
+            actor_identity=actor_identity_data(result.claim.claimed_by),
+            continuation=bundle_continuation_data(
+                bundle_id, result.claim.claimed_by
+            ),
         )
     finally:
         backend.close()
@@ -4246,7 +4598,7 @@ def finalize_bundle_review(
     try:
         try:
             gate = BundleReviewManager(
-                backend, SystemClock(), actor=_require_actor(actor)
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
             ).finalize(bundle_id)
             bundle = backend.get_bundle(bundle_id)
         except BundleReviewError as exc:
@@ -4275,7 +4627,7 @@ def checkpoint_bundle(
     try:
         try:
             checkpoint = BundleDeliveryManager(
-                backend, SystemClock(), actor=_require_actor(actor)
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
             ).checkpoint(bundle_id, commit_sha=commit_sha, pr_url=pr_url)
             bundle = backend.get_bundle(bundle_id)
         except (BundleDeliveryError, ValueError) as exc:
@@ -4306,7 +4658,7 @@ def reconcile_bundle(
     try:
         try:
             BundleDeliveryManager(
-                backend, SystemClock(), actor=_require_actor(actor)
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
             ).reconcile(
                 bundle_id, commit_sha=commit_sha, pr_url=pr_url, merged=merged
             )
@@ -4334,7 +4686,7 @@ def supersede_bundle(
     try:
         try:
             BundleDeliveryManager(
-                backend, SystemClock(), actor=_require_actor(actor)
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
             ).supersede(bundle_id, replacement_bundle_id=replacement_bundle_id)
             bundle = backend.get_bundle(bundle_id)
         except (BundleDeliveryError, ValueError) as exc:

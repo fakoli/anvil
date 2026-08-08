@@ -33,14 +33,20 @@ from pydantic import (
     model_validator,
 )
 
+from anvil.state.hashing import canonical_json_bytes
 from anvil.state.models import (
     DEFAULT_PRD_ID,
+    MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
     MAX_PRD_ASSUMPTIONS,
     BundleCheckpoint,
     BundleReviewPolicy,
     BundleReviewVerdict,
     BundleStatus,
     BundleThroughputBudget,
+    ClaimAttestationContext,
+    ClaimCommandProof,
     DelegatedAgentObservation,
     EvidenceCategory,
     PRDAssumption,
@@ -414,6 +420,63 @@ class TaskCreatedPayload(BaseModel):
     updated_at: str = ""
 
 
+_MAX_DEPENDENCY_BATCH_ENTRIES = 10_000
+
+
+class TaskDependencyEditPayload(BaseModel):
+    """One exact before/after dependency-set replacement in a batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: StrictStr = Field(min_length=1, max_length=512)
+    feature_id: StrictStr = Field(min_length=1, max_length=512)
+    expected_dependencies: list[StrictStr] = Field(
+        max_length=_MAX_DEPENDENCY_BATCH_ENTRIES
+    )
+    dependencies: list[StrictStr] = Field(max_length=_MAX_DEPENDENCY_BATCH_ENTRIES)
+
+    @field_validator("expected_dependencies", "dependencies")
+    @classmethod
+    def _validate_dependency_ids(cls, values: list[str]) -> list[str]:
+        if any(not value or len(value) > 512 for value in values):
+            raise ValueError("dependency ids must be non-empty and at most 512 characters")
+        return values
+
+    @model_validator(mode="after")
+    def _validate_final_dependencies(self) -> TaskDependencyEditPayload:
+        if self.task_id in self.dependencies:
+            raise ValueError("self-dependencies are not allowed")
+        if len(self.dependencies) != len(set(self.dependencies)):
+            raise ValueError("duplicate final dependencies are not allowed")
+        return self
+
+
+class TaskDependenciesBatchEditedPayload(BaseModel):
+    """Atomic dependency-graph edit scoped to one explicit PRD owner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    prd_id: StrictStr = Field(min_length=1, max_length=512)
+    edits: list[TaskDependencyEditPayload] = Field(
+        min_length=1,
+        max_length=_MAX_DEPENDENCY_BATCH_ENTRIES,
+    )
+
+    @model_validator(mode="after")
+    def _validate_batch(self) -> TaskDependenciesBatchEditedPayload:
+        task_ids = [edit.task_id for edit in self.edits]
+        if len(task_ids) != len(set(task_ids)):
+            raise ValueError("dependency batch task ids must be unique")
+        references = sum(
+            len(edit.expected_dependencies) + len(edit.dependencies)
+            for edit in self.edits
+        )
+        if references > _MAX_DEPENDENCY_BATCH_ENTRIES:
+            raise ValueError("dependency batch exceeds the bounded reference limit")
+        return self
+
+
 class TaskScoredPayload(BaseModel):
     """Payload for 'task.scored'."""
 
@@ -516,6 +579,9 @@ class BundleCreatedPayload(BaseModel):
     prd_id: str
     task_ids: list[str]
     coordinator: str
+    # Exact pre-normalization input for the live atomic collision check. Older
+    # events omit it; replay persists coordinator bytes unchanged.
+    coordinator_input: str | None = None
     status: BundleStatus = BundleStatus.planned
     branch: str | None = None
     worktree_path: str | None = None
@@ -870,6 +936,9 @@ class ClaimCreatedPayload(BaseModel):
     task_id: str
     bundle_claim_id: str | None = None
     claimed_by: str
+    # Exact pre-normalization input for the live atomic collision check. Older
+    # events omit it and replay never canonicalizes claimed_by.
+    actor_input: str | None = None
     claim_type: str
     status: str
     created_at: str
@@ -879,6 +948,10 @@ class ClaimCreatedPayload(BaseModel):
     worktree_path: str | None = None
     session_id: str | None = None
     expected_files: list[Any] = []
+    # v17 lifecycle binding.  Legacy events omit both fields; replay assigns a
+    # deterministic generation and leaves the context NULL (not attestable).
+    generation: StrictInt | None = Field(default=None, ge=1)
+    attestation_context: ClaimAttestationContext | None = None
     # Optional terminal-state fields — present when reading back a Claim
     # model that has already been released/staled (e.g. in replay scenarios
     # where the full Claim dict is passed as the event payload).
@@ -916,6 +989,30 @@ class ClaimRenewedPayload(BaseModel):
     last_heartbeat_at: str
     # Audit field emitted by ClaimManager.renew()
     renewed_by: str | None = None
+    # Present together only when this renewal consumes a previously persisted
+    # external progress attestation.  Absence preserves legacy/file-event renewals.
+    attestation_digest: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    attestation_generation: StrictInt | None = Field(default=None, ge=1)
+    attestation_trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ] | None = None
+
+    @model_validator(mode="after")
+    def _validate_attestation_consumption(self) -> ClaimRenewedPayload:
+        values = (
+            self.attestation_digest,
+            self.attestation_generation,
+            self.attestation_trust_mode,
+        )
+        if any(value is not None for value in values) and any(
+            value is None for value in values
+        ):
+            raise ValueError(
+                "attestation digest, generation, and trust mode must be supplied together"
+            )
+        return self
 
 
 class ClaimStalePayload(BaseModel):
@@ -960,6 +1057,42 @@ class EvidenceSubmittedPayload(BaseModel):
     # Typed as the enum (review finding): an out-of-range category must be
     # rejected at WRITE time, not poison every later evidence read.
     category: EvidenceCategory | None = None
+
+    @model_validator(mode="after")
+    def _validate_claim_command_proof_batch(self) -> EvidenceSubmittedPayload:
+        imported = [proof for proof in self.proofs if isinstance(proof, ClaimCommandProof)]
+        if len(imported) > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+            raise ValueError("too many claim-bound command proofs in one submission")
+        artifact_sizes = [
+            len(
+                canonical_json_bytes(
+                    proof.model_dump(mode="json"),
+                    max_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                    max_string_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                )
+            )
+            for proof in imported
+        ]
+        total_bytes = sum(artifact_sizes)
+        if total_bytes > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
+            raise ValueError("claim-bound command proof batch exceeds its byte limit")
+        digests = [proof.semantic_digest for proof in imported]
+        if len(digests) != len(set(digests)):
+            raise ValueError("claim-bound command proof batch contains a duplicate digest")
+        remaining_commands = [
+            value for value in self.commands_run if isinstance(value, str)
+        ]
+        for proof in imported:
+            if proof.exit_code != 0:
+                raise ValueError("claim-bound command proof requires exit_code 0")
+            try:
+                remaining_commands.remove(proof.command)
+            except ValueError:
+                raise ValueError(
+                    "each claim-bound command proof command must have one exact "
+                    "commands_run entry"
+                ) from None
+        return self
 
 
 class TaskAppliedPayload(BaseModel):
@@ -1017,6 +1150,140 @@ class ProgressNotedPayload(BaseModel):
     # still rejects unknown keys.
     phase: str | None = None
     detail: str | None = None
+
+
+class ProgressEvidenceCorePayload(BaseModel):
+    """Stable semantic identity of one externally verified progress fact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    kind: Literal["commit", "file"]
+    project_id: StrictStr = Field(min_length=1, max_length=255)
+    claim_id: StrictStr = Field(min_length=1, max_length=255)
+    generation: StrictInt = Field(ge=1)
+    task_id: StrictStr = Field(min_length=1, max_length=255)
+    task_revision: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    prd_id: StrictStr = Field(min_length=1, max_length=255)
+    prd_revision: StrictInt = Field(ge=1)
+    claimed_by: StrictStr = Field(min_length=1, max_length=4096)
+    repository_id: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    commit_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    path: StrictStr = Field(min_length=1, max_length=4096)
+    prior_sha256: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    file_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _strict_schema_version(cls, value: Any) -> Any:
+        if type(value) is not int:
+            raise ValueError("schema_version must be an integer")
+        return value
+
+
+class ProgressSignedPayload(ProgressEvidenceCorePayload):
+    """Exact Ed25519 signature preimage, including issuance time."""
+
+    issued_at: StrictStr
+
+    @field_validator("issued_at")
+    @classmethod
+    def _validate_issued_at(cls, value: str) -> str:
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("issued_at must be ISO 8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("issued_at must be timezone-aware")
+        return value
+
+
+class ProgressIssuerPayload(BaseModel):
+    """Durable issuer material required to re-verify a detached signature."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    algorithm: Literal["ed25519"]
+    signer_id: StrictStr = Field(pattern=r"^[0-9a-f]{16}$")
+    public_key: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    signature: StrictStr = Field(pattern=r"^[0-9a-f]{128}$")
+
+
+class ProgressAttestedPayload(BaseModel):
+    """Payload for ``progress.attested`` durable claim-bound evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    semantic_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    envelope_id: StrictStr | None = Field(default=None, max_length=255)
+    claim_id: StrictStr = Field(min_length=1)
+    task_id: StrictStr = Field(min_length=1)
+    claimed_by: StrictStr = Field(min_length=1)
+    generation: StrictInt = Field(ge=1)
+    repository_id: StrictStr = Field(min_length=1, max_length=512)
+    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    prd_id: StrictStr = Field(min_length=1, max_length=255)
+    prd_revision: StrictInt = Field(ge=1)
+    task_revision: StrictStr = Field(min_length=1, max_length=255)
+    kind: Literal["commit", "file"]
+    commit_sha: StrictStr | None = Field(
+        default=None, pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    )
+    changed_paths: list[StrictStr] = Field(default_factory=list)
+    path: StrictStr | None = Field(default=None, min_length=1, max_length=4096)
+    file_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    attested_at: str
+    recorded_at: str
+    trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ]
+    issuer_id: StrictStr | None = Field(default=None, max_length=255)
+    evidence_core: ProgressEvidenceCorePayload
+    signed_payload: ProgressSignedPayload
+    issuer: ProgressIssuerPayload | None = None
+
+    @field_validator("attested_at", "recorded_at")
+    @classmethod
+    def _validate_attestation_time(cls, value: str) -> str:
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("attestation timestamps must be ISO 8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("attestation timestamps must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_kind_and_issuer(self) -> ProgressAttestedPayload:
+        if self.kind == "commit":
+            if self.commit_sha is None or not self.changed_paths:
+                raise ValueError("commit attestation requires commit_sha and changed_paths")
+            if self.path is not None or self.file_sha256 is not None:
+                raise ValueError("commit attestation cannot carry file-only fields")
+        else:
+            if self.commit_sha is not None or self.changed_paths:
+                raise ValueError("file attestation cannot carry commit-only fields")
+            if self.path is None or self.file_sha256 is None:
+                raise ValueError("file attestation requires path and file_sha256")
+        if self.trust_mode == "configured_issuer_verified":
+            if (
+                self.issuer_id is None
+                or not self.issuer_id.strip()
+                or self.issuer is None
+            ):
+                raise ValueError("issuer-verified attestation requires issuer_id")
+        elif self.issuer_id is not None or self.issuer is not None:
+            raise ValueError("self-attested progress cannot declare issuer material")
+        signed = self.signed_payload.model_dump(mode="json")
+        issued_at = signed.pop("issued_at")
+        if signed != self.evidence_core.model_dump(mode="json"):
+            raise ValueError("signed payload must contain exactly the evidence core")
+        if issued_at != self.attested_at:
+            raise ValueError("signed payload issuance must match attested_at")
+        return self
 
 
 class SyncMappingUpsertedPayload(BaseModel):
@@ -1504,6 +1771,7 @@ __all__ = [
     "PrdReviewedPayload",
     "PrdRevisedPayload",
     "ProgressNotedPayload",
+    "ProgressAttestedPayload",
     "ProjectCreatedPayload",
     "StateInitializedPayload",
     "SyncAuditPayload",
@@ -1524,6 +1792,8 @@ __all__ = [
     "SyncReconciliationStartedPayload",
     "TaskAppliedPayload",
     "TaskCreatedPayload",
+    "TaskDependenciesBatchEditedPayload",
+    "TaskDependencyEditPayload",
     "TaskDeletedPayload",
     "TaskExpandedPayload",
     "TaskScoredPayload",

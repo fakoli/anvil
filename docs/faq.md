@@ -106,6 +106,10 @@ work should heartbeat every few minutes — see
 [`architecture.md` § Concurrency model](architecture.md) for the four
 layered mechanisms (SQLite WAL + `BEGIN IMMEDIATE`, leases, heartbeats,
 stale reaping).
+For work performed outside Anvil's file-change hooks, submit a canonical
+claim-bound artifact with `anvil progress <task> <phase> --attestation-file
+<path>` (or MCP `submit_progress.attestation_base64`) before renewing. The
+artifact is consumed once; an ordinary progress note never extends the lease.
 
 Full walkthrough: [`how-to/claiming-and-shipping-a-task.md`](how-to/claiming-and-shipping-a-task.md).
 
@@ -278,7 +282,7 @@ sqlite3 "$STATE_DIR/state.db" .schema
 sqlite3 "$STATE_DIR/state.db" "SELECT id, status, title FROM tasks;"
 ```
 
-The engine's current schema version is reported by `anvil --version` (v16 in
+The engine's current schema version is reported by `anvil --version` (v18 in
 this release). Supported historical databases are auto-upgraded through the
 ordered, additive migration chain when the backend opens (`anvil migrate
 state` is dry-run by default; pass `--yes` to apply it deliberately). Pydantic models in

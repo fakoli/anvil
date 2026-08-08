@@ -317,7 +317,10 @@ def resolve_actor(explicit: str | None = None) -> str:
         explicit arg > $ANVIL_ACTOR > $ANVIL_GATE_ACTOR (legacy) >
         (($USER | signing-key fingerprint | "agent") + session discriminator)
 
-    The first three are returned verbatim — the intentional coordination knobs.
+    The first three are returned exactly — the intentional coordination knobs.
+    Lookup callers must not strip or normalize these values because persisted
+    legacy identities remain exactly addressable. New-identity creation paths
+    separately apply ``anvil.actors.canonicalize_new_actor``.
     The DERIVED default (``$USER`` / fingerprint / ``"agent"``) instead gets a
     per-loop **session discriminator** appended when ``$ANVIL_SESSION_ID`` or
     ``$CLAUDE_CODE_SESSION_ID`` is set (#103/B47): without it, two concurrent
@@ -329,14 +332,14 @@ def resolve_actor(explicit: str | None = None) -> str:
     sibling loops are distinguishable by default. Set ``$ANVIL_ACTOR`` to pin an
     explicit identity and opt a loop out.
 
-    Always returns a non-empty, stripped string.
+    A derived default is always non-empty. An explicitly supplied or present
+    environment value is exact, even when a new identity policy would reject it.
     """
-    if explicit and explicit.strip():
-        return explicit.strip()
-    for env_var in ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR"):
-        value = os.environ.get(env_var)
-        if value and value.strip():
-            return value.strip()
+    from anvil.actors import resolve_actor_input
+
+    resolved = resolve_actor_input(explicit)
+    if resolved is not None:
+        return resolved
     base = _base_default_actor()
     session = _session_discriminator()
     return f"{base}-{session}" if session else base

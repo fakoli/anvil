@@ -31,8 +31,16 @@ def _event(
     target_id: str,
     payload: dict,
     *,
-    actor: str = "seed",
+    actor: str | None = None,
 ) -> EventDraft:
+    if actor is None:
+        identity_field = {
+            "claim.released": "released_by",
+            "claim.renewed": "renewed_by",
+            "evidence.submitted": "submitted_by",
+            "progress.noted": "actor",
+        }.get(action)
+        actor = str(payload.get(identity_field, "seed")) if identity_field else "seed"
     return EventDraft(
         timestamp=_NOW,
         actor=actor,
@@ -1182,6 +1190,41 @@ def test_replanned_bundle_can_acquire_a_new_claim_generation(tmp_path: Path) -> 
         backend.close()
 
 
+def test_bundle_member_generation_follows_prior_standalone_claim(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    try:
+        _seed(backend)
+        # Historical standalone work can precede bundle planning. The internal
+        # member authorization must allocate generation 2, not collide with the
+        # v17 schema default for the earlier lifecycle.
+        conn = backend._require_conn()
+        conn.execute(
+            """INSERT INTO claims
+               (id, task_id, claimed_by, claim_type, status, expected_files,
+                generation, attestation_context, created_at, lease_expires_at,
+                last_heartbeat_at, released_at, release_reason)
+               VALUES ('C-OLD', 'release:T001', 'old-owner', 'task', 'released',
+                       '[]', 1, NULL, ?, ?, ?, ?, 'historical')""",
+            (
+                (_NOW - timedelta(days=1)).isoformat(),
+                (_NOW - timedelta(hours=23)).isoformat(),
+                (_NOW - timedelta(days=1)).isoformat(),
+                (_NOW - timedelta(hours=23)).isoformat(),
+            ),
+        )
+
+        claimed = _manager(backend, tmp_path).claim("B001")
+        child_id = claimed.claim.member_claim_ids["release:T001"]
+        child = backend.get_claim(child_id)
+        assert child is not None
+        assert child.generation == 2
+        assert child.attestation_context is None
+    finally:
+        backend.close()
+
+
 def test_expired_public_claim_cannot_be_renewed(tmp_path: Path) -> None:
     backend = _backend(tmp_path)
     try:
@@ -2161,13 +2204,26 @@ def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
             "coordinator",
             "--branch",
             "agent/b001",
+            "--json",
             "--cwd",
             str(tmp_path),
         ],
         env=env,
     )
     assert claimed.exit_code == 0, claimed.output
-    assert "coordinator claim" in claimed.output
+    claim_data = json.loads(claimed.output)["data"]
+    assert claim_data["actor_identity"]["actor"] == "coordinator"
+    continuation = claim_data["continuation"]
+    assert continuation["renew"]["argv"][:4] == [
+        "anvil", "bundle", "renew", "B001",
+    ]
+    assert continuation["progress"]["argv"][:4] == [
+        "anvil", "bundle", "progress", "B001",
+    ]
+    assert continuation["complete"]["argv"][:4] == [
+        "anvil", "bundle", "complete", "B001",
+    ]
+    assert "submit" not in continuation
 
     packet = runner.invoke(
         app,
@@ -2244,3 +2300,42 @@ def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
         )
     finally:
         backend.close()
+
+
+def test_top_level_bundle_claim_human_lists_complete_continuation(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True
+    )
+    backend = _backend(state_dir)
+    try:
+        _seed(backend)
+    finally:
+        backend.close()
+    claimed = CliRunner().invoke(
+        app,
+        [
+            "claim",
+            "B001",
+            "--bundle",
+            "--actor",
+            "coordinator",
+            "--branch",
+            "agent/b001-human",
+            "--cwd",
+            str(tmp_path),
+        ],
+        env={"ANVIL_STATE_LAYOUT": "local"},
+    )
+
+    assert claimed.exit_code == 0, claimed.output
+    assert "ANVIL_ACTOR" in claimed.output
+    assert "anvil bundle renew " in claimed.output
+    assert "anvil bundle release " in claimed.output
+    assert "anvil bundle progress " in claimed.output
+    assert "anvil bundle complete " in claimed.output
+    assert "B001" in claimed.output
+    assert "anvil submit B001" not in claimed.output

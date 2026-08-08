@@ -68,10 +68,10 @@ _COMMAND = "describe"
 # identical. Consumers pin on ``api_version``; ``engine_version`` tells them the
 # exact build.
 #
-# Bumped to "5" when exact CLI node/flag contracts and build provenance were
-# added to the manifest. Consumers of the old shape must deliberately accept
-# the richer contract before treating it as compatible.
-API_VERSION = "5"
+# Bumped to "8" when dependency editing gained explicit PRD/project selection,
+# a resolved ``prd_id`` response field, and atomic batch persistence. Consumers
+# of the old shape must deliberately accept the richer contract.
+API_VERSION = "8"
 
 
 def describe(
@@ -119,14 +119,14 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "5",
-          "engine_version": "0.6.1",
-          "display_version": "0.6.1",
-          "schema_version": 16,
+          "api_version": "8",
+          "engine_version": "0.6.4",
+          "display_version": "0.6.4",
+          "schema_version": 18,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",
-          "tag": "v0.6.1",
+          "tag": "v0.6.4",
           "tag_distance": 0,
           "dirty": false,
           "cli": {
