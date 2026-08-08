@@ -27,7 +27,13 @@ from anvil.cli._helpers import (
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
 from anvil.naming import safe_path_component
-from anvil.state.models import ClaimCommandProof, CommandProof, EventDraft
+from anvil.state.models import (
+    MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
+    ClaimCommandProof,
+    CommandProof,
+    EventDraft,
+)
 
 
 def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
@@ -863,6 +869,22 @@ def submit(
             from anvil.cli.proof import _default_trust_path
 
             try:
+                # Refuse hostile batch shapes before opening even the first
+                # artifact. The verifier repeats these limits over loaded bytes;
+                # this adapter guard bounds I/O and diagnostics at the public edge.
+                if len(proof_files) > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+                    raise ClaimCommandProofError(
+                        "batch_size",
+                        "command proof batch is outside limits",
+                    )
+                total_file_bytes = 0
+                for proof_file in proof_files:
+                    total_file_bytes += proof_file.stat().st_size
+                    if total_file_bytes > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
+                        raise ClaimCommandProofError(
+                            "batch_too_large",
+                            "command proof batch exceeds its byte limit",
+                        )
                 trusted = signing.load_trust_list(_default_trust_path())
                 loaded = []
                 for proof_file in proof_files:

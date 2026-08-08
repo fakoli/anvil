@@ -102,16 +102,25 @@ task `required_proofs` command and one exact submitted `--commands` value.
 `output_base64` is the exact reported combined output and `output_sha256` is
 lowercase SHA-256 over those decoded bytes. `cwd_relative` is `.` or a canonical
 repository-relative POSIX path. Compute `cwd_identity` with the public
-`domain_separated_sha256` helper, domain `anvil.command-cwd.v1\0`, and object
-`{"repository_id": REPOSITORY_ID, "cwd_relative": CWD_RELATIVE}`.
+`anvil.claims.command_proof_artifact.claim_command_cwd_identity` helper, passing
+the repository root, `repository_id`, and `cwd_relative`. The helper verifies
+the contained directory without following links/reparse points and binds its
+stable filesystem identity; do not reproduce its hash preimage independently.
 
 Serialize with `anvil.state.hashing.canonical_json_bytes`: sorted keys, UTF-8,
 no BOM, whitespace, trailing newline, duplicate keys, floats, or noncanonical
 base64. Times use canonical UTC `...Z` spelling and must fall between claim
 creation and both verification time and lease expiry. Limits are 262,144 bytes
 per canonical envelope, 16,384 decoded command bytes, 131,072 decoded output
-bytes, 16 artifacts per batch, and 1 MiB aggregate encoded command/output. The
-semantic digest uses domain `anvil.command-proof.v1\0` over the typed payload.
+bytes, 16 artifacts per batch, and 1 MiB aggregate canonical bytes for the
+persisted `ClaimCommandProof` models. Adapters also prebound aggregate raw
+envelope/base64 input before loading; the verifier and state handler enforce the
+authoritative persisted-model cap. The semantic digest uses domain
+`anvil.command-proof.v1\0` over the typed payload
+projection **excluding `cwd_relative`**. The verifier-proven `cwd_identity`
+remains in that projection, so alternate display paths for the same working
+directory cannot mint distinct semantic evidence. A configured issuer still
+signs the full canonical payload bytes, including `cwd_relative`.
 
 An optional configured issuer has exact shape
 `{"algorithm":"ed25519","signer_id":"<16 hex>","public_key":"<64 hex>","signature":"<128 hex>"}`.

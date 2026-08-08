@@ -93,6 +93,7 @@ __all__ = [
     "ClaimCommandEvidenceCore",
     "ClaimCommandIssuer",
     "ClaimCommandProof",
+    "claim_command_semantic_projection",
     "DiffProof",
     "LinkProof",
     "AssertionProof",
@@ -511,6 +512,21 @@ class ClaimCommandEvidenceCore(BaseModel):
         if self.exit_code != 0:
             raise ValueError("claim command proof requires exit_code 0")
         return self
+
+
+def claim_command_semantic_projection(
+    core: ClaimCommandEvidenceCore,
+) -> dict[str, Any]:
+    """Return the stable execution identity, excluding cwd display spelling.
+
+    ``cwd_identity`` is verifier-proven and remains in the projection, so two
+    canonical spellings that resolve to the same directory cannot mint distinct
+    semantic evidence. The full core, including ``cwd_relative``, remains the
+    configured issuer's signature preimage.
+    """
+    projection = core.model_dump(mode="json")
+    projection.pop("cwd_relative")
+    return projection
 
 
 class ClaimCommandIssuer(BaseModel):

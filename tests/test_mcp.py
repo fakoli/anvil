@@ -337,7 +337,8 @@ def _set_required_command_proof(
 def _claim_command_artifact_base64(
     state_dir: Path, claim: dict[str, Any], command: str
 ) -> str:
-    from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
+    from anvil.claims.command_proof_artifact import claim_command_cwd_identity
+    from anvil.state.hashing import canonical_json_bytes
 
     conn = sqlite3.connect(str(state_dir / "state.db"))
     created_raw = conn.execute(
@@ -348,11 +349,10 @@ def _claim_command_artifact_base64(
     ended = datetime.now(UTC)
     context = claim["attestation_context"]
     output = b"1 passed\n"
-    cwd_identity = domain_separated_sha256(
-        b"anvil.command-cwd.v1\0",
-        {"repository_id": context["repository_id"], "cwd_relative": "."},
-        max_bytes=16_384,
-        max_string_bytes=8_192,
+    cwd_identity = claim_command_cwd_identity(
+        state_dir.parent,
+        context["repository_id"],
+        ".",
     )
     payload = {
         "schema_version": 1,
@@ -2620,6 +2620,69 @@ class TestSubmitProgress:
 # ===========================================================================
 
 class TestSubmitCompletionEvidence:
+    @pytest.mark.parametrize("oversized_kind", ["item_count", "aggregate_bytes"])
+    def test_adapter_refuses_oversized_proof_batch_before_decode_or_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        oversized_kind: str,
+    ) -> None:
+        from anvil.claims import command_proof_artifact
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="in_progress")
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="T001", claimed_by="agent-x"
+        )
+        monkeypatch.chdir(tmp_path)
+        calls = 0
+
+        def forbidden_loader(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            raise AssertionError("base64 artifact loader must not run")
+
+        monkeypatch.setattr(
+            command_proof_artifact,
+            "load_claim_command_proof_base64",
+            forbidden_loader,
+        )
+        artifacts = (
+            ["e30="] * 17
+            if oversized_kind == "item_count"
+            else ["A" * 800_000, "A" * 800_000]
+        )
+
+        async def submit() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "submit_completion_evidence",
+                    {
+                        "task_id": "T001",
+                        "actor": "agent-x",
+                        "commands_run": ["pytest -q"],
+                        "files_changed": ["src/foo.py"],
+                        "command_proof_artifacts_base64": artifacts,
+                        "cwd": str(tmp_path),
+                    },
+                )
+
+        with pytest.raises(ToolError, match=r"command_proof_error\[batch_"):
+            _run(submit())
+        assert calls == 0
+        assert _task_status(state_dir, "T001") == "in_progress"
+        conn = sqlite3.connect(str(state_dir / "state.db"))
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE task_id = 'T001'"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT status FROM claims WHERE id = 'C001'"
+            ).fetchone()[0] == "active"
+        finally:
+            conn.close()
+
     def test_claim_bound_command_proof_import_returns_receipt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -96,6 +96,7 @@ from anvil.state.models import (
     SyncMapping,
     Task,
     Verification,
+    claim_command_semantic_projection,
 )
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
@@ -145,7 +146,6 @@ _AUDIT_LINE_MAX_UTF8_BYTES = 4096
 _PROGRESS_ATTESTATION_MAX_BYTES = 262_144
 _PROGRESS_SEMANTIC_DOMAIN = b"anvil.progress-attestation.v1\0"
 _COMMAND_PROOF_SEMANTIC_DOMAIN = b"anvil.command-proof.v1\0"
-_COMMAND_CWD_DOMAIN = b"anvil.command-cwd.v1\0"
 _COMMAND_WINDOWS_RESERVED = re.compile(
     r"^(?:CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9\u00b9\u00b2\u00b3]|"
     r"LPT[1-9\u00b9\u00b2\u00b3])(?:\..*)?$",
@@ -10195,6 +10195,7 @@ class SqliteBackend:
     ) -> bool:
         """Recompute every durable command-proof identity and trust assertion."""
         core = proof.evidence_core.model_dump(mode="json")
+        semantic_projection = claim_command_semantic_projection(proof.evidence_core)
         try:
             command_bytes = base64.b64decode(
                 proof.evidence_core.command_base64.encode("ascii"), validate=True
@@ -10205,21 +10206,12 @@ class SqliteBackend:
             command = command_bytes.decode("utf-8", errors="strict")
             semantic_digest = domain_separated_sha256(
                 _COMMAND_PROOF_SEMANTIC_DOMAIN,
-                core,
+                semantic_projection,
                 max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
                 max_nodes=canonical_node_budget_for_bytes(
                     _PROGRESS_ATTESTATION_MAX_BYTES
                 ),
                 max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
-            )
-            cwd_identity = domain_separated_sha256(
-                _COMMAND_CWD_DOMAIN,
-                {
-                    "repository_id": proof.evidence_core.repository_id,
-                    "cwd_relative": proof.evidence_core.cwd_relative,
-                },
-                max_bytes=16_384,
-                max_string_bytes=8_192,
             )
             ended_at = datetime.datetime.fromisoformat(
                 proof.evidence_core.ended_at.replace("Z", "+00:00")
@@ -10236,7 +10228,6 @@ class SqliteBackend:
             != proof.evidence_core.output_sha256
             or proof.output_sha256 != proof.evidence_core.output_sha256
             or proof.semantic_digest != semantic_digest
-            or proof.evidence_core.cwd_identity != cwd_identity
             or proof.captured_at != ended_at
         ):
             return False

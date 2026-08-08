@@ -1868,8 +1868,34 @@ def submit_completion_evidence(
             )
             from anvil.cli._helpers import _resolve_project_dir
             from anvil.cli.proof import _default_trust_path
+            from anvil.state.models import (
+                MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+                MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
+            )
 
             try:
+                # Bound the public list before decoding any element. The
+                # conservative encoded cap permits base64 padding for every
+                # allowed item; exact decoded aggregate size is rechecked by
+                # verify_claim_command_proof_batch and the state handler.
+                artifact_count = len(command_proof_artifacts_base64)
+                if artifact_count > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+                    raise ClaimCommandProofError(
+                        "batch_size",
+                        "command proof batch is outside limits",
+                    )
+                max_encoded_batch = (
+                    (MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES + 2 * artifact_count + 2)
+                    // 3
+                ) * 4
+                if (
+                    sum(len(artifact) for artifact in command_proof_artifacts_base64)
+                    > max_encoded_batch
+                ):
+                    raise ClaimCommandProofError(
+                        "batch_too_large",
+                        "command proof batch exceeds its byte limit",
+                    )
                 trusted = signing.load_trust_list(_default_trust_path())
                 loaded = [
                     load_claim_command_proof_base64(

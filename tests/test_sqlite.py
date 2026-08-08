@@ -36,7 +36,13 @@ from anvil.state.backend import (
     TransactionAborted,
 )
 from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
-from anvil.state.models import ClaimStatus, Event, EventDraft
+from anvil.state.models import (
+    ClaimCommandEvidenceCore,
+    ClaimStatus,
+    Event,
+    EventDraft,
+    claim_command_semantic_projection,
+)
 from anvil.state.payloads import (
     EvidenceSubmittedPayload,
     PrdParsedPayload,
@@ -3305,6 +3311,7 @@ def _make_claim_command_proof(
     command: str = "pytest tests/ -v",
     output: bytes = b"5 passed\n",
     cwd_relative: str = ".",
+    cwd_identity: str = "1" * 64,
     started_at: datetime = _T0 + timedelta(minutes=10),
     ended_at: datetime = _T0 + timedelta(minutes=11),
     digest: str | None = None,
@@ -3312,10 +3319,6 @@ def _make_claim_command_proof(
     command_base64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
     output_base64 = base64.b64encode(output).decode("ascii")
     output_sha256 = hashlib.sha256(output).hexdigest()
-    cwd_identity = domain_separated_sha256(
-        b"anvil.command-cwd.v1\0",
-        {"repository_id": "e" * 64, "cwd_relative": cwd_relative},
-    )
     core = {
         "schema_version": 1,
         "project_id": "proj-1",
@@ -3344,7 +3347,12 @@ def _make_claim_command_proof(
         "output_sha256": output_sha256,
         "captured_at": ended_at.isoformat().replace("+00:00", "Z"),
         "semantic_digest": digest
-        or domain_separated_sha256(b"anvil.command-proof.v1\0", core),
+        or domain_separated_sha256(
+            b"anvil.command-proof.v1\0",
+            claim_command_semantic_projection(
+                ClaimCommandEvidenceCore.model_validate(core)
+            ),
+        ),
         "trust_mode": "claim_owner_self_attested",
         "issuer_id": None,
         "evidence_core": core,
@@ -13636,6 +13644,17 @@ class TestClaimCommandProofState:
         with pytest.raises(ValueError, match="one exact commands_run entry"):
             EvidenceSubmittedPayload.model_validate(payload)
 
+    def test_cwd_display_aliases_share_one_semantic_digest(self) -> None:
+        first = _make_claim_command_proof(cwd_relative=".")
+        alias = _make_claim_command_proof(cwd_relative="src")
+        assert first["semantic_digest"] == alias["semantic_digest"]
+        payload = _make_evidence_payload(
+            commands_run=["pytest tests/ -v", "pytest tests/ -v"]
+        )
+        payload["proofs"] = [first, alias]
+        with pytest.raises(ValueError, match="duplicate digest"):
+            EvidenceSubmittedPayload.model_validate(payload)
+
     def test_payload_rejects_timestamp_semantic_alias(self) -> None:
         payload = _make_evidence_payload()
         proof = _make_claim_command_proof()
@@ -13701,11 +13720,47 @@ class TestClaimCommandProofState:
         finally:
             b.close()
 
+    def test_replay_writer_rejects_legacy_cwd_spelling_digest(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            proof["semantic_digest"] = domain_separated_sha256(
+                b"anvil.command-proof.v1\0", proof["evidence_core"]
+            )
+            raw = _make_evidence_payload()
+            raw["proofs"] = [proof]
+            payload = EvidenceSubmittedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999993",
+                timestamp=_T0 + timedelta(minutes=12),
+                actor="agent-alpha",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EventRejected, match="replay claim-bound command proof"):
+                b._write_evidence_submitted(conn, payload, replayed)
+            conn.execute("ROLLBACK")
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+        finally:
+            b.close()
+
     @pytest.mark.parametrize(
         ("proof", "match"),
         [
             (_make_claim_command_proof(generation=2), "exact active claim generation"),
-            (_make_claim_command_proof(cwd_relative="NUL"), "durable proof material"),
+            (
+                _make_claim_command_proof(cwd_relative="NUL", output=b"6 passed\n"),
+                "durable proof material",
+            ),
             (_make_claim_command_proof(command="pytest -q"), "durable proof material"),
             (
                 _make_claim_command_proof(digest="0" * 64),

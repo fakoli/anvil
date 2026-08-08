@@ -30,6 +30,7 @@ import sqlite3 as _sqlite3
 import subprocess
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from anvil.cli import app
@@ -245,7 +246,8 @@ def _init_git_repo(root: Path) -> None:
 def _write_claim_command_artifact(
     tmp_path: Path, claim: dict[str, object], command: str
 ) -> Path:
-    from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
+    from anvil.claims.command_proof_artifact import claim_command_cwd_identity
+    from anvil.state.hashing import canonical_json_bytes
 
     conn = _sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
     created_raw = conn.execute(
@@ -258,11 +260,10 @@ def _write_claim_command_artifact(
     context = claim["attestation_context"]
     assert isinstance(context, dict)
     output = b"1 passed\n"
-    cwd_identity = domain_separated_sha256(
-        b"anvil.command-cwd.v1\0",
-        {"repository_id": context["repository_id"], "cwd_relative": "."},
-        max_bytes=16_384,
-        max_string_bytes=8_192,
+    cwd_identity = claim_command_cwd_identity(
+        tmp_path,
+        context["repository_id"],
+        ".",
     )
     payload = {
         "schema_version": 1,
@@ -646,6 +647,61 @@ class TestTypedProofGateEndToEnd:
             ],
         )
         assert result.exit_code == 1
+        assert _status(tmp_path, task_id) == "claimed"
+        conn = _sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE task_id = ?", (task_id,)
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize("oversized_kind", ["item_count", "aggregate_bytes"])
+    def test_adapter_refuses_oversized_batch_before_loading_or_mutating(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        oversized_kind: str,
+    ) -> None:
+        from anvil.claims import command_proof_artifact
+
+        task_id = _planned(tmp_path)
+        assert _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test"]
+        ).exit_code == 0
+
+        calls = 0
+
+        def forbidden_loader(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            raise AssertionError("artifact loader must not run")
+
+        monkeypatch.setattr(
+            command_proof_artifact, "load_claim_command_proof", forbidden_loader
+        )
+        if oversized_kind == "item_count":
+            paths = [tmp_path / f"missing-{index}.json" for index in range(17)]
+        else:
+            paths = [tmp_path / "large-a.json", tmp_path / "large-b.json"]
+            for path in paths:
+                path.write_bytes(b"x" * 600_000)
+
+        command = [
+            "submit",
+            task_id,
+            "--commands",
+            _PLANNED_VERIFY_CMD,
+            "--files-changed",
+            "src/app/converter.py",
+        ]
+        for path in paths:
+            command.extend(["--command-proof-file", str(path)])
+        command.extend(["--actor", "agent-test", "--json"])
+        result = _invoke(tmp_path, command)
+
+        assert result.exit_code == 1
+        assert calls == 0
         assert _status(tmp_path, task_id) == "claimed"
         conn = _sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
         try:

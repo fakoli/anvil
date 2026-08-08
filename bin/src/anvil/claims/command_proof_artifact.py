@@ -12,6 +12,7 @@ import binascii
 import datetime as dt
 import json
 import os
+import re
 import stat
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from anvil.state.hashing import (
     domain_separated_sha256,
 )
 from anvil.state.models import (
+    MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
     MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
     MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
     Claim,
@@ -42,9 +44,10 @@ from anvil.state.models import (
     ClaimStatus,
     ProofKind,
     Task,
+    claim_command_semantic_projection,
 )
 
-MAX_CLAIM_COMMAND_PROOF_BYTES = 262_144
+MAX_CLAIM_COMMAND_PROOF_BYTES = MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES
 
 _SEMANTIC_DOMAIN = b"anvil.command-proof.v1\0"
 _CWD_DOMAIN = b"anvil.command-cwd.v1\0"
@@ -138,7 +141,7 @@ def load_claim_command_proof(
     )
     semantic_digest = domain_separated_sha256(
         _SEMANTIC_DOMAIN,
-        core_value,
+        claim_command_semantic_projection(envelope.payload),
         max_bytes=MAX_CLAIM_COMMAND_PROOF_BYTES,
         max_nodes=canonical_node_budget_for_bytes(MAX_CLAIM_COMMAND_PROOF_BYTES),
         max_string_bytes=MAX_CLAIM_COMMAND_PROOF_BYTES,
@@ -320,12 +323,10 @@ def verify_claim_command_proof_batch(
             raise ClaimCommandProofError(
                 "command_not_declared", "command proof does not match submitted commands"
             )
-        cwd_relative, cwd = _verified_cwd(local.root, core.cwd_relative)
-        cwd_identity = domain_separated_sha256(
-            _CWD_DOMAIN,
-            {"repository_id": local.repository_id, "cwd_relative": cwd_relative},
-            max_bytes=16_384,
-            max_string_bytes=8_192,
+        cwd_relative, cwd, cwd_identity = _claim_command_cwd_binding(
+            local.root,
+            repository_id=local.repository_id,
+            cwd_relative=core.cwd_relative,
         )
         if core.cwd_identity != cwd_identity or not cwd.is_dir():
             raise ClaimCommandProofError(
@@ -359,6 +360,28 @@ def verify_claim_command_proof_batch(
                 "proof_invalid", "verified command proof cannot be represented"
             ) from exc
         verified.append(proof)
+    try:
+        durable_bytes = sum(
+            len(
+                canonical_json_bytes(
+                    proof.model_dump(mode="json"),
+                    max_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                    max_nodes=canonical_node_budget_for_bytes(
+                        MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES
+                    ),
+                    max_string_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                )
+            )
+            for proof in verified
+        )
+    except (CanonicalJsonRefusal, ValueError) as exc:
+        raise ClaimCommandProofError(
+            "proof_too_large", "persisted command proof exceeds its byte limit"
+        ) from exc
+    if durable_bytes > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
+        raise ClaimCommandProofError(
+            "batch_too_large", "persisted command proof batch exceeds its byte limit"
+        )
     return tuple(verified)
 
 
@@ -432,7 +455,44 @@ def _inspect_repository(project_root: Path, *, project_id: str) -> Any:
         raise ClaimCommandProofError(exc.code, str(exc)) from exc
 
 
-def _verified_cwd(root: Path, value: str) -> tuple[str, Path]:
+def claim_command_cwd_identity(
+    project_root: Path,
+    repository_id: str,
+    cwd_relative: str,
+) -> str:
+    """Bind one canonical contained directory to its stable filesystem identity."""
+    return _claim_command_cwd_binding(
+        project_root,
+        repository_id=repository_id,
+        cwd_relative=cwd_relative,
+    )[2]
+
+
+def _claim_command_cwd_binding(
+    project_root: Path,
+    *,
+    repository_id: str,
+    cwd_relative: str,
+) -> tuple[str, Path, str]:
+    if type(repository_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", repository_id):
+        raise ClaimCommandProofError(
+            "repository_invalid", "command proof repository identity is invalid"
+        )
+    relative, resolved, device, inode = _verified_cwd(project_root, cwd_relative)
+    identity = domain_separated_sha256(
+        _CWD_DOMAIN,
+        {
+            "repository_id": repository_id,
+            "filesystem_device": device,
+            "filesystem_inode": inode,
+        },
+        max_bytes=16_384,
+        max_string_bytes=8_192,
+    )
+    return relative, resolved, identity
+
+
+def _verified_cwd(root: Path, value: str) -> tuple[str, Path, int, int]:
     if value == ".":
         relative = "."
         parts: tuple[str, ...] = ()
@@ -447,23 +507,44 @@ def _verified_cwd(root: Path, value: str) -> tuple[str, Path]:
     current = root
     try:
         root_resolved = root.resolve(strict=True)
+        final_info = current.lstat()
+        if stat.S_ISLNK(final_info.st_mode) or (
+            os.name == "nt" and final_info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise ClaimCommandProofError(
+                "cwd_link_forbidden", "command proof cwd cannot traverse a link"
+            )
         for part in parts:
             current = current / part
-            info = current.lstat()
-            if stat.S_ISLNK(info.st_mode) or (
-                os.name == "nt" and info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            final_info = current.lstat()
+            if stat.S_ISLNK(final_info.st_mode) or (
+                os.name == "nt"
+                and final_info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
             ):
                 raise ClaimCommandProofError(
                     "cwd_link_forbidden", "command proof cwd cannot traverse a link"
                 )
-            if not stat.S_ISDIR(info.st_mode):
+            if not stat.S_ISDIR(final_info.st_mode):
                 raise ClaimCommandProofError("cwd_invalid", "command proof cwd is not a directory")
         resolved = current.resolve(strict=True)
         resolved.relative_to(root_resolved)
+        stable_info = current.lstat()
+        if (
+            final_info.st_dev != stable_info.st_dev
+            or final_info.st_ino != stable_info.st_ino
+            or final_info.st_mode != stable_info.st_mode
+            or not stat.S_ISDIR(stable_info.st_mode)
+            or stable_info.st_dev < 0
+            or stable_info.st_ino <= 0
+        ):
+            raise ClaimCommandProofError(
+                "cwd_identity_unavailable",
+                "command proof cwd has no stable filesystem identity",
+            )
     except ClaimCommandProofError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
         raise ClaimCommandProofError(
             "cwd_unavailable", "command proof cwd is unavailable or outside the repository"
         ) from exc
-    return relative, resolved
+    return relative, resolved, int(stable_info.st_dev), int(stable_info.st_ino)

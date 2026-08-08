@@ -16,6 +16,7 @@ from anvil import signing
 from anvil.claims.command_proof_artifact import (
     MAX_CLAIM_COMMAND_PROOF_BYTES,
     ClaimCommandProofError,
+    claim_command_cwd_identity,
     load_claim_command_proof,
     load_claim_command_proof_base64,
     verify_claim_command_proof_batch,
@@ -43,7 +44,6 @@ _ENDED = _NOW - dt.timedelta(minutes=1)
 _COMMAND = "uv run pytest -q"
 _TASK_REVISION = "a" * 64
 _SEMANTIC_DOMAIN = b"anvil.command-proof.v1\0"
-_CWD_DOMAIN = b"anvil.command-cwd.v1\0"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -121,13 +121,16 @@ def _core(
 ) -> dict[str, object]:
     claim = _claim(repo)
     assert claim.attestation_context is not None
-    cwd_identity = domain_separated_sha256(
-        _CWD_DOMAIN,
-        {
-            "repository_id": claim.attestation_context.repository_id,
-            "cwd_relative": cwd_relative,
-        },
-    )
+    try:
+        cwd_identity = claim_command_cwd_identity(
+            repo,
+            claim.attestation_context.repository_id,
+            cwd_relative,
+        )
+    except ClaimCommandProofError:
+        # Malformed-path tests need a schema-valid core so the live verifier,
+        # rather than this fixture builder, owns the refusal.
+        cwd_identity = "0" * 64
     value: dict[str, object] = {
         "schema_version": 1,
         "project_id": "project-1",
@@ -186,7 +189,12 @@ def test_unsigned_artifact_round_trips_exact_bytes_and_state_shape(repo: Path) -
     assert loaded.command_bytes == _COMMAND.encode()
     assert loaded.output_bytes == b"17 passed\n"
     assert loaded.semantic_digest == domain_separated_sha256(
-        _SEMANTIC_DOMAIN, loaded.evidence_core.model_dump(mode="json")
+        _SEMANTIC_DOMAIN,
+        {
+            key: value
+            for key, value in loaded.evidence_core.model_dump(mode="json").items()
+            if key != "cwd_relative"
+        },
     )
     assert proof.kind == "claim_command"
     assert proof.command == _COMMAND
@@ -351,6 +359,33 @@ def test_cwd_symlink_or_reparse_point_is_refused(repo: Path) -> None:
     assert caught.value.code == "cwd_link_forbidden"
 
 
+def test_windows_case_aliases_share_identity_and_semantic_digest(repo: Path) -> None:
+    (repo / "CaseDir").mkdir()
+    upper = load_claim_command_proof(
+        _artifact(repo, envelope_id="upper", core=_core(repo, cwd_relative="CaseDir"))
+    )
+    lower = load_claim_command_proof(
+        _artifact(repo, envelope_id="lower", core=_core(repo, cwd_relative="casedir"))
+    )
+    if not (repo / "casedir").is_dir():
+        pytest.skip("filesystem is case-sensitive")
+
+    assert upper.evidence_core.cwd_identity == lower.evidence_core.cwd_identity
+    assert upper.semantic_digest == lower.semantic_digest
+    with pytest.raises(ClaimCommandProofError) as caught:
+        verify_claim_command_proof_batch(
+            [upper, lower],
+            claim=_claim(repo),
+            task=_task(),
+            project_id="project-1",
+            project_root=repo,
+            actor="codex",
+            declared_commands=[_COMMAND, _COMMAND],
+            now=_NOW,
+        )
+    assert caught.value.code == "duplicate_evidence"
+
+
 def test_batch_rejects_duplicate_partial_and_resource_overruns_atomically(repo: Path) -> None:
     first = load_claim_command_proof(_artifact(repo, envelope_id="first"))
     same_evidence = load_claim_command_proof(_artifact(repo, envelope_id="second"))
@@ -390,6 +425,36 @@ def test_batch_rejects_duplicate_partial_and_resource_overruns_atomically(repo: 
             project_root=repo,
             actor="codex",
             declared_commands=[_COMMAND],
+            now=_NOW,
+        )
+    assert caught.value.code == "batch_too_large"
+
+
+def test_batch_cap_uses_exact_persisted_proof_bytes(repo: Path) -> None:
+    command = "x" * 16_384
+    loaded = []
+    for index in range(5):
+        output = b"o" * 131_071 + bytes([65 + index])
+        core = _core(
+            repo,
+            command=command,
+            output=output,
+            ended_at=_ENDED + dt.timedelta(microseconds=index),
+        )
+        loaded.append(
+            load_claim_command_proof(_artifact(repo, envelope_id=f"large-{index}", core=core))
+        )
+    assert sum(item.raw_size_bytes for item in loaded) < MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
+
+    with pytest.raises(ClaimCommandProofError) as caught:
+        verify_claim_command_proof_batch(
+            loaded,
+            claim=_claim(repo),
+            task=_task(command),
+            project_id="project-1",
+            project_root=repo,
+            actor="codex",
+            declared_commands=[command] * len(loaded),
             now=_NOW,
         )
     assert caught.value.code == "batch_too_large"
