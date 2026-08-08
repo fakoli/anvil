@@ -23,6 +23,8 @@ from pathlib import Path
 
 import typer
 
+from anvil.actors import ACTOR_AUTH_NOTICE
+from anvil.cli._actor_output import actor_flag_for_human, safe_actor_label
 from anvil.cli._helpers import (
     _resolve_state_dir,
     resolve_actor,
@@ -613,6 +615,14 @@ def _payload_file_path(payload: dict[str, object]) -> str:
 
 
 def _payload_actor(payload: dict[str, object], default: str = "unknown") -> str:
+    # A claim-time ANVIL_ACTOR pin is the lifecycle continuation contract and
+    # must beat a harness-specific payload session proxy. Preserve the proxy
+    # fallback for unpinned legacy installs.
+    if any(
+        os.environ.get(name, "").strip()
+        for name in ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR")
+    ):
+        return resolve_actor()
     value = payload.get("session_id")
     actor = str(value).strip() if value is not None else ""
     return actor or default
@@ -919,7 +929,8 @@ def hook_check_claim(
                     typer.echo(
                         f"[anvil:check-claim] WARNING: file '{file}' is "
                         f"in the scope of claim '{active_claim.id}' owned by "
-                        f"'{active_claim.claimed_by}', not '{actor}'.",
+                        f"{safe_actor_label(active_claim.claimed_by)}, not "
+                        f"{safe_actor_label(actor)}. {ACTOR_AUTH_NOTICE}",
                         err=True,
                     )
     except SystemExit:
@@ -1244,11 +1255,17 @@ def _warn_expiring_leases(
         marker = markers_dir / f"lease-warn-{claim.id}"
         if remaining < warn_minutes:
             if not marker.exists():
+                actor_flag = actor_flag_for_human(claim.claimed_by)
+                remedy = (
+                    f"'anvil renew {claim.id} {actor_flag}'"
+                    if actor_flag is not None
+                    else "the structured MCP renew_claim tool"
+                )
                 typer.echo(
                     f"[anvil:lease] WARNING: claim {claim.id} "
                     f"(task {claim.task_id}) lease expires in "
-                    f"{max(remaining, 0):.0f}m — commit progress or run "
-                    f"'anvil renew {claim.id}'.",
+                    f"{max(remaining, 0):.0f}m — commit progress or use "
+                    f"{remedy}. {ACTOR_AUTH_NOTICE}",
                     err=True,
                 )
                 markers_dir.mkdir(parents=True, exist_ok=True)
@@ -1262,7 +1279,10 @@ def hook_heartbeat(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor whose claim lease(s) to renew (default $ANVIL_GATE_ACTOR or 'agent').",
+        help=(
+            "Actor whose claim lease(s) to renew. Precedence: --actor > "
+            "ANVIL_ACTOR > ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     cwd: Path | None = typer.Option(  # noqa: B008
         None,

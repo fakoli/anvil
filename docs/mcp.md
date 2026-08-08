@@ -537,9 +537,12 @@ the agent has checked conflicts.
 
 ### `release_task`
 
-Releases the active claim on a task held by `actor`. The claim is located by task ID; the
-actor string does not need to match (the lookup finds the active claim regardless of who
-holds it). Stale-claim reaping runs first.
+Releases the active claim on a task held by `actor`. The claim is located by task ID, then
+the exact persisted owner must match `actor`; a mismatch refuses with structured owner and
+`ANVIL_ACTOR` / actor-argument remedies. Stale-claim reaping runs first.
+
+Actor values on MCP lifecycle tools are local coordination and audit attribution, not
+cryptographic authentication.
 
 **Inputs**
 
@@ -560,7 +563,8 @@ released accidentally.
 ```json
 {
   "released": true,
-  "claim_id": "C001"
+  "claim_id": "C001",
+  "actor_identity": {"actor": "agent-x", "authenticated": false, "notice": "..."}
 }
 ```
 
@@ -601,7 +605,9 @@ For a coordinator bundle lease, pass the bundle ID as `task_id` and set
 
 ```json
 {
-  "lease_expires_at": "2026-05-25T14:30:00+00:00"
+  "lease_expires_at": "2026-05-25T14:30:00+00:00",
+  "renewed": true,
+  "actor_identity": {"actor": "agent-x", "authenticated": false, "notice": "..."}
 }
 ```
 
@@ -620,7 +626,8 @@ to re-enter the `ready` pool.
 ### `submit_progress`
 
 Records an in-progress note for a task without changing its status. Writes a
-`progress.noted` event to the JSONL audit log. Does not require an active claim.
+`progress.noted` event to the JSONL audit log. It does not require a claim, but when the
+task has an active claim the exact owner must supply the progress actor.
 `phase` is an optional structured label ("build", "tests", "review-fixes", …)
 for the heartbeat bus; `detail` is free-text elaboration for the phase.
 

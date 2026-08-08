@@ -71,7 +71,8 @@ openclaw gateway restart
 ```
 
 How it works: on `before_agent_finalize` the plugin shells out to
-`anvil gate-check --json --actor agent` (cwd-scoped). If the actor holds an active
+`anvil gate-check --json --actor <resolved-actor>` (cwd-scoped). Resolution uses
+`ANVIL_ACTOR`, then the legacy `ANVIL_GATE_ACTOR`, then `agent`. If the actor holds an active
 claim whose task has missing/incomplete evidence, the hook returns
 `action:"revise"` (bounded to 3 attempts per run, keyed on task+runId) carrying
 anvil's instruction; otherwise it allows finalization.
@@ -119,9 +120,10 @@ openclaw config set plugins.entries.anvil-finish-gate.config.guardExec true --st
   configured, the request resolves to a denial — so prefer `warn` or `block` when
   unattended.
 - **Actor alignment:** the guard checks claims under the actor `agent` (override via
-  the `ANVIL_GATE_ACTOR` env, shared with the finish-gate; mode via
+  `ANVIL_ACTOR`, or the legacy `ANVIL_GATE_ACTOR`, shared with the finish-gate; mode via
   `ANVIL_CLAIM_GUARD_MODE`). If your harness claims under a different identity,
   `block`/`require_approval` could mis-fire — keep the default `warn` until aligned.
+  This identity is local coordination/audit attribution, not cryptographic authentication.
 - Editing a file outside your claim's declared scope only **warns** (advisory —
   `expected_files` is not exhaustive; a claim with no declared files is not warned).
   The guard is default-OPEN (no project / no cwd / anvil missing / any error ⇒ the

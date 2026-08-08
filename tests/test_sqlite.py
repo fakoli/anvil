@@ -32,7 +32,7 @@ from anvil.state.backend import (
     StateLocked,
     TransactionAborted,
 )
-from anvil.state.models import Event, EventDraft
+from anvil.state.models import ClaimStatus, Event, EventDraft
 from anvil.state.payloads import PrdParsedPayload
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import (
@@ -1553,11 +1553,24 @@ def _make_event(
     target_kind: str = "prd",
     target_id: str = "proj-1",
     now: datetime = _T0,
+    actor: str | None = None,
 ) -> EventDraft:
     """Return an EventDraft (SL1-RR-1: id is ignored, assigned by backend)."""
+    if actor is None:
+        actor = str(
+            payload.get(
+                {
+                    "claim.released": "released_by",
+                    "claim.renewed": "renewed_by",
+                    "evidence.submitted": "submitted_by",
+                    "progress.noted": "actor",
+                }.get(action, ""),
+                "test",
+            )
+        )
     return EventDraft(
         timestamp=now,
-        actor="test",
+        actor=actor,
         action=action,
         target_kind=target_kind,
         target_id=target_id,
@@ -9632,9 +9645,17 @@ def _make_draft(
     target_kind: str = "project",
     target_id: str = "proj-1",
     now: datetime = _T0,
-    actor: str = "test",
+    actor: str | None = None,
 ) -> EventDraft:
     """Build a minimal EventDraft for T4 tests."""
+    if actor is None:
+        identity_field = {
+            "claim.released": "released_by",
+            "claim.renewed": "renewed_by",
+            "evidence.submitted": "submitted_by",
+            "progress.noted": "actor",
+        }.get(action)
+        actor = str(payload.get(identity_field, "test")) if identity_field else "test"
     return EventDraft(
         timestamp=now,
         actor=actor,
@@ -12099,12 +12120,12 @@ class TestDecideApplyContract:
                                  target_kind="claim", target_id="C001"))
             # First release succeeds.
             b.append(_make_event("claim.released",
-                                 {"claim_id": "C001", "released_by": "agent",
+                                 {"claim_id": "C001", "released_by": "agent-alpha",
                                   "release_reason": "done", "force": False},
                                  target_kind="claim", target_id="C001"))
             # Second release is idempotent no-op.
             result = b.append(_make_event("claim.released",
-                                          {"claim_id": "C001", "released_by": "agent",
+                                          {"claim_id": "C001", "released_by": "agent-alpha",
                                            "release_reason": "done again", "force": False},
                                           target_kind="claim", target_id="C001"))
             assert result is None
@@ -12126,7 +12147,7 @@ class TestDecideApplyContract:
             b.append(_make_event("claim.created", _make_claim_payload(),
                                  target_kind="claim", target_id="C001"))
             b.append(_make_event("claim.released",
-                                 {"claim_id": "C001", "released_by": "agent",
+                                 {"claim_id": "C001", "released_by": "agent-alpha",
                                   "release_reason": "done", "force": False},
                                  target_kind="claim", target_id="C001"))
             with pytest.raises(EventRejected):
@@ -12148,7 +12169,8 @@ class TestDecideApplyContract:
             new_heartbeat = _T0.isoformat()
             b.append(_make_event("claim.renewed",
                                  {"claim_id": "C001", "lease_expires_at": new_expiry,
-                                  "last_heartbeat_at": new_heartbeat},
+                                  "last_heartbeat_at": new_heartbeat,
+                                  "renewed_by": "agent-alpha"},
                                  target_kind="claim", target_id="C001"))
             claim = b.get_claim("C001")
             assert claim is not None
@@ -12795,5 +12817,166 @@ class TestConflictGroupPersistence:
                     target_kind="conflict_group",
                     target_id="x",
                 )
+        finally:
+            b.close()
+
+
+class TestActorIdentityAtomicity:
+    def test_replay_preserves_exact_legacy_owner_bytes(self, tmp_path: Path) -> None:
+        events_path = tmp_path / "events.jsonl"
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            b.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(actor="normal-owner"),
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+            b.append(
+                _make_event(
+                    "claim.released",
+                    {
+                        "claim_id": "C001",
+                        "released_by": "normal-owner",
+                        "force": False,
+                    },
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+
+            legacy = "legacy\x01owner"
+            rows = _read_jsonl(str(events_path))
+            for row in rows:
+                if row["action"] == "claim.created":
+                    row["actor"] = legacy
+                    row["payload_json"]["claimed_by"] = legacy
+                elif row["action"] == "claim.released":
+                    row["actor"] = legacy
+                    row["payload_json"]["released_by"] = legacy
+            events_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+
+            b.replay_from_empty(str(events_path))
+            claim = b.get_claim("C001")
+            assert claim is not None
+            assert claim.claimed_by == legacy
+            assert claim.status is ClaimStatus.released
+        finally:
+            b.close()
+
+    def test_live_claim_rejects_normalized_collision_under_sqlite_lock(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            conn.execute(
+                """INSERT INTO claims
+                   (id, task_id, claimed_by, claim_type, status, expected_files,
+                    created_at, lease_expires_at, last_heartbeat_at)
+                   VALUES ('CLEGACY', 'T001', ?, 'task', 'released', '[]', ?, ?, ?)""",
+                (
+                    "cafe\u0301",
+                    _T0.isoformat(),
+                    (_T0 + timedelta(hours=1)).isoformat(),
+                    _T0.isoformat(),
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            payload = _make_claim_payload(claim_id="CNEW", actor="caf\u00e9")
+            payload["actor_input"] = "cafe\u0301"
+            with pytest.raises(EventRejected, match="collides"):
+                b.append(
+                    _make_event(
+                        "claim.created",
+                        payload,
+                        target_kind="claim",
+                        target_id="CNEW",
+                    )
+                )
+            assert b.get_claim("CNEW") is None
+        finally:
+            b.close()
+
+    def test_wrong_actor_lifecycle_events_fail_before_log_append(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            b.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(actor="owner"),
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+            attempts = [
+                (
+                    "claim.renewed",
+                    "claim",
+                    "C001",
+                    {
+                        "claim_id": "C001",
+                        "renewed_by": "other",
+                        "lease_expires_at": (_T0 + timedelta(hours=2)).isoformat(),
+                        "last_heartbeat_at": (_T0 + timedelta(minutes=1)).isoformat(),
+                    },
+                ),
+                (
+                    "claim.released",
+                    "claim",
+                    "C001",
+                    {"claim_id": "C001", "released_by": "other", "force": False},
+                ),
+                (
+                    "progress.noted",
+                    "task",
+                    "T001",
+                    {
+                        "task_id": "T001",
+                        "actor": "other",
+                        "notes": "spoof",
+                        "noted_at": _T0.isoformat(),
+                    },
+                ),
+                (
+                    "evidence.submitted",
+                    "task",
+                    "T001",
+                    {
+                        "task_id": "T001",
+                        "claim_id": "C001",
+                        "submitted_by": "other",
+                        "evidence_id": "EVOTHER",
+                        "commands_run": ["pytest -q"],
+                        "files_changed": [],
+                    },
+                ),
+            ]
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            for action, target_kind, target_id, payload in attempts:
+                with pytest.raises(EventRejected, match="exact|owner"):
+                    b.append(
+                        _make_event(
+                            action,
+                            payload,
+                            target_kind=target_kind,
+                            target_id=target_id,
+                            actor="other",
+                        )
+                    )
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
         finally:
             b.close()

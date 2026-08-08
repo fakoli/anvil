@@ -44,6 +44,8 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 
+from anvil.actors import ACTOR_AUTH_NOTICE
+from anvil.cli._actor_output import actor_flag_for_human, safe_actor_label
 from anvil.cli._helpers import (
     StateRootError,
     _open_backend,
@@ -68,8 +70,8 @@ def gate_check(
         None,
         "--actor",
         help=(
-            "Actor whose active claims to gate. Defaults to $USER or 'agent' "
-            "(the identity an agent harness claims under via MCP/CLI)."
+            "Actor whose active claims to gate. Precedence: --actor > "
+            "ANVIL_ACTOR > ANVIL_GATE_ACTOR > derived local identity."
         ),
     ),
     json_output: bool = JSON_OPTION,
@@ -211,12 +213,19 @@ def _block_instruction(task_id: str, actor: str, missing: list[str], others: int
     extra = (
         f" (and {others} other claimed task(s) also need evidence)" if others else ""
     )
+    actor_flag = actor_flag_for_human(actor)
+    submit_remedy = (
+        f"`anvil submit {task_id} {actor_flag}`"
+        if actor_flag is not None
+        else "the structured MCP submit_completion_evidence tool"
+    )
     return (
-        f"Task {task_id} is claimed by '{actor}' but its verification evidence is "
+        f"Task {task_id} is claimed by {safe_actor_label(actor)} but its "
+        f"verification evidence is "
         f"incomplete (missing: {miss}){extra}. Run the task's verification commands "
-        f"and submit evidence before finishing — e.g. `anvil submit {task_id}` — then "
+        f"and submit evidence before finishing — e.g. {submit_remedy} — then "
         f"end your turn. (anvil checks that required evidence was submitted, not that "
-        f"commands exited 0.)"
+        f"commands exited 0.) {ACTOR_AUTH_NOTICE}"
     )
 
 

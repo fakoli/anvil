@@ -78,7 +78,10 @@ Claimed task 'T012' as 'alice'.
   Lease until: 2026-05-25T15:23:00+00:00
   Branch:      agent/t012-wire-submit-progress-evidence-buffer-flush
 
-Run `anvil renew C9F3A210` to extend the lease before it expires.
+  Actor:        'alice'
+  Actor identity is local coordination and audit attribution, not cryptographic authentication.
+  Pin for continuation: `export ANVIL_ACTOR=alice`
+Run `anvil renew C9F3A210 --actor alice` to extend the lease before it expires.
 ```
 
 ### Claim flags
@@ -87,7 +90,7 @@ Run `anvil renew C9F3A210` to extend the lease before it expires.
 |---|---|
 | `--worktree` | Also create a git worktree at `../wt-<task_id>/` so you can work on multiple claims in parallel without checkout-thrash. Skipped (with a stderr warning) if the working tree is dirty. |
 | `--force` | Override file-overlap and conflict-group warnings; the conflict event is still logged. Use sparingly. |
-| `--actor <name>` | Identity recorded on the claim. Defaults to `$USER`, then `agent`. |
+| `--actor <name>` | Local audit identity recorded on the claim. Precedence is explicit `--actor` > `ANVIL_ACTOR` > legacy `ANVIL_GATE_ACTOR` > derived `$USER`/signing fingerprint/`agent` plus a session discriminator. It is not cryptographic authentication. Claim output returns exact structured continuation argv/environment data. |
 | `--lease <minutes>` | Lease duration for this claim, overriding `default_lease_minutes` from project/global `config.yaml` (precedence: this flag > project config > global config > built-in default of `240`). |
 | `--branch <name>` | Attach the claim to an existing or caller-named branch instead of the generated `agent/<task_id>-<slug>` name. The branch is checked out if it exists, created otherwise, and the name is recorded on the claim. |
 
@@ -147,7 +150,7 @@ The first file change auto-transitions the task `claimed → in_progress`.
 A claim's lease expires after `default_lease_minutes` (the `ClaimManager` ships with `240` as the in-code default; the project-level override lives in `.anvil/config.yaml`). Renew it before expiry:
 
 ```bash
-anvil renew C9F3A210
+anvil renew C9F3A210 --actor alice
 ```
 
 Sample output:
@@ -158,7 +161,7 @@ Renewed claim 'C9F3A210'.
   Last heartbeat:  2026-05-25T15:23:00+00:00
 ```
 
-The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes`. Only the owning actor can renew an active claim — `renew` fails with `ClaimError` on actor mismatch or non-active status. Pass `renew C9F3A210 --lease <minutes>` to extend by a different duration than `default_lease_minutes` for this renewal.
+The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes`. Only the exact persisted owner can renew an active claim. A mismatch refuses with the owner and structured `--actor` / `ANVIL_ACTOR` remedies. Pin `ANVIL_ACTOR` in the agent-loop environment, or carry the claim output's actor argument on each command. Pass `renew C9F3A210 --lease <minutes>` to override the renewal duration.
 
 ### What happens if you do not renew
 
@@ -196,7 +199,7 @@ anvil submit T012 \
 | `--commit-sha` | no | Commit SHA pinned to this submission. |
 | `--known-limitations` | no | Free-text caveats. Checked by the evidence-gate fallback when a required-evidence item does not match any structured field. |
 | `--screenshots` | no | Comma-separated paths to screenshot files — required when `required_evidence` mentions "screenshot" (the gate checks `evidence.screenshots` is non-empty). |
-| `--actor` | no | Submitting actor; defaults to `$USER`, then `agent`. |
+| `--actor` | no | Submitting actor under the same precedence as claim. When a claim is active, the exact persisted owner is required; foreign submission refuses before evidence is appended. |
 
 Back-compat: passing `--commands` (or `--files-changed`) exactly once still
 splits that single value on commas, so the older
@@ -205,6 +208,8 @@ repeatable form above is canonical and is the only form that survives a
 value with an embedded comma intact.
 
 `submit` locates the active claim for the task (one per task at most), constructs an `Evidence` row with a fresh ID (`EV` + 8 hex), emits an `evidence.submitted` event, and the backend handler atomically:
+
+Actor identity is local audit attribution, not cryptographic authentication. It prevents accidental cross-agent lifecycle mutation; it is not an authorization boundary.
 
 1. Inserts the `Evidence` row.
 2. Transitions the task `in_progress → needs_review`.

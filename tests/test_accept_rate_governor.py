@@ -86,6 +86,18 @@ def test_accept_rate_is_per_work_actor() -> None:
     assert m.accept_rate("C") is None  # no reviewed history
 
 
+def test_accept_rate_does_not_merge_legacy_normalized_spellings() -> None:
+    """Replay/read metrics key exact stored bytes, never an NFC alias."""
+    decomposed = "cafe\u0301"
+    composed = "caf\u00e9"
+    metrics = _metrics(
+        [("T1", "rejected", _iso(1)), ("T2", "accepted", _iso(1))],
+        [_ev("T1", decomposed), _ev("T2", composed)],
+    )
+    assert metrics.accept_rate(decomposed) == 0.0
+    assert metrics.accept_rate(composed) == 1.0
+
+
 def test_rework_attributes_each_decision_to_the_runner_who_earned_it() -> None:
     """Rework cycle: A submits T (rejected), then B re-submits T (accepted).
     A owns the rejection, B owns the acceptance — NOT both credited to the

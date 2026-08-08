@@ -20,6 +20,14 @@ from anvil.state.schema import SCHEMA_VERSION
 runner = CliRunner()
 
 
+def test_payload_actor_prefers_pinned_lifecycle_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANVIL_ACTOR", "pinned-owner")
+    monkeypatch.setenv("ANVIL_GATE_ACTOR", "legacy-owner")
+    assert hooks._payload_actor({"session_id": "harness-session"}) == "pinned-owner"
+
+
 class _RecordingInput(io.BytesIO):
     def __init__(self) -> None:
         super().__init__()

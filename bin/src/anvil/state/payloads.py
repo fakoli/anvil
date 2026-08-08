@@ -516,6 +516,9 @@ class BundleCreatedPayload(BaseModel):
     prd_id: str
     task_ids: list[str]
     coordinator: str
+    # Exact pre-normalization input for the live atomic collision check. Older
+    # events omit it; replay persists coordinator bytes unchanged.
+    coordinator_input: str | None = None
     status: BundleStatus = BundleStatus.planned
     branch: str | None = None
     worktree_path: str | None = None
@@ -870,6 +873,9 @@ class ClaimCreatedPayload(BaseModel):
     task_id: str
     bundle_claim_id: str | None = None
     claimed_by: str
+    # Exact pre-normalization input for the live atomic collision check. Older
+    # events omit it and replay never canonicalizes claimed_by.
+    actor_input: str | None = None
     claim_type: str
     status: str
     created_at: str

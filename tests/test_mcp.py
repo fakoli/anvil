@@ -1803,6 +1803,11 @@ class TestClaimTask:
         assert "id" in claim
         assert "lease_expires_at" in claim
         assert claim["expected_files"] == ["src/foo.py"]
+        assert claim["actor_identity"]["actor"] == "agent-x"
+        assert claim["actor_identity"]["authenticated"] is False
+        assert "not cryptographic authentication" in claim["actor_identity"]["notice"]
+        assert claim["continuation"]["environment"] == {"ANVIL_ACTOR": "agent-x"}
+        assert claim["continuation"]["renew"]["argv"][-2:] == ["--actor", "agent-x"]
 
     def test_error_when_prd_is_draft(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Gate: owning PRD in 'draft' status → ToolError.
@@ -2202,6 +2207,29 @@ class TestSubmitProgress:
 
         with pytest.raises(ToolError, match="not found|NOPE"):
             _run(run())
+
+    def test_claimed_task_refuses_progress_from_foreign_actor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="T001", claimed_by="owner"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "submit_progress",
+                    {"task_id": "T001", "actor": "other", "notes": "nope"},
+                )
+
+        with pytest.raises(ToolError, match="actor_mismatch|claim owner"):
+            _run(run())
+        events = (state_dir / "events.jsonl").read_text(encoding="utf-8")
+        assert "progress.noted" not in events
 
 
 # ===========================================================================

@@ -117,6 +117,20 @@ def _build_normal(state_dir: Path) -> SqliteBackend:
     for raw in _load_committed_events():
         # Strip the id: EventDraft has no id field (the backend assigns it).
         draft_data = {k: v for k, v in raw.items() if k != "id"}
+        # The golden predates actor/payload continuity and used a generic
+        # event.actor. Re-submitting through today's live path must model the
+        # current producer while replay below still proves the old bytes remain
+        # reconstructable.
+        identity_field = {
+            "claim.released": "released_by",
+            "claim.renewed": "renewed_by",
+            "evidence.submitted": "submitted_by",
+            "progress.noted": "actor",
+        }.get(str(raw.get("action")))
+        if identity_field is not None:
+            draft_data["actor"] = raw["payload_json"].get(
+                identity_field, draft_data["actor"]
+            )
         draft = EventDraft.model_validate(draft_data)
         b.append(draft)
     return b

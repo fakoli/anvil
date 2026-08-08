@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -183,6 +184,38 @@ class ClaimManager:
             if max_claim_age_minutes is not None
             else default_lease_minutes * self.DEFAULT_MAX_CLAIM_AGE_MULTIPLIER
         )
+
+    def _actor_for_new_claim(self) -> tuple[str, str | None]:
+        """Return the exact existing actor or a validated NFC identity.
+
+        Existing values are deliberately compared before validation so a
+        legacy owner that predates the actor-id contract remains able to create
+        another claim under that exact identity.  This is only the ergonomic
+        preflight; SQLite repeats the collision check under its append lock.
+        """
+        existing = {claim.claimed_by for claim in self._backend.list_claims()}
+        existing.update(bundle.coordinator for bundle in self._backend.list_bundles())
+        if self._actor in existing:
+            return self._actor, None
+
+        from anvil.actors import canonicalize_new_actor
+
+        try:
+            candidate = canonicalize_new_actor(self._actor)
+        except ValueError as exc:
+            raise ClaimError(f"Invalid actor identity: {exc}") from exc
+        for persisted in existing:
+            try:
+                collision = unicodedata.normalize("NFC", persisted) == candidate
+            except UnicodeError:
+                collision = False
+            if collision:
+                raise ClaimError(
+                    "Actor identity collides with an existing owner after NFC "
+                    "normalization; use the exact persisted owner or choose a "
+                    "distinct actor."
+                )
+        return candidate, self._actor if candidate != self._actor else None
 
     # ------------------------------------------------------------------
     # Main flow
@@ -521,6 +554,10 @@ class ClaimManager:
                 f"Task '{task_id}' cannot be claimed: no PRD found. "
                 "Parse and review the PRD before claiming tasks."
             )
+        # Actor identity creation is part of the serialized claim operation.
+        # Exact persisted owners bypass the new-id policy; all new identities
+        # are canonicalized before any Claim/Event model is built.
+        self._actor, actor_input = self._actor_for_new_claim()
         now = self._clock.now()
         # Build a temporary Claim shell for the transition gate check.
         # The transition only uses claim for context in error messages; the
@@ -638,6 +675,8 @@ class ClaimManager:
         # the payload dict directly.
         claim_payload = claim.model_dump(mode="json")
         claim_payload["force"] = force
+        if actor_input is not None:
+            claim_payload["actor_input"] = actor_input
         claim_draft = EventDraft(
             timestamp=now,
             actor=self._actor,

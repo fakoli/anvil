@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+import shlex
+
+import pytest
+
+from anvil.actors import (
+    ACTOR_AUTH_NOTICE,
+    ActorIdentityError,
+    actor_continuation,
+    actor_identity_context,
+    canonicalize_new_actor,
+    continuation_context,
+    quote_actor_posix,
+    quote_actor_powershell,
+    render_actor_continuation,
+    resolve_actor_input,
+    safe_actor_for_human,
+    safe_actor_display,
+)
+
+
+def test_new_actor_is_nfc_normalized_without_narrowing_safe_text() -> None:
+    assert (
+        canonicalize_new_actor("Cafe\u0301 worker $;& ' 🚀") == "Café worker $;& ' 🚀"
+    )
+
+
+def test_new_actor_utf8_limit_is_applied_after_normalization() -> None:
+    assert canonicalize_new_actor("é" * 64) == "é" * 64
+    with pytest.raises(ActorIdentityError, match="128 UTF-8 bytes"):
+        canonicalize_new_actor("é" * 65)
+
+
+@pytest.mark.parametrize(
+    "actor",
+    [
+        "",
+        "   ",
+        "bad\x00actor",
+        "bad\x1factor",
+        "bad\x7factor",
+        "bad\x80actor",
+        "bad\x9factor",
+        "bad\u2028actor",
+        "bad\u2029actor",
+        "bad\u061cactor",
+        "bad\u200eactor",
+        "bad\u202eactor",
+        "bad\u2066actor",
+        "bad\u2069actor",
+        "bad\ud800actor",
+    ],
+)
+def test_new_actor_rejects_unsafe_text(actor: str) -> None:
+    with pytest.raises(ActorIdentityError):
+        canonicalize_new_actor(actor)
+
+
+def test_exact_resolution_distinguishes_absent_from_legacy_values() -> None:
+    env = {"ANVIL_ACTOR": "  legacy\u0301  ", "ANVIL_GATE_ACTOR": "fallback"}
+    assert resolve_actor_input(None, env) == "  legacy\u0301  "
+    assert resolve_actor_input("", env) == ""
+    assert resolve_actor_input(None, {}) is None
+
+
+def test_shell_quoting_and_structured_continuation_round_trip_exact_actor() -> None:
+    actor = "O'Brien $HOME; echo nope 🚀"
+    assert shlex.split(quote_actor_posix(actor)) == [actor]
+    assert quote_actor_powershell(actor) == "'O''Brien $HOME; echo nope 🚀'"
+
+    continuation = actor_continuation(actor, ["anvil", "renew", "C001"])
+    assert continuation == {
+        "actor": actor,
+        "argv": ["anvil", "renew", "C001"],
+        "env": {"ANVIL_ACTOR": actor},
+        "identity_notice": ACTOR_AUTH_NOTICE,
+    }
+    assert render_actor_continuation(
+        actor, ["anvil", "renew", "C001"], shell="posix"
+    ).startswith(f"ANVIL_ACTOR={quote_actor_posix(actor)} ")
+    assert (
+        render_actor_continuation(actor, ["anvil", "renew", "C001"], shell="powershell")
+        == "$env:ANVIL_ACTOR = 'O''Brien $HOME; echo nope 🚀'; & 'anvil' 'renew' 'C001'"
+    )
+
+
+def test_safe_display_redacts_invalid_and_noncanonical_legacy_values() -> None:
+    assert safe_actor_display("safe actor") == "safe actor"
+    assert safe_actor_display("bad\x00actor").startswith("<unsafe-actor sha256:")
+    assert safe_actor_display("Cafe\u0301").startswith("<legacy-actor sha256:")
+    assert safe_actor_for_human("safe actor") == "safe actor"
+    assert safe_actor_for_human("Cafe\u0301") is None
+
+
+def test_structured_identity_and_lifecycle_context_never_use_shell_strings() -> None:
+    actor = "worker $HOME 'alpha'"
+    assert actor_identity_context(actor) == {
+        "actor": actor,
+        "authenticated": False,
+        "notice": ACTOR_AUTH_NOTICE,
+    }
+    context = continuation_context("T001", "C001", actor)
+    assert context["environment"] == {"ANVIL_ACTOR": actor}
+    assert context["renew"]["argv"] == [
+        "anvil",
+        "renew",
+        "C001",
+        "--actor",
+        actor,
+    ]
+    assert context["release"]["env"] == {"ANVIL_ACTOR": actor}
+    assert context["submit"]["argv"][-1] == actor

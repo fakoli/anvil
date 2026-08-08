@@ -152,7 +152,8 @@ silent.
 **Payload extraction.** The script parses stdin JSON for:
 - `.tool_input.path` (Edit, Write) or `.tool_input.notebook_path`
   (NotebookEdit) — the file being modified.
-- `.session_id` — used as the actor proxy.
+- `.session_id` — used as the actor proxy only when neither `ANVIL_ACTOR` nor
+  legacy `ANVIL_GATE_ACTOR` is pinned. A pinned lifecycle actor wins.
 
 **Skip conditions (silent).** The script exits 0 with no output when any of
 the following hold:
@@ -284,6 +285,10 @@ identity `anvil claim` used (`resolve_actor`: explicit arg > `$ANVIL_ACTOR` >
 `$ANVIL_GATE_ACTOR` > derived `$USER`/fingerprint/`"agent"` + session
 discriminator) so the heartbeat renews the lease the current session actually
 holds instead of a different actor's.
+
+All hook actor values are local coordination/audit attribution, not
+cryptographic authentication. Lease and gate continuation messages carry the
+exact owner through safely quoted `--actor` guidance or structured MCP fields.
 
 **Skip conditions (silent).** Exits 0 with no output when:
 - No anvil state exists anywhere (`.anvil/`, `bin/.anvil/`, or the HOME

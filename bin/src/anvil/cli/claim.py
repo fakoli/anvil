@@ -8,6 +8,15 @@ from typing import Any
 
 import typer
 
+from anvil.cli._actor_output import (
+    actor_flag_for_human,
+    actor_identity_data,
+    actor_mismatch_data,
+    actor_mismatch_message,
+    actor_notice_lines,
+    continuation_data,
+    safe_actor_label,
+)
 from anvil.cli._helpers import (
     PRD_OPTION,
     _lease_manager_kwargs,
@@ -21,7 +30,27 @@ from anvil.cli._helpers import (
     resolve_actor,
     resolve_prd_id,
 )
-from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
+from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
+
+
+def _refuse_actor_mismatch(
+    command: str,
+    *,
+    owner: str,
+    actual: str,
+    action: str,
+    json_output: bool,
+) -> None:
+    message = actor_mismatch_message(owner=owner, actual=actual, action=action)
+    if json_output:
+        fail_with(
+            command,
+            message,
+            code="actor_mismatch",
+            extra=actor_mismatch_data(owner=owner, actual=actual),
+        )
+    typer.echo(f"Error: {message}", err=True)
+    raise typer.Exit(code=1)
 
 # ---------------------------------------------------------------------------
 # claim subcommand
@@ -63,7 +92,10 @@ def claim(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Claim actor; defaults to $USER or 'agent'.",
+        help=(
+            "Claim actor. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     lease_minutes: float | None = typer.Option(  # noqa: B008
         None,
@@ -244,15 +276,21 @@ def claim(
                         "branch": recorded_branch,
                         "worktree": worktree_path,
                         "warnings": warnings,
+                        "actor_identity": actor_identity_data(resolved_actor),
+                        "continuation": continuation_data(
+                            task_id, bundle_result.claim.id, resolved_actor
+                        ),
                     },
                 )
                 return
             typer.echo(
-                f"Claimed bundle '{task_id}' as '{resolved_actor}' with "
+                f"Claimed bundle '{task_id}' as {safe_actor_label(resolved_actor)} with "
                 f"coordinator claim {bundle_result.claim.id}."
             )
             typer.echo(f"  Branch: {recorded_branch or '—'}")
             typer.echo(f"  Worktree: {worktree_path or '—'}")
+            for line in actor_notice_lines(resolved_actor):
+                typer.echo(line)
             return
 
         # Gate: task must exist.
@@ -573,12 +611,16 @@ def claim(
                 "branch": reported_branch,
                 "worktree": worktree_path,
                 "warnings": warnings,
+                "actor_identity": actor_identity_data(resolved_actor),
+                "continuation": continuation_data(
+                    task_id, claim_obj.id, resolved_actor
+                ),
             },
         )
         return
 
     # Confirmation output.
-    typer.echo(f"Claimed task '{task_id}' as '{resolved_actor}'.")
+    typer.echo(f"Claimed task '{task_id}' as {safe_actor_label(resolved_actor)}.")
     typer.echo(f"  Claim ID:    {claim_obj.id}")
     typer.echo(f"  Lease until: {claim_obj.lease_expires_at.isoformat()}")
     if reported_branch:
@@ -586,9 +628,16 @@ def claim(
     if worktree_path:
         typer.echo(f"  Worktree:    {worktree_path}")
     typer.echo("")
-    typer.echo(
-        f"Run `anvil renew {claim_obj.id}` to extend the lease before it expires."
-    )
+    for line in actor_notice_lines(resolved_actor):
+        typer.echo(line)
+    actor_flag = actor_flag_for_human(resolved_actor)
+    if actor_flag is not None:
+        typer.echo(
+            f"Run `anvil renew {claim_obj.id} {actor_flag}` to extend the lease "
+            "before it expires."
+        )
+    else:
+        typer.echo("Use the structured JSON/MCP renew argv to extend this lease.")
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +660,10 @@ def release(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor identity; defaults to $USER or 'agent'.",
+        help=(
+            "Actor identity. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
@@ -645,6 +697,14 @@ def release(
             None,
         )
         if bundle_claim is not None:
+            if not force and bundle_claim.claimed_by != resolved_actor:
+                _refuse_actor_mismatch(
+                    "release",
+                    owner=bundle_claim.claimed_by,
+                    actual=resolved_actor,
+                    action="Release",
+                    json_output=json_output,
+                )
             from anvil.bundles.manager import BundleError, BundleManager
 
             try:
@@ -662,13 +722,31 @@ def release(
             if json_output:
                 emit_success(
                     "release",
-                    {"claim_id": claim_id, "released": True, "reason": reason},
+                    {
+                        "claim_id": claim_id,
+                        "released": True,
+                        "reason": reason,
+                        "actor_identity": actor_identity_data(resolved_actor),
+                    },
                 )
                 return
             typer.echo(f"Released bundle claim '{claim_id}'.")
             return
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)
+        existing_claim = backend.get_claim(claim_id)
+        if (
+            existing_claim is not None
+            and not force
+            and existing_claim.claimed_by != resolved_actor
+        ):
+            _refuse_actor_mismatch(
+                "release",
+                owner=existing_claim.claimed_by,
+                actual=resolved_actor,
+                action="Release",
+                json_output=json_output,
+            )
         try:
             manager.release(claim_id, force=force, reason=reason)
         except ClaimError as exc:
@@ -682,13 +760,20 @@ def release(
     if json_output:
         emit_success(
             "release",
-            {"claim_id": claim_id, "released": True, "reason": reason},
+            {
+                "claim_id": claim_id,
+                "released": True,
+                "reason": reason,
+                "actor_identity": actor_identity_data(resolved_actor),
+            },
         )
         return
 
     typer.echo(f"Released claim '{claim_id}'.")
     if reason:
         typer.echo(f"  Reason: {reason}")
+    for line in actor_notice_lines(resolved_actor):
+        typer.echo(line)
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +786,10 @@ def renew(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor identity; defaults to $USER or 'agent'.",
+        help=(
+            "Actor identity. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     lease_minutes: float | None = typer.Option(  # noqa: B008
         None,
@@ -755,6 +843,14 @@ def renew(
             None,
         )
         if bundle_claim is not None:
+            if bundle_claim.claimed_by != resolved_actor:
+                _refuse_actor_mismatch(
+                    "renew",
+                    owner=bundle_claim.claimed_by,
+                    actual=resolved_actor,
+                    action="Renewal",
+                    json_output=json_output,
+                )
             from anvil.bundles.manager import BundleError, BundleManager
 
             try:
@@ -771,7 +867,14 @@ def renew(
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             if json_output:
-                emit_success("renew", {"claim": dump_model(updated), "renewed": True})
+                emit_success(
+                    "renew",
+                    {
+                        "claim": dump_model(updated),
+                        "renewed": True,
+                        "actor_identity": actor_identity_data(resolved_actor),
+                    },
+                )
                 return
             typer.echo(f"Renewed bundle claim '{claim_id}'.")
             typer.echo(f"  New lease until: {updated.lease_expires_at.isoformat()}")
@@ -781,6 +884,14 @@ def renew(
             backend, clock, actor=resolved_actor, **lease_kwargs
         )
         before = backend.get_claim(claim_id)
+        if before is not None and before.claimed_by != resolved_actor:
+            _refuse_actor_mismatch(
+                "renew",
+                owner=before.claimed_by,
+                actual=resolved_actor,
+                action="Renewal",
+                json_output=json_output,
+            )
         try:
             updated = manager.renew(claim_id)
         except ClaimError as exc:
@@ -797,7 +908,14 @@ def renew(
     extended = before is None or updated.lease_expires_at != before.lease_expires_at
 
     if json_output:
-        emit_success("renew", {"claim": dump_model(updated), "renewed": extended})
+        emit_success(
+            "renew",
+            {
+                "claim": dump_model(updated),
+                "renewed": extended,
+                "actor_identity": actor_identity_data(resolved_actor),
+            },
+        )
         return
 
     if extended:
@@ -808,6 +926,8 @@ def renew(
         typer.echo(f"Renew declined for '{claim_id}': no progress since last heartbeat.")
         typer.echo(f"  Lease still expires at: {updated.lease_expires_at.isoformat()}")
         typer.echo("  Change a file among the claim's expected files, or release and re-claim.")
+    for line in actor_notice_lines(resolved_actor):
+        typer.echo(line)
 
 
 # ---------------------------------------------------------------------------

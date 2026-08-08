@@ -37,6 +37,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -44,6 +45,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel
 
+from anvil.actors import canonicalize_new_actor
 from anvil.bundles.eligibility import analyze_bundle_graph
 from anvil.state.backend import (
     BackendError,  # noqa: F401
@@ -4649,7 +4651,9 @@ class SqliteBackend:
             ),
             # Phase 6: MCP submit_progress — audit-only, no SQLite mutation.
             "progress.noted": ActionSpec(
-                ProgressNotedPayload, self._check_audit_only, self._write_audit_only
+                ProgressNotedPayload,
+                self._check_progress_noted,
+                self._write_audit_only,
             ),
             # Phase 8: sync_mappings table — external-system mirroring.
             "sync_mapping.upserted": ActionSpec(
@@ -4708,6 +4712,30 @@ class SqliteBackend:
         could reject it, so this phase never raises.
         """
         _ = (conn, payload, event)
+
+    @staticmethod
+    def _check_progress_noted(
+        conn: sqlite3.Connection,
+        payload: ProgressNotedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Require exact owner continuity when a task currently has a claim."""
+        if event.target_kind != "task" or event.target_id != payload.task_id:
+            raise EventRejected("progress.noted: event target mismatch.")
+        if event.actor != payload.actor:
+            raise EventRejected("progress.noted: event actor mismatch.")
+        row = conn.execute(
+            "SELECT claimed_by FROM claims WHERE task_id = ? AND status = 'active' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (payload.task_id,),
+        ).fetchone()
+        # Preserve the historical audit-note contract for unclaimed tasks. Once
+        # a claim exists, however, only its exact persisted owner may report
+        # lifecycle progress.
+        if row is not None and row[0] != payload.actor:
+            raise EventRejected(
+                "progress.noted: only the exact active claim owner may record progress."
+            )
 
     def _write_audit_only(
         self,
@@ -5682,6 +5710,53 @@ class SqliteBackend:
             return False
         return SqliteBackend._event_schema_version(conn, row[0]) is None
 
+    @staticmethod
+    def _persisted_actor_ids(conn: sqlite3.Connection) -> set[str]:
+        """Return exact work-owner identities already present in state.
+
+        Claims are append-only history, while a planned bundle establishes its
+        coordinator before the coordinator claim exists.  Both therefore count
+        as an existing identity for legacy exact-match and NFC-collision rules.
+        """
+        rows = conn.execute(
+            "SELECT claimed_by FROM claims UNION SELECT coordinator FROM execution_bundles"
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    @classmethod
+    def _validate_new_actor_locked(
+        cls,
+        conn: sqlite3.Connection,
+        actor: str,
+        *,
+        action: str,
+        actor_input: str | None = None,
+    ) -> None:
+        """Validate a prospective identity under the current write snapshot."""
+        persisted_ids = cls._persisted_actor_ids(conn)
+        raw_actor = actor if actor_input is None else actor_input
+        if raw_actor in persisted_ids and raw_actor == actor:
+            # Exact-first is the compatibility boundary for legacy invalid IDs.
+            return
+        try:
+            canonical = canonicalize_new_actor(raw_actor)
+        except ValueError as exc:
+            raise EventRejected(f"{action}: invalid actor identity: {exc}") from exc
+        if canonical != actor:
+            raise EventRejected(
+                f"{action}: persisted actor must equal the NFC-normalized input."
+            )
+        for persisted in persisted_ids:
+            try:
+                collision = unicodedata.normalize("NFC", persisted) == canonical
+            except UnicodeError:
+                collision = False
+            if collision:
+                raise EventRejected(
+                    f"{action}: actor identity collides with an existing owner "
+                    "after NFC normalization."
+                )
+
     def _check_bundle_created(
         self,
         conn: sqlite3.Connection,
@@ -5706,6 +5781,7 @@ class SqliteBackend:
         try:
             bundle_data = payload.model_dump(mode="json")
             bundle_data.pop("schema_version", None)
+            bundle_data.pop("coordinator_input", None)
             # The log authority assigns the real creation_event_id only after
             # this pre-log check succeeds. A placeholder completes the state
             # model for relational validation without trusting caller input.
@@ -5722,6 +5798,12 @@ class SqliteBackend:
         # flock before any canonical log line is written.
         conn.execute("BEGIN IMMEDIATE")
         try:
+            self._validate_new_actor_locked(
+                conn,
+                bundle.coordinator,
+                action="bundle.created",
+                actor_input=payload.coordinator_input,
+            )
             self._validate_bundle_created_locked(conn, bundle)
         finally:
             conn.execute("COMMIT")
@@ -5805,6 +5887,7 @@ class SqliteBackend:
             return
         bundle_data = payload.model_dump(mode="json")
         bundle_data.pop("schema_version", None)
+        bundle_data.pop("coordinator_input", None)
         bundle_data["creation_event_id"] = event.id
         bundle = ExecutionBundle.model_validate(bundle_data)
         # Git-backed histories may contain two independently valid creations
@@ -7265,6 +7348,9 @@ class SqliteBackend:
             raise EventRejected("bundle.claimed: lease must expire in the future.")
         conn.execute("BEGIN IMMEDIATE")
         try:
+            self._validate_new_actor_locked(
+                conn, payload.claimed_by, action="bundle.claimed"
+            )
             row = conn.execute(
                 "SELECT creation_event_id, coordinator, status, throughput_budget, "
                 "created_at, updated_at "
@@ -8728,6 +8814,12 @@ class SqliteBackend:
         # refresh the read mark.
         conn.execute("BEGIN IMMEDIATE")
         try:
+            self._validate_new_actor_locked(
+                conn,
+                payload.claimed_by,
+                action="claim.created",
+                actor_input=payload.actor_input,
+            )
             self._validate_claim_created_locked(conn, payload)
         finally:
             # Release the write lock we took purely to refresh the snapshot.
@@ -9147,11 +9239,15 @@ class SqliteBackend:
         metadata so the prior tombstone is still emitted) for an already-terminal
         claim that the guard would not match.
         """
-        _ = event
         claim_id: str = payload.claim_id
+        if event.target_kind != "claim" or event.target_id != claim_id:
+            raise EventRejected("claim.released: event target mismatch.")
+        if event.actor != payload.released_by:
+            raise EventRejected("claim.released: event actor mismatch.")
         self._reject_claim_replay_collision(conn, claim_id, "claim.released")
         row = conn.execute(
-            "SELECT status, bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT status, bundle_claim_id, claimed_by FROM claims WHERE id = ?",
+            (claim_id,),
         ).fetchone()
         if row is None:
             raise EventRejected(f"claim.released: claim '{claim_id}' not found.")
@@ -9159,6 +9255,10 @@ class SqliteBackend:
             raise EventRejected(
                 "claim.released: bundle member authorizations are managed by "
                 "their coordinator claim."
+            )
+        if not payload.force and row[2] != payload.released_by:
+            raise EventRejected(
+                "claim.released: only the exact claim owner may release without force."
             )
         current_status = row[0]
         if payload.force:
@@ -9195,9 +9295,15 @@ class SqliteBackend:
         """
         claim_id: str = payload.claim_id
         child_row = conn.execute(
-            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT bundle_claim_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
-        if child_row is not None and child_row[0] is not None:
+        if (
+            event.target_kind != "claim"
+            or event.target_id != claim_id
+            or child_row is None
+            or child_row[0] is not None
+            or (not payload.force and child_row[1] != payload.released_by)
+        ):
             return
         if self._claim_replay_collision(conn, claim_id):
             return
@@ -9254,11 +9360,15 @@ class SqliteBackend:
         Was two validation guards in the old handler (claim not found; claim not
         active) interpreted from a 0-row UPDATE; both now reject up front.
         """
-        _ = event
         claim_id: str = payload.claim_id
+        if event.target_kind != "claim" or event.target_id != claim_id:
+            raise EventRejected("claim.renewed: event target mismatch.")
+        if payload.renewed_by is None or event.actor != payload.renewed_by:
+            raise EventRejected("claim.renewed: event actor mismatch.")
         self._reject_claim_replay_collision(conn, claim_id, "claim.renewed")
         row = conn.execute(
-            "SELECT status, bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT status, bundle_claim_id, claimed_by FROM claims WHERE id = ?",
+            (claim_id,),
         ).fetchone()
         if row is None:
             raise EventRejected(f"claim.renewed: claim '{claim_id}' not found.")
@@ -9266,6 +9376,8 @@ class SqliteBackend:
             raise EventRejected(
                 "claim.renewed: renew the public bundle coordinator claim instead."
             )
+        if row[2] != payload.renewed_by:
+            raise EventRejected("claim.renewed: only the exact claim owner may renew.")
         actual_status = row[0]
         if actual_status != "active":
             raise EventRejected(
@@ -9296,13 +9408,19 @@ class SqliteBackend:
         """
         claim_id: str = payload.claim_id
         child_row = conn.execute(
-            "SELECT bundle_claim_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT bundle_claim_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
-        if child_row is not None and child_row[0] is not None:
+        renewed_by = payload.renewed_by
+        if (
+            event.target_kind != "claim"
+            or event.target_id != claim_id
+            or child_row is None
+            or child_row[0] is not None
+            or (renewed_by is not None and child_row[1] != renewed_by)
+        ):
             return
         if self._claim_replay_collision(conn, claim_id):
             return
-        _ = event
         lease_expires_at: str = payload.lease_expires_at
         last_heartbeat_at: str = payload.last_heartbeat_at
 
@@ -9441,7 +9559,10 @@ class SqliteBackend:
         The claim auto-release branch (and its conditional warn log) is NOT a
         gate — it is a side effect of the write and stays there.
         """
-        _ = event
+        if event.target_kind != "task" or event.target_id != payload.task_id:
+            raise EventRejected("evidence.submitted: event target mismatch.")
+        if event.actor != payload.submitted_by:
+            raise EventRejected("evidence.submitted: event actor mismatch.")
         # At least one proof is mandatory: a non-empty `commands_run`. An empty
         # `files_changed` is legitimate for a verification-only / check step that
         # runs commands but changes no files (B32) — the older rule forced a
@@ -9457,7 +9578,7 @@ class SqliteBackend:
         task_id: str = payload.task_id
 
         claim_row = conn.execute(
-            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT task_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if claim_row is None:
             raise EventRejected(
@@ -9467,6 +9588,10 @@ class SqliteBackend:
             raise EventRejected(
                 f"evidence.submitted: claim '{claim_id}' belongs to task "
                 f"'{claim_row[0]}', not '{task_id}'."
+            )
+        if claim_row[1] != payload.submitted_by:
+            raise EventRejected(
+                "evidence.submitted: only the exact claim owner may submit evidence."
             )
         active_bundle_child = conn.execute(
             "SELECT id FROM claims WHERE task_id = ? AND status = 'active' "
@@ -9552,11 +9677,14 @@ class SqliteBackend:
         task_id: str = payload.task_id
         claim_id: str = payload.claim_id
         claim_row = conn.execute(
-            "SELECT task_id FROM claims WHERE id = ?", (claim_id,)
+            "SELECT task_id, claimed_by FROM claims WHERE id = ?", (claim_id,)
         ).fetchone()
         if (
             claim_row is None
             or claim_row[0] != task_id
+            or claim_row[1] != payload.submitted_by
+            or event.target_kind != "task"
+            or event.target_id != task_id
             or self._claim_replay_collision(conn, claim_id)
         ):
             return

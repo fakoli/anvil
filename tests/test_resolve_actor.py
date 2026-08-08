@@ -22,10 +22,10 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
-def test_explicit_actor_wins_and_is_stripped(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_explicit_actor_wins_and_is_exact(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("ANVIL_ACTOR", "env-actor")
     assert resolve_actor("explicit") == "explicit"
-    assert resolve_actor("  spaced  ") == "spaced"
+    assert resolve_actor("  spaced  ") == "  spaced  "
 
 
 def test_anvil_actor_env_beats_legacy_and_user(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -33,10 +33,16 @@ def test_anvil_actor_env_beats_legacy_and_user(monkeypatch) -> None:  # type: ig
     monkeypatch.setenv("ANVIL_GATE_ACTOR", "legacy")
     monkeypatch.setenv("USER", "alice")
     monkeypatch.setenv("ANVIL_ACTOR", "fleet-1")
-    # explicit None or empty falls through to the env tiers
+    # Only absence falls through; an explicit value is an exact legacy lookup.
     assert resolve_actor(None) == "fleet-1"
-    assert resolve_actor("") == "fleet-1"
-    assert resolve_actor("   ") == "fleet-1"
+    assert resolve_actor("") == ""
+    assert resolve_actor("   ") == "   "
+
+
+def test_present_actor_env_is_exact(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ANVIL_ACTOR", "  legacy actor  ")
+    assert resolve_actor(None) == "  legacy actor  "
 
 
 def test_legacy_gate_actor_env_still_honored(monkeypatch) -> None:  # type: ignore[no-untyped-def]

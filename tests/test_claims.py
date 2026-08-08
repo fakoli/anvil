@@ -2263,3 +2263,55 @@ class TestStaleDetectionEdgeCases:
             assert reaped == []
         finally:
             b.close()
+# ---------------------------------------------------------------------------
+# T006 — actor identity creation vs exact legacy lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestActorIdentityLifecycle:
+    def test_new_claim_actor_is_nfc_normalized(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(conn, task_id="T001", status="ready")
+            conn.close()
+
+            result = _make_manager(b, actor="cafe\u0301").claim("T001")
+            assert result.claim.claimed_by == "caf\u00e9"
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize("owner", ["legacy\x01owner", "x" * 129])
+    def test_legacy_invalid_owner_remains_exactly_renewable_and_releasable(
+        self, tmp_path: Path, owner: str
+    ) -> None:
+        clock = _make_clock(_T0 + timedelta(minutes=1))
+        b = _make_backend(tmp_path, clock)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(conn, task_id="T001", status="claimed")
+            _insert_active_claim_raw(
+                conn,
+                claim_id="CLEGACY",
+                task_id="T001",
+                actor=owner,
+                lease_expires_at=_T0 + timedelta(hours=2),
+            )
+            conn.close()
+
+            manager = _make_manager(b, actor=owner, clock=clock)
+            renewed = manager.renew("CLEGACY")
+            assert renewed.claimed_by == owner
+            manager.release("CLEGACY")
+            stored = b.get_claim("CLEGACY")
+            assert stored is not None
+            assert stored.claimed_by == owner
+            assert stored.status is ClaimStatus.released
+        finally:
+            b.close()

@@ -4563,6 +4563,40 @@ class TestClaimCommand:
         combined = result.output + (result.stderr if hasattr(result, "stderr") and result.stderr else "")
         assert "Warning" in combined or "Claimed" in result.output
 
+    def test_claim_returns_actor_continuation_and_auth_notice(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        actor = "Å O'Brien; $(echo inert)"
+
+        human = _invoke_cmd(tmp_path, ["claim", task_id, "--actor", actor])
+        assert human.exit_code == 0, human.output
+        assert "ANVIL_ACTOR" in human.output
+        assert "--actor" in human.output
+        assert "not cryptographic authentication" in human.output
+
+        # Release with the exact structured continuation, then claim again in
+        # JSON mode so both surfaces are exercised without a double claim.
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            claim_id = conn.execute(
+                "SELECT id FROM claims WHERE task_id=? AND status='active'", (task_id,)
+            ).fetchone()[0]
+        assert _invoke_cmd(
+            tmp_path, ["release", claim_id, "--actor", actor]
+        ).exit_code == 0
+        result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", actor, "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["actor_identity"]["actor"] == actor
+        assert data["actor_identity"]["authenticated"] is False
+        assert data["continuation"]["environment"] == {"ANVIL_ACTOR": actor}
+        assert data["continuation"]["renew"]["argv"][-2:] == ["--actor", actor]
+        assert data["continuation"]["progress"]["argv"][-2:] == ["--actor", actor]
+
     def test_claim_refuses_unready_task(self, tmp_path: Path) -> None:
         """Claiming a task not in 'ready' status exits non-zero."""
         _do_init_and_plan(tmp_path, with_git=False)
@@ -4890,6 +4924,22 @@ class TestReleaseCommand:
         )
         assert result.exit_code == 0, f"release --force failed: {result.output}"
 
+    def test_release_wrong_actor_returns_exact_json_remedies(self, tmp_path: Path) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        claim_id = self._claim_task(tmp_path, task_id)
+        result = _invoke_cmd(
+            tmp_path,
+            ["release", claim_id, "--actor", "wrong", "--json"],
+        )
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "actor_mismatch"
+        assert error["owner"] == "agent-test"
+        assert error["remedies"]["actor_argv"] == ["--actor", "agent-test"]
+        assert error["authenticated"] is False
+
 
 # ---------------------------------------------------------------------------
 # Phase 4 — renew command
@@ -4925,6 +4975,31 @@ class TestRenewCommand:
 
         # New lease should be present in output (some time string)
         assert old_expiry[:10] in result.output or "lease" in result.output.lower()
+
+
+class TestProgressActorContinuity:
+    def test_progress_on_claimed_task_requires_exact_owner(self, tmp_path: Path) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        assert _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", "owner"]
+        ).exit_code == 0
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["progress", task_id, "tests", "--actor", "other", "--json"],
+        )
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "actor_mismatch"
+        assert error["owner"] == "owner"
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM events WHERE action='progress.noted' "
+                "AND target_id=?",
+                (task_id,),
+            ).fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -5803,20 +5878,28 @@ class TestCaptureEvidenceByClaim:
         ).exit_code == 0
         assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
 
-    def test_submit_zero_proof_mismatch_warns(self, tmp_path: Path) -> None:
-        """T007 AC3: submit with verification commands but zero attached
-        proofs prints the mismatch warning naming both identities."""
+    def test_submit_wrong_actor_refuses_before_evidence_append(
+        self, tmp_path: Path
+    ) -> None:
+        """T006: a foreign actor cannot submit another owner's claim."""
         task_id = self._init_and_claim(tmp_path, actor="claude-opus-retro")
-        # No capture-evidence run → buffer empty.
         result = _invoke_cmd(
             tmp_path,
             ["submit", task_id, "--commands", "pytest -q",
-             "--files-changed", "x.py", "--actor", "session-bob"],
+             "--files-changed", "x.py", "--actor", "session-bob", "--json"],
         )
-        assert result.exit_code == 0
-        assert "zero typed proofs attached" in result.output
-        assert "claude-opus-retro" in result.output
-        assert "session-bob" in result.output
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "actor_mismatch"
+        assert error["owner"] == "claude-opus-retro"
+        assert error["remedies"]["environment"] == {
+            "ANVIL_ACTOR": "claude-opus-retro"
+        }
+        assert _get_task_status(tmp_path, task_id) == "claimed"
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE task_id=?", (task_id,)
+            ).fetchone()[0] == 0
 
     def test_submit_with_attached_proof_prints_no_warning(
         self, tmp_path: Path

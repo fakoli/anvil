@@ -495,6 +495,16 @@ class TestRenderPacketJSON:
         up = packet.json_data["update_protocol"]
         assert "renew_command" in up
         assert "C001" in up["renew_command"]
+        assert "--actor" in up["renew_command"]
+        assert "agent-alpha" in up["renew_command"]
+        assert up["actor_identity"]["authenticated"] is False
+        assert up["continuation"]["environment"] == {
+            "ANVIL_ACTOR": "agent-alpha"
+        }
+        assert up["continuation"]["submit"]["argv"][-2:] == [
+            "--actor",
+            "agent-alpha",
+        ]
 
     def test_json_update_protocol_no_renew_command_when_no_claim(self) -> None:
         """Without a claim, update_protocol does not have 'renew_command'."""

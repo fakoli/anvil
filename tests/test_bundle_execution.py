@@ -31,8 +31,16 @@ def _event(
     target_id: str,
     payload: dict,
     *,
-    actor: str = "seed",
+    actor: str | None = None,
 ) -> EventDraft:
+    if actor is None:
+        identity_field = {
+            "claim.released": "released_by",
+            "claim.renewed": "renewed_by",
+            "evidence.submitted": "submitted_by",
+            "progress.noted": "actor",
+        }.get(action)
+        actor = str(payload.get(identity_field, "seed")) if identity_field else "seed"
     return EventDraft(
         timestamp=_NOW,
         actor=actor,

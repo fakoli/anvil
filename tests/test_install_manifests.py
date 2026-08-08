@@ -547,6 +547,16 @@ def test_openclaw_readme_exists() -> None:
     assert "hooks" in text.lower()
 
 
+def test_openclaw_actor_precedence_matches_cli() -> None:
+    source = (
+        _packaging() / "openclaw" / "plugin" / "index.ts"
+    ).read_text(encoding="utf-8")
+    assert (
+        "process.env.ANVIL_ACTOR || process.env.ANVIL_GATE_ACTOR || \"agent\""
+        in source
+    )
+
+
 def test_openclaw_plugin_version_synced() -> None:
     """The native OpenClaw plugin manifest is version-locked to anvil (T001) —
     kept in lockstep so its declared version never drifts (CI catches it), the

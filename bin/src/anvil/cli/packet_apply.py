@@ -7,6 +7,13 @@ from pathlib import Path
 
 import typer
 
+from anvil.cli._actor_output import (
+    actor_identity_data,
+    actor_mismatch_data,
+    actor_mismatch_message,
+    actor_notice_lines,
+    safe_actor_label,
+)
 from anvil.cli._helpers import (
     PRD_OPTION,
     _load_config_optional,
@@ -18,7 +25,7 @@ from anvil.cli._helpers import (
     resolve_actor,
     resolve_prd_id,
 )
-from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
+from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
 from anvil.naming import safe_path_component
 from anvil.state.models import CommandProof, EventDraft
 
@@ -663,7 +670,10 @@ def submit(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor submitting evidence; defaults to $USER or 'agent'.",
+        help=(
+            "Actor submitting evidence. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
@@ -734,6 +744,24 @@ def submit(
                 f"Run `anvil claim {task_id}` first.",
                 err=True,
             )
+            raise typer.Exit(code=1)
+
+        if task_claim.claimed_by != resolved_actor:
+            message = actor_mismatch_message(
+                owner=task_claim.claimed_by,
+                actual=resolved_actor,
+                action="Evidence submission",
+            )
+            if json_output:
+                fail_with(
+                    "submit",
+                    message,
+                    code="actor_mismatch",
+                    extra=actor_mismatch_data(
+                        owner=task_claim.claimed_by, actual=resolved_actor
+                    ),
+                )
+            typer.echo(f"Error: {message}", err=True)
             raise typer.Exit(code=1)
 
         # Parse repeatable / comma-separated arguments. --commands and
@@ -892,6 +920,7 @@ def submit(
                 "claim_verdict": _verdict_json(submit_verdict),  # T005
                 "proof_mismatch_warning": proof_mismatch_warning,  # T007
                 "next_ready": next_ready,
+                "actor_identity": actor_identity_data(resolved_actor),
             },
         )
         return
@@ -899,7 +928,7 @@ def submit(
     typer.echo(f"Evidence submitted for task '{task_id}'.")
     typer.echo(f"  Evidence ID:  {evidence_id}")
     typer.echo(f"  Claim ID:     {task_claim.id} (auto-released)")
-    typer.echo(f"  Submitted by: {resolved_actor}")
+    typer.echo(f"  Submitted by: {safe_actor_label(resolved_actor)}")
     typer.echo(f"  Commands:     {commands_list}")
     typer.echo(f"  Files:        {files_list}")
     if pr_url:
@@ -930,6 +959,8 @@ def submit(
     _echo_claim_verdict(submit_verdict)
     if proof_mismatch_warning is not None:
         typer.echo(f"Warning: {proof_mismatch_warning}", err=True)
+    for line in actor_notice_lines(resolved_actor):
+        typer.echo(line)
 
 
 # ---------------------------------------------------------------------------

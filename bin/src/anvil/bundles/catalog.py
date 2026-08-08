@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import unicodedata
+
+from anvil.actors import canonicalize_new_actor
 from anvil.clock import Clock
 from anvil.state.backend import Backend, BackendError
 from anvil.state.models import (
@@ -33,6 +36,27 @@ class BundleCatalog:
         review_policy: BundleReviewPolicy | None = None,
         throughput_budget: BundleThroughputBudget | None = None,
     ) -> ExecutionBundle:
+        coordinator_input: str | None = None
+        existing = {claim.claimed_by for claim in self._backend.list_claims()}
+        existing.update(bundle.coordinator for bundle in self._backend.list_bundles())
+        if coordinator not in existing:
+            try:
+                raw_coordinator = coordinator
+                coordinator = canonicalize_new_actor(coordinator)
+                if coordinator != raw_coordinator:
+                    coordinator_input = raw_coordinator
+            except ValueError as exc:
+                raise BundleCatalogError(f"Invalid coordinator identity: {exc}") from exc
+            for persisted in existing:
+                try:
+                    collision = unicodedata.normalize("NFC", persisted) == coordinator
+                except UnicodeError:
+                    collision = False
+                if collision:
+                    raise BundleCatalogError(
+                        "Coordinator identity collides with an existing owner after "
+                        "NFC normalization."
+                    )
         now = self._clock.now()
         try:
             self._backend.append(
@@ -48,6 +72,11 @@ class BundleCatalog:
                         "prd_id": prd_id,
                         "task_ids": task_ids,
                         "coordinator": coordinator,
+                        **(
+                            {"coordinator_input": coordinator_input}
+                            if coordinator_input is not None
+                            else {}
+                        ),
                         "status": "planned",
                         "review_policy": (review_policy or BundleReviewPolicy()).model_dump(
                             mode="json"

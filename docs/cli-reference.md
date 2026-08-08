@@ -742,8 +742,10 @@ worktree at `../wt-<task_id>/`.
 - `--force` *(flag)* — override the pre-claim conflict warnings. Without
   `--force`, file overlap or group conflicts cause the command to exit 1
   after listing every conflicting claim.
-- `--actor TEXT` *(optional)* — claim actor; defaults to `$USER` or
-  `agent`.
+- `--actor TEXT` *(optional)* — local audit actor. Precedence: explicit flag >
+  `ANVIL_ACTOR` > legacy `ANVIL_GATE_ACTOR` > derived local identity. Claim
+  output includes structured continuation argv/environment data. Actor identity
+  is not cryptographic authentication.
 - `--lease FLOAT` *(optional)* — lease duration in minutes for this claim.
   Overrides `default_lease_minutes` from config. Lease precedence: this flag
   > project `config.yaml` > global `config.yaml` > built-in `240` (see
@@ -793,8 +795,8 @@ Emits a `claim.released` event with the optional reason.
   actor. Without `--force`, releasing someone else's claim fails.
 - `--reason TEXT` *(optional)* — human-readable reason for the release
   (recorded on the event).
-- `--actor TEXT` *(optional)* — actor identity; defaults to `$USER` or
-  `agent`.
+- `--actor TEXT` *(optional)* — actor identity under claim's precedence. Without
+  `--force`, it must exactly match the persisted owner.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -824,8 +826,8 @@ to prevent the stale-claim reaper from reclaiming the task mid-flight.
 
 **Flags:**
 
-- `--actor TEXT` *(optional)* — actor identity; defaults to `$USER` or
-  `agent`.
+- `--actor TEXT` *(optional)* — actor identity under claim's precedence; it must
+  exactly match the persisted owner.
 - `--lease FLOAT` *(optional)* — lease extension in minutes. Overrides
   `default_lease_minutes` from config (same precedence as
   [`claim --lease`](#claim)).
@@ -1052,8 +1054,9 @@ satisfies the task's `required_evidence`.
   files. Required when the task's `verification.required_evidence` includes
   an item matching "screenshot" (the gate checks `evidence.screenshots` is
   non-empty). Default: `[]`.
-- `--actor TEXT` *(optional)* — actor submitting evidence; defaults to
-  `$USER` or `agent`.
+- `--actor TEXT` *(optional)* — actor submitting evidence under claim's
+  precedence. An active claim requires its exact owner; mismatch refuses before
+  evidence is appended.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**

@@ -23,6 +23,11 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 from anvil import __version__
+from anvil.cli._actor_output import (
+    actor_identity_data,
+    actor_mismatch_data,
+    continuation_data,
+)
 from anvil.state.rollup import BundleRollupEntry
 
 if TYPE_CHECKING:
@@ -256,6 +261,8 @@ class ClaimResponse(BaseModel):
     # Advisory notes (e.g. the worktree_isolation shared-checkout warning);
     # additive with a default so existing readers are unaffected.
     warnings: list[str] = []
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+    continuation: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReleaseResponse(BaseModel):
@@ -265,6 +272,7 @@ class ReleaseResponse(BaseModel):
 
     released: bool
     claim_id: str
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
 
 
 class RenewResponse(BaseModel):
@@ -278,6 +286,7 @@ class RenewResponse(BaseModel):
     # unchanged, possibly-imminent expiry — the client should not treat it as a
     # fresh lease.
     renewed: bool = True
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkPacketResponse(BaseModel):
@@ -295,6 +304,7 @@ class ProgressResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     recorded: bool
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
 
 
 class BundleReviewPolicyRecord(BaseModel):
@@ -487,6 +497,7 @@ class EvidenceResponse(BaseModel):
     # T014: name the next claimable task (deps/claims/conflict-group/file-overlap
     # aware) so the agent can chain work; null when none is available.
     next_ready: NextReadyTask | None = None
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConflictEntry(BaseModel):
@@ -607,6 +618,16 @@ def _require_actor(actor: str) -> str:
             "pass the agent or user identity for audit-trail attribution."
         )
     return stripped
+
+
+def _actor_mismatch_tool_error(*, owner: str, actual: str, action: str) -> ToolError:
+    """Return an exact but JSON-escaped MCP ownership refusal."""
+    detail = {
+        "code": "actor_mismatch",
+        "message": f"Only the claim owner may {action}.",
+        **actor_mismatch_data(owner=owner, actual=actual),
+    }
+    return ToolError(json.dumps(detail, ensure_ascii=True, separators=(",", ":")))
 
 
 def _resolve_state_dir(cwd: str | None = None) -> Path:
@@ -1310,6 +1331,8 @@ def claim_task(
             worktree_path=claim.worktree_path,
             expected_files=claim.expected_files,
             warnings=isolation_warnings,
+            actor_identity=actor_identity_data(claimed_by),
+            continuation=continuation_data(task_id, claim.id, claimed_by),
         )
     finally:
         backend.close()
@@ -1350,13 +1373,22 @@ def release_task(
                 )
             except BundleError as exc:
                 raise ToolError(f"bundle_error: {exc}") from exc
-            return ReleaseResponse(released=True, claim_id=claim.id)
+            return ReleaseResponse(
+                released=True,
+                claim_id=claim.id,
+                actor_identity=actor_identity_data(actor),
+            )
 
         active_claim = _find_active_claim_for_task(backend, task_id)
         if active_claim is None:
             raise ToolError(
                 f"No active claim found for task '{task_id}'. "
                 "The task may already be released or was never claimed.",
+            )
+
+        if active_claim.claimed_by != actor:
+            raise _actor_mismatch_tool_error(
+                owner=active_claim.claimed_by, actual=actor, action="release the claim"
             )
 
         manager = ClaimManager(
@@ -1370,7 +1402,11 @@ def release_task(
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
-        return ReleaseResponse(released=True, claim_id=active_claim.id)
+        return ReleaseResponse(
+            released=True,
+            claim_id=active_claim.id,
+            actor_identity=actor_identity_data(actor),
+        )
     finally:
         backend.close()
 
@@ -1425,6 +1461,7 @@ def renew_claim(
             return RenewResponse(
                 lease_expires_at=updated.lease_expires_at.isoformat(),
                 renewed=updated.lease_expires_at != claim.lease_expires_at,
+                actor_identity=actor_identity_data(actor),
             )
 
         active_claim = _find_active_claim_for_task(backend, task_id)
@@ -1432,6 +1469,11 @@ def renew_claim(
             raise ToolError(
                 f"No active claim found for task '{task_id}'. "
                 "The task may have been released or its lease may have expired.",
+            )
+
+        if active_claim.claimed_by != actor:
+            raise _actor_mismatch_tool_error(
+                owner=active_claim.claimed_by, actual=actor, action="renew the claim"
             )
 
         lease_minutes = max(1, extend_seconds // 60)
@@ -1454,6 +1496,7 @@ def renew_claim(
         return RenewResponse(
             lease_expires_at=updated_claim.lease_expires_at.isoformat(),
             renewed=renewed,
+            actor_identity=actor_identity_data(actor),
         )
     finally:
         backend.close()
@@ -1588,6 +1631,14 @@ def submit_progress(
         if task is None:
             raise ToolError(f"Task '{task_id}' not found.")
 
+        active_claim = _find_active_claim_for_task(backend, task_id)
+        if active_claim is not None and active_claim.claimed_by != actor:
+            raise _actor_mismatch_tool_error(
+                owner=active_claim.claimed_by,
+                actual=actor,
+                action="record progress for the claim",
+            )
+
         clock = SystemClock()
         now = clock.now()
 
@@ -1613,7 +1664,9 @@ def submit_progress(
             },
         )
         backend.append(draft)
-        return ProgressResponse(recorded=True)
+        return ProgressResponse(
+            recorded=True, actor_identity=actor_identity_data(actor)
+        )
     finally:
         backend.close()
 
@@ -1676,9 +1729,10 @@ def submit_completion_evidence(
         # Without this guard any MCP caller can force-complete another agent's
         # claim by passing a different actor name (caught by critic-PR#45-P1).
         if active_claim.claimed_by != actor:
-            raise ToolError(
-                f"Task '{task_id}' is claimed by '{active_claim.claimed_by}', "
-                f"not '{actor}'. Only the claim owner may submit completion evidence.",
+            raise _actor_mismatch_tool_error(
+                owner=active_claim.claimed_by,
+                actual=actor,
+                action="submit completion evidence",
             )
 
         evidence_id = "EV" + uuid.uuid4().hex[:8].upper()
@@ -1739,6 +1793,7 @@ def submit_completion_evidence(
             evidence_id=evidence_id,
             task_status=task_status,
             next_ready=next_ready,
+            actor_identity=actor_identity_data(actor),
         )
     finally:
         backend.close()

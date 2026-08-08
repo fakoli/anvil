@@ -13,6 +13,12 @@ from pathlib import Path
 
 import typer
 
+from anvil.cli._actor_output import (
+    actor_identity_data,
+    actor_mismatch_data,
+    actor_mismatch_message,
+    actor_notice_lines,
+)
 from anvil.cli._helpers import (
     StateRootError,
     _open_backend,
@@ -20,7 +26,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
     resolve_actor,
 )
-from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.cli._json import JSON_OPTION, emit_success, fail, fail_with
 
 _COMMAND = "progress"
 
@@ -45,7 +51,10 @@ def progress(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor identity (default: $ANVIL_ACTOR / $USER derivation).",
+        help=(
+            "Actor identity. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
@@ -101,10 +110,13 @@ def progress(
                         "phase": phase,
                         "detail": detail,
                         "recorded": True,
+                        "actor_identity": actor_identity_data(resolved_actor),
                     },
                 )
                 return
             typer.echo(f"Progress recorded for bundle '{task_id}': {phase}")
+            for line in actor_notice_lines(resolved_actor):
+                typer.echo(line)
             return
 
         task = backend.get_task(task_id)
@@ -116,6 +128,28 @@ def progress(
                     code="task_not_found",
                 )
             typer.echo(f"Error: task '{task_id}' not found.", err=True)
+            raise typer.Exit(code=1)
+
+        active_claim = next(
+            (claim for claim in backend.list_active_claims() if claim.task_id == task_id),
+            None,
+        )
+        if active_claim is not None and active_claim.claimed_by != resolved_actor:
+            message = actor_mismatch_message(
+                owner=active_claim.claimed_by,
+                actual=resolved_actor,
+                action="Progress update",
+            )
+            if json_output:
+                fail_with(
+                    _COMMAND,
+                    message,
+                    code="actor_mismatch",
+                    extra=actor_mismatch_data(
+                        owner=active_claim.claimed_by, actual=resolved_actor
+                    ),
+                )
+            typer.echo(f"Error: {message}", err=True)
             raise typer.Exit(code=1)
 
         now = SystemClock().now()
@@ -149,8 +183,11 @@ def progress(
                 "phase": phase,
                 "detail": detail,
                 "recorded": True,
+                "actor_identity": actor_identity_data(resolved_actor),
             },
         )
         return
     detail_note = f" — {detail}" if detail else ""
     typer.echo(f"Progress recorded for '{task_id}': {phase}{detail_note}")
+    for line in actor_notice_lines(resolved_actor):
+        typer.echo(line)

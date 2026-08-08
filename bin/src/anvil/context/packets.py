@@ -19,6 +19,15 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from anvil.actors import (
+    ACTOR_AUTH_NOTICE,
+    actor_identity_context,
+    continuation_context,
+    quote_posix_actor,
+    quote_powershell_actor,
+    safe_actor_for_human,
+)
+
 if TYPE_CHECKING:
     from anvil.config import Config
     from anvil.review.gates import DeferredFinding
@@ -657,22 +666,59 @@ def _render_markdown(
     # keeps all three so a higher-stakes task documents the whole lifecycle.
     lines.append("## Update protocol")
     lines.append("")
+    packet_actor = active_claim.claimed_by if active_claim is not None else None
+    safe_packet_actor = (
+        safe_actor_for_human(packet_actor) if packet_actor is not None else None
+    )
+    if packet_actor is not None:
+        lines.append(f"- {ACTOR_AUTH_NOTICE}")
+        if safe_packet_actor is not None:
+            posix_actor = quote_posix_actor(packet_actor)
+            powershell_actor = quote_powershell_actor(packet_actor)
+            lines.append(
+                f"- Pin actor (POSIX): `export ANVIL_ACTOR={posix_actor}`"
+            )
+            lines.append(
+                f"- Pin actor (PowerShell): `$env:ANVIL_ACTOR = {powershell_actor}`"
+            )
+        else:
+            lines.append(
+                "- The persisted actor is unsafe to render in shell text; use the "
+                "JSON packet's structured continuation fields."
+            )
+
     if lightweight:
+        actor_suffix = (
+            f" --actor {quote_posix_actor(packet_actor)}"
+            if packet_actor is not None and safe_packet_actor is not None
+            else ""
+        )
         lines.append(
             f"- On completion, submit evidence via"
             f" `anvil submit {task.id}"
-            f" --commands ... --files-changed ...`"
+            f" --commands ... --files-changed ...{actor_suffix}`"
         )
     else:
         if active_claim is not None:
-            lines.append(
-                f"- Heartbeat your claim every 5 minutes via"
-                f" `anvil renew {active_claim.id}`"
-            )
+            if safe_packet_actor is not None:
+                lines.append(
+                    f"- Heartbeat your claim every 5 minutes via"
+                    f" `anvil renew {active_claim.id}"
+                    f" --actor {quote_posix_actor(packet_actor)}`"
+                )
+            else:
+                lines.append(
+                    "- Heartbeat through the JSON packet's structured renew argv."
+                )
+        actor_suffix = (
+            f" --actor {quote_posix_actor(packet_actor)}"
+            if packet_actor is not None and safe_packet_actor is not None
+            else ""
+        )
         lines.append(
             f"- On completion, submit evidence via"
             f" `anvil submit {task.id}"
-            f" --commands ... --files-changed ...`"
+            f" --commands ... --files-changed ...{actor_suffix}`"
         )
         lines.append(
             "- Status will transition"
@@ -719,18 +765,31 @@ def _render_json(
     # the markdown renderer applies — so an MCP consumer sees the identical
     # right-sized protocol. The full variant carries the status flow and (when
     # claimed) the renew command.
-    update_protocol: dict[str, str] = {
+    actor_suffix = (
+        f" --actor {quote_posix_actor(active_claim.claimed_by)}"
+        if active_claim is not None
+        and safe_actor_for_human(active_claim.claimed_by) is not None
+        else ""
+    )
+    update_protocol: dict[str, Any] = {
         "submit_command": (
-            f"anvil submit {task.id} --commands ... --files-changed ..."
+            f"anvil submit {task.id} --commands ... --files-changed ...{actor_suffix}"
         ),
     }
+    if active_claim is not None:
+        update_protocol["actor_identity"] = actor_identity_context(
+            active_claim.claimed_by
+        )
+        update_protocol["continuation"] = continuation_context(
+            task.id, active_claim.id, active_claim.claimed_by
+        )
     if not lightweight:
         update_protocol["status_flow"] = (
             "claimed → in_progress → needs_review → accepted → done"
         )
         if active_claim is not None:
             update_protocol["renew_command"] = (
-                f"anvil renew {active_claim.id}"
+                f"anvil renew {active_claim.id}{actor_suffix}"
             )
 
     # T020 — the right-sized required-evidence checklist the agent is shown.
