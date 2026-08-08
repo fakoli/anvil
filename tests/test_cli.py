@@ -5972,7 +5972,7 @@ class TestCaptureEvidenceByClaim:
         result = _invoke_cmd(
             tmp_path,
             ["submit", task_id, "--commands", "echo done",
-             "--files-changed", "x.py", "--actor", "session-bob"],
+             "--files-changed", "x.py", "--actor", "claude-opus-retro"],
         )
         assert result.exit_code == 0
         assert "zero typed proofs attached" not in result.output
@@ -8785,6 +8785,7 @@ class TestApplyMergeCheck:
                 "submit", task_id,
                 "--commands", "echo merged-ok",
                 "--files-changed", "README.md",
+                "--actor", "amc-agent",
             ],
         )
         assert submit_result.exit_code == 0, submit_result.output
@@ -9257,7 +9258,7 @@ class TestApplyClaimGate:
         submit_result = _invoke_cmd(
             tmp_path,
             ["submit", task_id, "--commands", "echo ok",
-             "--files-changed", "x.py"],
+             "--files-changed", "x.py", "--actor", "cg-agent"],
         )
         assert submit_result.exit_code == 0, submit_result.output
 
@@ -9395,7 +9396,8 @@ class TestSubmitCategory:
         result = _invoke_cmd(
             tmp_path,
             ["submit", "T001", "--category", "diagnostic",
-             "--commands", "echo ok", "--files-changed", "x.py", "--json"],
+             "--commands", "echo ok", "--files-changed", "x.py",
+             "--actor", "cat-agent", "--json"],
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.output.strip().splitlines()[-1])["data"]
@@ -9421,7 +9423,7 @@ class TestSubmitCategory:
         result = _invoke_cmd(
             tmp_path,
             ["submit", "T001", "--commands", "echo ok",
-             "--files-changed", "x.py"],
+             "--files-changed", "x.py", "--actor", "cat-agent"],
         )
         assert result.exit_code == 0, result.output
         approved = _invoke_cmd(
@@ -9439,7 +9441,8 @@ class TestSubmitCategory:
         result = _invoke_cmd(
             tmp_path,
             ["submit", "T001", "--category", "blocked",
-             "--commands", "echo ok", "--files-changed", "x.py"],
+             "--commands", "echo ok", "--files-changed", "x.py",
+             "--actor", "cat-agent"],
         )
         assert result.exit_code == 0, result.output
         assert "blocked submission always refuses" in result.output
@@ -9458,7 +9461,8 @@ class TestSubmitCategory:
         result = _invoke_cmd(
             tmp_path,
             ["submit", "T002", "--category", "blocked",
-             "--commands", "echo ok", "--files-changed", "x.py", "--json"],
+             "--commands", "echo ok", "--files-changed", "x.py",
+             "--actor", "cat-agent", "--json"],
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.output.strip().splitlines()[-1])["data"]
@@ -9599,7 +9603,7 @@ class TestApplyIntentLinter:
         assert _invoke_cmd(
             tmp_path,
             ["submit", task_id, "--commands", "echo ok",
-             "--files-changed", "x.py"],
+             "--files-changed", "x.py", "--actor", "intent-agent"],
         ).exit_code == 0
 
     def test_incident_shape_warns(self, tmp_path: Path) -> None:
