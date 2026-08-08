@@ -1262,7 +1262,8 @@ def claim_task(
     (read-only/docs work). Under ``advisory`` a shared-checkout collision
     warning is returned in the response.
     """
-    claimed_by = _require_actor(claimed_by)
+    # ClaimManager owns new-identity canonicalization. Passing the exact input
+    # preserves actor_input for SQLite's locked normalized-collision check.
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -4066,7 +4067,10 @@ def create_bundle(
                 bundle_id,
                 prd_id=prd_id,
                 task_ids=task_ids,
-                coordinator=_require_actor(coordinator),
+                # Preserve the exact caller spelling so BundleCatalog can pass
+                # it through to SQLite's locked NFC-collision check. The
+                # catalog canonicalizes the persisted coordinator itself.
+                coordinator=coordinator,
                 review_policy=BundleReviewPolicy(
                     max_reviews=max_reviews,
                     max_rereviews=max_rereviews,

@@ -961,6 +961,38 @@ class TestBundleTools:
         assert progress["recorded"] is True
         assert progress["bundle"]["status"] == "active"
 
+    def test_create_bundle_preserves_raw_coordinator_for_nfc_collision_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001"],
+                        "coordinator": "caf\u00e9",
+                        "actor": "planner",
+                    },
+                )
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B002",
+                        "prd_id": "default",
+                        "task_ids": ["T002"],
+                        "coordinator": "cafe\u0301",
+                        "actor": "planner",
+                    },
+                )
+
+        with pytest.raises(ToolError, match="collides"):
+            _run(run())
+
     def test_existing_renew_release_tools_dispatch_bundle_ids(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -6427,7 +6459,7 @@ class TestPlanTasksOrphanPrune:
 
 class TestRequireActor:
     """Each mutating tool that records an actor must reject empty or
-    whitespace-only actor values before touching the backend.
+    whitespace-only actor values before appending a mutation.
 
     Covers: claim_task (claimed_by), release_task, renew_claim,
     submit_progress, submit_completion_evidence, update_task_status.
@@ -6479,6 +6511,36 @@ class TestRequireActor:
 
         with pytest.raises(ToolError, match="actor|empty|whitespace"):
             _run(run())
+
+    def test_claim_task_preserves_raw_actor_for_nfc_collision_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_task(state_dir, task_id="T002", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "claim_task",
+                    {"task_id": "T001", "claimed_by": "caf\u00e9"},
+                )
+                await client.call_tool(
+                    "claim_task",
+                    {"task_id": "T002", "claimed_by": "cafe\u0301"},
+                )
+
+        with pytest.raises(ToolError, match="collides"):
+            _run(run())
+
+        with sqlite3.connect(state_dir / "state.db") as conn:
+            rows = conn.execute(
+                "SELECT task_id, claimed_by FROM claims ORDER BY task_id"
+            ).fetchall()
+        assert rows == [("T001", "caf\u00e9")]
 
     @pytest.mark.parametrize("legacy_owner", ["", " \t "])
     def test_exact_legacy_owner_can_complete_every_mcp_lifecycle_lookup(
