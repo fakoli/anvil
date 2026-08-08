@@ -12,8 +12,8 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+import scripts.check_skill_cli_contract as skill_contract
 from scripts.check_skill_cli_contract import (
-    ALLOWLIST_PHANTOM,
     ContractError,
     check_invocation,
     code_segments,
@@ -129,13 +129,66 @@ anvil submit T012 \\
     ) == []
 
 
-def test_phantom_commands_are_not_real(contract: dict[str, object]) -> None:
-    commands = contract["commands"]
-    assert isinstance(commands, list)
-    for name in ALLOWLIST_PHANTOM:
-        assert name not in commands, (
-            f"anvil {name} now ships but is still allowlisted as a phantom"
-        )
+@pytest.mark.parametrize("name", ["decision", "start-prd", "for"])
+def test_nonexistent_commands_are_rejected_everywhere(
+    contract: dict[str, object], name: str
+) -> None:
+    assert check_invocation(["anvil", name], contract) == [
+        f"unknown command: anvil {name}"
+    ]
+
+
+def test_non_invocation_exceptions_are_occurrence_exact_and_stale_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skill = tmp_path / "skills" / "state-ops" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    output = 'anvil for "myproject" (id: myproject)'
+    skill.write_text(f"```text\n{output}\n```\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("agent notes\n", encoding="utf-8")
+    exception = (
+        "skills/state-ops/SKILL.md",
+        2,
+        "fence:text",
+        output,
+        ("anvil", "for", "myproject", "(id:", "myproject"),
+    )
+    monkeypatch.setattr(
+        skill_contract, "NON_INVOCATION_EXCEPTIONS", frozenset({exception})
+    )
+
+    assert validate_docs(tmp_path, _source_manifest()) == []
+
+    skill.write_text(f"```bash\n{output}\n```\n", encoding="utf-8")
+    context_findings = validate_docs(tmp_path, _source_manifest())
+    assert len(context_findings) == 2
+    assert any("unknown command: anvil for" in finding for finding in context_findings)
+    assert any("stale non-invocation exception" in finding for finding in context_findings)
+
+    skill.write_text(f"```text\n  {output}\n```\n", encoding="utf-8")
+    indentation_findings = validate_docs(tmp_path, _source_manifest())
+    assert len(indentation_findings) == 2
+    assert any(
+        "unknown command: anvil for" in finding for finding in indentation_findings
+    )
+    assert any(
+        "stale non-invocation exception" in finding for finding in indentation_findings
+    )
+
+    skill.write_text(
+        f"```text\n{output}\n```\n```bash\n{output}\n```\n", encoding="utf-8"
+    )
+    duplicate_findings = validate_docs(tmp_path, _source_manifest())
+    assert len(duplicate_findings) == 1
+    assert "skills/state-ops/SKILL.md:5: unknown command: anvil for" in (
+        duplicate_findings[0]
+    )
+
+    skill.write_text("output removed\n", encoding="utf-8")
+    assert validate_docs(tmp_path, _source_manifest()) == [
+        "skills/state-ops/SKILL.md:2: stale non-invocation exception\n"
+        f"    -> {output}"
+    ]
 
 
 def test_every_cited_command_and_flag_exists() -> None:
