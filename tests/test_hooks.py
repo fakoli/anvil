@@ -28,6 +28,15 @@ def test_payload_actor_prefers_pinned_lifecycle_actor(
     assert hooks._payload_actor({"session_id": "harness-session"}) == "pinned-owner"
 
 
+def test_payload_actor_preserves_whitespace_only_legacy_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANVIL_ACTOR", "   ")
+    monkeypatch.delenv("ANVIL_GATE_ACTOR", raising=False)
+
+    assert hooks._payload_actor({"session_id": "harness-session"}) == "   "
+
+
 class _RecordingInput(io.BytesIO):
     def __init__(self) -> None:
         super().__init__()

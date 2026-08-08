@@ -618,10 +618,7 @@ def _payload_actor(payload: dict[str, object], default: str = "unknown") -> str:
     # A claim-time ANVIL_ACTOR pin is the lifecycle continuation contract and
     # must beat a harness-specific payload session proxy. Preserve the proxy
     # fallback for unpinned legacy installs.
-    if any(
-        os.environ.get(name, "").strip()
-        for name in ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR")
-    ):
+    if any(name in os.environ for name in ("ANVIL_ACTOR", "ANVIL_GATE_ACTOR")):
         return resolve_actor()
     value = payload.get("session_id")
     actor = str(value).strip() if value is not None else ""

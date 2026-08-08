@@ -74,6 +74,7 @@ def test_bundle_create_show_and_list_human_json_contracts(tmp_path) -> None:
     assert status.exit_code == 0, status.output
     assert json.loads(status.output)["data"]["bundles"][0]["claimable"] is True
 
+
     claimed = _invoke(
         tmp_path,
         ["bundle", "claim", "B001", "--actor", "coordinator", "--json"],
@@ -111,6 +112,31 @@ def test_bundle_create_show_and_list_human_json_contracts(tmp_path) -> None:
     )
     assert progress.exit_code == 0, progress.output
     assert json.loads(progress.output)["data"]["recorded"] is True
+
+
+def test_bundle_create_preserves_spaces_and_rejects_explicit_empty_coordinator(
+    tmp_path: Path,
+) -> None:
+    _seed_cli_project(tmp_path)
+    created = _invoke(
+        tmp_path,
+        [
+            "bundle", "create", "BSPACE", "release:T001", "--prd", "release",
+            "--coordinator", " actor ", "--actor", "planner", "--json",
+        ],
+    )
+    assert created.exit_code == 0, created.output
+    assert json.loads(created.output)["data"]["bundle"]["coordinator"] == " actor "
+
+    empty = _invoke(
+        tmp_path,
+        [
+            "bundle", "create", "BEMPTY", "release:T002", "--prd", "release",
+            "--coordinator", "", "--actor", "planner", "--json",
+        ],
+    )
+    assert empty.exit_code != 0
+    assert "Invalid coordinator identity" in empty.output
 
 
 def test_bundle_create_errors_match_stable_json_code(tmp_path) -> None:

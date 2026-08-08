@@ -68,7 +68,7 @@ def create_bundle(
     state_dir, backend = _state(cwd, command, json_output)
     del state_dir
     resolved_actor = resolve_actor(actor)
-    resolved_coordinator = (coordinator or resolved_actor).strip()
+    resolved_coordinator = coordinator if coordinator is not None else resolved_actor
     try:
         bundle = BundleCatalog(backend, SystemClock(), actor=resolved_actor).create(
             bundle_id,
