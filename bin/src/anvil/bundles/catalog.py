@@ -39,24 +39,25 @@ class BundleCatalog:
         coordinator_input: str | None = None
         existing = {claim.claimed_by for claim in self._backend.list_claims()}
         existing.update(bundle.coordinator for bundle in self._backend.list_bundles())
-        if coordinator not in existing:
+        try:
+            raw_coordinator = coordinator
+            coordinator = canonicalize_new_actor(coordinator)
+            if coordinator != raw_coordinator:
+                coordinator_input = raw_coordinator
+        except ValueError as exc:
+            raise BundleCatalogError(f"Invalid coordinator identity: {exc}") from exc
+        for persisted in existing:
             try:
-                raw_coordinator = coordinator
-                coordinator = canonicalize_new_actor(coordinator)
-                if coordinator != raw_coordinator:
-                    coordinator_input = raw_coordinator
-            except ValueError as exc:
-                raise BundleCatalogError(f"Invalid coordinator identity: {exc}") from exc
-            for persisted in existing:
-                try:
-                    collision = unicodedata.normalize("NFC", persisted) == coordinator
-                except UnicodeError:
-                    collision = False
-                if collision:
-                    raise BundleCatalogError(
-                        "Coordinator identity collides with an existing owner after "
-                        "NFC normalization."
-                    )
+                collision = unicodedata.normalize("NFC", persisted) == coordinator
+            except UnicodeError:
+                collision = False
+            if collision and not (
+                persisted == coordinator and raw_coordinator == coordinator
+            ):
+                raise BundleCatalogError(
+                    "Coordinator identity collides with an existing owner after "
+                    "NFC normalization."
+                )
         now = self._clock.now()
         try:
             self._backend.append(

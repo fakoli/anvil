@@ -6329,6 +6329,11 @@ class TestRequireActor:
     submit_progress, submit_completion_evidence, update_task_status.
     """
 
+    def test_preserves_leading_and_trailing_spaces_for_exact_lookup(self) -> None:
+        from anvil.mcp_server import _require_actor
+
+        assert _require_actor(" actor ") == " actor "
+
     # -----------------------------------------------------------------------
     # claim_task — uses `claimed_by` as the actor field
     # -----------------------------------------------------------------------

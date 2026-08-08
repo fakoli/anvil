@@ -2285,6 +2285,29 @@ class TestActorIdentityLifecycle:
             b.close()
 
     @pytest.mark.parametrize("owner", ["legacy\x01owner", "x" * 129])
+    def test_legacy_invalid_owner_cannot_create_a_new_claim(
+        self, tmp_path: Path, owner: str
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(conn, task_id="T001", status="claimed")
+            _insert_task_raw(conn, task_id="T002", status="ready")
+            _insert_active_claim_raw(
+                conn, claim_id="CLEGACY", task_id="T001", actor=owner
+            )
+            conn.close()
+
+            with pytest.raises(ClaimError, match="Invalid actor identity"):
+                _make_manager(b, actor=owner).claim("T002")
+            assert b.get_task("T002").status is TaskStatus.ready
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize("owner", ["legacy\x01owner", "x" * 129])
     def test_legacy_invalid_owner_remains_exactly_renewable_and_releasable(
         self, tmp_path: Path, owner: str
     ) -> None:

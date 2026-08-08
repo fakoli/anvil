@@ -600,24 +600,28 @@ _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
 
 
 def _require_actor(actor: str) -> str:
-    """Strip leading/trailing whitespace and raise ToolError when empty.
+    """Preserve the exact actor and raise ToolError when it is blank.
 
     An empty or whitespace-only actor would write a blank ``actor`` field into
     every audit event emitted by the tool, making the audit trail useless for
     attribution. Raise early so the caller gets a clear error rather than a
     silent blank entry in the event log.
 
-    Returns the stripped actor string on success so callers can write::
+    Existing lifecycle owners are exact identifiers, including legacy values
+    with leading or trailing spaces.  New-identity boundaries perform the NFC
+    and safety validation; this shared lookup helper must never alias one
+    persisted owner to another by stripping it.
+
+    Returns the exact actor string on success so callers can write::
 
         actor = _require_actor(actor)
     """
-    stripped = actor.strip()
-    if not stripped:
+    if not actor.strip():
         raise ToolError(
             "actor must not be empty or whitespace — "
             "pass the agent or user identity for audit-trail attribution."
         )
-    return stripped
+    return actor
 
 
 def _actor_mismatch_tool_error(*, owner: str, actual: str, action: str) -> ToolError:

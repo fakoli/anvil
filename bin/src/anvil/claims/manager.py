@@ -186,18 +186,14 @@ class ClaimManager:
         )
 
     def _actor_for_new_claim(self) -> tuple[str, str | None]:
-        """Return the exact existing actor or a validated NFC identity.
+        """Return a validated NFC identity for a newly created claim.
 
-        Existing values are deliberately compared before validation so a
-        legacy owner that predates the actor-id contract remains able to create
-        another claim under that exact identity.  This is only the ergonomic
-        preflight; SQLite repeats the collision check under its append lock.
+        Exact legacy identities remain usable for lifecycle lookup, but every
+        new claim must satisfy the current identity contract. SQLite repeats
+        the validation and collision check under its append lock.
         """
         existing = {claim.claimed_by for claim in self._backend.list_claims()}
         existing.update(bundle.coordinator for bundle in self._backend.list_bundles())
-        if self._actor in existing:
-            return self._actor, None
-
         from anvil.actors import canonicalize_new_actor
 
         try:
@@ -209,7 +205,9 @@ class ClaimManager:
                 collision = unicodedata.normalize("NFC", persisted) == candidate
             except UnicodeError:
                 collision = False
-            if collision:
+            if collision and not (
+                persisted == candidate and self._actor == candidate
+            ):
                 raise ClaimError(
                     "Actor identity collides with an existing owner after NFC "
                     "normalization; use the exact persisted owner or choose a "

@@ -5735,9 +5735,6 @@ class SqliteBackend:
         """Validate a prospective identity under the current write snapshot."""
         persisted_ids = cls._persisted_actor_ids(conn)
         raw_actor = actor if actor_input is None else actor_input
-        if raw_actor in persisted_ids and raw_actor == actor:
-            # Exact-first is the compatibility boundary for legacy invalid IDs.
-            return
         try:
             canonical = canonicalize_new_actor(raw_actor)
         except ValueError as exc:
@@ -5751,7 +5748,9 @@ class SqliteBackend:
                 collision = unicodedata.normalize("NFC", persisted) == canonical
             except UnicodeError:
                 collision = False
-            if collision:
+            if collision and not (
+                persisted == canonical and raw_actor == canonical
+            ):
                 raise EventRejected(
                     f"{action}: actor identity collides with an existing owner "
                     "after NFC normalization."
