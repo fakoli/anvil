@@ -1600,6 +1600,8 @@ flag list; full prose treatment may follow in a later pass.
   verifies and records one canonical claim-bound progress artifact. An accepted
   artifact reports its digest, generation, and trust mode and is consumed once
   by the next renewal; free-text `progress.noted` events never authorize renewal.
+  See [Attesting progress from an external writer](how-to/attesting-external-progress.md)
+  for the exact canonical envelope and a reproducible generator.
   `anvil status` shows each active claim's latest phase, elapsed time, and
   lease-expiry countdown.
 - `anvil drift` — Report intent/state/filesystem-git divergence (orphan

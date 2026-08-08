@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from anvil import signing
 from anvil.clock import FrozenClock
 from anvil.state.backend import (
     EventRejected,
@@ -32,6 +34,7 @@ from anvil.state.backend import (
     StateLocked,
     TransactionAborted,
 )
+from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
 from anvil.state.models import ClaimStatus, Event, EventDraft
 from anvil.state.payloads import PrdParsedPayload, ProgressAttestedPayload
 from anvil.state.schema import DDL, SCHEMA_VERSION
@@ -3218,11 +3221,11 @@ def _make_attestable_claim_payload(
         generation=generation,
     )
     payload["attestation_context"] = {
-        "repository_id": "repo:test",
+        "repository_id": "e" * 64,
         "claim_start_sha": "a" * 40,
         "prd_id": "default",
         "prd_revision": 1,
-        "task_revision": "task-v1",
+        "task_revision": "f" * 64,
         "expected_paths": [
             {"path": "src/a.py", "baseline_sha256": "b" * 64}
         ],
@@ -3234,21 +3237,42 @@ def _make_progress_attested_payload(
     *,
     claim_id: str = "C001",
     generation: int = 1,
-    digest: str = "d" * 64,
+    digest: str | None = None,
     recorded_at: datetime = _T0 + timedelta(minutes=10),
 ) -> dict[str, Any]:
+    evidence_core = {
+        "schema_version": 1,
+        "kind": "file",
+        "project_id": "proj-1",
+        "claim_id": claim_id,
+        "generation": generation,
+        "task_id": "T001",
+        "task_revision": "f" * 64,
+        "prd_id": "default",
+        "prd_revision": 1,
+        "claimed_by": "agent-alpha",
+        "repository_id": "e" * 64,
+        "claim_start_sha": "a" * 40,
+        "commit_sha": "a" * 40,
+        "path": "src/a.py",
+        "prior_sha256": "b" * 64,
+        "file_sha256": "c" * 64,
+    }
+    semantic_digest = digest or domain_separated_sha256(
+        b"anvil.progress-attestation.v1\0", evidence_core
+    )
     return {
-        "semantic_digest": digest,
+        "semantic_digest": semantic_digest,
         "envelope_id": "external-1",
         "claim_id": claim_id,
         "task_id": "T001",
         "claimed_by": "agent-alpha",
         "generation": generation,
-        "repository_id": "repo:test",
+        "repository_id": "e" * 64,
         "claim_start_sha": "a" * 40,
         "prd_id": "default",
         "prd_revision": 1,
-        "task_revision": "task-v1",
+        "task_revision": "f" * 64,
         "kind": "file",
         "commit_sha": None,
         "changed_paths": [],
@@ -3258,7 +3282,13 @@ def _make_progress_attested_payload(
         "recorded_at": recorded_at.isoformat(),
         "trust_mode": "claim_owner_self_attested",
         "issuer_id": None,
+        "evidence_core": evidence_core,
+        "signed_payload": {**evidence_core, "issued_at": recorded_at.isoformat()},
+        "issuer": None,
     }
+
+
+_PROGRESS_DIGEST = _make_progress_attested_payload()["semantic_digest"]
 
 
 def _setup_claimable_task(b: SqliteBackend, task_id: str = "T001") -> None:
@@ -12981,7 +13011,7 @@ class TestClaimProgressAttestationState:
                         "lease_expires_at": (_T0 + timedelta(hours=2)).isoformat(),
                         "last_heartbeat_at": heartbeat.isoformat(),
                         "renewed_by": "agent-alpha",
-                        "attestation_digest": "d" * 64,
+                        "attestation_digest": _PROGRESS_DIGEST,
                         "attestation_generation": 1,
                         "attestation_trust_mode": "claim_owner_self_attested",
                     },
@@ -12993,7 +13023,7 @@ class TestClaimProgressAttestationState:
             )
             assert renewed is not None
             assert b.get_pending_progress_attestation("C001", 1) is None
-            stored = b.get_progress_attestation("d" * 64)
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
             assert stored is not None
             assert stored.consumed_by_event_id == renewed.id
             assert b.get_claim("C001").last_heartbeat_at == heartbeat  # type: ignore[union-attr]
@@ -13010,7 +13040,7 @@ class TestClaimProgressAttestationState:
                                 _T0 + timedelta(minutes=30)
                             ).isoformat(),
                             "renewed_by": "agent-alpha",
-                            "attestation_digest": "d" * 64,
+                            "attestation_digest": _PROGRESS_DIGEST,
                             "attestation_generation": 1,
                             "attestation_trust_mode": "claim_owner_self_attested",
                         },
@@ -13044,7 +13074,7 @@ class TestClaimProgressAttestationState:
             )
             assert released is not None
             assert b.get_pending_progress_attestation("C001", 1) is None
-            stored = b.get_progress_attestation("d" * 64)
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
             assert stored is not None
             assert stored.invalidated_by_event_id == released.id
         finally:
@@ -13064,7 +13094,7 @@ class TestClaimProgressAttestationState:
                 "lease_expires_at": (_T0 + timedelta(hours=2)).isoformat(),
                 "last_heartbeat_at": (_T0 + timedelta(minutes=20)).isoformat(),
                 "renewed_by": "agent-alpha",
-                "attestation_digest": "d" * 64,
+                "attestation_digest": _PROGRESS_DIGEST,
                 "attestation_generation": 1,
                 "attestation_trust_mode": "claim_owner_self_attested",
             }
@@ -13083,7 +13113,7 @@ class TestClaimProgressAttestationState:
             conn.execute("BEGIN IMMEDIATE")
             b._write_claim_renewed(conn, typed, replayed)
             conn.execute("COMMIT")
-            stored = b.get_progress_attestation("d" * 64)
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
             assert stored is not None
             assert stored.consumed_by_event_id is None
             assert b.get_claim("C001").lease_expires_at == _T0 + timedelta(hours=1)  # type: ignore[union-attr]
@@ -13108,7 +13138,7 @@ class TestClaimProgressAttestationState:
                 )
             )
             assert submitted is not None
-            stored = b.get_progress_attestation("d" * 64)
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
             assert stored is not None
             assert stored.invalidated_by_event_id == submitted.id
             assert b.get_pending_progress_attestation("C001", 1) is None
@@ -13124,9 +13154,239 @@ class TestClaimProgressAttestationState:
             recorded_at = _T0 + timedelta(hours=2)
             with pytest.raises(EventRejected, match="binding mismatch"):
                 self._attest(b, recorded_at=recorded_at)
-            assert b.get_progress_attestation("d" * 64) is None
+            assert b.get_progress_attestation(_PROGRESS_DIGEST) is None
         finally:
             b.close()
+
+    @pytest.mark.parametrize("forgery", ["digest", "issuer"])
+    def test_live_append_rejects_forged_attestation_proof(
+        self, tmp_path: Path, forgery: str
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            payload = _make_progress_attested_payload(recorded_at=recorded_at)
+            if forgery == "digest":
+                payload["semantic_digest"] = "0" * 64
+            else:
+                payload.update(
+                    {
+                        "trust_mode": "configured_issuer_verified",
+                        "issuer_id": "0" * 16,
+                        "issuer": {
+                            "algorithm": "ed25519",
+                            "signer_id": "0" * 16,
+                            "public_key": "1" * 64,
+                            "signature": "2" * 128,
+                        },
+                    }
+                )
+            with pytest.raises(EventRejected, match="digest|signature|issuer trust"):
+                b.append(
+                    _make_event(
+                        "progress.attested",
+                        payload,
+                        target_kind="claim",
+                        target_id="C001",
+                        actor="agent-alpha",
+                        now=recorded_at,
+                    )
+                )
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_live_append_accepts_cryptographically_bound_issuer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            payload = _make_progress_attested_payload(recorded_at=recorded_at)
+            private_key = Ed25519PrivateKey.generate()
+            public_key = signing.public_key_to_hex(private_key.public_key())
+            signer_id = signing.fingerprint(public_key)
+            trust_path = tmp_path / "trust.txt"
+            trust_path.write_text(public_key + "\n", encoding="utf-8")
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(trust_path))
+            payload.update(
+                {
+                    "trust_mode": "configured_issuer_verified",
+                    "issuer_id": signer_id,
+                    "issuer": {
+                        "algorithm": "ed25519",
+                        "signer_id": signer_id,
+                        "public_key": public_key,
+                        "signature": signing.sign(
+                            private_key,
+                            canonical_json_bytes(payload["signed_payload"]),
+                        ),
+                    },
+                }
+            )
+            accepted = b.append(
+                _make_event(
+                    "progress.attested",
+                    payload,
+                    target_kind="claim",
+                    target_id="C001",
+                    actor="agent-alpha",
+                    now=recorded_at,
+                )
+            )
+            assert accepted is not None
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert stored is not None
+            assert stored.trust_mode == "configured_issuer_verified"
+            assert stored.issuer_id == signer_id
+        finally:
+            b.close()
+
+    def test_live_append_rejects_valid_but_unconfigured_issuer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            payload = _make_progress_attested_payload(recorded_at=recorded_at)
+            private_key = Ed25519PrivateKey.generate()
+            public_key = signing.public_key_to_hex(private_key.public_key())
+            signer_id = signing.fingerprint(public_key)
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(tmp_path / "empty-trust.txt"))
+            payload.update(
+                {
+                    "trust_mode": "configured_issuer_verified",
+                    "issuer_id": signer_id,
+                    "issuer": {
+                        "algorithm": "ed25519",
+                        "signer_id": signer_id,
+                        "public_key": public_key,
+                        "signature": signing.sign(
+                            private_key,
+                            canonical_json_bytes(payload["signed_payload"]),
+                        ),
+                    },
+                }
+            )
+            with pytest.raises(EventRejected, match="configured issuer trust"):
+                b.append(
+                    _make_event(
+                        "progress.attested",
+                        payload,
+                        target_kind="claim",
+                        target_id="C001",
+                        actor="agent-alpha",
+                        now=recorded_at,
+                    )
+                )
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_replay_writer_rejects_forged_semantic_digest(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            raw = _make_progress_attested_payload(
+                recorded_at=recorded_at, digest="0" * 64
+            )
+            payload = ProgressAttestedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999996",
+                timestamp=recorded_at,
+                actor="agent-alpha",
+                action="progress.attested",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            b._write_progress_attested(conn, payload, replayed)
+            conn.execute("COMMIT")
+            assert b.get_progress_attestation("0" * 64) is None
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_replay_writer_rejects_valid_but_unconfigured_issuer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            recorded_at = _T0 + timedelta(minutes=10)
+            raw = _make_progress_attested_payload(recorded_at=recorded_at)
+            private_key = Ed25519PrivateKey.generate()
+            public_key = signing.public_key_to_hex(private_key.public_key())
+            signer_id = signing.fingerprint(public_key)
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(tmp_path / "empty-trust.txt"))
+            raw.update(
+                {
+                    "trust_mode": "configured_issuer_verified",
+                    "issuer_id": signer_id,
+                    "issuer": {
+                        "algorithm": "ed25519",
+                        "signer_id": signer_id,
+                        "public_key": public_key,
+                        "signature": signing.sign(
+                            private_key,
+                            canonical_json_bytes(raw["signed_payload"]),
+                        ),
+                    },
+                }
+            )
+            payload = ProgressAttestedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999995",
+                timestamp=recorded_at,
+                actor="agent-alpha",
+                action="progress.attested",
+                target_kind="claim",
+                target_id="C001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            b._write_progress_attested(conn, payload, replayed)
+            conn.execute("COMMIT")
+            assert b.get_progress_attestation(_PROGRESS_DIGEST) is None
+            assert b.get_pending_progress_attestation("C001", 1) is None
+        finally:
+            b.close()
+
+    def test_genuine_self_attestation_survives_deterministic_replay(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            self._attest(b, recorded_at=_T0 + timedelta(minutes=10))
+            original = b.get_progress_attestation(_PROGRESS_DIGEST)
+            assert original is not None
+        finally:
+            b.close()
+
+        replay = SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        replay.initialize()
+        try:
+            replay.replay_from_empty(events_path)
+            rebuilt = replay.get_progress_attestation(_PROGRESS_DIGEST)
+            assert rebuilt == original
+        finally:
+            replay.close()
 
     def test_changed_outer_event_id_quarantines_semantic_replay(
         self, tmp_path: Path
@@ -13153,7 +13413,7 @@ class TestClaimProgressAttestationState:
             b._write_progress_attested(conn, payload, duplicate)
             conn.execute("COMMIT")
 
-            stored = b.get_progress_attestation("d" * 64)
+            stored = b.get_progress_attestation(_PROGRESS_DIGEST)
             assert stored is not None
             assert stored.accepted_event_id == accepted.id
             assert stored.collision_detected is True

@@ -1054,6 +1054,64 @@ class ProgressNotedPayload(BaseModel):
     detail: str | None = None
 
 
+class ProgressEvidenceCorePayload(BaseModel):
+    """Stable semantic identity of one externally verified progress fact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    kind: Literal["commit", "file"]
+    project_id: StrictStr = Field(min_length=1, max_length=255)
+    claim_id: StrictStr = Field(min_length=1, max_length=255)
+    generation: StrictInt = Field(ge=1)
+    task_id: StrictStr = Field(min_length=1, max_length=255)
+    task_revision: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    prd_id: StrictStr = Field(min_length=1, max_length=255)
+    prd_revision: StrictInt = Field(ge=1)
+    claimed_by: StrictStr = Field(min_length=1, max_length=4096)
+    repository_id: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    commit_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    path: StrictStr = Field(min_length=1, max_length=4096)
+    prior_sha256: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    file_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _strict_schema_version(cls, value: Any) -> Any:
+        if type(value) is not int:
+            raise ValueError("schema_version must be an integer")
+        return value
+
+
+class ProgressSignedPayload(ProgressEvidenceCorePayload):
+    """Exact Ed25519 signature preimage, including issuance time."""
+
+    issued_at: StrictStr
+
+    @field_validator("issued_at")
+    @classmethod
+    def _validate_issued_at(cls, value: str) -> str:
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("issued_at must be ISO 8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("issued_at must be timezone-aware")
+        return value
+
+
+class ProgressIssuerPayload(BaseModel):
+    """Durable issuer material required to re-verify a detached signature."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    algorithm: Literal["ed25519"]
+    signer_id: StrictStr = Field(pattern=r"^[0-9a-f]{16}$")
+    public_key: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    signature: StrictStr = Field(pattern=r"^[0-9a-f]{128}$")
+
+
 class ProgressAttestedPayload(BaseModel):
     """Payload for ``progress.attested`` durable claim-bound evidence."""
 
@@ -1085,6 +1143,9 @@ class ProgressAttestedPayload(BaseModel):
         "claim_owner_self_attested", "configured_issuer_verified"
     ]
     issuer_id: StrictStr | None = Field(default=None, max_length=255)
+    evidence_core: ProgressEvidenceCorePayload
+    signed_payload: ProgressSignedPayload
+    issuer: ProgressIssuerPayload | None = None
 
     @field_validator("attested_at", "recorded_at")
     @classmethod
@@ -1110,10 +1171,20 @@ class ProgressAttestedPayload(BaseModel):
             if self.path is None or self.file_sha256 is None:
                 raise ValueError("file attestation requires path and file_sha256")
         if self.trust_mode == "configured_issuer_verified":
-            if self.issuer_id is None or not self.issuer_id.strip():
+            if (
+                self.issuer_id is None
+                or not self.issuer_id.strip()
+                or self.issuer is None
+            ):
                 raise ValueError("issuer-verified attestation requires issuer_id")
-        elif self.issuer_id is not None:
-            raise ValueError("self-attested progress cannot declare issuer_id")
+        elif self.issuer_id is not None or self.issuer is not None:
+            raise ValueError("self-attested progress cannot declare issuer material")
+        signed = self.signed_payload.model_dump(mode="json")
+        issued_at = signed.pop("issued_at")
+        if signed != self.evidence_core.model_dump(mode="json"):
+            raise ValueError("signed payload must contain exactly the evidence core")
+        if issued_at != self.attested_at:
+            raise ValueError("signed payload issuance must match attested_at")
         return self
 
 

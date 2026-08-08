@@ -96,7 +96,7 @@ Run `anvil renew C9F3A210 --actor alice` to extend the lease before it expires.
 
 ### What the claim records
 
-The `Claim` row carries `expected_files` (copied from `task.likely_files`), `claimed_by`, `lease_expires_at` (now + default lease), `last_heartbeat_at`, and `status="active"`. The `expected_files` list is what the `check-claim.sh` PreToolUse hook uses to warn when an Edit/Write targets a file outside the recorded scope.
+The `Claim` row carries `expected_files` (copied from `task.likely_files`), `claimed_by`, `lease_expires_at` (now + default lease), `last_heartbeat_at`, and `status="active"`. Git-backed claims also carry a monotonic generation and immutable attestation context for external progress. The `expected_files` list is what the `check-claim.sh` PreToolUse hook uses to warn when an Edit/Write targets a file outside the recorded scope.
 
 ### Git is not required
 
@@ -161,7 +161,12 @@ Renewed claim 'C9F3A210'.
   Last heartbeat:  2026-05-25T15:23:00+00:00
 ```
 
-The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes`. Only the exact persisted owner can renew an active claim. A mismatch refuses with the owner and structured `--actor` / `ANVIL_ACTOR` remedies. Pin `ANVIL_ACTOR` in the agent-loop environment, or carry the claim output's actor argument on each command. Pass `renew C9F3A210 --lease <minutes>` to override the renewal duration.
+The heartbeat sets `last_heartbeat_at = now` and `lease_expires_at = now + default_lease_minutes` only when new hook-observed file progress or a pending verified attestation authorizes it. Only the exact persisted owner can renew an active claim. A mismatch refuses with the owner and structured `--actor` / `ANVIL_ACTOR` remedies. Pin `ANVIL_ACTOR` in the agent-loop environment, or carry the claim output's actor argument on each command. Pass `renew C9F3A210 --lease <minutes>` to override the renewal duration.
+
+When work is produced outside Anvil's hooks, follow [Attesting progress from an
+external writer](attesting-external-progress.md) to construct the exact `file`
+or `commit` envelope. An accepted artifact is consumed by one renewal;
+free-text progress notes never extend the lease.
 
 ### What happens if you do not renew
 

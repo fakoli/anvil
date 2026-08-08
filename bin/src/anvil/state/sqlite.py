@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel
 
+from anvil import signing
 from anvil.actors import canonicalize_new_actor
 from anvil.bundles.eligibility import analyze_bundle_graph
 from anvil.state.backend import (
@@ -56,7 +57,13 @@ from anvil.state.backend import (
     StateLocked,
     TransactionAborted,
 )
-from anvil.state.hashing import hash_event_id
+from anvil.state.hashing import (
+    CanonicalJsonRefusal,
+    canonical_json_bytes,
+    canonical_node_budget_for_bytes,
+    domain_separated_sha256,
+    hash_event_id,
+)
 from anvil.state.models import (
     DEFAULT_PRD_ID,
     PRD,
@@ -129,6 +136,8 @@ from anvil.state.payloads import (
 from anvil.state.schema import DDL, SCHEMA_VERSION
 
 _AUDIT_LINE_MAX_UTF8_BYTES = 4096
+_PROGRESS_ATTESTATION_MAX_BYTES = 262_144
+_PROGRESS_SEMANTIC_DOMAIN = b"anvil.progress-attestation.v1\0"
 _OWNERSHIP_RECOVERY_REFUSAL_PREFIX = "task.created ownership recovery refused:"
 _OWNERSHIP_RECOVERY_REFUSAL_MESSAGES = {
     "explicit_prd_mismatch": "explicit prd_id mismatch",
@@ -4855,6 +4864,100 @@ class SqliteBackend:
             )
 
     @staticmethod
+    def _progress_attestation_proof_is_valid(
+        payload: ProgressAttestedPayload,
+        *,
+        require_configured_trust: bool = False,
+    ) -> bool:
+        """Recompute durable evidence identity and issuer cryptography.
+
+        The live verifier owns Git/filesystem checks and configured trust-list
+        membership. This pure check makes both append and replay independently
+        reject altered semantic identities, projection fields, or signatures.
+        """
+        core = payload.evidence_core.model_dump(mode="json")
+        signed_payload = payload.signed_payload.model_dump(mode="json")
+        try:
+            digest = domain_separated_sha256(
+                _PROGRESS_SEMANTIC_DOMAIN,
+                core,
+                max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                max_nodes=canonical_node_budget_for_bytes(
+                    _PROGRESS_ATTESTATION_MAX_BYTES
+                ),
+                max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+            )
+            signed_bytes = canonical_json_bytes(
+                signed_payload,
+                max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                max_nodes=canonical_node_budget_for_bytes(
+                    _PROGRESS_ATTESTATION_MAX_BYTES
+                ),
+                max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+            )
+        except (CanonicalJsonRefusal, ValueError):
+            return False
+        if digest != payload.semantic_digest:
+            return False
+
+        flattened_match = (
+            core["claim_id"] == payload.claim_id
+            and core["task_id"] == payload.task_id
+            and core["claimed_by"] == payload.claimed_by
+            and core["generation"] == payload.generation
+            and core["repository_id"] == payload.repository_id
+            and core["claim_start_sha"] == payload.claim_start_sha
+            and core["prd_id"] == payload.prd_id
+            and core["prd_revision"] == payload.prd_revision
+            and core["task_revision"] == payload.task_revision
+            and core["kind"] == payload.kind
+        )
+        if not flattened_match:
+            return False
+        if payload.kind == "commit":
+            if (
+                payload.commit_sha != core["commit_sha"]
+                or payload.changed_paths != [core["path"]]
+                or payload.path is not None
+                or payload.file_sha256 is not None
+            ):
+                return False
+        elif (
+            core["commit_sha"] != payload.claim_start_sha
+            or payload.commit_sha is not None
+            or payload.changed_paths
+            or payload.path != core["path"]
+            or payload.file_sha256 != core["file_sha256"]
+        ):
+            return False
+
+        issuer = payload.issuer
+        if payload.trust_mode == "claim_owner_self_attested":
+            return issuer is None and payload.issuer_id is None
+        if issuer is None or payload.issuer_id is None:
+            return False
+        try:
+            genuine_id = signing.fingerprint(issuer.public_key)
+        except ValueError:
+            return False
+        cryptographically_valid = (
+            issuer.algorithm == "ed25519"
+            and issuer.signer_id == payload.issuer_id == genuine_id
+            and signing.verify(issuer.public_key, signed_bytes, issuer.signature)
+        )
+        if not cryptographically_valid or not require_configured_trust:
+            return cryptographically_valid
+        configured_path = os.environ.get("ANVIL_TRUST_LIST")
+        trust_path = (
+            Path(configured_path).expanduser()
+            if configured_path
+            else Path.home() / ".anvil" / "trust.txt"
+        )
+        return signing.is_trusted(
+            issuer.public_key, signing.load_trust_list(trust_path)
+        )
+
+    @staticmethod
     def _progress_attestation_matches_claim(
         conn: sqlite3.Connection,
         payload: ProgressAttestedPayload,
@@ -4867,7 +4970,10 @@ class SqliteBackend:
         binds that proof to authoritative lifecycle state and is replay-safe.
         """
         if (
-            event.target_kind != "claim"
+            not SqliteBackend._progress_attestation_proof_is_valid(
+                payload, require_configured_trust=True
+            )
+            or event.target_kind != "claim"
             or event.target_id != payload.claim_id
             or event.actor != payload.claimed_by
         ):
@@ -4921,11 +5027,19 @@ class SqliteBackend:
         if current_prd is None or int(current_prd[0]) != context.prd_revision:
             return False
         expected = {entry.path for entry in context.expected_paths}
+        baseline = {entry.path: entry.baseline_sha256 for entry in context.expected_paths}
+        core = payload.evidence_core
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        if (
+            project is None
+            or core.project_id != project[0]
+            or core.path not in expected
+            or core.prior_sha256 != baseline.get(core.path)
+        ):
+            return False
         if payload.kind == "commit":
-            return bool(payload.changed_paths) and set(payload.changed_paths).issubset(
-                expected
-            )
-        return payload.path in expected
+            return payload.changed_paths == [core.path]
+        return payload.path == core.path
 
     def _check_progress_attested(
         self,
@@ -4936,6 +5050,13 @@ class SqliteBackend:
         """Validate one non-stackable attestation against a fresh DB snapshot."""
         conn.execute("BEGIN IMMEDIATE")
         try:
+            if not self._progress_attestation_proof_is_valid(
+                payload, require_configured_trust=True
+            ):
+                raise EventRejected(
+                    "progress.attested: evidence digest, signature, or configured "
+                    "issuer trust is invalid."
+                )
             if not self._progress_attestation_matches_claim(conn, payload, event):
                 raise EventRejected(
                     "progress.attested: exact active claim ownership or binding mismatch."

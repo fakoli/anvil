@@ -368,6 +368,59 @@ def test_loader_reads_limit_plus_one_before_decode() -> None:
     assert stream.requested == MAX_PROGRESS_ATTESTATION_BYTES + 1
 
 
+def test_loader_collects_short_reads_and_detects_hidden_overrun(repo: Path) -> None:
+    context = _context(repo)
+    raw = _envelope_bytes(
+        _payload(
+            context,
+            kind="file",
+            commit_sha=context.claim_start_sha,
+            file_sha256="a" * 64,
+        )
+    )
+
+    class ChunkedStream:
+        def __init__(self, content: bytes, chunk_size: int) -> None:
+            self.content = content
+            self.chunk_size = chunk_size
+            self.offset = 0
+            self.calls = 0
+
+        def read(self, size: int = -1) -> bytes:
+            self.calls += 1
+            count = min(size, self.chunk_size, len(self.content) - self.offset)
+            if count <= 0:
+                return b""
+            result = self.content[self.offset : self.offset + count]
+            self.offset += count
+            return result
+
+    chunked = ChunkedStream(raw, 7)
+    loaded = load_progress_attestation(chunked)  # type: ignore[arg-type]
+    assert loaded.raw_size_bytes == len(raw)
+    assert chunked.calls > 2
+
+    hidden = ChunkedStream(
+        raw + b"x" * (MAX_PROGRESS_ATTESTATION_BYTES + 1 - len(raw)),
+        MAX_PROGRESS_ATTESTATION_BYTES,
+    )
+    _assert_code("source_too_large", lambda: load_progress_attestation(hidden))  # type: ignore[arg-type]
+    assert hidden.calls == 2
+
+
+def test_loader_treats_zero_progress_as_eof_without_looping() -> None:
+    class ZeroThenData:
+        calls = 0
+
+        def read(self, size: int = -1) -> bytes:
+            self.calls += 1
+            return b"" if self.calls == 1 else b"{}"
+
+    stream = ZeroThenData()
+    _assert_code("invalid_json", lambda: load_progress_attestation(stream))  # type: ignore[arg-type]
+    assert stream.calls == 1
+
+
 def test_base64_adapter_is_strict_bounded_and_preserves_hostile_bytes() -> None:
     _assert_code("base64_invalid", lambda: load_progress_attestation_base64("e30=\n"))
     _assert_code("base64_invalid", lambda: load_progress_attestation_base64("e30"))
@@ -456,6 +509,30 @@ def test_semantic_digest_excludes_envelope_and_signature_wrapper(repo: Path) -> 
     assert first.semantic_bytes == second.semantic_bytes
 
 
+def test_evidence_digest_is_stable_across_issued_at_but_signature_preimage_is_not(
+    repo: Path,
+) -> None:
+    context = _context(repo)
+    payload = _payload(
+        context,
+        kind="file",
+        commit_sha=context.claim_start_sha,
+        file_sha256="a" * 64,
+    )
+    later = dict(payload)
+    later["issued_at"] = (
+        (_NOW + dt.timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+    )
+
+    first = load_progress_attestation(_envelope_bytes(payload))
+    second = load_progress_attestation(_envelope_bytes(later))
+
+    assert first.evidence_core == second.evidence_core
+    assert first.semantic_digest == second.semantic_digest
+    assert first.signed_payload != second.signed_payload
+    assert first.semantic_bytes != second.semantic_bytes
+
+
 def test_asserted_issuer_must_be_genuine_trusted_and_valid(
     repo: Path, tmp_path: Path
 ) -> None:
@@ -495,16 +572,13 @@ def test_verify_file_attestation_round_trip_and_state_payload(repo: Path) -> Non
     context = _context(repo)
     (repo / "src" / "feature.txt").write_bytes(b"after working tree\n")
     digest = hashlib.sha256(b"after working tree\n").hexdigest()
-    loaded = load_progress_attestation(
-        _envelope_bytes(
-            _payload(
-                context,
-                kind="file",
-                commit_sha=context.claim_start_sha,
-                file_sha256=digest,
-            )
-        )
+    payload = _payload(
+        context,
+        kind="file",
+        commit_sha=context.claim_start_sha,
+        file_sha256=digest,
     )
+    loaded = load_progress_attestation(_envelope_bytes(payload))
 
     verified = verify_progress_attestation(
         loaded,
@@ -525,6 +599,21 @@ def test_verify_file_attestation_round_trip_and_state_payload(repo: Path) -> Non
     assert state["changed_paths"] == []
     assert state["file_sha256"] == digest
     assert ProgressAttestedPayload.model_validate(state).kind == "file"
+
+    later_payload = dict(payload)
+    later_payload["issued_at"] = (
+        (_NOW + dt.timedelta(seconds=3)).isoformat().replace("+00:00", "Z")
+    )
+    later_loaded = load_progress_attestation(_envelope_bytes(later_payload))
+    later_verified = verify_progress_attestation(
+        later_loaded,
+        context,
+        project_root=repo,
+        now=_NOW + dt.timedelta(seconds=4),
+        lease_expires_at=_NOW + dt.timedelta(hours=1),
+    )
+    assert later_verified.loaded.semantic_digest == loaded.semantic_digest
+    assert later_verified.model_dump()["semantic_digest"] == state["semantic_digest"]
 
 
 def test_verify_commit_attestation_requires_descendant_changed_regular_blob(

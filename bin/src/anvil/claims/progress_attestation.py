@@ -276,6 +276,9 @@ class LoadedProgressAttestation:
     payload: CommitProgressPayload | FileProgressPayload
     semantic_digest: str
     semantic_bytes: bytes
+    evidence_core: Mapping[str, Any]
+    signed_payload: Mapping[str, Any]
+    issuer: Mapping[str, Any] | None
     trust_mode: Literal["claim_owner_self_attested", "configured_issuer_verified"]
     issuer_id: str | None
     raw_size_bytes: int
@@ -436,6 +439,8 @@ def load_progress_attestation(
     except ValidationError as exc:
         raise ProgressAttestationError("schema_invalid", "attestation schema is invalid") from exc
     payload_value = envelope.payload.model_dump(mode="json")
+    evidence_core = dict(payload_value)
+    evidence_core.pop("issued_at")
     semantic_bytes = canonical_json_bytes(
         payload_value,
         max_bytes=MAX_PROGRESS_ATTESTATION_BYTES,
@@ -444,7 +449,7 @@ def load_progress_attestation(
     )
     semantic_digest = domain_separated_sha256(
         _SEMANTIC_DOMAIN,
-        payload_value,
+        evidence_core,
         max_bytes=MAX_PROGRESS_ATTESTATION_BYTES,
         max_nodes=canonical_node_budget_for_bytes(MAX_PROGRESS_ATTESTATION_BYTES),
         max_string_bytes=MAX_PROGRESS_ATTESTATION_BYTES,
@@ -477,6 +482,9 @@ def load_progress_attestation(
         payload=envelope.payload,
         semantic_digest=semantic_digest,
         semantic_bytes=semantic_bytes,
+        evidence_core=evidence_core,
+        signed_payload=payload_value,
+        issuer=(envelope.issuer.model_dump(mode="json") if envelope.issuer is not None else None),
         trust_mode=trust_mode,
         issuer_id=issuer_id,
         raw_size_bytes=len(raw),
@@ -595,6 +603,9 @@ def verify_progress_attestation(
         "recorded_at": verified_at.isoformat().replace("+00:00", "Z"),
         "trust_mode": loaded.trust_mode,
         "issuer_id": loaded.issuer_id,
+        "evidence_core": dict(loaded.evidence_core),
+        "signed_payload": dict(loaded.signed_payload),
+        "issuer": dict(loaded.issuer) if loaded.issuer is not None else None,
     }
     return VerifiedProgressAttestation(loaded=loaded, state_payload=state_payload)
 
@@ -615,12 +626,23 @@ def _bounded_source_bytes(source: bytes | BinaryIO) -> bytes:
     if isinstance(source, bytes):
         raw = source
     elif hasattr(source, "read"):
+        buffered = bytearray()
         try:
-            raw = source.read(MAX_PROGRESS_ATTESTATION_BYTES + 1)
-        except (OSError, ValueError) as exc:
+            while len(buffered) <= MAX_PROGRESS_ATTESTATION_BYTES:
+                remaining = MAX_PROGRESS_ATTESTATION_BYTES + 1 - len(buffered)
+                chunk = source.read(remaining)
+                if not isinstance(chunk, bytes):
+                    raise ProgressAttestationError(
+                        "source_invalid", "attestation stream must be binary"
+                    )
+                if not chunk:
+                    break
+                buffered.extend(chunk)
+        except ProgressAttestationError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
             raise ProgressAttestationError("source_unavailable", "cannot read attestation") from exc
-        if not isinstance(raw, bytes):
-            raise ProgressAttestationError("source_invalid", "attestation stream must be binary")
+        raw = bytes(buffered)
     else:
         raise ProgressAttestationError("source_invalid", "attestation source must be bytes")
     if len(raw) > MAX_PROGRESS_ATTESTATION_BYTES:

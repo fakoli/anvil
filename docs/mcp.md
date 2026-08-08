@@ -644,6 +644,8 @@ Alternatively, pass strict canonical `attestation_base64` plus the project `cwd`
 and record `progress.attested`. The receipt includes digest, generation, kind, and trust
 mode. The next renewal consumes that accepted artifact exactly once. Free-text notes never
 authorize renewal.
+See [Attesting progress from an external writer](how-to/attesting-external-progress.md)
+for both payload kinds, canonical bytes, signing/trust rules, and base64 encoding.
 
 **Inputs**
 
