@@ -79,6 +79,21 @@ def test_no_claim_blocks(tmp_path, monkeypatch) -> None:
     assert data["has_claim"] is False
 
 
+def test_human_no_claim_redacts_unsafe_legacy_actor(tmp_path, monkeypatch) -> None:
+    actor = "legacy\nowner"
+    _use(monkeypatch, _StubBackend(claims=[]), tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["claim-guard", "--actor", actor, "--file", "src/a.py"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert actor not in result.stdout
+    assert "<unsafe legacy actor; use --json>" in result.stdout
+
+
 def test_other_actor_claim_only_blocks(tmp_path, monkeypatch) -> None:
     # Only a human's claim exists; the agent still has no claim → block.
     _use(monkeypatch, _StubBackend(claims=[_claim(actor="alice", expected_files=("x.py",))]), tmp_path)

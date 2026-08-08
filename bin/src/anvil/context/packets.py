@@ -16,6 +16,7 @@ is responsible for collecting the inputs and writing the output to
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -95,6 +96,28 @@ LIGHTWEIGHT_BLAST_RADIUS_MAX = 2
 # ---------------------------------------------------------------------------
 
 FAST_LANE_REQUIRED_EVIDENCE_MAX = 1
+
+
+def _packet_shell() -> Literal["posix", "powershell"]:
+    return "powershell" if os.name == "nt" else "posix"
+
+
+def _quote_packet_actor(
+    actor: str, shell: Literal["posix", "powershell"] | None = None
+) -> str:
+    selected = shell or _packet_shell()
+    return (
+        quote_powershell_actor(actor)
+        if selected == "powershell"
+        else quote_posix_actor(actor)
+    )
+
+
+def _packet_actor_env(actor: str) -> str:
+    quoted = _quote_packet_actor(actor)
+    if _packet_shell() == "powershell":
+        return f"$env:ANVIL_ACTOR = {quoted}"
+    return f"export ANVIL_ACTOR={quoted}"
 
 
 # ---------------------------------------------------------------------------
@@ -673,13 +696,8 @@ def _render_markdown(
     if packet_actor is not None:
         lines.append(f"- {ACTOR_AUTH_NOTICE}")
         if safe_packet_actor is not None:
-            posix_actor = quote_posix_actor(packet_actor)
-            powershell_actor = quote_powershell_actor(packet_actor)
             lines.append(
-                f"- Pin actor (POSIX): `export ANVIL_ACTOR={posix_actor}`"
-            )
-            lines.append(
-                f"- Pin actor (PowerShell): `$env:ANVIL_ACTOR = {powershell_actor}`"
+                f"- Pin actor ({_packet_shell()}): `{_packet_actor_env(packet_actor)}`"
             )
         else:
             lines.append(
@@ -688,38 +706,48 @@ def _render_markdown(
             )
 
     if lightweight:
-        actor_suffix = (
-            f" --actor {quote_posix_actor(packet_actor)}"
-            if packet_actor is not None and safe_packet_actor is not None
-            else ""
-        )
-        lines.append(
-            f"- On completion, submit evidence via"
-            f" `anvil submit {task.id}"
-            f" --commands ... --files-changed ...{actor_suffix}`"
-        )
+        if packet_actor is not None and safe_packet_actor is None:
+            lines.append(
+                "- On completion, use the JSON packet's structured submit argv."
+            )
+        else:
+            actor_suffix = (
+                f" --actor {_quote_packet_actor(packet_actor)}"
+                if packet_actor is not None
+                else ""
+            )
+            lines.append(
+                f"- On completion, submit evidence via"
+                f" `anvil submit {task.id}"
+                f" --commands ... --files-changed ...{actor_suffix}`"
+            )
     else:
         if active_claim is not None:
             if safe_packet_actor is not None:
                 lines.append(
                     f"- Heartbeat your claim every 5 minutes via"
                     f" `anvil renew {active_claim.id}"
-                    f" --actor {quote_posix_actor(packet_actor)}`"
+                    f" --actor {_quote_packet_actor(packet_actor)}`"
                 )
             else:
                 lines.append(
                     "- Heartbeat through the JSON packet's structured renew argv."
                 )
-        actor_suffix = (
-            f" --actor {quote_posix_actor(packet_actor)}"
-            if packet_actor is not None and safe_packet_actor is not None
-            else ""
-        )
-        lines.append(
-            f"- On completion, submit evidence via"
-            f" `anvil submit {task.id}"
-            f" --commands ... --files-changed ...{actor_suffix}`"
-        )
+        if packet_actor is not None and safe_packet_actor is None:
+            lines.append(
+                "- On completion, use the JSON packet's structured submit argv."
+            )
+        else:
+            actor_suffix = (
+                f" --actor {_quote_packet_actor(packet_actor)}"
+                if packet_actor is not None
+                else ""
+            )
+            lines.append(
+                f"- On completion, submit evidence via"
+                f" `anvil submit {task.id}"
+                f" --commands ... --files-changed ...{actor_suffix}`"
+            )
         lines.append(
             "- Status will transition"
             " `claimed → in_progress → needs_review → accepted → done`"
@@ -766,16 +794,16 @@ def _render_json(
     # right-sized protocol. The full variant carries the status flow and (when
     # claimed) the renew command.
     actor_suffix = (
-        f" --actor {quote_posix_actor(active_claim.claimed_by)}"
+        f" --actor {_quote_packet_actor(active_claim.claimed_by)}"
         if active_claim is not None
         and safe_actor_for_human(active_claim.claimed_by) is not None
         else ""
     )
-    update_protocol: dict[str, Any] = {
-        "submit_command": (
+    update_protocol: dict[str, Any] = {}
+    if active_claim is None or actor_suffix:
+        update_protocol["submit_command"] = (
             f"anvil submit {task.id} --commands ... --files-changed ...{actor_suffix}"
-        ),
-    }
+        )
     if active_claim is not None:
         update_protocol["actor_identity"] = actor_identity_context(
             active_claim.claimed_by
@@ -787,7 +815,7 @@ def _render_json(
         update_protocol["status_flow"] = (
             "claimed → in_progress → needs_review → accepted → done"
         )
-        if active_claim is not None:
+        if active_claim is not None and actor_suffix:
             update_protocol["renew_command"] = (
                 f"anvil renew {active_claim.id}{actor_suffix}"
             )

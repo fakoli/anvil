@@ -6376,6 +6376,83 @@ class TestRequireActor:
         with pytest.raises(ToolError, match="actor|empty|whitespace"):
             _run(run())
 
+    @pytest.mark.parametrize("legacy_owner", ["", " \t "])
+    def test_exact_legacy_owner_can_complete_every_mcp_lifecycle_lookup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_owner: str,
+    ) -> None:
+        """T006 regression: creation rejects these values, but persisted legacy
+        owners remain exactly addressable by renew/release/progress/submit."""
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        for task_id, status in (
+            ("TREL", "claimed"),
+            ("TREN", "claimed"),
+            ("TPRO", "claimed"),
+            ("TSUB", "in_progress"),
+        ):
+            _add_task(state_dir, task_id=task_id, status=status)
+        _add_active_claim(
+            state_dir, claim_id="C001", task_id="TREL", claimed_by=legacy_owner
+        )
+        _add_active_claim(
+            state_dir,
+            claim_id="C002",
+            task_id="TREN",
+            claimed_by=legacy_owner,
+            minutes_until_expiry=30,
+        )
+        _add_active_claim(
+            state_dir, claim_id="C003", task_id="TPRO", claimed_by=legacy_owner
+        )
+        _add_active_claim(
+            state_dir, claim_id="C004", task_id="TSUB", claimed_by=legacy_owner
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> tuple[dict[str, Any], ...]:
+            async with Client(mcp) as c:
+                renewed = _data(
+                    await c.call_tool(
+                        "renew_claim", {"task_id": "TREN", "actor": legacy_owner}
+                    )
+                )
+                progressed = _data(
+                    await c.call_tool(
+                        "submit_progress",
+                        {
+                            "task_id": "TPRO",
+                            "actor": legacy_owner,
+                            "notes": "legacy exact lookup",
+                        },
+                    )
+                )
+                released = _data(
+                    await c.call_tool(
+                        "release_task", {"task_id": "TREL", "actor": legacy_owner}
+                    )
+                )
+                submitted = _data(
+                    await c.call_tool(
+                        "submit_completion_evidence",
+                        {
+                            "task_id": "TSUB",
+                            "actor": legacy_owner,
+                            "commands_run": ["pytest -q"],
+                            "files_changed": ["src/legacy.py"],
+                        },
+                    )
+                )
+                return renewed, progressed, released, submitted
+
+        renewed, progressed, released, submitted = _run(run())
+        assert renewed["actor_identity"]["actor"] == legacy_owner
+        assert progressed["recorded"] is True
+        assert released["released"] is True
+        assert submitted["task_status"] == "needs_review"
+
     # -----------------------------------------------------------------------
     # release_task
     # -----------------------------------------------------------------------

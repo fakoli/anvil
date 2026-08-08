@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import typer
 import yaml
 
+from anvil.cli._actor_output import safe_actor_label
 from anvil.cli._helpers import (
     PRD_OPTION,
     PrdSourceIngestError,
@@ -2139,8 +2140,10 @@ def show(
     _section("Active Claims")
     if task_claims:
         for claim in task_claims:
-            typer.echo(f"  {claim.id}: claimed by '{claim.claimed_by}' "
-                       f"(expires {claim.lease_expires_at.isoformat()})")
+            typer.echo(
+                f"  {claim.id}: claimed by {safe_actor_label(claim.claimed_by)} "
+                f"(expires {claim.lease_expires_at.isoformat()})"
+            )
     else:
         typer.echo("  (none)")
 

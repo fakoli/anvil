@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 
+from anvil.cli._actor_output import safe_actor_label
 from anvil.cli._helpers import (
     StateRootError,
     _open_backend,
@@ -130,7 +131,8 @@ def claim_guard(
             "claim": None,
             "scope": "no_claim",
             "reason": (
-                f"'{resolved_actor}' is about to edit without an active anvil claim. "
+                f"{safe_actor_label(resolved_actor)} is about to edit without an "
+                "active anvil claim. "
                 f"Claim a task first: `anvil next` then `anvil claim <task-id>`."
             ),
         })

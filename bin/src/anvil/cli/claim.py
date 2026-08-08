@@ -361,7 +361,7 @@ def claim(
             )
             for c in conflicts:
                 typer.echo(
-                    f"  Claim {c.other_claim_id} by '{c.other_actor}': "
+                    f"  Claim {c.other_claim_id} by {safe_actor_label(c.other_actor)}: "
                     f"overlapping files: {c.overlapping_files}",
                     err=True,
                 )
@@ -453,7 +453,8 @@ def claim(
                 ]
                 if shared_active:
                     others = ", ".join(
-                        f"{c.task_id} ({c.claimed_by})" for c in shared_active[:4]
+                        f"{c.task_id} ({safe_actor_label(c.claimed_by)})"
+                        for c in shared_active[:4]
                     )
                     note = (
                         f"{len(shared_active)} other active claim(s) share this "
@@ -1083,7 +1084,9 @@ def next(  # noqa: A001
                 return
             if selected is not None:
                 typer.echo(f"Next recommended bundle: {selected.bundle_id}")
-                typer.echo(f"  Coordinator: {selected.coordinator}")
+                typer.echo(
+                    f"  Coordinator: {safe_actor_label(selected.coordinator)}"
+                )
                 typer.echo(
                     "  Throughput: "
                     f"tasks={selected.throughput['tasks']}/"
@@ -1099,9 +1102,17 @@ def next(  # noqa: A001
             typer.echo("No claimable execution bundles available.")
             for entry in rollups:
                 for refusal in entry.refusals:
+                    detail = refusal["detail"]
+                    remediation = refusal["remediation"]
+                    if refusal["code"] == "coordinator":
+                        coordinator = safe_actor_label(entry.coordinator)
+                        detail = f"coordinator is {coordinator}; caller differs."
+                        remediation = (
+                            f"Run as {coordinator} or assign a replacement bundle."
+                        )
                     typer.echo(
                         f"  {entry.bundle_id} [{refusal['code']}]: "
-                        f"{refusal['detail']} Remediation: {refusal['remediation']}"
+                        f"{detail} Remediation: {remediation}"
                     )
             return
         scoped_ready_tasks = (
@@ -1216,7 +1227,7 @@ def next(  # noqa: A001
             )
         elif withheld_reason == "actor_below_floor":
             typer.echo(
-                f"No work offered: actor '{resolved_actor}' is below the "
+                f"No work offered: actor {safe_actor_label(resolved_actor)} is below the "
                 "accept-rate floor. Let current work clear review first."
             )
         elif withheld_reason == "risk_ceiling":
@@ -1239,7 +1250,8 @@ def next(  # noqa: A001
     for warning in conflict_warnings:
         typer.echo(
             f"  Conflict warning: files {', '.join(warning['files'])} overlap "
-            f"active claim {warning['claim_id']} ({warning['actor']})."
+            f"active claim {warning['claim_id']} "
+            f"({safe_actor_label(str(warning['actor']))})."
         )
     typer.echo("")
     typer.echo(f"Run `anvil claim {task.id}` to acquire the lease.")

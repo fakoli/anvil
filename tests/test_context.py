@@ -11,9 +11,13 @@ Coverage targets (>= 85%):
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
+import anvil.context.packets as packets
 from anvil.config import Config
 from anvil.context.packets import (
     FAST_LANE_REQUIRED_EVIDENCE_MAX,
@@ -512,6 +516,44 @@ class TestRenderPacketJSON:
         packet = render_packet(task)
         up = packet.json_data["update_protocol"]
         assert "renew_command" not in up
+
+    @pytest.mark.parametrize("shell", ["posix", "powershell"])
+    def test_legacy_shell_commands_quote_actor_for_current_platform(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        shell: str,
+    ) -> None:
+        actor = "O'Brien $HOME; Write-Output nope"
+        monkeypatch.setattr(packets, "_packet_shell", lambda: shell)
+
+        packet = render_packet(_make_task(), active_claim=_make_claim(actor=actor))
+        protocol = packet.json_data["update_protocol"]
+        submit = protocol["submit_command"]
+        renew = protocol["renew_command"]
+
+        if shell == "powershell":
+            quoted = "'O''Brien $HOME; Write-Output nope'"
+            assert f"--actor {quoted}" in submit
+            assert f"--actor {quoted}" in renew
+            assert f"$env:ANVIL_ACTOR = {quoted}" in packet.markdown
+        else:
+            quoted = packets.quote_posix_actor(actor)
+            assert f"--actor {quoted}" in submit
+            assert f"--actor {quoted}" in renew
+            assert shlex.split(quoted) == [actor]
+            assert f"export ANVIL_ACTOR={quoted}" in packet.markdown
+
+    def test_unsafe_legacy_actor_uses_only_structured_continuation(self) -> None:
+        actor = "legacy\nowner"
+        packet = render_packet(_make_task(), active_claim=_make_claim(actor=actor))
+        protocol = packet.json_data["update_protocol"]
+
+        assert "submit_command" not in protocol
+        assert "renew_command" not in protocol
+        assert protocol["actor_identity"]["actor"] == actor
+        assert protocol["continuation"]["submit"]["argv"][-1] == actor
+        assert actor not in packet.markdown
+        assert "structured submit argv" in packet.markdown
 
     def test_json_decisions_list_correct_length(self) -> None:
         """json_data['decisions'] has one entry per decision passed in."""

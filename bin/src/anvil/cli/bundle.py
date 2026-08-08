@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from anvil.cli._actor_output import safe_actor_label
 from anvil.cli._helpers import (
     _open_backend,
     _reap_stale_claims,
@@ -93,7 +94,7 @@ def create_bundle(
         return
     typer.echo(f"Created bundle '{bundle.id}' ({bundle.status.value}).")
     typer.echo(f"  PRD:         {bundle.prd_id}")
-    typer.echo(f"  Coordinator: {bundle.coordinator}")
+    typer.echo(f"  Coordinator: {safe_actor_label(bundle.coordinator)}")
     typer.echo(f"  Members:     {', '.join(bundle.task_ids)}")
 
 
@@ -126,7 +127,10 @@ def show_bundle(
         emit_success(command, data)
         return
     typer.echo(f"Bundle {bundle.id}: {bundle.status.value}")
-    typer.echo(f"  PRD: {bundle.prd_id}; coordinator: {bundle.coordinator}")
+    typer.echo(
+        f"  PRD: {bundle.prd_id}; coordinator: "
+        f"{safe_actor_label(bundle.coordinator)}"
+    )
     typer.echo(f"  Members: {', '.join(bundle.task_ids)}")
     typer.echo(f"  Claim: {claim.id if claim else '(none)'}")
     typer.echo(f"  Reviews: {len(reviews)}")
@@ -157,7 +161,8 @@ def list_bundles(
         return
     for bundle in bundles:
         typer.echo(
-            f"{bundle.id}  {bundle.status.value}  coordinator={bundle.coordinator} "
+            f"{bundle.id}  {bundle.status.value}  "
+            f"coordinator={safe_actor_label(bundle.coordinator)} "
             f"members={len(bundle.task_ids)}"
         )
 

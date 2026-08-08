@@ -600,27 +600,23 @@ _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
 
 
 def _require_actor(actor: str) -> str:
-    """Preserve the exact actor and raise ToolError when it is blank.
+    """Validate and NFC-canonicalize a newly introduced audit identity."""
+    from anvil.actors import ActorIdentityError, canonicalize_new_actor
 
-    An empty or whitespace-only actor would write a blank ``actor`` field into
-    every audit event emitted by the tool, making the audit trail useless for
-    attribution. Raise early so the caller gets a clear error rather than a
-    silent blank entry in the event log.
+    try:
+        return canonicalize_new_actor(actor)
+    except ActorIdentityError as exc:
+        raise ToolError(str(exc)) from exc
 
-    Existing lifecycle owners are exact identifiers, including legacy values
-    with leading or trailing spaces.  New-identity boundaries perform the NFC
-    and safety validation; this shared lookup helper must never alias one
-    persisted owner to another by stripping it.
 
-    Returns the exact actor string on success so callers can write::
+def _exact_lifecycle_actor(actor: str) -> str:
+    """Return a persisted lifecycle owner exactly, including legacy-invalid IDs.
 
-        actor = _require_actor(actor)
+    Renew/release/progress/submit compare this byte-for-byte with the active
+    claim before appending anything.  Validation belongs only to creation: a
+    historical empty, whitespace, non-NFC, or control-bearing owner must remain
+    addressable without being silently rewritten or orphaned.
     """
-    if not actor.strip():
-        raise ToolError(
-            "actor must not be empty or whitespace — "
-            "pass the agent or user identity for audit-trail attribution."
-        )
     return actor
 
 
@@ -1356,7 +1352,7 @@ def release_task(
     cwd: str | None = None,
 ) -> ReleaseResponse:
     """Release a task claim, or an explicit target_kind=bundle coordinator claim."""
-    actor = _require_actor(actor)
+    actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
@@ -1429,7 +1425,7 @@ def renew_claim(
     cwd: str | None = None,
 ) -> RenewResponse:
     """Renew a task claim, or an explicit target_kind=bundle coordinator claim."""
-    actor = _require_actor(actor)
+    actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
@@ -1622,7 +1618,7 @@ def submit_progress(
     "tests", "review-fixes", ...) for the heartbeat bus — status surfaces
     read the latest phase back so operators can see where a long run is
     without asking. ``detail`` is free-text elaboration for the phase."""
-    actor = _require_actor(actor)
+    actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
@@ -1642,6 +1638,8 @@ def submit_progress(
                 actual=actor,
                 action="record progress for the claim",
             )
+        if active_claim is None:
+            actor = _require_actor(actor)
 
         clock = SystemClock()
         now = clock.now()
@@ -1707,7 +1705,7 @@ def submit_completion_evidence(
                 f"invalid_category: {category!r} is not a valid evidence "
                 f"category; valid values: {', '.join(valid)}."
             )
-    actor = _require_actor(actor)
+    actor = _exact_lifecycle_actor(actor)
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:

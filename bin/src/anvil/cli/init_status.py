@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import click
 import typer
 
+from anvil.cli._actor_output import safe_actor_label
 from anvil.cli._helpers import (
     _STATE_DIR_NAME,
     PRD_OPTION,
@@ -684,7 +685,8 @@ def status(
     for bundle in bundle_rollup:
         typer.echo("")
         typer.echo(
-            f"Bundle {bundle.bundle_id} ({bundle.status}) coordinator={bundle.coordinator}"
+            f"Bundle {bundle.bundle_id} ({bundle.status}) "
+            f"coordinator={safe_actor_label(bundle.coordinator)}"
         )
         typer.echo(
             f"  Members: {bundle.member_counts}; critical-path "
@@ -701,9 +703,14 @@ def status(
                 f"({bundle.coordinator_claim['status']})"
             )
         for agent in bundle.delegated_agents:
+            agent_id = safe_actor_label(str(agent["id"]))
+            handle = (
+                safe_actor_label(str(agent["handle"]))
+                if agent.get("handle")
+                else "-"
+            )
             typer.echo(
-                f"  Agent: {agent['id']} status={agent['status']} "
-                f"handle={agent.get('handle') or '-'}"
+                f"  Agent: {agent_id} status={agent['status']} handle={handle}"
             )
         if bundle.last_result_at is not None:
             typer.echo(
@@ -711,7 +718,12 @@ def status(
                 f"elapsed={bundle.elapsed_since_result_seconds}s"
             )
         if bundle.checkpoint is not None:
-            typer.echo(f"  Checkpoint: {bundle.checkpoint}")
+            checkpoint = dict(bundle.checkpoint)
+            if checkpoint.get("recorded_by") is not None:
+                checkpoint["recorded_by"] = safe_actor_label(
+                    str(checkpoint["recorded_by"])
+                )
+            typer.echo(f"  Checkpoint: {checkpoint}")
         if bundle.checkpoint_warning:
             typer.echo(f"  Warning: {bundle.checkpoint_warning}")
         if bundle.superseded_by:
@@ -726,9 +738,15 @@ def status(
         if bundle.claimable:
             typer.echo("  Claimability: ready (`anvil next --bundle`)")
         for refusal in bundle.refusals:
+            detail = refusal["detail"]
+            remediation = refusal["remediation"]
+            if refusal["code"] == "coordinator":
+                coordinator = safe_actor_label(bundle.coordinator)
+                detail = f"coordinator is {coordinator}; caller differs."
+                remediation = f"Run as {coordinator} or assign a replacement bundle."
             typer.echo(
-                f"  Refusal [{refusal['code']}]: {refusal['detail']} "
-                f"Remediation: {refusal['remediation']}"
+                f"  Refusal [{refusal['code']}]: {detail} "
+                f"Remediation: {remediation}"
             )
 
     typer.echo("")
@@ -759,7 +777,7 @@ def status(
         )
         phase_label = detail["phase"] or "-"
         typer.echo(
-            f"  {detail['task_id']} [{detail['actor']}] "
+            f"  {detail['task_id']} [{safe_actor_label(str(detail['actor']))}] "
             f"phase={phase_label} elapsed={elapsed_min}m {expiry_label}"
         )
     typer.echo(f"Sync:          {sync_label}")
