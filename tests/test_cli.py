@@ -1417,6 +1417,48 @@ class TestPrdParse:
         assert "Parsed" in result.output or "parsed" in result.output.lower()
         assert "2" in result.output  # 2 requirements
 
+    def test_prd_parse_custom_source_uses_one_ingestion_without_persisting_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.cli._helpers import IngestedPrdSource, _open_backend
+
+        _do_init(tmp_path)
+        source_bytes = _MINIMAL_PRD_CONTENT.encode("utf-8")
+        ingested = IngestedPrdSource(
+            source_bytes=source_bytes,
+            markdown=source_bytes.decode("utf-8"),
+            source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+            source_size_bytes=len(source_bytes),
+        )
+        missing_custom_path = tmp_path / "private" / "never-reread.md"
+        observed: list[Path] = []
+
+        def ingest_once(path: Path) -> IngestedPrdSource:
+            observed.append(path)
+            return ingested
+
+        monkeypatch.setattr("anvil.cli.prd.ingest_prd_source", ingest_once)
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "parse", "--file", str(missing_custom_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert observed == [missing_custom_path]
+        payload = _prd_parsed_payload(tmp_path)
+        _assert_source_provenance(payload, source_bytes, 1)
+        assert str(missing_custom_path) not in json.dumps(payload)
+        assert not any("path" in key.lower() for key in payload)
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            persisted = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert persisted is not None
+        assert persisted.source_bytes == source_bytes
+        assert persisted.source_revision == persisted.revision == 1
+
     def test_prd_parse_missing_required_section(self, tmp_path: Path) -> None:
         """PRD without ## Goals → exit 1, error mentions missing section."""
         _do_init(tmp_path)
@@ -1652,6 +1694,20 @@ def _prd_parsed_payload(tmp_path: Path) -> dict:  # type: ignore[type-arg]
     return payload
 
 
+def _assert_source_provenance(
+    payload: Mapping[str, object], source_bytes: bytes, revision: int
+) -> None:
+    source_text = payload["source_text"]
+    assert isinstance(source_text, str)
+    assert source_text.encode("utf-8") == source_bytes
+    assert payload["source_sha256"] == hashlib.sha256(source_bytes).hexdigest()
+    assert payload["source_size_bytes"] == len(source_bytes)
+    assert payload["source_encoding"] == "utf-8"
+    assert payload["source_revision"] == revision
+    assert payload["provenance_state"] == "available"
+    assert payload["content_available"] is True
+
+
 class TestPrdSourcePath:
     def test_default_prd_id_maps_to_bare_prd_md(self) -> None:
         """prd_source_path returns <state_dir>/prd.md for the default PRD."""
@@ -1735,6 +1791,7 @@ class TestPrdParseNamed:
         prd.parsed event carrying prd_id='v0.2'."""
         _do_init(tmp_path)
         _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        source_bytes = (tmp_path / ".anvil" / "prds" / "v0.2.md").read_bytes()
 
         result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "v0.2"])
         assert result.exit_code == 0, f"named parse failed: {result.output}"
@@ -1746,6 +1803,7 @@ class TestPrdParseNamed:
         assert payload.get("prd_id") == "v0.2"
         assert payload.get("is_default") is False
         assert payload["title"] == "CLI Named PRD"
+        _assert_source_provenance(payload, source_bytes, 1)
         # Named PRD ids are prefixed (T015).
         assert [r["id"] for r in payload["requirements"]] == [
             "v0.2:R001",
@@ -1775,6 +1833,7 @@ class TestPrdParseNamed:
         default partition and bare requirement ids."""
         _do_init(tmp_path)
         _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        source_bytes = (tmp_path / ".anvil" / "prd.md").read_bytes()
 
         result = _invoke_cmd(tmp_path, ["prd", "parse"])
         assert result.exit_code == 0, f"prd parse failed: {result.output}"
@@ -1786,6 +1845,7 @@ class TestPrdParseNamed:
         assert "prd_id" not in payload
         assert "is_default" not in payload
         assert payload["title"] == "CLI Test Project"
+        _assert_source_provenance(payload, source_bytes, 1)
         # Default PRD keeps bare requirement ids.
         assert [r["id"] for r in payload["requirements"]] == ["R001", "R002"]
 
@@ -2150,6 +2210,7 @@ class TestPrdReparse:
 
         # Re-parse the SAME (default) prd_id with an edited PRD.
         _write_prd(tmp_path, _MINIMAL_PRD_CONTENT_V2)
+        revised_source_bytes = (tmp_path / ".anvil" / "prd.md").read_bytes()
         second = _invoke_cmd(tmp_path, ["prd", "parse"])
         assert second.exit_code == 0, f"re-parse failed: {second.output}"
         assert "Revised" in second.output
@@ -2163,6 +2224,7 @@ class TestPrdReparse:
         payload = revised[0]
         assert payload["prd_id"] == "default"
         assert payload["revision"] == 2
+        _assert_source_provenance(payload, revised_source_bytes, 2)
         added = {r["id"] for r in payload["requirements_added"]}
         superseded = {r["id"] for r in payload["requirements_superseded"]}
         unchanged = {r["id"] for r in payload["requirements_unchanged"]}
@@ -2189,6 +2251,81 @@ class TestPrdReparse:
         assert live == {"R002", "R003"}
         assert full == {"R001": 2, "R002": None, "R003": None}, full
         assert prd is not None and prd.revision == 2
+        assert prd.source_bytes == revised_source_bytes
+        assert prd.source_revision == 2
+
+    def test_prd_revision_concurrency_keeps_source_bindings_invocation_local(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.cli.prd as prd_module
+        from anvil.cli._helpers import _open_backend
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+
+        stale_path = tmp_path / "stale-revision.md"
+        stale_path.write_bytes(_MINIMAL_PRD_CONTENT_V2.encode("utf-8"))
+        stale_source = stale_path.read_bytes()
+        winner_path = tmp_path / "winner-revision.md"
+        winner_path.write_bytes(
+            _MINIMAL_PRD_CONTENT_V2.replace(
+                "A project for CLI testing, revised.",
+                "The concurrent winner's independently ingested revision.",
+            ).encode("utf-8")
+        )
+        winner_source = winner_path.read_bytes()
+        real_append = SqliteBackend.append
+        stale_payload: dict[str, object] | None = None
+        winner_log: bytes | None = None
+        winner_projection: tuple[int, bytes | None] | None = None
+        interleaved = False
+
+        def append_winner_first(self, draft):  # type: ignore[no-untyped-def]
+            nonlocal interleaved, stale_payload, winner_log, winner_projection
+            if draft.action == "prd.revised" and not interleaved:
+                interleaved = True
+                stale_payload = dict(draft.payload_json)
+                # A second complete CLI parse runs after the stale invocation
+                # prepared its draft but before that draft reaches append.
+                prd_module.prd_parse(
+                    file=winner_path,
+                    prd="default",
+                    json_output=False,
+                    cwd=tmp_path,
+                )
+                winner_log = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
+                current = self.get_prd("default")
+                assert current is not None
+                winner_projection = (current.revision, current.source_bytes)
+            return real_append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", append_winner_first)
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "parse", "--file", str(stale_path), "--prd", "default"],
+        )
+
+        assert result.exit_code == 1
+        assert stale_payload is not None
+        _assert_source_provenance(stale_payload, stale_source, 2)
+        revised = _events_of_action(tmp_path, "prd.revised")
+        assert len(revised) == 1
+        _assert_source_provenance(revised[0], winner_source, 2)
+        assert winner_log is not None
+        assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == winner_log
+        assert winner_projection == (2, winner_source)
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            persisted = backend.get_prd("default")
+        finally:
+            backend.close()
+        assert persisted is not None
+        assert persisted.revision == persisted.source_revision == 2
+        assert persisted.source_bytes == winner_source
+        assert (persisted.revision, persisted.source_bytes) == winner_projection
 
     def test_reparse_pure_additive_keeps_approved_status(self, tmp_path: Path) -> None:
         """A PURE-ADDITIVE re-parse (nothing superseded) must KEEP the PRD's
