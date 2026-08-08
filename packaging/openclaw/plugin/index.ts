@@ -33,7 +33,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 // The identity to gate. Match the CLI resolver's pinned-actor precedence so
 // claim, evidence capture, guard, and finish-gate remain one lifecycle.
 // ANVIL_GATE_ACTOR remains a backward-compatible legacy alias.
-const ANVIL_ACTOR = process.env.ANVIL_ACTOR || process.env.ANVIL_GATE_ACTOR || "agent";
+const ANVIL_ACTOR = process.env.ANVIL_ACTOR ?? process.env.ANVIL_GATE_ACTOR ?? "agent";
 const MAX_ATTEMPTS = 3;
 
 // Every anvil invocation is bounded by a timeout: these hooks run inside the
