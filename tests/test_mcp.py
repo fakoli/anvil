@@ -306,6 +306,83 @@ def _set_required_evidence(
     conn.close()
 
 
+def _set_required_command_proof(
+    state_dir: Path, task_id: str, command: str
+) -> None:
+    db_path = str(state_dir / "state.db")
+    conn = sqlite3.connect(db_path)
+    verification_json = json.dumps(
+        {
+            "commands": [command],
+            "manual_steps": [],
+            "required_evidence": [],
+            "required_proofs": [
+                {
+                    "kind": "command",
+                    "command": command,
+                    "passing_exit_codes": [0],
+                    "label": "tests pass",
+                }
+            ],
+        }
+    )
+    conn.execute(
+        "UPDATE tasks SET verification = ? WHERE id = ?",
+        (verification_json, task_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _claim_command_artifact_base64(
+    state_dir: Path, claim: dict[str, Any], command: str
+) -> str:
+    from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
+
+    conn = sqlite3.connect(str(state_dir / "state.db"))
+    created_raw = conn.execute(
+        "SELECT created_at FROM claims WHERE id = ?", (claim["id"],)
+    ).fetchone()[0]
+    conn.close()
+    created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+    ended = datetime.now(UTC)
+    context = claim["attestation_context"]
+    output = b"1 passed\n"
+    cwd_identity = domain_separated_sha256(
+        b"anvil.command-cwd.v1\0",
+        {"repository_id": context["repository_id"], "cwd_relative": "."},
+        max_bytes=16_384,
+        max_string_bytes=8_192,
+    )
+    payload = {
+        "schema_version": 1,
+        "project_id": "proj-test",
+        "claim_id": claim["id"],
+        "generation": claim["generation"],
+        "claimed_by": claim["claimed_by"],
+        "task_id": claim["task_id"],
+        "task_revision": context["task_revision"],
+        "prd_id": context["prd_id"],
+        "prd_revision": context["prd_revision"],
+        "repository_id": context["repository_id"],
+        "claim_start_sha": context["claim_start_sha"],
+        "cwd_relative": ".",
+        "cwd_identity": cwd_identity,
+        "command_base64": base64.b64encode(command.encode()).decode(),
+        "started_at": created.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "ended_at": ended.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "exit_code": 0,
+        "output_base64": base64.b64encode(output).decode(),
+        "output_sha256": hashlib.sha256(output).hexdigest(),
+    }
+    raw = canonical_json_bytes(
+        {"envelope_id": "ENV-MCP-1", "payload": payload},
+        max_bytes=262_144,
+        max_string_bytes=262_144,
+    )
+    return base64.b64encode(raw).decode()
+
+
 def _add_evidence(
     state_dir: Path,
     *,
@@ -2543,6 +2620,54 @@ class TestSubmitProgress:
 # ===========================================================================
 
 class TestSubmitCompletionEvidence:
+    def test_claim_bound_command_proof_import_returns_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_git_repo(tmp_path)
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        command = "pytest -q"
+        _set_required_command_proof(state_dir, "T001", command)
+        monkeypatch.chdir(tmp_path)
+
+        async def claim_task() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "agent-x"},
+                    )
+                )
+
+        claim = _run(claim_task())
+        artifact = _claim_command_artifact_base64(state_dir, claim, command)
+
+        async def submit() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "submit_completion_evidence",
+                        {
+                            "task_id": "T001",
+                            "actor": "agent-x",
+                            "commands_run": [command],
+                            "files_changed": ["src/foo.py"],
+                            "command_proof_artifacts_base64": [artifact],
+                            "cwd": str(tmp_path),
+                        },
+                    )
+                )
+
+        response = _run(submit())
+        assert response["missing_claim_bound_proofs"] == []
+        assert response["legacy_hook_proofs"] == []
+        receipt = response["claim_bound_command_proofs"][0]
+        assert receipt["generation"] == 1
+        assert receipt["trust_mode"] == "claim_owner_self_attested"
+        assert receipt["command"] == command
+
     def test_happy_path_transitions_task_to_needs_review(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
@@ -2564,6 +2689,8 @@ class TestSubmitCompletionEvidence:
         assert "evidence_id" in resp
         assert resp["evidence_id"].startswith("EV")
         assert resp["task_status"] == "needs_review"
+        assert resp["claim_bound_command_proofs"] == []
+        assert resp["legacy_hook_proofs"] == []
 
     def test_error_when_no_active_claim(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Must have an active claim before submitting evidence."""

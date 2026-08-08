@@ -16,6 +16,8 @@ Design decisions:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import datetime
 import enum
@@ -62,6 +64,11 @@ __all__ = [
     # Constants
     "DEFAULT_PRD_ID",
     "TERMINAL_BUNDLE_STATUSES",
+    "MAX_CLAIM_COMMAND_BYTES",
+    "MAX_CLAIM_COMMAND_OUTPUT_BYTES",
+    "MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES",
+    "MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS",
+    "MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES",
     # Enums
     "PRDStatus",
     "FeatureStatus",
@@ -83,6 +90,9 @@ __all__ = [
     "Score",
     "Verification",
     "CommandProof",
+    "ClaimCommandEvidenceCore",
+    "ClaimCommandIssuer",
+    "ClaimCommandProof",
     "DiffProof",
     "LinkProof",
     "AssertionProof",
@@ -419,6 +429,171 @@ class CommandProof(BaseModel):
         return _require_utc(v, "captured_at")
 
 
+MAX_CLAIM_COMMAND_BYTES = 16_384
+MAX_CLAIM_COMMAND_OUTPUT_BYTES = 131_072
+MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES = 262_144
+MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS = 16
+MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES = 1_048_576
+
+
+class ClaimCommandEvidenceCore(BaseModel):
+    """Stable claim-bound identity of one externally observed command run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1]
+    project_id: StrictStr = Field(min_length=1, max_length=255)
+    claim_id: StrictStr = Field(min_length=1, max_length=255)
+    generation: StrictInt = Field(ge=1)
+    claimed_by: StrictStr = Field(min_length=1, max_length=4096)
+    task_id: StrictStr = Field(min_length=1, max_length=255)
+    task_revision: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    prd_id: StrictStr = Field(min_length=1, max_length=255)
+    prd_revision: StrictInt = Field(ge=1)
+    repository_id: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    cwd_relative: StrictStr = Field(min_length=1, max_length=4096)
+    cwd_identity: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    command_base64: StrictStr = Field(min_length=4)
+    started_at: StrictStr
+    ended_at: StrictStr
+    exit_code: StrictInt
+    output_base64: StrictStr
+    output_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _strict_schema_version(cls, value: Any) -> Any:
+        if type(value) is not int:
+            raise ValueError("schema_version must be an integer")
+        return value
+
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def _validate_command_time(cls, value: str) -> str:
+        try:
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("command proof timestamps must be ISO 8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("command proof timestamps must be timezone-aware")
+        canonical = parsed.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
+        if value != canonical:
+            raise ValueError("command proof timestamps must use canonical UTC spelling")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_bounded_bytes(self) -> ClaimCommandEvidenceCore:
+        started_at = datetime.datetime.fromisoformat(
+            self.started_at.replace("Z", "+00:00")
+        )
+        ended_at = datetime.datetime.fromisoformat(self.ended_at.replace("Z", "+00:00"))
+        if started_at > ended_at:
+            raise ValueError("command proof start must not follow its end")
+        command = _decode_canonical_base64(
+            self.command_base64,
+            field_name="command_base64",
+            max_bytes=MAX_CLAIM_COMMAND_BYTES,
+            allow_empty=False,
+        )
+        try:
+            command.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise ValueError("command_base64 must encode valid UTF-8") from None
+        output = _decode_canonical_base64(
+            self.output_base64,
+            field_name="output_base64",
+            max_bytes=MAX_CLAIM_COMMAND_OUTPUT_BYTES,
+            allow_empty=True,
+        )
+        if hashlib.sha256(output).hexdigest() != self.output_sha256:
+            raise ValueError("output_sha256 must match decoded output bytes")
+        if self.exit_code != 0:
+            raise ValueError("claim command proof requires exit_code 0")
+        return self
+
+
+class ClaimCommandIssuer(BaseModel):
+    """Durable detached Ed25519 issuer material for a command proof."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    algorithm: Literal["ed25519"]
+    signer_id: StrictStr = Field(pattern=r"^[0-9a-f]{16}$")
+    public_key: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    signature: StrictStr = Field(pattern=r"^[0-9a-f]{128}$")
+
+
+class ClaimCommandProof(BaseModel):
+    """First-class claim-bound command proof embedded in completion evidence."""
+
+    model_config = _MODEL_CONFIG
+
+    kind: Literal["claim_command"] = "claim_command"
+    command: StrictStr = Field(min_length=1, max_length=MAX_CLAIM_COMMAND_BYTES)
+    exit_code: StrictInt
+    output_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    captured_at: datetime.datetime
+    semantic_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ]
+    issuer_id: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
+    evidence_core: ClaimCommandEvidenceCore
+    issuer: ClaimCommandIssuer | None = None
+
+    @field_validator("captured_at", mode="after")
+    @classmethod
+    def _validate_captured_at(cls, value: datetime.datetime) -> datetime.datetime:
+        return _require_utc(value, "captured_at")
+
+    @model_validator(mode="after")
+    def _validate_flattened_command_proof(self) -> ClaimCommandProof:
+        command = _decode_canonical_base64(
+            self.evidence_core.command_base64,
+            field_name="command_base64",
+            max_bytes=MAX_CLAIM_COMMAND_BYTES,
+            allow_empty=False,
+        ).decode("utf-8", errors="strict")
+        ended_at = datetime.datetime.fromisoformat(
+            self.evidence_core.ended_at.replace("Z", "+00:00")
+        )
+        if (
+            self.command != command
+            or self.exit_code != self.evidence_core.exit_code
+            or self.output_sha256 != self.evidence_core.output_sha256
+            or self.captured_at != ended_at
+        ):
+            raise ValueError("flattened command proof fields must match evidence_core")
+        if self.trust_mode == "configured_issuer_verified":
+            if self.issuer is None or self.issuer_id is None:
+                raise ValueError("issuer-verified command proof requires issuer material")
+            if self.issuer.signer_id != self.issuer_id:
+                raise ValueError("command proof issuer identity mismatch")
+        elif self.issuer is not None or self.issuer_id is not None:
+            raise ValueError("self-attested command proof cannot declare issuer material")
+        return self
+
+
+def _decode_canonical_base64(
+    value: str, *, field_name: str, max_bytes: int, allow_empty: bool
+) -> bytes:
+    if not value:
+        if allow_empty:
+            return b""
+        raise ValueError(f"{field_name} must not be empty")
+    if len(value) > ((max_bytes + 2) // 3) * 4 or len(value) % 4:
+        raise ValueError(f"{field_name} is outside its byte limit")
+    try:
+        encoded = value.encode("ascii", errors="strict")
+        decoded = base64.b64decode(encoded, validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError):
+        raise ValueError(f"{field_name} must be canonical base64") from None
+    if len(decoded) > max_bytes or base64.b64encode(decoded) != encoded:
+        raise ValueError(f"{field_name} must be canonical base64")
+    return decoded
+
+
 class DiffProof(BaseModel):
     """A unified diff captured by the hooks (a later drift check keys on this)."""
 
@@ -456,7 +631,7 @@ class AssertionProof(BaseModel):
 # the events.jsonl payload round-trip through ``TypeAdapter(list[ProofArtifact])``
 # deterministically. ``ProofArtifact`` is a discriminated union, not a BaseModel.
 ProofArtifact = Annotated[
-    CommandProof | DiffProof | LinkProof | AssertionProof,
+    CommandProof | ClaimCommandProof | DiffProof | LinkProof | AssertionProof,
     Field(discriminator="kind"),
 ]
 
@@ -1551,7 +1726,9 @@ class AcceptanceProof(BaseModel):
     task_id: TaskID
     claim_id: ClaimID
     actor: str
-    command_results: list[CommandProof] = Field(default_factory=list)
+    command_results: list[CommandProof | ClaimCommandProof] = Field(
+        default_factory=list
+    )
     event_range: EventRange
     created_at: datetime.datetime
     # --- signature envelope (NOT covered by the signature) ---

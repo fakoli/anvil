@@ -98,7 +98,7 @@ try:
         'stdout_excerpt': stdout_ex,
         'stderr_excerpt': stderr_ex,
         'actor':          actor,
-        'note':           'orphan — no active claim found at capture time; pass this file via: anvil submit TASK_ID --output-file <THIS_FILE>',
+        'note':           'orphan — no active claim found at capture time; --output-file can attach it only as a descriptive excerpt and cannot satisfy required_proofs; rerun under an explicit claim or import a claim-bound command-proof artifact',
     }
     evidence_line = json.dumps(record)
 
@@ -187,8 +187,10 @@ fi
 #
 # Active-claim lookup from shell would require shelling out to the CLI again
 # (or reading state.db directly, which we must never do).  For Phase 5 we
-# always write to orphan.json so no evidence is lost.  The user can attach
-# orphan evidence to a claim later via `anvil submit --output-file`.
+# always write to orphan.json so no output is lost.  The user can attach that
+# output later via `anvil submit --output-file`, but it remains descriptive and
+# cannot satisfy typed required_proofs. Rerun under an explicit claim or import
+# a claim-bound command-proof artifact for the gate.
 #
 # When the CLI subcommand (guido Wave 2) is wired, it will:
 #   1. Look up the active claim for --actor in state.db.

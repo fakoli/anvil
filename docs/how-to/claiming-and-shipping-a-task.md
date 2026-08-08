@@ -200,6 +200,7 @@ anvil submit T012 \
 | `--commands` | yes | Verification command that was run (e.g. `pytest tests/`). Repeatable — pass `--commands` once per command so a command containing a comma survives intact. |
 | `--files-changed` | yes | File path modified. Repeatable — pass `--files-changed` once per path. |
 | `--output-file` | no | Path to a file whose contents are read (truncated to 8000 chars) and stored as the output excerpt. |
+| `--command-proof-file` | no | Repeatable path to a bounded claim-bound typed command-proof artifact. The whole batch is validated before submission and each proof command must exactly match one `--commands` value. |
 | `--pr-url` | no | Pull request URL — checked by the evidence gate when `required_evidence` mentions "PR" or "pull request". |
 | `--commit-sha` | no | Commit SHA pinned to this submission. |
 | `--known-limitations` | no | Free-text caveats. Checked by the evidence-gate fallback when a required-evidence item does not match any structured field. |
@@ -211,6 +212,13 @@ splits that single value on commas, so the older
 `--commands "a,b" --files-changed "x,y"` form keeps working — but the
 repeatable form above is canonical and is the only form that survives a
 value with an embedded comma intact.
+
+`--output-file` is descriptive only. A log containing `exit: 0` does not
+become a typed proof and cannot satisfy `verification.required_proofs`.
+Use the hook-captured per-claim buffer or import a valid artifact with
+`--command-proof-file`. Imported artifacts are reported as
+`claim_owner_self_attested` unless their configured issuer signature verifies;
+they are never described as independently executed by Anvil.
 
 `submit` locates the active claim for the task (one per task at most), constructs an `Evidence` row with a fresh ID (`EV` + 8 hex), emits an `evidence.submitted` event, and the backend handler atomically:
 
@@ -233,7 +241,7 @@ Run `anvil apply T012` when ready for human review.
 Evidence gate: PASSED — all required evidence present.
 ```
 
-If `task.verification.required_evidence` is unsatisfied you get:
+If descriptive `task.verification.required_evidence` is unsatisfied you get:
 
 ```text
 Evidence gate: INCOMPLETE — missing items for required_evidence:
@@ -242,6 +250,11 @@ Evidence gate: INCOMPLETE — missing items for required_evidence:
 ```
 
 Re-run `submit` with the missing flag (`--commands` for test output, `--pr-url` for PR link, etc.). Each `submit` creates a new `Evidence` row; the latest one is what `apply` reviews.
+
+Missing typed requirements are reported separately as
+`missing_claim_bound_proofs`. Supply a matching hook-observed proof or a valid
+claim-bound artifact; adding the expected words to `--output-file` cannot repair
+that gate.
 
 ### How the evidence gate matches
 

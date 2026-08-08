@@ -184,7 +184,7 @@ anvil submit T012 \
   --pr-url https://github.com/org/repo/pull/42
 ```
 
-`--commands` and `--files-changed` are both **required** and **repeatable**: pass the flag once per value (one occurrence == one value, so commands or paths with embedded commas survive intact), or pass a single comma-separated occurrence for the simple case shown above. `--output-file` attaches a log file to the Evidence row. `--pr-url` links the branch's PR if one exists.
+`--commands` and `--files-changed` are both **required** and **repeatable**: pass the flag once per value (one occurrence == one value, so commands or paths with embedded commas survive intact), or pass a single comma-separated occurrence for the simple case shown above. `--output-file` attaches up to 8000 characters as a descriptive excerpt; it never creates a typed proof or satisfies `required_proofs`. For an external/subagent run, repeat `--command-proof-file ARTIFACT` to import a bounded claim-bound proof batch. Every proof must match the explicit claim owner/context and an exact `--commands` value or the whole submission is refused. `--pr-url` links the branch's PR if one exists.
 
 `submit` does the following atomically:
 

@@ -223,8 +223,9 @@ tracks adding `flock` to harden concurrent appends.
 a verification pattern (substring match against a hardcoded set). If yes,
 capture `stdout` / `stderr` / `exit_code` into the active claim's evidence
 buffer at `.anvil/.evidence-buffer/<claim-id>.json`. If no claim is
-held by the actor, the record lands in `orphan.json` and can be re-attached
-later via `anvil submit TASK_ID --output-file <FILE>`.
+held by the actor, the record lands in `orphan.json`. It can be preserved
+later with `anvil submit TASK_ID --output-file <FILE>` only as a descriptive
+excerpt; that flag cannot satisfy typed `required_proofs`.
 
 **Verification matcher (hardcoded, substring match).**
 - `pytest`
@@ -248,8 +249,8 @@ header comments).
 
 **Truncation.** Both `stdout` and `stderr` are truncated to 4000
 characters in the captured record. See
-[`docs/evidence-buffer.md`](evidence-buffer.md) for the full record
-schema and the `submit --output-file` recovery path.
+[`docs/evidence-buffer.md`](evidence-buffer.md) for the full record schema,
+the descriptive `submit --output-file` path, and claim-bound proof import.
 
 **Two-tier write strategy.**
 1. **Preferred path.** Shell out to `anvil hook capture-evidence
@@ -260,8 +261,10 @@ schema and the `submit --output-file` recovery path.
 2. **Direct-write fallback.** If the CLI is absent, returns non-zero, or
    `mktemp` fails, a second `python3` call writes the record directly to
    `orphan.json`. The fallback cannot reach `state.db` from shell cheaply
-   enough to honour the <200ms budget, so it always writes to orphan; the
-   user re-attaches it later via `submit --output-file`.
+   enough to honour the <200ms budget, so it always writes to orphan. The
+   user may attach it later via `submit --output-file` as descriptive output,
+   but must rerun under a claim or import a valid claim-bound artifact to
+   satisfy typed proof requirements.
 
 **Side effects.** Appends one line to `.anvil/.evidence-buffer/<claim-id>.json`
 or `.anvil/.evidence-buffer/orphan.json`.
@@ -358,9 +361,8 @@ Checks:
   per-claim file.
 - Inspect `.anvil/.evidence-buffer/` for any `*.json` files.
 - For recovery from `orphan.json`, see
-  [`docs/evidence-buffer.md`](evidence-buffer.md) and use
-  `anvil submit TASK_ID --output-file
-  .anvil/.evidence-buffer/orphan.json`.
+  [`docs/evidence-buffer.md`](evidence-buffer.md). `--output-file` preserves
+  the text only; it does not create a typed proof.
 
 ### A hook is too slow
 
@@ -401,9 +403,8 @@ existing levers above are the supported workflow today.
 ## See also
 
 - [`architecture.md` → Hooks](architecture.md#hooks-5) — architectural placement of the hook layer.
-- [`evidence-buffer.md`](evidence-buffer.md) — the record schema, the
-  consume-and-rotate lifecycle, and the `submit --output-file` recovery
-  path used by `capture-evidence.sh`.
+- [`evidence-buffer.md`](evidence-buffer.md) — the record schema, lifecycle,
+  descriptive `submit --output-file` behavior, and claim-bound proof import.
 - [`hooks/hooks.json`](https://github.com/fakoli/anvil/blob/main/hooks/hooks.json) — the source of truth for
   event-to-script wiring.
 - [`bin/src/anvil/cli/hooks.py`](https://github.com/fakoli/anvil/blob/main/bin/src/anvil/cli/hooks.py) —

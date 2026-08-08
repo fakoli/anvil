@@ -66,7 +66,8 @@ agent's flow needs the long form.
 | 1. Agent runs `pytest` (or other verification command) | Bash tool | `PostToolUse` hook fires |
 | 2. `hooks/capture-evidence.sh` shells to `anvil hook capture-evidence` | Hook | One JSON line appended to `<claim-id>.json` (or `orphan.json` if no matching active claim) |
 | 3. Agent runs `anvil submit T012 --commands "pytest" --files-changed ...` | CLI | Reads `<claim-id>.json`, parses each well-formed line into a `CommandProof`, and embeds them in the `evidence.submitted` event's `proofs` field |
-| 4. `submit --output-file` provided directly | CLI | The buffer is bypassed; output is taken from the file the agent supplied |
+| 4. `submit --output-file` provided directly | CLI | The buffer is bypassed; up to 8000 characters become a descriptive output excerpt. This never creates a typed proof or satisfies `required_proofs`. |
+| 5. `submit --command-proof-file ARTIFACT` provided | CLI | The bounded claim-bound artifact is validated against the explicit active claim, actor, generation, task/PRD revision, repository, cwd, command, timestamps, exit code, and output digest before it is imported as a typed proof. Repeat the flag for a batch. |
 
 Submit is **read-only** with respect to the buffer: it turns the transient
 buffer into the durable `evidence.submitted` JSONL event but does **not**
@@ -82,6 +83,48 @@ Run \`anvil claim ...\` first.`, exit 1). Re-claiming the task afterward mints
 a brand-new claim ID, so any further hook-captured commands land in a new
 `<new-claim-id>.json`; the original claim's buffer file is never re-read by a
 later submit.
+
+## External claim-bound command-proof artifact
+
+External and subagent runners can satisfy an exact typed command requirement
+without hook instrumentation by constructing one canonical JSON envelope:
+
+```json
+{"envelope_id":"RUN-1","payload":{"schema_version":1,"project_id":"P1","claim_id":"C123","generation":1,"claimed_by":"agent-a","task_id":"T001","task_revision":"<64 hex>","prd_id":"default","prd_revision":1,"repository_id":"<64 hex>","claim_start_sha":"<40 or 64 hex>","cwd_relative":".","cwd_identity":"<64 hex>","command_base64":"cHl0ZXN0IC1x","started_at":"2026-08-08T18:00:00Z","ended_at":"2026-08-08T18:00:01Z","exit_code":0,"output_base64":"MSBwYXNzZWQK","output_sha256":"a92b7fdcb45e1d22fc2af4c80adc6e7fc1389ff8a694010cf5e6ff0b5ffbf1f6"}}
+```
+
+The root contains exactly `envelope_id`, `payload`, and optional `issuer`.
+The payload contains exactly the fields shown. Take the claim/task/PRD and
+repository values from the explicit claim response and current project status;
+do not infer an owner or use another active claim. `command_base64` is standard
+canonical base64 of the exact UTF-8 command bytes and must decode to one exact
+task `required_proofs` command and one exact submitted `--commands` value.
+`output_base64` is the exact reported combined output and `output_sha256` is
+lowercase SHA-256 over those decoded bytes. `cwd_relative` is `.` or a canonical
+repository-relative POSIX path. Compute `cwd_identity` with the public
+`domain_separated_sha256` helper, domain `anvil.command-cwd.v1\0`, and object
+`{"repository_id": REPOSITORY_ID, "cwd_relative": CWD_RELATIVE}`.
+
+Serialize with `anvil.state.hashing.canonical_json_bytes`: sorted keys, UTF-8,
+no BOM, whitespace, trailing newline, duplicate keys, floats, or noncanonical
+base64. Times use canonical UTC `...Z` spelling and must fall between claim
+creation and both verification time and lease expiry. Limits are 262,144 bytes
+per canonical envelope, 16,384 decoded command bytes, 131,072 decoded output
+bytes, 16 artifacts per batch, and 1 MiB aggregate encoded command/output. The
+semantic digest uses domain `anvil.command-proof.v1\0` over the typed payload.
+
+An optional configured issuer has exact shape
+`{"algorithm":"ed25519","signer_id":"<16 hex>","public_key":"<64 hex>","signature":"<128 hex>"}`.
+The signature covers the canonical payload bytes. The public key or fingerprint
+must be present in `ANVIL_TRUST_LIST` or `~/.anvil/trust.txt`; otherwise import
+fails. Without this issuer, the receipt truthfully reports
+`claim_owner_self_attested`, not independent execution.
+
+Import canonical JSON files with repeated `--command-proof-file` flags. MCP
+clients base64-encode each entire canonical envelope and pass the resulting
+strings in `command_proof_artifacts_base64` together with `cwd`. Every artifact
+is prevalidated before the one durable `evidence.submitted` append, so one bad
+item imports nothing and leaves the claim active.
 
 ## `orphan.json` accumulation
 
@@ -100,9 +143,11 @@ until the user deletes it manually:
 rm .anvil/.evidence-buffer/orphan.json
 ```
 
-This is a known limitation. The recovery path is `submit --output-file`,
-which lets an agent point at a specific orphan record (or any file) and
-attach it as evidence without going through the buffer. A future
+This is a known limitation. `submit --output-file` can preserve an orphan
+record as a descriptive excerpt, but it **cannot** turn that record into a
+typed command proof or satisfy `required_proofs`. To satisfy a typed command
+requirement, rerun the command while the explicit claim is active or import a
+valid claim-bound artifact with `submit --command-proof-file`. A future
 `anvil evidence prune` command could rotate `orphan.json` on a TTL
 basis; tracked separately.
 

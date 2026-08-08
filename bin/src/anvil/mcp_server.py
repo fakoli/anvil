@@ -533,6 +533,10 @@ class EvidenceResponse(BaseModel):
     # aware) so the agent can chain work; null when none is available.
     next_ready: NextReadyTask | None = None
     actor_identity: dict[str, Any] = Field(default_factory=dict)
+    claim_bound_command_proofs: list[dict[str, Any]] = Field(default_factory=list)
+    legacy_hook_proofs: list[dict[str, Any]] = Field(default_factory=list)
+    missing_claim_bound_proofs: list[str] = Field(default_factory=list)
+    missing_legacy_evidence: list[str] = Field(default_factory=list)
 
 
 class ConflictEntry(BaseModel):
@@ -1800,6 +1804,8 @@ def submit_completion_evidence(
     pr_url: str | None = None,
     commit_sha: str | None = None,
     category: str | None = None,
+    command_proof_artifacts_base64: list[str] | None = None,
+    cwd: str | None = None,
 ) -> EvidenceResponse:
     """Submit completion evidence for task_id (requires an active claim held by
     actor). Auto-releases the claim and moves the task to needs_review; names
@@ -1818,7 +1824,7 @@ def submit_completion_evidence(
                 f"category; valid values: {', '.join(valid)}."
             )
     actor = _exact_lifecycle_actor(actor)
-    state_dir = _resolve_state_dir()
+    state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
     try:
         from anvil.cli.packet_apply import _read_command_proofs
@@ -1849,9 +1855,50 @@ def submit_completion_evidence(
                 action="submit completion evidence",
             )
 
-        evidence_id = "EV" + uuid.uuid4().hex[:8].upper()
         clock = SystemClock()
         now = clock.now()
+
+        claim_bound_proofs = ()
+        if command_proof_artifacts_base64:
+            from anvil import signing
+            from anvil.claims.command_proof_artifact import (
+                ClaimCommandProofError,
+                load_claim_command_proof_base64,
+                verify_claim_command_proof_batch,
+            )
+            from anvil.cli._helpers import _resolve_project_dir
+            from anvil.cli.proof import _default_trust_path
+
+            try:
+                trusted = signing.load_trust_list(_default_trust_path())
+                loaded = [
+                    load_claim_command_proof_base64(
+                        artifact, trusted_issuers=trusted
+                    )
+                    for artifact in command_proof_artifacts_base64
+                ]
+                project = backend.get_project()
+                if project is None:
+                    raise ClaimCommandProofError(
+                        "context_missing",
+                        "command proof requires an initialized project",
+                    )
+                claim_bound_proofs = verify_claim_command_proof_batch(
+                    loaded,
+                    claim=active_claim,
+                    task=task,
+                    project_id=project.id,
+                    project_root=_resolve_project_dir(Path(cwd) if cwd else None),
+                    actor=actor,
+                    declared_commands=commands_run,
+                    now=now,
+                )
+            except ClaimCommandProofError as exc:
+                raise ToolError(
+                    f"command_proof_error[{exc.code}]: {exc}"
+                ) from exc
+
+        evidence_id = "EV" + uuid.uuid4().hex[:8].upper()
 
         # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
         # the PostToolUse hook observed) into typed CommandProofs, so an
@@ -1882,7 +1929,10 @@ def submit_completion_evidence(
                 "commit_sha": commit_sha,
                 "screenshots": [],
                 "known_limitations": None,
-                "proofs": [p.model_dump(mode="json") for p in command_proofs],
+                "proofs": [
+                    p.model_dump(mode="json")
+                    for p in [*command_proofs, *claim_bound_proofs]
+                ],
             },
         )
 
@@ -1893,6 +1943,15 @@ def submit_completion_evidence(
 
         fresh_task = backend.get_task(task_id)
         task_status = fresh_task.status.value if fresh_task is not None else "needs_review"
+        missing_claim_bound_proofs: list[str] = []
+        missing_legacy_evidence: list[str] = []
+        evidence_obj = backend.get_latest_evidence(task_id)
+        if fresh_task is not None and evidence_obj is not None:
+            from anvil.review.gates import evidence_missing_details
+
+            missing_legacy_evidence, missing_claim_bound_proofs = (
+                evidence_missing_details(fresh_task, evidence_obj)
+            )
 
         # T014: name the next claimable task now that this one has left the
         # active set. The submitting actor's own (now-released) claim is
@@ -1908,6 +1967,29 @@ def submit_completion_evidence(
             task_status=task_status,
             next_ready=next_ready,
             actor_identity=actor_identity_data(actor),
+            claim_bound_command_proofs=[
+                {
+                    "digest": proof.semantic_digest,
+                    "generation": proof.evidence_core.generation,
+                    "trust_mode": proof.trust_mode,
+                    "issuer_id": proof.issuer_id,
+                    "command": proof.command,
+                    "output_sha256": proof.output_sha256,
+                }
+                for proof in claim_bound_proofs
+            ],
+            legacy_hook_proofs=[
+                {
+                    "command": proof.command,
+                    "exit_code": proof.exit_code,
+                    "output_sha256": proof.output_sha256,
+                    "captured_at": proof.captured_at.isoformat(),
+                    "source": "legacy_hook",
+                }
+                for proof in command_proofs
+            ],
+            missing_claim_bound_proofs=missing_claim_bound_proofs,
+            missing_legacy_evidence=missing_legacy_evidence,
         )
     finally:
         backend.close()

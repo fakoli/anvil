@@ -21,9 +21,13 @@ since the planner does not surface it — same technique as
 
 from __future__ import annotations
 
+import base64
+import datetime as _dt
+import hashlib
 import json as _json
 import os
 import sqlite3 as _sqlite3
+import subprocess
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -219,6 +223,79 @@ def _status(tmp_path: Path, task_id: str) -> str | None:
     finally:
         conn.close()
     return row[0] if row else None
+
+
+def _init_git_repo(root: Path) -> None:
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Anvil Tests"], cwd=root, check=True
+    )
+    (root / "README.md").write_text("test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True
+    )
+
+
+def _write_claim_command_artifact(
+    tmp_path: Path, claim: dict[str, object], command: str
+) -> Path:
+    from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
+
+    conn = _sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
+    created_raw = conn.execute(
+        "SELECT created_at FROM claims WHERE id = ?", (claim["id"],)
+    ).fetchone()[0]
+    project_id = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()[0]
+    conn.close()
+    created = _dt.datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+    ended = _dt.datetime.now(_dt.UTC)
+    context = claim["attestation_context"]
+    assert isinstance(context, dict)
+    output = b"1 passed\n"
+    cwd_identity = domain_separated_sha256(
+        b"anvil.command-cwd.v1\0",
+        {"repository_id": context["repository_id"], "cwd_relative": "."},
+        max_bytes=16_384,
+        max_string_bytes=8_192,
+    )
+    payload = {
+        "schema_version": 1,
+        "project_id": project_id,
+        "claim_id": claim["id"],
+        "generation": claim["generation"],
+        "claimed_by": claim["claimed_by"],
+        "task_id": claim["task_id"],
+        "task_revision": context["task_revision"],
+        "prd_id": context["prd_id"],
+        "prd_revision": context["prd_revision"],
+        "repository_id": context["repository_id"],
+        "claim_start_sha": context["claim_start_sha"],
+        "cwd_relative": ".",
+        "cwd_identity": cwd_identity,
+        "command_base64": base64.b64encode(command.encode()).decode(),
+        "started_at": created.astimezone(_dt.UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "ended_at": ended.isoformat().replace("+00:00", "Z"),
+        "exit_code": 0,
+        "output_base64": base64.b64encode(output).decode(),
+        "output_sha256": hashlib.sha256(output).hexdigest(),
+    }
+    path = tmp_path / "command-proof.json"
+    path.write_bytes(
+        canonical_json_bytes(
+            {"envelope_id": "ENV-CLI-1", "payload": payload},
+            max_bytes=262_144,
+            max_string_bytes=262_144,
+        )
+    )
+    return path
 
 
 def _reach_needs_review_insufficient(tmp_path: Path, task_id: str) -> None:
@@ -474,6 +551,171 @@ _PLANNED_VERIFY_CMD = "pytest tests/test_converter.py -v"
 class TestTypedProofGateEndToEnd:
     """The full observed-proof chain: planner emits required_proofs → hook
     buffers a CommandProof → submit reconciles it → strict apply enforces it."""
+
+    def test_claim_bound_artifact_satisfies_typed_proof_without_hook(
+        self, tmp_path: Path
+    ) -> None:
+        _init_git_repo(tmp_path)
+        task_id = _planned(tmp_path)
+        claim_result = _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test", "--json"]
+        )
+        assert claim_result.exit_code == 0, claim_result.output
+        claim = _json.loads(claim_result.stdout)["data"]["claim"]
+        artifact = _write_claim_command_artifact(
+            tmp_path, claim, _PLANNED_VERIFY_CMD
+        )
+
+        result = _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                _PLANNED_VERIFY_CMD,
+                "--files-changed",
+                "src/app/converter.py",
+                "--command-proof-file",
+                str(artifact),
+                "--actor",
+                "agent-test",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.stdout)["data"]
+        assert data["missing_claim_bound_proofs"] == []
+        assert data["legacy_hook_proofs"] == []
+        receipt = data["claim_bound_command_proofs"][0]
+        assert receipt["command"] == _PLANNED_VERIFY_CMD
+        assert receipt["trust_mode"] == "claim_owner_self_attested"
+
+        apply_result = _invoke(
+            tmp_path,
+            [
+                "apply",
+                task_id,
+                "--approve",
+                "--strict",
+                "--reviewer",
+                "human",
+                "--json",
+            ],
+        )
+        assert apply_result.exit_code == 0, apply_result.output
+        acceptance_path = _json.loads(apply_result.stdout)["data"]["proof_path"]
+        from anvil.state.models import AcceptanceProof, ClaimCommandProof
+
+        acceptance = AcceptanceProof.model_validate_json(
+            Path(acceptance_path).read_text(encoding="utf-8")
+        )
+        assert any(
+            isinstance(proof, ClaimCommandProof)
+            for proof in acceptance.command_results
+        )
+
+    def test_claim_bound_artifact_batch_is_atomic_on_one_invalid_file(
+        self, tmp_path: Path
+    ) -> None:
+        _init_git_repo(tmp_path)
+        task_id = _planned(tmp_path)
+        claim_result = _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test", "--json"]
+        )
+        claim = _json.loads(claim_result.stdout)["data"]["claim"]
+        valid = _write_claim_command_artifact(tmp_path, claim, _PLANNED_VERIFY_CMD)
+        invalid = tmp_path / "invalid-proof.json"
+        invalid.write_text("{not-json", encoding="utf-8")
+
+        result = _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                _PLANNED_VERIFY_CMD,
+                "--files-changed",
+                "src/app/converter.py",
+                "--command-proof-file",
+                str(valid),
+                "--command-proof-file",
+                str(invalid),
+                "--actor",
+                "agent-test",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 1
+        assert _status(tmp_path, task_id) == "claimed"
+        conn = _sqlite3.connect(str(tmp_path / ".anvil" / "state.db"))
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE task_id = ?", (task_id,)
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_output_file_is_descriptive_and_reports_typed_proof_missing(
+        self, tmp_path: Path
+    ) -> None:
+        task_id = _planned(tmp_path)
+        assert _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test"]
+        ).exit_code == 0
+        output = tmp_path / "pytest.log"
+        output.write_text("exit: 0\nall tests passed\n", encoding="utf-8")
+
+        res = _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                _PLANNED_VERIFY_CMD,
+                "--files-changed",
+                "src/app/converter.py",
+                "--output-file",
+                str(output),
+                "--actor",
+                "agent-test",
+                "--json",
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        data = _json.loads(res.stdout)["data"]
+        assert data["claim_bound_command_proofs"] == []
+        assert data["legacy_hook_proofs"] == []
+        assert data["missing_claim_bound_proofs"]
+        assert data["missing_legacy_evidence"] == []
+
+    def test_human_submit_distinguishes_typed_proof_from_output_excerpt(
+        self, tmp_path: Path
+    ) -> None:
+        task_id = _planned(tmp_path)
+        assert _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test"]
+        ).exit_code == 0
+        output = tmp_path / "pytest.log"
+        output.write_text("exit: 0\nall tests passed\n", encoding="utf-8")
+        result = _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                _PLANNED_VERIFY_CMD,
+                "--files-changed",
+                "src/app/converter.py",
+                "--output-file",
+                str(output),
+                "--actor",
+                "agent-test",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Missing typed required_proofs" in result.output
+        assert "--output-file is descriptive only" in result.output
+        assert "missing items for required_evidence" not in result.output
 
     def test_strict_passes_when_observed_command_exited_zero(
         self, tmp_path: Path

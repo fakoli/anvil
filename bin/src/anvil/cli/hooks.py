@@ -1124,14 +1124,14 @@ def hook_capture_evidence(
         if claim_id is not None:
             buffer_file = buffer_dir / f"{claim_id}.json"
         else:
-            # No active claim found — write to orphan buffer. Recovery path
-            # uses the existing `submit --output-file` flag; the previously-
-            # referenced `evidence attach` subcommand did not exist (Critic-2
-            # flagged that following the error message produced Typer's
-            # "No such command 'evidence'" error).
+            # No active claim found — write to orphan buffer. Keep the
+            # diagnostic actionable without implying that a descriptive
+            # output excerpt is a typed command proof.
             record["note"] = (
                 "orphan — no active claim found at capture time; "
-                "pass this file via: anvil submit TASK_ID --output-file <THIS_FILE>"
+                "--output-file can attach it only as a descriptive excerpt and "
+                "cannot satisfy required_proofs; rerun under an explicit claim "
+                "or import a claim-bound command-proof artifact"
             )
             buffer_file = buffer_dir / "orphan.json"
 

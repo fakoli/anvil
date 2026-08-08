@@ -27,7 +27,7 @@ from anvil.cli._helpers import (
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
 from anvil.naming import safe_path_component
-from anvil.state.models import CommandProof, EventDraft
+from anvil.state.models import ClaimCommandProof, CommandProof, EventDraft
 
 
 def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
@@ -76,6 +76,39 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     return proofs
 
 
+def _claim_command_proof_receipts(
+    proofs: tuple[ClaimCommandProof, ...] | list[ClaimCommandProof],
+) -> list[dict[str, object]]:
+    """Return the stable, non-payload receipt for imported command proofs."""
+    return [
+        {
+            "digest": proof.semantic_digest,
+            "generation": proof.evidence_core.generation,
+            "trust_mode": proof.trust_mode,
+            "issuer_id": proof.issuer_id,
+            "command": proof.command,
+            "output_sha256": proof.output_sha256,
+        }
+        for proof in proofs
+    ]
+
+
+def _legacy_command_proof_receipts(
+    proofs: list[CommandProof],
+) -> list[dict[str, object]]:
+    """Return explicit hook-observed receipts without overstating their trust."""
+    return [
+        {
+            "command": proof.command,
+            "exit_code": proof.exit_code,
+            "output_sha256": proof.output_sha256,
+            "captured_at": proof.captured_at.isoformat(),
+            "source": "legacy_hook",
+        }
+        for proof in proofs
+    ]
+
+
 def emit_acceptance_proof(
     state_dir: Path, backend: object, task_id: str, applied_event: object
 ) -> Path | None:
@@ -92,12 +125,21 @@ def emit_acceptance_proof(
     """
     try:
         from anvil import signing
-        from anvil.state.models import AcceptanceProof, CommandProof, EventRange
+        from anvil.state.models import (
+            AcceptanceProof,
+            ClaimCommandProof,
+            CommandProof,
+            EventRange,
+        )
 
         evidence = backend.get_latest_evidence(task_id)  # type: ignore[attr-defined]
         if evidence is None:
             return None  # nothing submitted to attest to
-        command_results = [p for p in evidence.proofs if isinstance(p, CommandProof)]
+        command_results = [
+            p
+            for p in evidence.proofs
+            if isinstance(p, (CommandProof, ClaimCommandProof))
+        ]
         start_id = backend.first_event_id(task_id) or applied_event.id  # type: ignore[attr-defined]
         project = backend.get_project()  # type: ignore[attr-defined]
         project_id = project.id if project is not None else ""
@@ -642,7 +684,18 @@ def submit(
     output_file: Path | None = typer.Option(  # noqa: B008
         None,
         "--output-file",
-        help="Path to a file whose content will be used as the output excerpt.",
+        help=(
+            "Path to a file whose content will be used as the descriptive output "
+            "excerpt. This never creates a typed command proof."
+        ),
+    ),
+    command_proof_files: list[Path] | None = typer.Option(  # noqa: B008
+        None,
+        "--command-proof-file",
+        help=(
+            "Canonical JSON claim-bound command-proof artifact. Repeat for a "
+            "batch; every artifact is validated before evidence is recorded."
+        ),
     ),
     pr_url: str | None = typer.Option(  # noqa: B008
         None,
@@ -771,6 +824,7 @@ def submit(
         # compatibility with the legacy comma-joined form (CL-2).
         commands_list = _split_repeatable(commands)
         files_list = _split_repeatable(files_changed)
+        proof_files = command_proof_files or []
         screenshots_list = (
             [p.strip() for p in screenshots.split(",") if p.strip()]
             if screenshots
@@ -794,10 +848,59 @@ def submit(
 
         now = clock.now()
 
+        # T008: external/subagent proofs are accepted only through the strict,
+        # claim-bound artifact boundary. Load and verify the entire batch before
+        # constructing the single evidence event so one refusal imports nothing.
+        claim_bound_proofs: tuple[ClaimCommandProof, ...] = ()
+        if proof_files:
+            from anvil import signing
+            from anvil.claims.command_proof_artifact import (
+                ClaimCommandProofError,
+                load_claim_command_proof,
+                verify_claim_command_proof_batch,
+            )
+            from anvil.cli._helpers import _resolve_project_dir
+            from anvil.cli.proof import _default_trust_path
+
+            try:
+                trusted = signing.load_trust_list(_default_trust_path())
+                loaded = []
+                for proof_file in proof_files:
+                    with proof_file.open("rb") as stream:
+                        loaded.append(
+                            load_claim_command_proof(
+                                stream, trusted_issuers=trusted
+                            )
+                        )
+                task = backend.get_task(task_id)
+                project = backend.get_project()
+                if task is None or project is None:
+                    raise ClaimCommandProofError(
+                        "context_missing",
+                        "command proof requires an initialized project and task",
+                    )
+                claim_bound_proofs = verify_claim_command_proof_batch(
+                    loaded,
+                    claim=task_claim,
+                    task=task,
+                    project_id=project.id,
+                    project_root=_resolve_project_dir(cwd),
+                    actor=resolved_actor,
+                    declared_commands=commands_list,
+                    now=now,
+                )
+            except (OSError, ClaimCommandProofError) as exc:
+                code = str(getattr(exc, "code", "command_proof_error"))
+                if json_output:
+                    fail("submit", str(exc), code=code)
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+
         # SL-3 / B48: reconcile the per-claim evidence buffer (real exit codes
         # captured by the PostToolUse hook) into typed CommandProofs — the
         # observed proofs the gate trusts.
         command_proofs = _read_command_proofs(state_dir, task_claim.id)
+        all_command_proofs = [*command_proofs, *claim_bound_proofs]
 
         # T007 — zero-proof mismatch warning: if verification-pattern commands
         # ran this session but NO typed proof attached, the capture hook and
@@ -842,7 +945,7 @@ def submit(
             "commit_sha": commit_sha,
             "screenshots": screenshots_list,
             "known_limitations": known_limitations,
-            "proofs": [p.model_dump(mode="json") for p in command_proofs],
+            "proofs": [p.model_dump(mode="json") for p in all_command_proofs],
         }
 
         draft = EventDraft(
@@ -871,6 +974,8 @@ def submit(
     # human gate-summary block below. Failures here are non-fatal (the gate is
     # informational); ``gate`` stays None and is reported as null / skipped.
     gate: tuple[bool, list[str]] | None = None
+    legacy_missing: list[str] = []
+    claim_bound_missing: list[str] = []
     if fresh_task is not None:
         try:
             from anvil.review.gates import evidence_complete
@@ -887,12 +992,17 @@ def submit(
                 commit_sha=commit_sha,
                 screenshots=screenshots_list,
                 known_limitations=known_limitations,
-                proofs=command_proofs,
+                proofs=all_command_proofs,
                 category=category,
                 submitted_at=now,
                 submitted_by=resolved_actor,
             )
             gate = evidence_complete(fresh_task, evidence_obj)
+            from anvil.review.gates import evidence_missing_details
+
+            legacy_missing, claim_bound_missing = evidence_missing_details(
+                fresh_task, evidence_obj
+            )
             # evidence-contracts:T005 — show the contract verdict at submit
             # so the agent sees unproven claims BEFORE review.
             submit_verdict = _claim_verdict_block(fresh_task, evidence_obj, cwd)
@@ -919,6 +1029,14 @@ def submit(
                 ),
                 "claim_verdict": _verdict_json(submit_verdict),  # T005
                 "proof_mismatch_warning": proof_mismatch_warning,  # T007
+                "claim_bound_command_proofs": _claim_command_proof_receipts(
+                    claim_bound_proofs
+                ),
+                "legacy_hook_proofs": _legacy_command_proof_receipts(
+                    command_proofs
+                ),
+                "missing_claim_bound_proofs": claim_bound_missing,
+                "missing_legacy_evidence": legacy_missing,
                 "next_ready": next_ready,
                 "actor_identity": actor_identity_data(resolved_actor),
             },
@@ -935,6 +1053,13 @@ def submit(
         typer.echo(f"  PR URL:       {pr_url}")
     if commit_sha:
         typer.echo(f"  Commit SHA:   {commit_sha}")
+    if claim_bound_proofs:
+        typer.echo(
+            f"  Claim-bound proofs: {len(claim_bound_proofs)} "
+            "(validated; see --json for trust receipts)"
+        )
+    if command_proofs:
+        typer.echo(f"  Legacy hook proofs: {len(command_proofs)}")
     typer.echo("")
     typer.echo(f"Task '{task_id}' status → needs_review.")
     if category == "blocked":
@@ -951,11 +1076,19 @@ def submit(
         if passed:
             typer.echo("Evidence gate: PASSED — all required evidence present.")
         else:
-            typer.echo(
-                "Evidence gate: INCOMPLETE — missing items for required_evidence:"
-            )
-            for item in missing:
-                typer.echo(f"  - {item}")
+            typer.echo("Evidence gate: INCOMPLETE")
+            if legacy_missing:
+                typer.echo("  Missing descriptive required_evidence:")
+                for item in legacy_missing:
+                    typer.echo(f"    - {item}")
+            if claim_bound_missing:
+                typer.echo("  Missing typed required_proofs:")
+                for item in claim_bound_missing:
+                    typer.echo(f"    - {item}")
+                typer.echo(
+                    "  --output-file is descriptive only and cannot satisfy "
+                    "typed proofs."
+                )
     _echo_claim_verdict(submit_verdict)
     if proof_mismatch_warning is not None:
         typer.echo(f"Warning: {proof_mismatch_warning}", err=True)

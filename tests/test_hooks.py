@@ -20,6 +20,17 @@ from anvil.state.schema import SCHEMA_VERSION
 runner = CliRunner()
 
 
+def test_orphan_capture_guidance_does_not_claim_output_file_is_typed_proof() -> None:
+    root = Path(__file__).resolve().parents[1]
+    sources = [
+        (root / "bin/src/anvil/cli/hooks.py").read_text(encoding="utf-8"),
+        (root / "hooks/capture-evidence.sh").read_text(encoding="utf-8"),
+    ]
+    for source in sources:
+        assert "pass this file via: anvil submit" not in source
+        assert "cannot satisfy required_proofs" in source
+
+
 def test_payload_actor_prefers_pinned_lifecycle_actor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

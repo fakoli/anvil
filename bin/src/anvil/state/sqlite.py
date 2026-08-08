@@ -25,12 +25,15 @@ try:
     import msvcrt  # Windows byte-range file locking (locking)
 except ImportError:  # POSIX: msvcrt is Windows-only.
     msvcrt = None  # type: ignore[assignment]
+import base64
 import datetime
 import hashlib
 import json
 import logging
+import ntpath
 import os
 import random
+import re
 import sqlite3
 import struct
 import sys
@@ -74,6 +77,7 @@ from anvil.state.models import (
     BundleStatus,
     Claim,
     ClaimAttestationContext,
+    ClaimCommandProof,
     ClaimProgressAttestation,
     ClaimStatus,
     ConflictGroup,
@@ -84,12 +88,14 @@ from anvil.state.models import (
     Feature,
     PRDAssumption,
     Project,
+    ProofKind,
     Requirement,
     Review,
     ReviewDecision,
     Score,
     SyncMapping,
     Task,
+    Verification,
 )
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
@@ -138,6 +144,13 @@ from anvil.state.schema import DDL, SCHEMA_VERSION
 _AUDIT_LINE_MAX_UTF8_BYTES = 4096
 _PROGRESS_ATTESTATION_MAX_BYTES = 262_144
 _PROGRESS_SEMANTIC_DOMAIN = b"anvil.progress-attestation.v1\0"
+_COMMAND_PROOF_SEMANTIC_DOMAIN = b"anvil.command-proof.v1\0"
+_COMMAND_CWD_DOMAIN = b"anvil.command-cwd.v1\0"
+_COMMAND_WINDOWS_RESERVED = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9\u00b9\u00b2\u00b3]|"
+    r"LPT[1-9\u00b9\u00b2\u00b3])(?:\..*)?$",
+    re.IGNORECASE,
+)
 _OWNERSHIP_RECOVERY_REFUSAL_PREFIX = "task.created ownership recovery refused:"
 _OWNERSHIP_RECOVERY_REFUSAL_MESSAGES = {
     "explicit_prd_mismatch": "explicit prd_id mismatch",
@@ -150,6 +163,34 @@ _OWNERSHIP_RECOVERY_REFUSAL_MESSAGES = {
     "invalid_task_payload": "recoverable Task payload is invalid",
     "not_dependency_only": "event is not a dependency-only upsert",
 }
+
+
+def _command_cwd_is_canonical(value: str) -> bool:
+    """Mirror the hostile-input verifier's portable cwd spelling contract."""
+    if value == ".":
+        return True
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    if (
+        not encoded
+        or len(encoded) > 4_096
+        or value.startswith(("/", "\\"))
+        or bool(ntpath.splitdrive(value)[0])
+        or "\\" in value
+        or any(char in value for char in '<>"|?*')
+        or any(ord(char) <= 31 or 127 <= ord(char) <= 159 for char in value)
+    ):
+        return False
+    parts = value.split("/")
+    return not any(
+        part in {"", ".", ".."}
+        or ":" in part
+        or part.endswith((".", " "))
+        or _COMMAND_WINDOWS_RESERVED.fullmatch(part)
+        for part in parts
+    )
 
 
 def _redacted_identifier(value: Any) -> str:
@@ -10148,6 +10189,204 @@ class SqliteBackend:
     # Phase 5 handlers — completion flow
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _claim_command_proof_material_is_valid(
+        proof: ClaimCommandProof, *, require_configured_trust: bool
+    ) -> bool:
+        """Recompute every durable command-proof identity and trust assertion."""
+        core = proof.evidence_core.model_dump(mode="json")
+        try:
+            command_bytes = base64.b64decode(
+                proof.evidence_core.command_base64.encode("ascii"), validate=True
+            )
+            output_bytes = base64.b64decode(
+                proof.evidence_core.output_base64.encode("ascii"), validate=True
+            )
+            command = command_bytes.decode("utf-8", errors="strict")
+            semantic_digest = domain_separated_sha256(
+                _COMMAND_PROOF_SEMANTIC_DOMAIN,
+                core,
+                max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                max_nodes=canonical_node_budget_for_bytes(
+                    _PROGRESS_ATTESTATION_MAX_BYTES
+                ),
+                max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+            )
+            cwd_identity = domain_separated_sha256(
+                _COMMAND_CWD_DOMAIN,
+                {
+                    "repository_id": proof.evidence_core.repository_id,
+                    "cwd_relative": proof.evidence_core.cwd_relative,
+                },
+                max_bytes=16_384,
+                max_string_bytes=8_192,
+            )
+            ended_at = datetime.datetime.fromisoformat(
+                proof.evidence_core.ended_at.replace("Z", "+00:00")
+            )
+        except (CanonicalJsonRefusal, UnicodeError, ValueError):
+            return False
+        if not _command_cwd_is_canonical(proof.evidence_core.cwd_relative):
+            return False
+        if (
+            proof.evidence_core.exit_code != 0
+            or proof.exit_code != 0
+            or command != proof.command
+            or hashlib.sha256(output_bytes).hexdigest()
+            != proof.evidence_core.output_sha256
+            or proof.output_sha256 != proof.evidence_core.output_sha256
+            or proof.semantic_digest != semantic_digest
+            or proof.evidence_core.cwd_identity != cwd_identity
+            or proof.captured_at != ended_at
+        ):
+            return False
+        issuer = proof.issuer
+        if proof.trust_mode == "claim_owner_self_attested":
+            return issuer is None and proof.issuer_id is None
+        if issuer is None or proof.issuer_id is None:
+            return False
+        try:
+            genuine_id = signing.fingerprint(issuer.public_key)
+        except ValueError:
+            return False
+        cryptographically_valid = (
+            issuer.algorithm == "ed25519"
+            and issuer.signer_id == proof.issuer_id == genuine_id
+            and signing.verify(
+                issuer.public_key,
+                canonical_json_bytes(
+                    core,
+                    max_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                    max_nodes=canonical_node_budget_for_bytes(
+                        _PROGRESS_ATTESTATION_MAX_BYTES
+                    ),
+                    max_string_bytes=_PROGRESS_ATTESTATION_MAX_BYTES,
+                ),
+                issuer.signature,
+            )
+        )
+        if not cryptographically_valid or not require_configured_trust:
+            return cryptographically_valid
+        configured_path = os.environ.get("ANVIL_TRUST_LIST")
+        trust_path = (
+            Path(configured_path).expanduser()
+            if configured_path
+            else Path.home() / ".anvil" / "trust.txt"
+        )
+        return signing.is_trusted(
+            issuer.public_key, signing.load_trust_list(trust_path)
+        )
+
+    @classmethod
+    def _claim_command_proof_batch_matches_claim(
+        cls,
+        conn: sqlite3.Connection,
+        payload: EvidenceSubmittedPayload,
+        event: EventDraft | Event,
+    ) -> bool:
+        """Bind an imported batch to one exact active claim generation."""
+        imported = [
+            proof for proof in payload.proofs if isinstance(proof, ClaimCommandProof)
+        ]
+        if not imported:
+            return True
+        if (
+            event.target_kind != "task"
+            or event.target_id != payload.task_id
+            or event.actor != payload.submitted_by
+            or cls._claim_replay_collision(conn, payload.claim_id)
+        ):
+            return False
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?",
+            (payload.claim_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != payload.task_id
+            or row[1] != payload.submitted_by
+            or row[2] != "active"
+            or row[3] is not None
+            or row[5] is None
+            or row[8] is not None
+        ):
+            return False
+        try:
+            generation = int(row[4])
+            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            claim_created_at = datetime.datetime.fromisoformat(
+                row[6].replace("Z", "+00:00")
+            )
+            lease_expires_at = datetime.datetime.fromisoformat(
+                row[7].replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        task_binding = conn.execute(
+            "SELECT prd_id, verification FROM tasks WHERE id = ?", (payload.task_id,)
+        ).fetchone()
+        current_prd = conn.execute(
+            "SELECT revision FROM prds WHERE id = ?", (context.prd_id,)
+        ).fetchone()
+        if task_binding is None:
+            return False
+        try:
+            verification = Verification.model_validate(json.loads(task_binding[1]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        required_commands = {
+            requirement.command
+            for requirement in verification.required_proofs
+            if requirement.kind is ProofKind.command
+            and requirement.command is not None
+            and 0 in requirement.passing_exit_codes
+        }
+        if (
+            project is None
+            or task_binding[0] != context.prd_id
+            or current_prd is None
+            or int(current_prd[0]) != context.prd_revision
+            or not required_commands
+            or event.timestamp >= lease_expires_at
+        ):
+            return False
+        for proof in imported:
+            core = proof.evidence_core
+            try:
+                started_at = datetime.datetime.fromisoformat(
+                    core.started_at.replace("Z", "+00:00")
+                )
+                ended_at = datetime.datetime.fromisoformat(
+                    core.ended_at.replace("Z", "+00:00")
+                )
+            except ValueError:
+                return False
+            if (
+                not cls._claim_command_proof_material_is_valid(
+                    proof, require_configured_trust=True
+                )
+                or core.project_id != project[0]
+                or core.claim_id != payload.claim_id
+                or core.generation != generation
+                or core.claimed_by != payload.submitted_by
+                or core.task_id != payload.task_id
+                or core.task_revision != context.task_revision
+                or core.prd_id != context.prd_id
+                or core.prd_revision != context.prd_revision
+                or core.repository_id != context.repository_id
+                or core.claim_start_sha != context.claim_start_sha
+                or proof.command not in required_commands
+                or claim_created_at > started_at
+                or started_at > ended_at
+                or ended_at > event.timestamp
+                or ended_at >= lease_expires_at
+            ):
+                return False
+        return True
+
     def _check_evidence_submitted(
         self,
         conn: sqlite3.Connection,
@@ -10174,6 +10413,11 @@ class SqliteBackend:
             raise EventRejected("evidence.submitted: event target mismatch.")
         if event.actor != payload.submitted_by:
             raise EventRejected("evidence.submitted: event actor mismatch.")
+        if not self._claim_command_proof_batch_matches_claim(conn, payload, event):
+            raise EventRejected(
+                "evidence.submitted: claim-bound command proof batch does not match "
+                "the exact active claim generation or durable proof material."
+            )
         # At least one proof is mandatory: a non-empty `commands_run`. An empty
         # `files_changed` is legitimate for a verification-only / check step that
         # runs commands but changes no files (B32) — the older rule forced a
@@ -10285,6 +10529,13 @@ class SqliteBackend:
               claim was already released/stale; the conditional warn log records
               that — it is an audit side effect, not a rejection.
         """
+        imported = any(isinstance(proof, ClaimCommandProof) for proof in payload.proofs)
+        if imported and not self._claim_command_proof_batch_matches_claim(
+            conn, payload, event
+        ):
+            raise EventRejected(
+                "evidence.submitted: replay claim-bound command proof batch is invalid."
+            )
         task_id: str = payload.task_id
         claim_id: str = payload.claim_id
         claim_row = conn.execute(

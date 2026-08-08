@@ -796,6 +796,11 @@ def _local_repository(project_root: Path, *, project_id: str) -> _LocalRepositor
     )
 
 
+def inspect_local_repository(project_root: Path, *, project_id: str) -> _LocalRepository:
+    """Return the canonical local Git identity used by claim-bound verifiers."""
+    return _local_repository(project_root, project_id=project_id)
+
+
 def _canonical_os_identity(path: Path) -> str:
     value = str(path.resolve(strict=True))
     if value.startswith("\\\\?\\UNC\\"):

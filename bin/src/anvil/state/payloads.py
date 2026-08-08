@@ -33,8 +33,12 @@ from pydantic import (
     model_validator,
 )
 
+from anvil.state.hashing import canonical_json_bytes
 from anvil.state.models import (
     DEFAULT_PRD_ID,
+    MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
     MAX_PRD_ASSUMPTIONS,
     BundleCheckpoint,
     BundleReviewPolicy,
@@ -42,6 +46,7 @@ from anvil.state.models import (
     BundleStatus,
     BundleThroughputBudget,
     ClaimAttestationContext,
+    ClaimCommandProof,
     DelegatedAgentObservation,
     EvidenceCategory,
     PRDAssumption,
@@ -995,6 +1000,42 @@ class EvidenceSubmittedPayload(BaseModel):
     # Typed as the enum (review finding): an out-of-range category must be
     # rejected at WRITE time, not poison every later evidence read.
     category: EvidenceCategory | None = None
+
+    @model_validator(mode="after")
+    def _validate_claim_command_proof_batch(self) -> EvidenceSubmittedPayload:
+        imported = [proof for proof in self.proofs if isinstance(proof, ClaimCommandProof)]
+        if len(imported) > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+            raise ValueError("too many claim-bound command proofs in one submission")
+        artifact_sizes = [
+            len(
+                canonical_json_bytes(
+                    proof.model_dump(mode="json"),
+                    max_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                    max_string_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                )
+            )
+            for proof in imported
+        ]
+        total_bytes = sum(artifact_sizes)
+        if total_bytes > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
+            raise ValueError("claim-bound command proof batch exceeds its byte limit")
+        digests = [proof.semantic_digest for proof in imported]
+        if len(digests) != len(set(digests)):
+            raise ValueError("claim-bound command proof batch contains a duplicate digest")
+        remaining_commands = [
+            value for value in self.commands_run if isinstance(value, str)
+        ]
+        for proof in imported:
+            if proof.exit_code != 0:
+                raise ValueError("claim-bound command proof requires exit_code 0")
+            try:
+                remaining_commands.remove(proof.command)
+            except ValueError:
+                raise ValueError(
+                    "each claim-bound command proof command must have one exact "
+                    "commands_run entry"
+                ) from None
+        return self
 
 
 class TaskAppliedPayload(BaseModel):

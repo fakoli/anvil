@@ -12,15 +12,17 @@ and ``anvil submit`` reconciles them into ``Evidence.proofs``.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import json
 from pathlib import Path
 
 from anvil.cli.packet_apply import _read_command_proofs
-from anvil.review.gates import evidence_complete
+from anvil.review.gates import evidence_complete, evidence_missing_details
 from anvil.state.models import (
     AssertionProof,
+    ClaimCommandProof,
     CommandProof,
     DiffProof,
     Evidence,
@@ -69,6 +71,48 @@ def _cmd_proof(command: str, exit_code: int) -> CommandProof:
     )
 
 
+def _claim_cmd_proof(command: str) -> ClaimCommandProof:
+    command_b64 = base64.b64encode(command.encode()).decode()
+    output_b64 = base64.b64encode(b"passed\n").decode()
+    output_hash = hashlib.sha256(b"passed\n").hexdigest()
+    return ClaimCommandProof.model_validate(
+        {
+            "kind": "claim_command",
+            "command": command,
+            "exit_code": 0,
+            "output_sha256": output_hash,
+            "captured_at": _NOW.isoformat(),
+            "semantic_digest": "b" * 64,
+            "trust_mode": "claim_owner_self_attested",
+            "issuer_id": None,
+            "evidence_core": {
+                "schema_version": 1,
+                "project_id": "P1",
+                "claim_id": "C1",
+                "generation": 1,
+                "claimed_by": "agent",
+                "task_id": "T1",
+                "task_revision": "c" * 64,
+                "prd_id": "default",
+                "prd_revision": 1,
+                "repository_id": "d" * 64,
+                "claim_start_sha": "e" * 40,
+                "cwd_relative": ".",
+                "cwd_identity": "f" * 64,
+                "command_base64": command_b64,
+                "started_at": (_NOW - datetime.timedelta(seconds=1))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "ended_at": _NOW.isoformat().replace("+00:00", "Z"),
+                "exit_code": 0,
+                "output_base64": output_b64,
+                "output_sha256": output_hash,
+            },
+            "issuer": None,
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # The non-gameable command requirement
 # ---------------------------------------------------------------------------
@@ -86,6 +130,15 @@ def test_passing_command_proof_satisfies_requirement() -> None:
     passed, missing = evidence_complete(
         _task(required_proofs=[_CMD_REQ]),
         _evidence(proofs=[_cmd_proof(_PYTEST, 0)]),
+    )
+    assert passed is True
+    assert missing == []
+
+
+def test_claim_bound_command_proof_satisfies_requirement() -> None:
+    passed, missing = evidence_complete(
+        _task(required_proofs=[_CMD_REQ]),
+        _evidence(proofs=[_claim_cmd_proof(_PYTEST)]),
     )
     assert passed is True
     assert missing == []
@@ -183,6 +236,13 @@ def test_missing_items_are_deduplicated_across_both_surfaces() -> None:
     passed, missing = evidence_complete(task, _evidence())
     assert passed is False
     assert missing == ["run tests"]  # deduped, not ["run tests", "run tests"]
+
+
+def test_missing_details_keep_descriptive_and_typed_gaps_separate() -> None:
+    task = _task(required_proofs=[_CMD_REQ], required_evidence=["screenshots"])
+    legacy, typed = evidence_missing_details(task, _evidence())
+    assert legacy == ["screenshots"]
+    assert typed == ["tests pass"]
 
 
 def test_command_requirement_without_command_is_rejected_at_construction() -> None:

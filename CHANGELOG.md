@@ -22,8 +22,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   the next renewal consumes one accepted attestation atomically and reports its
   trust mode. Free-text progress remains audit-only, duplicate or stale
   evidence cannot extend a lease, and legacy/non-Git claims retain their prior
-  renewal behavior. The self-described public API contract advances to version
-  6 for the new CLI flag and MCP request/response fields.
+  renewal behavior. This introduced public API contract version 6 for the new
+  CLI flag and MCP request/response fields.
+- **Claim-bound typed command-proof import (#180).** CLI and MCP evidence
+  submission can now import bounded canonical command artifacts that bind exact
+  command and output bytes to the active actor, claim generation, repository,
+  working directory, task, and PRD revision. Mixed or stale batches fail before
+  the single atomic evidence transition, legacy hook proofs remain supported,
+  and descriptive `--output-file` content can no longer be mistaken for a typed
+  proof. The public API contract advances to version 7.
 
 ## [0.6.3] - 2026-08-08
 

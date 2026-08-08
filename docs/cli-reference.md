@@ -1026,8 +1026,8 @@ semantics.
 active claim and transitions the task to `needs_review`. Emits an
 `evidence.submitted` event with the commands run, files changed, optional
 output excerpt (truncated to 8000 chars), PR url, commit SHA, and known
-limitations. Prints a gate summary indicating whether the recorded evidence
-satisfies the task's `required_evidence`.
+limitations. Prints separate gate diagnostics for descriptive
+`required_evidence` and typed `required_proofs`.
 
 **Positional arguments:**
 
@@ -1047,7 +1047,13 @@ satisfies the task's `required_evidence`.
   [`anvil apply`](#apply).
 - `--output-file PATH` *(optional)* — path to a file whose content is used
   as the output excerpt (read with `errors="replace"`, truncated to 8000
-  chars).
+  chars). Descriptive only: it never creates a typed command proof or
+  satisfies `required_proofs`.
+- `--command-proof-file PATH` *(optional, repeatable)* — import a bounded,
+  versioned claim-bound command-proof artifact. Every artifact in the batch
+  must match the explicit active claim, exact actor, generation, task/PRD
+  revision, repository and canonical cwd, and one exact `--commands` value.
+  Validation is all-or-nothing before evidence is recorded.
 - `--pr-url TEXT` *(optional)* — pull request URL.
 - `--commit-sha TEXT` *(optional)* — commit SHA associated with this
   submission.
@@ -1067,6 +1073,12 @@ satisfies the task's `required_evidence`.
   summary may report INCOMPLETE without changing the exit code (gate
   feedback is informational; the human reviewer decides at `apply` time).
 - `1` — no active claim found for `TASK_ID` (run `claim` first).
+
+With `--json`, additive proof receipts are returned as
+`claim_bound_command_proofs` and `legacy_hook_proofs`. Missing typed command
+requirements are listed in `missing_claim_bound_proofs`; descriptive legacy
+gaps remain separate in `missing_legacy_evidence` while the historical
+`evidence_gate` envelope is preserved.
 
 **Example:**
 
@@ -1090,8 +1102,8 @@ anvil submit T002 \
 
 **See also:** [`anvil claim`](#claim) for the prior step;
 [`anvil apply`](#apply) for human review;
-[`docs/evidence-buffer.md`](evidence-buffer.md) for the hook-captured
-evidence buffer that feeds `--output-file`.
+[`docs/evidence-buffer.md`](evidence-buffer.md) for the hook-captured evidence
+buffer, descriptive `--output-file` behavior, and claim-bound proof import.
 
 ### `anvil apply` { #apply }
 
@@ -1499,7 +1511,7 @@ anvil hook capture-evidence \
 ```
 
 **See also:** [`docs/evidence-buffer.md`](evidence-buffer.md) for the buffer
-format and how `submit --output-file` consumes it;
+format, descriptive output attachment, and claim-bound proof import;
 `hooks/capture-evidence.sh`.
 
 ---

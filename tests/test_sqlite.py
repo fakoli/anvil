@@ -13,6 +13,7 @@ Coverage targets:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -36,7 +37,11 @@ from anvil.state.backend import (
 )
 from anvil.state.hashing import canonical_json_bytes, domain_separated_sha256
 from anvil.state.models import ClaimStatus, Event, EventDraft
-from anvil.state.payloads import PrdParsedPayload, ProgressAttestedPayload
+from anvil.state.payloads import (
+    EvidenceSubmittedPayload,
+    PrdParsedPayload,
+    ProgressAttestedPayload,
+)
 from anvil.state.schema import DDL, SCHEMA_VERSION
 from anvil.state.sqlite import (
     _FLOCK_BACKOFF_CAP_S,
@@ -1204,6 +1209,7 @@ def _make_task_payload(
     task_type: str | None = None,
     acceptance_criteria: list[str] | None = None,
     verification_commands: list[str] | None = None,
+    verification_required_proofs: list[dict[str, Any]] | None = None,
     likely_files: list[str] | None = None,
     now: datetime = _T0,
 ) -> dict[str, Any]:
@@ -1233,6 +1239,8 @@ def _make_task_payload(
     # (a payload that predates the field) is also exercised by callers.
     if task_type is not None:
         payload["task_type"] = task_type
+    if verification_required_proofs is not None:
+        payload["verification"]["required_proofs"] = verification_required_proofs
     return payload
 
 
@@ -3291,7 +3299,88 @@ def _make_progress_attested_payload(
 _PROGRESS_DIGEST = _make_progress_attested_payload()["semantic_digest"]
 
 
-def _setup_claimable_task(b: SqliteBackend, task_id: str = "T001") -> None:
+def _make_claim_command_proof(
+    *,
+    generation: int = 1,
+    command: str = "pytest tests/ -v",
+    output: bytes = b"5 passed\n",
+    cwd_relative: str = ".",
+    started_at: datetime = _T0 + timedelta(minutes=10),
+    ended_at: datetime = _T0 + timedelta(minutes=11),
+    digest: str | None = None,
+) -> dict[str, Any]:
+    command_base64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
+    output_base64 = base64.b64encode(output).decode("ascii")
+    output_sha256 = hashlib.sha256(output).hexdigest()
+    cwd_identity = domain_separated_sha256(
+        b"anvil.command-cwd.v1\0",
+        {"repository_id": "e" * 64, "cwd_relative": cwd_relative},
+    )
+    core = {
+        "schema_version": 1,
+        "project_id": "proj-1",
+        "claim_id": "C001",
+        "generation": generation,
+        "claimed_by": "agent-alpha",
+        "task_id": "T001",
+        "task_revision": "f" * 64,
+        "prd_id": "default",
+        "prd_revision": 1,
+        "repository_id": "e" * 64,
+        "claim_start_sha": "a" * 40,
+        "cwd_relative": cwd_relative,
+        "cwd_identity": cwd_identity,
+        "command_base64": command_base64,
+        "started_at": started_at.isoformat().replace("+00:00", "Z"),
+        "ended_at": ended_at.isoformat().replace("+00:00", "Z"),
+        "exit_code": 0,
+        "output_base64": output_base64,
+        "output_sha256": output_sha256,
+    }
+    return {
+        "kind": "claim_command",
+        "command": command,
+        "exit_code": 0,
+        "output_sha256": output_sha256,
+        "captured_at": ended_at.isoformat().replace("+00:00", "Z"),
+        "semantic_digest": digest
+        or domain_separated_sha256(b"anvil.command-proof.v1\0", core),
+        "trust_mode": "claim_owner_self_attested",
+        "issuer_id": None,
+        "evidence_core": core,
+        "issuer": None,
+    }
+
+
+def _configure_claim_command_proof_issuer(
+    proof: dict[str, Any], private_key: Ed25519PrivateKey
+) -> tuple[str, str]:
+    public_key = signing.public_key_to_hex(private_key.public_key())
+    signer_id = signing.fingerprint(public_key)
+    proof.update(
+        {
+            "trust_mode": "configured_issuer_verified",
+            "issuer_id": signer_id,
+            "issuer": {
+                "algorithm": "ed25519",
+                "signer_id": signer_id,
+                "public_key": public_key,
+                "signature": signing.sign(
+                    private_key,
+                    canonical_json_bytes(proof["evidence_core"]),
+                ),
+            },
+        }
+    )
+    return public_key, signer_id
+
+
+def _setup_claimable_task(
+    b: SqliteBackend,
+    task_id: str = "T001",
+    *,
+    verification_required_proofs: list[dict[str, Any]] | None = None,
+) -> None:
     """Apply the minimal event chain to produce a 'ready' task."""
     _setup_project(b)
     b.append(_make_event(
@@ -3330,7 +3419,10 @@ def _setup_claimable_task(b: SqliteBackend, task_id: str = "T001") -> None:
     ))
     b.append(_make_event(
         "task.created",
-        _make_task_payload(task_id=task_id),
+        _make_task_payload(
+            task_id=task_id,
+            verification_required_proofs=verification_required_proofs,
+        ),
         event_id="E000006", target_kind="task", target_id=task_id,
     ))
     # proposed → drafted → reviewed → ready
@@ -13456,6 +13548,185 @@ class TestClaimProgressAttestationState:
             conn.execute("COMMIT")
             assert b.get_claim("C001") is not None
             assert b.get_claim("C999") is None
+        finally:
+            b.close()
+
+
+class TestClaimCommandProofState:
+    def _claim(self, backend: SqliteBackend) -> None:
+        _setup_claimable_task(
+            backend,
+            verification_required_proofs=[
+                {
+                    "kind": "command",
+                    "command": "pytest tests/ -v",
+                    "passing_exit_codes": [0],
+                    "label": "tests pass",
+                }
+            ],
+        )
+        backend.append(
+            _make_event(
+                "claim.created",
+                _make_attestable_claim_payload(),
+                target_kind="claim",
+                target_id="C001",
+            )
+        )
+
+    def _submit(
+        self, backend: SqliteBackend, proofs: list[dict[str, Any]]
+    ) -> Event:
+        payload = _make_evidence_payload()
+        payload["proofs"] = proofs
+        payload["commands_run"] = [proof["command"] for proof in proofs]
+        event = backend.append(
+            _make_event(
+                "evidence.submitted",
+                payload,
+                target_kind="task",
+                target_id="T001",
+                actor="agent-alpha",
+                now=_T0 + timedelta(minutes=12),
+            )
+        )
+        assert event is not None
+        return event
+
+    def test_claim_bound_command_batch_is_persisted_and_replays(
+        self, tmp_path: Path
+    ) -> None:
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            self._submit(b, [proof])
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            assert len(evidence.proofs) == 1
+            assert evidence.proofs[0].kind == "claim_command"
+            assert evidence.proofs[0].semantic_digest == proof["semantic_digest"]  # type: ignore[union-attr]
+            original = evidence.model_dump(mode="json")
+            assert b.get_claim("C001").status is ClaimStatus.released  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+        replay = SqliteBackend(
+            db_path=db_path,
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        replay.initialize()
+        try:
+            replay.replay_from_empty(events_path)
+            rebuilt = replay.get_latest_evidence("T001")
+            assert rebuilt is not None
+            assert rebuilt.model_dump(mode="json") == original
+        finally:
+            replay.close()
+
+    def test_payload_requires_one_declared_command_per_imported_proof(self) -> None:
+        payload = _make_evidence_payload()
+        payload["proofs"] = [
+            _make_claim_command_proof(),
+            _make_claim_command_proof(output=b"6 passed\n"),
+        ]
+        with pytest.raises(ValueError, match="one exact commands_run entry"):
+            EvidenceSubmittedPayload.model_validate(payload)
+
+    def test_payload_rejects_timestamp_semantic_alias(self) -> None:
+        payload = _make_evidence_payload()
+        proof = _make_claim_command_proof()
+        proof["evidence_core"]["started_at"] = (_T0 + timedelta(minutes=10)).isoformat()
+        payload["proofs"] = [proof]
+        with pytest.raises(ValueError, match="canonical UTC spelling"):
+            EvidenceSubmittedPayload.model_validate(payload)
+
+    def test_configured_issuer_is_rechecked_and_persisted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            public_key, signer_id = _configure_claim_command_proof_issuer(
+                proof, Ed25519PrivateKey.generate()
+            )
+            trust_path = tmp_path / "trust.txt"
+            trust_path.write_text(public_key + "\n", encoding="utf-8")
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(trust_path))
+            self._submit(b, [proof])
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            stored = evidence.proofs[0]
+            assert stored.kind == "claim_command"
+            assert stored.trust_mode == "configured_issuer_verified"  # type: ignore[union-attr]
+            assert stored.issuer_id == signer_id  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+    def test_replay_writer_rejects_valid_but_unconfigured_issuer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof()
+            _configure_claim_command_proof_issuer(
+                proof, Ed25519PrivateKey.generate()
+            )
+            monkeypatch.setenv("ANVIL_TRUST_LIST", str(tmp_path / "empty-trust.txt"))
+            raw = _make_evidence_payload()
+            raw["proofs"] = [proof]
+            payload = EvidenceSubmittedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999994",
+                timestamp=_T0 + timedelta(minutes=12),
+                actor="agent-alpha",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EventRejected, match="replay claim-bound command proof"):
+                b._write_evidence_submitted(conn, payload, replayed)
+            conn.execute("ROLLBACK")
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize(
+        ("proof", "match"),
+        [
+            (_make_claim_command_proof(generation=2), "exact active claim generation"),
+            (_make_claim_command_proof(cwd_relative="NUL"), "durable proof material"),
+            (_make_claim_command_proof(command="pytest -q"), "durable proof material"),
+            (
+                _make_claim_command_proof(digest="0" * 64),
+                "durable proof material",
+            ),
+        ],
+    )
+    def test_invalid_batch_rejects_atomically(
+        self, tmp_path: Path, proof: dict[str, Any], match: str
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match=match):
+                self._submit(b, [_make_claim_command_proof(), proof])
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+            assert b.get_task("T001").status.value == "claimed"  # type: ignore[union-attr]
         finally:
             b.close()
 

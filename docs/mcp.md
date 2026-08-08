@@ -698,12 +698,27 @@ Submits completion evidence for a task. Requires an active claim. Emits an
 | `pr_url`         | `string \| null`        | no       | `null`  |
 | `commit_sha`     | `string \| null`        | no       | `null`  |
 | `category`       | `string \| null`        | no       | `null`  |
+| `command_proof_artifacts_base64` | `list[string] \| null` | no | `null` |
+| `cwd`            | `string \| null`        | no       | `null`  |
 
 `category` (evidence contracts, issue #153) is the evidence role —
 `completion` (the default when omitted), `diagnostic`, `blocked`,
 `advisory`, or `promotion_quality`. `diagnostic`/`advisory` evidence can
 never satisfy a completion claim; an invalid value raises `ToolError`
 (`invalid_category`). Mirrors `anvil submit --category`.
+
+`command_proof_artifacts_base64` contains canonical base64 encodings of
+canonical JSON claim-bound command-proof envelopes. The entire batch is loaded
+and verified before the single evidence event is appended. Every artifact must
+match the explicit claim owner, claim ID and generation, task/PRD revision,
+repository and canonical `cwd`, and one exact `commands_run` value. One invalid,
+duplicate, stale, oversized, nonzero, or mismatched artifact refuses the whole
+submission. These artifacts attest reported bytes; Anvil does not execute the
+command. Unsigned artifacts are reported as `claim_owner_self_attested`; only a
+valid configured issuer is reported as `configured_issuer_verified`.
+
+`output_excerpt` is descriptive only. Text such as `exit: 0` in that field does
+not create a typed command proof or satisfy `required_proofs`.
 
 **Output**
 
@@ -715,12 +730,31 @@ never satisfy a completion claim; an invalid value raises `ToolError`
     "id": "T014",
     "title": "Implement the converter",
     "priority": "high"
-  }
+  },
+  "claim_bound_command_proofs": [
+    {
+      "digest": "…",
+      "generation": 1,
+      "trust_mode": "claim_owner_self_attested",
+      "issuer_id": null,
+      "command": "pytest -q",
+      "output_sha256": "…"
+    }
+  ],
+  "legacy_hook_proofs": [],
+  "missing_claim_bound_proofs": [],
+  "missing_legacy_evidence": []
 }
 ```
 
 `evidence_id` is an `"EV"` prefix followed by 8 uppercase hex characters, generated at
 call time.
+
+The four proof fields are additive receipts. `claim_bound_command_proofs`
+describes validated imports without echoing their bounded output bytes;
+`legacy_hook_proofs` separately identifies the compatibility hook path;
+`missing_claim_bound_proofs` and `missing_legacy_evidence` keep typed proof gaps
+distinct from descriptive evidence gaps.
 
 `next_ready` names the next claimable task now that this one has left the active set —
 respecting dependencies, active claims, conflict groups, and file-conflict exclusions
@@ -1423,7 +1457,7 @@ None.
 
 ```json
 {
-  "api_version": "6",
+  "api_version": "7",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",
