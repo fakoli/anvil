@@ -6,8 +6,16 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-08-08
+
 ### Added
 
+- **Explicit lifecycle actor continuity (#180).** Claim, renewal, release,
+  progress, submission, bundle, hook, work-packet, and MCP surfaces now carry
+  one canonical actor identity with shell-safe continuation data. New actor
+  identifiers are NFC-normalized and bounded, exact legacy owners remain
+  addressable, normalized aliases cannot collide, and the local actor field is
+  clearly identified as audit attribution rather than authentication.
 - **Claim-bound external progress attestations (#180).** Standalone Git-backed
   claims now persist a generation and immutable repository/task/PRD context.
   CLI and MCP callers can submit bounded canonical commit or file attestations;

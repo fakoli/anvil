@@ -13308,8 +13308,9 @@ class TestClaimProgressAttestationState:
             )
             conn = b._require_conn()
             conn.execute("BEGIN IMMEDIATE")
-            b._write_progress_attested(conn, payload, replayed)
-            conn.execute("COMMIT")
+            with pytest.raises(EventRejected, match="replay evidence digest"):
+                b._write_progress_attested(conn, payload, replayed)
+            conn.execute("ROLLBACK")
             assert b.get_progress_attestation("0" * 64) is None
             assert b.get_pending_progress_attestation("C001", 1) is None
         finally:
@@ -13354,8 +13355,9 @@ class TestClaimProgressAttestationState:
             )
             conn = b._require_conn()
             conn.execute("BEGIN IMMEDIATE")
-            b._write_progress_attested(conn, payload, replayed)
-            conn.execute("COMMIT")
+            with pytest.raises(EventRejected, match="configured issuer trust"):
+                b._write_progress_attested(conn, payload, replayed)
+            conn.execute("ROLLBACK")
             assert b.get_progress_attestation(_PROGRESS_DIGEST) is None
             assert b.get_pending_progress_attestation("C001", 1) is None
         finally:

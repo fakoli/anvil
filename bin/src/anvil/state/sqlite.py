@@ -5097,6 +5097,13 @@ class SqliteBackend:
         event: Event,
     ) -> None:
         """Project an attestation once; quarantine divergent replay envelopes."""
+        if not self._progress_attestation_proof_is_valid(
+            payload, require_configured_trust=True
+        ):
+            raise EventRejected(
+                "progress.attested: replay evidence digest, signature, or "
+                "configured issuer trust is invalid."
+            )
         existing = conn.execute(
             "SELECT accepted_event_id FROM claim_progress_attestations "
             "WHERE semantic_digest = ?",

@@ -140,7 +140,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.3 (schema 16)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 17)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
