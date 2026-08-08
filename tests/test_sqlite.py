@@ -14420,6 +14420,60 @@ def _dependency_batch_draft(edits: list[dict[str, Any]]) -> EventDraft:
     )
 
 
+def _exact_e005106_event() -> tuple[Event, str]:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "replay"
+        / "e005106-task-created.json"
+    )
+    fixture_text = fixture_path.read_text(encoding="utf-8").strip()
+    return Event.model_validate(json.loads(fixture_text)), fixture_text
+
+
+def _setup_exact_e005106_baseline(
+    backend: SqliteBackend,
+    exact_event: Event,
+) -> None:
+    _setup_project(backend)
+    backend.append(
+        _make_event(
+            "prd.parsed",
+            {
+                **_make_prd_parsed_payload(),
+                "prd_id": "autonomous-lifecycle-hardening",
+            },
+            target_kind="prd",
+            target_id="autonomous-lifecycle-hardening",
+        )
+    )
+    backend.append(
+        _make_event(
+            "feature.created",
+            {
+                **_make_feature_payload(
+                    feat_id="autonomous-lifecycle-hardening:F002"
+                ),
+                "prd_id": "autonomous-lifecycle-hardening",
+            },
+            target_kind="feature",
+            target_id="autonomous-lifecycle-hardening:F002",
+        )
+    )
+    baseline_payload = dict(exact_event.payload_json)
+    baseline_payload["prd_id"] = "autonomous-lifecycle-hardening"
+    baseline_payload["dependencies"] = ["autonomous-lifecycle-hardening:T008.1"]
+    baseline_payload["updated_at"] = baseline_payload["created_at"]
+    backend.append(
+        _make_event(
+            "task.created",
+            baseline_payload,
+            target_kind="task",
+            target_id="autonomous-lifecycle-hardening:T009",
+        )
+    )
+
+
 class TestDepsNamedBatchAtomicReplayCycleRace:
     def test_breaks_cycle_and_adds_cross_prd_gate_atomically(
         self, tmp_path: Path
@@ -14686,15 +14740,7 @@ class TestDepsNamedBatchAtomicReplayCycleRace:
     def test_exact_e005106_legacy_missing_prd_dependency_upsert_replays(
         self, tmp_path: Path
     ) -> None:
-        fixture_path = (
-            Path(__file__).parent
-            / "fixtures"
-            / "replay"
-            / "e005106-task-created.json"
-        )
-        fixture_text = fixture_path.read_text(encoding="utf-8").strip()
-        fixture_raw = json.loads(fixture_text)
-        exact_event = Event.model_validate(fixture_raw)
+        exact_event, fixture_text = _exact_e005106_event()
         assert exact_event.id == "E005106"
         assert exact_event.target_id == "autonomous-lifecycle-hardening:T009"
         assert exact_event.payload_json["feature_id"] == (
@@ -14711,45 +14757,7 @@ class TestDepsNamedBatchAtomicReplayCycleRace:
         events_path = state_dir / "events.jsonl"
         backend = _make_backend(state_dir)
         try:
-            _setup_project(backend)
-            backend.append(
-                _make_event(
-                    "prd.parsed",
-                    {
-                        **_make_prd_parsed_payload(),
-                        "prd_id": "autonomous-lifecycle-hardening",
-                    },
-                    target_kind="prd",
-                    target_id="autonomous-lifecycle-hardening",
-                )
-            )
-            backend.append(
-                _make_event(
-                    "feature.created",
-                    {
-                        **_make_feature_payload(
-                            feat_id="autonomous-lifecycle-hardening:F002"
-                        ),
-                        "prd_id": "autonomous-lifecycle-hardening",
-                    },
-                    target_kind="feature",
-                    target_id="autonomous-lifecycle-hardening:F002",
-                )
-            )
-            baseline_payload = dict(exact_event.payload_json)
-            baseline_payload["prd_id"] = "autonomous-lifecycle-hardening"
-            baseline_payload["dependencies"] = [
-                "autonomous-lifecycle-hardening:T008.1"
-            ]
-            baseline_payload["updated_at"] = baseline_payload["created_at"]
-            backend.append(
-                _make_event(
-                    "task.created",
-                    baseline_payload,
-                    target_kind="task",
-                    target_id="autonomous-lifecycle-hardening:T009",
-                )
-            )
+            _setup_exact_e005106_baseline(backend, exact_event)
 
             # Reproduce a projection exactly one event behind E005106 without
             # fabricating 5,100 unrelated events. The catch-up cursor is the
@@ -14816,3 +14824,38 @@ class TestDepsNamedBatchAtomicReplayCycleRace:
             )
         finally:
             replayed.close()
+
+    def test_exact_e005106_shape_is_replay_only_on_live_append(
+        self, tmp_path: Path
+    ) -> None:
+        exact_event, _ = _exact_e005106_event()
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_exact_e005106_baseline(backend, exact_event)
+            events_path = tmp_path / "events.jsonl"
+            before_log = events_path.read_bytes()
+            before_task = backend.get_task(
+                "autonomous-lifecycle-hardening:T009"
+            )
+            assert before_task is not None
+            before_projection = before_task.model_dump(mode="json")
+            live_draft = EventDraft(
+                timestamp=exact_event.timestamp,
+                actor=exact_event.actor,
+                action=exact_event.action,
+                target_kind=exact_event.target_kind,
+                target_id=exact_event.target_id,
+                payload_json=exact_event.payload_json,
+            )
+
+            with pytest.raises(EventRejected, match="code=live_omitted_prd"):
+                backend.append(live_draft)
+
+            assert events_path.read_bytes() == before_log
+            after_task = backend.get_task(
+                "autonomous-lifecycle-hardening:T009"
+            )
+            assert after_task is not None
+            assert after_task.model_dump(mode="json") == before_projection
+        finally:
+            backend.close()

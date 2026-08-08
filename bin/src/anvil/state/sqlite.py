@@ -169,6 +169,7 @@ _OWNERSHIP_RECOVERY_REFUSAL_MESSAGES = {
     "stored_identity_mismatch": "stored task identity does not match owner",
     "invalid_task_payload": "recoverable Task payload is invalid",
     "not_dependency_only": "event is not a dependency-only upsert",
+    "live_omitted_prd": "legacy omitted prd_id is replay-only",
 }
 
 
@@ -8745,6 +8746,17 @@ class SqliteBackend:
                 ) from None
             raise
         task_dict = self._normalize_task_payload(conn, payload_data, event)
+        recovery_owner = self._task_created_recovery_owner(conn, event)
+        if recovery_owner is not None:
+            # The normalization above deliberately preserves the exact legacy
+            # allowlist diagnostics. An otherwise valid omitted-PRD recovery
+            # shape is still replay/catch-up only and must never enter the live
+            # log through append().
+            raise self._task_created_recovery_refusal(
+                event,
+                owner_prd_id=recovery_owner,
+                code="live_omitted_prd",
+            )
         try:
             Task.model_validate(task_dict)
         except Exception as exc:
