@@ -214,7 +214,7 @@ def render_bundle_packet(
         "",
         f"**PRD:** {bundle.prd_id}",
         f"**Status:** {bundle.status.value}",
-        f"**Coordinator:** {bundle.coordinator}",
+        f"**Coordinator:** {safe_actor_for_human(bundle.coordinator)}",
         f"**Branch:** {bundle.branch or '—'}",
         f"**Worktree:** {bundle.worktree_path or '—'}",
         "",

@@ -16,7 +16,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
     resolve_actor,
 )
-from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
+from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
 
 bundle_app = typer.Typer(help="Create, inspect, review, and deliver execution bundles.")
 
@@ -190,7 +190,7 @@ def claim_bundle(
     cwd: Path | None = typer.Option(None, "--cwd", hidden=True),  # noqa: B008
 ) -> None:
     """Claim a bundle without Git side effects (use top-level claim for Git)."""
-    from anvil.bundles.manager import BundleError
+    from anvil.bundles.manager import BundleActorMismatch, BundleError
 
     command = "bundle claim"
     state_dir, backend = _state(cwd, command, json_output)
@@ -222,6 +222,15 @@ def claim_bundle(
         result = _manager(
             backend, state_dir, resolve_actor(actor), cwd=cwd
         ).claim(bundle_id)
+    except BundleActorMismatch as exc:
+        if json_output:
+            fail_with(
+                command,
+                str(exc),
+                code="actor_mismatch",
+                extra={"owner": exc.owner, "resolved_actor": exc.actual},
+            )
+        _fail(command, str(exc), json_output)
     except BundleError as exc:
         _fail(command, str(exc), json_output)
     finally:

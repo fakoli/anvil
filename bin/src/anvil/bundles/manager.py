@@ -32,6 +32,18 @@ class BundleError(Exception):
     """A coordinator bundle operation failed its gate."""
 
 
+class BundleActorMismatch(BundleError):
+    """Exact coordinator mismatch whose identifiers require structured output."""
+
+    def __init__(self, *, bundle_id: str, owner: str, actual: str) -> None:
+        self.bundle_id = bundle_id
+        self.owner = owner
+        self.actual = actual
+        super().__init__(
+            f"Bundle '{bundle_id}' belongs to a different persisted coordinator."
+        )
+
+
 @dataclass(frozen=True)
 class BundleClaimResult:
     bundle: ExecutionBundle
@@ -129,9 +141,10 @@ class BundleManager:
         if bundle is None:
             raise BundleError(f"Bundle '{bundle_id}' not found.")
         if bundle.coordinator != self._actor:
-            raise BundleError(
-                f"Bundle '{bundle_id}' coordinator is '{bundle.coordinator}', "
-                f"not '{self._actor}'."
+            raise BundleActorMismatch(
+                bundle_id=bundle_id,
+                owner=bundle.coordinator,
+                actual=self._actor,
             )
         if bundle.status is not BundleStatus.planned:
             raise BundleError(

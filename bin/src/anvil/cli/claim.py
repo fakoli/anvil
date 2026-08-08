@@ -181,7 +181,11 @@ def claim(
         )
 
         if bundle_mode:
-            from anvil.bundles.manager import BundleError, BundleManager
+            from anvil.bundles.manager import (
+                BundleActorMismatch,
+                BundleError,
+                BundleManager,
+            )
 
             execution_bundle = backend.get_bundle(task_id)
             if execution_bundle is None:
@@ -198,6 +202,16 @@ def claim(
             )
             try:
                 bundle_manager.preflight(task_id)
+            except BundleActorMismatch as exc:
+                if json_output:
+                    fail_with(
+                        "claim",
+                        str(exc),
+                        code="actor_mismatch",
+                        extra={"owner": exc.owner, "resolved_actor": exc.actual},
+                    )
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             except BundleError as exc:
                 if json_output:
                     fail("claim", str(exc), code="bundle_claim_error")
