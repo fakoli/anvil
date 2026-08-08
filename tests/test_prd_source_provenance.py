@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import pickle
 import sqlite3
@@ -104,8 +105,8 @@ def _append_available_projection_parse(
     source_bytes: bytes,
     *,
     prd_id: str = "release",
-) -> None:
-    backend.append(
+) -> str:
+    event = backend.append(
         _projection_event(
             "prd.parsed",
             {
@@ -121,6 +122,24 @@ def _append_available_projection_parse(
             target_id=prd_id,
         )
     )
+    return event.id
+
+
+def _assert_projected_source(
+    prd: PRD | None,
+    source_bytes: bytes,
+    *,
+    revision: int,
+) -> None:
+    assert prd is not None
+    assert prd.revision == revision
+    assert prd.source_bytes == source_bytes
+    assert prd.source_sha256 == hashlib.sha256(source_bytes).hexdigest()
+    assert prd.source_size_bytes == len(source_bytes)
+    assert prd.source_encoding == "utf-8"
+    assert prd.source_revision == revision
+    assert prd.provenance_state == "available"
+    assert prd.content_available is True
 
 
 @pytest.mark.parametrize(
@@ -1567,3 +1586,194 @@ def test_prd_parse_relative_file_uses_explicit_cwd(
         prd_module.prd_parse(file=Path("relative.md"), prd=None, cwd=tmp_path)
 
     assert observed == [tmp_path.resolve() / "relative.md"]
+
+
+def test_events_only_replay_reconstructs_each_byte_distinct_revision(
+    tmp_path: Path,
+) -> None:
+    revision_one = "# Release\n\nNFC é\n".encode()
+    revision_two = "# Release\r\n\r\nNFD e\u0301\r\n".encode()
+    live_dir = tmp_path / "live"
+    live = _projection_backend(live_dir)
+    try:
+        _setup_projection_project(live)
+        parsed_event_id = _append_available_projection_parse(live, revision_one)
+        revised_event = live.append(
+            _projection_event(
+                "prd.revised",
+                {
+                    "project_id": "project",
+                    "prd_id": "release",
+                    "revision": 2,
+                    "expected_status": "draft",
+                    "status": "draft",
+                    "title": "Release revised",
+                    **_available_source_fields(revision_two, 2),
+                },
+                target_kind="prd",
+                target_id="release",
+                timestamp=_T0 + timedelta(minutes=1),
+            )
+        )
+        _assert_projected_source(live.get_prd("release"), revision_two, revision=2)
+        assert hashlib.sha256(revision_one).digest() != hashlib.sha256(
+            revision_two
+        ).digest()
+    finally:
+        live.close()
+
+    source_events = live_dir / "events.jsonl"
+    at_revision_one = _projection_backend(tmp_path / "revision-one")
+    at_revision_two = _projection_backend(tmp_path / "revision-two")
+    try:
+        at_revision_one.replay_to_event_id(str(source_events), parsed_event_id)
+        _assert_projected_source(
+            at_revision_one.get_prd("release"), revision_one, revision=1
+        )
+
+        at_revision_two.replay_to_event_id(str(source_events), revised_event.id)
+        _assert_projected_source(
+            at_revision_two.get_prd("release"), revision_two, revision=2
+        )
+    finally:
+        at_revision_one.close()
+        at_revision_two.close()
+
+
+def test_custom_file_replay_survives_source_change_and_disappearance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANVIL_STATE_LAYOUT", "local")
+    state_dir = tmp_path / ".anvil"
+    live = _projection_backend(state_dir)
+    try:
+        _setup_projection_project(live)
+    finally:
+        live.close()
+
+    original = b"""# Project: Custom source
+
+## Summary
+
+Replay the captured source.
+
+## Goals
+
+- Preserve exact bytes.
+
+## Requirements
+
+- R001: Replay without the source file.
+"""
+    custom_source = tmp_path / "outside-name.md"
+    custom_source.write_bytes(original)
+    prd_module.prd_parse(
+        file=custom_source,
+        prd="release",
+        json_output=False,
+        cwd=tmp_path,
+    )
+    custom_source.write_bytes(b"# changed after parse\n")
+
+    changed_replay = _projection_backend(tmp_path / "custom-replay-changed")
+    try:
+        changed_replay.replay_from_empty(str(state_dir / "events.jsonl"))
+        _assert_projected_source(
+            changed_replay.get_prd("release"), original, revision=1
+        )
+    finally:
+        changed_replay.close()
+
+    custom_source.unlink()
+    replay = _projection_backend(tmp_path / "custom-replay-disappeared")
+    try:
+        replay.replay_from_empty(str(state_dir / "events.jsonl"))
+        _assert_projected_source(replay.get_prd("release"), original, revision=1)
+    finally:
+        replay.close()
+
+
+def test_legacy_replay_marks_source_content_unavailable_without_digest(
+    tmp_path: Path,
+) -> None:
+    live_dir = tmp_path / "legacy-live"
+    live = _projection_backend(live_dir)
+    try:
+        _setup_projection_project(live)
+        live.append(
+            _projection_event(
+                "prd.parsed",
+                {
+                    "project_id": "project",
+                    "prd_id": "legacy",
+                    "expected_absent": True,
+                    "title": "Legacy",
+                    "is_default": False,
+                    "status": "draft",
+                },
+                target_kind="prd",
+                target_id="legacy",
+            )
+        )
+    finally:
+        live.close()
+
+    replay = _projection_backend(tmp_path / "legacy-replay")
+    try:
+        replay.replay_from_empty(str(live_dir / "events.jsonl"))
+        prd = replay.get_prd("legacy")
+        assert prd is not None
+        assert prd.provenance_state == "legacy_unbound"
+        assert prd.content_available is False
+        assert prd.source_bytes is None
+        assert prd.source_sha256 is None
+        assert prd.source_size_bytes is None
+        assert prd.source_encoding is None
+        assert prd.source_revision is None
+    finally:
+        replay.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "secret"),
+    [
+        ("source_sha256", "0" * 64, None),
+        ("source_text", "PRIVATE-SURROGATE-\ud800", "PRIVATE-SURROGATE"),
+    ],
+    ids=["digest-mismatch", "non-utf8-encodable-source"],
+)
+def test_corrupt_provenance_event_replay_fails_closed_without_projection(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    secret: str | None,
+) -> None:
+    live_dir = tmp_path / "corrupt-live"
+    live = _projection_backend(live_dir)
+    try:
+        _setup_projection_project(live)
+        _append_available_projection_parse(live, b"# Valid source\n")
+    finally:
+        live.close()
+
+    raw_events = [
+        json.loads(line)
+        for line in (live_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    raw_events[-1]["payload_json"][field] = value
+    corrupt_events = tmp_path / f"corrupt-{field}.jsonl"
+    corrupt_events.write_text(
+        "".join(f"{json.dumps(event, ensure_ascii=True)}\n" for event in raw_events),
+        encoding="utf-8",
+    )
+
+    replay = _projection_backend(tmp_path / f"replay-{field}")
+    try:
+        with pytest.raises(TransactionAborted) as refusal:
+            replay.replay_from_empty(str(corrupt_events))
+        assert replay.get_prd("release") is None
+        if secret is not None:
+            assert secret not in str(refusal.value)
+    finally:
+        replay.close()
