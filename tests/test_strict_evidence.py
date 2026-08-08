@@ -617,7 +617,7 @@ class TestTypedProofGateEndToEnd:
         assert result.exit_code == 0, result.output
         data = _json.loads(result.stdout)["data"]
         assert data["missing_claim_bound_proofs"] == []
-        assert data["legacy_hook_proofs"] == []
+        assert data["hook_command_proofs"] == []
         receipt = data["claim_bound_command_proofs"][0]
         assert receipt["command"] == _PLANNED_VERIFY_CMD
         assert receipt["trust_mode"] == "claim_owner_self_attested"
@@ -844,7 +844,7 @@ class TestTypedProofGateEndToEnd:
         assert res.exit_code == 0, res.output
         data = _json.loads(res.stdout)["data"]
         assert data["claim_bound_command_proofs"] == []
-        assert data["legacy_hook_proofs"] == []
+        assert data["hook_command_proofs"] == []
         assert data["missing_claim_bound_proofs"]
         assert data["missing_legacy_evidence"] == []
 
@@ -905,6 +905,98 @@ class TestTypedProofGateEndToEnd:
         )
         assert res.exit_code == 0, res.output
         assert _status(tmp_path, task_id) == "done"
+
+    def test_non_git_hook_capture_is_claim_bound_and_strict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        task_id = _planned(tmp_path)
+        claim_result = _invoke(
+            tmp_path,
+            ["claim", task_id, "--actor", "agent-test", "--json"],
+        )
+        assert claim_result.exit_code == 0, claim_result.output
+        claim = _json.loads(claim_result.stdout)["data"]["claim"]
+        assert claim["attestation_context"] is None
+        monkeypatch.setenv("ANVIL_CLAIM_ID", claim["id"])
+        stdout_file = tmp_path / "stdout.txt"
+        stderr_file = tmp_path / "stderr.txt"
+        stdout_file.write_text("1 passed\n", encoding="utf-8")
+        stderr_file.write_text("", encoding="utf-8")
+        capture = _invoke(
+            tmp_path,
+            [
+                "hook",
+                "capture-evidence",
+                "--command",
+                _PLANNED_VERIFY_CMD,
+                "--exit-code",
+                "0",
+                "--stdout-file",
+                str(stdout_file),
+                "--stderr-file",
+                str(stderr_file),
+                "--actor",
+                "agent-test",
+            ],
+        )
+        assert capture.exit_code == 0, capture.output
+
+        submit = _invoke(
+            tmp_path,
+            [
+                "submit",
+                task_id,
+                "--commands",
+                _PLANNED_VERIFY_CMD,
+                "--files-changed",
+                "src/app/converter.py",
+                "--actor",
+                "agent-test",
+                "--json",
+            ],
+        )
+        assert submit.exit_code == 0, submit.output
+        receipt = _json.loads(submit.stdout)["data"]["hook_command_proofs"][0]
+        assert receipt == {
+            "command": _PLANNED_VERIFY_CMD,
+            "exit_code": 0,
+            "output_sha256": hashlib.sha256(b"1 passed\n").hexdigest(),
+            "captured_at": receipt["captured_at"],
+            "source": "hook_claim_bound",
+            "claim_id": claim["id"],
+            "generation": claim["generation"],
+            "semantic_digest": receipt["semantic_digest"],
+            "actor": "agent-test",
+        }
+        assert len(receipt["semantic_digest"]) == 64
+        apply_result = _invoke(
+            tmp_path,
+            ["apply", task_id, "--approve", "--strict", "--reviewer", "human"],
+        )
+        assert apply_result.exit_code == 0, apply_result.output
+
+    def test_hook_buffer_reader_is_bounded_by_item_count_and_bytes(
+        self, tmp_path: Path
+    ) -> None:
+        from anvil.cli.packet_apply import _read_command_proofs
+        from anvil.state.models import MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
+
+        _init_git_repo(tmp_path)
+        task_id = _planned(tmp_path)
+        claim_result = _invoke(
+            tmp_path, ["claim", task_id, "--actor", "agent-test", "--json"]
+        )
+        claim = _json.loads(claim_result.stdout)["data"]["claim"]
+        _inject_command_proof(tmp_path, task_id, _PLANNED_VERIFY_CMD, exit_code=0)
+        buffer_file = (
+            tmp_path / ".anvil" / ".evidence-buffer" / f"{claim['id']}.json"
+        )
+        line = buffer_file.read_bytes()
+        buffer_file.write_bytes(line * 17)
+        assert len(_read_command_proofs(tmp_path / ".anvil", claim["id"])) == 16
+
+        buffer_file.write_bytes(b"x" * (MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES + 1))
+        assert _read_command_proofs(tmp_path / ".anvil", claim["id"]) == []
 
     def test_hook_capture_attribution_strict_refuses_nonzero_exit(
         self, tmp_path: Path

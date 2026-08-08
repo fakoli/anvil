@@ -56,7 +56,7 @@ fi
 # ACTOR/EXIT_CODE/TIMESTAMP, plus a ready-to-append EVIDENCE_LINE so the
 # fallback path needs no second interpreter spawn.
 ASSIGNMENTS=$(HOOK_PAYLOAD="$PAYLOAD" python3 - <<'PYEOF' 2>/dev/null
-import os, json, datetime, shlex
+import os, json, datetime, hashlib, shlex
 
 MAX_EXCERPT = 4000
 
@@ -78,9 +78,9 @@ try:
     actor      = os.environ.get('ANVIL_ACTOR', d.get('session_id') or '')
 
     try:
-        if exit_code is None or isinstance(exit_code, bool):
+        if type(exit_code) is not int:
             raise ValueError
-        exit_code_int = int(exit_code)
+        exit_code_int = exit_code
         valid_exit_code = True
     except (ValueError, TypeError):
         exit_code_int = -1
@@ -95,6 +95,9 @@ try:
 
     stdout_ex = stdout_raw[:MAX_EXCERPT]
     stderr_ex = stderr_raw[:MAX_EXCERPT]
+    output_sha256 = hashlib.sha256(
+        (stdout_raw + stderr_raw).encode('utf-8')
+    ).hexdigest()
 
     # Pre-build the JSON evidence line so the fallback path needs no second spawn.
     record = {
@@ -104,6 +107,7 @@ try:
         'stdout_excerpt': stdout_ex,
         'stderr_excerpt': stderr_ex,
         'actor':          actor,
+        'output_sha256':  output_sha256,
         'note':           'orphan — no active claim found at capture time; --output-file can attach it only as a descriptive excerpt and cannot satisfy required_proofs; rerun under an explicit claim or import a claim-bound command-proof artifact',
     }
     evidence_line = json.dumps(record)
@@ -112,6 +116,7 @@ try:
     emit('EXIT_CODE',      str(exit_code_int))
     emit('STDOUT_EXCERPT', stdout_ex)
     emit('STDERR_EXCERPT', stderr_ex)
+    emit('OUTPUT_SHA256', output_sha256)
     emit('ACTOR',          actor)
     emit('TIMESTAMP',      ts)
     emit('IS_VERIFICATION', str(is_verification))
@@ -121,7 +126,7 @@ except Exception:
     # fires and the hook exits 0 cleanly.
     for name in ('COMMAND', 'EXIT_CODE', 'STDOUT_EXCERPT',
                  'STDERR_EXCERPT', 'ACTOR', 'TIMESTAMP', 'IS_VERIFICATION',
-                 'EVIDENCE_LINE'):
+                 'OUTPUT_SHA256', 'EVIDENCE_LINE'):
         print(f"{name}=''")
 PYEOF
 )
@@ -153,8 +158,9 @@ fi
 #     --stdout-file PATH --stderr-file PATH \
 #     --actor ACTOR
 #
-# The hook passes --stdout-file / --stderr-file (temp files) rather than
-# inlining content because excerpts can be multi-line and avoid quoting issues.
+# The hook transports only bounded excerpts through temp files and passes the
+# digest computed from the full payload separately. This avoids command-line
+# size limits without weakening the full-output hash contract.
 
 CLI="${CLAUDE_PLUGIN_ROOT:-/nonexistent}/bin/anvil"
 
@@ -171,6 +177,7 @@ if [ -x "$CLI" ]; then
       --exit-code "${EXIT_CODE:-0}" \
       --stdout-file "$STDOUT_TMP" \
       --stderr-file "$STDERR_TMP" \
+      --output-sha256 "$OUTPUT_SHA256" \
       --actor "${ACTOR:-unknown}" \
       >/dev/null 2>&1
     CLI_EXIT=$?

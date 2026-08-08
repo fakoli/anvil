@@ -2814,11 +2814,85 @@ class TestSubmitCompletionEvidence:
 
         response = _run(submit())
         assert response["missing_claim_bound_proofs"] == []
-        assert response["legacy_hook_proofs"] == []
+        assert response["hook_command_proofs"] == []
         receipt = response["claim_bound_command_proofs"][0]
         assert receipt["generation"] == 1
         assert receipt["trust_mode"] == "claim_owner_self_attested"
         assert receipt["command"] == command
+
+    def test_non_git_hook_capture_returns_claim_bound_receipt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.cli import app
+        from typer.testing import CliRunner
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        _add_prd(state_dir, status="reviewed")
+        command = "pytest -q"
+        _set_required_command_proof(state_dir, "T001", command)
+        monkeypatch.chdir(tmp_path)
+
+        async def claim_task() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "claim_task",
+                        {"task_id": "T001", "claimed_by": "agent-x"},
+                    )
+                )
+
+        claim = _run(claim_task())
+        assert claim["attestation_context"] is None
+        monkeypatch.setenv("ANVIL_CLAIM_ID", claim["id"])
+        stdout_file = tmp_path / "stdout.txt"
+        stderr_file = tmp_path / "stderr.txt"
+        stdout_file.write_text("1 passed\n", encoding="utf-8")
+        stderr_file.write_text("", encoding="utf-8")
+        capture = CliRunner().invoke(
+            app,
+            [
+                "hook",
+                "capture-evidence",
+                "--command",
+                command,
+                "--exit-code",
+                "0",
+                "--stdout-file",
+                str(stdout_file),
+                "--stderr-file",
+                str(stderr_file),
+                "--actor",
+                "agent-x",
+            ],
+            catch_exceptions=False,
+        )
+        assert capture.exit_code == 0, capture.output
+
+        async def submit() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "submit_completion_evidence",
+                        {
+                            "task_id": "T001",
+                            "actor": "agent-x",
+                            "commands_run": [command],
+                            "files_changed": ["src/foo.py"],
+                            "cwd": str(tmp_path),
+                        },
+                    )
+                )
+
+        response = _run(submit())
+        receipt = response["hook_command_proofs"][0]
+        assert receipt["source"] == "hook_claim_bound"
+        assert receipt["claim_id"] == claim["id"]
+        assert receipt["generation"] == claim["generation"]
+        assert receipt["actor"] == "agent-x"
+        assert len(receipt["semantic_digest"]) == 64
+        assert response["missing_claim_bound_proofs"] == []
 
     def test_happy_path_transitions_task_to_needs_review(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         state_dir = _init_state_dir(tmp_path)
@@ -2842,7 +2916,7 @@ class TestSubmitCompletionEvidence:
         assert resp["evidence_id"].startswith("EV")
         assert resp["task_status"] == "needs_review"
         assert resp["claim_bound_command_proofs"] == []
-        assert resp["legacy_hook_proofs"] == []
+        assert resp["hook_command_proofs"] == []
 
     def test_error_when_no_active_claim(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Must have an active claim before submitting evidence."""

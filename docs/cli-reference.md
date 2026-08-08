@@ -1079,7 +1079,8 @@ limitations. Prints separate gate diagnostics for descriptive
 - `1` — no active claim found for `TASK_ID` (run `claim` first).
 
 With `--json`, additive proof receipts are returned as
-`claim_bound_command_proofs` and `legacy_hook_proofs`. Missing typed command
+`claim_bound_command_proofs` and `hook_command_proofs`. Hook receipts include
+the exact claim ID, generation, actor, and semantic digest. Missing typed command
 requirements are listed in `missing_claim_bound_proofs`; descriptive legacy
 gaps remain separate in `missing_legacy_evidence` while the historical
 `evidence_gate` envelope is preserved.
@@ -1488,7 +1489,9 @@ to `.anvil/.evidence-buffer/<CLAIM_ID>.json`. The process must carry the work
 packet's exact `ANVIL_CLAIM_ID` and `ANVIL_ACTOR`; the active claim owner and
 persisted session must match. Missing, stale, or mismatched context writes only
 to `.evidence-buffer/orphan.json`. Stdout/stderr excerpts are truncated to 4000
-chars each, while the digest covers full output.
+chars each, while the digest covers full output. Git claims bind their immutable
+repository context; non-Git claims bind the current task/PRD snapshot and omit
+repository identity.
 
 **Flags:**
 

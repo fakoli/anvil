@@ -147,7 +147,9 @@ Switch to the agent branch and edit the files in scope. Three hooks fire during 
 - **`capture-evidence` dispatcher (PostToolUse on Bash)** — when the command
   matches a verification pattern (`pytest`, `npm test`, `cargo test`, `ruff`,
   `mypy`, ...) and the packet's hook environment exactly matches the active
-  claim owner/session, the output is buffered with immutable claim attribution.
+  claim owner/session, the output is buffered with claim-bound attribution.
+  Git claims use immutable repository context; non-Git claims bind the current
+  task/PRD snapshot and omit repository identity.
   The legacy `capture-evidence.sh` wrapper delegates to this path. Missing or
   stale context lands in `orphan.json`; see
   [`../evidence-buffer.md`](../evidence-buffer.md).

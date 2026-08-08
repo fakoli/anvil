@@ -804,12 +804,11 @@ def _dispatch_capture_evidence(payload: dict[str, object], cwd: Path | None) -> 
     if not command or not any(pattern in command for pattern in _VERIFICATION_PATTERNS):
         return
     raw_exit_code = tool_response.get("exit_code")
-    if isinstance(raw_exit_code, bool) or raw_exit_code is None:
+    # JSON exit status is an integer contract.  In particular, do not let
+    # ``int(0.5)`` turn malformed tool output into a passing observation.
+    if type(raw_exit_code) is not int:
         return
-    try:
-        exit_code = int(raw_exit_code)
-    except (TypeError, ValueError):
-        return
+    exit_code = raw_exit_code
 
     tmp_paths: list[Path] = []
     try:
@@ -1047,6 +1046,12 @@ def hook_capture_evidence(
         "--stderr-file",
         help="Path to a temp file containing the command's stderr.",
     ),
+    output_sha256: str | None = typer.Option(  # noqa: B008
+        None,
+        "--output-sha256",
+        help="SHA-256 of the full stdout+stderr, computed before excerpting.",
+        hidden=True,
+    ),
     actor: str = typer.Option(..., "--actor", help="Session actor / session_id."),  # noqa: B008
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1087,9 +1092,12 @@ def hook_capture_evidence(
             except OSError:
                 pass
 
-        output_sha256 = hashlib.sha256(
-            (stdout_raw + stderr_raw).encode("utf-8")
-        ).hexdigest()
+        if output_sha256 is None:
+            output_sha256 = hashlib.sha256(
+                (stdout_raw + stderr_raw).encode("utf-8")
+            ).hexdigest()
+        elif re.fullmatch(r"[0-9a-f]{64}", output_sha256) is None:
+            raise ValueError("output SHA-256 must be 64 lowercase hex characters")
 
         # Build the evidence record — a CommandProof-shaped buffer line that
         # ``anvil submit`` reconciles into Evidence.proofs. ``kind`` +
@@ -1112,6 +1120,8 @@ def hook_capture_evidence(
 
         matched_claim = None
         project = None
+        task = None
+        prd = None
         try:
             from anvil.clock import SystemClock as _SystemClock
             from anvil.state.sqlite import SqliteBackend as _SqliteBackend
@@ -1139,6 +1149,13 @@ def hook_capture_evidence(
                     now,
                 )
                 project = _backend.get_project()
+                if matched_claim is not None:
+                    task = _backend.get_task(matched_claim.task_id)
+                    prd = (
+                        _backend.get_prd_for_task(task)
+                        if task is not None
+                        else None
+                    )
             finally:
                 _backend.close()
         except Exception:  # noqa: BLE001
@@ -1149,10 +1166,15 @@ def hook_capture_evidence(
             if matched_claim is not None
             else None
         )
-        if matched_claim is not None and context is not None and project is not None:
+        if (
+            matched_claim is not None
+            and project is not None
+            and (context is not None or (task is not None and prd is not None))
+        ):
             from anvil.state.models import (
                 HookCommandAttribution,
                 hook_command_semantic_digest,
+                task_snapshot_revision,
             )
 
             attribution = HookCommandAttribution(
@@ -1161,11 +1183,21 @@ def hook_capture_evidence(
                 generation=matched_claim.generation,
                 claimed_by=matched_claim.claimed_by,
                 task_id=matched_claim.task_id,
-                task_revision=context.task_revision,
-                prd_id=context.prd_id,
-                prd_revision=context.prd_revision,
-                repository_id=context.repository_id,
-                claim_start_sha=context.claim_start_sha,
+                task_revision=(
+                    context.task_revision
+                    if context is not None
+                    else task_snapshot_revision(task)
+                ),
+                prd_id=context.prd_id if context is not None else prd.id,
+                prd_revision=(
+                    context.prd_revision if context is not None else prd.revision
+                ),
+                repository_id=(
+                    context.repository_id if context is not None else None
+                ),
+                claim_start_sha=(
+                    context.claim_start_sha if context is not None else None
+                ),
             )
             semantic_digest = hook_command_semantic_digest(
                 attribution=attribution,
@@ -1189,8 +1221,8 @@ def hook_capture_evidence(
             # diagnostic actionable without implying that a descriptive
             # output excerpt is a typed command proof.
             record["note"] = (
-                "orphan — no exact active claim/owner hook pin with immutable "
-                "claim context was found at capture time; "
+                "orphan — no exact active claim/owner/session hook pin with "
+                "valid task context was found at capture time; "
                 "--output-file can attach it only as a descriptive excerpt and "
                 "cannot satisfy required_proofs; rerun under an explicit claim "
                 "or import a claim-bound command-proof artifact"

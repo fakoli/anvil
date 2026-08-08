@@ -203,7 +203,12 @@ def test_dispatch_capture_evidence_never_infers_passing_exit_code(
         "hook_capture_evidence",
         lambda **kwargs: calls.append("capture"),
     )
-    for response in ({"stdout": "ok"}, {"exit_code": "not-an-int"}):
+    for response in (
+        {"stdout": "ok"},
+        {"exit_code": "not-an-int"},
+        {"exit_code": "0"},
+        {"exit_code": 0.5},
+    ):
         payload = {
             "tool_input": {"command": "pytest -q"},
             "tool_response": response,

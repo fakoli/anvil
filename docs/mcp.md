@@ -747,7 +747,7 @@ not create a typed command proof or satisfy `required_proofs`.
       "output_sha256": "…"
     }
   ],
-  "legacy_hook_proofs": [],
+  "hook_command_proofs": [],
   "missing_claim_bound_proofs": [],
   "missing_legacy_evidence": []
 }
@@ -758,7 +758,9 @@ call time.
 
 The four proof fields are additive receipts. `claim_bound_command_proofs`
 describes validated imports without echoing their bounded output bytes;
-`legacy_hook_proofs` separately identifies the compatibility hook path;
+`hook_command_proofs` identifies exact-claim hook captures and returns their
+`claim_id`, `generation`, `actor`, `semantic_digest`, and
+`source: "hook_claim_bound"` audit metadata;
 `missing_claim_bound_proofs` and `missing_legacy_evidence` keep typed proof gaps
 distinct from descriptive evidence gaps.
 

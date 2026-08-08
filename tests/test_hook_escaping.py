@@ -15,6 +15,7 @@ event line; the shell appends it verbatim.  These tests confirm:
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -127,6 +128,40 @@ def test_capture_wrapper_requires_exit_code_and_preserves_actor_pin(
     record = json.loads(orphan.read_text(encoding="utf-8").splitlines()[-1])
     assert record["actor"] == "pinned-owner"
     assert "claim_id" not in record  # fallback is descriptive orphan data only
+
+
+def test_capture_wrapper_rejects_fractional_exit_and_hashes_full_output(
+    project_dir: Path,
+) -> None:
+    fractional = {
+        "tool_input": {"command": "pytest -q"},
+        "tool_response": {"stdout": "ok", "exit_code": 0.5},
+    }
+    assert _run_hook(
+        _CAPTURE_EVIDENCE_SH, fractional, anvil_dir=project_dir
+    ).returncode == 0
+    orphan = project_dir / ".anvil" / ".evidence-buffer" / "orphan.json"
+    assert not orphan.exists()
+
+    full_stdout = "x" * 5000
+    full_stderr = "y" * 5000
+    observed = {
+        "tool_input": {"command": "pytest -q"},
+        "tool_response": {
+            "stdout": full_stdout,
+            "stderr": full_stderr,
+            "exit_code": 0,
+        },
+    }
+    assert _run_hook(
+        _CAPTURE_EVIDENCE_SH, observed, anvil_dir=project_dir
+    ).returncode == 0
+    record = json.loads(orphan.read_text(encoding="utf-8").splitlines()[-1])
+    assert len(record["stdout_excerpt"]) == 4000
+    assert len(record["stderr_excerpt"]) == 4000
+    assert record["output_sha256"] == hashlib.sha256(
+        (full_stdout + full_stderr).encode("utf-8")
+    ).hexdigest()
 
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,7 @@ __all__ = [
     "CommandProof",
     "hook_command_semantic_digest",
     "hook_command_semantic_projection",
+    "task_snapshot_revision",
     "ClaimCommandEvidenceCore",
     "ClaimCommandIssuer",
     "ClaimCommandProof",
@@ -412,6 +413,7 @@ class ProofKind(enum.StrEnum):
 
 
 _HOOK_COMMAND_PROOF_SEMANTIC_DOMAIN = b"anvil.hook-command-proof.v1\0"
+_TASK_SNAPSHOT_REVISION_DOMAIN = b"anvil.progress-task.v1\0"
 
 
 class HookCommandAttribution(BaseModel):
@@ -433,8 +435,45 @@ class HookCommandAttribution(BaseModel):
     task_revision: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     prd_id: StrictStr = Field(min_length=1, max_length=255)
     prd_revision: StrictInt = Field(ge=1)
-    repository_id: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
-    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+    repository_id: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    claim_start_sha: StrictStr | None = Field(
+        default=None, pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    )
+
+    @model_validator(mode="after")
+    def _validate_repository_binding_pair(self) -> HookCommandAttribution:
+        if (self.repository_id is None) != (self.claim_start_sha is None):
+            raise ValueError(
+                "hook command repository identity and claim start SHA must be "
+                "supplied together"
+            )
+        return self
+
+
+def task_snapshot_revision(task_snapshot: Any) -> str:
+    """Return the deterministic semantic revision used by claim proof bindings."""
+    from anvil.state.hashing import (
+        canonical_node_budget_for_bytes,
+        domain_separated_sha256,
+    )
+
+    material = (
+        task_snapshot.model_dump(mode="json")
+        if isinstance(task_snapshot, BaseModel)
+        else dict(task_snapshot)
+        if isinstance(task_snapshot, Mapping)
+        else task_snapshot
+    )
+    max_bytes = MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES
+    return domain_separated_sha256(
+        _TASK_SNAPSHOT_REVISION_DOMAIN,
+        material,
+        max_bytes=max_bytes,
+        max_nodes=canonical_node_budget_for_bytes(max_bytes),
+        max_string_bytes=max_bytes,
+    )
 
 
 def hook_command_semantic_projection(

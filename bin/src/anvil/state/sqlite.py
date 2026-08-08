@@ -69,6 +69,9 @@ from anvil.state.hashing import (
 )
 from anvil.state.models import (
     DEFAULT_PRD_ID,
+    MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
+    MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
     PRD,
     TERMINAL_BUNDLE_STATUSES,
     BundleClaim,
@@ -99,6 +102,7 @@ from anvil.state.models import (
     Verification,
     claim_command_semantic_projection,
     hook_command_semantic_digest,
+    task_snapshot_revision,
 )
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
@@ -10287,9 +10291,8 @@ class SqliteBackend:
             return False
         return proof.semantic_digest == expected
 
-    @classmethod
     def _hook_command_proof_batch_matches_claim(
-        cls,
+        self,
         conn: sqlite3.Connection,
         payload: EvidenceSubmittedPayload,
         event: EventDraft | Event,
@@ -10313,6 +10316,26 @@ class SqliteBackend:
             )
         if not all(attributed) or any(proof.semantic_digest is None for proof in proofs):
             return False
+        if len(proofs) > MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS:
+            return False
+        try:
+            artifact_sizes = [
+                len(
+                    canonical_json_bytes(
+                        proof.model_dump(mode="json"),
+                        max_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                        max_nodes=canonical_node_budget_for_bytes(
+                            MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES
+                        ),
+                        max_string_bytes=MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES,
+                    )
+                )
+                for proof in proofs
+            ]
+        except (CanonicalJsonRefusal, ValueError):
+            return False
+        if sum(artifact_sizes) > MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES:
+            return False
         digests = [proof.semantic_digest for proof in proofs]
         if len(digests) != len(set(digests)):
             return False
@@ -10320,7 +10343,7 @@ class SqliteBackend:
             event.target_kind != "task"
             or event.target_id != payload.task_id
             or event.actor != payload.submitted_by
-            or cls._claim_replay_collision(conn, payload.claim_id)
+            or self._claim_replay_collision(conn, payload.claim_id)
         ):
             return False
         row = conn.execute(
@@ -10335,7 +10358,6 @@ class SqliteBackend:
             or row[1] != payload.submitted_by
             or row[2] != "active"
             or row[3] is not None
-            or row[5] is None
             or row[8] is not None
         ):
             return False
@@ -10347,7 +10369,11 @@ class SqliteBackend:
             return False
         try:
             generation = int(row[4])
-            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            context = (
+                ClaimAttestationContext.model_validate(json.loads(row[5]))
+                if row[5] is not None
+                else None
+            )
             claim_created_at = datetime.datetime.fromisoformat(
                 row[6].replace("Z", "+00:00")
             )
@@ -10363,18 +10389,22 @@ class SqliteBackend:
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
         project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
-        task_binding = conn.execute(
-            "SELECT prd_id FROM tasks WHERE id = ?", (payload.task_id,)
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (payload.task_id,)
         ).fetchone()
+        if task_row is None:
+            return False
+        try:
+            task = self._row_to_task(task_row, conn)
+            current_task_revision = task_snapshot_revision(task)
+        except (CanonicalJsonRefusal, TypeError, ValueError, json.JSONDecodeError):
+            return False
         current_prd = conn.execute(
-            "SELECT revision FROM prds WHERE id = ?", (context.prd_id,)
+            "SELECT revision FROM prds WHERE id = ?", (task.prd_id,)
         ).fetchone()
         if (
             project is None
-            or task_binding is None
-            or task_binding[0] != context.prd_id
             or current_prd is None
-            or int(current_prd[0]) != context.prd_revision
             or event_time >= lease_expires_at
             or (live_now is not None and live_now >= lease_expires_at)
             or (live_now is not None and event_time > live_now)
@@ -10386,17 +10416,34 @@ class SqliteBackend:
                 return False
             captured_at = proof.captured_at.astimezone(datetime.UTC)
             if (
-                not cls._hook_command_proof_material_is_valid(proof)
+                not self._hook_command_proof_material_is_valid(proof)
                 or attribution.project_id != project[0]
                 or attribution.claim_id != payload.claim_id
                 or attribution.generation != generation
                 or attribution.claimed_by != payload.submitted_by
                 or attribution.task_id != payload.task_id
-                or attribution.task_revision != context.task_revision
-                or attribution.prd_id != context.prd_id
-                or attribution.prd_revision != context.prd_revision
-                or attribution.repository_id != context.repository_id
-                or attribution.claim_start_sha != context.claim_start_sha
+                or (
+                    context is not None
+                    and (
+                        task.prd_id != context.prd_id
+                        or int(current_prd[0]) != context.prd_revision
+                        or attribution.task_revision != context.task_revision
+                        or attribution.prd_id != context.prd_id
+                        or attribution.prd_revision != context.prd_revision
+                        or attribution.repository_id != context.repository_id
+                        or attribution.claim_start_sha != context.claim_start_sha
+                    )
+                )
+                or (
+                    context is None
+                    and (
+                        attribution.task_revision != current_task_revision
+                        or attribution.prd_id != task.prd_id
+                        or attribution.prd_revision != int(current_prd[0])
+                        or attribution.repository_id is not None
+                        or attribution.claim_start_sha is not None
+                    )
+                )
                 or claim_created_at > captured_at
                 or captured_at > event_time
                 or captured_at >= lease_expires_at

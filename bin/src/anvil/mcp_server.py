@@ -534,7 +534,7 @@ class EvidenceResponse(BaseModel):
     next_ready: NextReadyTask | None = None
     actor_identity: dict[str, Any] = Field(default_factory=dict)
     claim_bound_command_proofs: list[dict[str, Any]] = Field(default_factory=list)
-    legacy_hook_proofs: list[dict[str, Any]] = Field(default_factory=list)
+    hook_command_proofs: list[dict[str, Any]] = Field(default_factory=list)
     missing_claim_bound_proofs: list[str] = Field(default_factory=list)
     missing_legacy_evidence: list[str] = Field(default_factory=list)
 
@@ -2022,13 +2022,17 @@ def submit_completion_evidence(
                 }
                 for proof in claim_bound_proofs
             ],
-            legacy_hook_proofs=[
+            hook_command_proofs=[
                 {
                     "command": proof.command,
                     "exit_code": proof.exit_code,
                     "output_sha256": proof.output_sha256,
                     "captured_at": proof.captured_at.isoformat(),
-                    "source": "legacy_hook",
+                    "source": "hook_claim_bound",
+                    "claim_id": proof.attribution.claim_id,
+                    "generation": proof.attribution.generation,
+                    "semantic_digest": proof.semantic_digest,
+                    "actor": proof.attribution.claimed_by,
                 }
                 for proof in command_proofs
             ],

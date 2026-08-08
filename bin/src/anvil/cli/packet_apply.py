@@ -56,37 +56,55 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     if not buffer_file.exists():
         return []
     try:
-        lines = buffer_file.read_text(encoding="utf-8").splitlines()
+        stream = buffer_file.open("rb")
     except OSError:
         return []
 
     proofs: list[CommandProof] = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-            if not isinstance(rec, dict):
-                continue
-            if rec.get("claim_id") != claim_id:
-                continue
-            attribution = HookCommandAttribution.model_validate(rec["attribution"])
-            if attribution.claim_id != claim_id:
-                continue
-            captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
-            proofs.append(
-                CommandProof(
-                    command=rec["command"],
-                    exit_code=int(rec["exit_code"]),
-                    output_sha256=rec["output_sha256"],
-                    captured_at=captured_at,
-                    attribution=attribution,
-                    semantic_digest=rec["semantic_digest"],
+    bytes_read = 0
+    with stream:
+        while (
+            len(proofs) < MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS
+            and bytes_read < MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES
+        ):
+            remaining = MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES - bytes_read
+            raw_line = stream.readline(remaining + 1)
+            if not raw_line:
+                break
+            bytes_read += len(raw_line)
+            if len(raw_line) > remaining:
+                break
+            try:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("claim_id") != claim_id:
+                    continue
+                attribution = HookCommandAttribution.model_validate(rec["attribution"])
+                if attribution.claim_id != claim_id:
+                    continue
+                captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
+                proofs.append(
+                    CommandProof(
+                        command=rec["command"],
+                        exit_code=rec["exit_code"],
+                        output_sha256=rec["output_sha256"],
+                        captured_at=captured_at,
+                        attribution=attribution,
+                        semantic_digest=rec["semantic_digest"],
+                    )
                 )
-            )
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-            continue  # skip partial / pre-SL-3 records — never block submit
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                KeyError,
+                ValueError,
+                TypeError,
+            ):
+                continue  # malformed/pre-attribution records never block submit
     return proofs
 
 
@@ -107,17 +125,21 @@ def _claim_command_proof_receipts(
     ]
 
 
-def _legacy_command_proof_receipts(
+def _hook_command_proof_receipts(
     proofs: list[CommandProof],
 ) -> list[dict[str, object]]:
-    """Return explicit hook-observed receipts without overstating their trust."""
+    """Return auditable receipts for claim-bound hook observations."""
     return [
         {
             "command": proof.command,
             "exit_code": proof.exit_code,
             "output_sha256": proof.output_sha256,
             "captured_at": proof.captured_at.isoformat(),
-            "source": "legacy_hook",
+            "source": "hook_claim_bound",
+            "claim_id": proof.attribution.claim_id,
+            "generation": proof.attribution.generation,
+            "semantic_digest": proof.semantic_digest,
+            "actor": proof.attribution.claimed_by,
         }
         for proof in proofs
     ]
@@ -1079,7 +1101,7 @@ def submit(
                 "claim_bound_command_proofs": _claim_command_proof_receipts(
                     claim_bound_proofs
                 ),
-                "legacy_hook_proofs": _legacy_command_proof_receipts(
+                "hook_command_proofs": _hook_command_proof_receipts(
                     command_proofs
                 ),
                 "missing_claim_bound_proofs": claim_bound_missing,
@@ -1106,7 +1128,7 @@ def submit(
             "(validated; see --json for trust receipts)"
         )
     if command_proofs:
-        typer.echo(f"  Legacy hook proofs: {len(command_proofs)}")
+        typer.echo(f"  Claim-bound hook proofs: {len(command_proofs)}")
     typer.echo("")
     typer.echo(f"Task '{task_id}' status → needs_review.")
     if category == "blocked":

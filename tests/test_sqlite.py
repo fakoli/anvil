@@ -44,6 +44,7 @@ from anvil.state.models import (
     HookCommandAttribution,
     claim_command_semantic_projection,
     hook_command_semantic_digest,
+    task_snapshot_revision,
 )
 from anvil.state.payloads import (
     EvidenceSubmittedPayload,
@@ -3372,8 +3373,8 @@ def _make_hook_command_proof(
     task_revision: str = "f" * 64,
     prd_id: str = "default",
     prd_revision: int = 1,
-    repository_id: str = "e" * 64,
-    claim_start_sha: str = "a" * 40,
+    repository_id: str | None = "e" * 64,
+    claim_start_sha: str | None = "a" * 40,
     command: str = "pytest tests/ -v",
     exit_code: int = 0,
     output_sha256: str = hashlib.sha256(b"5 passed\n").hexdigest(),
@@ -13969,6 +13970,46 @@ class TestHookCommandProofState:
         finally:
             b.close()
 
+    def test_contextless_non_git_claim_uses_current_task_and_prd_revision(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        b = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task(b)
+            b.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(),
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+            task = b.get_task("T001")
+            assert task is not None
+            prd = b.get_prd(task.prd_id)
+            assert prd is not None
+            proof = _make_hook_command_proof(
+                task_revision=task_snapshot_revision(task),
+                prd_id=task.prd_id,
+                prd_revision=prd.revision,
+                repository_id=None,
+                claim_start_sha=None,
+            )
+            self._submit(b, [proof])
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            stored = evidence.proofs[0]
+            assert stored.attribution is not None  # type: ignore[union-attr]
+            assert stored.attribution.repository_id is None  # type: ignore[union-attr]
+
+            b.replay_from_empty(events_path)
+            rebuilt = b.get_latest_evidence("T001")
+            assert rebuilt is not None
+            assert rebuilt.model_dump(mode="json") == evidence.model_dump(mode="json")
+        finally:
+            b.close()
+
     @pytest.mark.parametrize(
         "proof",
         [
@@ -14107,6 +14148,45 @@ class TestHookCommandProofState:
             before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
             with pytest.raises(EventRejected, match="hook command proof batch"):
                 self._submit(b, [proof, proof])
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+        finally:
+            b.close()
+
+    def test_attributed_hook_batch_count_is_bounded_before_append(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proofs = [
+                _make_hook_command_proof(
+                    captured_at=_T0
+                    + timedelta(minutes=11, microseconds=index)
+                )
+                for index in range(17)
+            ]
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                self._submit(b, proofs)
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+        finally:
+            b.close()
+
+    def test_attributed_hook_batch_canonical_bytes_are_bounded_before_append(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proofs = [
+                _make_hook_command_proof(command=("x" * 70_000) + str(index))
+                for index in range(16)
+            ]
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                self._submit(b, proofs)
             assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
             assert b.list_evidence() == []
         finally:

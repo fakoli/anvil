@@ -245,7 +245,8 @@ hook exits 0 without writing).
 **Default dispatcher.** The shipped manifest calls the shell-free Python
 dispatcher directly. It consumes the hook payload, preserves full output for
 the digest, and refuses to infer a passing result when `exit_code` is missing
-or malformed. The remaining details in this section describe the legacy shell
+or is any JSON type other than an integer. The remaining details in this
+section describe the legacy shell
 wrapper retained for existing installations.
 
 **Legacy-wrapper payload extraction.** A single `python3` round-trip parses
@@ -256,17 +257,21 @@ hook-perf-budget fix flagged by the hook-critic agent (see the script
 header comments).
 
 **Truncation.** Both `stdout` and `stderr` are truncated to 4000
-characters in the captured record. See
+characters in the captured record. The legacy wrapper computes the digest over
+the full strings first, then transports only the bounded excerpts and digest to
+the CLI. See
 [`docs/evidence-buffer.md`](evidence-buffer.md) for the full record schema,
 the descriptive `submit --output-file` path, and claim-bound proof import.
 
 **Two-tier write strategy.**
 1. **Preferred path.** Shell out to `anvil hook capture-evidence
    --command CMD --exit-code N --stdout-file F --stderr-file F --actor
-   ACTOR`. The subcommand resolves only the exact active claim named by the
+   ACTOR` (the wrapper also supplies its hidden full-output digest). The
+   subcommand resolves only the exact active claim named by the
    inherited `ANVIL_CLAIM_ID`, then checks the exact owner and persisted
    session before writing an attributed record. It never chooses a sole or
-   actor-only active claim.
+   actor-only active claim. Non-Git claims bind the current task and owning PRD
+   snapshot; Git claims retain their immutable repository binding.
 2. **Direct-write fallback.** If the CLI is absent, returns non-zero, or
    `mktemp` fails, a second `python3` call writes the record directly to
    `orphan.json`. The fallback cannot reach `state.db` from shell cheaply

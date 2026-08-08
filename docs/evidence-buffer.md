@@ -61,11 +61,13 @@ Each line in a file is one JSON object:
 }
 ```
 
-`output_sha256` is the SHA-256 of the *full* (untruncated) stdout+stderr,
-computed by `anvil hook capture-evidence` before truncation — it lets the
+`output_sha256` is the SHA-256 of the *full* (untruncated) stdout+stderr. The
+shell-free dispatcher computes it while reading the full payload; the legacy
+wrapper computes it before transporting bounded excerpts to the CLI. It lets the
 `CommandProof` attest to output that was never fully persisted. `kind` is
 written by the hook. The submit-side reconciler (`_read_command_proofs` in
-`packet_apply.py`) validates the exact `claim_id`, immutable `attribution`, and
+`packet_apply.py`) reads at most 16 proofs and 1 MiB, then validates the exact
+`claim_id`, attribution, and
 domain-separated `semantic_digest` before importing the line. It silently
 **skips** malformed, cross-claim, tampered, and historical unattributed records
 rather than failing `submit`.
@@ -80,7 +82,7 @@ agent's flow needs the long form.
 | Step | Who | Effect |
 |---|---|---|
 | 1. Agent runs `pytest` (or other verification command) | Bash tool | `PostToolUse` hook fires |
-| 2. The dispatcher calls `anvil hook capture-evidence` directly (the legacy wrapper shells to it) | Hook | With exact `ANVIL_CLAIM_ID`, `ANVIL_ACTOR`, and session ownership, one attributed JSON line is appended to `<claim-id>.json`; otherwise a descriptive line goes to `orphan.json` |
+| 2. The dispatcher calls `anvil hook capture-evidence` directly (the legacy wrapper shells to it) | Hook | With exact `ANVIL_CLAIM_ID`, `ANVIL_ACTOR`, and session ownership, one attributed JSON line is appended to `<claim-id>.json`; Git claims use their immutable claim context, while non-Git claims bind the current task/PRD snapshot and omit repository fields. Otherwise a descriptive line goes to `orphan.json`. |
 | 3. Agent runs `anvil submit T012 --commands "pytest" --files-changed ...` | CLI | Reads `<claim-id>.json`, parses each well-formed line into a `CommandProof`, and embeds them in the `evidence.submitted` event's `proofs` field |
 | 4. `submit --output-file` provided directly | CLI | The buffer is bypassed; up to 8000 characters become a descriptive output excerpt. This never creates a typed proof or satisfies `required_proofs`. |
 | 5. `submit --command-proof-file ARTIFACT` provided | CLI | The bounded claim-bound artifact is validated against the explicit active claim, actor, generation, task/PRD revision, repository, cwd, command, timestamps, exit code, and output digest before it is imported as a typed proof. Repeat the flag for a batch. |
