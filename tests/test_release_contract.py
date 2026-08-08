@@ -181,6 +181,13 @@ def test_publish_oidc_job_is_minimal_and_all_actions_are_immutable() -> None:
     assert '--out "$RUNNER_TEMP/anvil-benchmark-results.md"' in text
     assert "mkdocs build --strict" in text
     assert "(cd bin && uv run --locked ruff check ..)" in text
+    assert (
+        "printf '%s\\0' \"$wheel\" \"$sdist\" | sort -z | "
+        "xargs -0 sha256sum > SHA256SUMS"
+    ) in text
+    assert "find bin/dist -maxdepth 1 -type f -print0" not in text
+    assert "bin/dist/*.whl" in text
+    assert "bin/dist/*.tar.gz" in text
 
 
 def test_ci_release_contract_jobs_fetch_tags() -> None:
