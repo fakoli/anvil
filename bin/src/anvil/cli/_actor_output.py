@@ -121,3 +121,21 @@ def actor_notice_lines(actor: str) -> list[str]:
             "structured fields to continue."
         )
     return lines
+
+
+def bundle_continuation_lines(bundle_id: str, actor: str) -> list[str]:
+    """Render one safe human bundle lifecycle handoff for the current shell."""
+    lines = actor_notice_lines(actor)
+    actor_flag = actor_flag_for_human(actor)
+    if actor_flag is None:
+        lines.append("  Use the structured JSON/MCP bundle continuation argv.")
+        return lines
+    lines.extend(
+        [
+            f"  Renew:    `anvil bundle renew {bundle_id} {actor_flag}`",
+            f"  Release:  `anvil bundle release {bundle_id} {actor_flag}`",
+            f"  Progress: `anvil bundle progress {bundle_id} PHASE {actor_flag}`",
+            f"  Complete: `anvil bundle complete {bundle_id} {actor_flag}`",
+        ]
+    )
+    return lines

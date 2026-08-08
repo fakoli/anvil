@@ -8,10 +8,9 @@ from pathlib import Path
 import typer
 
 from anvil.cli._actor_output import (
-    actor_flag_for_human,
     actor_identity_data,
-    actor_notice_lines,
     bundle_continuation_data,
+    bundle_continuation_lines,
     safe_actor_label,
 )
 from anvil.cli._helpers import (
@@ -258,16 +257,8 @@ def claim_bundle(
     typer.echo(f"Claimed bundle '{bundle_id}' with coordinator claim {result.claim.id}.")
     for warning in warnings:
         typer.echo(f"  Warning: {warning}")
-    for line in actor_notice_lines(result.claim.claimed_by):
+    for line in bundle_continuation_lines(bundle_id, result.claim.claimed_by):
         typer.echo(line)
-    actor_flag = actor_flag_for_human(result.claim.claimed_by)
-    if actor_flag is not None:
-        typer.echo(
-            f"Continue with `anvil bundle progress {bundle_id} <phase> {actor_flag}`; "
-            f"complete with `anvil bundle complete {bundle_id} {actor_flag}`."
-        )
-    else:
-        typer.echo("Use the structured JSON/MCP bundle continuation argv.")
 
 
 @bundle_app.command("renew")

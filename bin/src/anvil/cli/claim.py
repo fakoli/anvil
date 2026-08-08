@@ -15,6 +15,7 @@ from anvil.cli._actor_output import (
     actor_mismatch_message,
     actor_notice_lines,
     bundle_continuation_data,
+    bundle_continuation_lines,
     continuation_data,
     safe_actor_label,
 )
@@ -307,7 +308,9 @@ def claim(
             )
             typer.echo(f"  Branch: {recorded_branch or '—'}")
             typer.echo(f"  Worktree: {worktree_path or '—'}")
-            for line in actor_notice_lines(bundle_result.claim.claimed_by):
+            for line in bundle_continuation_lines(
+                task_id, bundle_result.claim.claimed_by
+            ):
                 typer.echo(line)
             return
 

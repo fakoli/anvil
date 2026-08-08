@@ -152,8 +152,11 @@ def test_bundle_create_preserves_spaces_and_rejects_explicit_empty_coordinator(
     )
     assert human_claim.exit_code == 0, human_claim.output
     assert "ANVIL_ACTOR" in human_claim.output
+    assert "anvil bundle renew BSPACE" in human_claim.output
+    assert "anvil bundle release BSPACE" in human_claim.output
     assert "anvil bundle progress BSPACE" in human_claim.output
     assert "anvil bundle complete BSPACE" in human_claim.output
+    assert "anvil submit BSPACE" not in human_claim.output
 
     empty = _invoke(
         tmp_path,
