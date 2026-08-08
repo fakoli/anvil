@@ -2065,6 +2065,10 @@ class TestClaimTask:
         assert claim["actor_identity"]["authenticated"] is False
         assert "not cryptographic authentication" in claim["actor_identity"]["notice"]
         assert claim["continuation"]["environment"] == {"ANVIL_ACTOR": "agent-x"}
+        assert claim["continuation"]["hook_environment"] == {
+            "ANVIL_ACTOR": "agent-x",
+            "ANVIL_CLAIM_ID": claim["id"],
+        }
         assert claim["continuation"]["renew"]["argv"][-2:] == ["--actor", "agent-x"]
 
     def test_error_when_prd_is_draft(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

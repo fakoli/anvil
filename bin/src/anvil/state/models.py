@@ -89,7 +89,10 @@ __all__ = [
     # Models
     "Score",
     "Verification",
+    "HookCommandAttribution",
     "CommandProof",
+    "hook_command_semantic_digest",
+    "hook_command_semantic_projection",
     "ClaimCommandEvidenceCore",
     "ClaimCommandIssuer",
     "ClaimCommandProof",
@@ -408,6 +411,84 @@ class ProofKind(enum.StrEnum):
     assertion = "assertion"
 
 
+_HOOK_COMMAND_PROOF_SEMANTIC_DOMAIN = b"anvil.hook-command-proof.v1\0"
+
+
+class HookCommandAttribution(BaseModel):
+    """Immutable claim identity captured with one legacy hook command proof.
+
+    This keeps the hook trust boundary explicit: the hook writer is still the
+    source of the observation, but actor/claim ownership can no longer be lost
+    when the buffer record is imported into durable evidence.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    project_id: StrictStr = Field(min_length=1, max_length=255)
+    claim_id: StrictStr = Field(min_length=1, max_length=255)
+    generation: StrictInt = Field(ge=1)
+    claimed_by: StrictStr = Field(min_length=1, max_length=4096)
+    task_id: StrictStr = Field(min_length=1, max_length=255)
+    task_revision: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    prd_id: StrictStr = Field(min_length=1, max_length=255)
+    prd_revision: StrictInt = Field(ge=1)
+    repository_id: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    claim_start_sha: StrictStr = Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def hook_command_semantic_projection(
+    *,
+    attribution: HookCommandAttribution,
+    command: str,
+    exit_code: int,
+    output_sha256: str,
+    captured_at: datetime.datetime,
+) -> dict[str, Any]:
+    """Return the canonical identity of one hook-observed command result."""
+    captured_at = _require_utc(captured_at, "captured_at")
+    return {
+        "schema_version": 1,
+        "attribution": attribution.model_dump(mode="json"),
+        "command": command,
+        "exit_code": exit_code,
+        "output_sha256": output_sha256,
+        "captured_at": captured_at.astimezone(datetime.UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+
+
+def hook_command_semantic_digest(
+    *,
+    attribution: HookCommandAttribution,
+    command: str,
+    exit_code: int,
+    output_sha256: str,
+    captured_at: datetime.datetime,
+) -> str:
+    """Hash a hook proof together with its exact durable claim attribution."""
+    from anvil.state.hashing import (
+        canonical_node_budget_for_bytes,
+        domain_separated_sha256,
+    )
+
+    max_bytes = MAX_CLAIM_COMMAND_PROOF_ARTIFACT_BYTES
+    return domain_separated_sha256(
+        _HOOK_COMMAND_PROOF_SEMANTIC_DOMAIN,
+        hook_command_semantic_projection(
+            attribution=attribution,
+            command=command,
+            exit_code=exit_code,
+            output_sha256=output_sha256,
+            captured_at=captured_at,
+        ),
+        max_bytes=max_bytes,
+        max_nodes=canonical_node_budget_for_bytes(max_bytes),
+        max_string_bytes=max_bytes,
+    )
+
+
 class CommandProof(BaseModel):
     """A typed command result: command, real exit code, and an output hash.
 
@@ -423,11 +504,43 @@ class CommandProof(BaseModel):
     exit_code: int
     output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     captured_at: datetime.datetime
+    # Both fields are absent only on pre-T008.1 historical events. New live
+    # submissions require them at the authoritative append boundary.
+    attribution: HookCommandAttribution | None = None
+    semantic_digest: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
 
     @field_validator("captured_at", mode="after")
     @classmethod
     def _validate_utc(cls, v: datetime.datetime) -> datetime.datetime:
         return _require_utc(v, "captured_at")
+
+    @model_validator(mode="after")
+    def _validate_attributed_material(self) -> CommandProof:
+        if (self.attribution is None) != (self.semantic_digest is None):
+            raise ValueError(
+                "hook command attribution and semantic digest must be supplied together"
+            )
+        if self.attribution is not None:
+            expected = hook_command_semantic_digest(
+                attribution=self.attribution,
+                command=self.command,
+                exit_code=self.exit_code,
+                output_sha256=self.output_sha256,
+                captured_at=self.captured_at,
+            )
+            if self.semantic_digest != expected:
+                raise ValueError("hook command semantic digest does not match its material")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _preserve_historical_shape(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if self.attribution is None:
+            data.pop("attribution", None)
+            data.pop("semantic_digest", None)
+        return data
 
 
 MAX_CLAIM_COMMAND_BYTES = 16_384

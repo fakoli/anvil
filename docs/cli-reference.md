@@ -1481,12 +1481,14 @@ anvil hook record-file-change \
 
 ### `anvil hook capture-evidence` { #hook-capture-evidence }
 
-**Synopsis:** Used by `hooks/capture-evidence.sh` (PostToolUse on Bash).
-Appends a JSON record of the bash command (command string, exit code,
-stdout excerpt, stderr excerpt, actor, timestamp) to
-`.anvil/.evidence-buffer/<CLAIM_ID>.json`. If no active claim is found
-for the actor, writes to `.evidence-buffer/orphan.json` with a recovery hint.
-Stdout/stderr excerpts are truncated to 4000 chars each.
+**Synopsis:** Used by the shell-free PostToolUse dispatcher and the legacy
+`hooks/capture-evidence.sh` wrapper. Appends an attributed JSON record of the
+command, exit code, output digest/excerpts, actor, claim identity, and timestamp
+to `.anvil/.evidence-buffer/<CLAIM_ID>.json`. The process must carry the work
+packet's exact `ANVIL_CLAIM_ID` and `ANVIL_ACTOR`; the active claim owner and
+persisted session must match. Missing, stale, or mismatched context writes only
+to `.evidence-buffer/orphan.json`. Stdout/stderr excerpts are truncated to 4000
+chars each, while the digest covers full output.
 
 **Flags:**
 
@@ -1503,7 +1505,7 @@ Stdout/stderr excerpts are truncated to 4000 chars each.
 
 - `0` — always. Errors are silently swallowed.
 
-**Example (from `hooks/capture-evidence.sh`):**
+**Example (legacy wrapper; the shipped manifest dispatches directly):**
 
 ```bash
 anvil hook capture-evidence \
@@ -1513,6 +1515,11 @@ anvil hook capture-evidence \
   --stderr-file "$STDERR_TMP" \
   --actor "$SESSION_ID"
 ```
+
+`ANVIL_CLAIM_ID` is intentionally inherited rather than accepted as a command
+option: callers cannot select a claim by adding an untrusted argv value. The
+subcommand resolves the persisted active claim and derives all durable
+attribution from state.
 
 **See also:** [`docs/evidence-buffer.md`](evidence-buffer.md) for the buffer
 format, descriptive output attachment, and claim-bound proof import;

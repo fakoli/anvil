@@ -75,17 +75,23 @@ try:
     exit_code  = tr.get('exit_code')
     stdout_raw = tr.get('stdout') or ''
     stderr_raw = tr.get('stderr') or ''
-    actor      = d.get('session_id') or ''
+    actor      = os.environ.get('ANVIL_ACTOR', d.get('session_id') or '')
 
     try:
-        exit_code_int = int(exit_code) if exit_code is not None else 0
+        if exit_code is None or isinstance(exit_code, bool):
+            raise ValueError
+        exit_code_int = int(exit_code)
+        valid_exit_code = True
     except (ValueError, TypeError):
-        exit_code_int = 0
+        exit_code_int = -1
+        valid_exit_code = False
 
     # tz-aware UTC (utcnow() was deprecated in 3.12, removed in 3.13).
     ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    is_verification = int(any(p in command for p in VERIFICATION_PATTERNS))
+    is_verification = int(
+        valid_exit_code and any(p in command for p in VERIFICATION_PATTERNS)
+    )
 
     stdout_ex = stdout_raw[:MAX_EXCERPT]
     stderr_ex = stderr_raw[:MAX_EXCERPT]

@@ -120,6 +120,20 @@ def _packet_actor_env(actor: str) -> str:
     return f"export ANVIL_ACTOR={quoted}"
 
 
+def _packet_hook_env(actor: str, claim_id: str) -> str:
+    actor_quoted = _quote_packet_actor(actor)
+    claim_quoted = _quote_packet_actor(claim_id)
+    if _packet_shell() == "powershell":
+        return (
+            f"$env:ANVIL_ACTOR = {actor_quoted}; "
+            f"$env:ANVIL_CLAIM_ID = {claim_quoted}"
+        )
+    return (
+        f"export ANVIL_ACTOR={actor_quoted} "
+        f"ANVIL_CLAIM_ID={claim_quoted}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Output type
 # ---------------------------------------------------------------------------
@@ -701,6 +715,10 @@ def _render_markdown(
         if safe_packet_actor is not None:
             lines.append(
                 f"- Pin actor ({_packet_shell()}): `{_packet_actor_env(packet_actor)}`"
+            )
+            lines.append(
+                "- Pin hook attribution for this claim: "
+                f"`{_packet_hook_env(packet_actor, active_claim.id)}`"
             )
         else:
             lines.append(

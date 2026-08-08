@@ -73,12 +73,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run_hook(hook_path: Path, payload: dict, *, anvil_dir: Path) -> subprocess.CompletedProcess:
+def _run_hook(
+    hook_path: Path,
+    payload: dict,
+    *,
+    anvil_dir: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     """Run a hook script with the given JSON payload, CWD set to the tmp project root."""
     env = os.environ.copy()
     # Unset CLAUDE_PLUGIN_ROOT so the CLI path is never taken; we test the
     # direct-append fallback path.
     env.pop("CLAUDE_PLUGIN_ROOT", None)
+    env.pop("ANVIL_ACTOR", None)
+    env.pop("ANVIL_CLAIM_ID", None)
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         [_BASH, str(hook_path)],
         input=json.dumps(payload).encode(),
@@ -87,6 +97,36 @@ def _run_hook(hook_path: Path, payload: dict, *, anvil_dir: Path) -> subprocess.
         capture_output=True,
     )
     return result
+
+
+def test_capture_wrapper_requires_exit_code_and_preserves_actor_pin(
+    project_dir: Path,
+) -> None:
+    missing_exit = {
+        "tool_input": {"command": "pytest -q"},
+        "tool_response": {"stdout": "ok"},
+        "session_id": "session-fallback",
+    }
+    assert _run_hook(
+        _CAPTURE_EVIDENCE_SH, missing_exit, anvil_dir=project_dir
+    ).returncode == 0
+    orphan = project_dir / ".anvil" / ".evidence-buffer" / "orphan.json"
+    assert not orphan.exists()
+
+    observed = {
+        "tool_input": {"command": "pytest -q"},
+        "tool_response": {"stdout": "ok", "exit_code": 0},
+        "session_id": "session-fallback",
+    }
+    assert _run_hook(
+        _CAPTURE_EVIDENCE_SH,
+        observed,
+        anvil_dir=project_dir,
+        extra_env={"ANVIL_ACTOR": "pinned-owner", "ANVIL_CLAIM_ID": "C123"},
+    ).returncode == 0
+    record = json.loads(orphan.read_text(encoding="utf-8").splitlines()[-1])
+    assert record["actor"] == "pinned-owner"
+    assert "claim_id" not in record  # fallback is descriptive orphan data only
 
 
 # ---------------------------------------------------------------------------

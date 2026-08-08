@@ -178,6 +178,10 @@ def continuation_context(
     """Return exact argv/env continuations for a newly acquired claim."""
     context: dict[str, object] = {
         "environment": {"ANVIL_ACTOR": actor},
+        "hook_environment": {
+            "ANVIL_ACTOR": actor,
+            "ANVIL_CLAIM_ID": claim_id,
+        },
         "renew": actor_continuation(actor, ["anvil", "renew", claim_id, "--actor", actor]),
         "release": actor_continuation(actor, ["anvil", "release", claim_id, "--actor", actor]),
         "progress": actor_continuation(

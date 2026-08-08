@@ -189,27 +189,58 @@ def _inject_command_proof(
     import datetime as _dt
     import hashlib as _hashlib
 
+    from anvil.state.models import (
+        HookCommandAttribution,
+        hook_command_semantic_digest,
+    )
+
     db_path = tmp_path / ".anvil" / "state.db"
     conn = _sqlite3.connect(str(db_path))
     try:
         row = conn.execute(
-            "SELECT id FROM claims WHERE task_id=? AND status='active' LIMIT 1",
+            "SELECT id, generation, claimed_by, attestation_context "
+            "FROM claims WHERE task_id=? AND status='active' LIMIT 1",
             (task_id,),
         ).fetchone()
+        project_id = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()[0]
     finally:
         conn.close()
     assert row is not None, "no active claim to attach a proof to"
+    context = _json.loads(row[3])
+    captured_at = _dt.datetime.now(_dt.UTC)
+    output_sha256 = _hashlib.sha256(b"out").hexdigest()
+    attribution = HookCommandAttribution(
+        project_id=project_id,
+        claim_id=row[0],
+        generation=row[1],
+        claimed_by=row[2],
+        task_id=task_id,
+        task_revision=context["task_revision"],
+        prd_id=context["prd_id"],
+        prd_revision=context["prd_revision"],
+        repository_id=context["repository_id"],
+        claim_start_sha=context["claim_start_sha"],
+    )
     buf = tmp_path / ".anvil" / ".evidence-buffer"
     buf.mkdir(parents=True, exist_ok=True)
     rec = {
         "kind": "command",
-        "timestamp": _dt.datetime.now(_dt.UTC).isoformat(),
+        "timestamp": captured_at.isoformat(),
         "command": command,
         "exit_code": exit_code,
-        "output_sha256": _hashlib.sha256(b"out").hexdigest(),
+        "output_sha256": output_sha256,
         "stdout_excerpt": "out",
         "stderr_excerpt": "",
         "actor": "agent-test",
+        "claim_id": row[0],
+        "attribution": attribution.model_dump(mode="json"),
+        "semantic_digest": hook_command_semantic_digest(
+            attribution=attribution,
+            command=command,
+            exit_code=exit_code,
+            output_sha256=output_sha256,
+            captured_at=captured_at,
+        ),
     }
     (buf / f"{row[0]}.json").write_text(_json.dumps(rec) + "\n", encoding="utf-8")
 
@@ -846,9 +877,10 @@ class TestTypedProofGateEndToEnd:
         assert "--output-file is descriptive only" in result.output
         assert "missing items for required_evidence" not in result.output
 
-    def test_strict_passes_when_observed_command_exited_zero(
+    def test_hook_capture_attribution_strict_passes_on_zero_exit(
         self, tmp_path: Path
     ) -> None:
+        _init_git_repo(tmp_path)
         task_id = _planned(tmp_path)
         assert _invoke(
             tmp_path, ["claim", task_id, "--actor", "agent-test"]
@@ -874,11 +906,12 @@ class TestTypedProofGateEndToEnd:
         assert res.exit_code == 0, res.output
         assert _status(tmp_path, task_id) == "done"
 
-    def test_strict_refuses_when_observed_command_exited_nonzero(
+    def test_hook_capture_attribution_strict_refuses_nonzero_exit(
         self, tmp_path: Path
     ) -> None:
         """The closed hole: a recorded command that FAILED (exit 1) must not let
         the task through the strict gate, even though it 'ran'."""
+        _init_git_repo(tmp_path)
         task_id = _planned(tmp_path)
         assert _invoke(
             tmp_path, ["claim", task_id, "--actor", "agent-test"]
@@ -904,7 +937,7 @@ class TestTypedProofGateEndToEnd:
         assert res.exit_code != 0
         assert _status(tmp_path, task_id) == "needs_review"
 
-    def test_acceptance_emits_a_verifiable_signed_proof(
+    def test_hook_capture_attribution_emits_verifiable_acceptance_proof(
         self, tmp_path: Path
     ) -> None:
         """B48 part 2: accepting a task writes a portable signed AcceptanceProof
@@ -912,6 +945,7 @@ class TestTypedProofGateEndToEnd:
         from anvil import signing
         from anvil.state.models import AcceptanceProof
 
+        _init_git_repo(tmp_path)
         task_id = _planned(tmp_path)
         assert _invoke(
             tmp_path, ["claim", task_id, "--actor", "agent-test"]

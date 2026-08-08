@@ -123,7 +123,10 @@ Sections in the markdown packet:
 - **Decisions affecting this task** — pre-filtered to ones that reference this task.
 - **Verification** — the commands, required-evidence list, and manual steps the gate will check against on apply.
 - **Active claim** — claim ID, lease expiry, branch, worktree (when a claim is held).
-- **Update protocol** — the exact `renew` and `submit` commands for this claim.
+- **Update protocol** — the exact `renew` and `submit` commands plus a
+  `hook_environment` containing `ANVIL_ACTOR` and `ANVIL_CLAIM_ID` for this
+  claim. Apply that environment in the process that invokes tools; absent or
+  mismatched hook context is deliberately orphaned rather than guessed.
 
 ### Two formats
 
@@ -141,7 +144,13 @@ Switch to the agent branch and edit the files in scope. Three hooks fire during 
 
 - **`check-claim.sh` (PreToolUse on Edit/Write/NotebookEdit)** — warns to stderr if the file you are about to edit is outside the claim's `expected_files`. Non-blocking by hook contract.
 - **`record-file-change.sh` (PostToolUse on Edit/Write/NotebookEdit)** — records the change against the active claim for orphan detection.
-- **`capture-evidence.sh` (PostToolUse on Bash)** — when the command matches a verification pattern (`pytest`, `npm test`, `cargo test`, `ruff`, `mypy`, ...) the output is buffered against the active claim. The buffer is consumed by `submit` and is documented in [`../evidence-buffer.md`](../evidence-buffer.md).
+- **`capture-evidence` dispatcher (PostToolUse on Bash)** — when the command
+  matches a verification pattern (`pytest`, `npm test`, `cargo test`, `ruff`,
+  `mypy`, ...) and the packet's hook environment exactly matches the active
+  claim owner/session, the output is buffered with immutable claim attribution.
+  The legacy `capture-evidence.sh` wrapper delegates to this path. Missing or
+  stale context lands in `orphan.json`; see
+  [`../evidence-buffer.md`](../evidence-buffer.md).
 
 The first file change auto-transitions the task `claimed → in_progress`.
 

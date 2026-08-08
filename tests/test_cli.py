@@ -4705,6 +4705,7 @@ class TestClaimCommand:
         human = _invoke_cmd(tmp_path, ["claim", task_id, "--actor", actor])
         assert human.exit_code == 0, human.output
         assert "ANVIL_ACTOR" in human.output
+        assert "ANVIL_CLAIM_ID" in human.output
         assert "--actor" in human.output
         assert "not cryptographic authentication" in human.output
 
@@ -4725,6 +4726,10 @@ class TestClaimCommand:
         assert data["actor_identity"]["actor"] == actor
         assert data["actor_identity"]["authenticated"] is False
         assert data["continuation"]["environment"] == {"ANVIL_ACTOR": actor}
+        assert data["continuation"]["hook_environment"] == {
+            "ANVIL_ACTOR": actor,
+            "ANVIL_CLAIM_ID": data["claim"]["id"],
+        }
         assert data["continuation"]["renew"]["argv"][-2:] == ["--actor", actor]
         assert data["continuation"]["progress"]["argv"][-2:] == ["--actor", actor]
 
@@ -4745,6 +4750,10 @@ class TestClaimCommand:
         assert data["actor_identity"]["actor"] == persisted_actor
         assert data["continuation"]["environment"] == {
             "ANVIL_ACTOR": persisted_actor
+        }
+        assert data["continuation"]["hook_environment"] == {
+            "ANVIL_ACTOR": persisted_actor,
+            "ANVIL_CLAIM_ID": data["claim"]["id"],
         }
         release_argv = data["continuation"]["release"]["argv"]
         released = _invoke_cmd(tmp_path, release_argv[1:])
@@ -5991,7 +6000,7 @@ class TestHookCaptureEvidence:
 class TestCaptureEvidenceByClaim:
     def _init_and_claim(self, tmp_path: Path, actor: str) -> str:
         """Full setup through a claim held by `actor`; returns the task id."""
-        _do_init_and_plan(tmp_path, with_git=False)
+        _do_init_and_plan(tmp_path, with_git=True)
         task_id = _get_first_ready_task_id(tmp_path)
         assert task_id is not None
         assert _invoke_cmd(
@@ -5999,58 +6008,91 @@ class TestCaptureEvidenceByClaim:
         ).exit_code == 0
         return task_id
 
+    def _claim_id(self, tmp_path: Path, task_id: str) -> str:
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            row = conn.execute(
+                "SELECT id FROM claims WHERE task_id=? AND status='active'",
+                (task_id,),
+            ).fetchone()
+        assert row is not None
+        return str(row[0])
+
     def _buffer_dir(self, tmp_path: Path) -> Path:
         return tmp_path / ".anvil" / ".evidence-buffer"
 
-    def test_single_claim_captures_regardless_of_actor(
-        self, tmp_path: Path
+    def test_single_claim_without_explicit_hook_pin_is_orphaned(
+        self, tmp_path: Path,
     ) -> None:
-        """T007 AC1: a claim made with an explicit --actor different from the
-        session actor STILL accumulates CommandProofs — the retro incident."""
+        """Ambient database shape never chooses a claim for hook evidence."""
         self._init_and_claim(tmp_path, actor="claude-opus-retro")
         result = _invoke_cmd(
             tmp_path,
             ["hook", "capture-evidence", "--command", "pytest -q",
-             "--exit-code", "0", "--actor", "session-alice"],
+             "--exit-code", "0", "--actor", "claude-opus-retro"],
         )
         assert result.exit_code == 0
         buffers = list(self._buffer_dir(tmp_path).glob("C*.json"))
-        assert len(buffers) == 1, "proof did not attach to the single active claim"
-        assert (self._buffer_dir(tmp_path) / "orphan.json").exists() is False
-        assert "pytest" in buffers[0].read_text(encoding="utf-8")
+        assert buffers == []
+        assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
 
-    def test_two_claims_disambiguate_by_actor_else_orphan(
-        self, tmp_path: Path
+    def test_exact_claim_owner_hook_pin_writes_attributed_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """T007 AC2: with two active claims by different actors, an exact
-        actor match attaches to the right claim; an unmatched session actor
-        falls back to orphan (never cross-attached)."""
-        _do_init_and_plan(tmp_path, with_git=False)
-        # Claim two independent ready tasks as different actors.
-        ready = _invoke_cmd(tmp_path, ["list", "--status", "ready", "--json"])
-        ids = [t["id"] for t in json.loads(ready.output.strip().splitlines()[-1])["data"]["tasks"]]
-        assert len(ids) >= 2, "need two ready tasks for this test"
-        assert _invoke_cmd(
-            tmp_path, ["claim", ids[0], "--actor", "actor-a", "--force"]
-        ).exit_code == 0
-        assert _invoke_cmd(
-            tmp_path, ["claim", ids[1], "--actor", "actor-b", "--force"]
-        ).exit_code == 0
-
-        # Exact actor match → attaches to actor-a's claim only.
+        task_id = self._init_and_claim(tmp_path, actor="actor-a")
+        claim_id = self._claim_id(tmp_path, task_id)
+        monkeypatch.setenv("ANVIL_ACTOR", "actor-a")
+        monkeypatch.setenv("ANVIL_CLAIM_ID", claim_id)
         assert _invoke_cmd(
             tmp_path,
             ["hook", "capture-evidence", "--command", "pytest -q",
              "--exit-code", "0", "--actor", "actor-a"],
         ).exit_code == 0
-        claim_buffers = sorted(b.name for b in self._buffer_dir(tmp_path).glob("C*.json"))
-        assert len(claim_buffers) == 1
+        record = json.loads(
+            (self._buffer_dir(tmp_path) / f"{claim_id}.json")
+            .read_text(encoding="utf-8")
+            .splitlines()[0]
+        )
+        assert record["claim_id"] == claim_id
+        assert record["attribution"]["claimed_by"] == "actor-a"
+        assert record["attribution"]["task_id"] == task_id
+        assert len(record["semantic_digest"]) == 64
 
-        # Unmatched session actor with two claims → orphan (ambiguous).
+    def test_stale_or_wrong_owner_hook_pin_is_orphaned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        task_id = self._init_and_claim(tmp_path, actor="actor-a")
+        claim_id = self._claim_id(tmp_path, task_id)
+        monkeypatch.setenv("ANVIL_CLAIM_ID", claim_id)
         assert _invoke_cmd(
             tmp_path,
             ["hook", "capture-evidence", "--command", "pytest -q",
-             "--exit-code", "0", "--actor", "actor-nobody"],
+             "--exit-code", "0", "--actor", "actor-b"],
+        ).exit_code == 0
+        assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
+        monkeypatch.setenv("ANVIL_CLAIM_ID", "C-stale")
+        assert _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "actor-a"],
+        ).exit_code == 0
+        assert len(
+            (self._buffer_dir(tmp_path) / "orphan.json")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ) == 2
+
+    def test_persisted_session_mismatch_is_orphaned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ANVIL_SESSION_ID", "session-owner")
+        task_id = self._init_and_claim(tmp_path, actor="actor-a")
+        monkeypatch.setenv("ANVIL_CLAIM_ID", self._claim_id(tmp_path, task_id))
+        monkeypatch.setenv("ANVIL_SESSION_ID", "session-sibling")
+
+        assert _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "actor-a"],
         ).exit_code == 0
         assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
 
@@ -6078,10 +6120,12 @@ class TestCaptureEvidenceByClaim:
             ).fetchone()[0] == 0
 
     def test_submit_with_attached_proof_prints_no_warning(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """T007 AC3 (converse): a real attached proof → no warning."""
         task_id = self._init_and_claim(tmp_path, actor="proof-agent")
+        monkeypatch.setenv("ANVIL_ACTOR", "proof-agent")
+        monkeypatch.setenv("ANVIL_CLAIM_ID", self._claim_id(tmp_path, task_id))
         assert _invoke_cmd(
             tmp_path,
             ["hook", "capture-evidence", "--command", "pytest -q",

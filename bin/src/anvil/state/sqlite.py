@@ -80,6 +80,7 @@ from anvil.state.models import (
     ClaimCommandProof,
     ClaimProgressAttestation,
     ClaimStatus,
+    CommandProof,
     ConflictGroup,
     Event,
     EventDraft,
@@ -97,6 +98,7 @@ from anvil.state.models import (
     Task,
     Verification,
     claim_command_semantic_projection,
+    hook_command_semantic_digest,
 )
 from anvil.state.payloads import (
     ACTION_TO_PAYLOAD,
@@ -10268,6 +10270,141 @@ class SqliteBackend:
             issuer.public_key, signing.load_trust_list(trust_path)
         )
 
+    @staticmethod
+    def _hook_command_proof_material_is_valid(proof: CommandProof) -> bool:
+        """Recompute the integrity identity of one attributed hook proof."""
+        if proof.attribution is None or proof.semantic_digest is None:
+            return False
+        try:
+            expected = hook_command_semantic_digest(
+                attribution=proof.attribution,
+                command=proof.command,
+                exit_code=proof.exit_code,
+                output_sha256=proof.output_sha256,
+                captured_at=proof.captured_at,
+            )
+        except (CanonicalJsonRefusal, ValueError):
+            return False
+        return proof.semantic_digest == expected
+
+    @classmethod
+    def _hook_command_proof_batch_matches_claim(
+        cls,
+        conn: sqlite3.Connection,
+        payload: EvidenceSubmittedPayload,
+        event: EventDraft | Event,
+        *,
+        authoritative_now: datetime.datetime | None = None,
+        allow_historical_unattributed: bool = False,
+    ) -> bool:
+        """Bind hook proofs to the exact active claim that produced them.
+
+        Pre-T008.1 events carried no attribution. Replay may retain that exact
+        historical all-unattributed shape, but live append never accepts it and
+        a mixed attributed/unattributed batch is never a compatibility shape.
+        """
+        proofs = [proof for proof in payload.proofs if isinstance(proof, CommandProof)]
+        if not proofs:
+            return True
+        attributed = [proof.attribution is not None for proof in proofs]
+        if not any(attributed):
+            return allow_historical_unattributed and all(
+                proof.semantic_digest is None for proof in proofs
+            )
+        if not all(attributed) or any(proof.semantic_digest is None for proof in proofs):
+            return False
+        digests = [proof.semantic_digest for proof in proofs]
+        if len(digests) != len(set(digests)):
+            return False
+        if (
+            event.target_kind != "task"
+            or event.target_id != payload.task_id
+            or event.actor != payload.submitted_by
+            or cls._claim_replay_collision(conn, payload.claim_id)
+        ):
+            return False
+        row = conn.execute(
+            "SELECT task_id, claimed_by, status, bundle_claim_id, generation, "
+            "attestation_context, created_at, lease_expires_at, released_at "
+            "FROM claims WHERE id = ?",
+            (payload.claim_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row[0] != payload.task_id
+            or row[1] != payload.submitted_by
+            or row[2] != "active"
+            or row[3] is not None
+            or row[5] is None
+            or row[8] is not None
+        ):
+            return False
+        if authoritative_now is not None and (
+            not isinstance(authoritative_now, datetime.datetime)
+            or authoritative_now.tzinfo is None
+            or authoritative_now.utcoffset() is None
+        ):
+            return False
+        try:
+            generation = int(row[4])
+            context = ClaimAttestationContext.model_validate(json.loads(row[5]))
+            claim_created_at = datetime.datetime.fromisoformat(
+                row[6].replace("Z", "+00:00")
+            )
+            lease_expires_at = datetime.datetime.fromisoformat(
+                row[7].replace("Z", "+00:00")
+            )
+            event_time = event.timestamp.astimezone(datetime.UTC)
+            live_now = (
+                authoritative_now.astimezone(datetime.UTC)
+                if authoritative_now is not None
+                else None
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        project = conn.execute("SELECT id FROM projects LIMIT 1").fetchone()
+        task_binding = conn.execute(
+            "SELECT prd_id FROM tasks WHERE id = ?", (payload.task_id,)
+        ).fetchone()
+        current_prd = conn.execute(
+            "SELECT revision FROM prds WHERE id = ?", (context.prd_id,)
+        ).fetchone()
+        if (
+            project is None
+            or task_binding is None
+            or task_binding[0] != context.prd_id
+            or current_prd is None
+            or int(current_prd[0]) != context.prd_revision
+            or event_time >= lease_expires_at
+            or (live_now is not None and live_now >= lease_expires_at)
+            or (live_now is not None and event_time > live_now)
+        ):
+            return False
+        for proof in proofs:
+            attribution = proof.attribution
+            if attribution is None:
+                return False
+            captured_at = proof.captured_at.astimezone(datetime.UTC)
+            if (
+                not cls._hook_command_proof_material_is_valid(proof)
+                or attribution.project_id != project[0]
+                or attribution.claim_id != payload.claim_id
+                or attribution.generation != generation
+                or attribution.claimed_by != payload.submitted_by
+                or attribution.task_id != payload.task_id
+                or attribution.task_revision != context.task_revision
+                or attribution.prd_id != context.prd_id
+                or attribution.prd_revision != context.prd_revision
+                or attribution.repository_id != context.repository_id
+                or attribution.claim_start_sha != context.claim_start_sha
+                or claim_created_at > captured_at
+                or captured_at > event_time
+                or captured_at >= lease_expires_at
+                or (live_now is not None and captured_at > live_now)
+            ):
+                return False
+        return True
+
     @classmethod
     def _claim_command_proof_batch_matches_claim(
         cls,
@@ -10436,6 +10573,16 @@ class SqliteBackend:
                 "evidence.submitted: claim-bound command proof batch does not match "
                 "the exact active claim generation or durable proof material."
             )
+        if not self._hook_command_proof_batch_matches_claim(
+            conn,
+            payload,
+            event,
+            authoritative_now=self._clock.now(),
+        ):
+            raise EventRejected(
+                "evidence.submitted: hook command proof batch does not match the "
+                "exact active claim generation or durable attribution."
+            )
         # At least one proof is mandatory: a non-empty `commands_run`. An empty
         # `files_changed` is legitimate for a verification-only / check step that
         # runs commands but changes no files (B32) — the older rule forced a
@@ -10553,6 +10700,16 @@ class SqliteBackend:
         ):
             raise EventRejected(
                 "evidence.submitted: replay claim-bound command proof batch is invalid."
+            )
+        hooked = any(isinstance(proof, CommandProof) for proof in payload.proofs)
+        if hooked and not self._hook_command_proof_batch_matches_claim(
+            conn,
+            payload,
+            event,
+            allow_historical_unattributed=True,
+        ):
+            raise EventRejected(
+                "evidence.submitted: replay hook command proof batch is invalid."
             )
         task_id: str = payload.task_id
         claim_id: str = payload.claim_id

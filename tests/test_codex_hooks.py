@@ -193,6 +193,32 @@ def test_dispatch_capture_evidence_ignores_non_verification_command(
     assert calls == []
 
 
+def test_dispatch_capture_evidence_never_infers_passing_exit_code(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(hooks_mod, "_has_any_anvil_state", lambda cwd: True)
+    monkeypatch.setattr(
+        hooks_mod,
+        "hook_capture_evidence",
+        lambda **kwargs: calls.append("capture"),
+    )
+    for response in ({"stdout": "ok"}, {"exit_code": "not-an-int"}):
+        payload = {
+            "tool_input": {"command": "pytest -q"},
+            "tool_response": response,
+            "session_id": "sess-2",
+        }
+        result = runner.invoke(
+            app,
+            ["hook", "dispatch", "capture-evidence", "--cwd", str(tmp_path)],
+            input=json.dumps(payload),
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+    assert calls == []
+
+
 def test_dispatch_detect_state_renders_status_banner(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(hooks_mod, "_language_for_cwd", lambda cwd: "Python")
     monkeypatch.setattr(

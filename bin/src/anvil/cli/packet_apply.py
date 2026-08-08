@@ -33,6 +33,7 @@ from anvil.state.models import (
     ClaimCommandProof,
     CommandProof,
     EventDraft,
+    HookCommandAttribution,
 )
 
 
@@ -41,13 +42,11 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
 
     The capture-evidence hook writes one JSONL record per bash command to
     ``.anvil/.evidence-buffer/<claim-id>.json``. Each well-formed record
-    (carrying ``command`` + ``exit_code`` + ``output_sha256``) becomes a
-    :class:`CommandProof`. ``output_sha256`` is carried through as-is, NOT
-    re-verified here — the proof is only as trustworthy as the hook that wrote
-    the buffer (see the TRUST BOUNDARY note on the proof models; hardening
-    tracked in docs/tech-debt-backlog.md). Malformed or partial records (e.g. a
-    pre-SL-3 hook line with no ``output_sha256``) are skipped, never fatal:
-    ``submit`` must still succeed.
+    becomes a :class:`CommandProof` only when its exact claim attribution and
+    semantic digest validate. ``output_sha256`` is carried through as-is, NOT
+    re-verified here — the proof remains only as trustworthy as the hook that
+    wrote the buffer. Malformed, historical unattributed, or cross-claim lines
+    are skipped, never fatal: ``submit`` must still succeed.
     """
     import datetime
 
@@ -66,15 +65,22 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
             continue
         try:
             rec = json.loads(line)
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("claim_id") != claim_id:
+                continue
+            attribution = HookCommandAttribution.model_validate(rec["attribution"])
+            if attribution.claim_id != claim_id:
+                continue
             captured_at = datetime.datetime.fromisoformat(rec["timestamp"])
-            if captured_at.tzinfo is None:
-                captured_at = captured_at.replace(tzinfo=datetime.UTC)
             proofs.append(
                 CommandProof(
                     command=rec["command"],
                     exit_code=int(rec["exit_code"]),
                     output_sha256=rec["output_sha256"],
                     captured_at=captured_at,
+                    attribution=attribution,
+                    semantic_digest=rec["semantic_digest"],
                 )
             )
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):

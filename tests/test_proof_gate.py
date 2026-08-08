@@ -26,11 +26,13 @@ from anvil.state.models import (
     CommandProof,
     DiffProof,
     Evidence,
+    HookCommandAttribution,
     LinkProof,
     ProofKind,
     ProofRequirement,
     Task,
     Verification,
+    hook_command_semantic_digest,
 )
 
 _UTC = datetime.UTC
@@ -266,16 +268,39 @@ def _write_buffer(state_dir: Path, claim_id: str, records: list) -> None:
     (buf / f"{claim_id}.json").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _command_record(command: str, exit_code: int) -> dict:
+def _command_record(command: str, exit_code: int, *, claim_id: str = "C1") -> dict:
+    output_sha256 = hashlib.sha256(b"out").hexdigest()
+    attribution = HookCommandAttribution(
+        project_id="P1",
+        claim_id=claim_id,
+        generation=1,
+        claimed_by="agent",
+        task_id="T1",
+        task_revision="a" * 64,
+        prd_id="PRD-1",
+        prd_revision=1,
+        repository_id="b" * 64,
+        claim_start_sha="c" * 40,
+    )
+    semantic_digest = hook_command_semantic_digest(
+        attribution=attribution,
+        command=command,
+        exit_code=exit_code,
+        output_sha256=output_sha256,
+        captured_at=_NOW,
+    )
     return {
         "kind": "command",
         "timestamp": _NOW.isoformat(),
         "command": command,
         "exit_code": exit_code,
-        "output_sha256": hashlib.sha256(b"out").hexdigest(),
+        "output_sha256": output_sha256,
         "stdout_excerpt": "out",
         "stderr_excerpt": "",
         "actor": "agent",
+        "claim_id": claim_id,
+        "attribution": attribution.model_dump(mode="json"),
+        "semantic_digest": semantic_digest,
     }
 
 
@@ -294,8 +319,7 @@ def test_read_command_proofs_parses_valid_records(tmp_path: Path) -> None:
 
 
 def test_read_command_proofs_skips_partial_and_malformed(tmp_path: Path) -> None:
-    """A pre-SL-3 record (no output_sha256) or a torn line is skipped, never
-    fatal — submit must still succeed."""
+    """Historical unattributed and torn lines are skipped, never fatal."""
     partial = {
         "command": "old",
         "exit_code": 0,
@@ -309,6 +333,17 @@ def test_read_command_proofs_skips_partial_and_malformed(tmp_path: Path) -> None
     proofs = _read_command_proofs(tmp_path, "C1")
     assert len(proofs) == 1
     assert proofs[0].command == "uv run pytest -q"
+
+
+def test_read_command_proofs_skips_cross_claim_and_tampered_records(
+    tmp_path: Path,
+) -> None:
+    wrong_claim = _command_record("pytest wrong", 0, claim_id="C2")
+    tampered = _command_record("pytest original", 0)
+    tampered["command"] = "pytest tampered"
+    _write_buffer(tmp_path, "C1", [wrong_claim, tampered, "[]"])
+
+    assert _read_command_proofs(tmp_path, "C1") == []
 
 
 def test_read_command_proofs_missing_buffer_is_empty(tmp_path: Path) -> None:

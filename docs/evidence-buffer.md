@@ -2,10 +2,12 @@
 
 > **Audience:** users and operators inspecting or troubleshooting captured verification evidence.
 
-`.anvil/.evidence-buffer/` is a transient, append-only directory used by
-the `capture-evidence.sh` hook to record bash-command output between the moment
-a verification command runs and the moment `anvil submit` packages that
-output into a durable `evidence.submitted` event.
+`.anvil/.evidence-buffer/` is a transient, append-only directory used by the
+shell-free `anvil hook dispatch capture-evidence` hook to record command output
+between the moment a verification command runs and the moment `anvil submit`
+packages that output into a durable `evidence.submitted` event. The legacy
+`capture-evidence.sh` wrapper delegates to the same capture command when it is
+available.
 
 Only a fixed set of verification commands is captured: the hook matches on
 `pytest`, `ruff check`, `mypy`, `npm test`, `cargo test`, and `bun test`
@@ -26,7 +28,7 @@ by the active claim ID. The hook writes one file per claim:
 .anvil/.evidence-buffer/
 ├── 4F2A.json        # claim 4F2A's captured commands
 ├── 7B91.json        # claim 7B91's captured commands
-└── orphan.json      # commands captured while no active claim matched the actor
+└── orphan.json      # commands without an exact active claim/owner/session pin
 ```
 
 Each line in a file is one JSON object:
@@ -40,19 +42,33 @@ Each line in a file is one JSON object:
   "output_sha256": "9f3c...a1",
   "stdout_excerpt": "...up to 4000 chars...",
   "stderr_excerpt": "...up to 4000 chars...",
-  "actor": "agent-x"
+  "actor": "agent-x",
+  "claim_id": "4F2A",
+  "attribution": {
+    "schema_version": 1,
+    "project_id": "P1",
+    "claim_id": "4F2A",
+    "generation": 1,
+    "claimed_by": "agent-x",
+    "task_id": "T012",
+    "task_revision": "<64 hex>",
+    "prd_id": "default",
+    "prd_revision": 1,
+    "repository_id": "<64 hex>",
+    "claim_start_sha": "<40 or 64 hex>"
+  },
+  "semantic_digest": "<64 hex>"
 }
 ```
 
 `output_sha256` is the SHA-256 of the *full* (untruncated) stdout+stderr,
 computed by `anvil hook capture-evidence` before truncation — it lets the
 `CommandProof` attest to output that was never fully persisted. `kind` is
-written by the hook but not currently read back; `timestamp`, `command`,
-`exit_code`, and `output_sha256` are the fields the submit-side reconciler
-(`_read_command_proofs` in `packet_apply.py`) actually reads, and it
-silently **skips** any record missing one of them (e.g. a pre-SL-3 line with
-no `output_sha256`) rather than failing `submit`. A record missing
-`output_sha256` would simply be dropped, not embedded as evidence.
+written by the hook. The submit-side reconciler (`_read_command_proofs` in
+`packet_apply.py`) validates the exact `claim_id`, immutable `attribution`, and
+domain-separated `semantic_digest` before importing the line. It silently
+**skips** malformed, cross-claim, tampered, and historical unattributed records
+rather than failing `submit`.
 
 `stdout_excerpt` and `stderr_excerpt` are truncated to 4000 characters each
 to keep buffer files small and JSONL-friendly. Truncated outputs are still
@@ -64,7 +80,7 @@ agent's flow needs the long form.
 | Step | Who | Effect |
 |---|---|---|
 | 1. Agent runs `pytest` (or other verification command) | Bash tool | `PostToolUse` hook fires |
-| 2. `hooks/capture-evidence.sh` shells to `anvil hook capture-evidence` | Hook | One JSON line appended to `<claim-id>.json` (or `orphan.json` if no matching active claim) |
+| 2. The dispatcher calls `anvil hook capture-evidence` directly (the legacy wrapper shells to it) | Hook | With exact `ANVIL_CLAIM_ID`, `ANVIL_ACTOR`, and session ownership, one attributed JSON line is appended to `<claim-id>.json`; otherwise a descriptive line goes to `orphan.json` |
 | 3. Agent runs `anvil submit T012 --commands "pytest" --files-changed ...` | CLI | Reads `<claim-id>.json`, parses each well-formed line into a `CommandProof`, and embeds them in the `evidence.submitted` event's `proofs` field |
 | 4. `submit --output-file` provided directly | CLI | The buffer is bypassed; up to 8000 characters become a descriptive output excerpt. This never creates a typed proof or satisfies `required_proofs`. |
 | 5. `submit --command-proof-file ARTIFACT` provided | CLI | The bounded claim-bound artifact is validated against the explicit active claim, actor, generation, task/PRD revision, repository, cwd, command, timestamps, exit code, and output digest before it is imported as a typed proof. Repeat the flag for a batch. |
@@ -143,13 +159,18 @@ item imports nothing and leaves the claim active.
 
 ## `orphan.json` accumulation
 
-When a bash command runs and **no active claim matches the actor**, the
-record goes to `orphan.json`. This commonly happens when:
+When a command runs without an **exact active claim, owner, and session pin**,
+the record goes to `orphan.json`. The work packet's structured
+`update_protocol.continuation.hook_environment` supplies `ANVIL_CLAIM_ID` and
+`ANVIL_ACTOR`; both must be carried into the process that invokes tools. The
+claim ID selects a candidate but does not authenticate it: persisted ownership
+and any persisted session discriminator must also match. Orphaning commonly
+happens when:
 
 - An agent runs verification commands before claiming a task.
 - An agent runs commands after the claim has been released or has gone stale.
-- Multiple agents run concurrently and the hook's actor identity doesn't
-  match any owner.
+- The packet's hook environment was not applied, is stale, or names a different
+  owner/session.
 
 `orphan.json` is currently **never auto-cleaned**. It accumulates indefinitely
 until the user deletes it manually:

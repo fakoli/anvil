@@ -154,7 +154,13 @@ The output includes `lease_expires_at` for each active claim.
 
 ### Step 5 — Run verification before submitting
 
-Execute the task's `verification.commands` from the work packet. The `capture-evidence.sh` hook (PostToolUse Bash) captures stdout, stderr, and exit code from each registered verification command into the claim's pending evidence buffer automatically.
+Apply the work packet's structured `hook_environment` in the process that
+invokes tools, then execute the task's `verification.commands`. The shell-free
+`capture-evidence` dispatcher (PostToolUse Bash) captures stdout, stderr, and
+exit code into the claim's pending evidence buffer only when
+`ANVIL_CLAIM_ID`, `ANVIL_ACTOR`, active ownership, and any persisted session
+identity match exactly. It never guesses from a sole or actor-only claim. The
+legacy `capture-evidence.sh` wrapper delegates to the same capture command.
 
 The verification commands are the objective acceptance gate. Submit only when all verification commands exit 0. If a command fails:
 

@@ -537,6 +537,10 @@ class TestRenderPacketJSON:
         assert up["continuation"]["environment"] == {
             "ANVIL_ACTOR": "agent-alpha"
         }
+        assert up["continuation"]["hook_environment"] == {
+            "ANVIL_ACTOR": "agent-alpha",
+            "ANVIL_CLAIM_ID": "C001",
+        }
         assert up["continuation"]["submit"]["argv"][-2:] == [
             "--actor",
             "agent-alpha",
@@ -568,12 +572,14 @@ class TestRenderPacketJSON:
             assert f"--actor {quoted}" in submit
             assert f"--actor {quoted}" in renew
             assert f"$env:ANVIL_ACTOR = {quoted}" in packet.markdown
+            assert "$env:ANVIL_CLAIM_ID = 'C001'" in packet.markdown
         else:
             quoted = packets.quote_posix_actor(actor)
             assert f"--actor {quoted}" in submit
             assert f"--actor {quoted}" in renew
             assert shlex.split(quoted) == [actor]
             assert f"export ANVIL_ACTOR={quoted}" in packet.markdown
+            assert "ANVIL_CLAIM_ID=C001" in packet.markdown
 
     def test_unsafe_legacy_actor_uses_only_structured_continuation(self) -> None:
         actor = "legacy\nowner"

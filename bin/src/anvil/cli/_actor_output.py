@@ -76,6 +76,20 @@ def actor_env_for_human(actor: str) -> str | None:
     return f"export ANVIL_ACTOR={quoted}"
 
 
+def hook_env_for_human(actor: str, claim_id: str) -> str | None:
+    """Current-shell hook attribution pins, or None for an unsafe actor."""
+    if safe_actor_for_human(actor) is None:
+        return None
+    actor_quoted = _quote_for_current_shell(actor)
+    claim_quoted = _quote_for_current_shell(claim_id)
+    if current_shell_kind() == "powershell":
+        return (
+            f"$env:ANVIL_ACTOR = {actor_quoted}; "
+            f"$env:ANVIL_CLAIM_ID = {claim_quoted}"
+        )
+    return f"export ANVIL_ACTOR={actor_quoted} ANVIL_CLAIM_ID={claim_quoted}"
+
+
 def safe_actor_label(actor: str) -> str:
     """Render a human label without ever exposing unsafe persisted bytes."""
     safe = safe_actor_for_human(actor)

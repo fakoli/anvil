@@ -17,6 +17,7 @@ from anvil.cli._actor_output import (
     bundle_continuation_data,
     bundle_continuation_lines,
     continuation_data,
+    hook_env_for_human,
     safe_actor_label,
 )
 from anvil.cli._helpers import (
@@ -674,6 +675,11 @@ def claim(
     typer.echo("")
     for line in actor_notice_lines(claim_obj.claimed_by):
         typer.echo(line)
+    hook_env = hook_env_for_human(claim_obj.claimed_by, claim_obj.id)
+    if hook_env is not None:
+        typer.echo(f"  Pin hook attribution: `{hook_env}`")
+    else:
+        typer.echo("  Use JSON/MCP structured hook_environment for hook attribution.")
     if claim_obj.attestation_context is not None:
         typer.echo(
             f"External progress: `anvil progress {task_id} PHASE "

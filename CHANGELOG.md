@@ -32,6 +32,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   and descriptive `--output-file` content can no longer be mistaken for a typed
   proof. The public API contract advances to version 7.
 
+### Fixed
+
+- **Claim-isolated hook command capture (#180).** Hook-observed command proofs
+  now require an explicit claim pin and retain digest-covered actor, generation,
+  task, PRD, and repository attribution. Unscoped, stale, wrong-owner, or
+  wrong-session captures stay in the orphan buffer instead of being inferred
+  from the sole active claim or an actor-only match.
+
 ## [0.6.3] - 2026-08-08
 
 ### Fixed

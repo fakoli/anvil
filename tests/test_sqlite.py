@@ -41,7 +41,9 @@ from anvil.state.models import (
     ClaimStatus,
     Event,
     EventDraft,
+    HookCommandAttribution,
     claim_command_semantic_projection,
+    hook_command_semantic_digest,
 )
 from anvil.state.payloads import (
     EvidenceSubmittedPayload,
@@ -3357,6 +3359,54 @@ def _make_claim_command_proof(
         "issuer_id": None,
         "evidence_core": core,
         "issuer": None,
+    }
+
+
+def _make_hook_command_proof(
+    *,
+    project_id: str = "proj-1",
+    claim_id: str = "C001",
+    generation: int = 1,
+    claimed_by: str = "agent-alpha",
+    task_id: str = "T001",
+    task_revision: str = "f" * 64,
+    prd_id: str = "default",
+    prd_revision: int = 1,
+    repository_id: str = "e" * 64,
+    claim_start_sha: str = "a" * 40,
+    command: str = "pytest tests/ -v",
+    exit_code: int = 0,
+    output_sha256: str = hashlib.sha256(b"5 passed\n").hexdigest(),
+    captured_at: datetime = _T0 + timedelta(minutes=11),
+    semantic_digest: str | None = None,
+) -> dict[str, Any]:
+    attribution = HookCommandAttribution(
+        project_id=project_id,
+        claim_id=claim_id,
+        generation=generation,
+        claimed_by=claimed_by,
+        task_id=task_id,
+        task_revision=task_revision,
+        prd_id=prd_id,
+        prd_revision=prd_revision,
+        repository_id=repository_id,
+        claim_start_sha=claim_start_sha,
+    )
+    return {
+        "kind": "command",
+        "command": command,
+        "exit_code": exit_code,
+        "output_sha256": output_sha256,
+        "captured_at": captured_at.isoformat().replace("+00:00", "Z"),
+        "attribution": attribution.model_dump(mode="json"),
+        "semantic_digest": semantic_digest
+        or hook_command_semantic_digest(
+            attribution=attribution,
+            command=command,
+            exit_code=exit_code,
+            output_sha256=output_sha256,
+            captured_at=captured_at,
+        ),
     }
 
 
@@ -13858,6 +13908,207 @@ class TestClaimCommandProofState:
             claim = b.get_claim("C001")
             assert claim is not None and claim.status is ClaimStatus.active
             assert b.get_task("T001").status.value == "claimed"  # type: ignore[union-attr]
+        finally:
+            b.close()
+
+
+class TestHookCommandProofState:
+    def _claim(self, backend: SqliteBackend) -> None:
+        _setup_claimable_task(backend)
+        backend.append(
+            _make_event(
+                "claim.created",
+                _make_attestable_claim_payload(),
+                target_kind="claim",
+                target_id="C001",
+            )
+        )
+
+    def _submit(self, backend: SqliteBackend, proofs: list[dict[str, Any]]) -> Event:
+        raw = _make_evidence_payload()
+        raw["proofs"] = proofs
+        clock = backend._clock  # noqa: SLF001 - exercise append-lock clock
+        submit_time = _T0 + timedelta(minutes=12)
+        if isinstance(clock, FrozenClock) and clock.now() < submit_time:
+            clock.advance(seconds=(submit_time - clock.now()).total_seconds())
+        event = backend.append(
+            _make_event(
+                "evidence.submitted",
+                raw,
+                target_kind="task",
+                target_id="T001",
+                actor="agent-alpha",
+                now=submit_time,
+            )
+        )
+        assert event is not None
+        return event
+
+    def test_attributed_hook_proof_persists_and_replays(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_hook_command_proof()
+            self._submit(b, [proof])
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            stored = evidence.proofs[0]
+            assert stored.kind == "command"
+            assert stored.attribution is not None  # type: ignore[union-attr]
+            assert stored.attribution.claim_id == "C001"  # type: ignore[union-attr]
+            assert stored.semantic_digest == proof["semantic_digest"]  # type: ignore[union-attr]
+            original = evidence.model_dump(mode="json")
+
+            b.replay_from_empty(events_path)
+            rebuilt = b.get_latest_evidence("T001")
+            assert rebuilt is not None
+            assert rebuilt.model_dump(mode="json") == original
+        finally:
+            b.close()
+
+    @pytest.mark.parametrize(
+        "proof",
+        [
+            _make_hook_command_proof(generation=2),
+            _make_hook_command_proof(claimed_by="other-agent"),
+            _make_hook_command_proof(task_id="T999"),
+            _make_hook_command_proof(prd_revision=2),
+            _make_hook_command_proof(captured_at=_T0 + timedelta(minutes=20)),
+        ],
+    )
+    def test_wrong_attribution_rejects_before_log_append(
+        self, tmp_path: Path, proof: dict[str, Any]
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                self._submit(b, [proof])
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+            task = b.get_task("T001")
+            assert task is not None and task.status.value == "claimed"
+        finally:
+            b.close()
+
+    def test_live_unattributed_historical_shape_is_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            raw = _make_evidence_payload()
+            raw["proofs"] = [
+                {
+                    "kind": "command",
+                    "command": "pytest tests/ -v",
+                    "exit_code": 0,
+                    "output_sha256": hashlib.sha256(b"5 passed\n").hexdigest(),
+                    "captured_at": (_T0 + timedelta(minutes=11)).isoformat(),
+                }
+            ]
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                b.append(
+                    _make_event(
+                        "evidence.submitted",
+                        raw,
+                        target_kind="task",
+                        target_id="T001",
+                        actor="agent-alpha",
+                        now=_T0 + timedelta(minutes=12),
+                    )
+                )
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+        finally:
+            b.close()
+
+    def test_historical_unattributed_event_replays_without_shape_drift(
+        self, tmp_path: Path
+    ) -> None:
+        events_path = tmp_path / "events.jsonl"
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            raw = _make_evidence_payload()
+            historical = {
+                "kind": "command",
+                "command": "pytest tests/ -v",
+                "exit_code": 0,
+                "output_sha256": hashlib.sha256(b"5 passed\n").hexdigest(),
+                "captured_at": (_T0 + timedelta(minutes=11))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            raw["proofs"] = [historical]
+            next_id = f"E{len(_read_jsonl(str(events_path))) + 1:06d}"
+            replayed = Event(
+                id=next_id,
+                timestamp=_T0 + timedelta(minutes=12),
+                actor="agent-alpha",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=raw,
+            )
+            with events_path.open("a", encoding="utf-8") as stream:
+                stream.write(replayed.model_dump_json(exclude_none=True) + "\n")
+
+            b.replay_from_empty(str(events_path))
+            evidence = b.get_latest_evidence("T001")
+            assert evidence is not None
+            assert evidence.proofs[0].model_dump(mode="json") == historical
+        finally:
+            b.close()
+
+    def test_replay_rejects_attributed_generation_mismatch(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            raw = _make_evidence_payload()
+            raw["proofs"] = [_make_hook_command_proof(generation=2)]
+            payload = EvidenceSubmittedPayload.model_validate(raw)
+            replayed = Event(
+                id="E999992",
+                timestamp=_T0 + timedelta(minutes=12),
+                actor="agent-alpha",
+                action="evidence.submitted",
+                target_kind="task",
+                target_id="T001",
+                payload_json=raw,
+            )
+            conn = b._require_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            with pytest.raises(EventRejected, match="replay hook command proof"):
+                b._write_evidence_submitted(conn, payload, replayed)
+            conn.execute("ROLLBACK")
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+        finally:
+            b.close()
+
+    def test_duplicate_attributed_digest_rejects_atomically(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            self._claim(b)
+            proof = _make_hook_command_proof()
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="hook command proof batch"):
+                self._submit(b, [proof, proof])
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
         finally:
             b.close()
 
