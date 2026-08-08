@@ -268,7 +268,9 @@ def _write_buffer(state_dir: Path, claim_id: str, records: list) -> None:
     (buf / f"{claim_id}.json").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _command_record(command: str, exit_code: int, *, claim_id: str = "C1") -> dict:
+def _command_record(
+    command: str, exit_code: int, *, claim_id: str = "C00000001"
+) -> dict:
     output_sha256 = hashlib.sha256(b"out").hexdigest()
     attribution = HookCommandAttribution(
         project_id="P1",
@@ -307,10 +309,10 @@ def _command_record(command: str, exit_code: int, *, claim_id: str = "C1") -> di
 def test_read_command_proofs_parses_valid_records(tmp_path: Path) -> None:
     _write_buffer(
         tmp_path,
-        "C1",
+        "C00000001",
         [_command_record("uv run pytest -q", 0), _command_record("make build", 2)],
     )
-    proofs = _read_command_proofs(tmp_path, "C1")
+    proofs = _read_command_proofs(tmp_path, "C00000001")
     assert [(p.command, p.exit_code) for p in proofs] == [
         ("uv run pytest -q", 0),
         ("make build", 2),
@@ -327,10 +329,10 @@ def test_read_command_proofs_skips_partial_and_malformed(tmp_path: Path) -> None
     }  # no output_sha256
     _write_buffer(
         tmp_path,
-        "C1",
+        "C00000001",
         [_command_record("uv run pytest -q", 0), partial, "{not json"],
     )
-    proofs = _read_command_proofs(tmp_path, "C1")
+    proofs = _read_command_proofs(tmp_path, "C00000001")
     assert len(proofs) == 1
     assert proofs[0].command == "uv run pytest -q"
 
@@ -338,12 +340,12 @@ def test_read_command_proofs_skips_partial_and_malformed(tmp_path: Path) -> None
 def test_read_command_proofs_skips_cross_claim_and_tampered_records(
     tmp_path: Path,
 ) -> None:
-    wrong_claim = _command_record("pytest wrong", 0, claim_id="C2")
+    wrong_claim = _command_record("pytest wrong", 0, claim_id="C00000002")
     tampered = _command_record("pytest original", 0)
     tampered["command"] = "pytest tampered"
-    _write_buffer(tmp_path, "C1", [wrong_claim, tampered, "[]"])
+    _write_buffer(tmp_path, "C00000001", [wrong_claim, tampered, "[]"])
 
-    assert _read_command_proofs(tmp_path, "C1") == []
+    assert _read_command_proofs(tmp_path, "C00000001") == []
 
 
 def test_read_command_proofs_missing_buffer_is_empty(tmp_path: Path) -> None:
