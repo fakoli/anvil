@@ -40,7 +40,7 @@ The install registers five hooks, wires the MCP server, and makes the five plugi
 
 ```bash
 anvil --version
-# → anvil 0.6.4 (schema 17)
+# → anvil 0.6.4 (schema 18)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
@@ -412,7 +412,7 @@ if ($status.ok) {
 ```
 
 `anvil --version` identifies the CLI engine and supported schema, for example
-`anvil 0.6.4 (schema 17)`. `schema_version` is that engine schema.
+`anvil 0.6.4 (schema 18)`. `schema_version` is that engine schema.
 `db_schema_version` (shown as `pre_open_database_schema`) is the database stamp
 observed before the backend opens. If the command succeeds with a lower
 pre-open value, that same call completed a supported migration; rerun the

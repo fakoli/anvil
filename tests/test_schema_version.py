@@ -1,6 +1,6 @@
 """schema_version exposure tests (T007/B11).
 
-The existing SCHEMA_VERSION (=7) is surfaced to tooling through:
+The current SCHEMA_VERSION is surfaced to tooling through:
 - a public accessor ``schema.get_schema_version()``;
 - a backend accessor ``SqliteBackend.get_schema_version()`` (the DB's stamped
   ``PRAGMA user_version``);
@@ -44,7 +44,7 @@ def _init(tmp_path: Path) -> None:
 def test_get_schema_version_matches_constant() -> None:
     """The public accessor returns the current SCHEMA_VERSION constant."""
     assert get_schema_version() == SCHEMA_VERSION
-    assert get_schema_version() == 17
+    assert get_schema_version() == 18
 
 
 def test_backend_get_schema_version_matches_constant(tmp_path: Path) -> None:
@@ -528,7 +528,7 @@ def test_status_hook_format_unknown_schema_version_exits_zero(
     assert res.exit_code == 0, res.output
     line = res.output.strip()
     assert line.startswith("schema_mismatch ")
-    assert "supported-schema:17" in line
+    assert "supported-schema:18" in line
     assert "database-schema:99" in line
     assert "prd-status:" not in line
 

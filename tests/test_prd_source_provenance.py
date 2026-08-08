@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import pickle
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -26,9 +28,16 @@ from anvil.cli._helpers import (
     replace_prd_source_for_id,
     validate_prd_id,
 )
+from anvil.clock import FrozenClock
 from anvil.read_contracts import PrdScopedRefV1
-from anvil.state.models import PRD
+from anvil.state.backend import EventRejected, TransactionAborted
+from anvil.state.models import PRD, EventDraft
 from anvil.state.payloads import PrdParsedPayload, PrdRevisedPayload
+from anvil.state.schema import SCHEMA_VERSION
+from anvil.state.sqlite import SqliteBackend
+
+
+_T0 = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 
 
 def _available_source_fields(source_bytes: bytes, revision: int) -> dict[str, Any]:
@@ -41,6 +50,78 @@ def _available_source_fields(source_bytes: bytes, revision: int) -> dict[str, An
         "provenance_state": "available",
         "content_available": True,
     }
+
+
+def _projection_backend(state_dir: Path) -> SqliteBackend:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    events_path = state_dir / "events.jsonl"
+    events_path.touch()
+    backend = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(events_path),
+        clock=FrozenClock(_T0),
+    )
+    backend.initialize()
+    return backend
+
+
+def _projection_event(
+    action: str,
+    payload: dict[str, Any],
+    *,
+    target_kind: str,
+    target_id: str,
+    timestamp: datetime = _T0,
+) -> EventDraft:
+    return EventDraft(
+        timestamp=timestamp,
+        actor="provenance-test",
+        action=action,
+        target_kind=target_kind,
+        target_id=target_id,
+        payload_json=payload,
+    )
+
+
+def _setup_projection_project(backend: SqliteBackend) -> None:
+    backend.append(
+        _projection_event(
+            "project.created",
+            {
+                "id": "project",
+                "name": "Projection",
+                "description": "",
+                "created_at": _T0.isoformat(),
+                "updated_at": _T0.isoformat(),
+            },
+            target_kind="project",
+            target_id="project",
+        )
+    )
+
+
+def _append_available_projection_parse(
+    backend: SqliteBackend,
+    source_bytes: bytes,
+    *,
+    prd_id: str = "release",
+) -> None:
+    backend.append(
+        _projection_event(
+            "prd.parsed",
+            {
+                "project_id": "project",
+                "prd_id": prd_id,
+                "expected_absent": True,
+                "title": "Release",
+                "is_default": False,
+                "status": "draft",
+                **_available_source_fields(source_bytes, 1),
+            },
+            target_kind="prd",
+            target_id=prd_id,
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -380,6 +461,318 @@ def test_projection_model_defaults_legacy_provenance_to_unavailable() -> None:
     assert prd.source_size_bytes is None
     assert prd.source_encoding is None
     assert prd.source_revision is None
+
+
+def test_schema_v18_migration_preserves_lifecycle_tasks_and_marks_legacy_unavailable(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "migration"
+    backend = _projection_backend(state_dir)
+    try:
+        _setup_projection_project(backend)
+        backend.append(
+            _projection_event(
+                "prd.parsed",
+                {
+                    "project_id": "project",
+                    "prd_id": "release",
+                    "expected_absent": True,
+                    "title": "Release",
+                    "is_default": False,
+                },
+                target_kind="prd",
+                target_id="release",
+            )
+        )
+        backend.append(
+            _projection_event(
+                "feature.created",
+                {
+                    "id": "release:F001",
+                    "prd_id": "release",
+                    "title": "Feature",
+                    "description": "",
+                },
+                target_kind="feature",
+                target_id="release:F001",
+            )
+        )
+        conn = backend._require_conn()  # noqa: SLF001
+        conn.execute(
+            "UPDATE prds SET status = 'approved', revision = 4 WHERE id = 'release'"
+        )
+        conn.execute(
+            """INSERT INTO tasks (
+                   id, feature_id, prd_id, title, description, status, priority,
+                   task_type, dependencies, conflict_groups, scores,
+                   acceptance_criteria, implementation_notes, verification,
+                   likely_files, claims, parent_task_id, created_at, updated_at
+               ) VALUES (
+                   'release:T001', 'release:F001', 'release', 'Task', '', 'done',
+                   'high', 'feature', '[]', '[]', '{}', '[]', '[]', '{}', '[]',
+                   '[]', NULL, ?, ?
+               )""",
+            (_T0.isoformat(), _T0.isoformat()),
+        )
+    finally:
+        backend.close()
+
+    db_path = state_dir / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """CREATE TABLE prds_v17 (
+                id TEXT PRIMARY KEY DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                summary TEXT NOT NULL DEFAULT '',
+                goals TEXT NOT NULL DEFAULT '[]',
+                non_goals TEXT NOT NULL DEFAULT '[]',
+                requirements TEXT NOT NULL DEFAULT '[]',
+                acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+                risks TEXT NOT NULL DEFAULT '[]',
+                open_questions TEXT NOT NULL DEFAULT '[]',
+                assumptions TEXT NOT NULL DEFAULT '[]',
+                last_reviewed_at TEXT,
+                last_reviewed_by TEXT,
+                target_version TEXT,
+                target_tag TEXT,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT
+            )"""
+        )
+        legacy_columns = (
+            "id, project_id, title, status, summary, goals, non_goals, "
+            "requirements, acceptance_criteria, risks, open_questions, "
+            "assumptions, last_reviewed_at, last_reviewed_by, target_version, "
+            "target_tag, is_default, revision, created_at, updated_at"
+        )
+        conn.execute(
+            f"INSERT INTO prds_v17 ({legacy_columns}) "
+            f"SELECT {legacy_columns} FROM prds"
+        )
+        conn.execute("DROP TABLE prds")
+        conn.execute("ALTER TABLE prds_v17 RENAME TO prds")
+        conn.execute(
+            "CREATE UNIQUE INDEX ux_prds_default ON prds (project_id) "
+            "WHERE is_default = 1"
+        )
+        conn.execute(
+            "CREATE TRIGGER fail_source_migration BEFORE UPDATE ON prds "
+            "BEGIN SELECT RAISE(ABORT, 'injected source migration failure'); END"
+        )
+        conn.execute("PRAGMA user_version = 17")
+        conn.commit()
+    finally:
+        conn.close()
+
+    failing = SqliteBackend(
+        db_path=str(db_path),
+        events_path=str(state_dir / "events.jsonl"),
+        clock=FrozenClock(_T0),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="injected source migration"):
+        failing.initialize()
+    failing.close()
+    conn = sqlite3.connect(db_path)
+    try:
+        columns_after_failure = {
+            row[1] for row in conn.execute("PRAGMA table_info(prds)")
+        }
+        assert "source_bytes" not in columns_after_failure
+        assert conn.execute("PRAGMA user_version").fetchone() == (17,)
+        assert conn.execute(
+            "SELECT status, revision FROM prds WHERE id = 'release'"
+        ).fetchone() == ("approved", 4)
+        conn.execute("DROP TRIGGER fail_source_migration")
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrated = _projection_backend(state_dir)
+    try:
+        assert migrated.get_schema_version() == SCHEMA_VERSION == 18
+        prd = migrated.get_prd("release")
+        assert prd is not None
+        assert prd.status.value == "approved"
+        assert prd.revision == 4
+        assert prd.provenance_state == "legacy_unbound"
+        assert prd.content_available is False
+        assert prd.source_bytes is None
+        raw_provenance = migrated._require_conn().execute(  # noqa: SLF001
+            "SELECT source_bytes, source_sha256, source_size_bytes, "
+            "source_encoding, source_revision, provenance_state, "
+            "content_available FROM prds WHERE id = 'release'"
+        ).fetchone()
+        assert tuple(raw_provenance) == (
+            None,
+            None,
+            None,
+            None,
+            None,
+            "legacy_unbound",
+            0,
+        )
+        assert migrated.get_task("release:T001").status.value == "done"  # type: ignore[union-attr]
+        assert migrated.get_feature("release:F001").prd_id == "release"  # type: ignore[union-attr]
+    finally:
+        migrated.close()
+
+
+def test_parse_projection_persists_one_exact_revision_binding(tmp_path: Path) -> None:
+    source_bytes = "# Release\r\n\r\nNFD e\u0301 🚀\r\n".encode()
+    backend = _projection_backend(tmp_path / "parse-projection")
+    try:
+        _setup_projection_project(backend)
+        _append_available_projection_parse(backend, source_bytes)
+        prd = backend.get_prd("release")
+        assert prd is not None
+        assert prd.source_bytes == source_bytes
+        assert prd.source_sha256 == hashlib.sha256(source_bytes).hexdigest()
+        assert prd.source_size_bytes == len(source_bytes)
+        assert prd.source_encoding == "utf-8"
+        assert prd.source_revision == prd.revision == 1
+        assert prd.provenance_state == "available"
+        assert prd.content_available is True
+        row = backend._require_conn().execute(  # noqa: SLF001
+            "SELECT source_bytes, typeof(source_bytes), source_revision "
+            "FROM prds WHERE id = 'release'"
+        ).fetchone()
+        assert tuple(row) == (source_bytes, "blob", 1)
+    finally:
+        backend.close()
+
+
+def test_revision_projection_atomically_replaces_source_binding(
+    tmp_path: Path,
+) -> None:
+    original = b"# Revision 1\n"
+    revised = b"# Revision 2\r\n"
+    backend = _projection_backend(tmp_path / "revision-projection")
+    try:
+        _setup_projection_project(backend)
+        _append_available_projection_parse(backend, original)
+        backend._require_conn().execute(  # noqa: SLF001
+            "UPDATE prds SET status = 'approved' WHERE id = 'release'"
+        )
+        backend.append(
+            _projection_event(
+                "prd.revised",
+                {
+                    "project_id": "project",
+                    "prd_id": "release",
+                    "revision": 2,
+                    "expected_status": "approved",
+                    "status": "approved",
+                    "title": "Release revised",
+                    **_available_source_fields(revised, 2),
+                },
+                target_kind="prd",
+                target_id="release",
+                timestamp=_T0 + timedelta(minutes=1),
+            )
+        )
+        prd = backend.get_prd("release")
+        assert prd is not None
+        assert prd.status.value == "approved"
+        assert prd.revision == prd.source_revision == 2
+        assert prd.source_bytes == revised
+        assert prd.source_sha256 == hashlib.sha256(revised).hexdigest()
+        assert original not in prd.source_bytes
+    finally:
+        backend.close()
+
+
+def test_feature_projection_reads_persisted_prd_owner(tmp_path: Path) -> None:
+    backend = _projection_backend(tmp_path / "feature-projection")
+    try:
+        _setup_projection_project(backend)
+        _append_available_projection_parse(backend, b"# Release\n")
+        backend.append(
+            _projection_event(
+                "feature.created",
+                {
+                    "id": "release:F001",
+                    "prd_id": "release",
+                    "title": "Feature",
+                    "description": "",
+                },
+                target_kind="feature",
+                target_id="release:F001",
+            )
+        )
+        feature = backend.get_feature("release:F001")
+        assert feature is not None and feature.prd_id == "release"
+        assert [item.prd_id for item in backend.list_features()] == ["release"]
+        assert [item.prd_id for item in backend.list_features(prd_id="release")] == [
+            "release"
+        ]
+    finally:
+        backend.close()
+
+
+def test_projection_validation_and_storage_failure_preserve_prior_binding(
+    tmp_path: Path,
+) -> None:
+    original = b"# Original\n"
+    revised = b"# Revised\n"
+    state_dir = tmp_path / "failure-projection"
+    backend = _projection_backend(state_dir)
+    try:
+        _setup_projection_project(backend)
+        _append_available_projection_parse(backend, original)
+        conn = backend._require_conn()  # noqa: SLF001
+        before = tuple(conn.execute("SELECT * FROM prds WHERE id = 'release'").fetchone())
+        before_log = (state_dir / "events.jsonl").read_bytes()
+        invalid = {
+            "project_id": "project",
+            "prd_id": "release",
+            "revision": 2,
+            "expected_status": "draft",
+            "status": "draft",
+            **_available_source_fields(revised, 2),
+        }
+        invalid["source_sha256"] = "0" * 64
+        with pytest.raises(EventRejected, match="payload validation"):
+            backend.append(
+                _projection_event(
+                    "prd.revised",
+                    invalid,
+                    target_kind="prd",
+                    target_id="release",
+                )
+            )
+        assert (state_dir / "events.jsonl").read_bytes() == before_log
+        assert tuple(conn.execute("SELECT * FROM prds WHERE id = 'release'").fetchone()) == before
+
+        conn.execute(
+            "CREATE TRIGGER fail_provenance_update "
+            "BEFORE UPDATE OF source_bytes ON prds "
+            "BEGIN SELECT RAISE(ABORT, 'injected provenance failure'); END"
+        )
+        valid = {
+            "project_id": "project",
+            "prd_id": "release",
+            "revision": 2,
+            "expected_status": "draft",
+            "status": "draft",
+            **_available_source_fields(revised, 2),
+        }
+        with pytest.raises(TransactionAborted, match="log line remains"):
+            backend.append(
+                _projection_event(
+                    "prd.revised",
+                    valid,
+                    target_kind="prd",
+                    target_id="release",
+                )
+            )
+        assert tuple(conn.execute("SELECT * FROM prds WHERE id = 'release'").fetchone()) == before
+    finally:
+        backend.close()
 
 
 @pytest.mark.parametrize(

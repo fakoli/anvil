@@ -2750,7 +2750,7 @@ class SqliteBackend:
         """Return the Feature with the given ID, or None if not found."""
         conn = self._require_conn()
         row = conn.execute(
-            "SELECT id, title, description, status, requirements, tasks "
+            "SELECT id, prd_id, title, description, status, requirements, tasks "
             "FROM features WHERE id = ?",
             (feature_id,),
         ).fetchone()
@@ -2758,11 +2758,12 @@ class SqliteBackend:
             return None
         return Feature(
             id=row[0],
-            title=row[1],
-            description=row[2],
-            status=row[3],
-            requirements=json.loads(row[4] or "[]"),
-            tasks=json.loads(row[5] or "[]"),
+            prd_id=row[1],
+            title=row[2],
+            description=row[3],
+            status=row[4],
+            requirements=json.loads(row[5] or "[]"),
+            tasks=json.loads(row[6] or "[]"),
         )
 
     def list_features(self, *, prd_id: str | None = None) -> list[Feature]:
@@ -2776,18 +2777,19 @@ class SqliteBackend:
         where = "WHERE prd_id = ? " if prd_id is not None else ""
         params: tuple[str, ...] = (prd_id,) if prd_id is not None else ()
         rows = conn.execute(
-            "SELECT id, title, description, status, requirements, tasks "
+            "SELECT id, prd_id, title, description, status, requirements, tasks "
             f"FROM features {where}ORDER BY id",
             params,
         ).fetchall()
         return [
             Feature(
                 id=r[0],
-                title=r[1],
-                description=r[2],
-                status=r[3],
-                requirements=json.loads(r[4] or "[]"),
-                tasks=json.loads(r[5] or "[]"),
+                prd_id=r[1],
+                title=r[2],
+                description=r[3],
+                status=r[4],
+                requirements=json.loads(r[5] or "[]"),
+                tasks=json.loads(r[6] or "[]"),
             )
             for r in rows
         ]
@@ -3126,7 +3128,7 @@ class SqliteBackend:
         """Raise SchemaMismatch if on-disk version is incompatible with SCHEMA_VERSION.
 
         Auto-upgrade follows the ordered, idempotent ``_MIGRATIONS`` chain
-        through the current schema (v17). ``v0`` and ``v1`` are normalized to
+        through the current schema (v18). ``v0`` and ``v1`` are normalized to
         the v2 baseline by current DDL before the explicit ladder runs. The
         early historical transitions remain noteworthy because they repair
         pre-existing tables that ``CREATE TABLE IF NOT EXISTS`` cannot alter:
@@ -3832,6 +3834,58 @@ class SqliteBackend:
             "AND collision_detected = 0"
         )
 
+    def _m_to_v18(self, conn: sqlite3.Connection) -> None:
+        """v17 -> v18: persist exact revision-bound PRD source provenance."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(prds)")}
+            additions = (
+                ("source_bytes", "BLOB"),
+                ("source_sha256", "TEXT"),
+                (
+                    "source_size_bytes",
+                    "INTEGER CHECK (source_size_bytes IS NULL OR "
+                    "source_size_bytes BETWEEN 0 AND 2097152)",
+                ),
+                (
+                    "source_encoding",
+                    "TEXT CHECK (source_encoding IS NULL OR "
+                    "source_encoding = 'utf-8')",
+                ),
+                (
+                    "source_revision",
+                    "INTEGER CHECK (source_revision IS NULL OR "
+                    "source_revision >= 1)",
+                ),
+                (
+                    "provenance_state",
+                    "TEXT NOT NULL DEFAULT 'legacy_unbound' CHECK "
+                    "(provenance_state IN ('available', 'legacy_unbound'))",
+                ),
+                (
+                    "content_available",
+                    "INTEGER NOT NULL DEFAULT 0 CHECK "
+                    "(content_available IN (0, 1))",
+                ),
+            )
+            for column, definition in additions:
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE prds ADD COLUMN {column} {definition}")
+            # Every row crossing the v17 boundary predates authoritative
+            # provenance. Do not bless or retain any partially added/out-of-band
+            # source values: the only faithful migration is explicitly
+            # unavailable with the entire source tuple cleared.
+            conn.execute(
+                "UPDATE prds SET source_bytes = NULL, source_sha256 = NULL, "
+                "source_size_bytes = NULL, source_encoding = NULL, "
+                "source_revision = NULL, provenance_state = 'legacy_unbound', "
+                "content_available = 0"
+            )
+        except BaseException:
+            self._safe_rollback(conn)
+            raise
+        conn.execute("COMMIT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -3848,6 +3902,7 @@ class SqliteBackend:
         (14, _m_to_v15),
         (15, _m_to_v16),
         (16, _m_to_v17),
+        (17, _m_to_v18),
     ]
 
     @staticmethod
@@ -5453,6 +5508,8 @@ class SqliteBackend:
         # per-PRD re-parse clears and rewrites only its own partition.
         prd_id: str = payload.prd_id
 
+        source_values = self._prd_source_projection_values(payload)
+
         requirement_objects: list[Requirement] = [
             Requirement.model_validate(req_data) for req_data in requirements_raw
         ]
@@ -5484,9 +5541,13 @@ class SqliteBackend:
                  assumptions,
                  last_reviewed_at, last_reviewed_by,
                  target_version, target_tag,
-                 is_default, created_at, updated_at)
+                 is_default, revision,
+                 source_bytes, source_sha256, source_size_bytes,
+                 source_encoding, source_revision, provenance_state,
+                 content_available, created_at, updated_at)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 1,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
                 title = excluded.title,
@@ -5503,6 +5564,13 @@ class SqliteBackend:
                 last_reviewed_by = excluded.last_reviewed_by,
                 target_version = excluded.target_version,
                 target_tag = excluded.target_tag,
+                source_bytes = excluded.source_bytes,
+                source_sha256 = excluded.source_sha256,
+                source_size_bytes = excluded.source_size_bytes,
+                source_encoding = excluded.source_encoding,
+                source_revision = excluded.source_revision,
+                provenance_state = excluded.provenance_state,
+                content_available = excluded.content_available,
                 updated_at = excluded.updated_at
             """,
             (
@@ -5521,6 +5589,7 @@ class SqliteBackend:
                 payload.target_version,
                 payload.target_tag,
                 1 if payload.is_default else 0,
+                *source_values,
                 now,
                 now,
             ),
@@ -5559,6 +5628,26 @@ class SqliteBackend:
             conn.execute("RELEASE prd_requirements_replace")
             raise
         conn.execute("RELEASE prd_requirements_replace")
+
+    @staticmethod
+    def _prd_source_projection_values(
+        payload: PrdParsedPayload | PrdRevisedPayload,
+    ) -> tuple[bytes | None, str | None, int | None, str | None, int | None, str, int]:
+        """Return the complete validated source tuple for one PRD row."""
+        if payload.provenance_state == "legacy_unbound":
+            return (None, None, None, None, None, "legacy_unbound", 0)
+        # Payload validation has already proved this is present, strict UTF-8,
+        # within the fixed bound, and digest/size/revision consistent.
+        assert payload.source_text is not None
+        return (
+            payload.source_text.encode("utf-8", errors="strict"),
+            payload.source_sha256,
+            payload.source_size_bytes,
+            payload.source_encoding,
+            payload.source_revision,
+            "available",
+            1,
+        )
 
     def _check_prd_revised(
         self,
@@ -5730,6 +5819,7 @@ class SqliteBackend:
         """
         prd_id: str = payload.prd_id
         new_revision: int = payload.revision
+        source_values = self._prd_source_projection_values(payload)
 
         superseded_objects = [
             Requirement.model_validate(r) for r in payload.requirements_superseded
@@ -5800,6 +5890,13 @@ class SqliteBackend:
                        target_version = ?,
                        target_tag = ?,
                        revision = ?,
+                       source_bytes = ?,
+                       source_sha256 = ?,
+                       source_size_bytes = ?,
+                       source_encoding = ?,
+                       source_revision = ?,
+                       provenance_state = ?,
+                       content_available = ?,
                        updated_at = ?
                  WHERE id = ?
                 """,
@@ -5817,6 +5914,7 @@ class SqliteBackend:
                     payload.target_version,
                     payload.target_tag,
                     new_revision,
+                    *source_values,
                     now,
                     prd_id,
                 ),
@@ -11835,6 +11933,10 @@ class SqliteBackend:
         # is_default is stored as INTEGER (0/1); coerce to bool for the model.
         if "is_default" in d and d["is_default"] is not None:
             d["is_default"] = bool(d["is_default"])
+        if d.get("source_bytes") is not None:
+            d["source_bytes"] = bytes(d["source_bytes"])
+        if "content_available" in d and d["content_available"] is not None:
+            d["content_available"] = bool(d["content_available"])
         # Review #13: created_at / updated_at are backfilled by the v6->v7
         # migration via COALESCE(last_reviewed_at, project.created_at), both of
         # which are stored as tz-aware UTC ISO strings — so the PRD field

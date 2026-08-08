@@ -78,11 +78,14 @@ Version history
 - v17: claim-bound progress attestations — monotonic per-task claim generations,
   immutable nullable claim attestation context, and semantic-digest keyed
   consume-once progress projections.
+- v18: exact PRD source provenance — PRD projections persist revision-bound
+  UTF-8 source bytes and their digest/size/encoding, while every legacy row is
+  explicitly marked unavailable without changing lifecycle or task state.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 17
+SCHEMA_VERSION: int = 18
 
 
 def get_schema_version() -> int:
@@ -141,6 +144,25 @@ CREATE TABLE IF NOT EXISTS prds (
     target_tag                  TEXT,
     is_default                  INTEGER NOT NULL DEFAULT 0,
     revision                    INTEGER NOT NULL DEFAULT 1,
+    source_bytes                BLOB,
+    source_sha256               TEXT,
+    source_size_bytes           INTEGER CHECK (
+                                    source_size_bytes IS NULL
+                                    OR source_size_bytes BETWEEN 0 AND 2097152
+                                ),
+    source_encoding             TEXT CHECK (
+                                    source_encoding IS NULL
+                                    OR source_encoding = 'utf-8'
+                                ),
+    source_revision             INTEGER CHECK (
+                                    source_revision IS NULL OR source_revision >= 1
+                                ),
+    provenance_state            TEXT NOT NULL DEFAULT 'legacy_unbound' CHECK (
+                                    provenance_state IN ('available', 'legacy_unbound')
+                                ),
+    content_available           INTEGER NOT NULL DEFAULT 0 CHECK (
+                                    content_available IN (0, 1)
+                                ),
     created_at                  TEXT,
     updated_at                  TEXT
 );
@@ -438,7 +460,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 17;
+PRAGMA user_version = 18;
 """
 
 
