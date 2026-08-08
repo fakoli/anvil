@@ -22,6 +22,7 @@ truth — also not checked here.
 from __future__ import annotations
 
 import json
+import re
 import runpy
 import subprocess
 import tomllib
@@ -109,6 +110,37 @@ def test_version_is_semver_shaped() -> None:
             f"Each version component must be all digits; "
             f"got {part!r} in {anvil.__version__!r}"
         )
+
+
+def test_current_documentation_examples_match_package_version() -> None:
+    """Current-behavior examples must move with every release bump."""
+    import anvil
+
+    root = _plugin_root()
+    schema_examples: list[str] = []
+    for relative in (
+        "docs/how-to/getting-started.md",
+        "docs/cli-reference.md",
+    ):
+        text = (root / relative).read_text(encoding="utf-8")
+        schema_examples.extend(
+            re.findall(r"anvil (\d+\.\d+\.\d+) \(schema \d+\)", text)
+        )
+    assert schema_examples
+    assert set(schema_examples) == {anvil.__version__}
+
+    mcp = (root / "docs" / "mcp.md").read_text(encoding="utf-8")
+    engine_examples = re.findall(
+        r'"engine_version"\s*:\s*"(\d+\.\d+\.\d+)"', mcp
+    )
+    display_examples = re.findall(
+        r'"display_version"\s*:\s*"(\d+\.\d+\.\d+)"', mcp
+    )
+    tag_examples = re.findall(r'"tag"\s*:\s*"v(\d+\.\d+\.\d+)"', mcp)
+    assert engine_examples and display_examples and tag_examples
+    assert set(engine_examples + display_examples + tag_examples) == {
+        anvil.__version__
+    }
 
 
 def test_exact_release_checkout_remains_visibly_source_derived(tmp_path: Path) -> None:

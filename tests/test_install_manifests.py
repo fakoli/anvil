@@ -25,6 +25,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from anvil.state.schema import SCHEMA_VERSION
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -32,6 +34,24 @@ def _repo_root() -> Path:
 
 def _packaging() -> Path:
     return _repo_root() / "packaging"
+
+
+def _upgrade_guide() -> str:
+    return (_repo_root() / "docs" / "how-to" / "getting-started.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def _migration_guide() -> str:
+    return (_repo_root() / "docs" / "migrations.md").read_text(encoding="utf-8")
+
+
+def _cli_reference() -> str:
+    return (_repo_root() / "docs" / "cli-reference.md").read_text(encoding="utf-8")
+
+
+def _faq() -> str:
+    return (_repo_root() / "docs" / "faq.md").read_text(encoding="utf-8")
 
 
 def _pyproject() -> dict:
@@ -52,6 +72,123 @@ def _assert_uv_mcp_spec(spec: dict, project_var: str) -> None:
 
 
 # --- packaging as a standard installable tool (uv tool / pipx / pip) ----------
+
+
+def test_upgrade_guide_covers_every_version_boundary() -> None:
+    """Keep issue #180's recovery runbook executable and transport-complete."""
+    guide = _upgrade_guide()
+    for required in (
+        "command -v anvil",
+        "Get-Command anvil, anvil-mcp",
+        "anvil status --path-only",
+        "anvil --version",
+        "db_schema_version",
+        "pre_open_database_schema",
+        "supported_schema",
+        "database_schema",
+        'cp -a "$STATE_DIR" "$BACKUP_DIR"',
+        "Copy-Item -Recurse -LiteralPath $stateDir",
+        "uv tool upgrade anvil-state",
+        "claude plugin marketplace update anvil",
+        "claude plugin update anvil@anvil",
+        "codex plugin marketplace upgrade anvil",
+        "anvil install codex --write",
+        "anvil install openclaw --write",
+        "anvil mcp-config <client>",
+        '"method":"initialize"',
+        "serverInfo",
+    ):
+        assert required in guide
+    upgrade_section = guide.split("## Upgrading and uninstalling", 1)[1]
+    assert "/plugin install" not in upgrade_section
+
+
+def test_upgrade_guide_orders_restart_before_live_mcp_verification() -> None:
+    """A disk upgrade is incomplete until a fresh harness process is checked."""
+    guide = _upgrade_guide()
+    ordered_steps = (
+        "Upgrade the Python CLI/MCP install; this does not open project state.",
+        "With the upgraded CLI, resolve the state path and make the backup.",
+        "Refresh the plugin or harness integration",
+        "Fully restart every harness and MCP server process.",
+        "Verify the live MCP initialize metadata below.",
+    )
+    offsets = [guide.index(step) for step in ordered_steps]
+    assert offsets == sorted(offsets)
+    assert guide.index("anvil --version") < guide.index("uv tool upgrade anvil-state")
+    assert guide.index("uv tool upgrade anvil-state") < guide.index(
+        "anvil status --path-only"
+    )
+    assert guide.index("anvil status --path-only") < guide.index(
+        'cp -a "$STATE_DIR" "$BACKUP_DIR"'
+    ) < guide.index("STATUS_JSON=$(anvil status --json || true)")
+    assert guide.index("$stateDir = anvil status --path-only") < guide.index(
+        "Copy-Item -Recurse -LiteralPath $stateDir"
+    ) < guide.index("$status = anvil status --json | ConvertFrom-Json")
+    upgrade_section = guide.split("## Upgrading and uninstalling", 1)[1]
+    bash_backup = upgrade_section.index('cp -a "$STATE_DIR" "$BACKUP_DIR"')
+    powershell_backup = upgrade_section.index(
+        "Copy-Item -Recurse -LiteralPath $stateDir"
+    )
+    explicit_migration = upgrade_section.index("anvil migrate state        # dry run")
+    ordinary_status = upgrade_section.index("STATUS_JSON=$(anvil status --json || true)")
+    assert max(bash_backup, powershell_backup) < explicit_migration < ordinary_status
+    normalized = " ".join(guide.split())
+    assert "database stamp observed before the backend opens" in normalized
+    assert "rerun the status block to confirm the values are now equal" in normalized
+    assert "do not delete `state.db` or the state directory" in normalized
+    assert "Routine version recovery never requires deleting state" in normalized
+
+
+def test_upgrade_references_match_current_schema_and_path_only_contract() -> None:
+    """Operator references must track the implementation's live version boundary."""
+    migrations = _migration_guide()
+    cli_reference = _cli_reference()
+    faq = _faq()
+    assert f"currently v{SCHEMA_VERSION}" in migrations
+    assert f"v3 -> v{SCHEMA_VERSION}" in migrations
+    assert f"v{SCHEMA_VERSION - 1}→v{SCHEMA_VERSION}" in migrations
+    assert "--path-only" in cli_reference
+    assert "without opening" in cli_reference
+    assert "uninitialised project" in cli_reference
+    assert f"v{SCHEMA_VERSION} in\nthis release" in faq
+    assert "The schema is version 8" not in faq
+    assert faq.count("STATE_DIR=$(anvil status --path-only)") >= 3
+    assert "anvil status | grep '^Path:'" not in faq
+    assert "normal state command first initializes the backend" in migrations
+    assert "default dry-run of `anvil migrate state`" in migrations
+    assert "deliberately do not initialize and\nmigrate the backend" in migrations
+    assert f"Schema:        {SCHEMA_VERSION}" in _upgrade_guide()
+    assert "Schema:        8" not in _upgrade_guide()
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell not installed")
+def test_powershell_upgrade_block_flushes_heterogeneous_tables() -> None:
+    """The pasted block must render schema fields after its executable table."""
+    guide = _upgrade_guide()
+    assert (
+        "Get-Command anvil, anvil-mcp | Select-Object Name, Source | Out-Host"
+        in guide
+    )
+    script = """
+Get-Command pwsh | Select-Object Name, Source | Out-Host
+[pscustomobject]@{
+    status = 'compatible'
+    engine_schema = 16
+    pre_open_database_schema = 0
+}
+"""
+    rendered = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    assert "compatible" in rendered.stdout
+    assert "pre_open_database_schema" in rendered.stdout
+    assert "16" in rendered.stdout
+    assert "0" in rendered.stdout
 
 
 def test_pyproject_declares_both_console_scripts() -> None:

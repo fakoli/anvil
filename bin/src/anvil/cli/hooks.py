@@ -8,8 +8,17 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import logging
 import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
 import tempfile
+import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -33,6 +42,528 @@ _VERIFICATION_PATTERNS = (
     "cargo test",
     "bun test",
 )
+_HOOK_ENGINE_PROBE_TIMEOUT_SECONDS = 1.0
+_MAX_HOOK_CONTEXT_BYTES = 4_096
+_MAX_PLUGIN_MANIFEST_BYTES = 4_096
+_MAX_VERSION_OUTPUT_BYTES = 1_024
+_VERSION_PATTERN = re.compile(
+    r"anvil ([A-Za-z0-9][A-Za-z0-9.+_-]{0,63}) \(schema ([0-9]{1,10})\)"
+)
+_HOOK_SCHEMA_PATTERN = re.compile(
+    r"(?P<code>schema_mismatch|schema_probe_failed) "
+    r"engine-version:(?P<engine>[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}) "
+    r"supported-schema:(?P<supported>[0-9]{1,10}) "
+    r"database-schema:(?P<database>[0-9]{1,10}|unknown) "
+    r"direction:(?P<direction>newer|older|unknown) "
+    r"remediation-code:(?P<remediation>[A-Za-z0-9_-]{1,64}) "
+    r"restart-required:(?P<restart>true|false)"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineIdentity:
+    engine_version: str
+    schema_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class _InstallationProbe:
+    status: str
+    engine_version: str | None = None
+    schema_version: int | None = None
+
+
+def _active_hook_identity() -> _EngineIdentity:
+    from anvil import __version__
+    from anvil.state.schema import get_schema_version
+
+    return _EngineIdentity(__version__, get_schema_version())
+
+
+def _probe_plugin_manifest() -> _InstallationProbe:
+    """Read the packaged plugin version through a bounded closed parser."""
+    root_raw = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    root = Path(root_raw) if root_raw else Path(__file__).resolve().parents[4]
+    manifest = root / ".claude-plugin" / "plugin.json"
+    try:
+        with manifest.open("rb") as stream:
+            content = stream.read(_MAX_PLUGIN_MANIFEST_BYTES + 1)
+    except OSError:
+        return _InstallationProbe("unavailable")
+    if len(content) > _MAX_PLUGIN_MANIFEST_BYTES:
+        return _InstallationProbe("malformed")
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _InstallationProbe("malformed")
+    version = payload.get("version") if isinstance(payload, dict) else None
+    if not isinstance(version, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", version
+    ):
+        return _InstallationProbe("malformed")
+    return _InstallationProbe("ok", engine_version=version)
+
+
+def _create_windows_kill_job(process: subprocess.Popen[bytes]) -> int | None:
+    """Put a Windows probe in a kill-on-close job so descendants cannot escape."""
+    if os.name != "nt":
+        return None
+    job = None
+    kernel32 = None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )]
+
+        class _ExtendedLimit(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimit),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        limits = _ExtendedLimit()
+        limits.BasicLimitInformation.LimitFlags = 0x00002000
+        configured = kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        )
+        assigned = configured and kernel32.AssignProcessToJobObject(
+            job, wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
+        )
+        if not assigned:
+            kernel32.CloseHandle(job)
+            job = None
+            return None
+        return int(job)
+    except BaseException as exc:
+        if job and kernel32 is not None:
+            kernel32.CloseHandle(job)
+        if isinstance(exc, Exception):
+            # taskkill remains the safe fallback for ordinary API failures.
+            return None
+        raise
+
+
+def _close_windows_job(job_handle: int | None) -> None:
+    if job_handle is None or os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(
+        wintypes.HANDLE(job_handle)
+    )
+
+
+def _terminate_probe_tree(
+    process: subprocess.Popen[bytes], job_handle: int | None
+) -> None:
+    """Terminate the probe and all descendants, then reap the direct child."""
+    if os.name == "nt":
+        if job_handle is not None:
+            _close_windows_job(job_handle)
+        else:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=0.5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            # Do not SIGKILL the watchdog while SIGTERM may be blocked around
+            # target creation. It will consume the pending signal once its
+            # target-group cleanup handler is installed; if this parent exits,
+            # its parent-PID monitor performs the same cleanup.
+            return
+    if os.name == "nt" and process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _probe_path_engine(*, which_fn=None, popen_fn=None) -> _InstallationProbe:  # noqa: ANN001
+    """Probe trusted PATH with capped streams and a killable process tree.
+
+    PATH resolution is an executable trust boundary, just as it is for an
+    interactive ``anvil`` command. The one-second budget covers the contained
+    probe response; the hook manifest's five-second timeout bounds synchronous
+    operating-system process setup. Windows job handles and the POSIX worker's
+    parent-death monitor tear down the contained process tree with this parent.
+    """
+    resolver = which_fn or shutil.which
+    launcher = popen_fn or subprocess.Popen
+    # SessionStart must report the independently installed CLI identity, so it
+    # intentionally resolves PATH rather than importing another environment.
+    executable = resolver("anvil")
+    if not executable:
+        return _InstallationProbe("unavailable")
+    request = json.dumps(
+        {"executable": executable, "parent_pid": os.getpid()},
+        ensure_ascii=True,
+    ).encode("utf-8")
+    if len(request) > _MAX_VERSION_OUTPUT_BYTES:
+        return _InstallationProbe("malformed")
+    injected_launcher = popen_fn is not None
+    try:
+        process = launcher(
+            [sys.executable, "-m", "anvil.cli._version_probe_worker"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            bufsize=0,
+            start_new_session=os.name != "nt",
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            ),
+        )
+    except (OSError, ValueError):
+        return _InstallationProbe("unavailable")
+
+    job_handle: int | None = None
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    overflow = threading.Event()
+    readers: list[threading.Thread] = []
+
+    def read_capped(stream, destination: bytearray) -> None:  # noqa: ANN001
+        try:
+            while True:
+                chunk = stream.read(256)
+                if not chunk:
+                    return
+                remaining = _MAX_VERSION_OUTPUT_BYTES + 1 - len(destination)
+                destination.extend(chunk[:remaining])
+                if len(destination) > _MAX_VERSION_OUTPUT_BYTES:
+                    overflow.set()
+                    return
+        except (OSError, ValueError):
+            overflow.set()
+
+    timed_out = False
+    try:
+        job_handle = _create_windows_kill_job(process)
+        deadline = time.monotonic() + _HOOK_ENGINE_PROBE_TIMEOUT_SECONDS
+        if os.name == "nt" and job_handle is None and not injected_launcher:
+            # The trusted worker has not received a target yet, so failure to
+            # establish containment is safe: terminate it and do not launch.
+            _terminate_probe_tree(process, None)
+            return _InstallationProbe("unavailable")
+        if time.monotonic() >= deadline or process.stdin is None:
+            _terminate_probe_tree(process, job_handle)
+            job_handle = None
+            return _InstallationProbe("timeout")
+        try:
+            process.stdin.write(request + b"\n")
+            process.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            _terminate_probe_tree(process, job_handle)
+            job_handle = None
+            return _InstallationProbe("malformed")
+
+        readers = [
+            threading.Thread(
+                target=read_capped,
+                args=(process.stdout, stdout_buffer),
+                name="anvil-hook-version-stdout",
+            ),
+            threading.Thread(
+                target=read_capped,
+                args=(process.stderr, stderr_buffer),
+                name="anvil-hook-version-stderr",
+            ),
+        ]
+        for reader in readers:
+            reader.start()
+        while process.poll() is None and not overflow.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            overflow.wait(min(remaining, 0.01))
+        if timed_out or overflow.is_set():
+            _terminate_probe_tree(process, job_handle)
+            job_handle = None
+        else:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            # Tear down the containment boundary on success too: a hostile
+            # version executable may print a valid line, exit zero, and leave
+            # descendants behind.
+            if injected_launcher:
+                _close_windows_job(job_handle)
+            else:
+                _terminate_probe_tree(process, job_handle)
+            job_handle = None
+        for reader in readers:
+            reader.join(timeout=0.5)
+    except BaseException:
+        _terminate_probe_tree(process, job_handle)
+        job_handle = None
+        for reader in readers:
+            if reader.ident is not None:
+                reader.join(timeout=0.5)
+        return _InstallationProbe("timeout")
+    finally:
+        _close_windows_job(job_handle)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+
+    if timed_out:
+        return _InstallationProbe("timeout")
+    if overflow.is_set() or process.returncode != 0 or stderr_buffer:
+        return _InstallationProbe("malformed")
+    try:
+        stdout = stdout_buffer.decode("utf-8")
+    except UnicodeDecodeError:
+        return _InstallationProbe("malformed")
+    matched = _VERSION_PATTERN.fullmatch(stdout.strip())
+    if matched is None:
+        return _InstallationProbe("malformed")
+    schema = int(matched.group(2))
+    if schema > 0xFFFFFFFF:
+        return _InstallationProbe("malformed")
+    return _InstallationProbe("ok", matched.group(1), schema)
+
+
+def _identity_relationship(
+    active: _EngineIdentity, probe: _InstallationProbe
+) -> str:
+    if probe.status != "ok":
+        return probe.status
+    if (
+        probe.engine_version == active.engine_version
+        and probe.schema_version == active.schema_version
+    ):
+        return "equal"
+    if probe.engine_version == active.engine_version:
+        return "equal-version/unequal-schema"
+    if probe.schema_version == active.schema_version:
+        return "unequal-version/schema-compatible"
+    return "unequal-version/schema-incompatible"
+
+
+def _probe_label(probe: _InstallationProbe) -> str:
+    if probe.status != "ok":
+        return probe.status
+    if probe.schema_version is None:
+        return str(probe.engine_version)
+    return f"{probe.engine_version}/schema{probe.schema_version}"
+
+
+def _numeric_version_order(candidate: str | None, active: str) -> int | None:
+    """Compare ordinary dotted releases without guessing about prereleases."""
+    if candidate == active:
+        return 0
+    if candidate is None or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", candidate):
+        return None
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", active):
+        return None
+    candidate_parts = [int(part) for part in candidate.split(".")]
+    active_parts = [int(part) for part in active.split(".")]
+    width = max(len(candidate_parts), len(active_parts))
+    candidate_key = tuple(candidate_parts + [0] * (width - len(candidate_parts)))
+    active_key = tuple(active_parts + [0] * (width - len(active_parts)))
+    return (candidate_key > active_key) - (candidate_key < active_key)
+
+
+def _healthy_installation_actions(
+    active: _EngineIdentity,
+    manifest: _InstallationProbe,
+    path_probe: _InstallationProbe,
+) -> list[str]:
+    """Target only the component proven stale by the reported identities."""
+    actions: list[str] = []
+    manifest_order = _numeric_version_order(
+        manifest.engine_version if manifest.status == "ok" else None,
+        active.engine_version,
+    )
+    path_order = _numeric_version_order(
+        path_probe.engine_version if path_probe.status == "ok" else None,
+        active.engine_version,
+    )
+
+    if path_probe.status != "ok":
+        actions.append("repair the PATH anvil-state installation")
+    elif path_probe.schema_version is not None:
+        if (
+            path_probe.engine_version == active.engine_version
+            and path_probe.schema_version != active.schema_version
+        ):
+            actions.append("align the Anvil plugin and PATH to one build")
+        elif path_probe.schema_version < active.schema_version or path_order == -1:
+            actions.append("run `uv tool upgrade anvil-state`")
+        elif path_probe.schema_version > active.schema_version or path_order == 1:
+            if (
+                manifest.status != "ok"
+                or manifest.engine_version != path_probe.engine_version
+            ):
+                actions.append("update the Anvil plugin")
+        elif path_order is None and manifest.engine_version != path_probe.engine_version:
+            actions.append("align the Anvil plugin and PATH to one release")
+
+    if manifest.status != "ok" or manifest_order == -1:
+        actions.append("update the Anvil plugin")
+    elif manifest_order is None and manifest.engine_version != path_probe.engine_version:
+        actions.append("align the Anvil plugin and PATH to one release")
+
+    actions.append("restart the harness/MCP server")
+    return list(dict.fromkeys(actions))
+
+
+def _render_schema_mismatch_context(status_line: str, language: str) -> str:
+    """Enrich a closed hook record with bounded installation identities."""
+    matched = _HOOK_SCHEMA_PATTERN.fullmatch(status_line)
+    if matched is None:
+        return (
+            f"[anvil] Language: {language} | schema_mismatch | installation "
+            "probe malformed | action: upgrade anvil-state, update the Anvil "
+            "plugin, and restart the harness/MCP server. Do not delete state."
+        )
+
+    active = _active_hook_identity()
+    manifest = _probe_plugin_manifest()
+    path_probe = _probe_path_engine()
+    relationship = _identity_relationship(active, path_probe)
+    database_raw = matched.group("database")
+    database_schema = int(database_raw) if database_raw != "unknown" else None
+
+    actions: list[str] = []
+    path_matches_database = (
+        path_probe.status == "ok" and path_probe.schema_version == database_schema
+    )
+    if matched.group("code") == "schema_probe_failed":
+        actions.append("retry when state is idle")
+        if path_probe.status != "ok":
+            actions.append("repair the PATH anvil-state installation")
+    elif path_matches_database:
+        if (
+            active.engine_version == path_probe.engine_version
+            and active.schema_version != path_probe.schema_version
+        ):
+            actions.append("align the Anvil plugin and PATH to one build")
+        elif manifest.status == "ok" and manifest.engine_version == path_probe.engine_version:
+            pass
+        elif active.schema_version != path_probe.schema_version:
+            actions.append("update the Anvil plugin to match PATH")
+        else:
+            if matched.group("direction") == "newer":
+                actions.append("update the Anvil plugin to match PATH")
+            else:
+                actions.append("align the Anvil plugin with PATH")
+    elif (
+        matched.group("direction") == "newer"
+        and database_schema is not None
+        and (
+            path_probe.status != "ok"
+            or path_probe.schema_version is None
+            or path_probe.schema_version < database_schema
+        )
+    ):
+        actions.append("run `uv tool upgrade anvil-state`")
+        actions.append("update the Anvil plugin after the engine upgrade")
+    else:
+        actions.append(
+            f"install an Anvil engine compatible with database schema {database_raw}"
+        )
+        actions.append("align the Anvil plugin with that engine")
+    actions.append("restart the harness/MCP server")
+
+    context = (
+        f"[anvil] Language: {language} | {matched.group('code')} | "
+        f"active-hook:{active.engine_version}/schema{active.schema_version} | "
+        f"plugin-manifest:{_probe_label(manifest)} | "
+        f"PATH:{_probe_label(path_probe)} ({relationship}) | "
+        f"database:schema{database_raw} ({matched.group('direction')}) | "
+        f"action:{'; '.join(dict.fromkeys(actions))}. Do not delete state."
+    )
+    if len(context.encode("utf-8")) <= _MAX_HOOK_CONTEXT_BYTES:
+        return context
+    return (
+        f"[anvil] Language: {language} | schema_mismatch | action: align "
+        "Anvil installations and restart the harness/MCP server. Do not "
+        "delete state."
+    )
+
+
+def _render_healthy_installation_context(
+    status_line: str, language: str
+) -> str:
+    """Preserve the status banner unless an installation component is skewed."""
+    active = _active_hook_identity()
+    manifest = _probe_plugin_manifest()
+    path_probe = _probe_path_engine()
+    relationship = _identity_relationship(active, path_probe)
+    manifest_equal = (
+        manifest.status == "ok" and manifest.engine_version == active.engine_version
+    )
+    if manifest_equal and relationship == "equal":
+        return f"[anvil] Language: {language} | {status_line}"
+
+    actions = _healthy_installation_actions(active, manifest, path_probe)
+    context = (
+        f"[anvil] Language: {language} | {status_line} | install-skew "
+        f"active-hook:{active.engine_version}/schema{active.schema_version} "
+        f"plugin-manifest:{_probe_label(manifest)} "
+        f"PATH:{_probe_label(path_probe)} ({relationship}) "
+        f"database:schema{active.schema_version} | "
+        f"action:{'; '.join(dict.fromkeys(actions))}"
+    )
+    if len(context.encode("utf-8")) <= _MAX_HOOK_CONTEXT_BYTES:
+        return context
+    return (
+        f"[anvil] Language: {language} | install-skew | action: align Anvil "
+        "installations and restart the harness/MCP server"
+    )
 
 
 def _read_hook_payload() -> dict[str, object]:
@@ -131,14 +662,33 @@ def _status_hook_line(cwd: Path | None) -> tuple[str, int]:
     from anvil.cli.init_status import status
 
     stdout = io.StringIO()
+    prior_logging_disable = logging.root.manager.disable
+
+    class _DiscardText:
+        def write(self, value: str) -> int:
+            return len(value)
+
+        def flush(self) -> None:
+            return None
+
     try:
-        with contextlib.redirect_stdout(stdout):
+        logging.disable(logging.CRITICAL)
+        with (
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(_DiscardText()),
+        ):
             # Called programmatically (no Click context), so every Typer
             # Option must be passed explicitly — an omitted ``prd`` leaks the
             # OptionInfo sentinel into resolve_prd_id(), which crashes on
             # ``.strip()`` and degrades SessionStart to "status check
             # unavailable" for every initialized project.
-            status(hook_format=True, prd=None, json_output=False, cwd=cwd)
+            status(
+                hook_format=True,
+                path_only=False,
+                prd=None,
+                json_output=False,
+                cwd=cwd,
+            )
     except typer.Exit as exc:
         code = int(exc.exit_code or 0)
     except SystemExit as exc:
@@ -147,6 +697,8 @@ def _status_hook_line(cwd: Path | None) -> tuple[str, int]:
         return "", 1
     else:
         code = 0
+    finally:
+        logging.disable(prior_logging_disable)
     return stdout.getvalue().strip().splitlines()[0] if stdout.getvalue().strip() else "", code
 
 
@@ -169,8 +721,17 @@ def _dispatch_detect_state(payload: dict[str, object], cwd: Path | None) -> None
     legacy = (root / ".anvil").is_dir() or (root / "bin" / ".anvil").is_dir()
     status_line, status_exit = _status_hook_line(cwd)
 
+    if status_exit == 0 and status_line.startswith(
+        ("schema_mismatch ", "schema_probe_failed ")
+    ):
+        _emit_session_start_context(
+            _render_schema_mismatch_context(status_line, language)
+        )
+        return
     if status_exit == 0 and status_line and status_line != "uninitialized":
-        _emit_session_start_context(f"[anvil] Language: {language} | {status_line}")
+        _emit_session_start_context(
+            _render_healthy_installation_context(status_line, language)
+        )
         return
     if status_line == "uninitialized":
         if legacy:

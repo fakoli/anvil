@@ -355,6 +355,14 @@ def status(
             "(hooks must never fail the session)."
         ),
     ),
+    path_only: bool = typer.Option(  # noqa: B008
+        False,
+        "--path-only",
+        help=(
+            "Print the resolved state directory without opening state.db. "
+            "Works even when the database schema is incompatible."
+        ),
+    ),
     prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
@@ -371,6 +379,7 @@ def status(
     Default output is a human-readable multi-line summary.
     Pass --hook-format for the single-line compact format consumed by
     the SessionStart detect-state.sh hook.
+    Pass --path-only to resolve the state directory without opening the DB.
     With ``--json`` emits ``{"ok": true, "command": "status", "data": {...}}``
     carrying project, prd status, task counts, and active claim count; the
     not-initialized case is a ``{"ok": false, ...}`` envelope with exit 1.
@@ -381,13 +390,32 @@ def status(
     # "uninitialized" line with exit 0 instead of propagating the error.
     from anvil.cli._helpers import StateRootError
 
+    if path_only and hook_format:
+        message = "--path-only cannot be combined with --hook-format"
+        if json_output:
+            fail("status", message, code="bad_request")
+        raise typer.BadParameter(message)
+
     try:
         state_dir = _resolve_state_dir(cwd)
     except StateRootError:
         if hook_format:
             typer.echo("uninitialized")
             raise typer.Exit(code=0) from None
+        if json_output:
+            fail(
+                "status",
+                "Cannot resolve Anvil state directory. Fix ANVIL_ROOT or pass --cwd.",
+                code="invalid_state_root",
+            )
         raise
+
+    if path_only:
+        if json_output:
+            emit_success("status", {"path": str(state_dir)})
+        else:
+            typer.echo(state_dir)
+        return
 
     if not state_dir.exists():
         if json_output:
@@ -406,32 +434,36 @@ def status(
         )
         raise typer.Exit(code=1)
 
+    from anvil.cli._helpers import BoundedSchemaProbe
     from anvil.state.backend import SchemaMismatch
     from anvil.state.schema import get_schema_version
-    from anvil.state.sqlite import read_db_schema_version
 
     schema_version = get_schema_version()
+    schema_probe = BoundedSchemaProbe()
 
     # T007/B11 (MUST-FIX 2a): read the TRUE on-disk PRAGMA user_version BEFORE
     # the backend opens (open() migrates v0-v3 up and re-stamps it, masking
     # real drift). This standalone read makes drift (db < code) observable.
-    db_schema_version = read_db_schema_version(str(state_dir / "state.db"))
-
     # MUST-FIX 2: an un-migratable / unknown schema version (e.g. a db stamped
     # user_version=99) makes _open_backend() raise SchemaMismatch. status must
     # report that through the normal error path — a clean "Error: ..." line
     # (exit 1) or a {"ok": false, ...} envelope — NEVER a raw traceback.
     try:
-        backend = _open_backend(state_dir)
+        db_schema_version = schema_probe(state_dir / "state.db")
+        backend = _open_backend(state_dir, schema_probe=schema_probe)
     except SchemaMismatch as exc:
-        if json_output:
-            fail("status", str(exc), code="schema_mismatch")
         if hook_format:
-            # Hook safety: never fail the session on a schema problem.
-            typer.echo("uninitialized")
+            # Hook safety: report the closed mismatch honestly but never fail
+            # SessionStart. The dispatcher enriches this record with install
+            # identities and component-specific remediation.
+            from anvil.cli._helpers import schema_diagnostic_from_exception
+
+            typer.echo(schema_diagnostic_from_exception(exc).hook_line())
             raise typer.Exit(code=0) from None
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=1) from None
+        # Every ordinary CLI surface, including JSON, uses the one root
+        # schema-diagnostic boundary; hook format uses the same closed DTO
+        # above while preserving SessionStart's zero exit contract.
+        raise
     try:
         project = backend.get_project()
         # T021 audit (get_prd no-arg): default-only-correct. The flat

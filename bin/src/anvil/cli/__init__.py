@@ -9,6 +9,7 @@ from __future__ import annotations
 import typer
 
 from anvil.build_identity import get_build_identity
+from anvil.cli._helpers import SchemaDiagnosticGroup
 from anvil.cli.backup import backup, restore
 from anvil.cli.bundle import bundle_app
 from anvil.cli.claim import claim, next, release, renew
@@ -81,6 +82,7 @@ _force_utf8_stdio()
 
 app = typer.Typer(
     name="anvil",
+    cls=SchemaDiagnosticGroup,
     help=(
         "Local-first project state engine: turn rough ideas and PRDs into reviewed, "
         "lockable, evidence-backed work packets that humans and AI agents can "

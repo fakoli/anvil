@@ -193,19 +193,23 @@ $ sqlite3 .anvil/state.db "PRAGMA user_version;"
 
 ## Explicit migration: `anvil migrate state`
 
-The auto-upgrade described above runs **silently inside `initialize()`** on the
-first `anvil` command after an engine upgrade — convenient, but invisible
-and un-backed-up. For operators who want the migration to be deliberate,
+The auto-upgrade described above runs **silently inside `initialize()`** when a
+normal state command first initializes the backend after an engine upgrade —
+convenient, but invisible and un-backed-up. Project-free commands such as
+`anvil --version`, the non-opening `anvil status --path-only` probe, and the
+default dry-run of `anvil migrate state` deliberately do not initialize and
+migrate the backend. For operators who want the migration to be deliberate,
 `anvil migrate state` promotes that same in-init migration to an
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
-migration framework — it runs the exact ordered, idempotent forward branches
-(`0/1→8`, `2→8`, `3→8`, `4→8`, `5→8`, `6→8`, `7→8`) that already live in
+migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
+every supported historical version through the current `SCHEMA_VERSION`
+(currently v16, including the final v15→v16 step) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v8
+Schema migration  : v3 -> v16
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -213,7 +217,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v8.
+Migrated state.db v3 -> v16.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 

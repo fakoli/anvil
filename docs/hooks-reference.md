@@ -105,13 +105,32 @@ for Codex SessionStart hooks.
   > `[anvil] not initialized in this project — run \`anvil init\` to start`
 - If `.anvil/` exists and the CLI is available:
   > `[anvil] Language: Python | active-claims:2 ready-tasks:7 blockers:0 prd-status:approved`
+- If the loaded hook, packaged plugin manifest, and PATH installation differ,
+  the banner adds their versions and schemas plus an action for only the stale
+  component. A schema mismatch also reports the database schema and never
+  recommends deleting state.
 - If `.anvil/` exists but the CLI is missing or returns non-zero:
   > `[anvil] Language: Python | state present, CLI not available — install anvil bin to enable status`
 
 **Side effects.** None. Read-only banner.
 
-**Performance.** The script header targets <1s. In practice the SessionStart
-event fires once per session, so this is the loosest of the five budgets.
+**Performance.** The contained `anvil --version` response has a one-second
+budget after operating-system process setup. The manifest's five-second hard
+timeout bounds the complete hook, including synchronous process creation and
+the stdin handshake. Closing the hook process closes its Windows kill job; on
+POSIX, the worker verifies and monitors its expected parent PID and kills the
+contained process group if that parent exits.
+In practice SessionStart fires once per session, so this is the loosest of the
+five budgets.
+
+**PATH trust boundary.** To compare the loaded plugin with the independently
+installed CLI, SessionStart resolves `anvil` from PATH and executes its
+`--version` command inside a time- and output-bounded process job. PATH lookup
+is executable authorization, exactly as it is when a user runs `anvil` in a
+terminal; containment is not a filesystem or network sandbox. Do not place an
+untrusted or project-writable directory ahead of the intended Anvil install on
+PATH. Remove the SessionStart entry from `hooks.json` if that trust contract is
+not appropriate for the host.
 
 **CLI call.** `anvil status --hook-format` — emits a single line in
 the form `active-claims:N ready-tasks:N blockers:N prd-status:STATUS`.

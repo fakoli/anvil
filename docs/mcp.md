@@ -12,6 +12,8 @@ runtime — Claude Code, Codex, Cursor, OpenHands,
 Copilot, or a local script — can drive the full PRD → plan → review → approve → claim →
 apply workflow as first-class tool calls. Read-only tools return structured Pydantic
 objects; lease-sensitive claim, renew, and release tools reap stale claims before writing.
+MCP initialize metadata reports the Anvil engine version (the same value as
+`anvil --version`), rather than the version of the FastMCP transport package.
 
 The toolset is organized by lifecycle phase:
 
@@ -1394,11 +1396,11 @@ None.
 ```json
 {
   "api_version": "5",
-  "engine_version": "0.6.1",
-  "display_version": "0.6.1",
+  "engine_version": "0.6.2",
+  "display_version": "0.6.2",
   "build_kind": "release_artifact",
   "commit": "abcdef123456",
-  "tag": "v0.6.1",
+  "tag": "v0.6.2",
   "tag_distance": 0,
   "dirty": false,
   "schema_version": 16,
@@ -1438,9 +1440,20 @@ against `api_version`) without shelling out to the CLI.
 
 ## Error model
 
-Every failure raises a FastMCP `ToolError`. The message is a human-readable string
+Every failure raises a FastMCP `ToolError`. Most messages are human-readable strings
 describing what failed, what was expected, and what the agent should do next. There is no
-outer envelope — `ToolError` is surfaced directly to the MCP client.
+outer protocol envelope — `ToolError` is surfaced directly to the MCP client.
+
+Schema compatibility failures are the exception: their `ToolError` message is a bounded,
+path-free JSON object so clients can act on stable fields without parsing backend text:
+
+```json
+{"error":{"code":"schema_mismatch","database_schema":17,"direction":"newer","engine_version":"0.6.2","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":16}}
+```
+
+The server closes a backend that fails initialization. Because each tool call opens fresh
+state, a long-lived MCP connection detects a database that becomes incompatible between
+calls and returns the same closed error without restarting the transport.
 
 Example error message from `claim_task` when the PRD gate fires (the task's
 owning PRD is not yet reviewed/approved; enforced by ClaimManager's per-PRD gate):

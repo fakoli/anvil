@@ -40,7 +40,7 @@ The install registers five hooks, wires the MCP server, and makes the five plugi
 
 ```bash
 anvil --version
-# → anvil 0.6.1 (schema 16)
+# → anvil 0.6.2 (schema 16)
 ```
 
 > **Not using Claude Code?** Install the CLI + MCP server from PyPI instead —
@@ -296,35 +296,184 @@ PRD:           approved
 Tasks:         1 total (0 ready, 0 claimed, 0 in_progress, 0 needs_review, 0 blocked, 1 done)
 Active claims: 0
 Sync:          off
-Schema:        8
+Schema:        16
 ```
 
 The work packet under `.anvil/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).
 
 ## Upgrading and uninstalling
 
-- **Upgrade the CLI + MCP server** (installed from PyPI): `uv tool upgrade
-  anvil-state`. State on disk is untouched — `anvil` runs its schema
-  migration automatically the next time it opens `state.db` if the new
-  version ships one. Confirm the executable and named-PRD capability before
-  resuming a skill-driven workflow:
+Anvil can be loaded from several places at once: the `anvil` CLI and
+`anvil-mcp` server from the Python tool install, plus a harness plugin or
+generated MCP configuration. Upgrade them as one unit. A long-lived harness
+does not replace its already-running MCP process just because the executable
+on disk changed.
 
-  ```powershell
-  Get-Command anvil | Select-Object -ExpandProperty Source
-  anvil --version
-  anvil prd source-name --help
-  ```
+### Before upgrading: identify the active executable
 
-  On POSIX shells, use `command -v anvil` for the first line. A nonzero
-  `source-name --help` result means the active executable is still stale; do
-  not infer a PRD filename or continue with a mutating command.
-- **Upgrade the Claude Code plugin**: `/plugin marketplace update` re-fetches
-  the marketplace so the next `/plugin install`/session start picks up a new
-  published version. Restart the harness and MCP server after refreshing so
-  neither keeps an old skill or process in memory, then repeat `anvil
-  --version` and `anvil prd source-name --help`. A version bump is required
-  upstream for the marketplace to have anything new to fetch — see the
-  project's `CHANGELOG.md`.
+Run these checks in the project whose state you intend to open.
+
+On Bash:
+
+```bash
+command -v anvil
+command -v anvil-mcp
+anvil --version
+```
+
+On PowerShell:
+
+```powershell
+Get-Command anvil, anvil-mcp | Select-Object Name, Source | Out-Host
+anvil --version
+```
+
+### Upgrade the CLI and MCP executable
+
+| Installation method | Upgrade command |
+|---|---|
+| `uv tool` | `uv tool upgrade anvil-state` |
+| `pipx` | `pipx upgrade anvil-state` |
+
+These tool-manager commands replace the executable environment. They do not
+open this project's `state.db`.
+
+Before resuming a skill-driven workflow, verify that the upgraded executable
+exposes the named-PRD capability required by current skills:
+
+```bash
+anvil prd source-name --help
+```
+
+A nonzero result means the active executable is still stale; do not infer a
+PRD filename or continue with a mutating command.
+
+### Resolve and back up state with the upgraded CLI
+
+The target release provides `--path-only`, which resolves the state directory
+without opening its database. Use the upgraded CLI to make the backup before
+running ordinary `status` or any other backend-initializing command.
+
+On Bash:
+
+```bash
+STATE_DIR=$(anvil status --path-only)
+printf 'State directory: %s\n' "$STATE_DIR"
+BACKUP_DIR="${STATE_DIR}.pre-upgrade-$(date +%Y%m%d-%H%M%S)"
+cp -a "$STATE_DIR" "$BACKUP_DIR"
+```
+
+On PowerShell:
+
+```powershell
+$stateDir = anvil status --path-only
+"State directory: $stateDir"
+$backupDir = "$stateDir.pre-upgrade-$(Get-Date -Format yyyyMMdd-HHmmss)"
+Copy-Item -Recurse -LiteralPath $stateDir -Destination $backupDir
+```
+
+If the upgraded engine is newer and you want a deliberate migration, choose
+that path now, before ordinary `status` initializes the backend:
+
+```bash
+anvil migrate state        # dry run; review the reported backup path
+anvil migrate state --yes  # apply only after reviewing the dry run
+```
+
+Otherwise continue with ordinary status and allow the supported automatic
+migration. In either case, inspect the resulting version boundary.
+
+On Bash:
+
+```bash
+anvil --version
+STATUS_JSON=$(anvil status --json || true)
+printf '%s\n' "$STATUS_JSON" | python -c 'import json,sys; p=json.load(sys.stdin); s=p["data"] if p["ok"] else p["error"]; print({"status":"compatible" if p["ok"] else s["code"],"engine_schema":s["schema_version"] if p["ok"] else s.get("supported_schema"),("pre_open_database_schema" if p["ok"] else "database_schema"):s["db_schema_version"] if p["ok"] else s.get("database_schema")})'
+```
+
+On PowerShell:
+
+```powershell
+anvil --version
+$status = anvil status --json | ConvertFrom-Json
+if ($status.ok) {
+    [pscustomobject]@{
+        status = "compatible"
+        engine_schema = $status.data.schema_version
+        pre_open_database_schema = $status.data.db_schema_version
+    }
+} else {
+    [pscustomobject]@{
+        status = $status.error.code
+        engine_schema = $status.error.supported_schema
+        database_schema = $status.error.database_schema
+    }
+}
+```
+
+`anvil --version` identifies the CLI engine and supported schema, for example
+`anvil 0.6.2 (schema 16)`. `schema_version` is that engine schema.
+`db_schema_version` (shown as `pre_open_database_schema`) is the database stamp
+observed before the backend opens. If the command succeeds with a lower
+pre-open value, that same call completed a supported migration; rerun the
+status block to confirm the values are now equal. On mismatch, no migration
+occurs and the comparison comes from `supported_schema` and `database_schema`
+in the closed error envelope. `--path-only` never opens the database, so it
+still identifies the backup target when the installed engine cannot open that
+schema.
+
+### Refresh the harness integration
+
+| Installed integration | Refresh command | Required follow-up |
+|---|---|---|
+| Claude Code plugin | `claude plugin marketplace update anvil`, then `claude plugin update anvil@anvil` | Fully restart Claude Code so SessionStart and MCP load the new plugin. |
+| Codex native integration | `codex plugin marketplace upgrade anvil`, then `anvil install codex --write` | Restart Codex after the refreshed marketplace and CLI/MCP install are verified. |
+| OpenClaw native integration | `anvil install openclaw --write` | Restart OpenClaw after the refreshed CLI/MCP install is verified. |
+| Other MCP client | `anvil mcp-config <client>` and replace the managed config block | Restart the client so it launches a fresh `anvil-mcp`. |
+
+Use this order:
+
+1. Stop state mutations and identify the active executables.
+2. Upgrade the Python CLI/MCP install; this does not open project state.
+3. With the upgraded CLI, resolve the state path and make the backup.
+4. Run the engine-version and schema checks.
+5. Refresh the plugin or harness integration that launches the MCP server.
+6. Fully restart every harness and MCP server process.
+7. Verify the live MCP initialize metadata below.
+
+### Verify the live MCP process
+
+This sends one MCP initialize request to the same `anvil-mcp` executable a
+harness launches and prints its `serverInfo`. The reported version must match
+the engine version from `anvil --version`, not the FastMCP dependency version.
+
+On Bash:
+
+```bash
+MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"anvil-version-check","version":"1"}}}'
+printf '%s\n' "$MCP_INIT" | anvil-mcp 2>/dev/null |
+  python -c 'import json,sys; print(json.loads(sys.stdin.readline())["result"]["serverInfo"])'
+```
+
+On PowerShell:
+
+```powershell
+$mcpInit = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"anvil-version-check","version":"1"}}}'
+($mcpInit | anvil-mcp 2>$null | Select-Object -First 1 |
+    ConvertFrom-Json).result.serverInfo
+```
+
+If SessionStart names different plugin and PATH versions, refresh only the
+stale component it identifies, then restart the harness. If MCP still reports
+the old version, an old server process is still alive or the harness is
+launching a different executable than `Get-Command`/`command -v` found.
+
+If the database schema is newer than the engine, do not delete `state.db` or
+the state directory. Upgrade the stale CLI/plugin/MCP component and restart
+the harness. Routine version recovery never requires deleting state; see
+[Migrations](../migrations.md) for the supported migration ladder.
+
+### Uninstall or roll back
 - **Roll back a harness install**: `anvil install <harness> --rollback`
   restores every file `anvil install <harness> --write` modified from its
   backup and deletes anything anvil created (native installs also run the

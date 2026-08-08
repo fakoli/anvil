@@ -32,7 +32,9 @@ import logging
 import os
 import random
 import sqlite3
+import struct
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -48,6 +50,7 @@ from anvil.state.backend import (
     EventRejected,
     IdempotentNoOp,
     SchemaMismatch,
+    SchemaProbeFailed,
     StateLocked,
     TransactionAborted,
 )
@@ -382,14 +385,206 @@ def _append_lock_release(lock_fh: Any) -> None:
         pass
 
 
+_SCHEMA_INITIALIZATION_LOCK = threading.RLock()
+_SCHEMA_INITIALIZATION_LOCAL = threading.local()
+
+
+@contextmanager
+def _schema_initialization_lock(db_path: str, events_path: str) -> Iterator[None]:
+    """Serialize Anvil initializers without creating a separate lock entry.
+
+    The event log is the stable token because Git replay can replace the SQLite
+    projection while initialization is still active.  ``initialize()`` first
+    validates an existing database when this token is missing, so refusing a
+    future schema still creates nothing.  A per-thread stack reuses ownership
+    during nested Git projection rebuilds.
+    """
+    canonical = os.path.normcase(os.path.realpath(db_path))
+    with _SCHEMA_INITIALIZATION_LOCK:
+        stack: list[tuple[str, Any | None]] = getattr(
+            _SCHEMA_INITIALIZATION_LOCAL, "stack", []
+        )
+        _SCHEMA_INITIALIZATION_LOCAL.stack = stack
+        if any(owned_path == canonical for owned_path, _ in stack):
+            stack.append((canonical, None))
+            try:
+                yield
+            finally:
+                stack.pop()
+            return
+
+        lock_path = Path(events_path)
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_fh = lock_path.open("r+b" if lock_path.exists() else "a+b")
+        except OSError as exc:
+            raise SchemaProbeFailed(
+                "State could not be locked for side-effect-free schema inspection."
+            ) from exc
+
+        try:
+            deadline = time.monotonic() + _FLOCK_TIMEOUT_S
+            delays = _flock_backoff_delays()
+            while True:
+                try:
+                    _append_lock_acquire_nb(lock_fh)
+                    break
+                except OSError as exc:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SchemaProbeFailed(
+                            "Timed out waiting for side-effect-free schema inspection."
+                        ) from exc
+                    time.sleep(min(next(delays), remaining))
+            stack.append((canonical, lock_fh))
+            try:
+                yield
+            finally:
+                stack.pop()
+                _append_lock_release(lock_fh)
+        finally:
+            lock_fh.close()
+
+
+def _read_schema_from_rollback_copy(db_path: Path) -> int:
+    """Let SQLite recover a disposable rollback-journal snapshot."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+def _read_schema_from_rollback_snapshot(db_path: Path) -> int:
+    """Read schema through a disposable copy when a rollback journal exists.
+
+    Hot-journal recovery needs SQLite's transaction semantics.  It runs only
+    against a byte-stable temporary copy, never the live database.
+    """
+    try:
+        journal_path = Path(f"{db_path}-journal")
+        before_db = db_path.read_bytes()
+        before_journal = journal_path.read_bytes()
+        with tempfile.TemporaryDirectory(prefix="anvil-schema-probe-") as temp_dir:
+            snapshot_db = Path(temp_dir) / "state.db"
+            snapshot_db.write_bytes(before_db)
+            Path(f"{snapshot_db}-journal").write_bytes(before_journal)
+            if (
+                not journal_path.exists()
+                or db_path.read_bytes() != before_db
+                or journal_path.read_bytes() != before_journal
+            ):
+                raise SchemaProbeFailed(
+                    "Database changed during the side-effect-free schema probe; retry when idle."
+                )
+            return _read_schema_from_rollback_copy(snapshot_db)
+    except SchemaProbeFailed:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise SchemaProbeFailed(
+            "Database schema could not be inspected without mutating live state."
+        ) from exc
+
+
+def _wal_checksum(
+    content: bytes, *, byteorder: str, seed: tuple[int, int] = (0, 0)
+) -> tuple[int, int]:
+    """Implement SQLite's cumulative WAL checksum over an 8-byte-aligned buffer."""
+    if len(content) % 8:
+        raise SchemaProbeFailed("WAL checksum input is not 8-byte aligned.")
+    s0, s1 = seed
+    for offset in range(0, len(content), 8):
+        first = int.from_bytes(content[offset : offset + 4], byteorder)
+        second = int.from_bytes(content[offset + 4 : offset + 8], byteorder)
+        s0 = (s0 + first + s1) & 0xFFFFFFFF
+        s1 = (s1 + second + s0) & 0xFFFFFFFF
+    return s0, s1
+
+
+def _schema_version_from_database_bytes(database_header: bytes) -> int:
+    if len(database_header) == 0:
+        return 0
+    if len(database_header) < 100 or database_header[:16] != b"SQLite format 3\x00":
+        raise SchemaProbeFailed("Database header is incomplete or invalid.")
+    return int.from_bytes(database_header[60:64], "big")
+
+
+def _schema_version_from_wal(database_header: bytes, wal_content: bytes) -> int:
+    """Return committed ``user_version`` by replaying only WAL page-1 frames."""
+    main_version = _schema_version_from_database_bytes(database_header)
+    if not wal_content:
+        return main_version
+    if len(wal_content) < 32:
+        raise SchemaProbeFailed("WAL header is incomplete.")
+
+    magic, wal_version, page_size_raw, _, salt1, salt2, checksum1, checksum2 = (
+        struct.unpack(">8I", wal_content[:32])
+    )
+    if magic not in {0x377F0682, 0x377F0683} or wal_version != 3007000:
+        raise SchemaProbeFailed("WAL header is invalid or unsupported.")
+    page_size = 65536 if page_size_raw == 1 else page_size_raw
+    if page_size < 512 or page_size > 65536 or page_size & (page_size - 1):
+        raise SchemaProbeFailed("WAL page size is invalid.")
+
+    checksum_byteorder = "little" if magic == 0x377F0682 else "big"
+    running = _wal_checksum(wal_content[:24], byteorder=checksum_byteorder)
+    if running != (checksum1, checksum2):
+        raise SchemaProbeFailed("WAL header checksum is invalid.")
+
+    frame_size = 24 + page_size
+    latest_page_one: bytes | None = None
+    committed_page_one: bytes | None = None
+    offset = 32
+    while offset + frame_size <= len(wal_content):
+        header = wal_content[offset : offset + 24]
+        page = wal_content[offset + 24 : offset + frame_size]
+        page_number, database_size, frame_salt1, frame_salt2, stored1, stored2 = (
+            struct.unpack(">6I", header)
+        )
+        if (frame_salt1, frame_salt2) != (salt1, salt2):
+            break
+        running = _wal_checksum(
+            header[:8] + page,
+            byteorder=checksum_byteorder,
+            seed=running,
+        )
+        if running != (stored1, stored2):
+            break
+        if page_number == 1:
+            latest_page_one = page
+        if database_size:
+            committed_page_one = latest_page_one
+        offset += frame_size
+
+    if committed_page_one is None:
+        return main_version
+    return _schema_version_from_database_bytes(committed_page_one[:100])
+
+
+def _read_stable_database_and_wal(db_path: Path) -> tuple[bytes, bytes]:
+    """Read page 1 and the current WAL prefix without opening live SQLite state.
+
+    WAL appends are sequential and frame-checksummed. A concurrent writer may
+    extend the file after this read; that does not invalidate the complete,
+    committed prefix already captured. The parser ignores an incomplete or
+    checksum-invalid trailing frame exactly as SQLite recovery does.
+    """
+    wal_path = Path(f"{db_path}-wal")
+    with db_path.open("rb") as database:
+        database_header = database.read(100)
+    wal_content = wal_path.read_bytes() if wal_path.exists() else b""
+    return database_header, wal_content
+
+
 def read_db_schema_version(db_path: str | os.PathLike[str]) -> int:
     """Read the on-disk ``PRAGMA user_version`` WITHOUT migrating.
 
     T007/B11 (MUST-FIX 2a): the TRUE pre-migration schema version stamped on a
     database. Unlike ``SqliteBackend.get_schema_version()`` — which reads the
     PRAGMA *after* ``initialize()`` has already migrated/re-stamped it to
-    ``SCHEMA_VERSION`` — this is a lightweight standalone read that opens the db
-    read-only and never runs DDL or migrations. That makes genuine drift
+    ``SCHEMA_VERSION`` — this is a standalone byte-level read that never opens
+    the live database or runs DDL or migrations. That makes genuine drift
     (db_version < code_version, pre-migration) observable by the ``status``
     command instead of being masked by the open-time migration.
 
@@ -400,24 +595,27 @@ def read_db_schema_version(db_path: str | os.PathLike[str]) -> int:
     if not path.exists():
         return 0
 
-    def _read(conn: sqlite3.Connection) -> int:
-        try:
-            row = conn.execute("PRAGMA user_version").fetchone()
-            return int(row[0]) if row else 0
-        finally:
-            conn.close()
-
-    # Prefer a read-only open so a stale/un-migratable db is never mutated by a
-    # status read, and so we observe its CURRENT version, not a migrated one.
-    # A WAL-mode db with an uncheckpointed -wal sidecar can refuse mode=ro
-    # ("unable to open database file") because read-only mode cannot create the
-    # -shm it needs; fall back to a normal read connection in that case. We
-    # still only run a single PRAGMA read and never any DDL/migration, so the
-    # no-mutation intent holds either way.
+    # Read only page 1 and the WAL bytes. This follows SQLite's documented WAL
+    # frame/checksum format without opening the live database, so no SHM, WAL,
+    # journal, lock, or directory entry can be created or modified.
     try:
-        return _read(sqlite3.connect(f"file:{path}?mode=ro", uri=True))
-    except sqlite3.OperationalError:
-        return _read(sqlite3.connect(str(path)))
+        if Path(f"{path}-journal").exists():
+            return _read_schema_from_rollback_snapshot(path)
+        last_error: SchemaProbeFailed | None = None
+        for _ in range(3):
+            try:
+                database_header, wal_content = _read_stable_database_and_wal(path)
+                return _schema_version_from_wal(database_header, wal_content)
+            except SchemaProbeFailed as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
+    except SchemaProbeFailed:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise SchemaProbeFailed(
+            "Database schema could not be inspected without mutating live state."
+        ) from exc
 
 
 class SqliteBackend:
@@ -446,6 +644,8 @@ class SqliteBackend:
                    contention deadline. Defaults to ``time.monotonic`` — NOT
                    ``clock.now()``, which is wall-clock and would let an NTP
                    step stretch or shorten the 5 s timeout.
+    schema_probe_fn : optional transport-owned schema probe budget. ``None``
+                   keeps the backend's direct byte probe behavior.
 
     Lifecycle (SL1-RR-1 write-path)
     ---------------------------------
@@ -467,6 +667,7 @@ class SqliteBackend:
         events_storage: str = "local",
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
+        schema_probe_fn: Callable[[str | os.PathLike[str]], int] | None = None,
     ) -> None:
         self._db_path = db_path
         self._events_path = events_path
@@ -475,6 +676,7 @@ class SqliteBackend:
         self._events_storage = events_storage
         self._sleep_fn = sleep_fn
         self._monotonic_fn = monotonic_fn
+        self._schema_probe_fn = schema_probe_fn
         self._conn: sqlite3.Connection | None = None
         # In-memory monotonic counter; seeded from log max on initialize().
         # Incremented at log-append time inside the flock critical section.
@@ -516,7 +718,49 @@ class SqliteBackend:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @classmethod
+    def validate_schema_compatibility(cls, on_disk: int) -> None:
+        """Refuse incompatible versions before opening live state for writes."""
+        if on_disk == SCHEMA_VERSION:
+            return
+        if on_disk > SCHEMA_VERSION or on_disk < 0:
+            raise SchemaMismatch(
+                actual=on_disk,
+                expected=SCHEMA_VERSION,
+                direction="newer" if on_disk > SCHEMA_VERSION else "older",
+            )
+
+        # v0/v1 databases are brought to the v2 baseline by the current DDL;
+        # every later transition must have a contiguous migration step.  Check
+        # the ladder before any live DDL so an accidental gap cannot partially
+        # reshape an old database and only then fail.
+        available_steps = [from_version for from_version, _ in cls._MIGRATIONS]
+        required_steps = list(range(2, SCHEMA_VERSION))
+        if available_steps != required_steps:
+            raise SchemaMismatch(
+                actual=on_disk,
+                expected=SCHEMA_VERSION,
+                direction="older",
+            )
+
+    def _validate_probed_schema_version(self, on_disk: int) -> None:
+        """Instance adapter for the shared pre-construction validator."""
+        self.validate_schema_compatibility(on_disk)
+
     def initialize(self) -> None:
+        """Serialize same-process probes without creating filesystem entries."""
+        schema_probe = self._schema_probe_fn or read_db_schema_version
+        # If legacy/corrupt state has a database but no event log, establish
+        # compatibility before creating the stable coordination token.  The
+        # authoritative probe is repeated under the token below.
+        if os.path.exists(self._db_path) and not os.path.exists(self._events_path):
+            self._validate_probed_schema_version(
+                schema_probe(self._db_path)
+            )
+        with _schema_initialization_lock(self._db_path, self._events_path):
+            self._initialize_under_lock()
+
+    def _initialize_under_lock(self) -> None:
         """Open the SQLite connection, set PRAGMAs, apply DDL if needed.
 
         Idempotent — safe to call multiple times.  Raises SchemaMismatch if
@@ -541,9 +785,29 @@ class SqliteBackend:
         """
         if self._conn is not None:
             # Already initialised — verify version and return.
-            self._check_schema_version()
+            try:
+                self._check_schema_version()
+            except BaseException:
+                self.close()
+                raise
             return
 
+        # This probe is the mutation boundary: future schemas and unsupported
+        # migration gaps must fail before a write-capable connection, WAL/SHM
+        # recovery, PRAGMAs, DDL, event-log scan, or lock-file creation.  The
+        # outer OS lock is the linearization boundary shared by every Anvil
+        # initializer; direct SQLite schema writes that bypass the state engine
+        # are not a supported coordination path.
+        schema_probe = self._schema_probe_fn or read_db_schema_version
+        probed_version = schema_probe(self._db_path)
+        confirmed_version = schema_probe(self._db_path)
+        if probed_version != confirmed_version:
+            raise SchemaProbeFailed(
+                "Database schema changed during compatibility inspection; retry when idle."
+            )
+        self._validate_probed_schema_version(confirmed_version)
+
+        conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(
                 self._db_path,
@@ -552,68 +816,78 @@ class SqliteBackend:
             )
         except sqlite3.OperationalError as exc:
             raise TransactionAborted(f"Cannot open database at {self._db_path!r}: {exc}") from exc
+        try:
+            no_checkpoint_on_close = hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE")
+            if no_checkpoint_on_close:
+                conn.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+            # Re-check immediately after opening to narrow the probe/open race,
+            # still before any write-capable PRAGMA or DDL.
+            pre_ddl_row = conn.execute("PRAGMA user_version").fetchone()
+            pre_ddl_version = pre_ddl_row[0] if pre_ddl_row else 0
+            self._validate_probed_schema_version(pre_ddl_version)
 
-        # WAL mode for concurrent readers + one writer.
-        conn.execute("PRAGMA journal_mode = WAL")
-        # synchronous level is set by durability mode below.
-        conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA foreign_keys = ON")
+            # WAL mode for concurrent readers + one writer.
+            conn.execute("PRAGMA journal_mode = WAL")
+            # synchronous level is set by durability mode below.
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute("PRAGMA foreign_keys = ON")
 
-        # Row factory enables dict(row) in query helpers.
-        conn.row_factory = sqlite3.Row
+            # Row factory enables dict(row) in query helpers.
+            conn.row_factory = sqlite3.Row
+            self._conn = conn
 
-        self._conn = conn
+            # Apply durability-mode synchronous pragma.
+            if self._durability == "strict":
+                conn.execute("PRAGMA synchronous = FULL")
+            else:
+                conn.execute("PRAGMA synchronous = NORMAL")
 
-        # Apply durability-mode synchronous pragma.
-        if self._durability == "strict":
-            conn.execute("PRAGMA synchronous = FULL")
-        else:
-            conn.execute("PRAGMA synchronous = NORMAL")
+            # Apply DDL (CREATE TABLE IF NOT EXISTS — idempotent).
+            # Execute statement-by-statement; sqlite3 executescript auto-commits,
+            # so we split manually to preserve our transaction control.
+            self._apply_ddl()
 
-        # Capture the on-disk version before the migration ladder runs. The
-        # migration ladder relies on knowing the original version. (_apply_ddl
-        # no longer stamps user_version — BUG 002 — but capturing here is still
-        # correct and keeps the read away from any DDL side effects.)
-        pre_ddl_row = conn.execute("PRAGMA user_version").fetchone()
-        pre_ddl_version = pre_ddl_row[0] if pre_ddl_row else 0
+            # After DDL, verify schema version. Pass the pre-DDL version so the
+            # migration logic can decide what (if any) ALTER steps are needed.
+            self._check_schema_version(pre_ddl_version=pre_ddl_version)
+            if no_checkpoint_on_close:
+                conn.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, False)
 
-        # Apply DDL (CREATE TABLE IF NOT EXISTS — idempotent).
-        # Execute statement-by-statement; sqlite3 executescript auto-commits,
-        # so we split manually to preserve our transaction control.
-        self._apply_ddl()
+            # SL1-RR-1: seed the in-memory counter from the log max (log is the
+            # id authority; we never read SQLite MAX(id) for this purpose).
+            log_max = self._scan_tail_id()
+            self._next_seq = log_max
 
-        # After DDL, verify schema version. Pass the pre-DDL version so the
-        # migration logic can decide what (if any) ALTER steps are needed.
-        self._check_schema_version(pre_ddl_version=pre_ddl_version)
-
-        # SL1-RR-1: seed the in-memory counter from the log max (log is the
-        # id authority; we never read SQLite MAX(id) for this purpose).
-        log_max = self._scan_tail_id()
-        self._next_seq = log_max
-
-        # Forward catch-up: if projection is behind the log, re-apply the tail.
-        # Suppress audit side-effects during catch-up (same contract as replay).
-        # If _replaying is already True (we were called from replay_from_empty),
-        # do not run catch-up — replay_from_empty will apply every event itself.
-        # Running catch-up AND replay would apply events twice.
-        if self._events_storage == "git":
-            # Git mode (v1.22.0, Phase A): a `git pull`/merge can splice
-            # events ANYWHERE into the file, not just at the tail, so the
-            # local-mode assumption behind surgical catch-up — that the
-            # projection is a strict prefix of the log — no longer holds.
-            # Convergence is instead judged by event-id SET equality and
-            # healed by a full order-tolerant rebuild (which is the only way
-            # to apply a merged-in interior event at its correct HLC position).
-            if not self._replaying:
-                self._git_converge_projection()
-        elif log_max > 0 and not self._replaying:
-            table_max = self._table_max_id(conn)
-            if table_max < log_max:
-                self._replaying = True
-                try:
-                    self._forward_catch_up(conn, from_seq=table_max + 1, to_seq=log_max)
-                finally:
-                    self._replaying = False
+            # Forward catch-up: if projection is behind the log, re-apply the tail.
+            # Suppress audit side-effects during catch-up (same contract as replay).
+            # If _replaying is already True (we were called from replay_from_empty),
+            # do not run catch-up — replay_from_empty will apply every event itself.
+            # Running catch-up AND replay would apply events twice.
+            if self._events_storage == "git":
+                # Git mode (v1.22.0, Phase A): a `git pull`/merge can splice
+                # events ANYWHERE into the file, not just at the tail, so the
+                # local-mode assumption behind surgical catch-up — that the
+                # projection is a strict prefix of the log — no longer holds.
+                # Convergence is instead judged by event-id SET equality and
+                # healed by a full order-tolerant rebuild (which is the only way
+                # to apply a merged-in interior event at its correct HLC position).
+                if not self._replaying:
+                    self._git_converge_projection()
+            elif log_max > 0 and not self._replaying:
+                table_max = self._table_max_id(conn)
+                if table_max < log_max:
+                    self._replaying = True
+                    try:
+                        self._forward_catch_up(conn, from_seq=table_max + 1, to_seq=log_max)
+                    finally:
+                        self._replaying = False
+        except BaseException:
+            self._conn = None
+            try:
+                conn.close()
+            except BaseException:
+                pass
+            raise
 
     def close(self) -> None:
         """Close the SQLite connection cleanly.  Idempotent."""
@@ -2754,9 +3028,11 @@ class SqliteBackend:
     def _check_schema_version(self, *, pre_ddl_version: int | None = None) -> None:
         """Raise SchemaMismatch if on-disk version is incompatible with SCHEMA_VERSION.
 
-        Auto-upgrade behaviour (Phase 8 SF-6, refined by P1-3; v4 added in
-        v1.22.0 for git-backed events Phase A; v5 added by T015 for
-        non-feature task types):
+        Auto-upgrade follows the ordered, idempotent ``_MIGRATIONS`` chain
+        through the current schema (v16). ``v0`` and ``v1`` are normalized to
+        the v2 baseline by current DDL before the explicit ladder runs. The
+        early historical transitions remain noteworthy because they repair
+        pre-existing tables that ``CREATE TABLE IF NOT EXISTS`` cannot alter:
 
         - ``v0 / v1 → v5``: ``sync_mappings`` never existed pre-v2, so the
           IF NOT EXISTS DDL created the current-shaped table from scratch;
@@ -2787,8 +3063,9 @@ class SqliteBackend:
         equal to SCHEMA_VERSION) and the migration branches would never
         fire.
 
-        Future gaps (e.g. a v5 db opened by code that expects v6) still
-        raise. See docs/migrations.md.
+        Every later step, v5→v6 through v15→v16, is represented by one
+        contiguous tuple in ``_MIGRATIONS``. Any gap between the on-disk version
+        and ``SCHEMA_VERSION`` fails closed. See docs/migrations.md.
         """
         conn = self._require_conn()
         # Use the pre-DDL version when provided (initialize path); fall back
@@ -2808,8 +3085,8 @@ class SqliteBackend:
         # ``from_version`` to ``from_version + 1`` and is idempotent
         # (duplicate-column tolerant) so a crash mid-migrate re-runs cleanly.
         # We apply every step whose ``from_version >= on_disk`` in order, then
-        # stamp ``user_version``. Adding a future v8 step is ONE new tuple —
-        # no literal version comparison to update.
+        # stamp ``user_version``. Adding the next schema step is ONE new tuple;
+        # no literal version comparison elsewhere needs updating.
         #
         # An older DB that is already past a given step (e.g. a v3 DB whose DDL
         # already grew current-shaped tables) still runs that step's helpers:
@@ -2817,9 +3094,9 @@ class SqliteBackend:
         # the full ordered ladder from ``on_disk`` is always safe.
         if on_disk > SCHEMA_VERSION or on_disk < 0:
             raise SchemaMismatch(
-                f"Database schema version {on_disk} does not match "
-                f"expected version {SCHEMA_VERSION}. "
-                "Run a migration or delete state.db to start fresh."
+                actual=on_disk,
+                expected=SCHEMA_VERSION,
+                direction="newer" if on_disk > SCHEMA_VERSION else "older",
             )
         applied = False
         for from_version, migrate_fn in self._MIGRATIONS:
@@ -2831,9 +3108,9 @@ class SqliteBackend:
             # known floor and SCHEMA_VERSION) — fail loudly rather than stamp a
             # version we did not actually migrate to.
             raise SchemaMismatch(
-                f"Database schema version {on_disk} does not match "
-                f"expected version {SCHEMA_VERSION}. "
-                "Run a migration or delete state.db to start fresh."
+                actual=on_disk,
+                expected=SCHEMA_VERSION,
+                direction="older",
             )
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 

@@ -397,6 +397,90 @@ class TestSchemaMismatch:
 
         b.close()
 
+    def test_initial_future_schema_refusal_closes_connection(self, tmp_path: Path) -> None:
+        """A new backend refuses a future version before retaining any handle."""
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        Path(events_path).touch()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=_make_clock())
+        with pytest.raises(SchemaMismatch) as raised:
+            b.initialize()
+
+        assert raised.value.actual == SCHEMA_VERSION + 1
+        assert raised.value.direction == "newer"
+        assert b._conn is None  # noqa: SLF001
+
+    def test_unsupported_old_schema_gap_refuses_before_live_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing ladder edge fails before DDL or a retained connection."""
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        Path(events_path).touch()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+
+        incomplete = [
+            step for step in SqliteBackend._MIGRATIONS if step[0] != SCHEMA_VERSION - 1
+        ]
+        monkeypatch.setattr(SqliteBackend, "_MIGRATIONS", incomplete)
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=_make_clock())
+        with pytest.raises(SchemaMismatch) as raised:
+            b.initialize()
+
+        assert raised.value.actual == SCHEMA_VERSION - 1
+        assert raised.value.direction == "older"
+        assert b._conn is None  # noqa: SLF001
+
+    @pytest.mark.parametrize("ladder_fault", ["duplicate", "reordered"])
+    def test_noncanonical_migration_ladder_refuses_before_live_open(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ladder_fault: str,
+    ) -> None:
+        """The preflight validates ordered uniqueness, not set membership."""
+        db_path = str(tmp_path / "state.db")
+        events_path = str(tmp_path / "events.jsonl")
+        Path(events_path).touch()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+
+        broken = list(SqliteBackend._MIGRATIONS)
+        if ladder_fault == "duplicate":
+            broken.insert(-1, broken[-1])
+        else:
+            broken[-2:] = reversed(broken[-2:])
+        monkeypatch.setattr(SqliteBackend, "_MIGRATIONS", broken)
+
+        b = SqliteBackend(db_path=db_path, events_path=events_path, clock=_make_clock())
+        with pytest.raises(SchemaMismatch, match="no complete migration path"):
+            b.initialize()
+        assert b._conn is None  # noqa: SLF001
+
+    def test_initialize_failure_closes_and_clears_connection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure after live open does not leave a half-open backend."""
+        b = SqliteBackend(
+            db_path=str(tmp_path / "state.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=_make_clock(),
+        )
+        Path(b._events_path).touch()  # noqa: SLF001
+
+        def fail_ddl() -> None:
+            raise RuntimeError("injected DDL failure")
+
+        monkeypatch.setattr(b, "_apply_ddl", fail_ddl)
+        with pytest.raises(RuntimeError, match="injected DDL failure"):
+            b.initialize()
+
+        assert b._conn is None  # noqa: SLF001
+
 
 # ---------------------------------------------------------------------------
 # THE AUDIT GUARANTEE

@@ -431,4 +431,45 @@ class IdempotentNoOp(BackendError):
 
 
 class SchemaMismatch(BackendError):
-    """DB schema version != code expected version."""
+    """DB schema version is incompatible with the running engine.
+
+    ``actual``/``expected`` are optional for compatibility with callers that
+    still construct this exception from a pre-rendered message.  New storage
+    paths provide them so transports can render bounded, directional guidance
+    without parsing exception text.
+    """
+
+    code = "schema_mismatch"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        actual: int | None = None,
+        expected: int | None = None,
+        direction: str | None = None,
+    ) -> None:
+        self.actual = actual
+        self.expected = expected
+        self.direction = direction
+        if message is None:
+            if actual is None or expected is None or direction is None:
+                message = "Database schema is incompatible with the running Anvil engine."
+            elif direction == "newer":
+                message = (
+                    f"Database schema version {actual} is newer than supported version "
+                    f"{expected}. Upgrade Anvil and restart the harness; do not delete state."
+                )
+            else:
+                message = (
+                    f"Database schema version {actual} is older than supported version "
+                    f"{expected}, and no complete migration path is available. "
+                    "Use a compatible Anvil version; do not delete state."
+                )
+        super().__init__(message)
+
+
+class SchemaProbeFailed(SchemaMismatch):
+    """The live database schema could not be inspected without mutation."""
+
+    code = "schema_probe_failed"

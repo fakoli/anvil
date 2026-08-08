@@ -31,11 +31,14 @@ can be inferred from the code, it does not belong here.
   `packaging/gemini/gemini-extension.json`, and the OpenClaw manifests
   `packaging/openclaw/plugin/openclaw.plugin.json` +
   `.../package.json`), promotes the `CHANGELOG.md` `## [Unreleased]` block, and
-  refreshes the **user-facing version docs** that no test guards (the `README.md`
-  badge + "Beta — vX.Y.Z" lines and the `anvil X.Y.Z (schema N)` examples in
-  `docs/how-to/getting-started.md`, `docs/cli-reference.md`,
-  `docs/architecture.md` — the schema number is re-synced to
-  `state/schema.py`'s `SCHEMA_VERSION`). It leaves historical snapshots
+  refreshes the **user-facing current-version docs**: the `README.md` badge and
+  "Beta — vX.Y.Z" lines; the `anvil X.Y.Z (schema N)` examples in
+  `docs/how-to/getting-started.md` and `docs/cli-reference.md`; the MCP
+  identity/schema-error examples in `docs/mcp.md`; and `docs/architecture.md`.
+  `tests/test_release_helper.py` guards the dry-run file set, while
+  `tests/test_version_sync.py` rejects stale current-version examples (and the
+  schema number is re-synced to `state/schema.py`'s `SCHEMA_VERSION`). It leaves
+  historical snapshots
   (`docs/archive/**`, `benchmarks/RESULTS.md`, old `CHANGELOG.md` entries)
   untouched, and the root `marketplace.json` inherits its version from
   `plugin.json`. The pinned set lives in the script (and `tests/test_release_helper.py`

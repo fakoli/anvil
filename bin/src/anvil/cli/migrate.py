@@ -31,10 +31,13 @@ from pathlib import Path
 import typer
 
 from anvil.cli._helpers import (
+    _open_backend,
+    _preflight_schema_compatibility,
     _require_state_dir,
     _resolve_state_dir,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.state.schema import SCHEMA_VERSION
 
 # The union merge driver is the whole point of the git layout: concurrent
 # appends on two branches union into one file, and the order-tolerant replay
@@ -70,6 +73,12 @@ migrate_app = typer.Typer(
         "to the current engine schema version (dry-run by default; --yes to apply)."
     ),
     no_args_is_help=True,
+)
+
+_MIGRATE_STATE_HELP = (
+    "Upgrade .anvil/state.db through every supported forward migration to "
+    f"the current engine schema (v{SCHEMA_VERSION}). Dry-run by default; "
+    "use --yes to apply."
 )
 
 
@@ -115,6 +124,11 @@ def migrate_events(
     config_path = state_dir / "config.yaml"
     events_path = state_dir / "events.jsonl"
 
+    # Schema incompatibility is the primary safety boundary for every
+    # backend-opening command. Check it before YAML parsing can warn with an
+    # absolute path, raise a parser traceback, or otherwise pollute output.
+    schema_probe = _preflight_schema_compatibility(state_dir)
+
     # ------------------------------------------------------------------
     # Preconditions: valid config, not already migrated, no active claims.
     # load_config (not the narrow reader) on purpose — migration rewrites
@@ -125,16 +139,19 @@ def migrate_events(
     try:
         config = load_config(config_path)
     except (OSError, ValueError) as exc:
+        schema_probe.close()
         typer.echo(f"Error: cannot load {config_path}: {exc}", err=True)
         raise typer.Exit(code=1) from None
+    except BaseException:
+        schema_probe.close()
+        raise
 
     if config.events_storage == "git":
+        schema_probe.close()
         typer.echo("events_storage is already 'git' — nothing to migrate.")
         raise typer.Exit(code=0)
 
-    from anvil.cli._helpers import _open_backend
-
-    backend = _open_backend(state_dir)
+    backend = _open_backend(state_dir, schema_probe=schema_probe)
     try:
         active = backend.list_active_claims()
     finally:
@@ -280,7 +297,7 @@ def migrate_events(
     typer.echo("Commit .anvil/events.jsonl and .anvil/.gitattributes.")
 
 
-@migrate_app.command("state")
+@migrate_app.command("state", help=_MIGRATE_STATE_HELP)
 def migrate_state(
     yes: bool = typer.Option(  # noqa: B008
         False,
@@ -291,9 +308,9 @@ def migrate_state(
 ) -> None:
     """Upgrade .anvil/state.db to the current engine schema version.
 
-    T009/F006. The ordered, idempotent forward migration branches (0/1→8, 2→8,
-    3→8, 4→8, 5→8, 6→8, 7→8) ALREADY live inside
-    ``SqliteBackend._check_schema_version`` and run automatically on
+    T009/F006. The ordered, idempotent forward migration chain covers every
+    supported on-disk predecessor through ``SCHEMA_VERSION``. It already lives
+    inside ``SqliteBackend._check_schema_version`` and runs automatically on
     ``initialize()``. This command promotes that in-init
     migration to an explicit, backed-up, dry-run-by-default operation — it does
     NOT add a new migration framework.
@@ -311,10 +328,8 @@ def migrate_state(
        the existing engine migration by calling ``initialize()`` (which captures
        the pre-DDL version and runs the forward branches up to ``SCHEMA_VERSION``).
     """
+    from anvil.cli._helpers import BoundedSchemaProbe
     from anvil.state.backend import SchemaMismatch
-    from anvil.state.schema import SCHEMA_VERSION
-    from anvil.state.sqlite import read_db_schema_version
-
     command = "migrate state"
 
     state_dir = _resolve_state_dir(None)
@@ -325,11 +340,13 @@ def migrate_state(
     # 1. TRUE on-disk version, read WITHOUT migrating (T007 accessor). A missing
     #    db reports 0 — there is nothing to migrate, and initialize() would
     #    create a fresh db already stamped at SCHEMA_VERSION.
-    from_version = read_db_schema_version(db_path)
+    schema_probe = BoundedSchemaProbe()
+    from_version = schema_probe(db_path)
 
     # 2. Already current → idempotent no-op (covers "re-running migrate is a
     #    no-op" once the db has been brought up to SCHEMA_VERSION).
     if from_version == SCHEMA_VERSION:
+        schema_probe.close()
         if json_output:
             emit_success(
                 command,
@@ -350,17 +367,14 @@ def migrate_state(
 
     # 2b. An on-disk version the engine has no forward branch for (e.g. a db
     #     newer than this build, or an unknown stamp) cannot be migrated up.
-    #     Surface it cleanly rather than letting initialize() raise mid-apply.
+    #     Route it through the same closed root diagnostic as every command.
     if from_version > SCHEMA_VERSION:
-        msg = (
-            f"state.db schema version {from_version} is NEWER than this "
-            f"engine's version {SCHEMA_VERSION}. Upgrade anvil — this "
-            "build cannot migrate a forward-versioned database backward."
+        schema_probe.close()
+        raise SchemaMismatch(
+            actual=from_version,
+            expected=SCHEMA_VERSION,
+            direction="newer",
         )
-        if json_output:
-            fail(command, msg, code="schema_too_new")
-        typer.echo(f"Error: {msg}", err=True)
-        raise typer.Exit(code=1)
 
     # 3. Active-claim guard (same contract as migrate-events). Open the backend,
     #    but DO NOT let initialize() migrate yet on a non-dry run path — we open
@@ -372,8 +386,13 @@ def migrate_state(
     #    initialize() runs the migration. To keep the dry run side-effect-free,
     #    list claims against a SCRATCH copy of the db so the real db is never
     #    mutated until --yes.
-    active_ids = _active_claim_ids_without_migrating(state_dir, db_path)
+    try:
+        active_ids = _active_claim_ids_without_migrating(state_dir, db_path)
+    except BaseException:
+        schema_probe.close()
+        raise
     if active_ids:
+        schema_probe.close()
         ids = ", ".join(sorted(active_ids))
         msg = (
             f"{len(active_ids)} active claim(s) ({ids}). Release or finish them "
@@ -389,6 +408,7 @@ def migrate_state(
 
     # 4a. Dry run (default): report and exit, mutating nothing.
     if not yes:
+        schema_probe.close()
         if json_output:
             emit_success(
                 command,
@@ -411,6 +431,7 @@ def migrate_state(
     #     run the existing engine migration by initializing the backend (which
     #     captures the pre-DDL version and runs the forward branches).
     if backup_path.exists():
+        schema_probe.close()
         msg = (
             f"backup {backup_path} already exists (previous migration "
             "attempt?). Move it aside before re-running."
@@ -421,34 +442,50 @@ def migrate_state(
         raise typer.Exit(code=1)
 
     # Copy the db AND its WAL/SHM sidecars so the backup is a faithful restore
-    # point: a WAL-mode db with an uncheckpointed -wal carries committed rows
-    # not yet folded into the main file. copy2 preserves mtime; missing sidecars
-    # are skipped (a checkpointed db has none).
-    shutil.copy2(db_path, backup_path)
-    for sidecar_suffix in ("-wal", "-shm"):
-        sidecar = db_path.with_name(db_path.name + sidecar_suffix)
-        if sidecar.exists():
-            shutil.copy2(
-                sidecar, backup_path.with_name(backup_path.name + sidecar_suffix)
-            )
-
-    from anvil.cli._helpers import _open_backend
-
-    try:
-        backend = _open_backend(state_dir)
-    except SchemaMismatch as exc:
-        # No forward branch matched (handled the > case above, but a gap inside
-        # the supported range still raises). Leave the backup in place and the
-        # db untouched beyond whatever initialize did before raising.
+    # point. Own every absent destination as one cleanup set before the first
+    # copy; a partial copy failure must not strand a backup that blocks retry.
+    backup_artifacts = tuple(
+        backup_path.with_name(backup_path.name + suffix)
+        for suffix in ("", "-wal", "-shm")
+    )
+    existing_artifact = next(
+        (artifact for artifact in backup_artifacts if artifact.exists()), None
+    )
+    if existing_artifact is not None:
+        schema_probe.close()
         msg = (
-            f"cannot migrate state.db from version {from_version} to "
-            f"{SCHEMA_VERSION}: {exc}. The pre-migration backup is at "
-            f"{backup_path}."
+            f"backup artifact {existing_artifact} already exists (previous migration "
+            "attempt?). Move it aside before re-running."
         )
         if json_output:
-            fail(command, msg, code="schema_mismatch")
+            fail(command, msg, code="backup_exists")
         typer.echo(f"Error: {msg}", err=True)
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=1)
+
+    try:
+        shutil.copy2(db_path, backup_path)
+        for sidecar_suffix in ("-wal", "-shm"):
+            sidecar = db_path.with_name(db_path.name + sidecar_suffix)
+            if sidecar.exists():
+                shutil.copy2(
+                    sidecar,
+                    backup_path.with_name(backup_path.name + sidecar_suffix),
+                )
+    except BaseException:
+        for artifact in backup_artifacts:
+            artifact.unlink(missing_ok=True)
+        schema_probe.close()
+        raise
+
+    try:
+        backend = _open_backend(state_dir, schema_probe=schema_probe)
+    except SchemaMismatch:
+        # Compatibility refusal happens before live mutation. Remove only the
+        # backup artifacts created by this attempt, then let the root boundary
+        # render the closed path-free diagnostic.
+        for artifact in backup_artifacts:
+            artifact.unlink(missing_ok=True)
+        raise
 
     try:
         to_version = backend.get_schema_version()

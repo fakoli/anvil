@@ -47,6 +47,7 @@ __all__ = [
     "JSON_OPTION",
     "dump_model",
     "dump_models",
+    "emit_schema_failure",
     "emit_success",
     "fail",
     "fail_with",
@@ -94,6 +95,32 @@ def emit_success(command: str, data: dict[str, Any]) -> None:
     """
     envelope = {"ok": True, "command": command, "data": data}
     typer.echo(json.dumps(envelope, default=str))
+
+
+def emit_schema_failure(command: str, diagnostic: dict[str, object]) -> None:
+    """Emit the closed schema diagnostic without arbitrary exception text."""
+    error = dict(diagnostic)
+    error["message"] = error["guidance"]
+    envelope = {"ok": False, "command": command, "error": error}
+    payload = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"))
+
+    from anvil.cli._helpers import MAX_SCHEMA_DIAGNOSTIC_BYTES
+
+    if len(payload.encode("utf-8")) > MAX_SCHEMA_DIAGNOSTIC_BYTES:
+        # This cannot be reached while the closed DTO retains its field bounds.
+        # Keep the fallback valid JSON and free of input-derived content.
+        payload = json.dumps(
+            {
+                "ok": False,
+                "command": "anvil",
+                "error": {
+                    "code": "schema_mismatch",
+                    "message": "Schema diagnostic exceeded its safety bound.",
+                },
+            },
+            separators=(",", ":"),
+        )
+    typer.echo(payload)
 
 
 def fail(
