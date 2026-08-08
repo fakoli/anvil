@@ -34,6 +34,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
     resolve_actor,
 )
+from anvil.naming import session_discriminator, task_claim_buffer_path
 
 hook_app = typer.Typer(
     name="hook",
@@ -1124,12 +1125,11 @@ def hook_capture_evidence(
             )
             _backend.initialize()
             try:
-                from anvil.naming import session_discriminator
-
                 pinned_claim_id = os.environ.get("ANVIL_CLAIM_ID")
                 pinned_claim = (
                     _backend.get_claim(pinned_claim_id)
                     if pinned_claim_id is not None
+                    and task_claim_buffer_path(buffer_dir, pinned_claim_id) is not None
                     else None
                 )
                 matched_claim = _resolve_capture_claim(
@@ -1181,7 +1181,9 @@ def hook_capture_evidence(
                     "semantic_digest": semantic_digest,
                 }
             )
-            buffer_file = buffer_dir / f"{matched_claim.id}.json"
+            buffer_file = task_claim_buffer_path(buffer_dir, matched_claim.id)
+            if buffer_file is None:
+                raise ValueError("claim id is not eligible for hook capture")
         else:
             # No active claim found — write to orphan buffer. Keep the
             # diagnostic actionable without implying that a descriptive

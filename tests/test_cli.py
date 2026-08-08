@@ -6081,6 +6081,27 @@ class TestCaptureEvidenceByClaim:
             .splitlines()
         ) == 2
 
+    def test_path_shaped_persisted_claim_id_cannot_escape_buffer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        task_id = self._init_and_claim(tmp_path, actor="actor-a")
+        claim_id = self._claim_id(tmp_path, task_id)
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            conn.execute("UPDATE claims SET id='../escaped' WHERE id=?", (claim_id,))
+            conn.commit()
+        monkeypatch.setenv("ANVIL_ACTOR", "actor-a")
+        monkeypatch.setenv("ANVIL_CLAIM_ID", "../escaped")
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["hook", "capture-evidence", "--command", "pytest -q",
+             "--exit-code", "0", "--actor", "actor-a"],
+        )
+
+        assert result.exit_code == 0
+        assert not (tmp_path / ".anvil" / "escaped.json").exists()
+        assert (self._buffer_dir(tmp_path) / "orphan.json").exists()
+
     def test_persisted_session_mismatch_is_orphaned(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

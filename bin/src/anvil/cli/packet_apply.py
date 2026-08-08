@@ -26,7 +26,7 @@ from anvil.cli._helpers import (
     resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail, fail_with
-from anvil.naming import safe_path_component
+from anvil.naming import safe_path_component, task_claim_buffer_path
 from anvil.state.models import (
     MAX_CLAIM_COMMAND_PROOF_BATCH_BYTES,
     MAX_CLAIM_COMMAND_PROOF_BATCH_ITEMS,
@@ -50,7 +50,9 @@ def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
     """
     import datetime
 
-    buffer_file = state_dir / ".evidence-buffer" / f"{claim_id}.json"
+    buffer_file = task_claim_buffer_path(state_dir / ".evidence-buffer", claim_id)
+    if buffer_file is None:
+        return []
     if not buffer_file.exists():
         return []
     try:

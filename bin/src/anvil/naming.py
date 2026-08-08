@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 
 # Env vars that identify ONE agent loop/session (shared across that loop's
 # subprocesses, distinct between sibling loops). Lives here — the leaf naming
 # module — so both cli._helpers (actor naming) and claims.manager (the
 # same-actor/different-session fail-fast) import it downward with no cycle.
 _SESSION_ENV_VARS = ("ANVIL_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
+_TASK_CLAIM_ID_PATTERN = re.compile(r"^C[0-9A-F]{8}$")
 
 
 def session_discriminator() -> str | None:
@@ -40,6 +42,20 @@ def session_discriminator() -> str | None:
         if value and value.strip():
             return value.strip()
     return None
+
+
+def task_claim_buffer_path(
+    buffer_dir: str | os.PathLike[str], claim_id: str
+) -> Path | None:
+    """Return the contained buffer path for a generated standalone claim ID.
+
+    Historical/corrupt claim identifiers are deliberately ineligible for hook
+    capture.  They remain addressable through lifecycle APIs, but can never be
+    interpreted as filesystem syntax beneath ``.evidence-buffer``.
+    """
+    if _TASK_CLAIM_ID_PATTERN.fullmatch(claim_id) is None:
+        return None
+    return Path(buffer_dir) / f"{claim_id}.json"
 
 
 # The Windows-reserved filename set ``<>:"/\|?*`` plus C0 control characters.
