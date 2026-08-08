@@ -14,6 +14,7 @@ from anvil.cli._actor_output import (
     actor_mismatch_data,
     actor_mismatch_message,
     actor_notice_lines,
+    bundle_continuation_data,
     continuation_data,
     safe_actor_label,
 )
@@ -290,20 +291,23 @@ def claim(
                         "branch": recorded_branch,
                         "worktree": worktree_path,
                         "warnings": warnings,
-                        "actor_identity": actor_identity_data(resolved_actor),
-                        "continuation": continuation_data(
-                            task_id, bundle_result.claim.id, resolved_actor
+                        "actor_identity": actor_identity_data(
+                            bundle_result.claim.claimed_by
+                        ),
+                        "continuation": bundle_continuation_data(
+                            task_id, bundle_result.claim.claimed_by
                         ),
                     },
                 )
                 return
             typer.echo(
-                f"Claimed bundle '{task_id}' as {safe_actor_label(resolved_actor)} with "
+                f"Claimed bundle '{task_id}' as "
+                f"{safe_actor_label(bundle_result.claim.claimed_by)} with "
                 f"coordinator claim {bundle_result.claim.id}."
             )
             typer.echo(f"  Branch: {recorded_branch or '—'}")
             typer.echo(f"  Worktree: {worktree_path or '—'}")
-            for line in actor_notice_lines(resolved_actor):
+            for line in actor_notice_lines(bundle_result.claim.claimed_by):
                 typer.echo(line)
             return
 
@@ -626,16 +630,16 @@ def claim(
                 "branch": reported_branch,
                 "worktree": worktree_path,
                 "warnings": warnings,
-                "actor_identity": actor_identity_data(resolved_actor),
+                "actor_identity": actor_identity_data(claim_obj.claimed_by),
                 "continuation": continuation_data(
-                    task_id, claim_obj.id, resolved_actor
+                    task_id, claim_obj.id, claim_obj.claimed_by
                 ),
             },
         )
         return
 
     # Confirmation output.
-    typer.echo(f"Claimed task '{task_id}' as {safe_actor_label(resolved_actor)}.")
+    typer.echo(f"Claimed task '{task_id}' as {safe_actor_label(claim_obj.claimed_by)}.")
     typer.echo(f"  Claim ID:    {claim_obj.id}")
     typer.echo(f"  Lease until: {claim_obj.lease_expires_at.isoformat()}")
     if reported_branch:
@@ -643,9 +647,9 @@ def claim(
     if worktree_path:
         typer.echo(f"  Worktree:    {worktree_path}")
     typer.echo("")
-    for line in actor_notice_lines(resolved_actor):
+    for line in actor_notice_lines(claim_obj.claimed_by):
         typer.echo(line)
-    actor_flag = actor_flag_for_human(resolved_actor)
+    actor_flag = actor_flag_for_human(claim_obj.claimed_by)
     if actor_flag is not None:
         typer.echo(
             f"Run `anvil renew {claim_obj.id} {actor_flag}` to extend the lease "

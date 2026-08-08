@@ -941,6 +941,21 @@ class TestBundleTools:
         assert superseded["bundle"]["superseded_by"] == "B001"
         assert claimed["bundle"]["status"] == "active"
         assert set(claimed["claim"]["member_claim_ids"]) == {"T001", "T002"}
+        assert claimed["actor_identity"]["actor"] == "coordinator"
+        continuation = claimed["continuation"]
+        assert continuation["renew"]["argv"][:4] == [
+            "anvil", "bundle", "renew", "B001",
+        ]
+        assert continuation["release"]["argv"][:4] == [
+            "anvil", "bundle", "release", "B001",
+        ]
+        assert continuation["progress"]["argv"][:4] == [
+            "anvil", "bundle", "progress", "B001",
+        ]
+        assert continuation["complete"]["argv"][:4] == [
+            "anvil", "bundle", "complete", "B001",
+        ]
+        assert "submit" not in continuation
         assert packet["format"] == "json"
         assert packet["content"]["bundle"]["id"] == "B001"
         assert progress["recorded"] is True
@@ -1010,6 +1025,94 @@ class TestBundleTools:
         assert renewed["renewed"] is True
         assert released["released"] is True
         assert released["claim_id"].startswith("BC")
+
+    @pytest.mark.parametrize("legacy_owner", ["Cafe\u0301", "legacy\nowner"])
+    def test_exact_legacy_bundle_owner_can_continue_over_mcp(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_owner: str,
+    ) -> None:
+        self._seed(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def create_and_claim() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "create_bundle",
+                    {
+                        "bundle_id": "B001",
+                        "prd_id": "default",
+                        "task_ids": ["T001"],
+                        "coordinator": "coordinator",
+                        "actor": "planner",
+                    },
+                )
+                await client.call_tool(
+                    "claim_bundle",
+                    {"bundle_id": "B001", "actor": "coordinator"},
+                )
+
+        _run(create_and_claim())
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            conn.execute(
+                "UPDATE execution_bundles SET coordinator = ? WHERE id = 'B001'",
+                (legacy_owner,),
+            )
+            conn.execute(
+                "UPDATE bundle_claims SET claimed_by = ? WHERE bundle_id = 'B001'",
+                (legacy_owner,),
+            )
+            conn.execute(
+                "UPDATE claims SET claimed_by = ? WHERE bundle_claim_id IS NOT NULL",
+                (legacy_owner,),
+            )
+
+        async def continue_lifecycle() -> tuple[Any, Any, Any, Any]:
+            async with Client(mcp) as client:
+                packet = _data(
+                    await client.call_tool(
+                        "generate_bundle_packet",
+                        {"bundle_id": "B001", "actor": legacy_owner, "format": "json"},
+                    )
+                )
+                progress = _data(
+                    await client.call_tool(
+                        "submit_bundle_progress",
+                        {
+                            "bundle_id": "B001",
+                            "actor": legacy_owner,
+                            "phase": "legacy exact lookup",
+                        },
+                    )
+                )
+                renewed = _data(
+                    await client.call_tool(
+                        "renew_claim",
+                        {
+                            "task_id": "B001",
+                            "actor": legacy_owner,
+                            "target_kind": "bundle",
+                        },
+                    )
+                )
+                released = _data(
+                    await client.call_tool(
+                        "release_task",
+                        {
+                            "task_id": "B001",
+                            "actor": legacy_owner,
+                            "target_kind": "bundle",
+                        },
+                    )
+                )
+                return packet, progress, renewed, released
+
+        packet, progress, renewed, released = _run(continue_lifecycle())
+        assert packet["content"]["bundle"]["coordinator"] == legacy_owner
+        assert progress["recorded"] is True
+        assert renewed["actor_identity"]["actor"] == legacy_owner
+        assert released["actor_identity"]["actor"] == legacy_owner
 
     def test_failed_bundle_completion_does_not_append_progress(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

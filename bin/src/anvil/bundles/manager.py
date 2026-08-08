@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from anvil.actors import ActorIdentityError, canonicalize_new_actor
 from anvil.bundles.eligibility import analyze_bundle_graph
 from anvil.clock import Clock
 from anvil.context.packets import (
@@ -137,6 +138,10 @@ class BundleManager:
 
     def preflight(self, bundle_id: str) -> ExecutionBundle:
         """Read-only claimability check used before any Git side effect."""
+        try:
+            self._actor = canonicalize_new_actor(self._actor)
+        except ActorIdentityError as exc:
+            raise BundleError(f"Invalid coordinator identity: {exc}") from exc
         bundle = self._backend.get_bundle(bundle_id)
         if bundle is None:
             raise BundleError(f"Bundle '{bundle_id}' not found.")

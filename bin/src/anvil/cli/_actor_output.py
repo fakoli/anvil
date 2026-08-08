@@ -13,6 +13,7 @@ from typing import Any
 from anvil.actors import (
     ACTOR_AUTH_NOTICE,
     actor_identity_context,
+    bundle_continuation_context,
     continuation_context,
     quote_posix_actor,
     quote_powershell_actor,
@@ -38,6 +39,11 @@ def continuation_data(task_id: str, claim_id: str, actor: str) -> dict[str, Any]
         },
     )
     return context
+
+
+def bundle_continuation_data(bundle_id: str, actor: str) -> dict[str, Any]:
+    """Return bundle-specific lifecycle argv without a task-submit command."""
+    return dict(bundle_continuation_context(bundle_id, actor))
 
 
 def _quote_for_current_shell(value: str) -> str:

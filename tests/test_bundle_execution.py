@@ -2169,13 +2169,26 @@ def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
             "coordinator",
             "--branch",
             "agent/b001",
+            "--json",
             "--cwd",
             str(tmp_path),
         ],
         env=env,
     )
     assert claimed.exit_code == 0, claimed.output
-    assert "coordinator claim" in claimed.output
+    claim_data = json.loads(claimed.output)["data"]
+    assert claim_data["actor_identity"]["actor"] == "coordinator"
+    continuation = claim_data["continuation"]
+    assert continuation["renew"]["argv"][:4] == [
+        "anvil", "bundle", "renew", "B001",
+    ]
+    assert continuation["progress"]["argv"][:4] == [
+        "anvil", "bundle", "progress", "B001",
+    ]
+    assert continuation["complete"]["argv"][:4] == [
+        "anvil", "bundle", "complete", "B001",
+    ]
+    assert "submit" not in continuation
 
     packet = runner.invoke(
         app,

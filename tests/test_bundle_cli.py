@@ -80,7 +80,25 @@ def test_bundle_create_show_and_list_human_json_contracts(tmp_path) -> None:
         ["bundle", "claim", "B001", "--actor", "coordinator", "--json"],
     )
     assert claimed.exit_code == 0, claimed.output
-    assert json.loads(claimed.output)["data"]["bundle"]["status"] == "active"
+    claim_data = json.loads(claimed.output)["data"]
+    assert claim_data["bundle"]["status"] == "active"
+    assert claim_data["actor_identity"]["actor"] == "coordinator"
+    continuation = claim_data["continuation"]
+    assert set(continuation) == {
+        "environment",
+        "renew",
+        "release",
+        "progress",
+        "complete",
+        "identity_notice",
+    }
+    assert continuation["renew"]["argv"][:4] == [
+        "anvil", "bundle", "renew", "B001",
+    ]
+    assert continuation["complete"]["argv"][:4] == [
+        "anvil", "bundle", "complete", "B001",
+    ]
+    assert "submit" not in continuation
 
     packet = _invoke(
         tmp_path,
@@ -127,6 +145,15 @@ def test_bundle_create_preserves_spaces_and_rejects_explicit_empty_coordinator(
     )
     assert created.exit_code == 0, created.output
     assert json.loads(created.output)["data"]["bundle"]["coordinator"] == " actor "
+
+    human_claim = _invoke(
+        tmp_path,
+        ["bundle", "claim", "BSPACE", "--actor", " actor "],
+    )
+    assert human_claim.exit_code == 0, human_claim.output
+    assert "ANVIL_ACTOR" in human_claim.output
+    assert "anvil bundle progress BSPACE" in human_claim.output
+    assert "anvil bundle complete BSPACE" in human_claim.output
 
     empty = _invoke(
         tmp_path,

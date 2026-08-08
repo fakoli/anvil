@@ -4597,6 +4597,28 @@ class TestClaimCommand:
         assert data["continuation"]["renew"]["argv"][-2:] == ["--actor", actor]
         assert data["continuation"]["progress"]["argv"][-2:] == ["--actor", actor]
 
+    def test_claim_continuation_uses_persisted_nfc_actor(self, tmp_path: Path) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        raw_actor = "Cafe\u0301 worker"
+        persisted_actor = "Café worker"
+
+        result = _invoke_cmd(
+            tmp_path, ["claim", task_id, "--actor", raw_actor, "--json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["claim"]["claimed_by"] == persisted_actor
+        assert data["actor_identity"]["actor"] == persisted_actor
+        assert data["continuation"]["environment"] == {
+            "ANVIL_ACTOR": persisted_actor
+        }
+        release_argv = data["continuation"]["release"]["argv"]
+        released = _invoke_cmd(tmp_path, release_argv[1:])
+        assert released.exit_code == 0, released.output
+
     def test_claim_refuses_unready_task(self, tmp_path: Path) -> None:
         """Claiming a task not in 'ready' status exits non-zero."""
         _do_init_and_plan(tmp_path, with_git=False)

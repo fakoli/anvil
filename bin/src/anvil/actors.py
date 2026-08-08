@@ -150,6 +150,27 @@ def continuation_context(
     }
 
 
+def bundle_continuation_context(bundle_id: str, actor: str) -> dict[str, object]:
+    """Return exact argv/env continuations for a coordinator bundle claim."""
+    return {
+        "environment": {"ANVIL_ACTOR": actor},
+        "renew": actor_continuation(
+            actor, ["anvil", "bundle", "renew", bundle_id, "--actor", actor]
+        ),
+        "release": actor_continuation(
+            actor, ["anvil", "bundle", "release", bundle_id, "--actor", actor]
+        ),
+        "progress": actor_continuation(
+            actor,
+            ["anvil", "bundle", "progress", bundle_id, "<phase>", "--actor", actor],
+        ),
+        "complete": actor_continuation(
+            actor, ["anvil", "bundle", "complete", bundle_id, "--actor", actor]
+        ),
+        "identity_notice": ACTOR_AUTH_NOTICE,
+    }
+
+
 def render_actor_continuation(
     actor: str,
     argv: Sequence[str],

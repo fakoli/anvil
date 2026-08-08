@@ -26,6 +26,7 @@ from anvil.build_identity import get_build_identity
 from anvil.cli._actor_output import (
     actor_identity_data,
     actor_mismatch_data,
+    bundle_continuation_data,
     continuation_data,
 )
 from anvil.state.rollup import BundleRollupEntry
@@ -428,6 +429,8 @@ class BundleClaimResponse(BaseModel):
     bundle: BundleRecord
     claim: BundleClaimRecord
     warnings: list[str] = Field(default_factory=list)
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+    continuation: dict[str, Any] = Field(default_factory=dict)
 
 
 class BundleReviewGateResponse(BaseModel):
@@ -4014,6 +4017,8 @@ def _bundle_manager(
     actor: str,
     lease_minutes: float = 240,
     cwd: str | None = None,
+    *,
+    new_claim: bool = False,
 ):
     from anvil.bundles.manager import BundleManager
     from anvil.cli._helpers import _resolve_project_root
@@ -4022,7 +4027,11 @@ def _bundle_manager(
     return BundleManager(
         backend,
         SystemClock(),
-        actor=_require_actor(actor),
+        actor=(
+            _require_actor(actor)
+            if new_claim
+            else _exact_lifecycle_actor(actor)
+        ),
         project_root=_resolve_project_root(Path(cwd) if cwd else None),
         lease_minutes=lease_minutes,
     )
@@ -4160,6 +4169,7 @@ def claim_bundle(
                 actor,
                 lease_minutes=lease_minutes,
                 cwd=cwd,
+                new_claim=True,
             ).claim(bundle_id)
         except (BundleError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
@@ -4167,6 +4177,10 @@ def claim_bundle(
             bundle=_bundle_record(result.bundle),
             claim=_bundle_claim_record(result.claim),
             warnings=warnings,
+            actor_identity=actor_identity_data(result.claim.claimed_by),
+            continuation=bundle_continuation_data(
+                bundle_id, result.claim.claimed_by
+            ),
         )
     finally:
         backend.close()
@@ -4303,7 +4317,7 @@ def finalize_bundle_review(
     try:
         try:
             gate = BundleReviewManager(
-                backend, SystemClock(), actor=_require_actor(actor)
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
             ).finalize(bundle_id)
             bundle = backend.get_bundle(bundle_id)
         except BundleReviewError as exc:
@@ -4332,7 +4346,7 @@ def checkpoint_bundle(
     try:
         try:
             checkpoint = BundleDeliveryManager(
-                backend, SystemClock(), actor=_require_actor(actor)
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
             ).checkpoint(bundle_id, commit_sha=commit_sha, pr_url=pr_url)
             bundle = backend.get_bundle(bundle_id)
         except (BundleDeliveryError, ValueError) as exc:
@@ -4363,7 +4377,7 @@ def reconcile_bundle(
     try:
         try:
             BundleDeliveryManager(
-                backend, SystemClock(), actor=_require_actor(actor)
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
             ).reconcile(
                 bundle_id, commit_sha=commit_sha, pr_url=pr_url, merged=merged
             )
@@ -4391,7 +4405,7 @@ def supersede_bundle(
     try:
         try:
             BundleDeliveryManager(
-                backend, SystemClock(), actor=_require_actor(actor)
+                backend, SystemClock(), actor=_exact_lifecycle_actor(actor)
             ).supersede(bundle_id, replacement_bundle_id=replacement_bundle_id)
             bundle = backend.get_bundle(bundle_id)
         except (BundleDeliveryError, ValueError) as exc:
