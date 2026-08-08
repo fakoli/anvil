@@ -101,7 +101,7 @@ jobs:
               env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV ANVIL_STATE_LAYOUT=local "$venv/bin/anvil" prd source-name --prd CON --json > "$source_name"
             )
             test "$("$venv/bin/anvil-mcp" --version)" = "$version"
-            uv run --no-project --python 3.11 python scripts/check_skill_cli_contract.py --manifest "$manifest" --repo-root . --expected-version "$version" --expected-api-version 5
+            uv run --no-project --python 3.11 python scripts/check_skill_cli_contract.py --manifest "$manifest" --repo-root . --expected-version "$version" --expected-api-version 6
             uv run --no-project --python 3.11 python scripts/check_release_contract.py --manifest "$manifest" --repo-root . --expected-release-tag "$RELEASE_REF" --expected-commit "$commit"
             uv run --no-project --python 3.11 python -c 'import json, pathlib, sys; p=json.load(open(sys.argv[1])); n=p["data"]["relative_name"]; assert p["ok"] is True and n and not pathlib.PurePath(n).is_absolute()' "$source_name"
           }

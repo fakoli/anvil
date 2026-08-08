@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 import yaml
+from anvil.cli.describe import API_VERSION
 from scripts import check_release_contract
 from scripts.check_skill_cli_contract import ContractError, contract_digest
 
@@ -181,6 +182,7 @@ def test_publish_oidc_job_is_minimal_and_all_actions_are_immutable() -> None:
     assert '--out "$RUNNER_TEMP/anvil-benchmark-results.md"' in text
     assert "mkdocs build --strict" in text
     assert "(cd bin && uv run --locked ruff check ..)" in text
+    assert f"--expected-api-version {API_VERSION}" in text
     assert (
         "printf '%s\\0' \"$wheel\" \"$sdist\" | sort -z | "
         "xargs -0 sha256sum > SHA256SUMS"
