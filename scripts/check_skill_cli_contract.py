@@ -18,9 +18,27 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-ALLOWLIST_PHANTOM = {"decision", "start-prd"}
-ALLOWLIST_OUTPUT = {"for"}
-ALLOWLIST = ALLOWLIST_PHANTOM | ALLOWLIST_OUTPUT
+# The checker scans inline code and captured output as well as shell blocks. Keep
+# the two known non-invocations exact and source-scoped so the same text cannot
+# hide a real command citation anywhere else.
+NON_INVOCATION_EXCEPTIONS = frozenset(
+    {
+        (
+            "skills/start-prd/SKILL.md",
+            269,
+            "inline",
+            "This is a skill, not a CLI command; there is no `anvil start-prd`. The",
+            ("anvil", "start-prd"),
+        ),
+        (
+            "skills/state-ops/SKILL.md",
+            55,
+            "fence:plain",
+            'anvil for "myproject" (id: myproject)',
+            ("anvil", "for", "myproject", "(id:", "myproject"),
+        ),
+    }
+)
 
 _NAME = re.compile(r"[a-z][a-z-]+")
 _FLAG = re.compile(r"--[a-z0-9][a-z0-9-]*")
@@ -180,18 +198,28 @@ def docs_for(repo_root: Path) -> list[Path]:
     ]
 
 
-def code_segments(text: str) -> Iterable[tuple[int, str]]:
-    """Yield fenced and inline code, joining shell continuation lines."""
+def _code_segments_with_context(text: str) -> Iterable[tuple[int, str, str]]:
+    """Yield fenced and inline code with its source context."""
 
     in_fence = False
+    fence_context = ""
     continued: list[str] = []
+    continued_context = ""
     start_line = 0
     for lineno, line in enumerate(text.splitlines(), 1):
-        if re.match(r"^\s*```", line):
+        fence = re.match(r"^\s*```(?P<language>[^\s`]*)", line)
+        if fence:
             if continued:
-                yield start_line, " ".join(continued)
+                yield start_line, " ".join(continued), continued_context
                 continued = []
-            in_fence = not in_fence
+                continued_context = ""
+            if in_fence:
+                in_fence = False
+                fence_context = ""
+            else:
+                in_fence = True
+                language = fence.group("language").lower()
+                fence_context = f"fence:{language or 'plain'}"
             continue
         if in_fence:
             stripped = line.rstrip()
@@ -202,16 +230,25 @@ def code_segments(text: str) -> Iterable[tuple[int, str]]:
             elif is_continuation:
                 start_line = lineno
                 continued = [part]
+                continued_context = fence_context
             else:
-                yield lineno, line
+                yield lineno, line, fence_context
             if continued and not is_continuation:
-                yield start_line, " ".join(continued)
+                yield start_line, " ".join(continued), continued_context
                 continued = []
+                continued_context = ""
         else:
             for span in re.findall(r"`([^`\n]+)`", line):
-                yield lineno, span
+                yield lineno, span, "inline"
     if continued:
-        yield start_line, " ".join(continued)
+        yield start_line, " ".join(continued), continued_context
+
+
+def code_segments(text: str) -> Iterable[tuple[int, str]]:
+    """Yield fenced and inline code, joining shell continuation lines."""
+
+    for lineno, segment, _context in _code_segments_with_context(text):
+        yield lineno, segment
 
 
 def invocations(segment: str) -> Iterable[list[str]]:
@@ -258,7 +295,7 @@ def check_invocation(tokens: list[str], contract: Mapping[str, Any]) -> list[str
             if flag.startswith("--") and flag not in valid
         ]
     command = rest.pop(0)
-    if command in ALLOWLIST or _placeholder(command):
+    if _placeholder(command):
         return []
     if not _NAME.fullmatch(command):
         return [f"malformed command: anvil {command}"]
@@ -313,19 +350,35 @@ def validate_docs(repo_root: Path, payload: Mapping[str, Any]) -> list[str]:
 
     contract = load_manifest(payload)
     findings: list[str] = []
+    matched_exceptions: set[tuple[str, int, str, str, tuple[str, ...]]] = set()
     for document in docs_for(repo_root):
         if not document.is_file():
             raise ContractError(f"required agent document is missing: {document}")
         text = document.read_text(encoding="utf-8")
         lines = text.splitlines()
-        for lineno, segment in code_segments(text):
+        relative = document.relative_to(repo_root)
+        for lineno, segment, context in _code_segments_with_context(text):
             for tokens in invocations(segment):
+                source = lines[lineno - 1].rstrip()
+                exception = (
+                    relative.as_posix(),
+                    lineno,
+                    context,
+                    source,
+                    tuple(tokens),
+                )
+                if exception in NON_INVOCATION_EXCEPTIONS:
+                    matched_exceptions.add(exception)
+                    continue
                 for finding in check_invocation(tokens, contract):
-                    source = lines[lineno - 1].strip()
-                    relative = document.relative_to(repo_root)
                     findings.append(
-                        f"{relative}:{lineno}: {finding}\n    -> {source}"
+                        f"{relative.as_posix()}:{lineno}: {finding}\n    -> {source}"
                     )
+    for exception in sorted(NON_INVOCATION_EXCEPTIONS - matched_exceptions):
+        path, lineno, _context, source, _tokens = exception
+        findings.append(
+            f"{path}:{lineno}: stale non-invocation exception\n    -> {source}"
+        )
     return findings
 
 

@@ -6,7 +6,7 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
-## [0.6.2] - 2026-08-03
+## [0.6.2] - 2026-08-08
 
 ### Added
 
@@ -24,11 +24,9 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   hooks, in-process MCP calls, and real stdio startup all return bounded,
   redacted, direction-aware diagnostics without mutating future state, leaking
   raw paths, recursing through cleanup, or hanging the host process.
-
-## [0.6.1] - 2026-08-03
-
-### Fixed
-
+- **MCP initialize metadata preserves build provenance.** Source checkouts now
+  report the same commit-qualified display identity as `anvil-mcp --version`
+  instead of collapsing back to the plain package version.
 - **Release/skill compatibility is now fail-closed (#196).** Release checks
   build and install the candidate wheel, validate every command and exact flag
   cited by shipped skills, and compare the independently installed artifact to
@@ -36,6 +34,10 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   `anvil describe` distinguish source checkouts from installed artifacts, and
   named-PRD skills stop with actionable upgrade instructions when
   `prd source-name` is unavailable instead of guessing or mutating state.
+- **Skill/CLI contract checks no longer ignore phantom commands globally.**
+  Captured output and negative prose use exact source-scoped exceptions, while
+  real citations of nonexistent `decision`, `start-prd`, or `for` commands now
+  fail release qualification.
 - **Named-PRD dependency recovery and bounded diagnostics (#181).** Legacy
   dependency upserts that omitted `prd_id` now recover during forward catch-up
   and full replay without renumbering events. Dependency validation and

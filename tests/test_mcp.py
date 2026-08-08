@@ -35,6 +35,7 @@ from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 
 from anvil import __version__
+from anvil.build_identity import get_build_identity
 from anvil.mcp_server import mcp
 from anvil.planning._plan_helpers import (
     DEPENDENCY_BATCH_LIMIT_MESSAGE,
@@ -383,7 +384,7 @@ class TestMcpSchemaMismatch:
             async with Client(mcp) as client:
                 return client.initialize_result.serverInfo.version
 
-        assert _run(run()) == __version__
+        assert _run(run()) == get_build_identity().display_version
 
     def test_schema_mismatch_long_lived_client_detects_newer_database(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
