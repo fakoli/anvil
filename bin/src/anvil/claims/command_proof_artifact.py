@@ -479,17 +479,32 @@ def _claim_command_cwd_binding(
             "repository_invalid", "command proof repository identity is invalid"
         )
     relative, resolved, device, inode = _verified_cwd(project_root, cwd_relative)
-    identity = domain_separated_sha256(
-        _CWD_DOMAIN,
-        {
-            "repository_id": repository_id,
-            "filesystem_device": device,
-            "filesystem_inode": inode,
-        },
-        max_bytes=16_384,
-        max_string_bytes=8_192,
-    )
+    try:
+        identity = domain_separated_sha256(
+            _CWD_DOMAIN,
+            {
+                "repository_id": repository_id,
+                "filesystem_device": _filesystem_identity_hex(device, "device"),
+                "filesystem_inode": _filesystem_identity_hex(inode, "inode"),
+            },
+            max_bytes=16_384,
+            max_string_bytes=8_192,
+        )
+    except (CanonicalJsonRefusal, ValueError) as exc:
+        raise ClaimCommandProofError(
+            "cwd_identity_unavailable",
+            "command proof cwd has no stable filesystem identity",
+        ) from exc
     return relative, resolved, identity
+
+
+def _filesystem_identity_hex(value: int, name: str) -> str:
+    if type(value) is not int or value < 0 or value > 0xFFFFFFFFFFFFFFFF:
+        raise ClaimCommandProofError(
+            "cwd_identity_unavailable",
+            f"command proof cwd {name} identity is outside unsigned 64-bit range",
+        )
+    return format(value, "x")
 
 
 def _verified_cwd(root: Path, value: str) -> tuple[str, Path, int, int]:

@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 from anvil import signing
+from anvil.claims import command_proof_artifact
 from anvil.claims.command_proof_artifact import (
     MAX_CLAIM_COMMAND_PROOF_BYTES,
     ClaimCommandProofError,
@@ -44,6 +45,7 @@ _ENDED = _NOW - dt.timedelta(minutes=1)
 _COMMAND = "uv run pytest -q"
 _TASK_REVISION = "a" * 64
 _SEMANTIC_DOMAIN = b"anvil.command-proof.v1\0"
+_CWD_DOMAIN = b"anvil.command-cwd.v1\0"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -384,6 +386,36 @@ def test_windows_case_aliases_share_identity_and_semantic_digest(repo: Path) -> 
             now=_NOW,
         )
     assert caught.value.code == "duplicate_evidence"
+
+
+def test_cwd_identity_encodes_unsigned_stat_boundaries_as_hex(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        command_proof_artifact,
+        "_verified_cwd",
+        lambda _root, _relative: (".", repo, 2**63, 2**64 - 1),
+    )
+    identity = claim_command_cwd_identity(repo, "a" * 64, ".")
+    assert identity == domain_separated_sha256(
+        _CWD_DOMAIN,
+        {
+            "repository_id": "a" * 64,
+            "filesystem_device": "8000000000000000",
+            "filesystem_inode": "ffffffffffffffff",
+        },
+        max_bytes=16_384,
+        max_string_bytes=8_192,
+    )
+
+    monkeypatch.setattr(
+        command_proof_artifact,
+        "_verified_cwd",
+        lambda _root, _relative: (".", repo, 2**64, 1),
+    )
+    with pytest.raises(ClaimCommandProofError) as caught:
+        claim_command_cwd_identity(repo, "a" * 64, ".")
+    assert caught.value.code == "cwd_identity_unavailable"
 
 
 def test_batch_rejects_duplicate_partial_and_resource_overruns_atomically(repo: Path) -> None:
