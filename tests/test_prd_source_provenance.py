@@ -36,7 +36,6 @@ from anvil.state.payloads import PrdParsedPayload, PrdRevisedPayload
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import SqliteBackend
 
-
 _T0 = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 
 
