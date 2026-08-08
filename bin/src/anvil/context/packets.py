@@ -209,12 +209,15 @@ def render_bundle_packet(
     internal_edges: list[dict[str, str]] = []
     open_external: list[str] = []
     member_json: list[dict[str, Any]] = []
+    coordinator_label = safe_actor_for_human(bundle.coordinator)
+    if coordinator_label is None:
+        coordinator_label = "<unsafe legacy actor; use JSON structured coordinator>"
     lines = [
         f"# Bundle {bundle.id}",
         "",
         f"**PRD:** {bundle.prd_id}",
         f"**Status:** {bundle.status.value}",
-        f"**Coordinator:** {safe_actor_for_human(bundle.coordinator)}",
+        f"**Coordinator:** {coordinator_label}",
         f"**Branch:** {bundle.branch or '—'}",
         f"**Worktree:** {bundle.worktree_path or '—'}",
         "",
