@@ -6,6 +6,15 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-08
+
+### Fixed
+
+- **Release checksums now select exactly the wheel and source distribution.**
+  The qualifier ignores build-tool sidecars such as `bin/dist/.gitignore` and
+  uploads only the two validated artifacts. The v0.6.2 GitHub release failed
+  closed before bundle upload or PyPI publication and is superseded by v0.6.3.
+
 ## [0.6.2] - 2026-08-08
 
 ### Added
