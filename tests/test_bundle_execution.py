@@ -2265,3 +2265,41 @@ def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
         )
     finally:
         backend.close()
+
+
+def test_top_level_bundle_claim_human_lists_complete_continuation(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True
+    )
+    backend = _backend(state_dir)
+    try:
+        _seed(backend)
+    finally:
+        backend.close()
+    claimed = CliRunner().invoke(
+        app,
+        [
+            "claim",
+            "B001",
+            "--bundle",
+            "--actor",
+            "coordinator",
+            "--branch",
+            "agent/b001-human",
+            "--cwd",
+            str(tmp_path),
+        ],
+        env={"ANVIL_STATE_LAYOUT": "local"},
+    )
+
+    assert claimed.exit_code == 0, claimed.output
+    assert "ANVIL_ACTOR" in claimed.output
+    assert "anvil bundle renew B001" in claimed.output
+    assert "anvil bundle release B001" in claimed.output
+    assert "anvil bundle progress B001" in claimed.output
+    assert "anvil bundle complete B001" in claimed.output
+    assert "anvil submit B001" not in claimed.output
