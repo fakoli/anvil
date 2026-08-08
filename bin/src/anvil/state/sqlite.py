@@ -10326,6 +10326,7 @@ class SqliteBackend:
             lease_expires_at = datetime.datetime.fromisoformat(
                 row[7].replace("Z", "+00:00")
             )
+            event_time = event.timestamp.astimezone(datetime.UTC)
             live_now = (
                 authoritative_now.astimezone(datetime.UTC)
                 if authoritative_now is not None
@@ -10359,8 +10360,9 @@ class SqliteBackend:
             or current_prd is None
             or int(current_prd[0]) != context.prd_revision
             or not required_commands
-            or event.timestamp >= lease_expires_at
+            or event_time >= lease_expires_at
             or (live_now is not None and live_now >= lease_expires_at)
+            or (live_now is not None and event_time > live_now)
         ):
             return False
         for proof in imported:
@@ -10391,8 +10393,9 @@ class SqliteBackend:
                 or proof.command not in required_commands
                 or claim_created_at > started_at
                 or started_at > ended_at
-                or ended_at > event.timestamp
+                or ended_at > event_time
                 or ended_at >= lease_expires_at
+                or (live_now is not None and ended_at > live_now)
             ):
                 return False
         return True

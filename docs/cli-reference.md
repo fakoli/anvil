@@ -1053,7 +1053,11 @@ limitations. Prints separate gate diagnostics for descriptive
   versioned claim-bound command-proof artifact. Every artifact in the batch
   must match the explicit active claim, exact actor, generation, task/PRD
   revision, repository and canonical cwd, and one exact `--commands` value.
-  Validation is all-or-nothing before evidence is recorded.
+  Validation is all-or-nothing before evidence is recorded. For signed proofs,
+  current issuer membership in `ANVIL_TRUST_LIST` or `~/.anvil/trust.txt` is
+  required at append and replay; preserve and restore that trust configuration
+  with state or replay fails closed. Self-attested replay is trust-list
+  independent.
 - `--pr-url TEXT` *(optional)* — pull request URL.
 - `--commit-sha TEXT` *(optional)* — commit SHA associated with this
   submission.

@@ -716,6 +716,12 @@ duplicate, stale, oversized, nonzero, or mismatched artifact refuses the whole
 submission. These artifacts attest reported bytes; Anvil does not execute the
 command. Unsigned artifacts are reported as `claim_owner_self_attested`; only a
 valid configured issuer is reported as `configured_issuer_verified`.
+Configured-issuer membership is revalidated from `ANVIL_TRUST_LIST` or
+`~/.anvil/trust.txt` both at live append and during event-log replay. Operators
+must back up and restore the effective trust list with state and retain each
+signing public key or fingerprint; missing or changed membership fails closed
+and aborts append or replay. Self-attested proof replay does not depend on the
+external trust list.
 
 `output_excerpt` is descriptive only. Text such as `exit: 0` in that field does
 not create a typed command proof or satisfy `required_proofs`.

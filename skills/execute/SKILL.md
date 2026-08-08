@@ -186,6 +186,12 @@ anvil submit T012 \
 
 `--commands` and `--files-changed` are both **required** and **repeatable**: pass the flag once per value (one occurrence == one value, so commands or paths with embedded commas survive intact), or pass a single comma-separated occurrence for the simple case shown above. `--output-file` attaches up to 8000 characters as a descriptive excerpt; it never creates a typed proof or satisfies `required_proofs`. For an external/subagent run, repeat `--command-proof-file ARTIFACT` to import a bounded claim-bound proof batch. Every proof must match the explicit claim owner/context and an exact `--commands` value or the whole submission is refused. `--pr-url` links the branch's PR if one exists.
 
+Signed command proofs also depend on current issuer membership in
+`ANVIL_TRUST_LIST` or `~/.anvil/trust.txt` during both append and replay. Back up
+and restore that trust list with state and retain the signing key or fingerprint;
+missing membership fails closed. Self-attested proof replay is trust-list
+independent.
+
 `submit` does the following atomically:
 
 1. Writes an `Evidence` row to `state.db` with the commands run, files changed, and output excerpt.

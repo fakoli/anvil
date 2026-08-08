@@ -220,6 +220,13 @@ Use the hook-captured per-claim buffer or import a valid artifact with
 `claim_owner_self_attested` unless their configured issuer signature verifies;
 they are never described as independently executed by Anvil.
 
+For `configured_issuer_verified` proofs, both the live append and later replay
+revalidate the issuer against `ANVIL_TRUST_LIST` or the default
+`~/.anvil/trust.txt`. Back up and restore that trust list with Anvil state, and
+retain the signing public key or fingerprint: missing or changed membership
+fails closed and aborts replay. `claim_owner_self_attested` replay is independent
+of the external trust list.
+
 `submit` locates the active claim for the task (one per task at most), constructs an `Evidence` row with a fresh ID (`EV` + 8 hex), emits an `evidence.submitted` event, and the backend handler atomically:
 
 Actor identity is local audit attribution, not cryptographic authentication. It prevents accidental cross-agent lifecycle mutation; it is not an authorization boundary.

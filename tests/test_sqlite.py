@@ -13588,6 +13588,10 @@ class TestClaimCommandProofState:
         payload = _make_evidence_payload()
         payload["proofs"] = proofs
         payload["commands_run"] = [proof["command"] for proof in proofs]
+        clock = backend._clock  # noqa: SLF001 - exercise the live clock boundary
+        submit_time = _T0 + timedelta(minutes=12)
+        if isinstance(clock, FrozenClock) and clock.now() < submit_time:
+            clock.advance(seconds=(submit_time - clock.now()).total_seconds())
         event = backend.append(
             _make_event(
                 "evidence.submitted",
@@ -13595,7 +13599,7 @@ class TestClaimCommandProofState:
                 target_kind="task",
                 target_id="T001",
                 actor="agent-alpha",
-                now=_T0 + timedelta(minutes=12),
+                now=submit_time,
             )
         )
         assert event is not None
@@ -13662,6 +13666,41 @@ class TestClaimCommandProofState:
             clock.advance(hours=2)
             with pytest.raises(EventRejected, match="exact active claim generation"):
                 b.append(stale_draft)
+
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
+            assert b.list_evidence() == []
+            claim = b.get_claim("C001")
+            assert claim is not None and claim.status is ClaimStatus.active
+            task = b.get_task("T001")
+            assert task is not None and task.status.value == "claimed"
+        finally:
+            b.close()
+
+    def test_append_lock_clock_rejects_future_draft_and_proof(
+        self, tmp_path: Path
+    ) -> None:
+        clock = _make_clock()
+        b = _make_backend(tmp_path, clock)
+        try:
+            self._claim(b)
+            proof = _make_claim_command_proof(
+                started_at=_T0 + timedelta(minutes=30),
+                ended_at=_T0 + timedelta(minutes=31),
+            )
+            raw = _make_evidence_payload()
+            raw["proofs"] = [proof]
+            future_draft = _make_event(
+                "evidence.submitted",
+                raw,
+                target_kind="task",
+                target_id="T001",
+                actor="agent-alpha",
+                now=_T0 + timedelta(minutes=32),
+            )
+            before = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+
+            with pytest.raises(EventRejected, match="exact active claim generation"):
+                b.append(future_draft)
 
             assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == before
             assert b.list_evidence() == []

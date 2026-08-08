@@ -125,9 +125,15 @@ signs the full canonical payload bytes, including `cwd_relative`.
 An optional configured issuer has exact shape
 `{"algorithm":"ed25519","signer_id":"<16 hex>","public_key":"<64 hex>","signature":"<128 hex>"}`.
 The signature covers the canonical payload bytes. The public key or fingerprint
-must be present in `ANVIL_TRUST_LIST` or `~/.anvil/trust.txt`; otherwise import
-fails. Without this issuer, the receipt truthfully reports
-`claim_owner_self_attested`, not independent execution.
+must be present in `ANVIL_TRUST_LIST` or `~/.anvil/trust.txt`. Anvil revalidates
+that current trust membership and the signature both during the live append and
+during event-log replay. Missing or unreadable trust configuration, or a change
+that removes the signing public key or fingerprint, fails closed and aborts the
+append or replay. Back up and restore the effective trust-list file
+with project state, and preserve the issuer public key or fingerprint for as
+long as signed proof events must remain replayable. Unsigned proof events stored
+as `claim_owner_self_attested` do not depend on this external trust list during
+replay; they remain self-attestations, not independent execution.
 
 Import canonical JSON files with repeated `--command-proof-file` flags. MCP
 clients base64-encode each entire canonical envelope and pass the resulting
