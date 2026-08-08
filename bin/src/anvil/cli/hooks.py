@@ -1152,7 +1152,10 @@ def hook_stop_gate(
     actor: str | None = typer.Option(  # noqa: B008
         None,
         "--actor",
-        help="Actor whose active claims to gate. Defaults to $ANVIL_GATE_ACTOR or 'agent'.",
+        help=(
+            "Actor whose active claims to gate. Precedence: --actor > ANVIL_ACTOR > "
+            "ANVIL_GATE_ACTOR > derived local identity."
+        ),
     ),
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
