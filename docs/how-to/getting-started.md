@@ -302,7 +302,7 @@ PRD:           approved
 Tasks:         1 total (0 ready, 0 claimed, 0 in_progress, 0 needs_review, 0 blocked, 1 done)
 Active claims: 0
 Sync:          off
-Schema:        18
+Schema:        19
 ```
 
 The work packet under `.anvil/packets/T001.md` is the contract that drove the work. For the full picture of how transitions, gates, claims, and the event log fit together, see [`../architecture.md`](../architecture.md).

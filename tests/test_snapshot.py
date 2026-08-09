@@ -211,7 +211,14 @@ def _build_populated_backend(state_dir: Path) -> SqliteBackend:
     applied_event_id = next(eid)
     b.append(_event(
         "task.applied",
-        {"task_id": "T001", "reviewer": "alice", "decision": "accepted", "notes": None},
+        {
+            "task_id": "T001",
+            "reviewer": "alice",
+            "decision": "accepted",
+            "notes": None,
+            "schema_version": 1,
+            "review_attempt_id": "EV001",
+        },
         event_id=applied_event_id, target_id="T001",
     ))
 
