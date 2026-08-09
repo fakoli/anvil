@@ -38,11 +38,14 @@ from anvil.read_contracts import (
 )
 from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
 from anvil.state.hashing import CanonicalJsonRefusal, canonical_json_bytes
-from anvil.state.models import Event
+from anvil.state.models import Event, Verification
 from anvil.state.sqlite import query_only_transaction
 
 EVENT_FRONTIER_DOMAIN_V1 = b"anvil.project-event-frontier.v1\0"
 _MAX_EVENT_RECORD_BYTES = PROVIDER_LIMITS_V1.max_snapshot_bytes
+_MAX_GIT_DUPLICATE_COPIES_PER_EVENT = 16
+_MAX_EVENT_LOG_BYTES = 256 * 1024 * 1024
+_MAX_RAW_TASK_METADATA_BYTES = PROVIDER_LIMITS_V1.max_snapshot_bytes
 
 
 class ProjectSnapshotError(RuntimeError):
@@ -208,17 +211,7 @@ def _project_payload(
 
     task_rows = conn.execute(
         "SELECT id, feature_id, prd_id, title, status, priority, "
-        "dependencies, acceptance_criteria, parent_task_id, "
-        "COALESCE(json_array_length(json_extract(verification, '$.commands')), 0) "
-        "AS command_count, "
-        "COALESCE(json_array_length(json_extract(verification, '$.manual_steps')), 0) "
-        "AS manual_count, "
-        "COALESCE(json_array_length(json_extract(verification, '$.required_evidence')), 0) "
-        "AS evidence_count, "
-        "COALESCE(json_array_length(json_extract(verification, '$.required_proofs')), 0) "
-        "AS proof_count, "
-        "COALESCE(json_array_length(json_extract(verification, '$.artifact_assertions')), 0) "
-        "AS assertion_count "
+        "dependencies, acceptance_criteria, verification, parent_task_id "
         "FROM tasks ORDER BY id"
     ).fetchall()
     task_refs: dict[str, TaskScopedRefV1] = {}
@@ -277,13 +270,14 @@ def _project_payload(
                 len(acceptance),
                 limits.max_acceptance_criteria_per_task,
             )
-        summaries = _verification_summaries(
-            _required_int(row["command_count"], minimum=0),
-            _required_int(row["manual_count"], minimum=0),
-            _required_int(row["evidence_count"], minimum=0),
-            _required_int(row["proof_count"], minimum=0),
-            _required_int(row["assertion_count"], minimum=0),
-        )
+        verification = _verification(row["verification"])
+        summaries = _verification_summaries(verification)
+        if len(summaries) > limits.max_verification_summaries_per_task:
+            _limit(
+                ProviderLimitNameV1.max_verification_summaries_per_task,
+                len(summaries),
+                limits.max_verification_summaries_per_task,
+            )
         parent_id = _optional_string(row["parent_task_id"])
         parent_ref = None
         if parent_id is not None:
@@ -344,6 +338,8 @@ def _event_cursor(
     events_fh: BinaryIO,
 ) -> tuple[EventCursorV1, tuple[int, int, int, int]]:
     start_stat = os.fstat(events_fh.fileno())
+    if start_stat.st_size > _MAX_EVENT_LOG_BYTES:
+        _refuse(ReadErrorCode.projection_not_converged, field="projection")
     events_fh.seek(0)
     with tempfile.TemporaryDirectory(prefix="anvil-project-snapshot-") as temp_dir:
         spool = sqlite3.connect(Path(temp_dir) / "events.db")
@@ -353,7 +349,7 @@ def _event_cursor(
             spool.execute(
                 "CREATE TABLE event_spool ("
                 "id TEXT PRIMARY KEY, record BLOB NOT NULL, parent_id TEXT, "
-                "lamport INTEGER)"
+                "lamport INTEGER, duplicate_count INTEGER NOT NULL DEFAULT 1)"
             )
             spool.execute(
                 "CREATE INDEX event_spool_parent_id ON event_spool(parent_id)"
@@ -402,7 +398,9 @@ def _spool_event_log(
         if not line.endswith(b"\n") or line.startswith(b"\xef\xbb\xbf"):
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
         try:
-            event = Event.model_validate(_strict_json(line[:-1]))
+            document = _strict_json(line[:-1])
+            _validate_raw_event_document(document)
+            event = Event.model_validate(document)
             record = canonical_json_bytes(
                 event.model_dump(mode="json"),
                 max_bytes=_MAX_EVENT_RECORD_BYTES,
@@ -433,10 +431,18 @@ def _spool_event_log(
             event_count += 1
         except sqlite3.IntegrityError:
             prior = spool.execute(
-                "SELECT record FROM event_spool WHERE id = ?", (event.id,)
+                "SELECT record, duplicate_count FROM event_spool WHERE id = ?",
+                (event.id,),
             ).fetchone()
             if mode != "git" or prior is None or bytes(prior[0]) != record:
                 _refuse(ReadErrorCode.projection_not_converged, field="projection")
+            duplicate_count = int(prior[1]) + 1
+            if duplicate_count > _MAX_GIT_DUPLICATE_COPIES_PER_EVENT:
+                _refuse(ReadErrorCode.projection_not_converged, field="projection")
+            spool.execute(
+                "UPDATE event_spool SET duplicate_count = ? WHERE id = ?",
+                (duplicate_count, event.id),
+            )
     return mode, event_count
 
 
@@ -641,25 +647,30 @@ def _validated_source_binding(
     return source_sha, source_size, encoding
 
 
+def _verification(raw: Any) -> Verification:
+    try:
+        if not isinstance(raw, str):
+            raise TypeError
+        return Verification.model_validate(_strict_json(raw.encode("utf-8")))
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError):
+        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+
+
 def _verification_summaries(
-    commands: int,
-    manual_steps: int,
-    required_evidence: int,
-    required_proofs: int,
-    artifact_assertions: int,
+    verification: Verification,
 ) -> tuple[VerificationSummaryV1, ...]:
     groups = (
-        (VerificationKindV1.command, "Automated checks", commands),
-        (VerificationKindV1.manual_step, "Manual checks", manual_steps),
+        (VerificationKindV1.command, "Automated checks", len(verification.commands)),
+        (VerificationKindV1.manual_step, "Manual checks", len(verification.manual_steps)),
         (
             VerificationKindV1.required_evidence,
             "Required evidence",
-            required_evidence,
+            len(verification.required_evidence),
         ),
         (
             VerificationKindV1.typed_proof,
             "Typed proofs",
-            required_proofs + artifact_assertions,
+            len(verification.required_proofs) + len(verification.artifact_assertions),
         ),
     )
     return tuple(
@@ -698,6 +709,7 @@ def _preflight_storage_limits(
             "parent_task_id",
         ),
     }
+    visible_total = 0
     for table, columns in visible_columns.items():
         expressions = ", ".join(
             f"COALESCE(MAX(length(CAST({column} AS BLOB))), 0)" for column in columns
@@ -710,6 +722,29 @@ def _preflight_storage_limits(
                 actual,
                 limits.max_string_bytes,
             )
+        total_expression = " + ".join(
+            f"COALESCE(length(CAST({column} AS BLOB)), 0)" for column in columns
+        )
+        total_row = conn.execute(
+            f"SELECT COALESCE(SUM({total_expression}), 0) FROM {table}"  # noqa: S608
+        ).fetchone()
+        visible_total += int(total_row[0])
+    if visible_total > PROVIDER_LIMITS_V1.max_snapshot_bytes:
+        _limit(
+            ProviderLimitNameV1.max_snapshot_bytes,
+            visible_total,
+            PROVIDER_LIMITS_V1.max_snapshot_bytes,
+        )
+
+    invalid_scalars = conn.execute(
+        "SELECT 1 FROM prds WHERE typeof(revision) != 'integer' OR "
+        "typeof(is_default) != 'integer' OR "
+        "(source_size_bytes IS NOT NULL AND typeof(source_size_bytes) != 'integer') OR "
+        "(source_revision IS NOT NULL AND typeof(source_revision) != 'integer') OR "
+        "typeof(content_available) != 'integer' LIMIT 1"
+    ).fetchone()
+    if invalid_scalars is not None:
+        _refuse(ReadErrorCode.invalid_hierarchy, field="prds")
 
     source_row = conn.execute(
         "SELECT COALESCE(MAX(length(source_bytes)), 0), "
@@ -724,17 +759,22 @@ def _preflight_storage_limits(
         )
 
     raw_json_row = conn.execute(
-        "SELECT COALESCE(MAX(length(CAST(dependencies AS BLOB))), 0), "
-        "COALESCE(MAX(length(CAST(acceptance_criteria AS BLOB))), 0), "
-        "COALESCE(MAX(length(CAST(verification AS BLOB))), 0) FROM tasks"
+        "SELECT COALESCE(MAX(MAX(length(CAST(dependencies AS BLOB)), "
+        "length(CAST(acceptance_criteria AS BLOB)))), 0), "
+        "COALESCE(SUM(length(CAST(dependencies AS BLOB)) + "
+        "length(CAST(acceptance_criteria AS BLOB)) + "
+        "length(CAST(verification AS BLOB))), 0) FROM tasks"
     ).fetchone()
-    raw_actual = max(int(value) for value in raw_json_row)
-    if raw_actual > limits.max_snapshot_bytes:
+    visible_json_actual = int(raw_json_row[0])
+    if visible_json_actual > limits.max_snapshot_bytes:
         _limit(
             ProviderLimitNameV1.max_snapshot_bytes,
-            raw_actual,
+            visible_json_actual,
             limits.max_snapshot_bytes,
         )
+    raw_actual = int(raw_json_row[1])
+    if raw_actual > _MAX_RAW_TASK_METADATA_BYTES:
+        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
 
     malformed = conn.execute(
         "SELECT 1 FROM tasks WHERE "
@@ -770,7 +810,6 @@ def _preflight_storage_limits(
             int(dependency_total),
             limits.max_dependency_edges,
         )
-    _preflight_verification(conn, limits)
 
 
 def _preflight_json_string_array(
@@ -805,55 +844,6 @@ def _preflight_json_string_array(
         )
 
 
-def _preflight_verification(
-    conn: sqlite3.Connection,
-    limits: ProviderReadLimitsV1,
-) -> None:
-    fields = (
-        "commands",
-        "manual_steps",
-        "required_evidence",
-        "required_proofs",
-        "artifact_assertions",
-    )
-    allowed = ",".join("?" for _ in fields)
-    unknown = conn.execute(
-        "SELECT 1 FROM tasks, json_each(tasks.verification) "
-        f"WHERE json_each.key NOT IN ({allowed}) LIMIT 1",  # noqa: S608
-        fields,
-    ).fetchone()
-    if unknown is not None:
-        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
-    for field in fields:
-        invalid = conn.execute(
-            "SELECT 1 FROM tasks WHERE "
-            f"json_type(verification, '$.{field}') IS NOT NULL AND "  # noqa: S608
-            f"json_type(verification, '$.{field}') != 'array' LIMIT 1"  # noqa: S608
-        ).fetchone()
-        if invalid is not None:
-            _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
-        expected_type = "text" if field in fields[:3] else "object"
-        invalid_item = conn.execute(
-            "SELECT 1 FROM tasks, "
-            f"json_each(tasks.verification, '$.{field}') "  # noqa: S608
-            f"WHERE json_each.type != '{expected_type}' LIMIT 1"  # noqa: S608
-        ).fetchone()
-        if invalid_item is not None:
-            _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
-    expression = " + ".join(
-        f"COALESCE(json_array_length(json_extract(verification, '$.{field}')), 0)"
-        for field in fields
-    )
-    maximum = conn.execute(
-        f"SELECT COALESCE(MAX({expression}), 0) FROM tasks"  # noqa: S608
-    ).fetchone()
-    actual = int(maximum[0])
-    if actual > limits.max_verification_summaries_per_task:
-        _limit(
-            ProviderLimitNameV1.max_verification_summaries_per_task,
-            actual,
-            limits.max_verification_summaries_per_task,
-        )
 def _local_entity_id(stored_id: str, prd_id: str) -> str:
     if prd_id == "default":
         if ":" in stored_id:
@@ -898,6 +888,29 @@ def _strict_json(raw: bytes) -> Any:
             ValueError("non-finite JSON number")
         ),
     )
+
+
+def _validate_raw_event_document(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("event must be an object")
+    for field in (
+        "id",
+        "timestamp",
+        "actor",
+        "action",
+        "target_kind",
+        "target_id",
+    ):
+        if type(value.get(field)) is not str:
+            raise ValueError("event scalar type is invalid")
+    if not isinstance(value.get("payload_json"), dict):
+        raise ValueError("event payload must be an object")
+    parent = value.get("parent_event_id")
+    if parent is not None and type(parent) is not str:
+        raise ValueError("event parent type is invalid")
+    lamport = value.get("lamport")
+    if lamport is not None and type(lamport) is not int:
+        raise ValueError("event lamport type is invalid")
 
 
 def _map_hierarchy_validation(exc: ValidationError) -> NoReturn:

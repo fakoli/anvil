@@ -603,6 +603,64 @@ def test_git_parent_cycle_refuses_even_with_matching_fingerprints(
     assert refusal.value.error.code is ReadErrorCode.projection_not_converged
 
 
+@pytest.mark.parametrize("alias", [True, 1.0, "1"])
+def test_git_lamport_requires_exact_json_integer(
+    tmp_path: Path,
+    frozen_clock: FrozenClock,
+    alias: object,
+) -> None:
+    events_path = tmp_path / "events.jsonl"
+    events_path.touch()
+    backend = SqliteBackend(
+        db_path=str(tmp_path / "state.db"),
+        events_path=str(events_path),
+        clock=frozen_clock,
+        events_storage="git",
+    )
+    backend.initialize()
+    backend.append(
+        _event("project.created", _project_payload(), kind="project", target="project-1")
+    )
+    backend.append(_event("state.initialized", {}, kind="project", target="project-1"))
+    backend.close()
+    documents = [json.loads(line) for line in events_path.read_bytes().splitlines()]
+    documents[0]["lamport"] = alias
+    events_path.write_bytes(
+        b"".join(
+            (json.dumps(document, separators=(",", ":")) + "\n").encode()
+            for document in documents
+        )
+    )
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(tmp_path)
+    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+
+
+def test_git_duplicate_envelope_amplification_is_bounded(
+    tmp_path: Path,
+    frozen_clock: FrozenClock,
+) -> None:
+    events_path = tmp_path / "events.jsonl"
+    events_path.touch()
+    backend = SqliteBackend(
+        db_path=str(tmp_path / "state.db"),
+        events_path=str(events_path),
+        clock=frozen_clock,
+        events_storage="git",
+    )
+    backend.initialize()
+    backend.append(
+        _event("project.created", _project_payload(), kind="project", target="project-1")
+    )
+    backend.append(_event("state.initialized", {}, kind="project", target="project-1"))
+    backend.close()
+    lines = events_path.read_bytes().splitlines(keepends=True)
+    events_path.write_bytes(b"".join(line * 17 for line in lines))
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(tmp_path)
+    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+
+
 @pytest.mark.parametrize(
     ("statement", "parameters", "expected_code"),
     [
@@ -656,7 +714,7 @@ def test_raw_storage_limits_refuse_with_exact_metadata(
     )
 
 
-def test_verification_item_cap_precedes_body_materialization(
+def test_verification_item_count_is_summary_count_not_summary_cardinality(
     populated: SqliteBackend,
 ) -> None:
     root = _state_path(populated)
@@ -668,14 +726,55 @@ def test_verification_item_cap_precedes_body_materialization(
     )
     conn.commit()
     conn.close()
+    result = read_project_snapshot(root)
+    summary = result.payload.tasks[0].verification_summaries[0]
+    assert summary.kind.value == "command"
+    assert summary.count == 257
+
+
+@pytest.mark.parametrize(
+    "verification",
+    [
+        '{"commands":[],"commands":["x"]}',
+        '{"required_proofs":[{}]}',
+    ],
+)
+def test_malformed_verification_refuses_strictly(
+    populated: SqliteBackend,
+    verification: str,
+) -> None:
+    root = _state_path(populated)
+    populated.close()
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute(
+        "UPDATE tasks SET verification = ? WHERE id = 'T001'", (verification,)
+    )
+    conn.commit()
+    conn.close()
     with pytest.raises(ProjectSnapshotError) as refusal:
         read_project_snapshot(root)
-    assert refusal.value.error == ProviderLimitRefusalV1(
-        operation_id="state.project.snapshot",
-        limit_name=ProviderLimitNameV1.max_verification_summaries_per_task,
-        actual=257,
-        limit=256,
+    assert refusal.value.error.code is ReadErrorCode.invalid_hierarchy
+
+
+def test_excluded_verification_body_does_not_consume_snapshot_limit(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    baseline = read_project_snapshot(root)
+    baseline_size = len(snapshot_response_canonical_bytes(baseline))
+    populated.close()
+    verification = json.dumps({"commands": ["x" * 10_000]}, separators=(",", ":"))
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute(
+        "UPDATE tasks SET verification = ? WHERE id = 'T001'", (verification,)
     )
+    conn.commit()
+    conn.close()
+    result = read_project_snapshot(
+        root,
+        limits=lowered_limits({"max_snapshot_bytes": baseline_size + 100}),
+    )
+    assert result.payload.tasks[0].verification_summaries[0].count == 1
 
 
 def test_prd_content_cap_precedes_blob_materialization(populated: SqliteBackend) -> None:
