@@ -41,6 +41,7 @@ from anvil.cli.plan import (
 )
 from anvil.cli.prd import prd_app
 from anvil.cli.progress import progress
+from anvil.cli.project import project_app
 from anvil.cli.proof import proof_app
 from anvil.cli.replay import replay
 from anvil.cli.run_workflow import run_workflow
@@ -102,6 +103,7 @@ app.add_typer(sync_app, name="sync")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(proof_app, name="proof")
 app.add_typer(bundle_app, name="bundle")
+app.add_typer(project_app, name="project")
 
 # ---------------------------------------------------------------------------
 # --version callback
