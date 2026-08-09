@@ -69,7 +69,7 @@ def read_project_snapshot(
             root / "state.db",
             root / "events.jsonl",
         ) as (conn, events_fh):
-            event_cursor = _event_cursor(conn, events_fh)
+            event_cursor, event_identity = _event_cursor(conn, events_fh)
             payload = _project_payload(conn, applied_limits)
             payload_digest = snapshot_digest(payload)
             _enforce_serialized_limits(
@@ -78,12 +78,14 @@ def read_project_snapshot(
                 payload_digest,
                 applied_limits,
             )
-            return ProjectSnapshotDataV1(
+            response = ProjectSnapshotDataV1(
                 payload=payload,
                 event_cursor=event_cursor,
                 applied_limits=applied_limits,
                 snapshot_digest=payload_digest,
             )
+            _verify_event_identity(events_fh, event_identity)
+            return response
     except ProjectSnapshotError:
         raise
     except FileNotFoundError:
@@ -311,7 +313,10 @@ def _project_payload(
     return payload
 
 
-def _event_cursor(conn: sqlite3.Connection, events_fh: BinaryIO) -> EventCursorV1:
+def _event_cursor(
+    conn: sqlite3.Connection,
+    events_fh: BinaryIO,
+) -> tuple[EventCursorV1, tuple[int, int, int, int]]:
     start_stat = os.fstat(events_fh.fileno())
     events_fh.seek(0)
     by_id: dict[str, tuple[Event, bytes]] = {}
@@ -358,24 +363,8 @@ def _event_cursor(conn: sqlite3.Connection, events_fh: BinaryIO) -> EventCursorV
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
         by_id[event.id] = (event, record)
 
-    end_stat = os.fstat(events_fh.fileno())
-    try:
-        path_stat = os.stat(events_fh.name)
-    except OSError:
-        _refuse(ReadErrorCode.projection_not_converged, field="projection")
     identity = (start_stat.st_dev, start_stat.st_ino, start_stat.st_size, start_stat.st_mtime_ns)
-    if identity != (
-        end_stat.st_dev,
-        end_stat.st_ino,
-        end_stat.st_size,
-        end_stat.st_mtime_ns,
-    ) or identity != (
-        path_stat.st_dev,
-        path_stat.st_ino,
-        path_stat.st_size,
-        path_stat.st_mtime_ns,
-    ):
-        _refuse(ReadErrorCode.projection_not_converged, field="projection")
+    _verify_event_identity(events_fh, identity)
 
     rows = conn.execute(
         "SELECT id, timestamp, actor, action, target_kind, target_id, "
@@ -412,10 +401,36 @@ def _event_cursor(conn: sqlite3.Connection, events_fh: BinaryIO) -> EventCursorV
     for record in records:
         hasher.update(len(record).to_bytes(8, "big"))
         hasher.update(record)
-    return EventCursorV1(
-        event_count=len(records),
-        event_frontier_sha256=hasher.hexdigest(),
+    return (
+        EventCursorV1(
+            event_count=len(records),
+            event_frontier_sha256=hasher.hexdigest(),
+        ),
+        identity,
     )
+
+
+def _verify_event_identity(
+    events_fh: BinaryIO,
+    identity: tuple[int, int, int, int],
+) -> None:
+    end_stat = os.fstat(events_fh.fileno())
+    try:
+        path_stat = os.stat(events_fh.name)
+    except OSError:
+        _refuse(ReadErrorCode.projection_not_converged, field="projection")
+    if identity != (
+        end_stat.st_dev,
+        end_stat.st_ino,
+        end_stat.st_size,
+        end_stat.st_mtime_ns,
+    ) or identity != (
+        path_stat.st_dev,
+        path_stat.st_ino,
+        path_stat.st_size,
+        path_stat.st_mtime_ns,
+    ):
+        _refuse(ReadErrorCode.projection_not_converged, field="projection")
 
 
 def _validate_git_material(
