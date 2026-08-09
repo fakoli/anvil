@@ -40,11 +40,13 @@ from fastmcp.exceptions import ToolError
 from anvil import __version__
 from anvil.build_identity import get_build_identity
 from anvil.mcp_server import mcp
+from anvil.planning import inference as inference_module
 from anvil.planning._plan_helpers import (
     DEPENDENCY_BATCH_LIMIT_MESSAGE,
     DEPENDENCY_PAIR_FORMAT_MESSAGE,
     MAX_DEPENDENCY_EDGES_PER_BATCH,
 )
+from anvil.planning.inference import PathIdentityError
 from anvil.state.backend import EventRejected
 from anvil.state.schema import SCHEMA_VERSION
 
@@ -4306,6 +4308,51 @@ def _write_prd_file(state_dir: Path, content: str = _MINIMAL_PRD) -> Path:
     return prd_path
 
 
+def _inference_persistence_prd(narrow: str, broad_narrow: str) -> str:
+    """Return one acyclic planner fixture with an authored dependency chain."""
+    return f"""# Project: MCP Inference Persistence
+
+## Summary
+Persist one canonical dependency graph.
+
+## Goals
+- Keep planning surfaces equivalent.
+
+## Requirements
+- R001: Persist inferred and authored dependencies.
+
+## Features
+### F001: Planner
+**Requirements:** R001
+
+## Tasks
+### T001: Narrow change
+**Feature:** F001
+**Likely files:** {narrow}
+**Acceptance criteria:**
+- Narrow change works.
+**Verification:**
+- `pytest -q`
+
+### T002: Broad change
+**Feature:** F001
+**Likely files:** {broad_narrow}, src/broad.py
+**Acceptance criteria:**
+- Broad change works.
+**Verification:**
+- `pytest -q`
+
+### T003: Authored dependent
+**Feature:** F001
+**Dependencies:** T001
+**Likely files:** src/authored.py
+**Acceptance criteria:**
+- Authored dependency is preserved.
+**Verification:**
+- `pytest -q`
+"""
+
+
 # A re-parse of ``_MINIMAL_PRD``: R001 dropped (→ superseded), R002 carried
 # forward (→ unchanged), R003 added — a material change that exercises the
 # prd.revised diff and the approved→draft status demotion.
@@ -5860,6 +5907,75 @@ class TestMcpPrdAmbiguityAndEnv:
 
 
 class TestPlanTasks:
+    @staticmethod
+    def _run_inference_plan(
+        root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        narrow: str,
+        broad_narrow: str,
+        prd_id: str | None = None,
+    ) -> tuple[dict[str, list[str]], int, int]:
+        from anvil.clock import SystemClock
+        from anvil.planning.inference import build_bundle_plan
+        from anvil.state.sqlite import SqliteBackend
+
+        root.mkdir()
+        state_dir = _init_state_dir(root)
+        content = _inference_persistence_prd(narrow, broad_narrow)
+        arguments: dict[str, str] = {}
+        if prd_id is None:
+            _write_prd_file(state_dir, content)
+        else:
+            source = state_dir / "prds" / f"{prd_id}.md"
+            source.parent.mkdir()
+            source.write_text(content, encoding="utf-8")
+            arguments["prd_id"] = prd_id
+        monkeypatch.chdir(root)
+
+        async def plan() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("parse_prd", arguments)
+                await client.call_tool("plan_tasks", arguments)
+
+        _run(plan())
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            owner = prd_id or "default"
+            tasks = backend.list_tasks(prd_id=owner)
+            dependency_graph = {
+                task.id: list(task.dependencies)
+                for task in tasks
+            }
+            serial_depth = build_bundle_plan(
+                tasks,
+                project_root=root,
+            ).serial_depth
+        finally:
+            backend.close()
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM events WHERE action = 'task.created'"
+            ).fetchone()[0] == 0
+            batch_rows = connection.execute(
+                "SELECT payload_json FROM events "
+                "WHERE action = 'planning.batch_applied'"
+            ).fetchall()
+            assert len(batch_rows) == 1
+            task_event_count = sum(
+                operation["action"] == "task.created"
+                for operation in json.loads(batch_rows[0][0])["operations"]
+            )
+        finally:
+            connection.close()
+        return dependency_graph, serial_depth, task_event_count
+
     def test_happy_path_emits_features_and_tasks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5882,6 +5998,333 @@ class TestPlanTasks:
         statuses = {t["id"]: t["status"] for t in tasks}
         assert statuses.get("T001") == "drafted"
         assert statuses.get("T002") == "drafted"
+
+    def test_plan_atomically_binds_changed_prd_source_and_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        source_path = _write_prd_file(state_dir, _MINIMAL_PRD)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse_then_plan() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("parse_prd", {})
+                revised = _MINIMAL_PRD.replace(
+                    "A project for MCP workflow testing.",
+                    "A revised test project with exact source binding.",
+                )
+                source_path.write_text(revised, encoding="utf-8")
+                await client.call_tool("plan_tasks", {"use_llm": False})
+
+        _run(parse_then_plan())
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            row = connection.execute(
+                "SELECT revision, source_sha256 FROM prds WHERE id = 'default'"
+            ).fetchone()
+            assert row is not None and row[0] == 2
+            batch_json = connection.execute(
+                "SELECT payload_json FROM events "
+                "WHERE action = 'planning.batch_applied'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        payload = json.loads(batch_json)
+        assert payload["expected_prd_revision"] is None
+        assert payload["expected_prd_source_sha256"] is None
+        assert payload["operations"][0]["action"] == "prd.revised"
+        assert payload["operations"][0]["payload_json"]["source_sha256"] == row[1]
+
+    @pytest.mark.parametrize("prd_id", [None, "release"], ids=["default", "named"])
+    def test_plan_dependency_persistence_preserves_authored_acyclic_graph(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        prd_id: str | None,
+    ) -> None:
+        graph, serial_depth, task_event_count = self._run_inference_plan(
+            tmp_path / (prd_id or "default"),
+            monkeypatch,
+            narrow="src/core.py",
+            broad_narrow="./src/core.py",
+            prd_id=prd_id,
+        )
+        prefix = f"{prd_id}:" if prd_id else ""
+        assert graph == {
+            f"{prefix}T001": [f"{prefix}T002"],
+            f"{prefix}T002": [],
+            f"{prefix}T003": [f"{prefix}T001"],
+        }
+        assert serial_depth == 3
+        # One canonical nested task mutation per task in one atomic graph event.
+        assert task_event_count == 3
+
+    def test_plan_inference_dependency_graph_matches_bundle_for_equivalent_paths(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        slash_graph, slash_depth, _ = self._run_inference_plan(
+            tmp_path / "slash",
+            monkeypatch,
+            narrow="src/core.py",
+            broad_narrow="src/core.py",
+        )
+        alternate_graph, alternate_depth, _ = self._run_inference_plan(
+            tmp_path / "alternate",
+            monkeypatch,
+            narrow=r".\src\core.py",
+            broad_narrow="./src/./core.py",
+        )
+        assert slash_graph == alternate_graph
+        assert slash_depth == alternate_depth == 3
+
+    def test_plan_inference_failure_is_typed_and_atomic_before_task_creation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("parse_prd", {})
+
+        _run(parse())
+        events_path = state_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+
+        def fail_identity(path: Path) -> None:
+            raise PathIdentityError("Windows path case mapping failed")
+
+        monkeypatch.setattr(
+            inference_module,
+            "_windows_existing_path_identity",
+            fail_identity,
+        )
+
+        async def plan() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("plan_tasks", {})
+
+        with pytest.raises(
+            ToolError,
+            match="Planning inference refused: Windows path case mapping failed",
+        ):
+            _run(plan())
+
+        assert events_path.read_bytes() == before
+
+        async def list_tasks() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("list_tasks", {}))
+
+        assert _run(list_tasks()) == []
+
+    def test_plan_injected_second_task_failure_is_typed_and_atomic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("parse_prd", {})
+
+        _run(parse())
+        events_path = state_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        original = SqliteBackend._write_task_created  # noqa: SLF001
+        task_writes = 0
+
+        def fail_second_task(
+            backend: SqliteBackend, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal task_writes
+            task_writes += 1
+            if task_writes == 2:
+                raise RuntimeError("injected second task failure")
+            original(backend, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(SqliteBackend, "_write_task_created", fail_second_task)
+
+        async def plan() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("plan_tasks", {})
+
+        with pytest.raises(ToolError, match="planning batch refused"):
+            _run(plan())
+
+        assert events_path.read_bytes() == before
+
+        async def list_tasks() -> Any:
+            async with Client(mcp) as client:
+                return _data(await client.call_tool("list_tasks", {}))
+
+        assert _run(list_tasks()) == []
+
+    def test_persists_identical_conflict_records_for_reordered_input(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        header = """# Project: Deterministic MCP Conflicts
+
+## Summary
+Conflict persistence fixture.
+## Goals
+- Persist stable conflicts.
+## Requirements
+- R001: Coordinate overlaps.
+## Features
+### F001: Planner
+**Requirements:** R001
+## Tasks
+"""
+        blocks = {
+            "T001": """### T001: One
+**Feature:** F001
+**Likely files:** src/shared.py, src/one.py
+**Acceptance criteria:**
+- One works.
+**Verification:**
+- `pytest -q`
+""",
+            "T002": """### T002: Two
+**Feature:** F001
+**Likely files:** ./src/shared.py, src/two.py
+**Acceptance criteria:**
+- Two works.
+**Verification:**
+- `pytest -q`
+""",
+            "T003": """### T003: Three
+**Feature:** F001
+**Likely files:** src/three.py, src/shared.py
+**Acceptance criteria:**
+- Three works.
+**Verification:**
+- `pytest -q`
+""",
+        }
+
+        def run(root: Path, order: list[str]) -> list[tuple[str, str, str, str]]:
+            root.mkdir()
+            state_dir = _init_state_dir(root)
+            _write_prd_file(
+                state_dir,
+                header + "\n".join(blocks[task_id] for task_id in order),
+            )
+            monkeypatch.chdir(root)
+
+            async def plan() -> None:
+                async with Client(mcp) as client:
+                    await client.call_tool("parse_prd", {})
+                    await client.call_tool("plan_tasks", {})
+
+            _run(plan())
+            connection = sqlite3.connect(state_dir / "state.db")
+            try:
+                return connection.execute(
+                    "SELECT id, name, task_ids, reason "
+                    "FROM conflict_groups ORDER BY id"
+                ).fetchall()
+            finally:
+                connection.close()
+
+        forward = run(tmp_path / "forward", ["T003", "T001", "T002"])
+        reverse = run(tmp_path / "reverse", ["T002", "T001", "T003"])
+
+        assert forward == reverse
+        assert [row[0] for row in forward] == [
+            "CG-T001-T002",
+            "CG-T001-T003",
+            "CG-T002-T003",
+        ]
+        assert all(
+            row[3].endswith("share overlapping files: src/shared.py")
+            for row in forward
+        )
+
+    @pytest.mark.parametrize(
+        "invalid_path,expected",
+        [
+            (
+                "src/\ud800.py",
+                "bundle planning requires valid UTF-8 likely-file paths",
+            ),
+            (
+                "src/\udfff.py",
+                "bundle planning requires valid UTF-8 likely-file paths",
+            ),
+            (
+                "é" * 2_048 + "a",
+                "bundle planning requires likely-file paths no longer than "
+                "4096 UTF-8 bytes",
+            ),
+        ],
+        ids=["high-surrogate", "low-surrogate", "oversized-multibyte"],
+    )
+    def test_rejects_malformed_paths_before_state_or_cache_mutation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        invalid_path: str,
+        expected: str,
+    ) -> None:
+        from anvil.planning import template as template_module
+
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("parse_prd", {})
+
+        _run(parse())
+        events_path = state_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        original_parse = template_module.parse_prd
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+
+        def parse_with_invalid_path(*args: object, **kwargs: object) -> object:
+            result = original_parse(*args, **kwargs)
+            result.tasks[0].likely_files.append(invalid_path)
+            return result
+
+        monkeypatch.setattr(
+            template_module, "parse_prd", parse_with_invalid_path
+        )
+
+        async def plan() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("plan_tasks", {})
+
+        with pytest.raises(ToolError) as error:
+            _run(plan())
+
+        assert str(error.value) == f"Planning inference refused: {expected}"
+        assert len(str(error.value)) <= 4_096
+        assert str(error.value).encode("cp1252")
+        assert events_path.read_bytes() == before
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
 
     def test_error_when_no_prd_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

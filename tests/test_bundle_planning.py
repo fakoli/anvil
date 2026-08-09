@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,7 +12,12 @@ import pytest
 from typer.testing import CliRunner
 
 from anvil.cli import app
-from anvil.planning.inference import BundlePlanningError, build_bundle_plan
+from anvil.planning import inference as inference_module
+from anvil.planning.inference import (
+    BundlePlanningError,
+    PathIdentityError,
+    build_bundle_plan,
+)
 from anvil.review.gates import evaluate_bundle_reviews
 from anvil.state.models import (
     BundleReviewPolicy,
@@ -141,6 +147,58 @@ def test_bundle_plan_normalizes_equivalent_project_paths_deterministically() -> 
     ):
         with pytest.raises(BundlePlanningError, match="project"):
             build_bundle_plan([_task("T001", [unsafe])])
+
+
+def test_bundle_plan_skips_optional_edge_that_would_close_authored_cycle() -> None:
+    tasks = [
+        _task("T001", ["src/narrow.py"]),
+        _task(
+            "T002",
+            ["src/narrow.py", "src/broad.py"],
+            dependencies=["T001"],
+        ),
+    ]
+
+    first = build_bundle_plan(tasks)
+    second = build_bundle_plan(list(reversed(tasks)))
+
+    assert first.to_dict() == second.to_dict()
+    assert first.serial_depth == 2
+    assert first.proposed_bundles[0].task_ids == ("T001", "T002")
+
+
+def test_bundle_plan_computes_maximum_chain_iteratively() -> None:
+    tasks = [
+        _task(
+            f"T{index:03d}",
+            [f"src/task-{index:03d}.py"],
+            dependencies=[f"T{index - 1:03d}"] if index > 1 else [],
+        )
+        for index in range(1, 501)
+    ]
+
+    report = build_bundle_plan(
+        tasks,
+        max_tasks=500,
+        max_serial_stages=500,
+    )
+
+    assert report.task_count == 500
+    assert report.serial_depth == 500
+    assert report.limit_breaches == ()
+
+
+def test_bundle_plan_serial_depth_is_exact_for_branched_dag() -> None:
+    tasks = [
+        _task("T001", ["src/one.py"]),
+        _task("T002", ["src/two.py"], dependencies=["T001"]),
+        _task("T003", ["src/three.py"], dependencies=["T001"]),
+        _task("T004", ["src/four.py"], dependencies=["T002", "T003"]),
+    ]
+
+    report = build_bundle_plan(tasks)
+
+    assert report.serial_depth == 3
 
 
 def test_review_gate_requires_three_distinct_non_author_angles() -> None:
@@ -339,3 +397,251 @@ Cycle fixture.
         assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == before
     finally:
         os.chdir(original)
+
+
+@pytest.mark.parametrize(
+    "plan_args,json_output",
+    [
+        (["plan"], False),
+        (["plan", "--json"], True),
+        (["plan", "--bundles"], False),
+        (["plan", "--bundles", "--json"], True),
+    ],
+    ids=["normal-human", "normal-json", "bundles-human", "bundles-json"],
+)
+def test_plan_native_path_failure_is_typed_and_atomic_before_task_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plan_args: list[str],
+    json_output: bool,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--name", "Atomic Plan"]).exit_code == 0
+    (tmp_path / ".anvil" / "prd.md").write_text(
+        """# Project: Atomic Plan
+
+## Summary
+Atomic inference fixture.
+## Goals
+- Refuse before writes.
+## Requirements
+- R001: Plan safely.
+## Features
+### F001: Planner
+**Requirements:** R001
+## Tasks
+### T001: First
+**Feature:** F001
+**Likely files:** src/shared.py
+**Acceptance criteria:**
+- First works.
+**Verification:**
+- `pytest -q`
+### T002: Second
+**Feature:** F001
+**Likely files:** src/shared.py, src/other.py
+**Acceptance criteria:**
+- Second works.
+**Verification:**
+- `pytest -q`
+""",
+        encoding="utf-8",
+    )
+    parsed = runner.invoke(app, ["prd", "parse"])
+    assert parsed.exit_code == 0, parsed.output
+    events_path = tmp_path / ".anvil" / "events.jsonl"
+    before = events_path.read_bytes()
+
+    monkeypatch.setattr(
+        inference_module, "_uses_windows_path_identity", lambda: True
+    )
+
+    def fail_identity(path: Path) -> None:
+        raise PathIdentityError("Windows path case mapping failed")
+
+    monkeypatch.setattr(
+        inference_module,
+        "_windows_existing_path_identity",
+        fail_identity,
+    )
+    result = runner.invoke(app, plan_args)
+
+    assert result.exit_code == 1
+    if json_output:
+        payload = json.loads(result.output)
+        assert payload["error"] == {
+            "code": "path_identity_error",
+            "message": "Windows path case mapping failed",
+        }
+    else:
+        assert result.output == "Error: Windows path case mapping failed\n"
+    assert events_path.read_bytes() == before
+    listed = runner.invoke(app, ["list", "--json"])
+    assert listed.exit_code == 0
+    assert json.loads(listed.output)["data"]["tasks"] == []
+
+
+def test_cli_plan_persists_identical_conflict_records_for_reordered_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_runner = CliRunner()
+
+    def prd(task_blocks: list[str]) -> str:
+        return """# Project: Deterministic Conflicts
+
+## Summary
+Conflict persistence fixture.
+## Goals
+- Persist stable conflicts.
+## Requirements
+- R001: Coordinate overlaps.
+## Features
+### F001: Planner
+**Requirements:** R001
+## Tasks
+""" + "\n".join(task_blocks)
+
+    blocks = {
+        "T001": """### T001: One
+**Feature:** F001
+**Likely files:** src/shared.py, src/one.py
+**Acceptance criteria:**
+- One works.
+**Verification:**
+- `pytest -q`
+""",
+        "T002": """### T002: Two
+**Feature:** F001
+**Likely files:** ./src/shared.py, src/two.py
+**Acceptance criteria:**
+- Two works.
+**Verification:**
+- `pytest -q`
+""",
+        "T003": """### T003: Three
+**Feature:** F001
+**Likely files:** src/three.py, src/shared.py
+**Acceptance criteria:**
+- Three works.
+**Verification:**
+- `pytest -q`
+""",
+    }
+
+    def run(root: Path, order: list[str]) -> list[tuple[str, str, str, str]]:
+        root.mkdir()
+        monkeypatch.chdir(root)
+        initialized = cli_runner.invoke(app, ["init", "--name", "Conflicts"])
+        assert initialized.exit_code == 0, initialized.output
+        (root / ".anvil" / "prd.md").write_text(
+            prd([blocks[task_id] for task_id in order]), encoding="utf-8"
+        )
+        parsed = cli_runner.invoke(app, ["prd", "parse"])
+        assert parsed.exit_code == 0, parsed.output
+        planned = cli_runner.invoke(app, ["plan", "--json"])
+        assert planned.exit_code == 0, planned.output
+        connection = sqlite3.connect(root / ".anvil" / "state.db")
+        try:
+            return connection.execute(
+                "SELECT id, name, task_ids, reason "
+                "FROM conflict_groups ORDER BY id"
+            ).fetchall()
+        finally:
+            connection.close()
+
+    forward = run(tmp_path / "forward", ["T003", "T001", "T002"])
+    reverse = run(tmp_path / "reverse", ["T002", "T001", "T003"])
+
+    assert forward == reverse
+    assert [row[0] for row in forward] == [
+        "CG-T001-T002",
+        "CG-T001-T003",
+        "CG-T002-T003",
+    ]
+    assert all(row[3].endswith("share overlapping files: src/shared.py") for row in forward)
+
+
+@pytest.mark.parametrize(
+    "invalid_path,expected",
+    [
+        ("src/\ud800.py", "bundle planning requires valid UTF-8 likely-file paths"),
+        ("src/\udfff.py", "bundle planning requires valid UTF-8 likely-file paths"),
+        (
+            "é" * 2_048 + "a",
+            "bundle planning requires likely-file paths no longer than "
+            "4096 UTF-8 bytes",
+        ),
+    ],
+    ids=["high-surrogate", "low-surrogate", "oversized-multibyte"],
+)
+def test_cli_plan_rejects_malformed_paths_before_state_or_cache_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_path: str,
+    expected: str,
+) -> None:
+    from anvil.planning import template as template_module
+
+    cli_runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    assert cli_runner.invoke(app, ["init", "--name", "Surrogate Plan"]).exit_code == 0
+    (tmp_path / ".anvil" / "prd.md").write_text(
+        """# Project: Surrogate Plan
+
+## Summary
+Surrogate fixture.
+## Goals
+- Refuse malformed paths.
+## Requirements
+- R001: Plan safely.
+## Features
+### F001: Planner
+**Requirements:** R001
+## Tasks
+### T001: First
+**Feature:** F001
+**Likely files:** src/valid.py
+**Acceptance criteria:**
+- First works.
+**Verification:**
+- `pytest -q`
+""",
+        encoding="utf-8",
+    )
+    parsed = cli_runner.invoke(app, ["prd", "parse"])
+    assert parsed.exit_code == 0, parsed.output
+    events_path = tmp_path / ".anvil" / "events.jsonl"
+    before = events_path.read_bytes()
+    original_parse = template_module.parse_prd
+    inference_module._cached_windows_path_key.cache_clear()
+    inference_module._cached_windows_paths_equal.cache_clear()
+    key_before = inference_module._cached_windows_path_key.cache_info()
+    comparison_before = inference_module._cached_windows_paths_equal.cache_info()
+
+    def parse_with_invalid_path(*args: object, **kwargs: object) -> object:
+        result = original_parse(*args, **kwargs)
+        result.tasks[0].likely_files.append(invalid_path)
+        return result
+
+    monkeypatch.setattr(template_module, "parse_prd", parse_with_invalid_path)
+    result = cli_runner.invoke(app, ["plan", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["code"] == "path_identity_error"
+    assert payload["error"]["message"] == expected
+    assert len(payload["error"]["message"]) <= 4_096
+    assert payload["error"]["message"].encode("cp1252")
+    assert events_path.read_bytes() == before
+    assert inference_module._cached_windows_path_key.cache_info() == key_before
+    assert (
+        inference_module._cached_windows_paths_equal.cache_info()
+        == comparison_before
+    )
+    connection = sqlite3.connect(tmp_path / ".anvil" / "state.db")
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+    finally:
+        connection.close()

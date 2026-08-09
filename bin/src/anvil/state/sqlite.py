@@ -127,6 +127,7 @@ from anvil.state.payloads import (
     FeatureCreatedPayload,
     FeatureDeletedPayload,
     FileChangedPayload,
+    PlanningBatchAppliedPayload,
     PrdApprovedPayload,
     PrdDecisionResolvedPayload,
     PrdParsedPayload,
@@ -317,7 +318,8 @@ class _GitPrdReplayPolicy(NamedTuple):
 
     skip_projection: frozenset[str]
     title_overlays: dict[str, tuple[str, str]]
-    content_heads: dict[str, tuple[int, str]]
+    content_heads: dict[str, tuple[int, str, str | None]]
+    graph_heads: dict[str, tuple[int, str | None, str]]
 
 
 class _ReplayContentSnapshot(NamedTuple):
@@ -334,6 +336,7 @@ class _ReplayContentSnapshot(NamedTuple):
     risks: Any
     open_questions: Any
     assumptions: Any
+    source_sha256: Any
     requirements_xor: int
     requirements_count: int
     requirement_delta: dict[str, int | None]
@@ -349,6 +352,7 @@ class _ReplayContentSnapshot(NamedTuple):
             and self.risks == other.risks
             and self.open_questions == other.open_questions
             and self.assumptions == other.assumptions
+            and self.source_sha256 == other.source_sha256
             and self.requirements_count == other.requirements_count
             and self.requirements_xor == other.requirements_xor
         )
@@ -872,10 +876,19 @@ class SqliteBackend:
         self._max_lamport: int = 0
         # Canonical projected PRD content heads, populated once during Git
         # convergence/replay and advanced after successful live content
-        # appends. Values are (revision, event_id). This keeps causal-parent
-        # resolution O(1) instead of reparsing the Git log and rebuilding
-        # replay policy for every mutation.
-        self._git_prd_content_heads: dict[str, tuple[int, str]] = {}
+        # appends. Values are (revision, event_id, source_sha256). This keeps
+        # exact causal-parent resolution O(1) instead of reparsing the Git log
+        # and rebuilding replay policy for every mutation.
+        self._git_prd_content_heads: dict[
+            str, tuple[int, str, str | None]
+        ] = {}
+        # Latest accepted graph event for the current exact content head.
+        # Values are (revision, source_sha256, event_id). Chaining the next
+        # graph or content revision through this head makes sequential graph
+        # state distinguishable from a sibling branch during union replay.
+        self._git_prd_graph_heads: dict[
+            str, tuple[int, str | None, str]
+        ] = {}
         # Identity of the Git event log after its last complete integrity scan.
         # Every append compares this content-authenticated signature under the
         # global flock. The unchanged path hashes bytes without parsing JSON;
@@ -892,6 +905,11 @@ class SqliteBackend:
         # ClaimManager.claim() may serialize their pre-append reads on the same
         # lock, then call append(), whose _append_lock() takes it again.
         self._proc_lock = threading.RLock()
+        # Reuse one cross-process append-lock ownership for nested logical
+        # operations. The integer is safe because every access occurs while
+        # ``_proc_lock`` is held; another thread cannot observe a non-zero
+        # depth until the owning thread exits.
+        self._append_lock_depth = 0
         # Set True during replay_from_empty and _forward_catch_up so that
         # _write_* methods with audit side-effects (e.g. _write_evidence_submitted)
         # suppress those writes — audit lines must not be appended during replay.
@@ -1221,6 +1239,7 @@ class SqliteBackend:
                         self._git_prd_content_heads = dict(
                             prd_policy.content_heads
                         )
+                        self._git_prd_graph_heads = dict(prd_policy.graph_heads)
                         cached_parent = self._git_prd_cached_parent(
                             materialized_draft
                         )
@@ -1603,6 +1622,50 @@ class SqliteBackend:
         value = event.payload_json.get("prd_id", DEFAULT_PRD_ID)
         return value if isinstance(value, str) else DEFAULT_PRD_ID
 
+    @staticmethod
+    def _planning_batch_prd_content_operation(
+        event: EventDraft | Event,
+    ) -> dict[str, Any] | None:
+        """Return the sole embedded PRD content operation, when present."""
+        if event.action != "planning.batch_applied":
+            return None
+        operations = event.payload_json.get("operations")
+        if not isinstance(operations, list):
+            return None
+        content = [
+            operation
+            for operation in operations
+            if isinstance(operation, dict)
+            and operation.get("action") in {"prd.parsed", "prd.revised"}
+        ]
+        return content[0] if len(content) == 1 else None
+
+    @classmethod
+    def _git_prd_policy_event(cls, event: Event) -> Event:
+        """Expose an atomic batch's PRD content to the Git lineage resolver."""
+        operation = cls._planning_batch_prd_content_operation(event)
+        if operation is None:
+            return event
+        payload = operation.get("payload_json")
+        target_kind = operation.get("target_kind")
+        target_id = operation.get("target_id")
+        action = operation.get("action")
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(target_kind, str)
+            or not isinstance(target_id, str)
+            or action not in {"prd.parsed", "prd.revised"}
+        ):
+            return event
+        return event.model_copy(
+            update={
+                "action": action,
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "payload_json": payload,
+            }
+        )
+
     def _build_git_prd_replay_policy(
         self, ordered: list[Event]
     ) -> _GitPrdReplayPolicy:
@@ -1614,6 +1677,11 @@ class SqliteBackend:
         ``expected_revision``.  Missing markers retain their original replay
         semantics.
         """
+        # One atomic planning event may contain the PRD content transition plus
+        # its complete graph. Resolve branch competition using a virtual view of
+        # that content operation while retaining the outer event id/ancestry;
+        # replay still applies or skips the complete batch as one unit.
+        ordered = [self._git_prd_policy_event(event) for event in ordered]
         events_by_id = {event.id: event for event in ordered}
         order_index = {event.id: index for index, event in enumerate(ordered)}
 
@@ -1845,6 +1913,7 @@ class SqliteBackend:
                     risks=payload.get("risks", []),
                     open_questions=payload.get("open_questions", []),
                     assumptions=payload.get("assumptions", []),
+                    source_sha256=payload.get("source_sha256"),
                     requirements_xor=requirements_xor,
                     requirements_count=requirements_count,
                     requirement_delta=requirement_delta,
@@ -2016,6 +2085,235 @@ class SqliteBackend:
                 skip.add(candidate.id)
                 losing_content.add(candidate.id)
 
+        # A graph-only planning batch is a derived fact, not independent PRD
+        # content. It may project only when its exact causal content ancestor
+        # survives branch resolution, matches the revision and source digest
+        # the planner observed, and belongs to the final accepted lineage. A
+        # graph may precede a later accepted content revision only when that
+        # revision causally descends from the graph. Sibling graphs are losing
+        # derived lineages even when both branches happen to use revision N.
+        accepted_content_heads: dict[str, Event] = {}
+        for content_event in ordered:
+            if content_event.id in skip or content_event.action not in {
+                "prd.parsed",
+                "prd.revised",
+            }:
+                continue
+            accepted_content_heads[self._git_prd_id(content_event)] = content_event
+
+        losing_graphs: set[str] = set()
+        for event in ordered:
+            if event.action != "planning.batch_applied":
+                continue
+            prd_id = self._git_prd_id(event)
+            expected_revision = event.payload_json.get("expected_prd_revision")
+            expected_source = event.payload_json.get(
+                "expected_prd_source_sha256"
+            )
+            base = nearest_content_ancestor(event)
+            base_revision = (
+                1
+                if base is not None and base.action == "prd.parsed"
+                else (
+                    base.payload_json.get("revision")
+                    if base is not None and base.action == "prd.revised"
+                    else None
+                )
+            )
+            base_source = (
+                base.payload_json.get("source_sha256")
+                if base is not None
+                else None
+            )
+            accepted_head = accepted_content_heads.get(prd_id)
+            belongs_to_final_lineage = (
+                accepted_head is not None
+                and (
+                    (base is not None and base.id == accepted_head.id)
+                    or descends(accepted_head, event.id)
+                )
+            )
+            if (
+                base is None
+                or base.id in losing_content
+                or base.id in skip
+                or not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or not isinstance(base_revision, int)
+                or isinstance(base_revision, bool)
+                or expected_revision != base_revision
+                or expected_source != base_source
+                or not belongs_to_final_lineage
+            ):
+                skip.add(event.id)
+                losing_graphs.add(event.id)
+
+        def entity_key(kind: Any, entity_id: Any) -> tuple[str, str] | None:
+            if kind not in {"feature", "task", "claim", "evidence", "bundle"}:
+                return None
+            if not isinstance(entity_id, str) or not entity_id:
+                return None
+            return kind, entity_id
+
+        def event_writes(event: Event) -> set[tuple[str, str]]:
+            """Entity identities whose projected value this event mutates."""
+            writes: set[tuple[str, str]] = set()
+            operations = (
+                event.payload_json.get("operations")
+                if event.action == "planning.batch_applied"
+                else None
+            )
+            if isinstance(operations, list):
+                for operation in operations:
+                    if not isinstance(operation, dict):
+                        continue
+                    key = entity_key(
+                        operation.get("target_kind"),
+                        operation.get("target_id"),
+                    )
+                    if key is not None:
+                        writes.add(key)
+                return writes
+            if event.action == "task.expanded":
+                subtasks = event.payload_json.get("subtasks")
+                if isinstance(subtasks, list):
+                    for subtask in subtasks:
+                        if not isinstance(subtask, dict):
+                            continue
+                        subtask_key = entity_key("task", subtask.get("id"))
+                        if subtask_key is not None:
+                            writes.add(subtask_key)
+                return writes
+            if event.action == "bundle.claimed":
+                coordinator = entity_key("claim", event.payload_json.get("id"))
+                if coordinator is not None:
+                    writes.add(coordinator)
+                member_claims = event.payload_json.get("member_claims")
+                if isinstance(member_claims, list):
+                    for member in member_claims:
+                        if not isinstance(member, dict):
+                            continue
+                        member_claim = entity_key("claim", member.get("id"))
+                        if member_claim is not None:
+                            writes.add(member_claim)
+            key = entity_key(event.target_kind, event.target_id)
+            if key is not None:
+                writes.add(key)
+            return writes
+
+        def payload_references(
+            payload: dict[str, Any], *, action: Any = None
+        ) -> set[tuple[str, str]]:
+            references: set[tuple[str, str]] = set()
+            for field, kind in (
+                ("feature_id", "feature"),
+                ("task_id", "task"),
+                ("parent_task_id", "task"),
+                ("claim_id", "claim"),
+                ("bundle_claim_id", "claim"),
+                ("evidence_id", "evidence"),
+                ("bundle_id", "bundle"),
+                ("replacement_bundle_id", "bundle"),
+            ):
+                key = entity_key(kind, payload.get(field))
+                if key is not None:
+                    references.add(key)
+            for field, kind in (
+                ("dependencies", "task"),
+                ("expected_dependencies", "task"),
+                ("task_ids", "task"),
+                ("member_task_ids", "task"),
+                ("claim_ids", "claim"),
+            ):
+                values = payload.get(field)
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    key = entity_key(kind, value)
+                    if key is not None:
+                        references.add(key)
+            if action == "feature.created":
+                tasks = payload.get("tasks")
+                if isinstance(tasks, list):
+                    for task_id in tasks:
+                        key = entity_key("task", task_id)
+                        if key is not None:
+                            references.add(key)
+            nested_field = {
+                "task.dependencies_batch_edited": "edits",
+                "task.expanded": "subtasks",
+                "bundle.claimed": "member_claims",
+            }.get(action)
+            nested_values = (
+                payload.get(nested_field) if nested_field is not None else None
+            )
+            if isinstance(nested_values, list):
+                for nested in nested_values:
+                    if isinstance(nested, dict):
+                        references.update(payload_references(nested))
+            return references
+
+        def event_references(event: Event) -> set[tuple[str, str]]:
+            references = event_writes(event)
+            operations = (
+                event.payload_json.get("operations")
+                if event.action == "planning.batch_applied"
+                else None
+            )
+            if isinstance(operations, list):
+                for operation in operations:
+                    if not isinstance(operation, dict):
+                        continue
+                    payload = operation.get("payload_json")
+                    if isinstance(payload, dict):
+                        references.update(
+                            payload_references(
+                                payload,
+                                action=operation.get("action"),
+                            )
+                        )
+                return references
+            references.update(
+                payload_references(event.payload_json, action=event.action)
+            )
+            return references
+
+        # Physical hash ancestry expresses append order, not semantic
+        # dependence. Propagate a rejected graph only through events that
+        # reference an entity actually written by that graph (and through
+        # identities written by those skipped descendants). A same- or
+        # cross-PRD transition on pre-existing state remains independent even
+        # when its generic hash parent happens to be the losing graph tail.
+        active_taint: dict[tuple[str, str], int] = {}
+        for root_id in roots:
+            taint_stack: list[
+                tuple[str, bool, tuple[tuple[str, str], ...]]
+            ] = [(root_id, False, ())]
+            while taint_stack:
+                event_id, leaving, additions = taint_stack.pop()
+                if leaving:
+                    for key in additions:
+                        remaining = active_taint[key] - 1
+                        if remaining:
+                            active_taint[key] = remaining
+                        else:
+                            del active_taint[key]
+                    continue
+                event = events_by_id[event_id]
+                added: tuple[tuple[str, str], ...] = ()
+                if event_id in losing_graphs:
+                    added = tuple(event_writes(event))
+                elif active_taint and any(
+                    key in active_taint for key in event_references(event)
+                ):
+                    skip.add(event_id)
+                    added = tuple(event_writes(event))
+                for key in added:
+                    active_taint[key] = active_taint.get(key, 0) + 1
+                taint_stack.append((event_id, True, added))
+                for child_id in reversed(children[event_id]):
+                    taint_stack.append((child_id, False, ()))
+
         current_lifecycle = [
             event
             for event in ordered
@@ -2097,7 +2395,7 @@ class SqliteBackend:
             ):
                 skip.add(event.id)
 
-        content_heads: dict[str, tuple[int, str]] = {}
+        content_heads: dict[str, tuple[int, str, str | None]] = {}
         for event in ordered:
             if event.id in skip:
                 continue
@@ -2115,7 +2413,35 @@ class SqliteBackend:
             # Replay applies accepted content in this exact order; assigning
             # on every event reproduces the final projected owner even for
             # historical destructive parses whose revision resets to one.
-            content_heads[self._git_prd_id(event)] = (revision, event.id)
+            source_sha256 = event.payload_json.get("source_sha256")
+            content_heads[self._git_prd_id(event)] = (
+                revision,
+                event.id,
+                source_sha256 if isinstance(source_sha256, str) else None,
+            )
+
+        graph_heads: dict[str, tuple[int, str | None, str]] = {}
+        for event in ordered:
+            if event.id in skip or event.action != "planning.batch_applied":
+                continue
+            prd_id = self._git_prd_id(event)
+            content_head = content_heads.get(prd_id)
+            base = nearest_content_ancestor(event)
+            if content_head is None or base is None or base.id != content_head[1]:
+                continue
+            expected_revision = event.payload_json.get("expected_prd_revision")
+            expected_source = event.payload_json.get(
+                "expected_prd_source_sha256"
+            )
+            if (
+                expected_revision == content_head[0]
+                and expected_source == content_head[2]
+            ):
+                graph_heads[prd_id] = (
+                    content_head[0],
+                    content_head[2],
+                    event.id,
+                )
 
         return _GitPrdReplayPolicy(
             skip_projection=frozenset(skip),
@@ -2124,6 +2450,7 @@ class SqliteBackend:
                 for prd_id, rank in overlay_candidates.items()
             },
             content_heads=content_heads,
+            graph_heads=graph_heads,
         )
 
     @staticmethod
@@ -2255,6 +2582,7 @@ class SqliteBackend:
             )
             prd_policy = self._build_git_prd_replay_policy(ordered)
             self._git_prd_content_heads = dict(prd_policy.content_heads)
+            self._git_prd_graph_heads = dict(prd_policy.graph_heads)
 
             max_lamport = 0
             for seq, event in enumerate(ordered, start=1):
@@ -2486,6 +2814,7 @@ class SqliteBackend:
             bounded_ordered = ordered[: stop_index + 1]
             prd_policy = self._build_git_prd_replay_policy(bounded_ordered)
             self._git_prd_content_heads = dict(prd_policy.content_heads)
+            self._git_prd_graph_heads = dict(prd_policy.graph_heads)
 
             max_lamport = 0
             for seq, event in enumerate(bounded_ordered, start=1):
@@ -4104,6 +4433,13 @@ class SqliteBackend:
         so a coordinated wave of claimants does not poll in lockstep.
         """
         with self._proc_lock:
+            if self._append_lock_depth:
+                self._append_lock_depth += 1
+                try:
+                    yield
+                finally:
+                    self._append_lock_depth -= 1
+                return
             # Ensure the log file exists before we try to flock it.
             log_path = self._events_path
             if not os.path.exists(log_path):
@@ -4135,8 +4471,10 @@ class SqliteBackend:
                         # Clamp so the final sleep cannot overshoot the budget.
                         self._sleep_fn(min(next(delays), remaining))
                 try:
+                    self._append_lock_depth = 1
                     yield
                 finally:
+                    self._append_lock_depth = 0
                     _append_lock_release(_lock_fh)
 
     @contextmanager
@@ -4153,6 +4491,130 @@ class SqliteBackend:
         """
         with self._proc_lock:
             yield
+
+    @contextmanager
+    def collect_planning_batch(self, *, actor: str) -> Iterator[Any]:
+        """Run legacy planning code on a serialized rollback-only view.
+
+        The event-log flock remains owned from the first simulated write until
+        the one outer event commits. This prevents another process from
+        logging an event whose projection is blocked by the collector's open
+        SQLite savepoint.
+        """
+        backend = self
+        operations: list[EventDraft] = []
+        batch_prd_id: str | None = None
+
+        class _Collector:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(backend, name)
+
+            def append(self, draft: EventDraft) -> None:
+                nonlocal batch_prd_id
+                if draft.actor != actor:
+                    raise EventRejected("planning batch refused: code=actor_mismatch")
+                candidate = draft.payload_json.get("prd_id", DEFAULT_PRD_ID)
+                if batch_prd_id is None:
+                    batch_prd_id = str(candidate)
+                operation = {
+                    "action": draft.action,
+                    "target_kind": draft.target_kind,
+                    "target_id": draft.target_id,
+                    "payload_json": draft.payload_json,
+                }
+                is_content = draft.action in {"prd.parsed", "prd.revised"}
+                expected_revision: int | None = None
+                expected_source_sha256: str | None = None
+                if not is_content:
+                    row = backend._require_conn().execute(  # noqa: SLF001
+                        "SELECT revision, source_sha256 FROM prds WHERE id = ?",
+                        (batch_prd_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise EventRejected(
+                            "planning batch refused: code=missing_prd"
+                        )
+                    expected_revision = int(row["revision"])
+                    expected_source_sha256 = row["source_sha256"]
+                single = PlanningBatchAppliedPayload.model_validate({
+                    "schema_version": 1,
+                    "prd_id": batch_prd_id,
+                    "expected_prd_revision": expected_revision,
+                    "expected_prd_source_sha256": expected_source_sha256,
+                    "operations": [operation],
+                })
+                outer = EventDraft(
+                    timestamp=draft.timestamp,
+                    actor=actor,
+                    action="planning.batch_applied",
+                    target_kind="prd",
+                    target_id=batch_prd_id,
+                    payload_json={},
+                )
+                backend._apply_planning_batch_operations(  # noqa: SLF001
+                    backend._require_conn(),  # noqa: SLF001
+                    single,
+                    outer,
+                    check=True,
+                    index_offset=len(operations),
+                )
+                operations.append(draft)
+
+        conn = self._require_conn()
+        with self._append_lock():
+            conn.execute("SAVEPOINT planning_batch_collection")
+            succeeded = False
+            try:
+                yield _Collector()
+                succeeded = True
+            finally:
+                conn.execute("ROLLBACK TO planning_batch_collection")
+                conn.execute("RELEASE planning_batch_collection")
+            if succeeded and operations:
+                if batch_prd_id is None:
+                    raise EventRejected("planning batch refused: code=missing_prd")
+                first = operations[0]
+                contains_content = any(
+                    operation.action in {"prd.parsed", "prd.revised"}
+                    for operation in operations
+                )
+                expected_revision: int | None = None
+                expected_source_sha256: str | None = None
+                if not contains_content:
+                    row = conn.execute(
+                        "SELECT revision, source_sha256 FROM prds WHERE id = ?",
+                        (batch_prd_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise EventRejected(
+                            "planning batch refused: code=missing_prd"
+                        )
+                    expected_revision = int(row["revision"])
+                    expected_source_sha256 = row["source_sha256"]
+                self.append(
+                    EventDraft(
+                        timestamp=first.timestamp,
+                        actor=actor,
+                        action="planning.batch_applied",
+                        target_kind="prd",
+                        target_id=batch_prd_id,
+                        payload_json={
+                            "schema_version": 1,
+                            "prd_id": batch_prd_id,
+                            "expected_prd_revision": expected_revision,
+                            "expected_prd_source_sha256": expected_source_sha256,
+                            "operations": [
+                                {
+                                    "action": operation.action,
+                                    "target_kind": operation.target_kind,
+                                    "target_id": operation.target_id,
+                                    "payload_json": operation.payload_json,
+                                }
+                                for operation in operations
+                            ],
+                        },
+                    )
+                )
 
     def _read_tail_window(self) -> list[bytes]:
         """Return candidate raw lines from the end of events.jsonl, oldest first.
@@ -4386,6 +4848,7 @@ class SqliteBackend:
             )
         policy = self._build_git_prd_replay_policy(ordered)
         self._git_prd_content_heads = dict(policy.content_heads)
+        self._git_prd_graph_heads = dict(policy.graph_heads)
         self._max_lamport = max(
             self._max_lamport,
             max((event.lamport or 0 for event in ordered), default=0),
@@ -4394,25 +4857,57 @@ class SqliteBackend:
         # sample and cache a later, unvalidated version of the file.
         self._git_validated_log_signature = signature_after
 
-    @staticmethod
-    def _uses_git_prd_causal_parent(draft: EventDraft) -> bool:
+    @classmethod
+    def _uses_git_prd_causal_parent(cls, draft: EventDraft) -> bool:
         """Whether a newly authored PRD fact opts into causal replay policy."""
-        payload = draft.payload_json
-        if draft.action == "prd.revised":
+        operation = cls._planning_batch_prd_content_operation(draft)
+        if draft.action == "planning.batch_applied" and operation is None:
+            revision = draft.payload_json.get("expected_prd_revision")
+            return isinstance(revision, int) and not isinstance(revision, bool)
+        action = operation.get("action") if operation is not None else draft.action
+        payload = (
+            operation.get("payload_json")
+            if operation is not None
+            else draft.payload_json
+        )
+        if not isinstance(payload, dict):
+            return False
+        if action == "prd.revised":
             return payload.get("expected_status") is not None
-        if draft.action in {"prd.reviewed", "prd.approved"}:
+        if action in {"prd.reviewed", "prd.approved"}:
             return payload.get("expected_revision") is not None
         return False
 
-    @staticmethod
+    @classmethod
     def _git_prd_observed_revision(
+        cls,
         draft: EventDraft,
     ) -> tuple[str, int] | None:
         """Return (PRD id, revision observed by a current producer)."""
-        payload = draft.payload_json
-        prd_id_raw = payload.get("prd_id", DEFAULT_PRD_ID)
+        operation = cls._planning_batch_prd_content_operation(draft)
+        if draft.action == "planning.batch_applied" and operation is None:
+            revision = draft.payload_json.get("expected_prd_revision")
+            prd_id_raw = draft.payload_json.get("prd_id", DEFAULT_PRD_ID)
+            if not isinstance(revision, int) or isinstance(revision, bool):
+                return None
+            return (
+                prd_id_raw if isinstance(prd_id_raw, str) else DEFAULT_PRD_ID,
+                revision,
+            )
+        action = operation.get("action") if operation is not None else draft.action
+        payload = (
+            operation.get("payload_json")
+            if operation is not None
+            else draft.payload_json
+        )
+        if not isinstance(payload, dict):
+            return None
+        prd_id_raw = payload.get(
+            "prd_id",
+            draft.payload_json.get("prd_id", DEFAULT_PRD_ID),
+        )
         prd_id = prd_id_raw if isinstance(prd_id_raw, str) else DEFAULT_PRD_ID
-        if draft.action == "prd.revised":
+        if action == "prd.revised":
             revision_raw = payload.get("revision")
             observed_revision = (
                 revision_raw - 1
@@ -4441,23 +4936,75 @@ class SqliteBackend:
         cached = self._git_prd_content_heads.get(prd_id)
         if cached is None or cached[0] != revision:
             return None
+        if draft.action == "planning.batch_applied" and (
+            self._planning_batch_prd_content_operation(draft) is None
+            and draft.payload_json.get("expected_prd_source_sha256") != cached[2]
+        ):
+            return None
+        operation = self._planning_batch_prd_content_operation(draft)
+        action = operation.get("action") if operation is not None else draft.action
+        graph_only = draft.action == "planning.batch_applied" and operation is None
+        if graph_only or action == "prd.revised":
+            graph_head = self._git_prd_graph_heads.get(prd_id)
+            if graph_head is not None and graph_head[:2] == (cached[0], cached[2]):
+                return graph_head[2]
         return cached[1]
 
     def _remember_git_prd_content_head(self, event: Event) -> None:
-        """Advance the head cache only after a successful live projection."""
-        if event.action == "prd.parsed":
+        """Advance exact content/graph heads after a successful projection."""
+        policy_event = self._git_prd_policy_event(event)
+        prd_id = self._git_prd_id(policy_event)
+        if policy_event.action not in {"prd.parsed", "prd.revised"}:
+            if event.action != "planning.batch_applied":
+                return
+            revision = event.payload_json.get("expected_prd_revision")
+            source_sha256 = event.payload_json.get(
+                "expected_prd_source_sha256"
+            )
+            cached = self._git_prd_content_heads.get(prd_id)
+            if (
+                isinstance(revision, int)
+                and not isinstance(revision, bool)
+                and cached is not None
+                and (revision, source_sha256) == (cached[0], cached[2])
+            ):
+                self._git_prd_graph_heads[prd_id] = (
+                    revision,
+                    source_sha256 if isinstance(source_sha256, str) else None,
+                    event.id,
+                )
+            return
+        if policy_event.action == "prd.parsed":
             revision = 1
-        elif event.action == "prd.revised":
-            revision_raw = event.payload_json.get("revision")
+        else:
+            revision_raw = policy_event.payload_json.get("revision")
             if not isinstance(revision_raw, int) or isinstance(revision_raw, bool):
                 return
             revision = revision_raw
-        else:
-            return
-        self._git_prd_content_heads[self._git_prd_id(event)] = (
+        source_sha256 = policy_event.payload_json.get("source_sha256")
+        normalized_source = source_sha256 if isinstance(source_sha256, str) else None
+        self._git_prd_content_heads[prd_id] = (
             revision,
             event.id,
+            normalized_source,
         )
+        operations = (
+            event.payload_json.get("operations")
+            if event.action == "planning.batch_applied"
+            else None
+        )
+        if isinstance(operations, list) and any(
+            isinstance(operation, dict)
+            and operation.get("action") not in {"prd.parsed", "prd.revised"}
+            for operation in operations
+        ):
+            self._git_prd_graph_heads[prd_id] = (
+                revision,
+                normalized_source,
+                event.id,
+            )
+        else:
+            self._git_prd_graph_heads.pop(prd_id, None)
 
     def _scan_log_ids_and_lamport(self) -> tuple[set[str], int]:
         """Full-log scan: every event id + the Lamport high-water mark (git mode).
@@ -4535,6 +5082,7 @@ class SqliteBackend:
         else:
             policy = self._build_git_prd_replay_policy(ordered)
             self._git_prd_content_heads = dict(policy.content_heads)
+            self._git_prd_graph_heads = dict(policy.graph_heads)
         signature_after = self._git_log_signature()
         if signature_before != signature_after:
             raise TransactionAborted(
@@ -4882,6 +5430,11 @@ class SqliteBackend:
                 FeatureCreatedPayload,
                 self._check_feature_created,
                 self._write_feature_created,
+            ),
+            "planning.batch_applied": ActionSpec(
+                PlanningBatchAppliedPayload,
+                self._check_planning_batch_applied,
+                self._write_planning_batch_applied,
             ),
             "task.created": ActionSpec(
                 TaskCreatedPayload, self._check_task_created, self._write_task_created
@@ -6304,6 +6857,152 @@ class SqliteBackend:
                 (?, 'prd', ?, ?, 'approve', NULL, ?)
             """,
             (review_id, project_id, approver, timestamp),
+        )
+
+    @staticmethod
+    def _planning_batch_nested_event(
+        event: EventDraft | Event,
+        *,
+        index: int,
+        action: str,
+        target_kind: str,
+        target_id: str,
+        payload_json: dict[str, Any],
+    ) -> Event:
+        """Materialize one deterministic internal event for projection handlers."""
+        outer_id = getattr(event, "id", "pending")
+        digest = hashlib.sha256(
+            f"{outer_id}\0{index}\0{action}".encode()
+        ).hexdigest()[:12]
+        return Event(
+            id=f"E-{digest}",
+            timestamp=event.timestamp,
+            actor=event.actor,
+            action=action,
+            target_kind=target_kind,
+            target_id=target_id,
+            payload_json=payload_json,
+        )
+
+    def _apply_planning_batch_operations(
+        self,
+        conn: sqlite3.Connection,
+        payload: PlanningBatchAppliedPayload,
+        event: EventDraft | Event,
+        *,
+        check: bool,
+        replay: bool = False,
+        index_offset: int = 0,
+    ) -> None:
+        """Validate and project one ordered planning batch on the current view."""
+        if event.target_kind != "prd" or event.target_id != payload.prd_id:
+            raise EventRejected(
+                "planning batch refused: code=event_identity_mismatch"
+            )
+        has_content_operation = any(
+            operation.action in {"prd.parsed", "prd.revised"}
+            for operation in payload.operations
+        )
+        if not has_content_operation:
+            row = conn.execute(
+                "SELECT revision, source_sha256 FROM prds WHERE id = ?",
+                (payload.prd_id,),
+            ).fetchone()
+            actual_revision = int(row["revision"]) if row is not None else None
+            actual_source_sha256 = (
+                row["source_sha256"] if row is not None else None
+            )
+            if actual_revision != payload.expected_prd_revision:
+                error_type = TransactionAborted if replay else EventRejected
+                raise error_type(
+                    "planning batch refused: code=stale_prd_revision"
+                )
+            if actual_source_sha256 != payload.expected_prd_source_sha256:
+                error_type = TransactionAborted if replay else EventRejected
+                raise error_type(
+                    "planning batch refused: code=stale_prd_source"
+                )
+        dispatch = self._get_action_dispatch()
+        for relative_index, operation in enumerate(payload.operations):
+            index = index_offset + relative_index
+            spec = dispatch.get(operation.action)
+            if spec is None or operation.action == "planning.batch_applied":
+                raise EventRejected(
+                    f"planning batch refused: code=unsupported_action index={index}"
+                )
+            try:
+                typed_payload = spec.payload_model.model_validate(operation.payload_json)
+                canonical_payload = typed_payload.model_dump(
+                    mode="json", exclude_unset=True, by_alias=True
+                )
+                typed_payload = spec.payload_model.model_validate(canonical_payload)
+                draft = EventDraft(
+                    timestamp=event.timestamp,
+                    actor=event.actor,
+                    action=operation.action,
+                    target_kind=operation.target_kind,
+                    target_id=operation.target_id,
+                    payload_json=canonical_payload,
+                )
+                if check:
+                    spec.check(conn, typed_payload, draft)
+                nested = self._planning_batch_nested_event(
+                    event,
+                    index=index,
+                    action=operation.action,
+                    target_kind=operation.target_kind,
+                    target_id=operation.target_id,
+                    payload_json=canonical_payload,
+                )
+                spec.write(conn, typed_payload, nested)
+            except IdempotentNoOp:
+                continue
+            except (EventRejected, TransactionAborted) as exc:
+                error_type = TransactionAborted if replay else EventRejected
+                raise error_type(
+                    f"planning batch refused: code=operation_rejected "
+                    f"index={index} action={operation.action}"
+                ) from exc
+            except Exception as exc:
+                error_type = TransactionAborted if replay else EventRejected
+                raise error_type(
+                    f"planning batch refused: code=invalid_operation "
+                    f"index={index} action={operation.action}"
+                ) from exc
+
+    def _check_planning_batch_applied(
+        self,
+        conn: sqlite3.Connection,
+        payload: PlanningBatchAppliedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Simulate the complete batch and roll it back before log append."""
+        savepoint = "planning_batch_preflight"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            self._apply_planning_batch_operations(
+                conn,
+                payload,
+                event,
+                check=True,
+            )
+        finally:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+
+    def _write_planning_batch_applied(
+        self,
+        conn: sqlite3.Connection,
+        payload: PlanningBatchAppliedPayload,
+        event: Event,
+    ) -> None:
+        """Apply every nested mutation inside the outer event transaction."""
+        self._apply_planning_batch_operations(
+            conn,
+            payload,
+            event,
+            check=True,
+            replay=self._replaying,
         )
 
     def _check_feature_created(

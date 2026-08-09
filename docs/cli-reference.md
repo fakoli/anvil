@@ -296,8 +296,18 @@ overwriting the seeded graph.
 **Exit codes:**
 
 - `0` — scan completed (first-seed or delta report).
-- `1` — `.anvil/` does not exist (run `init` / `init --from-repo`
-  first), or `ANVIL_ROOT` is set but invalid.
+- `1` — bounded refusal. JSON callers receive a stable code such as
+  `scan_locked` (another scan owns the project), `scan_artifact_error` (unsafe or
+  malformed scan/recovery storage), `scan_recovery_incomplete` (durable recovery
+  could not finish), `path_identity_error`, or a seed/initialization refusal.
+
+Before mutating `scan.db` or `prd.md`, scan creates an opaque
+`.anvil/recovery/scan-<token>` record and holds a project-wide scan lock. A retry
+automatically restores an uncommitted record or retires a state-bound committed
+record. Treat the token as opaque: do not rename, edit, or manually copy its marker
+files. If recovery cannot complete, preserve the directory and retry after removing
+the external lock/contention; the command fails closed instead of guessing which
+artifact is authoritative.
 
 **Example:**
 
@@ -492,11 +502,13 @@ anvil prd review --approve --reviewer "alex"
 ### `anvil plan` { #plan }
 
 **Synopsis:** Generate features and tasks from the parsed PRD. Re-reads
-`prd.md`, emits `feature.created` and `task.created` events for each feature
-and task found, runs dependency and conflict-group inference, then promotes
-all freshly-`proposed` tasks to `drafted`. Idempotent — re-running does not
-duplicate tasks (INSERT OR REPLACE semantics) and never regresses status of
-tasks that have already advanced past `drafted`.
+`prd.md`, runs dependency and conflict-group inference, then persists the
+complete canonical graph as one `planning.batch_applied` event and SQLite
+transaction. The batch contains the ordered feature/task/status/conflict
+operations and binds them to the exact persisted PRD source digest, so a later
+refusal or stale sibling revision cannot expose a partial or mismatched graph. Freshly
+`proposed` tasks advance to `drafted`; re-running does not duplicate tasks or
+regress tasks that have already advanced past `drafted`.
 
 **Flags:**
 

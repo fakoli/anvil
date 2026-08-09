@@ -23,6 +23,7 @@ from anvil.cli._helpers import (
     PrdSourceIngestError,
     _open_backend,
     _require_state_dir,
+    _resolve_project_dir,
     _resolve_state_dir,
     _scores_complete,
     canonical_prd_id,
@@ -320,9 +321,10 @@ def plan(
 ) -> None:
     """Generate features and tasks from the parsed PRD.
 
-    Re-reads prd.md, emits feature.created and task.created events for each
-    feature and task found.  Then runs dependency and conflict-group inference
-    and promotes all tasks from proposed to drafted.
+    Re-reads prd.md, builds the complete canonical feature/task graph, runs
+    dependency and conflict-group inference, and promotes proposed tasks to
+    drafted. The complete graph persists in one atomic
+    ``planning.batch_applied`` event; a refusal cannot leave a partial plan.
 
     With ``--use-llm`` Task descriptions shorter than
     ``template.DESCRIPTION_SHORT_THRESHOLD`` (currently 50 chars) are
@@ -341,7 +343,13 @@ def plan(
     ``prd.md`` it is never re-appended.
     """
     from anvil.clock import SystemClock
-    from anvil.planning.inference import InferenceResult
+    from anvil.planning.inference import (
+        BundlePlanningError,
+        InferenceResult,
+        PathIdentityError,
+        infer_conflict_groups,
+        infer_dependencies,
+    )
     from anvil.planning.llm import LLMProviderError
     from anvil.planning.llm_planner import (
         PlannerProviderUnavailable,
@@ -352,6 +360,7 @@ def plan(
     from anvil.state.models import EventDraft
 
     state_dir = _resolve_state_dir(cwd)
+    project_root = _resolve_project_dir(cwd)
     _require_state_dir(state_dir, command="plan", json_output=json_output)
 
     # Non-fatal warnings collected for the JSON envelope (parse warnings that
@@ -512,6 +521,7 @@ def plan(
 
         from anvil.planning._plan_helpers import has_tasks_section
         current_markdown = current_source.markdown
+        source = current_source
         if not has_tasks_section(current_markdown):
             new_markdown = (
                 current_markdown.rstrip() + "\n\n" + gen_result.markdown + "\n"
@@ -537,6 +547,7 @@ def plan(
                 )
                 raise typer.Exit(code=1) from exc
             markdown = updated_source.markdown
+            source = updated_source
         else:
             markdown = current_markdown
 
@@ -550,10 +561,7 @@ def plan(
             DEFAULT_BUNDLE_MAX_SERIAL_STAGES,
             DEFAULT_BUNDLE_MAX_TASKS,
         )
-        from anvil.planning.inference import (
-            BundlePlanningError,
-            build_bundle_plan,
-        )
+        from anvil.planning.inference import build_bundle_plan
 
         try:
             bundle_report = build_bundle_plan(
@@ -566,7 +574,13 @@ def plan(
                     if config
                     else DEFAULT_BUNDLE_MAX_SERIAL_STAGES
                 ),
+                project_root=project_root,
             )
+        except PathIdentityError as exc:
+            if json_output:
+                fail("plan", str(exc), code="path_identity_error")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         except BundlePlanningError as exc:
             if json_output:
                 fail("plan", str(exc), code="invalid_bundle_graph")
@@ -613,8 +627,10 @@ def plan(
         # TransactionAborted catch that the MCP version had).
         # --------------------------------------------------------------
         from anvil.planning._plan_helpers import (
+            build_prd_revision_draft,
+            build_prune_event_drafts,
             classify_orphans,
-            emit_prune_events,
+            emit_planning_batch,
         )
 
         # T017: the partition this plan run owns. ``parsed.prd.id`` is the
@@ -624,29 +640,18 @@ def plan(
         # all scope to this partition; conflict-group inference (below) does
         # NOT — it spans every PRD so cross-PRD file overlaps are detected.
         scope_prd_id = parsed.prd.id
-
-        if (
-            bundle_report is not None
-            and bundle_report.limit_breaches
-            and acknowledge_bundle_limits
-        ):
-            now = clock.now()
-            acknowledged_by = resolve_actor(None)
-            backend.append(
-                EventDraft(
-                    timestamp=now,
-                    actor=acknowledged_by,
-                    action="bundle.plan_acknowledged",
-                    target_kind="prd",
-                    target_id=scope_prd_id,
-                    payload_json={
-                        "prd_id": scope_prd_id,
-                        "breaches": list(bundle_report.limit_breaches),
-                        "acknowledged_by": acknowledged_by,
-                        "created_at": now.isoformat(),
-                    },
-                )
+        stored_prd = backend.get_prd(scope_prd_id)
+        if stored_prd is None:
+            message = (
+                f"No PRD found in state for '{scope_prd_id}'. Run `anvil prd "
+                "parse` before `anvil plan`."
             )
+            if json_output:
+                fail("plan", message, code="prd_not_found")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1)
+        expected_prd_revision = stored_prd.revision
+        expected_prd_source_sha256 = stored_prd.source_sha256
 
         # Scope orphan classification to THIS PRD: tasks/features in OTHER
         # PRDs must never be pruned just because they are absent from this
@@ -700,6 +705,61 @@ def plan(
             )
             raise typer.Exit(code=1)
 
+        # Complete every path-sensitive inference pass before the first event
+        # append. A host path API failure must refuse atomically: no prune,
+        # acknowledgement, feature, task, or conflict-group event may land.
+        subset_ids = {task.id for task in parsed.tasks}
+        orphan_ids = {
+            task.id
+            for task in (
+                classification.safe_task_orphans
+                + classification.unsafe_task_orphans
+            )
+        }
+        other_prd_tasks = [
+            task
+            for task in backend.list_tasks()
+            if task.id not in subset_ids and task.id not in orphan_ids
+        ]
+        try:
+            subset_with_deps = infer_dependencies(
+                parsed.tasks,
+                project_root=project_root,
+            )
+            all_with_cgs, conflict_groups = infer_conflict_groups(
+                subset_with_deps + other_prd_tasks,
+                project_root=project_root,
+            )
+        except BundlePlanningError as exc:
+            if json_output:
+                fail("plan", str(exc), code="path_identity_error")
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        cgs_by_id = {task.id: task for task in all_with_cgs}
+
+        if (
+            bundle_report is not None
+            and bundle_report.limit_breaches
+            and acknowledge_bundle_limits
+        ):
+            now = clock.now()
+            acknowledged_by = resolve_actor(None)
+            backend.append(
+                EventDraft(
+                    timestamp=now,
+                    actor=acknowledged_by,
+                    action="bundle.plan_acknowledged",
+                    target_kind="prd",
+                    target_id=scope_prd_id,
+                    payload_json={
+                        "prd_id": scope_prd_id,
+                        "breaches": list(bundle_report.limit_breaches),
+                        "acknowledged_by": acknowledged_by,
+                        "created_at": now.isoformat(),
+                    },
+                )
+            )
+
         # Surface TransactionAborted as a clean CLI error rather than a
         # raw Python traceback. The handler's message is user-actionable
         # as-is (names the blocking IDs and the resolution). Greptile MUST
@@ -708,18 +768,28 @@ def plan(
         # from prd.md while keeping its referencing tasks": the feature
         # becomes an orphan, the handler refuses, the CLI crashed.
         try:
-            prune_result = emit_prune_events(
+            prd_revision_draft = build_prd_revision_draft(
                 backend,
-                classification,
+                parsed,
+                source,
                 actor="anvil-cli",
                 clock=clock,
-                prune_force=prune_force,
             )
-        except EventRejected as exc:
+        except ValueError:
+            message = "Planning source could not be bound to the persisted PRD."
             if json_output:
-                fail("plan", f"orphan cleanup refused — {exc}", code="event_rejected")
-            typer.echo(f"Error: orphan cleanup refused — {exc}", err=True)
-            raise typer.Exit(code=1) from exc
+                fail("plan", message, code="invalid_prd_revision")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from None
+
+        operations, prune_result = build_prune_event_drafts(
+            classification,
+            actor="anvil-cli",
+            clock=clock,
+            prune_force=prune_force,
+        )
+        if prd_revision_draft is not None:
+            operations.insert(0, prd_revision_draft)
 
         deleted_task_ids = prune_result.pruned_task_ids
         deleted_feature_ids = prune_result.pruned_feature_ids
@@ -746,21 +816,7 @@ def plan(
                 target_id=feature.id,
                 payload_json=feature_data,
             )
-            backend.append(draft)
-
-        # Emit task.created for each task (status proposed at creation time).
-        for task in parsed.tasks:
-            now = clock.now()
-            task_data = _with_prd_id(task.model_dump(mode="json"), task.prd_id)
-            draft = EventDraft(
-                timestamp=now,
-                actor="anvil-cli",
-                action="task.created",
-                target_kind="task",
-                target_id=task.id,
-                payload_json=task_data,
-            )
-            backend.append(draft)
+            operations.append(draft)
 
         # ------------------------------------------------------------------
         # Inference (T017): dependency inference + proposed->drafted promotion
@@ -775,26 +831,6 @@ def plan(
         # already-persisted OTHER-PRD tasks, so a cross-PRD overlap lands in
         # a single CG-* group that both tasks reference.
         # ------------------------------------------------------------------
-        from anvil.planning.inference import (
-            infer_conflict_groups,
-            infer_dependencies,
-        )
-
-        subset_with_deps = infer_dependencies(parsed.tasks)
-        subset_ids = {t.id for t in subset_with_deps}
-
-        # OTHER-PRD persisted tasks: everything NOT in this partition. The
-        # just-emitted subset task.created rows are excluded by id so the
-        # in-memory (deps-annotated) copies are the ones fed to the scan.
-        other_prd_tasks = [
-            t for t in backend.list_tasks() if t.id not in subset_ids
-        ]
-
-        all_with_cgs, conflict_groups = infer_conflict_groups(
-            subset_with_deps + other_prd_tasks
-        )
-        cgs_by_id = {t.id: t for t in all_with_cgs}
-
         # Re-upsert THIS PRD's tasks with inferred dependencies + conflict
         # groups, then promote proposed -> drafted (subset only).
         for base_task in subset_with_deps:
@@ -811,7 +847,7 @@ def plan(
                 target_id=inferred_task.id,
                 payload_json=task_data,
             )
-            backend.append(upsert_draft)
+            operations.append(upsert_draft)
 
             # Promote proposed → drafted, but ONLY if the task is currently
             # at 'proposed'. On re-plan, existing tasks may have advanced
@@ -821,7 +857,7 @@ def plan(
             # touch status (Greptile PR #38 fix), so existing-task status
             # is preserved; we only need to promote fresh proposed tasks.
             current = backend.get_task(inferred_task.id)
-            if current is not None and current.status.value == "proposed":
+            if current is None or current.status.value == "proposed":
                 now = clock.now()
                 status_draft = EventDraft(
                     timestamp=now,
@@ -836,7 +872,7 @@ def plan(
                         "reason": "plan: initial draft after inference",
                     },
                 )
-                backend.append(status_draft)
+                operations.append(status_draft)
 
         # Re-upsert OTHER-PRD tasks whose conflict_groups changed because a
         # cross-PRD overlap with this PRD pulled them into a new CG-* group.
@@ -852,7 +888,7 @@ def plan(
             task_data = _with_prd_id(
                 inferred_task.model_dump(mode="json"), inferred_task.prd_id
             )
-            backend.append(
+            operations.append(
                 EventDraft(
                     timestamp=now,
                     actor="anvil-cli",
@@ -874,7 +910,7 @@ def plan(
         # these events populate the dedicated table with the full group records.
         for cg in inference_result.conflict_groups:
             now = clock.now()
-            backend.append(
+            operations.append(
                 EventDraft(
                     timestamp=now,
                     actor="anvil-cli",
@@ -884,6 +920,22 @@ def plan(
                     payload_json=cg.model_dump(mode="json"),
                 )
             )
+
+        try:
+            emit_planning_batch(
+                backend,
+                operations,
+                actor="anvil-cli",
+                clock=clock,
+                prd_id=scope_prd_id,
+                expected_prd_revision=expected_prd_revision,
+                expected_prd_source_sha256=expected_prd_source_sha256,
+            )
+        except EventRejected as exc:
+            if json_output:
+                fail("plan", f"planning graph refused — {exc}", code="event_rejected")
+            typer.echo(f"Error: planning graph refused - {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
         # Echo summary inside the try block so it only runs on full success;
         # otherwise inference_result may be unbound (if append raised
@@ -2100,7 +2152,7 @@ def show(
             indented = s.explanation.replace("\n", "\n    ")
             typer.echo(f"\n  Explanation:\n    {indented}")
     else:
-        typer.echo("  (not yet scored — run `anvil score`)")
+        typer.echo("  (not yet scored - run `anvil score`)")
 
     _section("Dependencies")
     if task.dependencies:
@@ -2121,14 +2173,14 @@ def show(
         for criterion in task.acceptance_criteria:
             typer.echo(f"  - {criterion}")
     else:
-        typer.echo("  (none — required before review)")
+        typer.echo("  (none - required before review)")
 
     _section("Verification Commands")
     if task.verification.commands:
         for cmd in task.verification.commands:
             typer.echo(f"  $ {cmd}")
     else:
-        typer.echo("  (none — required before review)")
+        typer.echo("  (none - required before review)")
 
     _section("Likely Files")
     if task.likely_files:

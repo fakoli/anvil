@@ -15,6 +15,7 @@ Tests run in isolated tmp directories and never touch the real cwd state.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sqlite3
@@ -232,6 +233,732 @@ class TestScanCommand:
         res = runner.invoke(app, ["scan"], catch_exceptions=False)
         assert res.exit_code == 1
         assert "not initialized" in res.output.lower()
+
+    @pytest.mark.parametrize(
+        "failure,message",
+        [
+            ("loader", "Windows path API unavailable (library load failed)"),
+            ("mapping", "Windows path case mapping failed"),
+            ("comparison", "Windows path comparison failed"),
+        ],
+    )
+    @pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+    def test_scan_native_path_failure_is_bounded_and_seed_atomic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        message: str,
+        json_output: bool,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning.inference import PathIdentityError
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before = events_path.read_bytes()
+        state_before = (tmp_path / ".anvil" / "state.db").read_bytes()
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        def fail_identity(path: Path) -> None:
+            raise PathIdentityError(message)
+
+        monkeypatch.setattr(
+            inference_module,
+            "_windows_existing_path_identity",
+            fail_identity,
+        )
+
+        arguments = ["scan"] + (["--json"] if json_output else [])
+        result = runner.invoke(app, arguments, catch_exceptions=False)
+
+        assert result.exit_code == 1
+        bounded = f"seed planning inference refused: {message}"
+        if json_output:
+            payload = json.loads(result.output)
+            assert payload["error"] == {
+                "code": "path_identity_error",
+                "message": bounded,
+            }
+        else:
+            assert result.output == f"Error: {bounded}\n"
+        assert events_path.read_bytes() == before
+        assert (tmp_path / ".anvil" / "state.db").read_bytes() == state_before
+        assert not (tmp_path / ".anvil" / "scan.db").exists()
+        assert not (tmp_path / ".anvil" / "prd.md").exists()
+        connection = sqlite3.connect(tmp_path / ".anvil" / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM features").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
+
+    @pytest.mark.parametrize("json_output", [False, True], ids=["human", "json"])
+    def test_scan_oversized_path_failure_restores_artifacts_and_retry_seeds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        json_output: bool,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning import template as template_module
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        oversized = "é" * 2_048 + "a"
+        original_parse = template_module.parse_prd
+        parse_calls = 0
+
+        def fail_first_parse(*args: object, **kwargs: object) -> object:
+            nonlocal parse_calls
+            result = original_parse(*args, **kwargs)
+            parse_calls += 1
+            if parse_calls == 1:
+                result.tasks[0].likely_files.append(oversized)
+            return result
+
+        monkeypatch.setattr(template_module, "parse_prd", fail_first_parse)
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+        state_dir = tmp_path / ".anvil"
+        events_path = state_dir / "events.jsonl"
+        events_before = events_path.read_bytes()
+        state_before = (state_dir / "state.db").read_bytes()
+
+        arguments = ["scan"] + (["--json"] if json_output else [])
+        failed = runner.invoke(app, arguments, catch_exceptions=False)
+
+        message = (
+            "seed planning inference refused: bundle planning requires "
+            "likely-file paths no longer than 4096 UTF-8 bytes"
+        )
+        assert failed.exit_code == 1
+        if json_output:
+            assert json.loads(failed.output)["error"] == {
+                "code": "path_identity_error",
+                "message": message,
+            }
+        else:
+            assert failed.output == f"Error: {message}\n"
+        assert len(message) <= 4_096
+        assert message.encode("cp1252")
+        assert events_path.read_bytes() == events_before
+        assert (state_dir / "state.db").read_bytes() == state_before
+        assert not (state_dir / "scan.db").exists()
+        assert not (state_dir / "prd.md").exists()
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+
+        retried = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+
+        assert retried.exit_code == 0, retried.output
+        retry_data = json.loads(retried.output)["data"]
+        assert retry_data["first_scan"] is True
+        assert retry_data["seeded"] is not None
+        assert retry_data["seeded"]["ready"] >= 1
+        assert (state_dir / "scan.db").exists()
+        assert (state_dir / "prd.md").exists()
+
+    def test_force_scan_failure_restores_existing_artifacts_byte_for_byte(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning import template as template_module
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        seeded = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert seeded.exit_code == 0, seeded.output
+        state_dir = tmp_path / ".anvil"
+        scan_before = (state_dir / "scan.db").read_bytes()
+        prd_before = (state_dir / "prd.md").read_bytes()
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            counts_before = tuple(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("prds", "features", "tasks", "conflict_groups")
+            )
+        finally:
+            connection.close()
+        state_before = (state_dir / "state.db").read_bytes()
+
+        original_parse = template_module.parse_prd
+
+        def parse_with_oversized_path(*args: object, **kwargs: object) -> object:
+            result = original_parse(*args, **kwargs)
+            result.tasks[0].likely_files.append("é" * 2_048 + "a")
+            return result
+
+        monkeypatch.setattr(
+            template_module, "parse_prd", parse_with_oversized_path
+        )
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+
+        failed = runner.invoke(
+            app, ["scan", "--force", "--json"], catch_exceptions=False
+        )
+
+        assert failed.exit_code == 1
+        assert json.loads(failed.output)["error"]["code"] == "path_identity_error"
+        assert (state_dir / "scan.db").read_bytes() == scan_before
+        assert (state_dir / "prd.md").read_bytes() == prd_before
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+        assert (state_dir / "state.db").read_bytes() == state_before
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            counts_after = tuple(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("prds", "features", "tasks", "conflict_groups")
+            )
+        finally:
+            connection.close()
+        assert counts_after == counts_before
+
+    @pytest.mark.parametrize("mode", ["first-run", "force"])
+    @pytest.mark.parametrize("failure_point", ["save-model", "prd-write"])
+    def test_every_post_mutation_failure_rolls_back_and_retry_succeeds(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+        failure_point: str,
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        scan_model = importlib.import_module("anvil.scan.model")
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        if mode == "force":
+            seeded = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+            assert seeded.exit_code == 0, seeded.output
+
+        artifacts_before = {
+            name: (state_dir / name).read_bytes()
+            if (state_dir / name).exists()
+            else None
+            for name in ("scan.db", "prd.md")
+        }
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        state_before = (state_dir / "state.db").read_bytes()
+
+        with monkeypatch.context() as injected:
+            if failure_point == "save-model":
+                original_save = scan_model.save_model
+
+                def fail_after_save(*args: object, **kwargs: object) -> None:
+                    original_save(*args, **kwargs)
+                    raise OSError("injected raw save failure")
+
+                injected.setattr(scan_model, "save_model", fail_after_save)
+            else:
+                original_write = scan_module._write_generated_prd
+
+                def fail_after_prd_write(path: Path, text: str) -> None:
+                    original_write(path, text)
+                    with path.open("a", encoding="utf-8") as handle:
+                        handle.write("\n# injected mutation\n")
+                    raise OSError("injected raw PRD failure")
+
+                injected.setattr(
+                    scan_module, "_write_generated_prd", fail_after_prd_write
+                )
+
+            arguments = ["scan", "--json"]
+            if mode == "force":
+                arguments.append("--force")
+            failed = runner.invoke(app, arguments, catch_exceptions=False)
+
+        assert failed.exit_code == 1
+        assert json.loads(failed.output)["error"] == {
+            "code": "scan_artifact_error",
+            "message": "scan artifact update failed; prior artifacts were restored",
+        }
+        assert "injected" not in failed.output
+        assert str(tmp_path) not in failed.output
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+        assert (state_dir / "state.db").read_bytes() == state_before
+        for name, prior_bytes in artifacts_before.items():
+            artifact = state_dir / name
+            if prior_bytes is None:
+                assert not artifact.exists()
+            else:
+                assert artifact.read_bytes() == prior_bytes
+        recovery_parent = state_dir / "recovery"
+        assert not list(recovery_parent.glob("scan-*"))
+
+        retried = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert retried.exit_code == 0, retried.output
+        retry_data = json.loads(retried.output)["data"]
+        if mode == "first-run":
+            assert retry_data["first_scan"] is True
+            assert retry_data["seeded"] is not None
+        else:
+            assert retry_data["seeded"] is None
+
+    @pytest.mark.parametrize("mode", ["first-run", "force"])
+    @pytest.mark.parametrize("restore_failure", ["scan.db", "prd.md"])
+    def test_incomplete_restore_retains_durable_backups_and_retry_recovers(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+        restore_failure: str,
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        if mode == "force":
+            seeded = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+            assert seeded.exit_code == 0, seeded.output
+
+        artifacts_before = {
+            name: (state_dir / name).read_bytes()
+            if (state_dir / name).exists()
+            else None
+            for name in ("scan.db", "prd.md")
+        }
+        events_before = (state_dir / "events.jsonl").read_bytes()
+        state_before = (state_dir / "state.db").read_bytes()
+        restore_attempts: list[str] = []
+
+        with monkeypatch.context() as injected:
+            original_write = scan_module._write_generated_prd
+            original_restore = scan_module._restore_scan_artifact
+
+            def fail_after_prd_write(path: Path, text: str) -> None:
+                original_write(path, text)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write("\n# injected mutation\n")
+                raise OSError("injected raw PRD failure")
+
+            def fail_one_restore(
+                recovery_state_dir: Path,
+                recovery_root: Path,
+                artifact_name: str,
+            ) -> None:
+                restore_attempts.append(artifact_name)
+                if artifact_name == restore_failure:
+                    raise OSError("injected raw restore failure")
+                original_restore(
+                    recovery_state_dir, recovery_root, artifact_name
+                )
+
+            injected.setattr(
+                scan_module, "_write_generated_prd", fail_after_prd_write
+            )
+            injected.setattr(
+                scan_module, "_restore_scan_artifact", fail_one_restore
+            )
+            arguments = ["scan", "--json"]
+            if mode == "force":
+                arguments.append("--force")
+            failed = runner.invoke(app, arguments, catch_exceptions=False)
+
+        assert restore_attempts == ["scan.db", "prd.md"]
+        assert failed.exit_code == 1
+        error = json.loads(failed.output)["error"]
+        assert error["code"] == "scan_recovery_incomplete"
+        assert error["message"].startswith(
+            "scan artifact recovery incomplete; backups retained at "
+            "recovery/scan-"
+        )
+        assert len(error["message"]) <= 4_096
+        assert error["message"].encode("cp1252")
+        assert "injected" not in error["message"]
+        assert str(tmp_path) not in error["message"]
+        token = error["message"].rsplit("/", maxsplit=1)[1]
+        assert len(token) == len("scan-") + 16
+        recovery_root = state_dir / "recovery" / token
+        assert recovery_root.is_dir()
+        for name, prior_bytes in artifacts_before.items():
+            marker = recovery_root / f"{name}.absent"
+            backup = recovery_root / f"{name}.backup"
+            if prior_bytes is None:
+                assert marker.read_bytes() == b"absent\n"
+                assert not backup.exists()
+            else:
+                assert backup.read_bytes() == prior_bytes
+                assert not marker.exists()
+        assert (state_dir / "events.jsonl").read_bytes() == events_before
+        assert (state_dir / "state.db").read_bytes() == state_before
+
+        original_resume = scan_module._resume_scan_recovery
+        restored_snapshot: dict[str, bytes | None] = {}
+        resume_calls = 0
+
+        def observe_automatic_resume(recovery_state_dir: Path) -> None:
+            nonlocal resume_calls
+            original_resume(recovery_state_dir)
+            resume_calls += 1
+            for name in ("scan.db", "prd.md"):
+                artifact = recovery_state_dir / name
+                restored_snapshot[name] = (
+                    artifact.read_bytes() if artifact.exists() else None
+                )
+
+        with monkeypatch.context() as retry_patch:
+            retry_patch.setattr(
+                scan_module, "_resume_scan_recovery", observe_automatic_resume
+            )
+            retried = runner.invoke(
+                app, ["scan", "--json"], catch_exceptions=False
+            )
+
+        assert resume_calls == 1
+        assert restored_snapshot == artifacts_before
+        assert not recovery_root.exists()
+        assert retried.exit_code == 0, retried.output
+        retry_data = json.loads(retried.output)["data"]
+        if mode == "first-run":
+            assert retry_data["first_scan"] is True
+            assert retry_data["seeded"] is not None
+        else:
+            assert retry_data["seeded"] is None
+
+    def test_plain_rescan_write_failure_restores_scan_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_model = importlib.import_module("anvil.scan.model")
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        first = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert first.exit_code == 0, first.output
+        state_dir = tmp_path / ".anvil"
+        artifacts_before = {
+            name: (state_dir / name).read_bytes()
+            for name in ("scan.db", "prd.md")
+        }
+        (tmp_path / "README.md").write_text("# Changed\n", encoding="utf-8")
+        original_save = scan_model.save_model
+
+        def fail_after_save(*args: object, **kwargs: object) -> None:
+            original_save(*args, **kwargs)
+            raise OSError("injected ordinary rescan failure")
+
+        monkeypatch.setattr(scan_model, "save_model", fail_after_save)
+        failed = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+
+        assert failed.exit_code == 1
+        assert json.loads(failed.output)["error"]["code"] == "scan_artifact_error"
+        assert "injected" not in failed.output
+        assert {
+            name: (state_dir / name).read_bytes()
+            for name in ("scan.db", "prd.md")
+        } == artifacts_before
+
+    @pytest.mark.parametrize("unsafe_target", ["state-artifact", "recovery-parent"])
+    def test_recovery_refuses_non_regular_paths_before_mutation(
+        self,
+        tmp_path: Path,
+        unsafe_target: str,
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        if unsafe_target == "state-artifact":
+            (state_dir / "prd.md").unlink()
+            (state_dir / "prd.md").mkdir()
+        else:
+            (state_dir / "recovery").write_bytes(b"not-a-directory")
+
+        with pytest.raises(scan_module.ScanArtifactError):
+            scan_module._create_scan_recovery(state_dir)
+
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        if unsafe_target == "state-artifact":
+            assert (state_dir / "prd.md").is_dir()
+        else:
+            assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+            assert (state_dir / "recovery").read_bytes() == b"not-a-directory"
+
+    def test_recovery_refuses_symlink_backup_without_touching_target(
+        self, tmp_path: Path
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        token, recovery_root = scan_module._create_scan_recovery(state_dir)
+        external = tmp_path / "external-secret"
+        external.write_bytes(b"do-not-touch")
+        backup = recovery_root / "prd.md.backup"
+        backup.unlink()
+        try:
+            backup.symlink_to(external)
+        except OSError:
+            pytest.skip("symlink creation is unavailable on this host")
+
+        with pytest.raises(scan_module.ScanRecoveryError) as raised:
+            scan_module._resume_scan_recovery(state_dir)
+
+        assert raised.value.token == token
+        assert external.read_bytes() == b"do-not-touch"
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
+    def test_backup_creation_failure_is_bounded_and_leaves_no_active_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        original_copy = scan_module._copy_regular_exclusive
+
+        def fail_prd_copy(source: Path, destination: Path) -> None:
+            if source.name == "prd.md":
+                raise OSError("injected backup failure")
+            original_copy(source, destination)
+
+        monkeypatch.setattr(
+            scan_module, "_copy_regular_exclusive", fail_prd_copy
+        )
+        with pytest.raises(scan_module.ScanArtifactError) as raised:
+            scan_module._create_scan_recovery(state_dir)
+
+        assert "injected" not in str(raised.value)
+        recovery_parent = state_dir / "recovery"
+        assert not list(recovery_parent.iterdir())
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
+    def test_failed_restore_verification_retains_record_for_retry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        _, recovery_root = scan_module._create_scan_recovery(state_dir)
+        (state_dir / "scan.db").write_bytes(b"scan-after")
+        (state_dir / "prd.md").write_bytes(b"prd-after")
+
+        monkeypatch.setattr(
+            scan_module,
+            "_verify_restored_scan_artifacts",
+            lambda *_args: False,
+        )
+        assert not scan_module._restore_scan_recovery(state_dir, recovery_root)
+        assert recovery_root.is_dir()
+
+        monkeypatch.undo()
+        assert scan_module._restore_scan_recovery(state_dir, recovery_root)
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+        assert not recovery_root.exists()
+
+    def test_retirement_cleanup_failure_retries_without_reactivation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        _, recovery_root = scan_module._create_scan_recovery(state_dir)
+        original_rmtree = scan_module.shutil.rmtree
+
+        def fail_retired_cleanup(path: Path) -> None:
+            if path.name.startswith(".retired-scan-"):
+                raise OSError("injected retirement failure")
+            original_rmtree(path)
+
+        monkeypatch.setattr(scan_module.shutil, "rmtree", fail_retired_cleanup)
+        assert not scan_module._retire_scan_recovery(recovery_root)
+        retired = list((state_dir / "recovery").glob(".retired-scan-*"))
+        assert len(retired) == 1
+        assert not recovery_root.exists()
+
+        monkeypatch.undo()
+        scan_module._resume_scan_recovery(state_dir)
+        assert not retired[0].exists()
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
+    def test_concurrent_recovery_creation_leaves_one_resumable_record(
+        self, tmp_path: Path
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        barrier = threading.Barrier(2)
+        outcome_lock = threading.Lock()
+        created: list[Path] = []
+        errors: list[BaseException] = []
+
+        def create() -> None:
+            barrier.wait(timeout=5)
+            try:
+                _token, recovery_root = scan_module._create_scan_recovery(state_dir)
+                with outcome_lock:
+                    created.append(recovery_root)
+            except BaseException as exc:
+                with outcome_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=create) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert not any(thread.is_alive() for thread in threads)
+        assert len(created) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], scan_module.ScanRecoveryError)
+        active = list((state_dir / "recovery").glob("scan-*"))
+        assert active == created
+
+        scan_module._resume_scan_recovery(state_dir)
+        assert not active[0].exists()
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
+    def test_cross_process_scan_recovery_session_refuses_second_writer(
+        self, tmp_path: Path
+    ) -> None:
+        import subprocess
+        import sys
+
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        probe = (
+            "import importlib, pathlib, sys\n"
+            "scan = importlib.import_module('anvil.cli.scan')\n"
+            "scan._SCAN_LOCK_TIMEOUT_SECONDS = 0.1\n"
+            "try:\n"
+            "    with scan._exclusive_scan_session(pathlib.Path(sys.argv[1])):\n"
+            "        print('acquired')\n"
+            "except scan.ScanLockedError:\n"
+            "    print('locked')\n"
+        )
+
+        with scan_module._exclusive_scan_session(state_dir):
+            completed = subprocess.run(  # noqa: S603
+                [sys.executable, "-c", probe, str(state_dir)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        assert completed.stdout.strip() == "locked"
+
+    def test_successful_seed_retirement_failure_preserves_committed_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        with monkeypatch.context() as injected:
+            injected.setattr(
+                scan_module,
+                "_retire_scan_recovery",
+                lambda *_args, **_kwargs: False,
+            )
+            with pytest.raises(scan_module.ScanRecoveryError):
+                scan_module.run_scan_and_report(state_dir, tmp_path)
+
+        prd_bytes = (state_dir / "prd.md").read_bytes()
+        scan_bytes = (state_dir / "scan.db").read_bytes()
+        active = list((state_dir / "recovery").glob("scan-*"))
+        assert len(active) == 1
+        assert (active[0] / "committed").read_bytes() == b"committed\n"
+        backend = scan_module._open_backend(state_dir)
+        try:
+            assert len(backend.list_prds()) == 1
+            assert len(backend.list_tasks()) == 4
+        finally:
+            backend.close()
+
+        scan_module._resume_scan_recovery(state_dir)
+        assert not active[0].exists()
+        assert (state_dir / "prd.md").read_bytes() == prd_bytes
+        assert (state_dir / "scan.db").read_bytes() == scan_bytes
+        retried = scan_module.run_scan_and_report(state_dir, tmp_path)
+
+        assert retried["seeded"] is None
+        assert (state_dir / "prd.md").read_bytes() == prd_bytes
+        backend = scan_module._open_backend(state_dir)
+        try:
+            assert len(backend.list_prds()) == 1
+            assert len(backend.list_tasks()) == 4
+        finally:
+            backend.close()
+
+    def test_recovery_refuses_oversized_fixed_marker_without_read_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        _token, recovery_root = scan_module._create_scan_recovery(state_dir)
+        marker = recovery_root / "scan.db.absent"
+        with marker.open("r+b") as handle:
+            handle.truncate(32 * 1024 * 1024)
+
+        monkeypatch.setattr(
+            Path,
+            "read_bytes",
+            lambda _self: pytest.fail("fixed recovery markers must be bounded"),
+        )
+        with pytest.raises(scan_module.ScanRecoveryError):
+            scan_module._resume_scan_recovery(state_dir)
+        assert recovery_root.exists()
+
+    def test_recovery_directory_entry_count_is_bounded_before_sort(
+        self, tmp_path: Path
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        recovery_parent = state_dir / "recovery"
+        recovery_parent.mkdir(parents=True)
+        for index in range(scan_module._MAX_SCAN_RECOVERY_ENTRIES + 1):
+            (recovery_parent / f".retired-scan-{index:016x}").mkdir()
+
+        with pytest.raises(scan_module.ScanArtifactError):
+            scan_module._resume_scan_recovery(state_dir)
 
     def test_first_scan_seeds_prd_tasks_and_codebase_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -481,8 +1208,10 @@ class TestScanCommand:
 
         assert result.exit_code == 1
         payload = json.loads(result.output)
-        assert payload["error"]["code"] == "seed_rejected"
-        assert "regular contained file" in payload["error"]["message"]
+        assert payload["error"] == {
+            "code": "scan_artifact_error",
+            "message": "scan artifact update failed; prior artifacts were restored",
+        }
         assert prd_path.is_symlink()
         assert outside.read_bytes() == authored
 
@@ -775,8 +1504,8 @@ class TestScanCommand:
 
         if failure_point == "fsync":
             monkeypatch.setattr(
-                scan_module.os,
-                "fsync",
+                scan_module,
+                "_fsync_prd_staging",
                 lambda _fd: (_ for _ in ()).throw(KeyboardInterrupt()),
             )
         else:
@@ -1858,7 +2587,7 @@ class TestScanCommand:
             def refuse_sync(_fd: int) -> None:
                 raise OSError(5, "synthetic write refusal")
 
-            monkeypatch.setattr(scan_module.os, "fsync", refuse_sync)
+            monkeypatch.setattr(scan_module, "_fsync_prd_staging", refuse_sync)
         else:
             def refuse_publish(
                 path: Path,
@@ -2084,6 +2813,58 @@ class TestScanCommand:
         assert not prd_path.exists()
         assert list(state_dir.glob(".prd.md.*.tmp")) == []
 
+    def test_first_scan_atomic_planning_failure_leaves_no_partial_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        events_path = state_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        original = SqliteBackend._write_task_created  # noqa: SLF001
+        task_writes = 0
+
+        def fail_second_task(
+            backend: SqliteBackend, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal task_writes
+            task_writes += 1
+            if task_writes == 2:
+                raise RuntimeError("injected second task failure")
+            original(backend, *args, **kwargs)  # type: ignore[arg-type]
+
+        with monkeypatch.context() as injected:
+            injected.setattr(
+                SqliteBackend,
+                "_write_task_created",
+                fail_second_task,
+            )
+            failed = runner.invoke(
+                app,
+                ["scan", "--json"],
+                catch_exceptions=False,
+            )
+
+        assert failed.exit_code == 1
+        assert json.loads(failed.output)["error"]["code"] == "seed_rejected"
+        assert events_path.read_bytes() == before
+        assert not (state_dir / "prd.md").exists()
+        assert not (state_dir / "scan.db").exists()
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM features").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
+
+        retried = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert retried.exit_code == 0, retried.output
+        assert json.loads(retried.output)["data"]["seeded"] is not None
+
 
 class TestInitFromRepo:
     def test_init_from_repo_scaffolds_and_seeds(
@@ -2114,3 +2895,131 @@ class TestInitFromRepo:
         )
         assert res.exit_code == 1
         assert "mutually exclusive" in res.output.lower()
+
+    @pytest.mark.parametrize(
+        "failure,message",
+        [
+            ("loader", "Windows path API unavailable (library load failed)"),
+            ("mapping", "Windows path case mapping failed"),
+            ("comparison", "Windows path comparison failed"),
+        ],
+    )
+    def test_init_from_repo_native_path_failure_is_bounded_and_seed_atomic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        message: str,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning.inference import PathIdentityError
+
+        _make_fixture_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        def fail_identity(path: Path) -> None:
+            raise PathIdentityError(message)
+
+        monkeypatch.setattr(
+            inference_module,
+            "_windows_existing_path_identity",
+            fail_identity,
+        )
+
+        result = runner.invoke(
+            app, ["init", "--from-repo"], catch_exceptions=False
+        )
+
+        assert result.exit_code == 1
+        assert f"Error: seed planning inference refused: {message}" in result.output
+        state_dir = tmp_path / ".anvil"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events] == [
+            "project.created",
+            "state.initialized",
+        ]
+        assert not (state_dir / "scan.db").exists()
+        assert not (state_dir / "prd.md").exists()
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM features").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
+
+    def test_init_from_repo_oversized_path_restores_artifacts_and_scan_retries(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning import template as template_module
+
+        _make_fixture_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        oversized = "é" * 2_048 + "a"
+        original_parse = template_module.parse_prd
+        parse_calls = 0
+
+        def fail_first_parse(*args: object, **kwargs: object) -> object:
+            nonlocal parse_calls
+            result = original_parse(*args, **kwargs)
+            parse_calls += 1
+            if parse_calls == 1:
+                result.tasks[0].likely_files.append(oversized)
+            return result
+
+        monkeypatch.setattr(template_module, "parse_prd", fail_first_parse)
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+
+        failed = runner.invoke(
+            app, ["init", "--from-repo"], catch_exceptions=False
+        )
+
+        message = (
+            "seed planning inference refused: bundle planning requires "
+            "likely-file paths no longer than 4096 UTF-8 bytes"
+        )
+        assert failed.exit_code == 1
+        assert f"Error: {message}" in failed.output
+        assert len(message) <= 4_096
+        assert message.encode("cp1252")
+        state_dir = tmp_path / ".anvil"
+        assert not (state_dir / "scan.db").exists()
+        assert not (state_dir / "prd.md").exists()
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events] == [
+            "project.created",
+            "state.initialized",
+        ]
+
+        retried = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+
+        assert retried.exit_code == 0, retried.output
+        retry_data = json.loads(retried.output)["data"]
+        assert retry_data["first_scan"] is True
+        assert retry_data["seeded"] is not None
+        assert retry_data["seeded"]["ready"] >= 1

@@ -420,6 +420,88 @@ class TaskCreatedPayload(BaseModel):
     updated_at: str = ""
 
 
+_PLANNING_BATCH_ACTIONS = Literal[
+    "prd.parsed",
+    "prd.revised",
+    "prd.reviewed",
+    "prd.approved",
+    "feature.created",
+    "feature.deleted",
+    "task.created",
+    "task.deleted",
+    "task.scored",
+    "task.status_changed",
+    "conflict_group.upserted",
+]
+_MAX_PLANNING_BATCH_OPERATIONS = 10_000
+_MAX_PLANNING_BATCH_BYTES = 16 * 1024 * 1024
+
+
+class PlanningBatchOperationPayload(BaseModel):
+    """One ordered mutation embedded in an atomic planning event."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: _PLANNING_BATCH_ACTIONS
+    target_kind: StrictStr = Field(min_length=1, max_length=64)
+    target_id: StrictStr = Field(min_length=1, max_length=512)
+    payload_json: dict[str, Any]
+
+
+class PlanningBatchAppliedPayload(BaseModel):
+    """A complete parse/plan/seed graph transition persisted as one event."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    prd_id: StrictStr = Field(min_length=1, max_length=512)
+    # Graph-only batches are derived from one already-persisted PRD revision.
+    # Combined parse/seed batches instead carry the content mutation inside the
+    # same atomic event and therefore use ``None``.
+    expected_prd_revision: StrictInt | None
+    expected_prd_source_sha256: StrictStr | None = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
+    operations: list[PlanningBatchOperationPayload] = Field(
+        min_length=1,
+        max_length=_MAX_PLANNING_BATCH_OPERATIONS,
+    )
+
+    @model_validator(mode="after")
+    def _validate_batch_size(self) -> PlanningBatchAppliedPayload:
+        content_operations = [
+            operation
+            for operation in self.operations
+            if operation.action in {"prd.parsed", "prd.revised"}
+        ]
+        if len(content_operations) > 1:
+            raise ValueError("planning batch may contain at most one PRD content event")
+        if content_operations:
+            if (
+                self.expected_prd_revision is not None
+                or self.expected_prd_source_sha256 is not None
+            ):
+                raise ValueError(
+                    "planning batch with PRD content must not bind prior content"
+                )
+            nested_prd_id = content_operations[0].payload_json.get(
+                "prd_id", DEFAULT_PRD_ID
+            )
+            if nested_prd_id != self.prd_id:
+                raise ValueError("planning batch PRD content owner mismatch")
+        elif (
+            self.expected_prd_revision is None
+            or isinstance(self.expected_prd_revision, bool)
+            or self.expected_prd_revision < 1
+        ):
+            raise ValueError(
+                "graph-only planning batch requires a positive expected PRD revision"
+            )
+        material = self.model_dump(mode="json")
+        canonical_json_bytes(material, max_bytes=_MAX_PLANNING_BATCH_BYTES)
+        return self
+
+
 _MAX_DEPENDENCY_BATCH_ENTRIES = 10_000
 
 
@@ -1041,12 +1123,12 @@ class EvidenceSubmittedPayload(BaseModel):
     claim_id: str
     submitted_by: str
     evidence_id: str
-    commands_run: list[Any] = []
-    files_changed: list[Any] = []
+    commands_run: list[StrictStr] = []
+    files_changed: list[StrictStr] = []
     output_excerpt: str | None = None
     pr_url: str | None = None
     commit_sha: str | None = None
-    screenshots: list[Any] = []
+    screenshots: list[StrictStr] = []
     known_limitations: str | None = None
     # SL-3 / B48: typed proofs, validated at write time (a malformed proof
     # raises here, not silently at replay). Defaults to [] so pre-SL-3 logs
@@ -1770,6 +1852,8 @@ __all__ = [
     "PrdParsedPayload",
     "PrdReviewedPayload",
     "PrdRevisedPayload",
+    "PlanningBatchAppliedPayload",
+    "PlanningBatchOperationPayload",
     "ProgressNotedPayload",
     "ProgressAttestedPayload",
     "ProjectCreatedPayload",

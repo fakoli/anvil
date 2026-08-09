@@ -333,7 +333,11 @@ def load_model(db_path: Path) -> CodebaseModel | None:
     """Load the persisted codebase model, or None if no scan db exists yet."""
     if not db_path.exists():
         return None
-    conn = _connect(db_path)
+    # A scan begins by reading the prior snapshot before it creates a recovery
+    # record.  Keep this connection genuinely read-only: ``_connect`` executes
+    # DDL and can therefore mutate an existing database during a nominal read.
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
     try:
         rows = conn.execute(
             "SELECT path, component, language, size_bytes, content_hash "

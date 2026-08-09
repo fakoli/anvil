@@ -1,3 +1,7 @@
 # Hooks and installers are executed by POSIX shells from Windows-mounted
 # worktrees as well as native Linux checkouts. Keep their working-tree form LF.
 *.sh text eol=lf
+
+# Packaged provider fixtures are byte-level public contracts. Preserve their
+# canonical JSON LF framing even when the checkout enables core.autocrlf.
+bin/src/anvil/_data/contracts/provider-reads/v1/*.json text eol=lf

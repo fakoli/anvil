@@ -25,6 +25,7 @@ distinct timestamps instead.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -181,6 +182,25 @@ def _prd_revised_payload(
     return payload
 
 
+def _with_source_binding(
+    payload: dict[str, Any],
+    source_text: str,
+    *,
+    revision: int,
+) -> dict[str, Any]:
+    source_bytes = source_text.encode("utf-8")
+    payload.update({
+        "source_text": source_text,
+        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "source_size_bytes": len(source_bytes),
+        "source_encoding": "utf-8",
+        "source_revision": revision,
+        "provenance_state": "available",
+        "content_available": True,
+    })
+    return payload
+
+
 def _seed_prd(b: SqliteBackend, *, prd_id: str = "default") -> None:
     b.append(
         _draft(
@@ -202,6 +222,66 @@ def _seed_prd(b: SqliteBackend, *, prd_id: str = "default") -> None:
             target_kind="prd",
             target_id=prd_id,
         )
+    )
+
+
+def _planning_prd_batch(action: str, payload: dict[str, Any]) -> EventDraft:
+    prd_id = str(payload.get("prd_id", "default"))
+    return _draft(
+        "planning.batch_applied",
+        {
+            "schema_version": 1,
+            "prd_id": prd_id,
+            "expected_prd_revision": None,
+            "expected_prd_source_sha256": None,
+            "operations": [
+                {
+                    "action": action,
+                    "target_kind": "prd",
+                    "target_id": prd_id,
+                    "payload_json": payload,
+                }
+            ],
+        },
+        target_kind="prd",
+        target_id=prd_id,
+    )
+
+
+def _planning_graph_batch(
+    feature_id: str,
+    *,
+    ts: datetime,
+    expected_prd_revision: int = 1,
+    expected_prd_source_sha256: str | None = None,
+) -> EventDraft:
+    return _draft(
+        "planning.batch_applied",
+        {
+            "schema_version": 1,
+            "prd_id": "default",
+            "expected_prd_revision": expected_prd_revision,
+            "expected_prd_source_sha256": expected_prd_source_sha256,
+            "operations": [
+                {
+                    "action": "feature.created",
+                    "target_kind": "feature",
+                    "target_id": feature_id,
+                    "payload_json": {
+                        "id": feature_id,
+                        "prd_id": "default",
+                        "title": feature_id,
+                        "description": "",
+                        "status": "proposed",
+                        "requirements": [],
+                        "tasks": [],
+                    },
+                }
+            ],
+        },
+        target_kind="prd",
+        target_id="default",
+        ts=ts,
     )
 
 
@@ -1279,6 +1359,810 @@ class TestGitReplayOrdering:
 
 
 class TestGitPrdLifecycleReplay:
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_graph_descending_from_losing_parse_is_skipped(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-lineage-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        backend.append(
+            _draft(
+                "project.created",
+                {
+                    "id": "proj-1",
+                    "name": "Planning lineage",
+                    "description": "",
+                    "created_at": _T0.isoformat(),
+                    "updated_at": _T0.isoformat(),
+                },
+            )
+        )
+        backend.append(_draft("state.initialized", {}))
+        backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        suffixes: list[list[str]] = []
+        for label, offset in (("A", 1), ("B", 2)):
+            branch = tmp_path / f"planning-lineage-{label}-{reverse_physical_order}"
+            shutil.copytree(base, branch)
+            branch_backend = _make_backend(branch)
+            parsed = branch_backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(title=f"PRD {label}"),
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=offset),
+                )
+            )
+            graph = branch_backend.append(
+                _planning_graph_batch(
+                    f"F-{label}",
+                    ts=_T0 + timedelta(seconds=offset + 10),
+                )
+            )
+            task_payload = _task_payload(f"T-{label}")
+            task_payload["feature_id"] = f"F-{label}"
+            task = branch_backend.append(
+                _draft(
+                    "task.created",
+                    task_payload,
+                    target_kind="task",
+                    target_id=f"T-{label}",
+                    ts=_T0 + timedelta(seconds=offset + 20),
+                )
+            )
+            assert parsed is not None and graph is not None
+            assert graph.parent_event_id == parsed.id
+            assert task is not None and task.parent_event_id == graph.id
+            branch_backend.close()
+            lines = (branch / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            suffixes.append(lines[len(prefix):])
+
+        ordered_suffixes = list(reversed(suffixes)) if reverse_physical_order else suffixes
+        merged = tmp_path / f"planning-lineage-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in ordered_suffixes for line in suffix])
+            + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None and prd.title == "PRD A"
+            assert [feature.id for feature in replay.list_features()] == ["F-A"]
+            assert [task.id for task in replay.list_tasks()] == ["T-A"]
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_graph_binds_exact_sibling_revision_source(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-source-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        suffixes: list[list[str]] = []
+        source_digests: dict[str, str] = {}
+        for label, offset in (("A", 1), ("B", 2)):
+            branch = tmp_path / f"planning-source-{label}-{reverse_physical_order}"
+            shutil.copytree(base, branch)
+            branch_backend = _make_backend(branch)
+            revised_payload = _with_source_binding(
+                _prd_revised_payload(revision=2, title="Same semantic PRD"),
+                f"# Project: Same semantic PRD\n\n## Tasks\n\n### {label}\n",
+                revision=2,
+            )
+            revised = branch_backend.append(
+                _draft(
+                    "prd.revised",
+                    revised_payload,
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=offset),
+                )
+            )
+            graph = branch_backend.append(
+                _planning_graph_batch(
+                    f"F-{label}",
+                    ts=_T0 + timedelta(seconds=offset + 10),
+                    expected_prd_revision=2,
+                    expected_prd_source_sha256=revised_payload["source_sha256"],
+                )
+            )
+            assert revised is not None and graph is not None
+            assert graph.parent_event_id == revised.id
+            source_digests[label] = str(revised_payload["source_sha256"])
+            branch_backend.close()
+            lines = (branch / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            suffixes.append(lines[len(prefix):])
+
+        ordered_suffixes = list(reversed(suffixes)) if reverse_physical_order else suffixes
+        merged = tmp_path / f"planning-source-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in ordered_suffixes for line in suffix])
+            + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None
+            assert prd.source_sha256 == source_digests["A"]
+            assert [feature.id for feature in replay.list_features()] == ["F-A"]
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_graph_sibling_to_later_winning_content_is_skipped(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-later-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        graph_branch = tmp_path / f"planning-later-graph-{reverse_physical_order}"
+        shutil.copytree(base, graph_branch)
+        graph_backend = _make_backend(graph_branch)
+        graph_backend.append(
+            _planning_graph_batch(
+                "F-stale",
+                ts=_T0 + timedelta(seconds=10),
+            )
+        )
+        graph_backend.close()
+
+        revision_branch = tmp_path / f"planning-later-revision-{reverse_physical_order}"
+        shutil.copytree(base, revision_branch)
+        revision_backend = _make_backend(revision_branch)
+        revision_backend.append(
+            _draft(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Winning revision"),
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=20),
+            )
+        )
+        revision_backend.close()
+
+        suffixes = [
+            (graph_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+            (revision_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+        ]
+        if reverse_physical_order:
+            suffixes.reverse()
+        merged = tmp_path / f"planning-later-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in suffixes for line in suffix]) + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None and prd.revision == 2
+            assert replay.list_features() == []
+        finally:
+            replay.close()
+
+    def test_atomic_planning_batch_participates_in_prd_causal_replay(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        backend.append(
+            _draft(
+                "project.created",
+                {
+                    "id": "proj-1",
+                    "name": "Git planning batch",
+                    "description": "",
+                    "created_at": _T0.isoformat(),
+                    "updated_at": _T0.isoformat(),
+                },
+            )
+        )
+        backend.append(_draft("state.initialized", {}))
+        parsed = backend.append(
+            _planning_prd_batch("prd.parsed", _prd_parsed_payload())
+        )
+        assert parsed is not None
+        unrelated = backend.append(
+            _draft(
+                "feature.created",
+                {
+                    "id": "F001",
+                    "prd_id": "default",
+                    "title": "Unrelated tail",
+                    "description": "",
+                    "status": "proposed",
+                    "requirements": [],
+                    "tasks": [],
+                },
+                target_kind="feature",
+                target_id="F001",
+            )
+        )
+        assert unrelated is not None and unrelated.id != parsed.id
+        revised = backend.append(
+            _planning_prd_batch(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Atomic revision"),
+            )
+        )
+        assert revised is not None
+        assert revised.parent_event_id == parsed.id
+        assert backend.get_prd("default").revision == 2  # type: ignore[union-attr]
+        backend.close()
+
+        replay = SqliteBackend(
+            db_path=str(tmp_path / "replayed.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=FrozenClock(_T0),
+            events_storage="git",
+        )
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None
+            assert prd.revision == 2
+            assert prd.title == "Atomic revision"
+        finally:
+            replay.close()
+
+    def test_sequential_graph_remains_live_and_replay_equivalent_until_replan(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _seed_prd(backend)
+            parsed_id = backend._git_prd_content_heads["default"][1]  # noqa: SLF001
+            graph = backend.append(
+                _planning_graph_batch(
+                    "F-old",
+                    ts=_T0 + timedelta(seconds=10),
+                )
+            )
+            assert graph is not None and graph.parent_event_id == parsed_id
+        finally:
+            backend.close()
+
+        reopened = _make_backend(tmp_path)
+        try:
+            revised = reopened.append(
+                _draft(
+                    "prd.revised",
+                    _prd_revised_payload(revision=2, title="Revision 2"),
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=20),
+                )
+            )
+            assert revised is not None
+            assert revised.parent_event_id == graph.id
+            assert [feature.id for feature in reopened.list_features()] == ["F-old"]
+        finally:
+            reopened.close()
+
+        replay = SqliteBackend(
+            db_path=str(tmp_path / "replayed.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=FrozenClock(_T0),
+            events_storage="git",
+        )
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None and prd.revision == 2
+            assert [feature.id for feature in replay.list_features()] == ["F-old"]
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_losing_graph_keeps_independent_descendant_transition(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-independent-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+            backend.append(
+                _draft(
+                    "feature.created",
+                    {
+                        "id": "F-base",
+                        "prd_id": "default",
+                        "title": "Base feature",
+                        "description": "",
+                        "status": "proposed",
+                        "requirements": [],
+                        "tasks": [],
+                    },
+                    target_kind="feature",
+                    target_id="F-base",
+                )
+            )
+            task_payload = _task_payload("T-base")
+            task_payload["feature_id"] = "F-base"
+            backend.append(
+                _draft(
+                    "task.created",
+                    task_payload,
+                    target_kind="task",
+                    target_id="T-base",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        graph_branch = tmp_path / f"planning-independent-graph-{reverse_physical_order}"
+        shutil.copytree(base, graph_branch)
+        graph_backend = _make_backend(graph_branch)
+        graph = graph_backend.append(
+            _planning_graph_batch(
+                "F-losing",
+                ts=_T0 + timedelta(seconds=10),
+            )
+        )
+        status = graph_backend.append(
+            _draft(
+                "task.status_changed",
+                {
+                    "task_id": "T-base",
+                    "from": "proposed",
+                    "to": "drafted",
+                    "reason": "independent transition",
+                },
+                target_kind="task",
+                target_id="T-base",
+                ts=_T0 + timedelta(seconds=11),
+            )
+        )
+        assert graph is not None and status is not None
+        assert status.parent_event_id == graph.id
+        graph_backend.close()
+
+        revision_branch = tmp_path / f"planning-independent-revision-{reverse_physical_order}"
+        shutil.copytree(base, revision_branch)
+        revision_backend = _make_backend(revision_branch)
+        revision_backend.append(
+            _draft(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Winning revision"),
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=20),
+            )
+        )
+        revision_backend.close()
+
+        suffixes = [
+            (graph_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+            (revision_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+        ]
+        if reverse_physical_order:
+            suffixes.reverse()
+        merged = tmp_path / f"planning-independent-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in suffixes for line in suffix]) + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            task = replay.get_task("T-base")
+            assert prd is not None and prd.revision == 2
+            assert task is not None and task.status.value == "drafted"
+            assert replay.get_feature("F-losing") is None
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_losing_graph_quarantines_nested_dependency_batch(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-deps-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+            backend.append(
+                _draft(
+                    "feature.created",
+                    {
+                        "id": "F-base",
+                        "prd_id": "default",
+                        "title": "Base feature",
+                        "description": "",
+                        "status": "proposed",
+                        "requirements": [],
+                        "tasks": [],
+                    },
+                    target_kind="feature",
+                    target_id="F-base",
+                )
+            )
+            task_payload = _task_payload("T-base")
+            task_payload["feature_id"] = "F-base"
+            backend.append(
+                _draft(
+                    "task.created",
+                    task_payload,
+                    target_kind="task",
+                    target_id="T-base",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        graph_branch = tmp_path / f"planning-deps-graph-{reverse_physical_order}"
+        shutil.copytree(base, graph_branch)
+        graph_backend = _make_backend(graph_branch)
+        graph = graph_backend.append(
+            _planning_graph_batch(
+                "F-losing",
+                ts=_T0 + timedelta(seconds=10),
+            )
+        )
+        losing_task_payload = _task_payload("T-losing")
+        losing_task_payload["feature_id"] = "F-losing"
+        losing_task = graph_backend.append(
+            _draft(
+                "task.created",
+                losing_task_payload,
+                target_kind="task",
+                target_id="T-losing",
+                ts=_T0 + timedelta(seconds=11),
+            )
+        )
+        dependency_batch = graph_backend.append(
+            _draft(
+                "task.dependencies_batch_edited",
+                {
+                    "schema_version": 1,
+                    "prd_id": "default",
+                    "edits": [
+                        {
+                            "task_id": "T-base",
+                            "feature_id": "F-base",
+                            "expected_dependencies": [],
+                            "dependencies": ["T-losing"],
+                        }
+                    ],
+                },
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=12),
+            )
+        )
+        assert graph is not None and losing_task is not None
+        assert dependency_batch is not None
+        assert losing_task.parent_event_id == graph.id
+        assert dependency_batch.parent_event_id == losing_task.id
+        graph_backend.close()
+
+        revision_branch = tmp_path / f"planning-deps-revision-{reverse_physical_order}"
+        shutil.copytree(base, revision_branch)
+        revision_backend = _make_backend(revision_branch)
+        revision_backend.append(
+            _draft(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Winning revision"),
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=20),
+            )
+        )
+        revision_backend.close()
+
+        suffixes = [
+            (graph_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+            (revision_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+        ]
+        if reverse_physical_order:
+            suffixes.reverse()
+        merged = tmp_path / f"planning-deps-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in suffixes for line in suffix]) + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            task = replay.get_task("T-base")
+            assert prd is not None and prd.revision == 2
+            assert task is not None and task.dependencies == []
+            assert replay.get_feature("F-losing") is None
+            assert replay.get_task("T-losing") is None
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_losing_graph_ignores_identity_keys_in_opaque_metadata(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-opaque-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+            backend.append(
+                _draft(
+                    "feature.created",
+                    {
+                        "id": "F-base",
+                        "prd_id": "default",
+                        "title": "Base feature",
+                        "description": "",
+                        "status": "proposed",
+                        "requirements": [],
+                        "tasks": [],
+                    },
+                    target_kind="feature",
+                    target_id="F-base",
+                )
+            )
+            task_payload = _task_payload("T-base")
+            task_payload["feature_id"] = "F-base"
+            backend.append(
+                _draft(
+                    "task.created",
+                    task_payload,
+                    target_kind="task",
+                    target_id="T-base",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        graph_branch = tmp_path / f"planning-opaque-graph-{reverse_physical_order}"
+        shutil.copytree(base, graph_branch)
+        graph_backend = _make_backend(graph_branch)
+        graph = graph_backend.append(
+            _planning_graph_batch(
+                "F-losing",
+                ts=_T0 + timedelta(seconds=10),
+            )
+        )
+        mapping = graph_backend.append(
+            _draft(
+                "sync_mapping.upserted",
+                {
+                    "task_id": "T-base",
+                    "external_system": "opaque-provider",
+                    "external_id": "opaque-1",
+                    "external_url": None,
+                    "last_synced_at": (_T0 + timedelta(seconds=11)).isoformat(),
+                    "sync_state": "in_sync",
+                    "conflict_resolution_strategy": "prompt",
+                    "provider_metadata": {
+                        "feature_id": "F-losing",
+                        "note": "provider-owned data is not an Anvil relation",
+                    },
+                    "prd_id": "default",
+                    "entity_kind": "task",
+                },
+                target_kind="task",
+                target_id="T-base",
+                ts=_T0 + timedelta(seconds=11),
+            )
+        )
+        assert graph is not None and mapping is not None
+        assert mapping.parent_event_id == graph.id
+        graph_backend.close()
+
+        revision_branch = tmp_path / f"planning-opaque-revision-{reverse_physical_order}"
+        shutil.copytree(base, revision_branch)
+        revision_backend = _make_backend(revision_branch)
+        revision_backend.append(
+            _draft(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Winning revision"),
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=20),
+            )
+        )
+        revision_backend.close()
+
+        suffixes = [
+            (graph_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+            (revision_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+        ]
+        if reverse_physical_order:
+            suffixes.reverse()
+        merged = tmp_path / f"planning-opaque-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in suffixes for line in suffix]) + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            sync_mapping = replay.get_sync_mapping("T-base")
+            assert prd is not None and prd.revision == 2
+            assert replay.get_feature("F-losing") is None
+            assert sync_mapping is not None
+            assert sync_mapping.external_id == "opaque-1"
+            assert sync_mapping.provider_metadata["feature_id"] == "F-losing"
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_losing_graph_quarantines_expansion_and_feature_task_relations(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-nested-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+            backend.append(
+                _draft(
+                    "feature.created",
+                    {
+                        "id": "F-base",
+                        "prd_id": "default",
+                        "title": "Base feature",
+                        "description": "",
+                        "status": "proposed",
+                        "requirements": [],
+                        "tasks": [],
+                    },
+                    target_kind="feature",
+                    target_id="F-base",
+                )
+            )
+            task_payload = _task_payload("T-base")
+            task_payload["feature_id"] = "F-base"
+            backend.append(
+                _draft(
+                    "task.created",
+                    task_payload,
+                    target_kind="task",
+                    target_id="T-base",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        graph_branch = tmp_path / f"planning-nested-graph-{reverse_physical_order}"
+        shutil.copytree(base, graph_branch)
+        graph_backend = _make_backend(graph_branch)
+        graph = graph_backend.append(
+            _planning_graph_batch(
+                "F-losing",
+                ts=_T0 + timedelta(seconds=10),
+            )
+        )
+        losing_task_payload = _task_payload("T-losing")
+        losing_task_payload["feature_id"] = "F-losing"
+        losing_task = graph_backend.append(
+            _draft(
+                "task.created",
+                losing_task_payload,
+                target_kind="task",
+                target_id="T-losing",
+                ts=_T0 + timedelta(seconds=11),
+            )
+        )
+        related_feature = graph_backend.append(
+            _draft(
+                "feature.created",
+                {
+                    "id": "F-related",
+                    "prd_id": "default",
+                    "title": "References losing task",
+                    "description": "",
+                    "status": "proposed",
+                    "requirements": [],
+                    "tasks": ["T-losing"],
+                },
+                target_kind="feature",
+                target_id="F-related",
+                ts=_T0 + timedelta(seconds=12),
+            )
+        )
+        subtask_payload = _task_payload("T-child")
+        subtask_payload["feature_id"] = "F-base"
+        subtask_payload["dependencies"] = ["T-losing"]
+        expansion = graph_backend.append(
+            _draft(
+                "task.expanded",
+                {
+                    "parent_task_id": "T-base",
+                    "subtasks": [subtask_payload],
+                },
+                target_kind="task",
+                target_id="T-base",
+                ts=_T0 + timedelta(seconds=13),
+            )
+        )
+        child_status = graph_backend.append(
+            _draft(
+                "task.status_changed",
+                {
+                    "task_id": "T-child",
+                    "from": "proposed",
+                    "to": "drafted",
+                    "reason": "descends from skipped expansion",
+                },
+                target_kind="task",
+                target_id="T-child",
+                ts=_T0 + timedelta(seconds=14),
+            )
+        )
+        assert graph is not None and losing_task is not None
+        assert related_feature is not None and expansion is not None
+        assert child_status is not None
+        assert losing_task.parent_event_id == graph.id
+        assert child_status.parent_event_id == expansion.id
+        graph_backend.close()
+
+        revision_branch = tmp_path / f"planning-nested-revision-{reverse_physical_order}"
+        shutil.copytree(base, revision_branch)
+        revision_backend = _make_backend(revision_branch)
+        revision_backend.append(
+            _draft(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Winning revision"),
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=20),
+            )
+        )
+        revision_backend.close()
+
+        suffixes = [
+            (graph_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+            (revision_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+        ]
+        if reverse_physical_order:
+            suffixes.reverse()
+        merged = tmp_path / f"planning-nested-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in suffixes for line in suffix]) + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None and prd.revision == 2
+            assert replay.get_task("T-base") is not None
+            assert replay.get_feature("F-losing") is None
+            assert replay.get_task("T-losing") is None
+            assert replay.get_feature("F-related") is None
+            assert replay.get_task("T-child") is None
+        finally:
+            replay.close()
+
     @pytest.mark.parametrize("reverse_physical_order", [False, True])
     def test_current_orphan_revision_lineage_is_ignored_in_full_and_bounded_replay(
         self, tmp_path: Path, reverse_physical_order: bool
@@ -2382,7 +3266,7 @@ class TestGitPrdLifecycleReplay:
         finally:
             tracemalloc.stop()
             backend.close()
-        assert policy.content_heads["default"] == (1500, parent)
+        assert policy.content_heads["default"] == (1500, parent, None)
         # The rejected transitive-frozenset implementation measured >50 MiB
         # for this 1,500-event chain. Keep ample platform headroom while still
         # catching quadratic retention.
@@ -2446,7 +3330,7 @@ class TestGitPrdLifecycleReplay:
         finally:
             tracemalloc.stop()
             backend.close()
-        assert policy.content_heads["default"] == (5001, parent)
+        assert policy.content_heads["default"] == (5001, parent, None)
         assert peak < 24 * 1024 * 1024
         assert elapsed < 10
 
@@ -3452,7 +4336,7 @@ class TestGitPrdLifecycleReplay:
         finally:
             tracemalloc.stop()
             backend.close()
-        assert policy.content_heads["default"] == (5001, parent)
+        assert policy.content_heads["default"] == (5001, parent, None)
         assert peak < 24 * 1024 * 1024
         assert elapsed < 10
 
@@ -3535,7 +4419,7 @@ class TestGitPrdLifecycleReplay:
             policy = backend._build_git_prd_replay_policy(events)  # noqa: SLF001
         finally:
             backend.close()
-        assert policy.content_heads["default"] == (1201, events[-3].id)
+        assert policy.content_heads["default"] == (1201, events[-3].id, None)
         assert time.perf_counter() - started < 10
 
     def test_cached_prd_head_avoids_full_log_scan_during_append(
@@ -3607,6 +4491,7 @@ class TestGitPrdLifecycleReplay:
             assert reopened._git_prd_content_heads["default"] == (  # noqa: SLF001
                 41,
                 appended.id,
+                None,
             )
             assert reopened.get_prd("default").revision == 41  # type: ignore[union-attr]
         finally:

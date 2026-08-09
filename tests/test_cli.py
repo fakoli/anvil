@@ -381,6 +381,24 @@ class TestInitWithSample:
         """Seeded events.jsonl replays to an identical DB (audit invariant)."""
         assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
         state_dir = tmp_path / ".anvil"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events].count(
+            "planning.batch_applied"
+        ) == 1
+        assert not any(
+            event["action"] in {
+                "prd.parsed",
+                "feature.created",
+                "task.created",
+                "task.status_changed",
+            }
+            for event in events
+        )
         scratch = tmp_path / "scratch.db"
         replay_result = self._run(
             [
@@ -402,6 +420,120 @@ class TestInitWithSample:
                 conn.close()
 
         assert task_rows(state_dir / "state.db") == task_rows(scratch)
+
+    @pytest.mark.parametrize(
+        "failure,message",
+        [
+            ("loader", "Windows path API unavailable (library load failed)"),
+            ("mapping", "Windows path case mapping failed"),
+            ("comparison", "Windows path comparison failed"),
+        ],
+    )
+    def test_init_with_sample_native_path_failure_is_bounded_and_seed_atomic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        message: str,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning.inference import PathIdentityError
+
+        monkeypatch.setattr(
+            inference_module, "_uses_windows_path_identity", lambda: True
+        )
+        def fail_identity(path: Path) -> None:
+            raise PathIdentityError(message)
+
+        monkeypatch.setattr(
+            inference_module,
+            "_windows_existing_path_identity",
+            fail_identity,
+        )
+
+        result = self._run(["init", "--with-sample"], tmp_path)
+
+        assert result.exit_code == 1
+        assert result.output == f"Error: seed planning inference refused: {message}\n"
+        state_dir = tmp_path / ".anvil"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events] == [
+            "project.created",
+            "state.initialized",
+        ]
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM features").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM conflict_groups"
+            ).fetchone() == (0,)
+        finally:
+            connection.close()
+
+    def test_init_with_sample_oversized_path_is_bounded_and_cache_atomic(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from anvil.planning import inference as inference_module
+        from anvil.planning import template as template_module
+
+        oversized = "é" * 2_048 + "a"
+        original_parse = template_module.parse_prd
+
+        def parse_with_oversized_path(*args: object, **kwargs: object) -> object:
+            result = original_parse(*args, **kwargs)
+            result.tasks[0].likely_files.append(oversized)
+            return result
+
+        monkeypatch.setattr(
+            template_module, "parse_prd", parse_with_oversized_path
+        )
+        inference_module._cached_windows_path_key.cache_clear()
+        inference_module._cached_windows_paths_equal.cache_clear()
+        key_before = inference_module._cached_windows_path_key.cache_info()
+        comparison_before = (
+            inference_module._cached_windows_paths_equal.cache_info()
+        )
+
+        result = self._run(["init", "--with-sample"], tmp_path)
+
+        message = (
+            "seed planning inference refused: bundle planning requires "
+            "likely-file paths no longer than 4096 UTF-8 bytes"
+        )
+        assert result.exit_code == 1
+        assert result.output == f"Error: {message}\n"
+        assert len(message) <= 4_096
+        assert message.encode("cp1252")
+        assert inference_module._cached_windows_path_key.cache_info() == key_before
+        assert (
+            inference_module._cached_windows_paths_equal.cache_info()
+            == comparison_before
+        )
+        state_dir = tmp_path / ".anvil"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events] == [
+            "project.created",
+            "state.initialized",
+        ]
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
 
 
 # ---------------------------------------------------------------------------
@@ -3970,6 +4102,84 @@ class TestPlan:
         assert "T001" in list_result.output
         assert "T002" in list_result.output
 
+    def test_plan_inference_persists_one_atomic_canonical_event(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _FULL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        result = _invoke_cmd(tmp_path, ["plan"])
+        assert result.exit_code == 0, result.output
+
+        events = [
+            json.loads(line)
+            for line in (tmp_path / ".anvil" / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        batches = [
+            event for event in events if event["action"] == "planning.batch_applied"
+        ]
+        assert len(batches) == 1
+        operations = batches[0]["payload_json"]["operations"]
+        assert sum(item["action"] == "task.created" for item in operations) == 2
+        assert not any(
+            event["action"] in {
+                "feature.created",
+                "task.created",
+                "task.status_changed",
+            }
+            for event in events
+        )
+
+    def test_plan_atomically_binds_changed_prd_source_and_graph(
+        self, tmp_path: Path
+    ) -> None:
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _FULL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        revised_source = _FULL_PRD_CONTENT.replace(
+            "A full project for complete CLI workflow testing.",
+            "A revised project for exact-source planning.",
+        )
+        _write_prd(tmp_path, revised_source)
+
+        result = _invoke_cmd(tmp_path, ["plan"])
+        assert result.exit_code == 0, result.output
+
+        events = [
+            json.loads(line)
+            for line in (tmp_path / ".anvil" / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        batches = [
+            event for event in events if event["action"] == "planning.batch_applied"
+        ]
+        assert len(batches) == 1
+        payload = batches[0]["payload_json"]
+        assert payload["expected_prd_revision"] is None
+        assert payload["expected_prd_source_sha256"] is None
+        assert payload["operations"][0]["action"] == "prd.revised"
+        revision = payload["operations"][0]["payload_json"]
+        assert revision["revision"] == revision["source_revision"] == 2
+        assert revision["source_sha256"] == hashlib.sha256(
+            (tmp_path / ".anvil" / "prd.md").read_bytes()
+        ).hexdigest()
+        assert not any(event["action"] == "prd.revised" for event in events)
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd = backend.get_prd("default")
+            assert prd is not None
+            assert prd.revision == prd.source_revision == 2
+            assert prd.source_sha256 == revision["source_sha256"]
+            assert {task.id for task in backend.list_tasks()} == {"T001", "T002"}
+        finally:
+            backend.close()
+
     def test_plan_is_idempotent(self, tmp_path: Path) -> None:
         """Running plan twice does not duplicate tasks and does not trip
         ON DELETE RESTRICT foreign keys. Regression test for the bug
@@ -4005,6 +4215,41 @@ class TestPlan:
         # No prd.md file written
         result = _invoke_cmd(tmp_path, ["plan"])
         assert result.exit_code == 1
+
+    def test_plan_inference_injected_second_task_failure_writes_no_partial_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _FULL_PRD_CONTENT)
+        parsed = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert parsed.exit_code == 0, parsed.output
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before = events_path.read_bytes()
+        original = SqliteBackend._write_task_created  # noqa: SLF001
+        task_writes = 0
+
+        def fail_second_task(
+            backend: SqliteBackend, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal task_writes
+            task_writes += 1
+            if task_writes == 2:
+                raise RuntimeError("injected second task failure")
+            original(backend, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(SqliteBackend, "_write_task_created", fail_second_task)
+        result = _invoke_cmd(tmp_path, ["plan", "--json"])
+
+        assert result.exit_code == 1
+        refusal = json.loads(result.output)
+        assert refusal["error"]["code"] == "event_rejected"
+        assert "planning batch refused" in refusal["error"]["message"]
+        assert events_path.read_bytes() == before
+        listed = _invoke_cmd(tmp_path, ["list", "--json"])
+        assert listed.exit_code == 0, listed.output
+        assert json.loads(listed.output)["data"]["tasks"] == []
 
 
 # ---------------------------------------------------------------------------

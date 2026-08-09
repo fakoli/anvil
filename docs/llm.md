@@ -253,10 +253,11 @@ LLM enrichment is layered on top.
 
 ### `anvil plan --use-llm`
 
-Re-parses `prd.md` and emits `feature.created` / `task.created` events as usual. With
-`--use-llm`, short task descriptions (under 50 characters) are extended by the LLM after the
-deterministic parse. The structural fields (id, dependencies, conflict groups, status
-transitions) are never touched by the model.
+Re-parses `prd.md` and builds the same atomic `planning.batch_applied` graph as a
+non-LLM plan. With `--use-llm`, short task descriptions (under 50 characters)
+are extended by the LLM after the deterministic parse. The structural fields
+(id, dependencies, conflict groups, status transitions) are never touched by
+the model.
 
 ```text
 $ anvil plan --use-llm
@@ -477,13 +478,12 @@ augmentation sites widen this guard further: any non-conforming custom provider 
 raises a different exception type is also caught and logged, so the deterministic
 baseline always survives.
 
-**Mid-batch interrupt.** `score --use-llm` and `plan --use-llm` commit per-task events
-inside their own `BEGIN IMMEDIATE` transactions, so a SIGINT (Ctrl-C) after 10 of 50
-tasks leaves 10 task.scored events durably committed and 40 untouched. The committed
-rows reflect whatever the LLM produced at the time (some may have full LLM-augmented
-explanations, some may have deterministic-only if the LLM was already failing). Re-run
-the command without arguments to resume; tasks that already have explanations are
-re-scored idempotently.
+**Mid-batch interrupt.** `score --use-llm` still commits one `task.scored` event per
+task, so a SIGINT (Ctrl-C) after 10 of 50 tasks leaves 10 scores durably committed
+and 40 untouched. Re-run the command without arguments to resume; existing scores
+are updated idempotently. `plan --use-llm` has a different guarantee: it validates
+the complete canonical graph first and commits one `planning.batch_applied` event,
+so interruption or refusal leaves either the complete plan or no graph mutation.
 
 ---
 

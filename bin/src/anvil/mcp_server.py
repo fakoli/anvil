@@ -3212,19 +3212,19 @@ def plan_tasks(
         prd_id: PRD partition to plan (multi-PRD, T019). Mirrors the CLI
             ``plan --prd``: a non-default id reads its portable collection source,
             scopes orphan-prune to that partition, and stamps the partition into
-            every feature/task event. ``None`` / 'default' / 'prd' keep the bare
-            ``.anvil/prd.md`` source + default partition, byte-identical to the
-            pre-multi-PRD behaviour.
+            the one atomic ``planning.batch_applied`` event. ``None`` / 'default' /
+            'prd' keep the bare ``.anvil/prd.md`` source + default partition.
     """
     from anvil.cli._helpers import (
         PrdSourceIngestError,
+        _resolve_project_dir,
         display_path,
         ingest_prd_source_for_id,
         replace_prd_source_for_id,
         selected_prd_source_path,
     )
     from anvil.clock import SystemClock
-    from anvil.planning.inference import infer_all
+    from anvil.planning.inference import BundlePlanningError, infer_all
     from anvil.planning.llm import LLMProviderError
     from anvil.planning.llm_planner import (
         PlannerProviderUnavailable,
@@ -3236,6 +3236,7 @@ def plan_tasks(
     from anvil.state.models import EventDraft
 
     state_dir = _resolve_state_dir(cwd)
+    project_root = _resolve_project_dir(Path(cwd) if cwd else None)
     if not state_dir.exists():
         raise ToolError(
             f"anvil not initialized in {state_dir.parent}. "
@@ -3370,6 +3371,7 @@ def plan_tasks(
 
         from anvil.planning._plan_helpers import has_tasks_section
         current_markdown = current_source.markdown
+        source = current_source
         if not has_tasks_section(current_markdown):
             new_markdown = (
                 current_markdown.rstrip() + "\n\n" + gen_result.markdown + "\n"
@@ -3386,6 +3388,7 @@ def plan_tasks(
                     f"Cannot write generated tasks to {prd_display}: {exc.message}"
                 ) from exc
             markdown = updated_source.markdown
+            source = updated_source
         else:
             markdown = current_markdown
         result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
@@ -3403,7 +3406,7 @@ def plan_tasks(
 
         # Guard: `parse_prd` must have run first so the backend has the PRD row
         # THIS run targets. Without this check, an out-of-order call would emit
-        # feature/task events into a backend with no matching PRD row, leaving
+        # a graph batch into a backend with no matching PRD row, leaving
         # downstream tools (review_prd, apply_review_decision) to fail with
         # "No PRD found" after the state was already mutated. Fail loudly here.
         #
@@ -3411,12 +3414,24 @@ def plan_tasks(
         # a multi-PRD project with only named PRDs (no is_default row) can call
         # plan_tasks(prd_id='v0.2') legitimately, and bare get_prd() would wrongly
         # raise even though v0.2 is a real parsed partition.
-        if backend.get_prd(scope_prd_id) is None:
+        stored_prd = backend.get_prd(scope_prd_id)
+        if stored_prd is None:
             raise ToolError(
                 f"No PRD found in state for '{scope_prd_id}'. Call parse_prd "
-                "before plan_tasks so the PRD row exists before feature and "
-                "task events are emitted."
+                "before plan_tasks so the PRD row exists before the atomic "
+                "planning graph is emitted."
             )
+
+        # Validate and infer the complete parsed task set before any event is
+        # appended. Native path identity failures must surface as ToolError
+        # and leave both the projection and append-only log byte-identical.
+        try:
+            inference_result = infer_all(
+                result.tasks,
+                project_root=project_root,
+            )
+        except BundlePlanningError as exc:
+            raise ToolError(f"Planning inference refused: {exc}") from None
 
         clock = SystemClock()
 
@@ -3435,8 +3450,10 @@ def plan_tasks(
         # was missing the TransactionAborted catch that the MCP had).
         # --------------------------------------------------------------
         from anvil.planning._plan_helpers import (
+            build_prd_revision_draft,
+            build_prune_event_drafts,
             classify_orphans,
-            emit_prune_events,
+            emit_planning_batch,
         )
 
         classification = classify_orphans(
@@ -3462,24 +3479,34 @@ def plan_tasks(
             )
 
         try:
-            prune_result = emit_prune_events(
+            prd_revision_draft = build_prd_revision_draft(
                 backend,
-                classification,
+                result,
+                source,
                 actor="anvil-mcp",
                 clock=clock,
-                prune_force=prune_force,
             )
-        except EventRejected as exc:
-            raise ToolError(str(exc)) from exc
+        except ValueError:
+            raise ToolError(
+                "Planning source could not be bound to the persisted PRD."
+            ) from None
+
+        operations, prune_result = build_prune_event_drafts(
+            classification,
+            actor="anvil-mcp",
+            clock=clock,
+            prune_force=prune_force,
+        )
+        if prd_revision_draft is not None:
+            operations.insert(0, prd_revision_draft)
 
         pruned_task_ids = prune_result.pruned_task_ids
         pruned_feature_ids = prune_result.pruned_feature_ids
 
-        # Emit feature.created per feature.
+        # Build one atomic canonical graph transition.
         for feature in result.features:
             now = clock.now()
-            try:
-                backend.append(EventDraft(
+            operations.append(EventDraft(
                     timestamp=now,
                     actor="anvil-mcp",
                     action="feature.created",
@@ -3489,32 +3516,14 @@ def plan_tasks(
                         feature.model_dump(mode="json"), feature.prd_id
                     ),
                 ))
-            except EventRejected as exc:
-                raise ToolError(str(exc)) from exc
 
-        # Emit task.created per task.
-        for task in result.tasks:
-            now = clock.now()
-            try:
-                backend.append(EventDraft(
-                    timestamp=now,
-                    actor="anvil-mcp",
-                    action="task.created",
-                    target_kind="task",
-                    target_id=task.id,
-                    payload_json=_with_prd_id(
-                        task.model_dump(mode="json"), task.prd_id
-                    ),
-                ))
-            except EventRejected as exc:
-                raise ToolError(str(exc)) from exc
-
-        inference_result = infer_all(result.tasks)
-
+        # Persist only the validated canonical inference result. Previously the
+        # MCP path first appended every raw parsed task and then upserted the
+        # inferred copy. That exposed a transient/raw graph in the event log and
+        # could leave it behind when a later inference append was refused.
         for inferred_task in inference_result.tasks:
             now = clock.now()
-            try:
-                backend.append(EventDraft(
+            operations.append(EventDraft(
                     timestamp=now,
                     actor="anvil-mcp",
                     action="task.created",
@@ -3524,14 +3533,11 @@ def plan_tasks(
                         inferred_task.model_dump(mode="json"), inferred_task.prd_id
                     ),
                 ))
-            except EventRejected as exc:
-                raise ToolError(str(exc)) from exc
 
             current = backend.get_task(inferred_task.id)
-            if current is not None and current.status.value == "proposed":
+            if current is None or current.status.value == "proposed":
                 now = clock.now()
-                try:
-                    backend.append(EventDraft(
+                operations.append(EventDraft(
                         timestamp=now,
                         actor="anvil-mcp",
                         action="task.status_changed",
@@ -3544,8 +3550,6 @@ def plan_tasks(
                             "reason": "plan_tasks: initial draft after inference",
                         },
                     ))
-                except EventRejected as exc:
-                    raise ToolError(str(exc)) from exc
 
         # CL-4 — persist the inferred ConflictGroups so the conflict_groups
         # table round-trips them (parity with `anvil plan`). The task rows
@@ -3553,8 +3557,7 @@ def plan_tasks(
         # table with the full group records.
         for cg in inference_result.conflict_groups:
             now = clock.now()
-            try:
-                backend.append(EventDraft(
+            operations.append(EventDraft(
                     timestamp=now,
                     actor="anvil-mcp",
                     action="conflict_group.upserted",
@@ -3562,8 +3565,19 @@ def plan_tasks(
                     target_id=cg.id,
                     payload_json=cg.model_dump(mode="json"),
                 ))
-            except EventRejected as exc:
-                raise ToolError(str(exc)) from exc
+
+        try:
+            emit_planning_batch(
+                backend,
+                operations,
+                actor="anvil-mcp",
+                clock=clock,
+                prd_id=scope_prd_id,
+                expected_prd_revision=stored_prd.revision,
+                expected_prd_source_sha256=stored_prd.source_sha256,
+            )
+        except EventRejected as exc:
+            raise ToolError(str(exc)) from exc
 
         return PlanTasksResponse(
             feature_count=len(result.features),

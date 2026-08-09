@@ -31,6 +31,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from anvil.state.backend import EventRejected
+
 if TYPE_CHECKING:
     from anvil.state.sqlite import SqliteBackend
 
@@ -165,6 +167,10 @@ class SampleSeedError(RuntimeError):
     ``Error: ...`` line (exit 1) rather than a traceback.
     """
 
+    def __init__(self, message: str, *, code: str = "sample_seed_error") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def write_sample_prd(state_dir: Path) -> Path:
     """Write the embedded sample PRD to ``<state_dir>/prd.md`` and return its path.
@@ -178,7 +184,10 @@ def write_sample_prd(state_dir: Path) -> Path:
 
 
 def seed_sample_pipeline(
-    backend: SqliteBackend, *, actor: str = "anvil-cli"
+    backend: SqliteBackend,
+    *,
+    actor: str = "anvil-cli",
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Drive parse → plan → score → review entirely offline against ``backend``.
 
@@ -202,6 +211,7 @@ def seed_sample_pipeline(
         backend,
         SAMPLE_PRD,
         actor=actor,
+        project_root=project_root,
         parse_error_hint=(
             "This is an anvil packaging bug — please report it."
         ),
@@ -215,6 +225,31 @@ def seed_pipeline_from_prd(
     actor: str = "anvil-cli",
     review_notes: str = "auto-seeded",
     parse_error_hint: str = "Fix the PRD and re-run.",
+    project_root: Path | None = None,
+) -> dict[str, Any]:
+    """Persist the complete deterministic seed pipeline as one atomic event."""
+    try:
+        with backend.collect_planning_batch(actor=actor) as atomic_backend:
+            return _seed_pipeline_from_prd_unbatched(
+                atomic_backend,
+                prd_text,
+                actor=actor,
+                review_notes=review_notes,
+                parse_error_hint=parse_error_hint,
+                project_root=project_root,
+            )
+    except EventRejected as exc:
+        raise SampleSeedError(f"the PRD seed was rejected: {exc}") from None
+
+
+def _seed_pipeline_from_prd_unbatched(
+    backend: SqliteBackend,
+    prd_text: str,
+    *,
+    actor: str = "anvil-cli",
+    review_notes: str = "auto-seeded",
+    parse_error_hint: str = "Fix the PRD and re-run.",
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Drive parse → plan → score → review offline for an *arbitrary* PRD text.
 
@@ -231,7 +266,7 @@ def seed_pipeline_from_prd(
     to parse.
     """
     from anvil.clock import SystemClock
-    from anvil.planning.inference import infer_all
+    from anvil.planning.inference import BundlePlanningError, infer_all
     from anvil.planning.scoring import score_task
     from anvil.planning.template import parse_prd
     from anvil.state.models import EventDraft
@@ -253,6 +288,19 @@ def seed_pipeline_from_prd(
             f"({len(parsed.errors)} error(s)): {detail}. "
             + parse_error_hint
         )
+
+    # Path identity is the only host-sensitive part of seeding.  Complete it
+    # before the first PRD/feature/task event append so loader, mapping,
+    # comparison, and collision-limit failures leave canonical state exactly
+    # unchanged.  The bounded seed error is shared by sample, scan, and
+    # init-from-repo callers instead of leaking a native exception.
+    try:
+        inference_result = infer_all(parsed.tasks, project_root=project_root)
+    except BundlePlanningError as exc:
+        raise SampleSeedError(
+            f"seed planning inference refused: {exc}",
+            code="path_identity_error",
+        ) from None
 
     project_id = backend.get_project().id  # type: ignore[union-attr]
 
@@ -338,8 +386,6 @@ def seed_pipeline_from_prd(
                 if item.id not in new_by_id
             ],
         }
-    from anvil.state.backend import EventRejected
-
     try:
         backend.append(
             EventDraft(
@@ -409,20 +455,6 @@ def seed_pipeline_from_prd(
             )
         )
 
-    for task in parsed.tasks:
-        now = clock.now()
-        backend.append(
-            EventDraft(
-                timestamp=now,
-                actor=actor,
-                action="task.created",
-                target_kind="task",
-                target_id=task.id,
-                payload_json=task.model_dump(mode="json"),
-            )
-        )
-
-    inference_result = infer_all(parsed.tasks)
     for inferred in inference_result.tasks:
         now = clock.now()
         backend.append(

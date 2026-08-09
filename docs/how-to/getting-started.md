@@ -278,7 +278,13 @@ anvil apply T001 --approve
 
 ## What just happened?
 
-`state.db` now records `T001=done` and the claim released. `events.jsonl` has the full audit trail: `project.created`, `state.initialized`, `prd.parsed`, `prd.reviewed`, `prd.approved`, `feature.created`, `task.created`, `task.scored`, `task.status_changed` × N, `claim.created`, `evidence.submitted`, `task.applied`. Replaying that log from an empty database reconstructs `state.db` byte-for-byte — the audit guarantee that makes `.anvil/` safe to back up by copy.
+`state.db` now records `T001=done` and the claim released. `events.jsonl` has
+the full audit trail: `project.created`, `state.initialized`, `prd.parsed`,
+`prd.reviewed`, `prd.approved`, one `planning.batch_applied` event containing
+the ordered feature/task/status/conflict graph, followed by scoring, task
+review, claim, evidence, and apply events. Replaying that log from an empty
+database reconstructs `state.db` byte-for-byte — the audit guarantee that
+makes `.anvil/` safe to back up by copy.
 
 `anvil status` sums it up, including the `Path:` line pointing at the workspace and a per-bucket task breakdown:
 
