@@ -7635,6 +7635,7 @@ class TestReviewTasks:
     ) -> None:
         """A drafted task with no acceptance criteria must block, not crash."""
         state_dir = _init_state_dir(tmp_path)
+        _add_prd(state_dir)
         _add_feature(state_dir)
         # Drop a drafted task and manually clear its acceptance_criteria
         # so the gate fails.
