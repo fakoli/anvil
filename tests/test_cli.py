@@ -3571,12 +3571,27 @@ class TestSinglePrdBackcompat:
             == {"T001", "T002"}
         )
 
-        # `next` is a single-pick, so its output IS byte-identical across the two
-        # paths: the highest-priority claimable task is the same either way.
+        # `next` is a single-pick, so the selected task and governor calculation
+        # are identical across the two paths. Each invocation truthfully reports
+        # its own observation time, so normalize only that timestamp pair.
         next_bare = json.loads(_invoke_cmd(tmp_path, ["next", "--json"]).output)
         next_def = json.loads(
             _invoke_cmd(tmp_path, ["next", "--json", "--prd", "default"]).output
         )
+        observed: list[datetime] = []
+        for response in (next_bare, next_def):
+            governor = response["data"]["governor"]
+            as_of = datetime.fromisoformat(governor["as_of"].replace("Z", "+00:00"))
+            window_start = datetime.fromisoformat(
+                governor["window_start"].replace("Z", "+00:00")
+            )
+            assert (as_of - window_start).total_seconds() == (
+                governor["window_days"] * 86_400
+            )
+            observed.append(as_of)
+            governor["as_of"] = "<observed>"
+            governor["window_start"] = "<window-start>"
+        assert observed[0] <= observed[1]
         assert next_bare == next_def
         assert next_bare["data"]["task"]["id"] == "T001"
 
