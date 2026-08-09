@@ -663,7 +663,7 @@ class TestWorkspaceLayoutGitOps:
         original_ref = _default_branch(project)
         original_sha = _git(project, "rev-parse", "HEAD")
 
-        def refuse(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
+        def refuse(_plan, *, cwd=None, tracker=None):  # type: ignore[no-untyped-def]
             raise ClaimPlanError("injected_git_failure", "injected Git failure")
 
         monkeypatch.setattr(git_ops, "apply_claim_plan", refuse)
@@ -703,8 +703,8 @@ class TestWorkspaceLayoutGitOps:
 
         real_apply = git_ops.apply_claim_plan
 
-        def cancel(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
-            real_apply(_plan, cwd=cwd)
+        def cancel(_plan, *, cwd=None, tracker=None):  # type: ignore[no-untyped-def]
+            real_apply(_plan, cwd=cwd, tracker=tracker)
             raise KeyboardInterrupt
 
         monkeypatch.setattr(git_ops, "apply_claim_plan", cancel)
@@ -798,7 +798,7 @@ class TestWorkspaceLayoutGitOps:
         assert created.exit_code == 0, created.output
         plan = resolve_claim_plan("B001", "Bundle B001", cwd=project)
 
-        def refuse(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
+        def refuse(_plan, *, cwd=None, tracker=None):  # type: ignore[no-untyped-def]
             raise ClaimPlanError("injected_git_failure", "injected Git failure")
 
         monkeypatch.setattr(git_ops, "apply_claim_plan", refuse)
@@ -847,8 +847,8 @@ class TestWorkspaceLayoutGitOps:
 
         real_apply = git_ops.apply_claim_plan
 
-        def cancel(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
-            real_apply(_plan, cwd=cwd)
+        def cancel(_plan, *, cwd=None, tracker=None):  # type: ignore[no-untyped-def]
+            real_apply(_plan, cwd=cwd, tracker=tracker)
             raise KeyboardInterrupt
 
         monkeypatch.setattr(git_ops, "apply_claim_plan", cancel)
@@ -1053,6 +1053,19 @@ class TestResolveClaimPlan:
         finally:
             compensate_claim_plan(mutation, cwd=project)
 
+        linked = tmp_path / "linked"
+        _git(project, "worktree", "add", "-b", "linked-separate", str(linked), "HEAD")
+        assert canonical_git_root(linked) == metadata.resolve()
+        linked_plan = resolve_claim_plan(
+            "T004B", "Linked separate gitdir", cwd=linked, worktree=True
+        )
+        assert linked_plan.canonical_root == str(metadata.resolve())
+        linked_mutation = apply_claim_plan(linked_plan, cwd=linked)
+        try:
+            assert linked_mutation.worktree_created is True
+        finally:
+            compensate_claim_plan(linked_mutation, cwd=linked)
+
     def test_git_observation_refuses_output_over_internal_cap(
         self,
         git_repo: Path,
@@ -1075,8 +1088,10 @@ class TestResolveClaimPlan:
         plan = resolve_claim_plan("T005", "Interrupt", cwd=git_repo, worktree=True)
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
-        def interrupt_after(args, cwd, *, code):  # type: ignore[no-untyped-def]
-            mutate(args, cwd, code=code)
+        def interrupt_after(  # type: ignore[no-untyped-def]
+            args, cwd, *, code, on_success=None
+        ):
+            mutate(args, cwd, code=code, on_success=on_success)
             if args[:2] == ["worktree", "add"]:
                 raise KeyboardInterrupt
 
@@ -1407,6 +1422,71 @@ class TestResolveClaimPlan:
 
 @pytest.mark.slow
 class TestApplyClaimPlan:
+    def test_external_branch_winner_is_never_compensated(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = resolve_claim_plan("T011A", "External branch", cwd=git_repo)
+        mutate = worktree_mod._mutate_git  # noqa: SLF001
+
+        def external_wins(  # type: ignore[no-untyped-def]
+            args, cwd, *, code, on_success=None
+        ):
+            if args[0] == "update-ref" and args[1].startswith("refs/heads/"):
+                _git(cwd, "update-ref", args[1], args[2], args[3])
+            mutate(args, cwd, code=code, on_success=on_success)
+
+        monkeypatch.setattr(worktree_mod, "_mutate_git", external_wins)
+        with pytest.raises(ClaimPlanError) as exc:
+            apply_claim_plan(plan, cwd=git_repo)
+
+        assert exc.value.code == "branch_create_failed"
+        assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+
+    def test_external_worktree_winner_is_never_compensated(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = resolve_claim_plan(
+            "T011B", "External worktree", cwd=git_repo, worktree=True
+        )
+        mutate = worktree_mod._mutate_git  # noqa: SLF001
+
+        def external_wins(  # type: ignore[no-untyped-def]
+            args, cwd, *, code, on_success=None
+        ):
+            if args[:2] == ["worktree", "add"]:
+                _git(cwd, *args)
+            mutate(args, cwd, code=code, on_success=on_success)
+
+        monkeypatch.setattr(worktree_mod, "_mutate_git", external_wins)
+        with pytest.raises(ClaimPlanError) as exc:
+            apply_claim_plan(plan, cwd=git_repo)
+
+        assert exc.value.code == "worktree_create_failed"
+        assert plan.target_path is not None and Path(plan.target_path).is_dir()
+        assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+
+    def test_external_checkout_winner_is_never_compensated(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = resolve_claim_plan("T011C", "External checkout", cwd=git_repo)
+        mutate = worktree_mod._mutate_git  # noqa: SLF001
+
+        def external_wins(  # type: ignore[no-untyped-def]
+            args, cwd, *, code, on_success=None
+        ):
+            if args[:2] == ["checkout", "--no-guess"]:
+                _git(cwd, *args)
+                raise ClaimPlanError(code, "external checkout won")
+            mutate(args, cwd, code=code, on_success=on_success)
+
+        monkeypatch.setattr(worktree_mod, "_mutate_git", external_wins)
+        with pytest.raises(ClaimPlanError) as exc:
+            apply_claim_plan(plan, cwd=git_repo)
+
+        assert exc.value.code == "branch_checkout_failed"
+        assert _default_branch(git_repo) == plan.branch
+        assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+
     def test_isolated_apply_preserves_caller_and_compensates_owned_artifacts(
         self, git_repo: Path
     ) -> None:

@@ -14,7 +14,9 @@ import os
 import shutil
 import stat
 import subprocess
-import threading
+import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -31,12 +33,12 @@ from anvil.naming import safe_path_component
 from anvil.state.models import ClaimGitMetadata
 
 _MAX_GIT_OBSERVATION_BYTES = 8 * 1024 * 1024
-_GIT_OBSERVATION_CHUNK_BYTES = 64 * 1024
-_GIT_PIPE_DRAIN_SECONDS = 0.25
+_GIT_OBSERVATION_POLL_SECONDS = 0.01
 
 __all__ = [
     "ClaimGitPlan",
     "ClaimGitMutation",
+    "ClaimGitMutationTracker",
     "ClaimPlanError",
     "ClaimPlanPrecondition",
     "GitWorktree",
@@ -45,7 +47,7 @@ __all__ = [
     "canonical_git_root",
     "claim_git_metadata",
     "compensate_claim_plan",
-    "compensate_claim_plan_intent",
+    "compensate_claim_plan_tracker",
     "create_worktree_for_task",
     "resolve_claim_plan",
     "revalidate_claim_plan",
@@ -143,6 +145,16 @@ class ClaimGitMutation:
     caller_checkout_changed: bool
 
 
+@dataclass
+class ClaimGitMutationTracker:
+    """Positive ownership evidence updated only after a Git mutation succeeds."""
+
+    plan: ClaimGitPlan
+    branch_created: bool = False
+    worktree_created: bool = False
+    caller_checkout_changed: bool = False
+
+
 def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
     """Run a read-only Git probe with bounded stdout and stderr capture."""
     env = os.environ.copy()
@@ -151,79 +163,42 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | N
     command = ["git", *args]
     process: subprocess.Popen[bytes] | None = None
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
-        if process.stdout is None or process.stderr is None:  # pragma: no cover
-            process.kill()
-            process.wait()
-            return None
-
-        stdout = bytearray()
-        stderr = bytearray()
-        total = [0]
-        guard = threading.Lock()
-        overflow = threading.Event()
-        read_failed = threading.Event()
-
-        def drain(stream: object, sink: bytearray) -> None:
-            try:
-                while True:
-                    chunk = stream.read(_GIT_OBSERVATION_CHUNK_BYTES)  # type: ignore[attr-defined]
-                    if not chunk:
-                        return
-                    with guard:
-                        remaining = _MAX_GIT_OBSERVATION_BYTES - total[0]
-                        if remaining > 0:
-                            sink.extend(chunk[:remaining])
-                        total[0] += len(chunk)
-                        if total[0] > _MAX_GIT_OBSERVATION_BYTES:
-                            overflow.set()
-                            try:
-                                process.kill()
-                            except OSError:
-                                pass
-            except OSError:
-                read_failed.set()
-                try:
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                command,
+                cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=env,
+            )
+            deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+            while process.poll() is None:
+                total = os.fstat(stdout_file.fileno()).st_size + os.fstat(
+                    stderr_file.fileno()
+                ).st_size
+                if total > _MAX_GIT_OBSERVATION_BYTES or time.monotonic() >= deadline:
                     process.kill()
-                except OSError:
-                    pass
-
-        readers = [
-            threading.Thread(target=drain, args=(process.stdout, stdout), daemon=True),
-            threading.Thread(target=drain, args=(process.stderr, stderr), daemon=True),
-        ]
-        for reader in readers:
-            reader.start()
-
-        timed_out = False
-        try:
-            process.wait(timeout=_GIT_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            process.kill()
-            process.wait()
-        for reader in readers:
-            reader.join(timeout=_GIT_PIPE_DRAIN_SECONDS)
-        if (
-            timed_out
-            or overflow.is_set()
-            or read_failed.is_set()
-            or any(reader.is_alive() for reader in readers)
-        ):
-            return None
-        return subprocess.CompletedProcess(
-            command,
-            process.returncode,
-            stdout.decode("utf-8", errors="strict"),
-            stderr.decode("utf-8", errors="strict"),
-        )
+                    process.wait()
+                    return None
+                time.sleep(_GIT_OBSERVATION_POLL_SECONDS)
+            total = os.fstat(stdout_file.fileno()).st_size + os.fstat(
+                stderr_file.fileno()
+            ).st_size
+            if total > _MAX_GIT_OBSERVATION_BYTES:
+                return None
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read(_MAX_GIT_OBSERVATION_BYTES + 1)
+            stderr = stderr_file.read(_MAX_GIT_OBSERVATION_BYTES + 1)
+            if len(stdout) + len(stderr) > _MAX_GIT_OBSERVATION_BYTES:
+                return None
+            return subprocess.CompletedProcess(
+                command,
+                process.returncode,
+                stdout.decode("utf-8", errors="strict"),
+                stderr.decode("utf-8", errors="strict"),
+            )
     except (OSError, UnicodeError):
         if process is not None and process.poll() is None:
             process.kill()
@@ -317,6 +292,12 @@ def canonical_git_root(cwd: Path) -> Path | None:
         ).resolve(strict=False)
         if configured.is_dir():
             return configured
+    # ``git init --separate-git-dir`` does not persist the main checkout path.
+    # From a linked worktree Git reports the common metadata directory as the
+    # first topology entry, so use that stable coordination root rather than
+    # inventing or searching for an unrecorded checkout path.
+    if _path_key(common_dir) in registered:
+        return common_dir
     return None
 
 
@@ -969,8 +950,16 @@ def revalidate_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> Non
             )
 
 
-def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGitMutation:
+def apply_claim_plan(
+    plan: ClaimGitPlan,
+    *,
+    cwd: Path | None = None,
+    tracker: ClaimGitMutationTracker | None = None,
+) -> ClaimGitMutation:
     """Apply one revalidated plan and roll back only artifacts created here."""
+    ownership = tracker or ClaimGitMutationTracker(plan)
+    if ownership.plan != plan:
+        raise ClaimPlanError("claim_plan_mismatch", "Mutation tracker has another plan")
     if not plan.git_metadata_available:
         return ClaimGitMutation(plan, False, False, False)
     root = Path(cwd or plan.caller_path)
@@ -978,16 +967,13 @@ def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGit
     if plan.branch is None or plan.claim_start_sha is None:
         raise ClaimPlanError("claim_plan_incomplete", "Git claim plan is incomplete")
     branch_ref = f"refs/heads/{plan.branch}"
-    branch_created = False
-    worktree_created = False
-    checkout_changed = False
     try:
         if not plan.branch_exists:
-            branch_created = True
             _mutate_git(
                 ["update-ref", branch_ref, plan.claim_start_sha, ""],
                 root,
                 code="branch_create_failed",
+                on_success=lambda: setattr(ownership, "branch_created", True),
             )
         if _ref_oid(branch_ref, root) != plan.claim_start_sha:
             raise ClaimPlanError(
@@ -1002,11 +988,13 @@ def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGit
                 code="caller_head_unavailable",
             )
             if current_ref != branch_ref or current_sha != plan.claim_start_sha:
-                checkout_changed = True
                 _mutate_git(
                     ["checkout", "--no-guess", plan.branch],
                     root,
                     code="branch_checkout_failed",
+                    on_success=lambda: setattr(
+                        ownership, "caller_checkout_changed", True
+                    ),
                 )
         elif plan.mode == "isolated":
             if plan.canonical_root is None or plan.target_path is None:
@@ -1023,11 +1011,11 @@ def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGit
                     raise ClaimPlanError(
                         "target_path_occupied", "Claim worktree target is occupied"
                     )
-                worktree_created = True
                 _mutate_git(
                     ["worktree", "add", "--no-guess", str(target), plan.branch],
                     root,
                     code="worktree_create_failed",
+                    on_success=lambda: setattr(ownership, "worktree_created", True),
                 )
             _validate_isolated_target(Path(plan.canonical_root), target, must_exist=True)
             owner = next(
@@ -1049,21 +1037,15 @@ def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGit
                 )
         mutation = ClaimGitMutation(
             plan=plan,
-            branch_created=branch_created,
-            worktree_created=worktree_created,
-            caller_checkout_changed=checkout_changed,
+            branch_created=ownership.branch_created,
+            worktree_created=ownership.worktree_created,
+            caller_checkout_changed=ownership.caller_checkout_changed,
         )
         if _ref_oid(branch_ref, root) != plan.claim_start_sha:
             raise ClaimPlanError("branch_moved", "Claim branch moved during mutation")
         return mutation
     except BaseException:
-        _compensate_values(
-            plan,
-            branch_created=branch_created,
-            worktree_created=worktree_created,
-            caller_checkout_changed=checkout_changed,
-            cwd=root,
-        )
+        compensate_claim_plan_tracker(ownership, cwd=root)
         raise
 
 
@@ -1082,68 +1064,26 @@ def compensate_claim_plan(
     )
 
 
-def compensate_claim_plan_intent(
-    plan: ClaimGitPlan,
+def compensate_claim_plan_tracker(
+    tracker: ClaimGitMutationTracker,
     *,
     cwd: Path | None = None,
 ) -> None:
-    """Compensate exact plan-owned artifacts when no mutation result was returned."""
+    """Compensate only mutations positively recorded by this invocation."""
+    plan = tracker.plan
     if not plan.git_metadata_available or plan.branch is None:
         return
     root = Path(cwd or plan.caller_path)
-    branch_ref = f"refs/heads/{plan.branch}"
-    branch_created = (
-        not plan.branch_exists
-        and plan.claim_start_sha is not None
-        and _ref_oid(branch_ref, root) == plan.claim_start_sha
-    )
-    topology = _normalize_topology_root(
-        _worktree_topology(root),
-        canonical_root=(
-            Path(plan.canonical_root) if plan.canonical_root is not None else None
-        ),
-        common_dir=(
-            Path(plan.git_common_dir) if plan.git_common_dir is not None else None
-        ),
-    )
-    target_owner = next(
-        (
-            item
-            for item in topology
-            if plan.target_path is not None
-            and _path_key(item.path) == _path_key(plan.target_path)
-        ),
-        None,
-    )
-    worktree_created = (
-        plan.mode == "isolated"
-        and plan.target_owner_branch is None
-        and target_owner is not None
-        and target_owner.branch_ref == branch_ref
-        and target_owner.head_sha == plan.claim_start_sha
-    )
-    current_ref = _symbolic_head(Path(plan.caller_worktree_path or root))
-    current_sha = _git_value(
-        ["rev-parse", "--verify", "HEAD^{commit}"],
-        Path(plan.caller_worktree_path or root),
-        code="caller_head_unavailable",
-    )
-    checkout_changed = (
-        plan.mode == "shared"
-        and current_ref == branch_ref
-        and current_sha == plan.claim_start_sha
-        and (
-            plan.caller_head_ref != current_ref
-            or plan.caller_head_sha != current_sha
-        )
-    )
     _compensate_values(
         plan,
-        branch_created=branch_created,
-        worktree_created=worktree_created,
-        caller_checkout_changed=checkout_changed,
+        branch_created=tracker.branch_created,
+        worktree_created=tracker.worktree_created,
+        caller_checkout_changed=tracker.caller_checkout_changed,
         cwd=root,
     )
+    tracker.branch_created = False
+    tracker.worktree_created = False
+    tracker.caller_checkout_changed = False
 
 
 def _compensate_values(
@@ -1192,11 +1132,16 @@ def _compensate_values(
                 code="checkout_compensation_failed",
             )
     if branch_created and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
-        _mutate_git(
-            ["update-ref", "-d", branch_ref, plan.claim_start_sha],
-            cwd,
-            code="branch_compensation_failed",
+        branch_owner = next(
+            (item for item in _worktree_topology(cwd) if item.branch_ref == branch_ref),
+            None,
         )
+        if branch_owner is None:
+            _mutate_git(
+                ["update-ref", "-d", branch_ref, plan.claim_start_sha],
+                cwd,
+                code="branch_compensation_failed",
+            )
 
 
 def _working_tree_dirty(
@@ -1233,7 +1178,13 @@ def _symbolic_head(cwd: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _mutate_git(args: list[str], cwd: Path, *, code: str) -> None:
+def _mutate_git(
+    args: list[str],
+    cwd: Path,
+    *,
+    code: str,
+    on_success: Callable[[], None] | None = None,
+) -> None:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
@@ -1250,6 +1201,8 @@ def _mutate_git(args: list[str], cwd: Path, *, code: str) -> None:
         raise ClaimPlanError(code, "Git mutation timed out or is unavailable") from exc
     if result.returncode != 0:
         raise ClaimPlanError(code, "Git mutation failed")
+    if on_success is not None:
+        on_success()
 
 
 def _validate_isolated_target(

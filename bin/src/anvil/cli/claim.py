@@ -143,10 +143,11 @@ def claim(
     from anvil.claims.manager import ClaimError, ClaimManager, ConflictWarning
     from anvil.clock import SystemClock
     from anvil.git_ops import (
+        ClaimGitMutationTracker,
         ClaimPlanError,
         apply_claim_plan,
         claim_git_metadata,
-        compensate_claim_plan_intent,
+        compensate_claim_plan_tracker,
         resolve_claim_plan,
         revalidate_claim_plan,
     )
@@ -247,6 +248,7 @@ def claim(
                     ignored_worktree_paths=(state_dir,),
                 )
                 metadata = claim_git_metadata(plan)
+                mutation_tracker = ClaimGitMutationTracker(plan)
             except ClaimPlanError as exc:
                 if json_output:
                     fail("claim", str(exc), code=exc.code)
@@ -264,7 +266,9 @@ def claim(
                         git_metadata=metadata,
                     )
                     try:
-                        apply_claim_plan(plan, cwd=resolved_cwd)
+                        apply_claim_plan(
+                            plan, cwd=resolved_cwd, tracker=mutation_tracker
+                        )
                     except BaseException:
                         try:
                             bundle_manager.release(
@@ -272,7 +276,9 @@ def claim(
                                 reason="transactional Git claim failed",
                             )
                         finally:
-                            compensate_claim_plan_intent(plan, cwd=resolved_cwd)
+                            compensate_claim_plan_tracker(
+                                mutation_tracker, cwd=resolved_cwd
+                            )
                         raise
             except ClaimPlanError as exc:
                 if json_output:
@@ -485,6 +491,7 @@ def claim(
                 ignored_worktree_paths=(state_dir,),
             )
             metadata = claim_git_metadata(plan)
+            mutation_tracker = ClaimGitMutationTracker(plan)
         except ClaimPlanError as exc:
             if json_output:
                 fail("claim", str(exc), code=exc.code)
@@ -506,7 +513,7 @@ def claim(
                     operation_locked=True,
                 )
                 try:
-                    apply_claim_plan(plan, cwd=resolved_cwd)
+                    apply_claim_plan(plan, cwd=resolved_cwd, tracker=mutation_tracker)
                 except BaseException:
                     try:
                         manager.release(
@@ -514,7 +521,9 @@ def claim(
                             reason="transactional Git claim failed",
                         )
                     finally:
-                        compensate_claim_plan_intent(plan, cwd=resolved_cwd)
+                        compensate_claim_plan_tracker(
+                            mutation_tracker, cwd=resolved_cwd
+                        )
                     raise
         except ClaimPlanError as exc:
             if json_output:

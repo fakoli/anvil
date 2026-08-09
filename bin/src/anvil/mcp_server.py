@@ -1321,10 +1321,11 @@ def claim_task(
         from anvil.claims.manager import ClaimError, ClaimManager
         from anvil.clock import SystemClock
         from anvil.git_ops import (
+            ClaimGitMutationTracker,
             ClaimPlanError,
             apply_claim_plan,
             claim_git_metadata,
-            compensate_claim_plan_intent,
+            compensate_claim_plan_tracker,
             resolve_claim_plan,
             revalidate_claim_plan,
         )
@@ -1394,6 +1395,7 @@ def claim_task(
                 ignored_worktree_paths=(state_dir,),
             )
             metadata = claim_git_metadata(plan)
+            mutation_tracker = ClaimGitMutationTracker(plan)
             with backend.claim_operation_lock():
                 revalidate_claim_plan(plan, cwd=project_dir)
                 result = manager.claim(
@@ -1407,7 +1409,7 @@ def claim_task(
                     operation_locked=True,
                 )
                 try:
-                    apply_claim_plan(plan, cwd=project_dir)
+                    apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
                 except BaseException:
                     try:
                         manager.release(
@@ -1415,7 +1417,9 @@ def claim_task(
                             reason="transactional Git claim failed",
                         )
                     finally:
-                        compensate_claim_plan_intent(plan, cwd=project_dir)
+                        compensate_claim_plan_tracker(
+                            mutation_tracker, cwd=project_dir
+                        )
                     raise
         except ClaimPlanError as exc:
             raise ToolError(f"{exc.code}: {exc}") from exc
@@ -4671,10 +4675,11 @@ def claim_bundle(
     from anvil.bundles.manager import BundleError
     from anvil.cli._helpers import _resolve_project_dir
     from anvil.git_ops import (
+        ClaimGitMutationTracker,
         ClaimPlanError,
         apply_claim_plan,
         claim_git_metadata,
-        compensate_claim_plan_intent,
+        compensate_claim_plan_tracker,
         resolve_claim_plan,
         revalidate_claim_plan,
     )
@@ -4723,6 +4728,7 @@ def claim_bundle(
                 ignored_worktree_paths=(state_dir,),
             )
             metadata = claim_git_metadata(plan)
+            mutation_tracker = ClaimGitMutationTracker(plan)
             with backend.claim_operation_lock():
                 revalidate_claim_plan(plan, cwd=project_dir)
                 result = manager.claim(
@@ -4734,7 +4740,7 @@ def claim_bundle(
                     git_metadata=metadata,
                 )
                 try:
-                    apply_claim_plan(plan, cwd=project_dir)
+                    apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
                 except BaseException:
                     try:
                         manager.release(
@@ -4742,7 +4748,9 @@ def claim_bundle(
                             reason="transactional Git claim failed",
                         )
                     finally:
-                        compensate_claim_plan_intent(plan, cwd=project_dir)
+                        compensate_claim_plan_tracker(
+                            mutation_tracker, cwd=project_dir
+                        )
                     raise
         except ClaimPlanError as exc:
             raise ToolError(f"bundle_error: {exc.code}: {exc}") from exc
