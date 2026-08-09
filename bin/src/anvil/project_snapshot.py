@@ -43,6 +43,13 @@ from anvil.state.sqlite import query_only_transaction
 
 EVENT_FRONTIER_DOMAIN_V1 = b"anvil.project-event-frontier.v1\0"
 _MAX_EVENT_RECORD_BYTES = PROVIDER_LIMITS_V1.max_snapshot_bytes
+_MIN_TASK_RECORD_CANONICAL_BYTES = 245
+_SUMMARY_CANONICAL_BYTES = {
+    "commands": 55,
+    "manual_steps": 56,
+    "required_evidence": 66,
+    "typed_proof": 55,
+}
 
 
 class ProjectSnapshotError(RuntimeError):
@@ -223,7 +230,7 @@ def _project_payload(
     dependency_edges = 0
     for row in conn.execute(
         "SELECT id, feature_id, prd_id, title, status, priority, "
-        "dependencies, acceptance_criteria, verification, parent_task_id "
+        "json(verification) AS verification, parent_task_id "
         "FROM tasks ORDER BY id"
     ):
         stored_id = _required_string(row["id"])
@@ -234,7 +241,7 @@ def _project_payload(
             _refuse(ReadErrorCode.missing_target, field="features")
         if feature_ref.prd_id != ref.prd_id:
             _refuse(ReadErrorCode.invalid_hierarchy, field="features")
-        dependency_ids = _json_string_list(row["dependencies"])
+        dependency_ids = _json_string_list_for_task(conn, stored_id, "dependencies")
         if len(dependency_ids) > limits.max_dependencies_per_task:
             _limit(
                 ProviderLimitNameV1.max_dependencies_per_task,
@@ -259,7 +266,9 @@ def _project_payload(
                 _refuse(ReadErrorCode.duplicate_edge, field="dependencies")
             dependencies.append(target)
 
-        acceptance = _json_string_list(row["acceptance_criteria"])
+        acceptance = _json_string_list_for_task(
+            conn, stored_id, "acceptance_criteria"
+        )
         if len(acceptance) > limits.max_acceptance_criteria_per_task:
             _limit(
                 ProviderLimitNameV1.max_acceptance_criteria_per_task,
@@ -745,29 +754,10 @@ def _preflight_storage_limits(
         )
 
     raw_json_row = conn.execute(
-        "SELECT COALESCE(MAX(MAX(length(CAST(dependencies AS BLOB)), "
-        "length(CAST(acceptance_criteria AS BLOB)))), 0), "
-        "COALESCE(MAX(length(CAST(verification AS BLOB))), 0), "
-        "COALESCE(SUM(length(CAST(dependencies AS BLOB)) + "
-        "length(CAST(acceptance_criteria AS BLOB))), 0) FROM tasks"
+        "SELECT COALESCE(MAX(length(CAST(json(verification) AS BLOB))), 0) FROM tasks"
     ).fetchone()
-    visible_json_actual = int(raw_json_row[0])
-    if visible_json_actual > limits.max_snapshot_bytes:
-        _limit(
-            ProviderLimitNameV1.max_snapshot_bytes,
-            visible_json_actual,
-            limits.max_snapshot_bytes,
-        )
-    if int(raw_json_row[1]) > PROVIDER_LIMITS_V1.max_snapshot_bytes:
+    if int(raw_json_row[0]) > PROVIDER_LIMITS_V1.max_snapshot_bytes:
         _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
-    visible_json_total = int(raw_json_row[2])
-    visible_preflight_total = visible_total + visible_json_total
-    if visible_preflight_total > PROVIDER_LIMITS_V1.max_snapshot_bytes:
-        _limit(
-            ProviderLimitNameV1.max_snapshot_bytes,
-            visible_preflight_total,
-            PROVIDER_LIMITS_V1.max_snapshot_bytes,
-        )
 
     malformed = conn.execute(
         "SELECT 1 FROM tasks WHERE "
@@ -803,6 +793,7 @@ def _preflight_storage_limits(
             int(dependency_total),
             limits.max_dependency_edges,
         )
+    _preflight_visible_payload_lower_bound(conn, visible_total)
 
 
 def _preflight_json_string_array(
@@ -837,6 +828,51 @@ def _preflight_json_string_array(
         )
 
 
+def _preflight_visible_payload_lower_bound(
+    conn: sqlite3.Connection,
+    visible_scalar_bytes: int,
+) -> None:
+    task_count = _table_count(conn, "tasks")
+    item_row = conn.execute(
+        "SELECT COALESCE(SUM(length(CAST(value AS BLOB)) + 2), 0) FROM ("
+        "SELECT json_each.value AS value FROM tasks, json_each(tasks.dependencies) "
+        "UNION ALL "
+        "SELECT json_each.value AS value FROM tasks, "
+        "json_each(tasks.acceptance_criteria))"
+    ).fetchone()
+    repeated_ref_row = conn.execute(
+        "SELECT COALESCE(SUM("
+        "CASE WHEN prd_id = 'default' THEN length(CAST(id AS BLOB)) "
+        "ELSE length(CAST(id AS BLOB)) - length(CAST(prd_id AS BLOB)) - 1 END "
+        "+ 2 * length(CAST(prd_id AS BLOB))), 0) FROM tasks"
+    ).fetchone()
+    summary_row = conn.execute(
+        "SELECT COALESCE(SUM("
+        "CASE WHEN COALESCE(json_array_length(verification, '$.commands'), 0) > 0 "
+        f"THEN {_SUMMARY_CANONICAL_BYTES['commands']} ELSE 0 END + "  # noqa: S608
+        "CASE WHEN COALESCE(json_array_length(verification, '$.manual_steps'), 0) > 0 "
+        f"THEN {_SUMMARY_CANONICAL_BYTES['manual_steps']} ELSE 0 END + "  # noqa: S608
+        "CASE WHEN COALESCE(json_array_length(verification, '$.required_evidence'), 0) > 0 "
+        f"THEN {_SUMMARY_CANONICAL_BYTES['required_evidence']} ELSE 0 END + "  # noqa: S608
+        "CASE WHEN COALESCE(json_array_length(verification, '$.required_proofs'), 0) + "
+        "COALESCE(json_array_length(verification, '$.artifact_assertions'), 0) > 0 "
+        f"THEN {_SUMMARY_CANONICAL_BYTES['typed_proof']} ELSE 0 END), 0) FROM tasks"  # noqa: S608
+    ).fetchone()
+    lower_bound = (
+        visible_scalar_bytes
+        + task_count * _MIN_TASK_RECORD_CANONICAL_BYTES
+        + int(item_row[0])
+        + int(repeated_ref_row[0])
+        + int(summary_row[0])
+    )
+    if lower_bound > PROVIDER_LIMITS_V1.max_snapshot_bytes:
+        _limit(
+            ProviderLimitNameV1.max_snapshot_bytes,
+            lower_bound,
+            PROVIDER_LIMITS_V1.max_snapshot_bytes,
+        )
+
+
 def _local_entity_id(stored_id: str, prd_id: str) -> str:
     if prd_id == "default":
         if ":" in stored_id:
@@ -851,16 +887,21 @@ def _local_entity_id(stored_id: str, prd_id: str) -> str:
     return local_id
 
 
-def _json_string_list(raw: Any) -> list[str]:
-    if not isinstance(raw, str):
-        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
-    try:
-        value = _strict_json(raw.encode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
-    return value
+def _json_string_list_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    column: str,
+) -> list[str]:
+    if column not in {"dependencies", "acceptance_criteria"}:
+        raise ValueError("unknown task JSON column")
+    return [
+        str(row[0])
+        for row in conn.execute(
+            f"SELECT json_each.value FROM tasks, "  # noqa: S608
+            f"json_each(tasks.{column}) WHERE tasks.id = ? ORDER BY json_each.key",  # noqa: S608
+            (task_id,),
+        )
+    ]
 
 
 def _strict_json(raw: bytes) -> Any:

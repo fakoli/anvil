@@ -838,12 +838,10 @@ def test_hard_snapshot_overflow_reports_exact_limit_metadata(
     conn.close()
     with pytest.raises(ProjectSnapshotError) as refusal:
         read_project_snapshot(root)
-    assert refusal.value.error == ProviderLimitRefusalV1(
-        operation_id="state.project.snapshot",
-        limit_name=ProviderLimitNameV1.max_snapshot_bytes,
-        actual=len(acceptance.encode()),
-        limit=16_777_216,
-    )
+    assert isinstance(refusal.value.error, ProviderLimitRefusalV1)
+    assert refusal.value.error.limit_name is ProviderLimitNameV1.max_snapshot_bytes
+    assert refusal.value.error.actual > 16_777_216
+    assert refusal.value.error.limit == 16_777_216
 
 
 def test_aggregate_visible_snapshot_overflow_reports_limit_metadata(
@@ -860,8 +858,8 @@ def test_aggregate_visible_snapshot_overflow_reports_limit_metadata(
     conn.close()
     monkeypatch.setattr(
         snapshot_module,
-        "_json_string_list",
-        lambda _raw: (_ for _ in ()).throw(AssertionError("materialized task JSON")),
+        "_json_string_list_for_task",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("materialized task JSON")),
     )
     with pytest.raises(ProjectSnapshotError) as refusal:
         read_project_snapshot(root)
@@ -869,6 +867,21 @@ def test_aggregate_visible_snapshot_overflow_reports_limit_metadata(
     assert refusal.value.error.limit_name is ProviderLimitNameV1.max_snapshot_bytes
     assert refusal.value.error.actual > 16_777_216
     assert refusal.value.error.limit == 16_777_216
+
+
+def test_json_whitespace_does_not_consume_semantic_snapshot_limit(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    baseline = read_project_snapshot(root)
+    populated.close()
+    padded = "[" + (" " * 8_500_000) + '"Visible criterion"]'
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute("UPDATE tasks SET acceptance_criteria = ?", (padded,))
+    conn.commit()
+    conn.close()
+    result = read_project_snapshot(root)
+    assert result.snapshot_digest == baseline.snapshot_digest
 
 
 def test_mixed_visible_aggregate_refuses_before_json_materialization(
@@ -896,8 +909,8 @@ def test_mixed_visible_aggregate_refuses_before_json_materialization(
     conn.close()
     monkeypatch.setattr(
         snapshot_module,
-        "_json_string_list",
-        lambda _raw: (_ for _ in ()).throw(AssertionError("materialized task JSON")),
+        "_json_string_list_for_task",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("materialized task JSON")),
     )
     with pytest.raises(ProjectSnapshotError) as refusal:
         read_project_snapshot(root)
