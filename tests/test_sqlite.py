@@ -14529,6 +14529,7 @@ def _planning_batch_draft(
     operations: list[EventDraft],
     *,
     expected_prd_revision: int = 1,
+    expected_prd_source_sha256: str | None = None,
 ) -> EventDraft:
     return EventDraft(
         timestamp=_T0,
@@ -14540,6 +14541,7 @@ def _planning_batch_draft(
             "schema_version": 1,
             "prd_id": "default",
             "expected_prd_revision": expected_prd_revision,
+            "expected_prd_source_sha256": expected_prd_source_sha256,
             "operations": [
                 {
                     "action": operation.action,
@@ -14604,6 +14606,29 @@ class TestPlanningBatchAtomicReplay:
             before = events_path.read_bytes()
 
             with pytest.raises(EventRejected, match="code=stale_prd_revision"):
+                backend.append(stale)
+
+            assert events_path.read_bytes() == before
+            assert backend.get_feature("F-batch") is None
+            assert backend.get_task("T-batch") is None
+        finally:
+            backend.close()
+
+    def test_graph_batch_refuses_stale_prd_source_before_log(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_project(backend)
+            backend.append(_make_event("prd.parsed", _make_prd_parsed_payload()))
+            events_path = tmp_path / "events.jsonl"
+            before = events_path.read_bytes()
+            stale = _planning_batch_draft(
+                _planning_graph_operations(),
+                expected_prd_source_sha256="a" * 64,
+            )
+
+            with pytest.raises(EventRejected, match="code=stale_prd_source"):
                 backend.append(stale)
 
             assert events_path.read_bytes() == before

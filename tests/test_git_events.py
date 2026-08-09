@@ -25,6 +25,7 @@ distinct timestamps instead.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -181,6 +182,25 @@ def _prd_revised_payload(
     return payload
 
 
+def _with_source_binding(
+    payload: dict[str, Any],
+    source_text: str,
+    *,
+    revision: int,
+) -> dict[str, Any]:
+    source_bytes = source_text.encode("utf-8")
+    payload.update({
+        "source_text": source_text,
+        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "source_size_bytes": len(source_bytes),
+        "source_encoding": "utf-8",
+        "source_revision": revision,
+        "provenance_state": "available",
+        "content_available": True,
+    })
+    return payload
+
+
 def _seed_prd(b: SqliteBackend, *, prd_id: str = "default") -> None:
     b.append(
         _draft(
@@ -213,6 +233,7 @@ def _planning_prd_batch(action: str, payload: dict[str, Any]) -> EventDraft:
             "schema_version": 1,
             "prd_id": prd_id,
             "expected_prd_revision": None,
+            "expected_prd_source_sha256": None,
             "operations": [
                 {
                     "action": action,
@@ -231,13 +252,16 @@ def _planning_graph_batch(
     feature_id: str,
     *,
     ts: datetime,
+    expected_prd_revision: int = 1,
+    expected_prd_source_sha256: str | None = None,
 ) -> EventDraft:
     return _draft(
         "planning.batch_applied",
         {
             "schema_version": 1,
             "prd_id": "default",
-            "expected_prd_revision": 1,
+            "expected_prd_revision": expected_prd_revision,
+            "expected_prd_source_sha256": expected_prd_source_sha256,
             "operations": [
                 {
                     "action": "feature.created",
@@ -1378,8 +1402,20 @@ class TestGitPrdLifecycleReplay:
                     ts=_T0 + timedelta(seconds=offset + 10),
                 )
             )
+            task_payload = _task_payload(f"T-{label}")
+            task_payload["feature_id"] = f"F-{label}"
+            task = branch_backend.append(
+                _draft(
+                    "task.created",
+                    task_payload,
+                    target_kind="task",
+                    target_id=f"T-{label}",
+                    ts=_T0 + timedelta(seconds=offset + 20),
+                )
+            )
             assert parsed is not None and graph is not None
             assert graph.parent_event_id == parsed.id
+            assert task is not None and task.parent_event_id == graph.id
             branch_backend.close()
             lines = (branch / "events.jsonl").read_text(
                 encoding="utf-8"
@@ -1399,6 +1435,132 @@ class TestGitPrdLifecycleReplay:
             prd = replay.get_prd("default")
             assert prd is not None and prd.title == "PRD A"
             assert [feature.id for feature in replay.list_features()] == ["F-A"]
+            assert [task.id for task in replay.list_tasks()] == ["T-A"]
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_graph_binds_exact_sibling_revision_source(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-source-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        suffixes: list[list[str]] = []
+        source_digests: dict[str, str] = {}
+        for label, offset in (("A", 1), ("B", 2)):
+            branch = tmp_path / f"planning-source-{label}-{reverse_physical_order}"
+            shutil.copytree(base, branch)
+            branch_backend = _make_backend(branch)
+            revised_payload = _with_source_binding(
+                _prd_revised_payload(revision=2, title="Same semantic PRD"),
+                f"# Project: Same semantic PRD\n\n## Tasks\n\n### {label}\n",
+                revision=2,
+            )
+            revised = branch_backend.append(
+                _draft(
+                    "prd.revised",
+                    revised_payload,
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=offset),
+                )
+            )
+            graph = branch_backend.append(
+                _planning_graph_batch(
+                    f"F-{label}",
+                    ts=_T0 + timedelta(seconds=offset + 10),
+                    expected_prd_revision=2,
+                    expected_prd_source_sha256=revised_payload["source_sha256"],
+                )
+            )
+            assert revised is not None and graph is not None
+            assert graph.parent_event_id == revised.id
+            source_digests[label] = str(revised_payload["source_sha256"])
+            branch_backend.close()
+            lines = (branch / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            suffixes.append(lines[len(prefix):])
+
+        ordered_suffixes = list(reversed(suffixes)) if reverse_physical_order else suffixes
+        merged = tmp_path / f"planning-source-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in ordered_suffixes for line in suffix])
+            + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None
+            assert prd.source_sha256 == source_digests["A"]
+            assert [feature.id for feature in replay.list_features()] == ["F-A"]
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_graph_sibling_to_later_winning_content_is_skipped(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-later-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        graph_branch = tmp_path / f"planning-later-graph-{reverse_physical_order}"
+        shutil.copytree(base, graph_branch)
+        graph_backend = _make_backend(graph_branch)
+        graph_backend.append(
+            _planning_graph_batch(
+                "F-stale",
+                ts=_T0 + timedelta(seconds=10),
+            )
+        )
+        graph_backend.close()
+
+        revision_branch = tmp_path / f"planning-later-revision-{reverse_physical_order}"
+        shutil.copytree(base, revision_branch)
+        revision_backend = _make_backend(revision_branch)
+        revision_backend.append(
+            _draft(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Winning revision"),
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=20),
+            )
+        )
+        revision_backend.close()
+
+        suffixes = [
+            (graph_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+            (revision_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+        ]
+        if reverse_physical_order:
+            suffixes.reverse()
+        merged = tmp_path / f"planning-later-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in suffixes for line in suffix]) + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None and prd.revision == 2
+            assert replay.list_features() == []
         finally:
             replay.close()
 
@@ -2569,7 +2731,7 @@ class TestGitPrdLifecycleReplay:
         finally:
             tracemalloc.stop()
             backend.close()
-        assert policy.content_heads["default"] == (1500, parent)
+        assert policy.content_heads["default"] == (1500, parent, None)
         # The rejected transitive-frozenset implementation measured >50 MiB
         # for this 1,500-event chain. Keep ample platform headroom while still
         # catching quadratic retention.
@@ -2633,7 +2795,7 @@ class TestGitPrdLifecycleReplay:
         finally:
             tracemalloc.stop()
             backend.close()
-        assert policy.content_heads["default"] == (5001, parent)
+        assert policy.content_heads["default"] == (5001, parent, None)
         assert peak < 24 * 1024 * 1024
         assert elapsed < 10
 
@@ -3639,7 +3801,7 @@ class TestGitPrdLifecycleReplay:
         finally:
             tracemalloc.stop()
             backend.close()
-        assert policy.content_heads["default"] == (5001, parent)
+        assert policy.content_heads["default"] == (5001, parent, None)
         assert peak < 24 * 1024 * 1024
         assert elapsed < 10
 
@@ -3722,7 +3884,7 @@ class TestGitPrdLifecycleReplay:
             policy = backend._build_git_prd_replay_policy(events)  # noqa: SLF001
         finally:
             backend.close()
-        assert policy.content_heads["default"] == (1201, events[-3].id)
+        assert policy.content_heads["default"] == (1201, events[-3].id, None)
         assert time.perf_counter() - started < 10
 
     def test_cached_prd_head_avoids_full_log_scan_during_append(
@@ -3794,6 +3956,7 @@ class TestGitPrdLifecycleReplay:
             assert reopened._git_prd_content_heads["default"] == (  # noqa: SLF001
                 41,
                 appended.id,
+                None,
             )
             assert reopened.get_prd("default").revision == 41  # type: ignore[union-attr]
         finally:

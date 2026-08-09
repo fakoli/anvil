@@ -5999,6 +5999,42 @@ class TestPlanTasks:
         assert statuses.get("T001") == "drafted"
         assert statuses.get("T002") == "drafted"
 
+    def test_plan_atomically_binds_changed_prd_source_and_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        source_path = _write_prd_file(state_dir, _MINIMAL_PRD)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse_then_plan() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("parse_prd", {})
+                revised = _MINIMAL_PRD.replace(
+                    "A project for MCP workflow testing.",
+                    "A revised test project with exact source binding.",
+                )
+                source_path.write_text(revised, encoding="utf-8")
+                await client.call_tool("plan_tasks", {"use_llm": False})
+
+        _run(parse_then_plan())
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            row = connection.execute(
+                "SELECT revision, source_sha256 FROM prds WHERE id = 'default'"
+            ).fetchone()
+            assert row is not None and row[0] == 2
+            batch_json = connection.execute(
+                "SELECT payload_json FROM events "
+                "WHERE action = 'planning.batch_applied'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        payload = json.loads(batch_json)
+        assert payload["expected_prd_revision"] is None
+        assert payload["expected_prd_source_sha256"] is None
+        assert payload["operations"][0]["action"] == "prd.revised"
+        assert payload["operations"][0]["payload_json"]["source_sha256"] == row[1]
+
     @pytest.mark.parametrize("prd_id", [None, "release"], ids=["default", "named"])
     def test_plan_dependency_persistence_preserves_authored_acyclic_graph(
         self,

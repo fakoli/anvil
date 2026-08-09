@@ -1151,7 +1151,8 @@ and `prd review --approve`.
 Runs the planner pipeline against the current PRD: builds the complete canonical
 feature/task graph, runs dependency + conflict-group inference, promotes
 `proposed → drafted`, then persists the whole transition in one
-`planning.batch_applied` event. A refusal cannot leave a partial graph. Mirrors
+`planning.batch_applied` event bound to the exact PRD revision and source digest.
+A refusal or losing Git lineage cannot leave a partial or mismatched graph. Mirrors
 `anvil plan`.
 
 `use_llm` defaults to `true`: when the PRD has features but no `## Tasks` section, the

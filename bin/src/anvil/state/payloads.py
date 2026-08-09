@@ -459,6 +459,9 @@ class PlanningBatchAppliedPayload(BaseModel):
     # Combined parse/seed batches instead carry the content mutation inside the
     # same atomic event and therefore use ``None``.
     expected_prd_revision: StrictInt | None
+    expected_prd_source_sha256: StrictStr | None = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
     operations: list[PlanningBatchOperationPayload] = Field(
         min_length=1,
         max_length=_MAX_PLANNING_BATCH_OPERATIONS,
@@ -474,9 +477,12 @@ class PlanningBatchAppliedPayload(BaseModel):
         if len(content_operations) > 1:
             raise ValueError("planning batch may contain at most one PRD content event")
         if content_operations:
-            if self.expected_prd_revision is not None:
+            if (
+                self.expected_prd_revision is not None
+                or self.expected_prd_source_sha256 is not None
+            ):
                 raise ValueError(
-                    "planning batch with PRD content must not bind a prior revision"
+                    "planning batch with PRD content must not bind prior content"
                 )
             nested_prd_id = content_operations[0].payload_json.get(
                 "prd_id", DEFAULT_PRD_ID

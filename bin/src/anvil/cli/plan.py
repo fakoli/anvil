@@ -521,6 +521,7 @@ def plan(
 
         from anvil.planning._plan_helpers import has_tasks_section
         current_markdown = current_source.markdown
+        source = current_source
         if not has_tasks_section(current_markdown):
             new_markdown = (
                 current_markdown.rstrip() + "\n\n" + gen_result.markdown + "\n"
@@ -546,6 +547,7 @@ def plan(
                 )
                 raise typer.Exit(code=1) from exc
             markdown = updated_source.markdown
+            source = updated_source
         else:
             markdown = current_markdown
 
@@ -625,6 +627,7 @@ def plan(
         # TransactionAborted catch that the MCP version had).
         # --------------------------------------------------------------
         from anvil.planning._plan_helpers import (
+            build_prd_revision_draft,
             build_prune_event_drafts,
             classify_orphans,
             emit_planning_batch,
@@ -648,6 +651,7 @@ def plan(
             typer.echo(f"Error: {message}", err=True)
             raise typer.Exit(code=1)
         expected_prd_revision = stored_prd.revision
+        expected_prd_source_sha256 = stored_prd.source_sha256
 
         # Scope orphan classification to THIS PRD: tasks/features in OTHER
         # PRDs must never be pruned just because they are absent from this
@@ -763,12 +767,29 @@ def plan(
         # the most accessible trigger was "user removes a feature heading
         # from prd.md while keeping its referencing tasks": the feature
         # becomes an orphan, the handler refuses, the CLI crashed.
-        operations, prune_result = build_prune_event_drafts(
-                classification,
+        try:
+            prd_revision_draft = build_prd_revision_draft(
+                backend,
+                parsed,
+                source,
                 actor="anvil-cli",
                 clock=clock,
-                prune_force=prune_force,
             )
+        except ValueError:
+            message = "Planning source could not be bound to the persisted PRD."
+            if json_output:
+                fail("plan", message, code="invalid_prd_revision")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1) from None
+
+        operations, prune_result = build_prune_event_drafts(
+            classification,
+            actor="anvil-cli",
+            clock=clock,
+            prune_force=prune_force,
+        )
+        if prd_revision_draft is not None:
+            operations.insert(0, prd_revision_draft)
 
         deleted_task_ids = prune_result.pruned_task_ids
         deleted_feature_ids = prune_result.pruned_feature_ids
@@ -908,6 +929,7 @@ def plan(
                 clock=clock,
                 prd_id=scope_prd_id,
                 expected_prd_revision=expected_prd_revision,
+                expected_prd_source_sha256=expected_prd_source_sha256,
             )
         except EventRejected as exc:
             if json_output:

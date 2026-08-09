@@ -505,7 +505,8 @@ anvil prd review --approve --reviewer "alex"
 `prd.md`, runs dependency and conflict-group inference, then persists the
 complete canonical graph as one `planning.batch_applied` event and SQLite
 transaction. The batch contains the ordered feature/task/status/conflict
-operations, so a later refusal cannot expose a partial raw graph. Freshly
+operations and binds them to the exact persisted PRD source digest, so a later
+refusal or stale sibling revision cannot expose a partial or mismatched graph. Freshly
 `proposed` tasks advance to `drafted`; re-running does not duplicate tasks or
 regress tasks that have already advanced past `drafted`.
 

@@ -3371,6 +3371,7 @@ def plan_tasks(
 
         from anvil.planning._plan_helpers import has_tasks_section
         current_markdown = current_source.markdown
+        source = current_source
         if not has_tasks_section(current_markdown):
             new_markdown = (
                 current_markdown.rstrip() + "\n\n" + gen_result.markdown + "\n"
@@ -3387,6 +3388,7 @@ def plan_tasks(
                     f"Cannot write generated tasks to {prd_display}: {exc.message}"
                 ) from exc
             markdown = updated_source.markdown
+            source = updated_source
         else:
             markdown = current_markdown
         result = _parse_prd_impl(markdown, prd_id=parse_prd_id)
@@ -3448,6 +3450,7 @@ def plan_tasks(
         # was missing the TransactionAborted catch that the MCP had).
         # --------------------------------------------------------------
         from anvil.planning._plan_helpers import (
+            build_prd_revision_draft,
             build_prune_event_drafts,
             classify_orphans,
             emit_planning_batch,
@@ -3475,12 +3478,27 @@ def plan_tasks(
                 "history is preserved either way)."
             )
 
+        try:
+            prd_revision_draft = build_prd_revision_draft(
+                backend,
+                result,
+                source,
+                actor="anvil-mcp",
+                clock=clock,
+            )
+        except ValueError:
+            raise ToolError(
+                "Planning source could not be bound to the persisted PRD."
+            ) from None
+
         operations, prune_result = build_prune_event_drafts(
             classification,
             actor="anvil-mcp",
             clock=clock,
             prune_force=prune_force,
         )
+        if prd_revision_draft is not None:
+            operations.insert(0, prd_revision_draft)
 
         pruned_task_ids = prune_result.pruned_task_ids
         pruned_feature_ids = prune_result.pruned_feature_ids
@@ -3556,6 +3574,7 @@ def plan_tasks(
                 clock=clock,
                 prd_id=scope_prd_id,
                 expected_prd_revision=stored_prd.revision,
+                expected_prd_source_sha256=stored_prd.source_sha256,
             )
         except EventRejected as exc:
             raise ToolError(str(exc)) from exc

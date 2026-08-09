@@ -4132,6 +4132,54 @@ class TestPlan:
             for event in events
         )
 
+    def test_plan_atomically_binds_changed_prd_source_and_graph(
+        self, tmp_path: Path
+    ) -> None:
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _FULL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        revised_source = _FULL_PRD_CONTENT.replace(
+            "A full project for complete CLI workflow testing.",
+            "A revised project for exact-source planning.",
+        )
+        _write_prd(tmp_path, revised_source)
+
+        result = _invoke_cmd(tmp_path, ["plan"])
+        assert result.exit_code == 0, result.output
+
+        events = [
+            json.loads(line)
+            for line in (tmp_path / ".anvil" / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        batches = [
+            event for event in events if event["action"] == "planning.batch_applied"
+        ]
+        assert len(batches) == 1
+        payload = batches[0]["payload_json"]
+        assert payload["expected_prd_revision"] is None
+        assert payload["expected_prd_source_sha256"] is None
+        assert payload["operations"][0]["action"] == "prd.revised"
+        revision = payload["operations"][0]["payload_json"]
+        assert revision["revision"] == revision["source_revision"] == 2
+        assert revision["source_sha256"] == hashlib.sha256(
+            (tmp_path / ".anvil" / "prd.md").read_bytes()
+        ).hexdigest()
+        assert not any(event["action"] == "prd.revised" for event in events)
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd = backend.get_prd("default")
+            assert prd is not None
+            assert prd.revision == prd.source_revision == 2
+            assert prd.source_sha256 == revision["source_sha256"]
+            assert {task.id for task in backend.list_tasks()} == {"T001", "T002"}
+        finally:
+            backend.close()
+
     def test_plan_is_idempotent(self, tmp_path: Path) -> None:
         """Running plan twice does not duplicate tasks and does not trip
         ON DELETE RESTRICT foreign keys. Regression test for the bug

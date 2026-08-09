@@ -318,7 +318,7 @@ class _GitPrdReplayPolicy(NamedTuple):
 
     skip_projection: frozenset[str]
     title_overlays: dict[str, tuple[str, str]]
-    content_heads: dict[str, tuple[int, str]]
+    content_heads: dict[str, tuple[int, str, str | None]]
 
 
 class _ReplayContentSnapshot(NamedTuple):
@@ -335,6 +335,7 @@ class _ReplayContentSnapshot(NamedTuple):
     risks: Any
     open_questions: Any
     assumptions: Any
+    source_sha256: Any
     requirements_xor: int
     requirements_count: int
     requirement_delta: dict[str, int | None]
@@ -350,6 +351,7 @@ class _ReplayContentSnapshot(NamedTuple):
             and self.risks == other.risks
             and self.open_questions == other.open_questions
             and self.assumptions == other.assumptions
+            and self.source_sha256 == other.source_sha256
             and self.requirements_count == other.requirements_count
             and self.requirements_xor == other.requirements_xor
         )
@@ -873,10 +875,12 @@ class SqliteBackend:
         self._max_lamport: int = 0
         # Canonical projected PRD content heads, populated once during Git
         # convergence/replay and advanced after successful live content
-        # appends. Values are (revision, event_id). This keeps causal-parent
-        # resolution O(1) instead of reparsing the Git log and rebuilding
-        # replay policy for every mutation.
-        self._git_prd_content_heads: dict[str, tuple[int, str]] = {}
+        # appends. Values are (revision, event_id, source_sha256). This keeps
+        # exact causal-parent resolution O(1) instead of reparsing the Git log
+        # and rebuilding replay policy for every mutation.
+        self._git_prd_content_heads: dict[
+            str, tuple[int, str, str | None]
+        ] = {}
         # Identity of the Git event log after its last complete integrity scan.
         # Every append compares this content-authenticated signature under the
         # global flock. The unchanged path hashes bytes without parsing JSON;
@@ -1900,6 +1904,7 @@ class SqliteBackend:
                     risks=payload.get("risks", []),
                     open_questions=payload.get("open_questions", []),
                     assumptions=payload.get("assumptions", []),
+                    source_sha256=payload.get("source_sha256"),
                     requirements_xor=requirements_xor,
                     requirements_count=requirements_count,
                     requirement_delta=requirement_delta,
@@ -2073,13 +2078,29 @@ class SqliteBackend:
 
         # A graph-only planning batch is a derived fact, not independent PRD
         # content. It may project only when its exact causal content ancestor
-        # survives branch resolution and matches the revision the planner
-        # observed. This prevents a losing parse/revision branch from leaking
-        # its feature/task graph into the winning PRD after a Git union merge.
+        # survives branch resolution, matches the revision and source digest
+        # the planner observed, and belongs to the final accepted lineage. A
+        # graph may precede a later accepted content revision only when that
+        # revision causally descends from the graph. Sibling graphs are losing
+        # derived lineages even when both branches happen to use revision N.
+        accepted_content_heads: dict[str, Event] = {}
+        for content_event in ordered:
+            if content_event.id in skip or content_event.action not in {
+                "prd.parsed",
+                "prd.revised",
+            }:
+                continue
+            accepted_content_heads[self._git_prd_id(content_event)] = content_event
+
+        losing_graphs: set[str] = set()
         for event in ordered:
             if event.action != "planning.batch_applied":
                 continue
+            prd_id = self._git_prd_id(event)
             expected_revision = event.payload_json.get("expected_prd_revision")
+            expected_source = event.payload_json.get(
+                "expected_prd_source_sha256"
+            )
             base = nearest_content_ancestor(event)
             base_revision = (
                 1
@@ -2088,6 +2109,19 @@ class SqliteBackend:
                     base.payload_json.get("revision")
                     if base is not None and base.action == "prd.revised"
                     else None
+                )
+            )
+            base_source = (
+                base.payload_json.get("source_sha256")
+                if base is not None
+                else None
+            )
+            accepted_head = accepted_content_heads.get(prd_id)
+            belongs_to_final_lineage = (
+                accepted_head is not None
+                and (
+                    (base is not None and base.id == accepted_head.id)
+                    or descends(accepted_head, event.id)
                 )
             )
             if (
@@ -2099,8 +2133,27 @@ class SqliteBackend:
                 or not isinstance(base_revision, int)
                 or isinstance(base_revision, bool)
                 or expected_revision != base_revision
+                or expected_source != base_source
+                or not belongs_to_final_lineage
             ):
                 skip.add(event.id)
+                losing_graphs.add(event.id)
+
+        # Every event causally descended from a rejected graph observed state
+        # that never exists in the selected projection. Quarantine the whole
+        # bounded subtree so a task/status/evidence descendant cannot recreate
+        # the losing graph or abort replay on a missing feature/task row.
+        stack = [
+            child_id
+            for graph_id in losing_graphs
+            for child_id in children.get(graph_id, [])
+        ]
+        while stack:
+            descendant_id = stack.pop()
+            if descendant_id in skip:
+                continue
+            skip.add(descendant_id)
+            stack.extend(children.get(descendant_id, []))
 
         current_lifecycle = [
             event
@@ -2183,7 +2236,7 @@ class SqliteBackend:
             ):
                 skip.add(event.id)
 
-        content_heads: dict[str, tuple[int, str]] = {}
+        content_heads: dict[str, tuple[int, str, str | None]] = {}
         for event in ordered:
             if event.id in skip:
                 continue
@@ -2201,7 +2254,12 @@ class SqliteBackend:
             # Replay applies accepted content in this exact order; assigning
             # on every event reproduces the final projected owner even for
             # historical destructive parses whose revision resets to one.
-            content_heads[self._git_prd_id(event)] = (revision, event.id)
+            source_sha256 = event.payload_json.get("source_sha256")
+            content_heads[self._git_prd_id(event)] = (
+                revision,
+                event.id,
+                source_sha256 if isinstance(source_sha256, str) else None,
+            )
 
         return _GitPrdReplayPolicy(
             skip_projection=frozenset(skip),
@@ -4281,9 +4339,10 @@ class SqliteBackend:
                 }
                 is_content = draft.action in {"prd.parsed", "prd.revised"}
                 expected_revision: int | None = None
+                expected_source_sha256: str | None = None
                 if not is_content:
                     row = backend._require_conn().execute(  # noqa: SLF001
-                        "SELECT revision FROM prds WHERE id = ?",
+                        "SELECT revision, source_sha256 FROM prds WHERE id = ?",
                         (batch_prd_id,),
                     ).fetchone()
                     if row is None:
@@ -4291,10 +4350,12 @@ class SqliteBackend:
                             "planning batch refused: code=missing_prd"
                         )
                     expected_revision = int(row["revision"])
+                    expected_source_sha256 = row["source_sha256"]
                 single = PlanningBatchAppliedPayload.model_validate({
                     "schema_version": 1,
                     "prd_id": batch_prd_id,
                     "expected_prd_revision": expected_revision,
+                    "expected_prd_source_sha256": expected_source_sha256,
                     "operations": [operation],
                 })
                 outer = EventDraft(
@@ -4333,9 +4394,10 @@ class SqliteBackend:
                     for operation in operations
                 )
                 expected_revision: int | None = None
+                expected_source_sha256: str | None = None
                 if not contains_content:
                     row = conn.execute(
-                        "SELECT revision FROM prds WHERE id = ?",
+                        "SELECT revision, source_sha256 FROM prds WHERE id = ?",
                         (batch_prd_id,),
                     ).fetchone()
                     if row is None:
@@ -4343,6 +4405,7 @@ class SqliteBackend:
                             "planning batch refused: code=missing_prd"
                         )
                     expected_revision = int(row["revision"])
+                    expected_source_sha256 = row["source_sha256"]
                 self.append(
                     EventDraft(
                         timestamp=first.timestamp,
@@ -4354,6 +4417,7 @@ class SqliteBackend:
                             "schema_version": 1,
                             "prd_id": batch_prd_id,
                             "expected_prd_revision": expected_revision,
+                            "expected_prd_source_sha256": expected_source_sha256,
                             "operations": [
                                 {
                                     "action": operation.action,
@@ -4686,6 +4750,11 @@ class SqliteBackend:
         cached = self._git_prd_content_heads.get(prd_id)
         if cached is None or cached[0] != revision:
             return None
+        if draft.action == "planning.batch_applied" and (
+            self._planning_batch_prd_content_operation(draft) is None
+            and draft.payload_json.get("expected_prd_source_sha256") != cached[2]
+        ):
+            return None
         return cached[1]
 
     def _remember_git_prd_content_head(self, event: Event) -> None:
@@ -4700,9 +4769,11 @@ class SqliteBackend:
             revision = revision_raw
         else:
             return
+        source_sha256 = policy_event.payload_json.get("source_sha256")
         self._git_prd_content_heads[self._git_prd_id(policy_event)] = (
             revision,
             event.id,
+            source_sha256 if isinstance(source_sha256, str) else None,
         )
 
     def _scan_log_ids_and_lamport(self) -> tuple[set[str], int]:
@@ -6603,14 +6674,22 @@ class SqliteBackend:
         )
         if not has_content_operation:
             row = conn.execute(
-                "SELECT revision FROM prds WHERE id = ?",
+                "SELECT revision, source_sha256 FROM prds WHERE id = ?",
                 (payload.prd_id,),
             ).fetchone()
             actual_revision = int(row["revision"]) if row is not None else None
+            actual_source_sha256 = (
+                row["source_sha256"] if row is not None else None
+            )
             if actual_revision != payload.expected_prd_revision:
                 error_type = TransactionAborted if replay else EventRejected
                 raise error_type(
                     "planning batch refused: code=stale_prd_revision"
+                )
+            if actual_source_sha256 != payload.expected_prd_source_sha256:
+                error_type = TransactionAborted if replay else EventRejected
+                raise error_type(
+                    "planning batch refused: code=stale_prd_source"
                 )
         dispatch = self._get_action_dispatch()
         for relative_index, operation in enumerate(payload.operations):
