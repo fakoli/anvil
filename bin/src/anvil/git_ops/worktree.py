@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import stat
 import subprocess
@@ -18,6 +19,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Literal
 
@@ -143,6 +145,7 @@ class ClaimGitMutation:
     branch_created: bool
     worktree_created: bool
     caller_checkout_changed: bool
+    ownership_token: str | None = None
 
 
 @dataclass
@@ -150,6 +153,9 @@ class ClaimGitMutationTracker:
     """Positive ownership evidence updated only after a Git mutation succeeds."""
 
     plan: ClaimGitPlan
+    ownership_token: str = dataclass_field(
+        default_factory=lambda: secrets.token_hex(16)
+    )
     branch_created: bool = False
     worktree_created: bool = False
     caller_checkout_changed: bool = False
@@ -245,7 +251,7 @@ def _git_dir(cwd: Path) -> Path | None:
 
 
 def canonical_git_root(cwd: Path) -> Path | None:
-    """Return the main worktree root shared by linked/nested callers."""
+    """Return one stable repository identity shared by linked/nested callers."""
     if shutil.which("git") is None:
         return None
     common_dir = _git_common_dir(cwd)
@@ -261,12 +267,27 @@ def canonical_git_root(cwd: Path) -> Path | None:
     ):
         return None
     caller_root = Path(root_result.stdout.strip()).resolve(strict=False)
-    # A main worktree may use a conventional .git directory, an absorbed
-    # submodule gitdir, or an arbitrary --separate-git-dir. In all three cases
-    # its absolute git-dir equals the common dir and show-toplevel is the real
-    # canonical checkout. Linked worktrees have a distinct per-worktree gitdir.
+    core_worktree = _run_git(
+        ["config", "--file", str(common_dir / "config"), "--get", "core.worktree"],
+        cwd,
+    )
+    configured: Path | None = None
+    if core_worktree is not None and core_worktree.returncode == 0:
+        raw_path = Path(core_worktree.stdout.strip())
+        candidate = (
+            raw_path if raw_path.is_absolute() else common_dir / raw_path
+        ).resolve(strict=False)
+        if candidate.is_dir():
+            configured = candidate
     if _path_key(git_dir) == _path_key(common_dir):
-        return caller_root
+        if _path_key(common_dir.parent) == _path_key(caller_root):
+            return caller_root
+        if configured is not None and _path_key(configured) == _path_key(caller_root):
+            return caller_root
+        # A separate-git-dir repository does not record its main checkout.
+        # The common directory is the only identity discoverable from every
+        # linked caller, so use it consistently rather than caller-local paths.
+        return common_dir
     try:
         topology = _worktree_topology(cwd)
     except ClaimPlanError:
@@ -281,17 +302,8 @@ def canonical_git_root(cwd: Path) -> Path | None:
     # Absorbed submodules store their common directory below the superproject's
     # ``.git/modules`` tree. Their config's core.worktree points back to the
     # actual submodule checkout; git-common-dir.parent does not.
-    core_worktree = _run_git(
-        ["config", "--file", str(common_dir / "config"), "--get", "core.worktree"],
-        cwd,
-    )
-    if core_worktree is not None and core_worktree.returncode == 0:
-        raw_path = Path(core_worktree.stdout.strip())
-        configured = (
-            raw_path if raw_path.is_absolute() else common_dir / raw_path
-        ).resolve(strict=False)
-        if configured.is_dir():
-            return configured
+    if configured is not None:
+        return configured
     # ``git init --separate-git-dir`` does not persist the main checkout path.
     # From a linked worktree Git reports the common metadata directory as the
     # first topology entry, so use that stable coordination root rather than
@@ -595,13 +607,14 @@ def resolve_claim_plan(
             "caller_topology_unavailable",
             "Canonical Git root cannot be resolved",
         )
-    linked = _path_key(caller_root) != _path_key(canonical_root)
     common_dir = _git_common_dir(caller_path)
-    if common_dir is None:
+    caller_git_dir = _git_dir(caller_path)
+    if common_dir is None or caller_git_dir is None:
         raise ClaimPlanError(
             "caller_topology_unavailable",
-            "Git common directory cannot be resolved",
+            "Git directory identity cannot be resolved",
         )
+    linked = _path_key(caller_git_dir) != _path_key(common_dir)
     normalized_ignored_paths = tuple(
         str(path.resolve(strict=False)) for path in ignored_worktree_paths
     )
@@ -644,7 +657,12 @@ def resolve_claim_plan(
         common_dir=common_dir,
     )
     caller_record = next(
-        (item for item in topology if _path_key(item.path) == _path_key(caller_root)),
+        (
+            item
+            for item in topology
+            if _path_key(item.path)
+            == _path_key(caller_root if linked else canonical_root)
+        ),
         None,
     )
     if caller_record is None:
@@ -970,7 +988,15 @@ def apply_claim_plan(
     try:
         if not plan.branch_exists:
             _mutate_git(
-                ["update-ref", branch_ref, plan.claim_start_sha, ""],
+                [
+                    "update-ref",
+                    "--create-reflog",
+                    "-m",
+                    _ownership_action(ownership.ownership_token, "branch"),
+                    branch_ref,
+                    plan.claim_start_sha,
+                    "",
+                ],
                 root,
                 code="branch_create_failed",
                 on_success=lambda: setattr(ownership, "branch_created", True),
@@ -995,6 +1021,9 @@ def apply_claim_plan(
                     on_success=lambda: setattr(
                         ownership, "caller_checkout_changed", True
                     ),
+                    reflog_action=_ownership_action(
+                        ownership.ownership_token, "checkout"
+                    ),
                 )
         elif plan.mode == "isolated":
             if plan.canonical_root is None or plan.target_path is None:
@@ -1016,6 +1045,9 @@ def apply_claim_plan(
                     root,
                     code="worktree_create_failed",
                     on_success=lambda: setattr(ownership, "worktree_created", True),
+                    reflog_action=_ownership_action(
+                        ownership.ownership_token, "worktree"
+                    ),
                 )
             _validate_isolated_target(Path(plan.canonical_root), target, must_exist=True)
             owner = next(
@@ -1040,6 +1072,7 @@ def apply_claim_plan(
             branch_created=ownership.branch_created,
             worktree_created=ownership.worktree_created,
             caller_checkout_changed=ownership.caller_checkout_changed,
+            ownership_token=ownership.ownership_token,
         )
         if _ref_oid(branch_ref, root) != plan.claim_start_sha:
             raise ClaimPlanError("branch_moved", "Claim branch moved during mutation")
@@ -1060,6 +1093,7 @@ def compensate_claim_plan(
         branch_created=mutation.branch_created,
         worktree_created=mutation.worktree_created,
         caller_checkout_changed=mutation.caller_checkout_changed,
+        ownership_token=mutation.ownership_token,
         cwd=Path(cwd or mutation.plan.caller_path),
     )
 
@@ -1079,6 +1113,7 @@ def compensate_claim_plan_tracker(
         branch_created=tracker.branch_created,
         worktree_created=tracker.worktree_created,
         caller_checkout_changed=tracker.caller_checkout_changed,
+        ownership_token=tracker.ownership_token,
         cwd=root,
     )
     tracker.branch_created = False
@@ -1092,12 +1127,27 @@ def _compensate_values(
     branch_created: bool,
     worktree_created: bool,
     caller_checkout_changed: bool,
+    ownership_token: str | None = None,
     cwd: Path,
 ) -> None:
     if not plan.git_metadata_available or plan.branch is None or plan.claim_start_sha is None:
         return
     branch_ref = f"refs/heads/{plan.branch}"
-    if worktree_created and plan.target_path is not None:
+    worktree_marker = (
+        _reflog_message("HEAD", Path(plan.target_path))
+        if ownership_token is not None
+        and plan.target_path is not None
+        and Path(plan.target_path).is_dir()
+        else None
+    )
+    owns_worktree = bool(
+        ownership_token is not None
+        and worktree_marker is not None
+        and worktree_marker.startswith(
+            _ownership_action(ownership_token, "worktree")
+        )
+    )
+    if (worktree_created or owns_worktree) and owns_worktree and plan.target_path is not None:
         owner = next(
             (
                 item
@@ -1110,14 +1160,22 @@ def _compensate_values(
             owner is not None
             and owner.branch_ref == branch_ref
             and owner.head_sha == plan.claim_start_sha
+            and not _working_tree_dirty(Path(plan.target_path))
         ):
             _mutate_git(
                 ["worktree", "remove", "--force", plan.target_path],
                 cwd,
                 code="worktree_compensation_failed",
             )
-    if caller_checkout_changed and plan.caller_worktree_path is not None:
-        caller = Path(plan.caller_worktree_path)
+    caller = Path(plan.caller_worktree_path or cwd)
+    checkout_marker = (
+        _reflog_message("HEAD", caller) if ownership_token is not None else None
+    )
+    owns_checkout = bool(
+        ownership_token is not None
+        and checkout_marker == _ownership_action(ownership_token, "checkout")
+    )
+    if (caller_checkout_changed or owns_checkout) and owns_checkout:
         if plan.caller_head_ref is not None:
             restore_name = plan.caller_head_ref.removeprefix("refs/heads/")
             _mutate_git(
@@ -1131,7 +1189,16 @@ def _compensate_values(
                 caller,
                 code="checkout_compensation_failed",
             )
-    if branch_created and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
+    branch_marker = (
+        _reflog_message(branch_ref, cwd) if ownership_token is not None else None
+    )
+    owns_branch = bool(
+        ownership_token is not None
+        and branch_marker == _ownership_action(ownership_token, "branch")
+    )
+    if (branch_created or owns_branch) and owns_branch and _ref_oid(
+        branch_ref, cwd
+    ) == plan.claim_start_sha:
         branch_owner = next(
             (item for item in _worktree_topology(cwd) if item.branch_ref == branch_ref),
             None,
@@ -1178,15 +1245,29 @@ def _symbolic_head(cwd: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _ownership_action(token: str, kind: str) -> str:
+    return f"anvil-claim:{token}:{kind}"
+
+
+def _reflog_message(ref: str, cwd: Path) -> str | None:
+    result = _run_git(["reflog", "show", "-1", "--format=%gs", ref], cwd)
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
 def _mutate_git(
     args: list[str],
     cwd: Path,
     *,
     code: str,
     on_success: Callable[[], None] | None = None,
+    reflog_action: str | None = None,
 ) -> None:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    if reflog_action is not None:
+        env["GIT_REFLOG_ACTION"] = reflog_action
     try:
         result = subprocess.run(
             ["git", *args],

@@ -1045,8 +1045,9 @@ class TestResolveClaimPlan:
         _git(project, "add", ".")
         _git(project, "commit", "-m", "initial")
 
-        assert canonical_git_root(project) == project.resolve()
+        assert canonical_git_root(project) == metadata.resolve()
         plan = resolve_claim_plan("T004", "Separate gitdir", cwd=project, worktree=True)
+        assert plan.canonical_root == str(metadata.resolve())
         mutation = apply_claim_plan(plan, cwd=project)
         try:
             assert mutation.worktree_created is True
@@ -1089,9 +1090,15 @@ class TestResolveClaimPlan:
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
         def interrupt_after(  # type: ignore[no-untyped-def]
-            args, cwd, *, code, on_success=None
+            args, cwd, *, code, on_success=None, reflog_action=None
         ):
-            mutate(args, cwd, code=code, on_success=on_success)
+            mutate(
+                args,
+                cwd,
+                code=code,
+                on_success=on_success,
+                reflog_action=reflog_action,
+            )
             if args[:2] == ["worktree", "add"]:
                 raise KeyboardInterrupt
 
@@ -1429,11 +1436,17 @@ class TestApplyClaimPlan:
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
         def external_wins(  # type: ignore[no-untyped-def]
-            args, cwd, *, code, on_success=None
+            args, cwd, *, code, on_success=None, reflog_action=None
         ):
-            if args[0] == "update-ref" and args[1].startswith("refs/heads/"):
-                _git(cwd, "update-ref", args[1], args[2], args[3])
-            mutate(args, cwd, code=code, on_success=on_success)
+            if args[0] == "update-ref" and args[-3].startswith("refs/heads/"):
+                _git(cwd, "update-ref", args[-3], args[-2], args[-1])
+            mutate(
+                args,
+                cwd,
+                code=code,
+                on_success=on_success,
+                reflog_action=reflog_action,
+            )
 
         monkeypatch.setattr(worktree_mod, "_mutate_git", external_wins)
         with pytest.raises(ClaimPlanError) as exc:
@@ -1451,11 +1464,17 @@ class TestApplyClaimPlan:
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
         def external_wins(  # type: ignore[no-untyped-def]
-            args, cwd, *, code, on_success=None
+            args, cwd, *, code, on_success=None, reflog_action=None
         ):
             if args[:2] == ["worktree", "add"]:
                 _git(cwd, *args)
-            mutate(args, cwd, code=code, on_success=on_success)
+            mutate(
+                args,
+                cwd,
+                code=code,
+                on_success=on_success,
+                reflog_action=reflog_action,
+            )
 
         monkeypatch.setattr(worktree_mod, "_mutate_git", external_wins)
         with pytest.raises(ClaimPlanError) as exc:
@@ -1472,12 +1491,18 @@ class TestApplyClaimPlan:
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
         def external_wins(  # type: ignore[no-untyped-def]
-            args, cwd, *, code, on_success=None
+            args, cwd, *, code, on_success=None, reflog_action=None
         ):
             if args[:2] == ["checkout", "--no-guess"]:
                 _git(cwd, *args)
                 raise ClaimPlanError(code, "external checkout won")
-            mutate(args, cwd, code=code, on_success=on_success)
+            mutate(
+                args,
+                cwd,
+                code=code,
+                on_success=on_success,
+                reflog_action=reflog_action,
+            )
 
         monkeypatch.setattr(worktree_mod, "_mutate_git", external_wins)
         with pytest.raises(ClaimPlanError) as exc:
@@ -1485,6 +1510,95 @@ class TestApplyClaimPlan:
 
         assert exc.value.code == "branch_checkout_failed"
         assert _default_branch(git_repo) == plan.branch
+        assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+
+    def test_child_success_then_interrupt_uses_durable_branch_marker(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = resolve_claim_plan("T011D", "Child interrupt", cwd=git_repo)
+        run = worktree_mod.subprocess.run
+        interrupted = False
+
+        def interrupt_after_success(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal interrupted
+            result = run(*args, **kwargs)
+            command = args[0]
+            if not interrupted and command[1] == "update-ref":
+                interrupted = True
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr(worktree_mod.subprocess, "run", interrupt_after_success)
+        with pytest.raises(KeyboardInterrupt):
+            apply_claim_plan(plan, cwd=git_repo)
+
+        assert interrupted is True
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+
+    @pytest.mark.parametrize("isolated", [False, True])
+    def test_child_success_then_interrupt_uses_durable_checkout_marker(
+        self,
+        git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated: bool,
+    ) -> None:
+        plan = resolve_claim_plan(
+            "T011D2" if isolated else "T011D1",
+            "Child checkout interrupt",
+            cwd=git_repo,
+            worktree=isolated,
+        )
+        original_branch = _default_branch(git_repo)
+        run = worktree_mod.subprocess.run
+        interrupted = False
+        expected = ["worktree", "add"] if isolated else ["checkout", "--no-guess"]
+
+        def interrupt_after_success(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal interrupted
+            result = run(*args, **kwargs)
+            command = args[0]
+            if not interrupted and command[1:3] == expected:
+                interrupted = True
+                raise KeyboardInterrupt
+            return result
+
+        monkeypatch.setattr(worktree_mod.subprocess, "run", interrupt_after_success)
+        with pytest.raises(KeyboardInterrupt):
+            apply_claim_plan(plan, cwd=git_repo)
+
+        assert interrupted is True
+        assert _default_branch(git_repo) == original_branch
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+        if isolated:
+            assert plan.target_path is not None
+            assert not Path(plan.target_path).exists()
+
+    def test_branch_aba_invalidates_durable_ownership_marker(
+        self, git_repo: Path
+    ) -> None:
+        plan = resolve_claim_plan("T011E", "Branch ABA", cwd=git_repo, worktree=True)
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+        branch_ref = f"refs/heads/{plan.branch}"
+        _git(git_repo, "update-ref", "-d", branch_ref, plan.claim_start_sha or "")
+        _git(git_repo, "update-ref", branch_ref, plan.claim_start_sha or "", "")
+
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert _ref_exists(git_repo, branch_ref)
+
+    def test_dirty_owned_worktree_is_preserved_during_compensation(
+        self, git_repo: Path
+    ) -> None:
+        plan = resolve_claim_plan("T011F", "Dirty worktree", cwd=git_repo, worktree=True)
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+        target = Path(plan.target_path or "")
+        external = target / "external-untracked.txt"
+        external.write_text("preserve\n", encoding="utf-8")
+
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert target.is_dir()
+        assert external.read_text(encoding="utf-8") == "preserve\n"
         assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
 
     def test_isolated_apply_preserves_caller_and_compensates_owned_artifacts(
