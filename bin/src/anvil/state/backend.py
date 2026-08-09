@@ -214,7 +214,7 @@ class Backend(Protocol):
         """
         ...
 
-    def list_task_review_decisions(self) -> list[tuple[str, str, str]]:
+    def list_task_review_decisions(self) -> list[tuple[str, str, str, str]]:
         """(task_id, decision, created_at_iso) for task.applied accepted/rejected
         outcomes, most-recent first. Backs the B49 accept-rate governor."""
         ...

@@ -1814,12 +1814,20 @@ class TestGetNextTask:
             async with Client(mcp) as c:
                 return _data(await c.call_tool("get_next_task", {}))
 
-        task = _run(run())
+        response = _run(run())
+        task = response["task"]
         assert task is not None
         assert task["id"] == "T002"
         assert task["priority"] == "high"
         assert task["review_tier"] == "max"  # unscored fixture fails safe
         assert task["conflict_warnings"] == []  # T009 — no active overlap
+        assert response["governor"]["numerator"] == 0
+        assert response["governor"]["denominator"] == 0
+        assert response["governor"]["rate"] is None
+        assert response["governor"]["floor"] == 0.8
+        assert response["governor"]["window_days"] == 7.0
+        assert response["governor"]["withheld_reason"] is None
+        assert response["governor"]["offer_throttled"] is False
 
     def test_conflict_warnings_surface_residual_overlap(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1847,7 +1855,7 @@ class TestGetNextTask:
             async with Client(mcp) as c:
                 return _data(await c.call_tool("get_next_task", {}))
 
-        task = _run(run())
+        task = _run(run())["task"]
         assert task is not None
         assert task["id"] == "T002"  # selection untouched
         assert task["conflict_warnings"] == [
@@ -1868,8 +1876,44 @@ class TestGetNextTask:
             async with Client(mcp) as c:
                 return _data(await c.call_tool("get_next_task", {}))
 
-        task = _run(run())
-        assert task is None
+        response = _run(run())
+        assert response["task"] is None
+        assert response["governor"]["withheld_reason"] == "no_ready_tasks"
+
+    def test_governor_withhold_is_structured_and_names_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        (state_dir / "config.yaml").write_text(
+            'project_name: "Governor Test"\n'
+            'project_id: "governor-test"\n'
+            "needs_review_cap: 0\n"
+            "accept_rate_floor: 0.75\n"
+            "accept_rate_window_days: 14\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool("get_next_task", {"actor": "worker-a"})
+                )
+
+        response = _run(run())
+        assert response["task"] is None
+        governor = response["governor"]
+        assert governor["numerator"] == 0
+        assert governor["denominator"] == 0
+        assert governor["rate"] is None
+        assert governor["floor"] == 0.75
+        assert governor["window_days"] == 14.0
+        assert governor["withheld_reason"] == "review_queue_saturated"
+        assert governor["offer_throttled"] is True
+        assert "Clearing the review queue alone does not restore" in governor["guidance"]
+        assert response["actor_identity"]["actor"] == "worker-a"
 
     def test_priority_ordering_high_over_medium_over_low(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """HIGH > MEDIUM > LOW — same feature, different priorities."""
@@ -1883,7 +1927,7 @@ class TestGetNextTask:
             async with Client(mcp) as c:
                 return _data(await c.call_tool("get_next_task", {}))
 
-        task = _run(run())
+        task = _run(run())["task"]
         assert task["id"] == "T003"
 
     def test_skips_task_with_unmet_dependency(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1900,7 +1944,7 @@ class TestGetNextTask:
                 return _data(await c.call_tool("get_next_task", {}))
 
         # T001 has unmet dep; T002 has no deps — T002 is the only eligible task
-        task = _run(run())
+        task = _run(run())["task"]
         assert task is not None
         assert task["id"] == "T002"
 
@@ -1918,7 +1962,7 @@ class TestGetNextTask:
             async with Client(mcp) as c:
                 return _data(await c.call_tool("get_next_task", {}))
 
-        task = _run(run())
+        task = _run(run())["task"]
         assert task["id"] == "T001"
 
     def test_prd_id_narrows_candidates(
@@ -1944,8 +1988,8 @@ class TestGetNextTask:
                 return unscoped, scoped
 
         unscoped, scoped = _run(run())
-        assert unscoped["id"] == "T001"  # high-priority default-PRD task wins
-        assert scoped["id"] == "T900"    # candidate pool narrowed to v0.2
+        assert unscoped["task"]["id"] == "T001"  # high-priority default task wins
+        assert scoped["task"]["id"] == "T900"  # candidate pool narrowed to v0.2
 
     def test_ceiling_withholds_over_ceiling_and_unconfirmed_tasks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -1978,9 +2022,9 @@ class TestGetNextTask:
                 return unrestricted, ceilinged
 
         unrestricted, ceilinged = _run(run())
-        assert unrestricted["id"] == "C"  # over-ceiling task wins with no ceiling
-        assert ceilinged is not None
-        assert ceilinged["id"] == "A"  # ceiling withholds C (over) and B (unconfirmed)
+        assert unrestricted["task"]["id"] == "C"  # wins with no ceiling
+        assert ceilinged["task"] is not None
+        assert ceilinged["task"]["id"] == "A"  # withholds C and B
 
     def test_prd_id_scoped_pick_skips_cross_prd_active_claim_collision(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -2011,7 +2055,7 @@ class TestGetNextTask:
                     await c.call_tool("get_next_task", {"prd_id": "v0.1"})
                 )
 
-        task = _run(run())
+        task = _run(run())["task"]
         assert task is not None
         assert task["id"] == "T101"
 
@@ -4208,7 +4252,8 @@ class TestGetNextTaskPriorityOrdering:
         async def run() -> None:
             async with Client(mcp) as c:
                 for _ in range(3):
-                    next_task = _data(await c.call_tool("get_next_task", {}))
+                    response = _data(await c.call_tool("get_next_task", {}))
+                    next_task = response["task"]
                     if next_task is None:
                         break
                     results.append(next_task["id"])
@@ -4236,7 +4281,7 @@ class TestGetNextTaskPriorityOrdering:
             async with Client(mcp) as c:
                 return _data(await c.call_tool("get_next_task", {}))
 
-        task = _run(run())
+        task = _run(run())["task"]
         assert task["id"] == "T_A"
 
 
@@ -5832,8 +5877,8 @@ class TestMcpPrdAmbiguityAndEnv:
         assert status["total_tasks"] == 2
         assert status["ready_queue_depth"] == 2
         # next picks SOME claimable task across both PRDs (no ambiguity raised).
-        assert nxt is not None
-        assert nxt["id"] in {"T100", "T900"}
+        assert nxt["task"] is not None
+        assert nxt["task"]["id"] in {"T100", "T900"}
 
     def test_prd_ambiguity_defused_by_explicit_prd_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -7138,7 +7183,25 @@ class TestApplyReviewDecision:
         assert rejection["claim_id"] == "C001"
         assert rejection["review_attempt_id"] == "EV0001"
         assert rejection["counts_toward_accept_rate"] is counts
-        assert response["rejection_metrics"]["counts_toward_accept_rate"] is counts
+        metrics = response["rejection_metrics"]
+        assert metrics["counts_toward_accept_rate"] is counts
+        assert metrics["numerator"] == 0
+        assert metrics["denominator"] == (1 if counts else 0)
+        assert metrics["rate"] == (0.0 if counts else None)
+        assert metrics["floor"] == 0.8
+        assert metrics["window_days"] == 7.0
+        assert "accepted finalized reviews" in metrics["guidance"]
+        with sqlite3.connect(state_dir / "state.db") as conn:
+            created_at = conn.execute(
+                "SELECT created_at FROM reviews WHERE target_kind='task' "
+                "AND target_id='T001' ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        assert metrics["as_of"] == (
+            datetime.fromisoformat(created_at)
+            .astimezone(UTC)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
 
     def test_rejection_duplicate_quality_findings_fail_before_mutation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

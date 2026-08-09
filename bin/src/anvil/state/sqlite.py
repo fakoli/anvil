@@ -3063,8 +3063,8 @@ class SqliteBackend:
         ).fetchall()
         return [self._row_to_review(row) for row in rows]
 
-    def list_task_review_decisions(self) -> list[tuple[str, str, str]]:
-        """Return (task_id, decision, created_at_iso) for every task.applied
+    def list_task_review_decisions(self) -> list[tuple[str, str, str, str]]:
+        """Return (task_id, decision, created_at_iso, review_id) for task.applied
         review outcome (decision in 'accepted' / 'rejected'), most-recent first.
 
         Reads the raw reviews table rather than the Review model: the
@@ -3074,12 +3074,12 @@ class SqliteBackend:
         """
         conn = self._require_conn()
         rows = conn.execute(
-            "SELECT target_id, decision, created_at FROM reviews "
+            "SELECT target_id, decision, created_at, id FROM reviews "
             "WHERE target_kind = 'task' AND (decision = 'accepted' OR "
             "(decision = 'rejected' AND counts_toward_accept_rate = 1)) "
-            "ORDER BY created_at DESC"
+            "ORDER BY created_at DESC, id DESC"
         ).fetchall()
-        return [(r[0], r[1], r[2]) for r in rows]
+        return [(r[0], r[1], r[2], r[3]) for r in rows]
 
     def list_evidence(self) -> list[Evidence]:
         """Return all Evidence rows sorted by id ASC.

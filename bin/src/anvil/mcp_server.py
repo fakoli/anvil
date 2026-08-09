@@ -528,6 +528,36 @@ class NextReadyTask(BaseModel):
     priority: str
 
 
+class GovernorProjectionResponse(BaseModel):
+    """Complete, deterministic accept-rate governor calculation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    as_of: str
+    window_days: float
+    window_start: str
+    numerator: int
+    denominator: int
+    rate: float | None
+    floor: float
+    configured_floor: float
+    needs_review_depth: int
+    needs_review_cap: int
+    guidance: str
+    withheld_reason: str | None = None
+    offer_throttled: bool = False
+
+
+class GetNextTaskResponse(BaseModel):
+    """Next task plus truthful governor state, including empty/withheld queues."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task: dict[str, Any] | None
+    governor: GovernorProjectionResponse
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvidenceResponse(BaseModel):
     """Result of submit_completion_evidence."""
 
@@ -1146,9 +1176,11 @@ def get_next_task(
     prd_id: str | None = None,
     max_blast: int | None = None,
     max_review_risk: int | None = None,
-) -> dict[str, Any] | None:
+) -> GetNextTaskResponse:
     """Return the single highest-priority ready task that has no overlapping
-    active claim, or null if none is claimable.
+    active claim, plus the complete offer-governor calculation. ``task`` is
+    null when no task is claimable; ``governor.withheld_reason`` distinguishes
+    throttling from an empty queue.
 
     Ordering: critical > high > medium > low; tiebreak agent_suitability desc,
     then id asc.
@@ -1164,8 +1196,7 @@ def get_next_task(
     exclusion sets (active claims, done-deps, active conflict groups) still span
     ALL PRDs — cross-PRD coordination, same contract as ``next --prd`` / the CLI
     ``ClaimManager.next_claimable(prd_id=...)``. ``None`` keeps the all-PRDs
-    behaviour. ``actor`` is currently unused by the ranking (the file-overlap
-    exclusion lives on the stricter finish-surface helper).
+    behaviour. ``actor`` selects the accept-rate history used by the governor.
     """
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
@@ -1178,7 +1209,21 @@ def get_next_task(
         # Collapse the default sentinel ('prd') so prd_id='prd' matches tasks
         # stored with prd_id='default' rather than narrowing to an empty pool.
         from anvil.claims.manager import within_risk_ceiling
-        from anvil.cli._helpers import canonical_prd_id
+        from anvil.claims.metrics import AcceptRateMetrics
+        from anvil.cli._helpers import canonical_prd_id, resolve_actor
+        from anvil.clock import SystemClock
+
+        resolved_actor = resolve_actor(actor)
+        clock = SystemClock()
+        cfg = _load_merged_config_optional(state_dir)
+        metrics = AcceptRateMetrics(
+            backend,
+            clock,
+            window_days=cfg.accept_rate_window_days if cfg is not None else 7.0,
+            floor=cfg.accept_rate_floor if cfg is not None else 0.80,
+            needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
+            as_of=clock.now(),
+        )
 
         scoped_prd_id = (
             canonical_prd_id(_resolve_prd_id(backend, prd_id)) if prd_id else None
@@ -1189,7 +1234,13 @@ def get_next_task(
         # candidate pool is narrowed to ``scoped_prd_id`` when one is named.
         all_tasks = backend.list_tasks()
         if not all_tasks:
-            return None
+            projection = metrics.projection(resolved_actor)
+            projection.update(withheld_reason="no_tasks", offer_throttled=False)
+            return GetNextTaskResponse(
+                task=None,
+                governor=GovernorProjectionResponse.model_validate(projection),
+                actor_identity=actor_identity_data(resolved_actor),
+            )
         ready_tasks = [
             t
             for t in all_tasks
@@ -1197,7 +1248,13 @@ def get_next_task(
             and (scoped_prd_id is None or t.prd_id == scoped_prd_id)
         ]
         if not ready_tasks:
-            return None
+            projection = metrics.projection(resolved_actor)
+            projection.update(withheld_reason="no_ready_tasks", offer_throttled=False)
+            return GetNextTaskResponse(
+                task=None,
+                governor=GovernorProjectionResponse.model_validate(projection),
+                actor_identity=actor_identity_data(resolved_actor),
+            )
 
         active_claims = backend.list_active_claims()
         claimed_task_ids: set[str] = {c.task_id for c in active_claims}
@@ -1214,7 +1271,10 @@ def get_next_task(
                     active_conflict_groups.add(cg_id)
 
         candidates = []
+        governor_reason = metrics.withhold_reason(resolved_actor)
         for task in ready_tasks:
+            if governor_reason is not None:
+                continue
             if task.id in claimed_task_ids:
                 continue
             if any(dep_id not in done_task_ids for dep_id in task.dependencies):
@@ -1227,10 +1287,29 @@ def get_next_task(
                 task, max_blast=max_blast, max_review_risk=max_review_risk
             ):
                 continue
+            if metrics.task_blocked_for_actor(task.id, resolved_actor):
+                continue
             candidates.append(task)
 
         if not candidates:
-            return None
+            withheld_reason = governor_reason
+            if withheld_reason is None and (
+                max_blast is not None or max_review_risk is not None
+            ):
+                withheld_reason = "risk_ceiling"
+            if withheld_reason is None:
+                withheld_reason = "no_claimable_tasks"
+            projection = metrics.projection(resolved_actor)
+            projection.update(
+                withheld_reason=withheld_reason,
+                offer_throttled=withheld_reason
+                in {"review_queue_saturated", "actor_below_floor"},
+            )
+            return GetNextTaskResponse(
+                task=None,
+                governor=GovernorProjectionResponse.model_validate(projection),
+                actor_identity=actor_identity_data(resolved_actor),
+            )
 
         def _sort_key(t: Any) -> tuple[int, int, str]:
             # Priority: higher rank = higher priority = sort first (negate).
@@ -1258,10 +1337,8 @@ def get_next_task(
         conflict_warnings: list[dict[str, Any]] = []
         if best.likely_files:
             from anvil.claims.manager import ClaimManager
-            from anvil.clock import SystemClock
-
             manager = ClaimManager(
-                backend, SystemClock(), actor=actor or "mcp"
+                backend, clock, actor=resolved_actor
             )
             conflict_warnings = [
                 {
@@ -1274,7 +1351,13 @@ def get_next_task(
                 )
             ]
         data["conflict_warnings"] = conflict_warnings
-        return data
+        projection = metrics.projection(resolved_actor, task_id=best.id)
+        projection.update(withheld_reason=None, offer_throttled=False)
+        return GetNextTaskResponse(
+            task=data,
+            governor=GovernorProjectionResponse.model_validate(projection),
+            actor_identity=actor_identity_data(resolved_actor),
+        )
     finally:
         backend.close()
 
@@ -3947,7 +4030,17 @@ class ApplyRejectionMetricsResponse(BaseModel):
 
     counts_toward_accept_rate: bool
     work_actor: str | None = None
-    accept_rate: float | None = None
+    as_of: str
+    window_days: float
+    window_start: str
+    numerator: int
+    denominator: int
+    rate: float | None = None
+    floor: float
+    configured_floor: float
+    needs_review_depth: int
+    needs_review_cap: int
+    guidance: str
     rejection_count: int
     required_floor: float
 
@@ -4197,6 +4290,7 @@ def apply_review_decision(
                     task_id=task_id,
                     provenance=rejection_provenance,
                     clock=clock,
+                    as_of=now,
                 )
             )
 

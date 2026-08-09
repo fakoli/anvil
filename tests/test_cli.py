@@ -1306,7 +1306,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "9"
+        assert API_VERSION == "10"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -5868,6 +5868,21 @@ class TestNextCommand:
         # Should mention a task or 'Next recommended'
         combined = result.output
         assert "T0" in combined or "task" in combined.lower() or "No claimable" in combined
+        assert "Governor: numerator=0 denominator=0 rate=None floor=0.8" in combined
+        assert "window_days=7.0" in combined
+        assert "Recovery: Clearing the review queue alone does not restore" in combined
+
+        structured = _invoke_cmd(
+            tmp_path, ["next", "--actor", "agent-test", "--json"]
+        )
+        assert structured.exit_code == 0, structured.output
+        governor = json.loads(structured.output)["data"]["governor"]
+        assert governor["numerator"] == 0
+        assert governor["denominator"] == 0
+        assert governor["rate"] is None
+        assert governor["floor"] == 0.8
+        assert governor["window_days"] == 7.0
+        assert governor["offer_throttled"] is False
 
     def test_next_prints_no_tasks_message_when_empty(self, tmp_path: Path) -> None:
         """next prints 'No claimable tasks' when no ready tasks exist."""
@@ -5876,6 +5891,39 @@ class TestNextCommand:
         result = _invoke_cmd(tmp_path, ["next", "--actor", "agent-test"])
         assert result.exit_code == 0, f"next (empty) failed: {result.output}"
         assert "No claimable" in result.output or "no" in result.output.lower()
+        assert "Governor: numerator=0 denominator=0 rate=None floor=0.8" in result.output
+        assert "Recovery: Clearing the review queue alone does not restore" in result.output
+
+    def test_next_governor_withhold_reports_truth_and_recovery(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        config = tmp_path / ".anvil" / "config.yaml"
+        with config.open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\nneeds_review_cap: 0\n"
+                "accept_rate_floor: 0.75\n"
+                "accept_rate_window_days: 14\n"
+            )
+
+        structured = _invoke_cmd(
+            tmp_path, ["next", "--actor", "worker-a", "--json"]
+        )
+        assert structured.exit_code == 0, structured.output
+        data = json.loads(structured.output)["data"]
+        assert data["task"] is None
+        assert data["withheld_reason"] == "review_queue_saturated"
+        assert data["governor"]["offer_throttled"] is True
+        assert data["governor"]["floor"] == 0.75
+        assert data["governor"]["window_days"] == 14.0
+        assert "accepted finalized reviews" in data["governor"]["guidance"]
+
+        human = _invoke_cmd(tmp_path, ["next", "--actor", "worker-a"])
+        assert human.exit_code == 0, human.output
+        assert "numerator=0 denominator=0 rate=None floor=0.75" in human.output
+        assert "window_days=14.0" in human.output
+        assert "Clearing the review queue alone does not restore" in human.output
+        assert "direct claim of a known task ID" in human.output
 
     def test_next_quiet_exits_3_on_empty_queue(self, tmp_path: Path) -> None:
         """next -q exits 3 and prints nothing when the queue is empty."""
@@ -6594,7 +6642,26 @@ class TestApplyCommand:
         assert rejection["counts_toward_accept_rate"] is True
         assert rejection["review_attempt_id"]
         assert len(rejection["supporting_evidence_digest"]) == 64
-        assert data["rejection_metrics"]["counts_toward_accept_rate"] is True
+        metrics = data["rejection_metrics"]
+        assert metrics["counts_toward_accept_rate"] is True
+        assert metrics["numerator"] == 0
+        assert metrics["denominator"] == 1
+        assert metrics["rate"] == 0.0
+        assert metrics["floor"] == 0.8
+        assert metrics["window_days"] == 7.0
+        assert "Clearing the review queue alone does not restore" in metrics["guidance"]
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            created_at = conn.execute(
+                "SELECT created_at FROM reviews WHERE target_kind='task' "
+                "AND target_id=? ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()[0]
+        assert metrics["as_of"] == (
+            datetime.fromisoformat(created_at)
+            .astimezone(UTC)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
 
     @pytest.mark.parametrize(
         "arguments",

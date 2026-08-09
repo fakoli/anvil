@@ -5602,7 +5602,7 @@ class TestTaskRejectionProvenanceState:
             assert review.rejection.category.value == "quality"
             assert review.reviewed_by == "reviewer-a"
             assert backend.list_task_review_decisions() == [
-                ("T001", "rejected", _T0.isoformat())
+                ("T001", "rejected", _T0.isoformat(), review.id)
             ]
         finally:
             backend.close()
@@ -6753,8 +6753,8 @@ class TestV18ToV19RejectionProvenanceMigration:
             assert accepted.rejection_category is None
             assert accepted.rejection is None
             assert migrated.list_task_review_decisions() == [
-                ("T001", "rejected", _T0.isoformat()),
-                ("T002", "accepted", _T0.isoformat()),
+                ("T001", "rejected", _T0.isoformat(), "RV-OLD-R"),
+                ("T002", "accepted", _T0.isoformat(), "RV-OLD-A"),
             ]
         finally:
             migrated.close()

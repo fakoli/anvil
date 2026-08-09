@@ -226,10 +226,13 @@ criteria and constraints before calling `claim_task`.
 ### `get_next_task`
 
 Returns the single highest-priority `ready` task that has no active claim and no unsatisfied
-dependencies. Sort key (implemented directly in this tool, not delegated to
+dependencies, together with the complete accept-rate governor calculation. Sort key
+(implemented directly in this tool, not delegated to
 `ClaimManager.next_claimable()`): `priority desc` (`critical` > `high` > `medium` > `low`),
 then `agent_suitability desc` (higher score wins; unscored tasks rank as `0`), then `id asc`
-(stable tiebreak). Returns `null` when no claimable task is available.
+(stable tiebreak). The response's `task` field is `null` when no claimable task
+is available; `governor.withheld_reason` distinguishes a governed withhold from
+an empty queue.
 
 Stale-claim reaping runs before the selection, so expired leases are cleared before the
 candidate set is computed. Tasks in active conflict groups (where a conflicting task is
@@ -244,8 +247,7 @@ already claimed) are excluded.
 | `max_blast`       | `int \| null`    | no       | `null`  |
 | `max_review_risk` | `int \| null`    | no       | `null`  |
 
-`actor` is accepted but not used in the selection logic in the current implementation;
-it is reserved for future suitability filtering.
+`actor` selects the finalized-review history used by the accept-rate governor.
 
 `prd_id` scopes the candidate pool to one PRD partition; the exclusion sets (active claims,
 done-dependency set, active conflict groups) still span all PRDs, so cross-PRD coordination
@@ -259,12 +261,19 @@ be handed high-risk work.
 
 **Output**
 
-A Task object serialized to JSON, or `null`. The object carries two derived
-fields: `review_tier` (`light`/`standard`/`max`, computed at read time from
-the merged project config — identical to the CLI `next` value) and
-`conflict_warnings` (advisory list of `{claim_id, actor, files}` entries
-where the task's `likely_files` overlap an active claim's `expected_files`;
-selection is never altered by these).
+An object with `task`, `governor`, and `actor_identity`. `task` is a serialized
+Task or `null`; a returned task carries `review_tier` and advisory
+`conflict_warnings`. `governor` reports `as_of`, `window_start`, `window_days`,
+`numerator`, `denominator`, `rate`, `floor`, `configured_floor`, review-queue
+depth/cap, `withheld_reason`, `offer_throttled`, and bounded recovery guidance.
+One accepted finalized review contributes `1/1`, one quality rejection
+contributes `0/1`, and evidence/process rejections contribute neither. A zero
+denominator yields `rate: null` and does not fail the floor.
+
+Clearing the review queue alone is insufficient to repair a low rate. Recovery
+comes from accepted finalized reviews, expiry from the configured window, or a
+configured floor change. Claiming a known ID directly bypasses only offer
+throttling; ownership, conflict, PRD, risk, and evidence gates remain enforced.
 
 **Failure modes**
 
@@ -1327,7 +1336,11 @@ review attempt and its claim. Typed findings always produce counting
 non-counting `evidence_resubmission`; `process` requires an exact persisted
 process predicate. Omitted, ambiguous, or falsified assertions remain
 `quality`. The response includes the immutable `rejection` object and the
-immediate `rejection_metrics` projection.
+immediate `rejection_metrics` projection. That projection includes the
+persisted review timestamp as `as_of`, numerator, denominator, rate, floor,
+window, queue depth/cap, counting classification, and recovery guidance. A
+non-counting evidence/process rejection therefore cannot lower the displayed
+rate.
 
 When the task declares an **evidence contract** (named `claims` and/or
 `Artifact assertions`, see [PRD template](prd-template.md)), `approve=true`
@@ -1478,7 +1491,7 @@ None.
 
 ```json
 {
-  "api_version": "9",
+  "api_version": "10",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",

@@ -1,5 +1,5 @@
 {
-  "api_version": "9",
+  "api_version": "10",
   "applied_limits": {
     "max_acceptance_criteria_per_task": 256,
     "max_canonical_json_depth": 128,
@@ -35,7 +35,7 @@
     "schema_id": "anvil.state.project-snapshot.v1",
     "tasks": []
   },
-  "schema_version": 18,
+  "schema_version": 19,
   "snapshot_digest": "7783f9dd27bb5effb40e705c2386213ab5e693661b2da7e377ca801bafc52c75",
   "truncated": false
 }

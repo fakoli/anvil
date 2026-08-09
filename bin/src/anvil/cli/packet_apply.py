@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -53,6 +54,7 @@ def _rejection_metrics_block(
     task_id: str,
     provenance: TaskRejectionProvenance,
     clock: Clock,
+    as_of: datetime.datetime,
 ) -> dict[str, object]:
     """Return the immediate governor projection for one rejected attempt."""
     from anvil.claims.metrics import AcceptRateMetrics
@@ -66,11 +68,18 @@ def _rejection_metrics_block(
         window_days=cfg.accept_rate_window_days if cfg is not None else 7.0,
         floor=cfg.accept_rate_floor if cfg is not None else 0.80,
         needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
+        as_of=as_of,
     )
+    projection = metrics.projection(actor, task_id=task_id) if actor is not None else {
+        **metrics.projection("", task_id=task_id),
+        "numerator": 0,
+        "denominator": 0,
+        "rate": None,
+    }
     return {
+        **projection,
         "counts_toward_accept_rate": provenance.counts_toward_accept_rate,
         "work_actor": actor,
-        "accept_rate": metrics.accept_rate(actor) if actor is not None else None,
         "rejection_count": metrics.rejection_count(task_id),
         "required_floor": metrics.required_floor(task_id),
     }
@@ -1704,6 +1713,7 @@ def apply(
                 task_id=task_id,
                 provenance=rejection_provenance,
                 clock=clock,
+                as_of=now,
             )
             if rejection_provenance is not None
             else None
@@ -1769,7 +1779,11 @@ def apply(
             if rejection_metrics is not None:
                 typer.echo(
                     "  Projected metrics: "
-                    f"accept_rate={rejection_metrics['accept_rate']} "
+                    f"rate={rejection_metrics['rate']} "
+                    f"numerator={rejection_metrics['numerator']} "
+                    f"denominator={rejection_metrics['denominator']} "
+                    f"window_days={rejection_metrics['window_days']} "
                     f"rejections={rejection_metrics['rejection_count']} "
                     f"required_floor={rejection_metrics['required_floor']}"
                 )
+                typer.echo(f"  Recovery: {rejection_metrics['guidance']}")

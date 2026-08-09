@@ -7,7 +7,7 @@
         "supported": false
       },
       {
-        "api_version": "10",
+        "api_version": "11",
         "reason": "describe_api_incompatible",
         "supported": false
       },
@@ -24,7 +24,7 @@
       }
     ],
     "required": {
-      "api_version": "9",
+      "api_version": "10",
       "operation_catalog_version": 1,
       "operations": {
         "state.prd.content": {

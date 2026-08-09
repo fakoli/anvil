@@ -74,10 +74,11 @@ _COMMAND = "describe"
 # identical. Consumers pin on ``api_version``; ``engine_version`` tells them the
 # exact build.
 #
-# Bumped to "9" when the provider-read milestone added ``project snapshot`` and
-# ``prd show`` plus the versioned operation catalog below. Consumers of API 8
-# must deliberately accept the new command and manifest shapes.
-API_VERSION = "9"
+# Bumped to "10" when task offers and rejection responses added the complete
+# accept-rate governor projection, and MCP ``get_next_task`` changed from a bare
+# task/null to a typed task+governor envelope. Consumers of API 9 must
+# deliberately accept the new response shapes.
+API_VERSION = "10"
 
 OPERATION_CATALOG_VERSION = 1
 _PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
@@ -277,7 +278,7 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "9",
+          "api_version": "10",
           "engine_version": "0.6.4",
           "display_version": "0.6.4",
           "schema_version": 19,

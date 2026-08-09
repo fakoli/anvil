@@ -266,7 +266,7 @@ anvil project snapshot --json
 anvil project snapshot --json --limit max_tasks=1000 --limit max_dependency_edges=5000
 ```
 
-Consumers must first pin describe API 9, operation version 1, and the exact
+Consumers must first pin describe API 10, operation version 1, and the exact
 packaged schema resource. See [Provider read contracts](contracts/provider-reads-v1.md)
 for limits, digest framing, fixtures, and the Workbench mapping.
 
@@ -762,15 +762,16 @@ anvil show T001
 ### `anvil next` { #next }
 
 **Synopsis:** Pick the highest-priority claimable task **without** claiming
-it. Prints the recommended task id, title, priority, review tier, and
-complexity. Run
+it. Prints the recommended task id, title, priority, review tier, complexity,
+and the complete accept-rate governor calculation. Run
 `anvil claim TASK_ID` to acquire the lease after reviewing the
 recommendation. Reaps any stale claims (expired leases) before recommending.
 
 **Flags:**
 
 - `--actor TEXT` *(optional)* — actor identity; defaults to `$USER` or
-  `agent`. Used to scope the "claimable by me" filter when implemented.
+  `agent`. Selects the finalized-review history used by the accept-rate
+  governor.
 - `--type TEXT` *(optional)* — only recommend tasks of this type: `feature`,
   `bugfix`, `refactor`, or `modify`.
 - `--max-blast INTEGER` *(optional, `$ANVIL_MAX_BLAST`)* — **[EXPERIMENTAL]**
@@ -797,6 +798,22 @@ recommendation. Reaps any stale claims (expired leases) before recommending.
   empty (the loop-seam signal). Also returned when `--prd` scopes the
   candidate pool and that PRD has no claimable task (both human and `--json`
   modes print/emit a PRD-specific message first).
+
+**Governor output:** Human and JSON output report the calculation boundary
+(`as_of`), inclusive window and `window_days`, accepted-review numerator,
+counting-attempt denominator, rate (`null` when the denominator is zero),
+configured or task-escalated floor, review-queue depth/cap, and whether an
+empty result was actually throttled. One accepted finalized review contributes
+`1/1`; one quality rejection contributes `0/1`; evidence-resubmission and
+process rejections contribute neither. Decisions exactly at either window
+boundary count, future decisions do not, and equal timestamps use event ID as
+the stable tiebreak.
+
+Clearing the review queue alone does **not** repair a low accept rate. Offer
+eligibility recovers through accepted finalized reviews, expiry of older
+reviews from the configured window, or a configured floor change. A direct
+`anvil claim KNOWN_TASK_ID` bypasses only this offer throttle; ownership,
+conflict, PRD, risk, and evidence gates still apply.
 
 **Example:**
 
@@ -830,6 +847,9 @@ worktree at `../wt-<task_id>/`.
 - `--force` *(flag)* — override the pre-claim conflict warnings. Without
   `--force`, file overlap or group conflicts cause the command to exit 1
   after listing every conflicting claim.
+- A known task ID is not subject to the `next` accept-rate offer throttle.
+  This is not a general override: all claim ownership, status, conflict, PRD,
+  and risk checks remain active, and later evidence gates remain unchanged.
 - `--actor TEXT` *(optional)* — local audit actor. Precedence: explicit flag >
   `ANVIL_ACTOR` > legacy `ANVIL_GATE_ACTOR` > derived local identity. Claim
   output includes structured continuation argv/environment data. Actor identity

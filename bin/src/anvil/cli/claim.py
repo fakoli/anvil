@@ -1205,6 +1205,7 @@ def next(  # noqa: A001
             window_days=cfg.accept_rate_window_days if cfg is not None else 7.0,
             floor=cfg.accept_rate_floor if cfg is not None else 0.80,
             needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
+            as_of=clock.now(),
         )
         task = manager.next_claimable(
             task_type=task_type,
@@ -1236,6 +1237,16 @@ def next(  # noqa: A001
                     f"No claimable tasks in this PRD ({scoped_prd_id})."
                 )
                 withheld_reason = "no_claimable_tasks_in_prd"
+
+        governor_projection = metrics.projection(
+            resolved_actor,
+            task_id=task.id if task is not None else None,
+        )
+        governor_projection["withheld_reason"] = withheld_reason
+        governor_projection["offer_throttled"] = withheld_reason in {
+            "review_queue_saturated",
+            "actor_below_floor",
+        }
 
         # retro-opps T009 — ADVISORY collision visibility: the selected task's
         # likely_files intersected with active claims' expected_files, via the
@@ -1275,6 +1286,7 @@ def next(  # noqa: A001
             "review_tier": task_review_tier,
             "conflict_warnings": conflict_warnings,
             "withheld_reason": withheld_reason,
+            "governor": governor_projection,
         }
         if scoped_empty_message is not None:
             data["prd"] = scoped_prd_id
@@ -1285,6 +1297,15 @@ def next(  # noqa: A001
         return
 
     if task is None:
+        typer.echo(
+            "Governor: "
+            f"numerator={governor_projection['numerator']} "
+            f"denominator={governor_projection['denominator']} "
+            f"rate={governor_projection['rate']} "
+            f"floor={governor_projection['floor']} "
+            f"window_days={governor_projection['window_days']} "
+            f"as_of={governor_projection['as_of']}"
+        )
         if scoped_empty_message is not None:
             typer.echo(scoped_empty_message)
             raise typer.Exit(code=3)
@@ -1296,7 +1317,7 @@ def next(  # noqa: A001
         elif withheld_reason == "actor_below_floor":
             typer.echo(
                 f"No work offered: actor {safe_actor_label(resolved_actor)} is below the "
-                "accept-rate floor. Let current work clear review first."
+                "accept-rate floor."
             )
         elif withheld_reason == "risk_ceiling":
             typer.echo(
@@ -1307,6 +1328,7 @@ def next(  # noqa: A001
             )
         else:
             typer.echo("No claimable tasks available.")
+        typer.echo(f"Recovery: {governor_projection['guidance']}")
         return
 
     typer.echo(f"Next recommended task: {task.id}")
@@ -1315,6 +1337,16 @@ def next(  # noqa: A001
     typer.echo(f"  Review tier: {task_review_tier}")
     if task.scores.complexity is not None:
         typer.echo(f"  Complexity: {task.scores.complexity}")
+    typer.echo(
+        "  Governor: "
+        f"numerator={governor_projection['numerator']} "
+        f"denominator={governor_projection['denominator']} "
+        f"rate={governor_projection['rate']} "
+        f"floor={governor_projection['floor']} "
+        f"window_days={governor_projection['window_days']} "
+        f"as_of={governor_projection['as_of']}"
+    )
+    typer.echo(f"  Recovery: {governor_projection['guidance']}")
     for warning in conflict_warnings:
         typer.echo(
             f"  Conflict warning: files {', '.join(warning['files'])} overlap "
