@@ -82,6 +82,29 @@ def _make_task(
     )
 
 
+def _inject_portable_windows_existing_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep simulated Windows policy tests independent of the host Win32 API."""
+
+    def existing_path(path: Path) -> inference_module._WindowsExistingPath | None:
+        try:
+            identity = path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        return inference_module._WindowsExistingPath(
+            volume_serial=f"test-device:{identity.st_dev}",
+            file_id=f"test-inode:{identity.st_ino}",
+            is_directory=path.is_dir(),
+        )
+
+    monkeypatch.setattr(
+        inference_module,
+        "_windows_existing_path_identity",
+        existing_path,
+    )
+
+
 # ---------------------------------------------------------------------------
 # infer_dependencies
 # ---------------------------------------------------------------------------
@@ -374,6 +397,7 @@ class TestInferDependencies:
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
         )
+        _inject_portable_windows_existing_paths(monkeypatch)
         monkeypatch.setattr(
             inference_module,
             "_directory_uses_case_sensitive_identity",
@@ -410,6 +434,7 @@ class TestInferDependencies:
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
         )
+        _inject_portable_windows_existing_paths(monkeypatch)
         monkeypatch.setattr(
             inference_module,
             "_directory_uses_case_sensitive_identity",
@@ -445,6 +470,7 @@ class TestInferDependencies:
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
         )
+        _inject_portable_windows_existing_paths(monkeypatch)
 
         def directory_policy(directory: Path) -> bool:
             observed.append(directory)
@@ -1527,6 +1553,7 @@ class TestInferDependencies:
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
         )
+        _inject_portable_windows_existing_paths(monkeypatch)
         monkeypatch.setattr(
             inference_module, "_cached_windows_path_key", lambda path: "collision"
         )
@@ -1549,6 +1576,7 @@ class TestInferDependencies:
         monkeypatch.setattr(
             inference_module, "_uses_windows_path_identity", lambda: True
         )
+        _inject_portable_windows_existing_paths(monkeypatch)
         monkeypatch.setattr(
             inference_module, "_cached_windows_path_key", lambda path: "collision"
         )
