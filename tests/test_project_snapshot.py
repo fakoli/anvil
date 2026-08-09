@@ -271,7 +271,7 @@ def test_project_snapshot_cli_success_is_closed_json_and_read_only(
     assert data["operation_id"] == "state.project.snapshot"
     assert data["operation_version"] == 1
     assert data["output_schema_id"] == "anvil.state.project-snapshot.v1"
-    assert data["api_version"] == "8"
+    assert data["api_version"] == "9"
     assert data["schema_version"] == 18
     assert data["digest_algorithm"] == "sha256"
     assert data["truncated"] is False

@@ -1174,7 +1174,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "8"
+        assert API_VERSION == "9"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -1190,6 +1190,85 @@ class TestDescribe:
         assert data["tag_distance"] is None or data["tag_distance"] >= 0
         assert isinstance(data["dirty"], bool)
         assert data["schema_version"] == get_schema_version()
+
+    def test_describe_advertises_versioned_provider_read_catalog(self) -> None:
+        result = runner.invoke(app, ["describe"], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        catalog = json.loads(result.stdout.strip())["data"]["operation_catalog"]
+
+        assert catalog["catalog_version"] == 1
+        operations = catalog["operations"]
+        assert [item["operation_id"] for item in operations] == [
+            "state.prd.content",
+            "state.project.snapshot",
+        ]
+        assert all(item["operation_version"] == 1 for item in operations)
+        assert all(item["effect"] == "read" for item in operations)
+        assert [item["transport"]["command"] for item in operations] == [
+            "prd show",
+            "project snapshot",
+        ]
+        for item in operations:
+            assert item["transport"] == {
+                "kind": "cli",
+                "command": item["transport"]["command"],
+                "json_required": True,
+            }
+            resources = item["schema_resources"]
+            assert list(resources) == ["input", "output", "error"]
+            assert all(
+                value.startswith("contracts/provider-reads/v1/")
+                and value.endswith(".schema.json")
+                for value in resources.values()
+            )
+            assert item["limits"] == sorted(set(item["limits"]))
+            assert item["error_codes"] == sorted(set(item["error_codes"]))
+
+    def test_provider_catalog_consumer_rejects_incompatible_versions(self) -> None:
+        """A consumer can fail closed on catalog, operation, or schema drift."""
+
+        from copy import deepcopy
+
+        from anvil.cli.describe import provider_operation_catalog
+
+        def supports(catalog: object) -> bool:
+            if not isinstance(catalog, dict) or catalog.get("catalog_version") != 1:
+                return False
+            operations = catalog.get("operations")
+            if not isinstance(operations, list):
+                return False
+            expected = {
+                "state.prd.content": "prd-content-output.schema.json",
+                "state.project.snapshot": "project-snapshot-output.schema.json",
+            }
+            if [item.get("operation_id") for item in operations] != sorted(expected):
+                return False
+            return all(
+                item.get("operation_version") == 1
+                and item.get("schema_resources", {}).get("output")
+                == (
+                    "contracts/provider-reads/v1/"
+                    + expected[item["operation_id"]]
+                )
+                for item in operations
+            )
+
+        catalog = provider_operation_catalog()
+        assert supports(catalog)
+
+        incompatible_catalog = deepcopy(catalog)
+        incompatible_catalog["catalog_version"] = 2
+        assert not supports(incompatible_catalog)
+
+        incompatible_operation = deepcopy(catalog)
+        incompatible_operation["operations"][0]["operation_version"] = 2
+        assert not supports(incompatible_operation)
+
+        incompatible_schema = deepcopy(catalog)
+        incompatible_schema["operations"][1]["schema_resources"]["output"] = (
+            "contracts/provider-reads/v2/project-snapshot-output.schema.json"
+        )
+        assert not supports(incompatible_schema)
 
     def test_describe_works_without_a_project(self, tmp_path: Path) -> None:
         """describe needs no init — it never opens a backend (runs anywhere)."""
@@ -1254,6 +1333,7 @@ class TestDescribe:
         assert not result.stdout.strip().startswith("{")
         assert "CLI commands" in result.output
         assert "MCP tools" in result.output
+        assert "Provider operations v1 (2)" in result.output
         assert "display_version:" in result.output
         assert "dirty:" in result.output
 

@@ -53,7 +53,13 @@ from anvil.build_identity import get_build_identity
 from anvil.cli._json import emit_success
 from anvil.state.schema import get_schema_version
 
-__all__ = ["API_VERSION", "build_manifest", "describe"]
+__all__ = [
+    "API_VERSION",
+    "OPERATION_CATALOG_VERSION",
+    "build_manifest",
+    "describe",
+    "provider_operation_catalog",
+]
 
 _COMMAND = "describe"
 
@@ -68,10 +74,128 @@ _COMMAND = "describe"
 # identical. Consumers pin on ``api_version``; ``engine_version`` tells them the
 # exact build.
 #
-# Bumped to "8" when dependency editing gained explicit PRD/project selection,
-# a resolved ``prd_id`` response field, and atomic batch persistence. Consumers
-# of the old shape must deliberately accept the richer contract.
-API_VERSION = "8"
+# Bumped to "9" when the provider-read milestone added ``project snapshot`` and
+# ``prd show`` plus the versioned operation catalog below. Consumers of API 8
+# must deliberately accept the new command and manifest shapes.
+API_VERSION = "9"
+
+OPERATION_CATALOG_VERSION = 1
+_PROVIDER_READ_RESOURCE_ROOT = "contracts/provider-reads/v1"
+
+_SNAPSHOT_ERROR_CODES = (
+    "dependency_cycle",
+    "duplicate_edge",
+    "invalid_hierarchy",
+    "invalid_request",
+    "limit_exceeded",
+    "missing_target",
+    "projection_not_converged",
+    "schema_incompatible",
+    "state_unavailable",
+)
+_CONTENT_ERROR_CODES = (
+    "content_unavailable",
+    "invalid_identifier",
+    "invalid_request",
+    "invalid_section",
+    "invalid_utf8",
+    "limit_exceeded",
+    "prd_not_found",
+    "projection_not_converged",
+    "schema_incompatible",
+    "source_drift",
+    "stale_digest",
+    "state_unavailable",
+)
+
+
+def provider_operation_catalog() -> dict[str, Any]:
+    """Return the deterministic version-1 provider-read operation catalog.
+
+    Resource identifiers are package-relative paths below ``anvil._data``.
+    T006.1 packages every advertised resource at exactly these paths, allowing
+    installed consumers to resolve them with ``importlib.resources`` without
+    learning a checkout or state-storage path.
+    """
+
+    snapshot_limits = sorted(
+        [
+        "max_acceptance_criteria_per_task",
+        "max_canonical_json_depth",
+        "max_dependency_edges",
+        "max_dependencies_per_task",
+        "max_diagnostic_bytes",
+        "max_features",
+        "max_prds",
+        "max_response_bytes",
+        "max_snapshot_bytes",
+        "max_string_bytes",
+        "max_tasks",
+        "max_verification_summaries_per_task",
+        "max_verification_summary_label_bytes",
+        ]
+    )
+    content_limits = [
+        "max_diagnostic_bytes",
+        "max_prd_content_bytes",
+        "max_response_bytes",
+    ]
+    operations = [
+        {
+            "operation_id": "state.prd.content",
+            "operation_version": 1,
+            "effect": "read",
+            "transport": {
+                "kind": "cli",
+                "command": "prd show",
+                "json_required": True,
+            },
+            "schema_resources": {
+                "input": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "prd-content-input.schema.json"
+                ),
+                "output": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "prd-content-output.schema.json"
+                ),
+                "error": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/read-error.schema.json"
+                ),
+            },
+            "limits": content_limits,
+            "error_codes": list(_CONTENT_ERROR_CODES),
+        },
+        {
+            "operation_id": "state.project.snapshot",
+            "operation_version": 1,
+            "effect": "read",
+            "transport": {
+                "kind": "cli",
+                "command": "project snapshot",
+                "json_required": True,
+            },
+            "schema_resources": {
+                "input": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "project-snapshot-input.schema.json"
+                ),
+                "output": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "project-snapshot-output.schema.json"
+                ),
+                "error": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/read-error.schema.json"
+                ),
+            },
+            "limits": snapshot_limits,
+            "error_codes": list(_SNAPSHOT_ERROR_CODES),
+        },
+    ]
+    return {
+        "catalog_version": OPERATION_CATALOG_VERSION,
+        "operations": operations,
+    }
 
 
 def describe(
@@ -119,7 +243,7 @@ def build_manifest() -> dict[str, Any]:
     Returns a JSON-safe dict::
 
         {
-          "api_version": "8",
+          "api_version": "9",
           "engine_version": "0.6.4",
           "display_version": "0.6.4",
           "schema_version": 18,
@@ -139,7 +263,11 @@ def build_manifest() -> dict[str, Any]:
             "contract_count": 76,
             "count": 68
           },
-          "mcp": {"tools": ["claim_task", ...], "count": 36}
+          "mcp": {"tools": ["claim_task", ...], "count": 36},
+          "operation_catalog": {
+            "catalog_version": 1,
+            "operations": [{"operation_id": "state.prd.content", ...}, ...]
+          }
         }
 
     Both lists are sorted for stable, diffable output. ``cli.commands`` are leaf
@@ -181,6 +309,7 @@ def build_manifest() -> dict[str, Any]:
             "tools": mcp_tools,
             "count": len(mcp_tools),
         },
+        "operation_catalog": provider_operation_catalog(),
     }
 
 
@@ -338,3 +467,14 @@ def _print_human(manifest: dict[str, Any]) -> None:
     typer.echo(f"MCP tools ({manifest['mcp']['count']}):")
     for name in manifest["mcp"]["tools"]:
         typer.echo(f"  {name}")
+    typer.echo("")
+    catalog = manifest["operation_catalog"]
+    typer.echo(
+        f"Provider operations v{catalog['catalog_version']} "
+        f"({len(catalog['operations'])}):"
+    )
+    for operation in catalog["operations"]:
+        typer.echo(
+            f"  {operation['operation_id']} v{operation['operation_version']} "
+            f"({operation['effect']})"
+        )
