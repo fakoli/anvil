@@ -1221,6 +1221,13 @@ class TestDescribe:
                 and value.endswith(".schema.json")
                 for value in resources.values()
             )
+            fixtures = item["fixture_resources"]
+            assert list(fixtures) == ["input", "output", "error", "digests"]
+            assert all(
+                value.startswith("contracts/provider-reads/v1/")
+                and value.endswith(".json")
+                for value in fixtures.values()
+            )
             assert item["limits"] == sorted(set(item["limits"]))
             assert item["error_codes"] == sorted(set(item["error_codes"]))
 

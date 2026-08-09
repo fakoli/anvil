@@ -1,0 +1,41 @@
+{
+  "api_version": "9",
+  "applied_limits": {
+    "max_acceptance_criteria_per_task": 256,
+    "max_canonical_json_depth": 128,
+    "max_dependencies_per_task": 512,
+    "max_dependency_edges": 200000,
+    "max_diagnostic_bytes": 4096,
+    "max_features": 4096,
+    "max_prd_content_bytes": 2097152,
+    "max_prds": 128,
+    "max_response_bytes": 16842752,
+    "max_snapshot_bytes": 16777216,
+    "max_string_bytes": 65536,
+    "max_tasks": 50000,
+    "max_verification_summaries_per_task": 256,
+    "max_verification_summary_label_bytes": 4096
+  },
+  "digest_algorithm": "sha256",
+  "event_cursor": {
+    "event_count": 0,
+    "event_frontier_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "operation_id": "state.project.snapshot",
+  "operation_version": 1,
+  "output_schema_id": "anvil.state.project-snapshot.v1",
+  "payload": {
+    "features": [],
+    "operation_version": 1,
+    "prds": [],
+    "project": {
+      "name": "Provider fixture",
+      "project_id": "fixture"
+    },
+    "schema_id": "anvil.state.project-snapshot.v1",
+    "tasks": []
+  },
+  "schema_version": 18,
+  "snapshot_digest": "7783f9dd27bb5effb40e705c2386213ab5e693661b2da7e377ca801bafc52c75",
+  "truncated": false
+}

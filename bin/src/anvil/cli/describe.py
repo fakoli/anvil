@@ -163,6 +163,23 @@ def provider_operation_catalog() -> dict[str, Any]:
                     f"{_PROVIDER_READ_RESOURCE_ROOT}/read-error.schema.json"
                 ),
             },
+            "fixture_resources": {
+                "input": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "prd-content-input.canonical.json"
+                ),
+                "output": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "prd-content-output.canonical.json"
+                ),
+                "error": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/read-error.canonical.json"
+                ),
+                "digests": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "provider-read-digests.v1.json"
+                ),
+            },
             "limits": content_limits,
             "error_codes": list(_CONTENT_ERROR_CODES),
         },
@@ -186,6 +203,23 @@ def provider_operation_catalog() -> dict[str, Any]:
                 ),
                 "error": (
                     f"{_PROVIDER_READ_RESOURCE_ROOT}/read-error.schema.json"
+                ),
+            },
+            "fixture_resources": {
+                "input": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "project-snapshot-input.canonical.json"
+                ),
+                "output": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "project-snapshot-output.canonical.json"
+                ),
+                "error": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/read-error.canonical.json"
+                ),
+                "digests": (
+                    f"{_PROVIDER_READ_RESOURCE_ROOT}/"
+                    "provider-read-digests.v1.json"
                 ),
             },
             "limits": snapshot_limits,

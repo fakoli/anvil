@@ -1,0 +1,8 @@
+{
+  "actual": null,
+  "code": "invalid_request",
+  "field": "request",
+  "limit": null,
+  "message": "The read request is invalid.",
+  "schema_id": "anvil.state.read-error.v1"
+}

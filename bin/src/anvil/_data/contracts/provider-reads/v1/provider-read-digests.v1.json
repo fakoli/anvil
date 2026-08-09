@@ -1,0 +1,26 @@
+{
+  "prd_content": {
+    "domain_base64": "YW52aWwucHJkLWNvbnRlbnQudjEA",
+    "full_content_digest": "f5e22d65e4df03b1f3a935f3aa049831d0399b87d04196dbacc48633354af72d",
+    "full_selector": {
+      "kind": "full",
+      "paths": []
+    },
+    "source_digest": "2b1b3fab185e4627f05131d808c1844c1a0b1ac908b5c2495a9a4f0afe323b49",
+    "source_utf8_base64": "IyBQcm9qZWN0OiBYDQoNCiMjIFN1bW1hcnkNCmNhZsOpDQojIyBHb2Fscw0KLSBzaGlwDQo=",
+    "summary_content_digest": "c7418b66a23c89794c79a02c9f325f100ddc0534659d666297afa26a7a60a99c",
+    "summary_selector": {
+      "kind": "sections",
+      "paths": [
+        "Summary"
+      ]
+    },
+    "summary_utf8_base64": "IyMgU3VtbWFyeQ0KY2Fmw6kNCg=="
+  },
+  "project_snapshot": {
+    "canonical_payload_utf8_base64": "eyJmZWF0dXJlcyI6W10sIm9wZXJhdGlvbl92ZXJzaW9uIjoxLCJwcmRzIjpbXSwicHJvamVjdCI6eyJuYW1lIjoiUHJvdmlkZXIgZml4dHVyZSIsInByb2plY3RfaWQiOiJmaXh0dXJlIn0sInNjaGVtYV9pZCI6ImFudmlsLnN0YXRlLnByb2plY3Qtc25hcHNob3QudjEiLCJ0YXNrcyI6W119",
+    "domain_base64": "YW52aWwucHJvamVjdC1zbmFwc2hvdC52MQA=",
+    "snapshot_digest": "7783f9dd27bb5effb40e705c2386213ab5e693661b2da7e377ca801bafc52c75"
+  },
+  "schema_id": "anvil.provider-read-digests.v1"
+}
