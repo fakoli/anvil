@@ -148,6 +148,7 @@ def claim(
         apply_claim_plan,
         claim_git_metadata,
         compensate_claim_plan_tracker,
+        finalize_claim_plan_tracker,
         resolve_claim_plan,
         revalidate_claim_plan,
     )
@@ -268,6 +269,9 @@ def claim(
                     try:
                         apply_claim_plan(
                             plan, cwd=resolved_cwd, tracker=mutation_tracker
+                        )
+                        finalize_claim_plan_tracker(
+                            mutation_tracker, cwd=resolved_cwd
                         )
                     except BaseException:
                         try:
@@ -514,6 +518,9 @@ def claim(
                 )
                 try:
                     apply_claim_plan(plan, cwd=resolved_cwd, tracker=mutation_tracker)
+                    finalize_claim_plan_tracker(
+                        mutation_tracker, cwd=resolved_cwd
+                    )
                 except BaseException:
                     try:
                         manager.release(

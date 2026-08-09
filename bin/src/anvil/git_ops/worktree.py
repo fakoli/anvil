@@ -50,6 +50,7 @@ __all__ = [
     "claim_git_metadata",
     "compensate_claim_plan",
     "compensate_claim_plan_tracker",
+    "finalize_claim_plan_tracker",
     "create_worktree_for_task",
     "resolve_claim_plan",
     "revalidate_claim_plan",
@@ -149,6 +150,7 @@ class ClaimGitMutation:
     ownership_token: str | None = None
     branch_identity: tuple[int, int, int] | None = None
     branch_reflog_state: tuple[int, str] | None = None
+    branch_marker_created: bool = False
     worktree_identity: tuple[int, int, int] | None = None
     checkout_identity: tuple[int, int, int] | None = None
 
@@ -166,6 +168,7 @@ class ClaimGitMutationTracker:
     caller_checkout_changed: bool = False
     branch_identity: tuple[int, int, int] | None = None
     branch_reflog_state: tuple[int, str] | None = None
+    branch_marker_created: bool = False
     worktree_identity: tuple[int, int, int] | None = None
     checkout_identity: tuple[int, int, int] | None = None
 
@@ -1003,11 +1006,24 @@ def apply_claim_plan(
     if plan.branch is None or plan.claim_start_sha is None:
         raise ClaimPlanError("claim_plan_incomplete", "Git claim plan is incomplete")
     branch_ref = f"refs/heads/{plan.branch}"
+    marker_ref = _branch_marker_ref(ownership.ownership_token)
+
+    def record_marker() -> None:
+        if _ref_oid(marker_ref, root) != plan.claim_start_sha:
+            raise ClaimPlanError(
+                "mutation_ownership_unavailable",
+                "Branch ownership marker cannot be proven",
+            )
+        ownership.branch_marker_created = True
 
     def record_branch() -> None:
         identity = _branch_identity(plan)
         reflog_state = _branch_reflog_state(plan, root)
-        if identity is None and reflog_state is None:
+        if (
+            identity is None
+            and reflog_state is None
+            and not _branch_marker_matches(ownership.ownership_token, plan, root)
+        ):
             raise ClaimPlanError(
                 "mutation_ownership_unavailable",
                 "Created branch ownership cannot be proven",
@@ -1038,6 +1054,14 @@ def apply_claim_plan(
 
     try:
         if not plan.branch_exists:
+            _mutate_git(
+                ["update-ref", marker_ref, plan.claim_start_sha, ""],
+                root,
+                code="branch_marker_create_failed",
+                on_success=record_marker,
+                success_probe=lambda: _ref_oid(marker_ref, root)
+                == plan.claim_start_sha,
+            )
             branch_action = _ownership_action(ownership.ownership_token, "branch")
             _mutate_git(
                 [
@@ -1139,6 +1163,7 @@ def apply_claim_plan(
             ownership_token=ownership.ownership_token,
             branch_identity=ownership.branch_identity,
             branch_reflog_state=ownership.branch_reflog_state,
+            branch_marker_created=ownership.branch_marker_created,
             worktree_identity=ownership.worktree_identity,
             checkout_identity=ownership.checkout_identity,
         )
@@ -1161,8 +1186,10 @@ def compensate_claim_plan(
         branch_created=mutation.branch_created,
         worktree_created=mutation.worktree_created,
         caller_checkout_changed=mutation.caller_checkout_changed,
+        ownership_token=mutation.ownership_token,
         branch_identity=mutation.branch_identity,
         branch_reflog_state=mutation.branch_reflog_state,
+        branch_marker_created=mutation.branch_marker_created,
         worktree_identity=mutation.worktree_identity,
         checkout_identity=mutation.checkout_identity,
         cwd=Path(cwd or mutation.plan.caller_path),
@@ -1184,8 +1211,10 @@ def compensate_claim_plan_tracker(
         branch_created=tracker.branch_created,
         worktree_created=tracker.worktree_created,
         caller_checkout_changed=tracker.caller_checkout_changed,
+        ownership_token=tracker.ownership_token,
         branch_identity=tracker.branch_identity,
         branch_reflog_state=tracker.branch_reflog_state,
+        branch_marker_created=tracker.branch_marker_created,
         worktree_identity=tracker.worktree_identity,
         checkout_identity=tracker.checkout_identity,
         cwd=root,
@@ -1195,6 +1224,7 @@ def compensate_claim_plan_tracker(
     tracker.caller_checkout_changed = False
     tracker.branch_identity = None
     tracker.branch_reflog_state = None
+    tracker.branch_marker_created = False
     tracker.worktree_identity = None
     tracker.checkout_identity = None
 
@@ -1205,8 +1235,10 @@ def _compensate_values(
     branch_created: bool,
     worktree_created: bool,
     caller_checkout_changed: bool,
+    ownership_token: str | None = None,
     branch_identity: tuple[int, int, int] | None = None,
     branch_reflog_state: tuple[int, str] | None = None,
+    branch_marker_created: bool = False,
     worktree_identity: tuple[int, int, int] | None = None,
     checkout_identity: tuple[int, int, int] | None = None,
     cwd: Path,
@@ -1258,12 +1290,19 @@ def _compensate_values(
                 code="checkout_compensation_failed",
             )
     current_reflog_state = _branch_reflog_state(plan, cwd)
+    marker_matches = bool(
+        branch_marker_created
+        and ownership_token is not None
+        and _branch_marker_matches(ownership_token, plan, cwd)
+    )
     if branch_reflog_state is not None and current_reflog_state is not None:
         owns_branch = current_reflog_state == branch_reflog_state
-    else:
+    elif branch_identity is not None and _branch_identity(plan) is not None:
         owns_branch = bool(
-            branch_identity is not None and _branch_identity(plan) == branch_identity
+            _branch_identity(plan) == branch_identity
         )
+    else:
+        owns_branch = marker_matches
     if branch_created and owns_branch and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
         branch_owner = next(
             (item for item in _worktree_topology(cwd) if item.branch_ref == branch_ref),
@@ -1275,6 +1314,23 @@ def _compensate_values(
                 cwd,
                 code="branch_compensation_failed",
             )
+    if branch_marker_created and ownership_token is not None:
+        _remove_branch_marker(ownership_token, plan, cwd)
+
+
+def finalize_claim_plan_tracker(
+    tracker: ClaimGitMutationTracker,
+    *,
+    cwd: Path | None = None,
+) -> None:
+    """Retire temporary ownership evidence after the state claim is durable."""
+    if tracker.branch_marker_created:
+        _remove_branch_marker(
+            tracker.ownership_token,
+            tracker.plan,
+            Path(cwd or tracker.plan.caller_path),
+        )
+    tracker.branch_marker_created = False
 
 
 def _working_tree_dirty(
@@ -1313,6 +1369,30 @@ def _symbolic_head(cwd: Path) -> str | None:
 
 def _ownership_action(token: str, kind: str) -> str:
     return f"anvil-claim:{token}:{kind}"
+
+
+def _branch_marker_ref(token: str) -> str:
+    return f"refs/anvil/claim-ownership/{token}"
+
+
+def _branch_marker_matches(token: str, plan: ClaimGitPlan, cwd: Path) -> bool:
+    return bool(
+        plan.claim_start_sha is not None
+        and _ref_oid(_branch_marker_ref(token), cwd) == plan.claim_start_sha
+    )
+
+
+def _remove_branch_marker(token: str, plan: ClaimGitPlan, cwd: Path) -> None:
+    if plan.claim_start_sha is None:
+        return
+    marker_ref = _branch_marker_ref(token)
+    if _ref_oid(marker_ref, cwd) != plan.claim_start_sha:
+        return
+    _mutate_git(
+        ["update-ref", "-d", marker_ref, plan.claim_start_sha],
+        cwd,
+        code="branch_marker_cleanup_failed",
+    )
 
 
 def _artifact_identity(path: Path) -> tuple[int, int, int] | None:

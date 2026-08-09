@@ -1326,6 +1326,7 @@ def claim_task(
             apply_claim_plan,
             claim_git_metadata,
             compensate_claim_plan_tracker,
+            finalize_claim_plan_tracker,
             resolve_claim_plan,
             revalidate_claim_plan,
         )
@@ -1410,6 +1411,9 @@ def claim_task(
                 )
                 try:
                     apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                    finalize_claim_plan_tracker(
+                        mutation_tracker, cwd=project_dir
+                    )
                 except BaseException:
                     try:
                         manager.release(
@@ -4680,6 +4684,7 @@ def claim_bundle(
         apply_claim_plan,
         claim_git_metadata,
         compensate_claim_plan_tracker,
+        finalize_claim_plan_tracker,
         resolve_claim_plan,
         revalidate_claim_plan,
     )
@@ -4741,6 +4746,9 @@ def claim_bundle(
                 )
                 try:
                     apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
+                    finalize_claim_plan_tracker(
+                        mutation_tracker, cwd=project_dir
+                    )
                 except BaseException:
                     try:
                         manager.release(

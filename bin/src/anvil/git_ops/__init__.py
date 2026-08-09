@@ -12,6 +12,7 @@ from anvil.git_ops.worktree import (
     claim_git_metadata,
     compensate_claim_plan,
     compensate_claim_plan_tracker,
+    finalize_claim_plan_tracker,
     resolve_claim_plan,
     revalidate_claim_plan,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "claim_git_metadata",
     "compensate_claim_plan",
     "compensate_claim_plan_tracker",
+    "finalize_claim_plan_tracker",
     "resolve_claim_plan",
     "revalidate_claim_plan",
 ]

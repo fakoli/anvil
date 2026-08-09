@@ -25,6 +25,7 @@ from anvil.git_ops.branch import (
 )
 from anvil.git_ops.freshness import BaseRef, check_freshness, resolve_base
 from anvil.git_ops.worktree import (
+    ClaimGitMutationTracker,
     ClaimPlanError,
     WorktreeResult,
     apply_claim_plan,
@@ -32,6 +33,7 @@ from anvil.git_ops.worktree import (
     claim_git_metadata,
     compensate_claim_plan,
     create_worktree_for_task,
+    finalize_claim_plan_tracker,
     resolve_claim_plan,
     revalidate_claim_plan,
 )
@@ -588,6 +590,15 @@ class TestWorkspaceLayoutGitOps:
         finally:
             replay.close()
         assert Path(data["worktree"]).exists()
+        assert (
+            _git(
+                project,
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/anvil/claim-ownership",
+            )
+            == ""
+        )
 
         after = subprocess.run(
             ["git", "branch", "--show-current"],
@@ -1463,6 +1474,68 @@ class TestApplyClaimPlan:
 
         assert _default_branch(project) == original_branch
         assert not _ref_exists(project, f"refs/heads/{plan.branch}")
+
+    @pytest.mark.parametrize("backend", ["files", "reftable"])
+    @pytest.mark.parametrize("isolated", [False, True])
+    def test_backend_neutral_marker_survives_ref_maintenance(
+        self,
+        tmp_path: Path,
+        backend: str,
+        isolated: bool,
+    ) -> None:
+        project = tmp_path / f"{backend}-{'isolated' if isolated else 'shared'}"
+        args = ["git", "init"]
+        if backend == "reftable":
+            args.append("--ref-format=reftable")
+        args.append(str(project))
+        initialized = subprocess.run(args, check=False, capture_output=True)
+        if initialized.returncode != 0:
+            pytest.skip("installed Git does not support the requested ref backend")
+        _git(project, "config", "user.email", "test@example.com")
+        _git(project, "config", "user.name", "Test User")
+        (project / "README.md").write_text("initial\n", encoding="utf-8")
+        _git(project, "add", ".")
+        _git(project, "commit", "-m", "initial")
+        original_branch = _default_branch(project)
+        plan = resolve_claim_plan(
+            f"T011M-{backend}-{'i' if isolated else 's'}",
+            "Ref maintenance",
+            cwd=project,
+            worktree=isolated,
+        )
+        mutation = apply_claim_plan(plan, cwd=project)
+        if backend == "files":
+            _git(project, "pack-refs", "--all")
+        _git(project, "reflog", "expire", "--expire=now", "--all")
+
+        compensate_claim_plan(mutation, cwd=project)
+
+        assert _default_branch(project) == original_branch
+        assert not _ref_exists(project, f"refs/heads/{plan.branch}")
+        assert (
+            _git(
+                project,
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/anvil/claim-ownership",
+            )
+            == ""
+        )
+        if isolated:
+            assert plan.target_path is not None
+            assert not Path(plan.target_path).exists()
+
+    def test_finalize_retires_backend_neutral_marker(self, git_repo: Path) -> None:
+        plan = resolve_claim_plan("T011MF", "Finalize marker", cwd=git_repo)
+        tracker = ClaimGitMutationTracker(plan)
+        apply_claim_plan(plan, cwd=git_repo, tracker=tracker)
+        marker_ref = f"refs/anvil/claim-ownership/{tracker.ownership_token}"
+        assert _ref_exists(git_repo, marker_ref)
+
+        finalize_claim_plan_tracker(tracker, cwd=git_repo)
+
+        assert not _ref_exists(git_repo, marker_ref)
+        assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
 
     def test_external_branch_winner_is_never_compensated(
         self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
