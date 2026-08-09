@@ -5760,6 +5760,15 @@ class TestParsePrd:
         assert {r["id"] for r in payload["requirements_added"]} == {"R003"}
         assert {r["id"] for r in payload["requirements_superseded"]} == {"R001"}
         assert {r["id"] for r in payload["requirements_unchanged"]} == {"R002"}
+        assert all(
+            type(requirement["id"]) is str
+            for field in (
+                "requirements_added",
+                "requirements_superseded",
+                "requirements_unchanged",
+            )
+            for requirement in payload[field]
+        )
 
         from anvil.clock import SystemClock
         from anvil.state.sqlite import SqliteBackend
@@ -7238,6 +7247,91 @@ class TestScoreTasks:
             "blast_radius", "review_risk", "agent_suitability",
         ):
             assert 1 <= entry[dim] <= 5
+
+        event_scores = _events_with_action(state_dir, "task.scored")[-1]["scores"]
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            stored_scores = json.loads(
+                connection.execute(
+                    "SELECT scores FROM tasks WHERE id = 'T001'"
+                ).fetchone()[0]
+            )
+        response_scores = {
+            dimension: entry[dimension]
+            for dimension in (
+                "complexity",
+                "parallelizability",
+                "context_load",
+                "blast_radius",
+                "review_risk",
+                "agent_suitability",
+            )
+        }
+        assert event_scores == response_scores
+        assert {
+            dimension: stored_scores[dimension] for dimension in response_scores
+        } == response_scores
+
+    def test_incomplete_score_refuses_before_append_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.planning import scoring as scoring_module
+        from anvil.planning.llm import LLMProvider
+        from anvil.planning.scoring import CompleteScore
+        from anvil.state.models import Score, Task
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="drafted")
+        _add_task(state_dir, task_id="T002", status="drafted")
+        monkeypatch.chdir(tmp_path)
+        before_events = (state_dir / "events.jsonl").read_bytes()
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            before_scores = connection.execute(
+                "SELECT scores FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+
+        calls: list[str] = []
+
+        def injected_score(
+            task: Task, *, provider: LLMProvider | None = None
+        ) -> Score:
+            _ = provider
+            calls.append(task.id)
+            if len(calls) == 1:
+                return CompleteScore(
+                    complexity=1,
+                    parallelizability=2,
+                    context_load=3,
+                    blast_radius=4,
+                    review_risk=5,
+                    agent_suitability=1,
+                )
+            return Score(
+                complexity=1,
+                parallelizability=2,
+                context_load=3,
+                blast_radius=4,
+                review_risk=5,
+                agent_suitability=None,
+            )
+
+        monkeypatch.setattr(scoring_module, "score_task", injected_score)
+
+        async def run() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool("score_tasks", {})
+
+        with pytest.raises(ToolError, match="score_incomplete"):
+            _run(run())
+
+        assert (state_dir / "events.jsonl").read_bytes() == before_events
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            after_scores = connection.execute(
+                "SELECT scores FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+        assert after_scores == before_scores
+        assert calls == ["T001", "T002"]
+        assert _events_with_action(state_dir, "task.scored") == []
 
     def test_error_on_unknown_task(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

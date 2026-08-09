@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from anvil.config import Config
     from anvil.planning.inference import BundlePlanReport, SubtaskProposal
     from anvil.planning.llm import LLMProvider
-    from anvil.planning.scoring import ExpansionCandidate
+    from anvil.planning.scoring import ExpansionCandidate, RecursiveExpansionCandidate
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ def _resolve_auto_expand(config: Config | None) -> tuple[bool, int]:
 
 
 def _render_expansion_queue(
-    queue: list[ExpansionCandidate],
+    queue: list[ExpansionCandidate] | list[RecursiveExpansionCandidate],
     *,
     threshold: int,
 ) -> None:
@@ -406,6 +406,7 @@ def plan(
     # project's llm_provider / llm_tier / bedrock_* / custom_* knobs apply
     # uniformly to both the --use-llm augmentation path and the no-tasks
     # backstop below.
+    config: Config | None
     config_path = state_dir / "config.yaml"
     if propose_bundles and config_path.exists():
         try:
@@ -1107,7 +1108,12 @@ def score(
     decomposition only happens when the expand command runs.
     """
     from anvil.clock import SystemClock
-    from anvil.planning.scoring import build_recursive_expansion_queue, score_task
+    from anvil.planning.scoring import (
+        IncompleteScoreError,
+        build_recursive_expansion_queue,
+        require_complete_score,
+        score_task,
+    )
     from anvil.state.models import EventDraft
 
     state_dir = _resolve_state_dir(cwd)
@@ -1163,7 +1169,20 @@ def score(
 
         scored_tasks = []
         for task in tasks_to_score:
-            computed_score = score_task(task, provider=provider)
+            try:
+                computed_score = require_complete_score(
+                    score_task(task, provider=provider)
+                )
+            except IncompleteScoreError as exc:
+                if json_output:
+                    fail("score", str(exc), code="score_incomplete")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            scored_tasks.append((task, computed_score))
+
+        # Completeness is a whole-request precondition: do not append the first
+        # task.scored event until every score in this invocation is total.
+        for task, computed_score in scored_tasks:
             now = clock.now()
             score_payload: dict[str, object] = {
                 "task_id": task.id,
@@ -1187,7 +1206,6 @@ def score(
                 payload_json=score_payload,
             )
             backend.append(draft)
-            scored_tasks.append((task, computed_score))
 
         # v1.21.0 — re-fetch AFTER the task.scored events landed so the
         # expansion queue covers every task at/above threshold (including

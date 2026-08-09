@@ -26,6 +26,8 @@ import re
 import sys
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
+from pydantic import Field, ValidationError
+
 from anvil.config import (
     DEFAULT_AUTO_EXPAND_THRESHOLD,
     DEFAULT_REVIEW_TIER_LIGHT_RISK_MAX,
@@ -41,18 +43,47 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_RECURSION_DEPTH_CAP",
     "AssumptionScore",
+    "CompleteScore",
     "ExpansionCandidate",
+    "IncompleteScoreError",
     "RecursiveExpansionCandidate",
     "build_expansion_queue",
     "build_recursive_expansion_queue",
     "is_expanded",
     "rank_assumptions",
+    "require_complete_score",
     "review_tier",
     "score_requirement_assumption",
     "score_task",
     "score_all",
     "suggested_subtask_count",
 ]
+
+
+class IncompleteScoreError(ValueError):
+    """A scoring provider returned an incomplete public mutation payload."""
+
+
+class CompleteScore(Score):
+    """A score whose six public dimensions are validated and total."""
+
+    complexity: int = Field(ge=1, le=5)
+    parallelizability: int = Field(ge=1, le=5)
+    context_load: int = Field(ge=1, le=5)
+    blast_radius: int = Field(ge=1, le=5)
+    review_risk: int = Field(ge=1, le=5)
+    agent_suitability: int = Field(ge=1, le=5)
+
+
+def require_complete_score(score: Score) -> CompleteScore:
+    """Revalidate all score dimensions before any public mutation is drafted."""
+
+    try:
+        return CompleteScore.model_validate(score.model_dump())
+    except ValidationError:
+        raise IncompleteScoreError(
+            "scoring produced incomplete or out-of-range dimensions"
+        ) from None
 
 # ---------------------------------------------------------------------------
 # LLM augmentation constants
@@ -317,7 +348,7 @@ def score_task(
     task: Task,
     *,
     provider: LLMProvider | None = None,
-) -> Score:
+) -> CompleteScore:
     """Compute a Score for task using rule-based heuristics.
 
     Pure function — does not mutate task.  Returns a fully-populated Score.
@@ -353,7 +384,7 @@ def score_task(
         agent_suitability_dim.explanation,
     ])
 
-    score = Score(
+    score = CompleteScore(
         complexity=complexity_dim.value,
         parallelizability=parallelizability_dim.value,
         context_load=context_load_dim.value,
@@ -430,14 +461,12 @@ def review_tier(
     # dims together, so in practice this is the all-None unscored case — but
     # a hand-built partially-scored Score must fail safe too, not slip into
     # the light gate on confirmed risk dims alone.
-    if any(
+    if review_risk is None or blast_radius is None or any(
         value is None
         for value in (
             scores.complexity,
             scores.parallelizability,
             scores.context_load,
-            blast_radius,
-            review_risk,
             scores.agent_suitability,
         )
     ):

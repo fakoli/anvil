@@ -1271,6 +1271,10 @@ mode.
 
 - `ToolError` — `task_id` provided but not found.
 - `ToolError` — project not initialized.
+- `ToolError` with `score_incomplete` — a scoring implementation returned an
+  incomplete or out-of-range dimension. The entire request is validated before
+  any `task.scored` event is appended, so a mixed valid/invalid batch leaves all
+  prior scores and the event frontier unchanged.
 
 ---
 

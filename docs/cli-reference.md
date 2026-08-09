@@ -594,7 +594,9 @@ event per task and prints a summary table.
 - `0` — scoring completed (including the "no tasks require scoring" no-op).
 - `1` — specified `TASK_ID` not found; or an explicitly-pinned
   (`bedrock`/`custom`) provider could not be built. The default agent-sdk
-  provider needs no key.
+  provider needs no key. A scoring implementation that returns an incomplete
+  or out-of-range dimension also exits with `score_incomplete`; when scoring a
+  batch, Anvil validates every result before appending any `task.scored` event.
 
 **Example:**
 

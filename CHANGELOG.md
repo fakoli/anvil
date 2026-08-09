@@ -43,6 +43,12 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
+- **Total, mutation-atomic planning contracts.** CLI and MCP PRD revisions keep
+  requirement identifiers structurally typed through diff construction, and
+  scoring validates all six bounded dimensions for the entire request before
+  appending any `task.scored` event. Incomplete mixed batches now fail with a
+  bounded `score_incomplete` refusal and leave scores and event history intact;
+  the strict planning/scoring mypy boundary is enforced in CI.
 - **Atomic canonical planning graphs.** CLI, MCP, sample, and scan planning now
   persist one validated canonical graph event and one SQLite transaction, so a
   later operation failure cannot leave a partial or transient raw graph in the

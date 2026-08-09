@@ -267,7 +267,7 @@ def _seed_pipeline_from_prd_unbatched(
     """
     from anvil.clock import SystemClock
     from anvil.planning.inference import BundlePlanningError, infer_all
-    from anvil.planning.scoring import score_task
+    from anvil.planning.scoring import require_complete_score, score_task
     from anvil.planning.template import parse_prd
     from anvil.state.models import EventDraft
     from anvil.state.transitions import (
@@ -488,7 +488,7 @@ def _seed_pipeline_from_prd_unbatched(
 
     # --- Score every task (rule-based, no LLM) -----------------------------
     for task in backend.list_tasks():
-        computed = score_task(task)
+        computed = require_complete_score(score_task(task))
         now = clock.now()
         backend.append(
             EventDraft(

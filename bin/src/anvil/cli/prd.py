@@ -333,16 +333,11 @@ def prd_parse(
         existing_prd = backend.get_prd(stored_prd_id)
         is_default_prd = parse_prd_id in _DEFAULT_PRD_IDS
 
-        new_requirements = [
-            {
-                "id": r.id,
-                "prd_section": r.prd_section,
-                "text": r.text,
-                "source_paragraph": r.source_paragraph,
-                "derived": r.derived,
-            }
-            for r in result.requirements
-        ]
+        # Keep revision projections as validated Requirement models until the
+        # final event serialization boundary. This makes every id statically a
+        # string and prevents heterogeneous anonymous dictionaries from
+        # weakening diff/refusal logic.
+        new_requirements = list(result.requirements)
 
         if existing_prd is None:
             # FIRST parse of this prd_id → create-if-absent prd.parsed.
@@ -354,7 +349,10 @@ def prd_parse(
                 "summary": result.prd.summary,
                 "goals": result.prd.goals,
                 "non_goals": result.prd.non_goals,
-                "requirements": new_requirements,
+                "requirements": [
+                    requirement.model_dump(mode="json")
+                    for requirement in new_requirements
+                ],
                 "acceptance_criteria": result.prd.acceptance_criteria,
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
@@ -413,7 +411,7 @@ def prd_parse(
                 prd_id=stored_prd_id, include_superseded=True
             )
             all_ids = {r.id for r in all_reqs}
-            new_by_id = {r["id"]: r for r in new_requirements}
+            new_by_id = {requirement.id: requirement for requirement in new_requirements}
 
             # A new parse that re-lists an id retired in a PRIOR revision (in
             # all_ids but NOT live) would fall into NO diff bucket — added
@@ -445,19 +443,15 @@ def prd_parse(
                 raise typer.Exit(code=1)
 
             requirements_added = [
-                r for r in new_requirements if r["id"] not in all_ids
+                requirement
+                for requirement in new_requirements
+                if requirement.id not in all_ids
             ]
             requirements_unchanged = [
                 new_by_id[rid] for rid in live_by_id if rid in new_by_id
             ]
             requirements_superseded = [
-                {
-                    "id": r.id,
-                    "prd_section": r.prd_section,
-                    "text": r.text,
-                    "source_paragraph": r.source_paragraph,
-                    "derived": r.derived,
-                }
+                r
                 for r in live_reqs
                 if r.id not in new_by_id
             ]
@@ -489,9 +483,18 @@ def prd_parse(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                "requirements_added": requirements_added,
-                "requirements_superseded": requirements_superseded,
-                "requirements_unchanged": requirements_unchanged,
+                "requirements_added": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_added
+                ],
+                "requirements_superseded": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_superseded
+                ],
+                "requirements_unchanged": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_unchanged
+                ],
                 **source_binding(new_revision),
             }
 

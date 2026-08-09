@@ -27,7 +27,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from anvil.clock import Clock
 from anvil.state import transitions
@@ -112,10 +112,14 @@ class RenewResult:
 
     claim: Claim
     renewed: bool
-    progress_source: str
+    progress_source: Literal[
+        "attestation", "file_changed", "legacy_unmeasurable", "none"
+    ]
     attestation_digest: str | None = None
     attestation_generation: int | None = None
-    attestation_trust_mode: str | None = None
+    attestation_trust_mode: Literal[
+        "claim_owner_self_attested", "configured_issuer_verified"
+    ] | None = None
 
 
 @dataclass(frozen=True)

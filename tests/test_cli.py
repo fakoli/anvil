@@ -4960,6 +4960,62 @@ class TestScore:
         assert result.exit_code == 0, f"score T001 failed: {result.output}"
         assert "T001" in result.output
 
+    def test_incomplete_score_json_refuses_before_append_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.planning import scoring as scoring_module
+        from anvil.planning.llm import LLMProvider
+        from anvil.planning.scoring import CompleteScore
+        from anvil.state.models import Score, Task
+
+        self._setup_planned_project(tmp_path)
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before_events = events_path.read_bytes()
+        db_path = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(str(db_path)) as connection:
+            before_scores = connection.execute(
+                "SELECT scores FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+        calls: list[str] = []
+
+        def injected_score(
+            task: Task, *, provider: LLMProvider | None = None
+        ) -> Score:
+            _ = provider
+            calls.append(task.id)
+            if len(calls) == 1:
+                return CompleteScore(
+                    complexity=1,
+                    parallelizability=2,
+                    context_load=3,
+                    blast_radius=4,
+                    review_risk=5,
+                    agent_suitability=1,
+                )
+            return Score(
+                complexity=1,
+                parallelizability=2,
+                context_load=3,
+                blast_radius=4,
+                review_risk=5,
+                agent_suitability=None,
+            )
+
+        monkeypatch.setattr(scoring_module, "score_task", injected_score)
+
+        result = _invoke_cmd(tmp_path, ["score", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"]["code"] == "score_incomplete"
+        assert events_path.read_bytes() == before_events
+        with sqlite3.connect(str(db_path)) as connection:
+            after_scores = connection.execute(
+                "SELECT scores FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+        assert after_scores == before_scores
+        assert calls == ["T001", "T002"]
+        assert _events_of_action(tmp_path, "task.scored") == []
+
     def test_score_nonexistent_task_exits_1(self, tmp_path: Path) -> None:
         """score T999 when T999 doesn't exist → exit 1."""
         self._setup_planned_project(tmp_path)

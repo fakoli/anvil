@@ -38,7 +38,9 @@ from anvil.state.models import (
 from anvil.state.rollup import BundleRollupEntry
 
 if TYPE_CHECKING:
+    from anvil.claims.command_proof_artifact import LoadedClaimCommandProof
     from anvil.cli._helpers import IngestedPrdSource
+    from anvil.state.models import ClaimCommandProof
 
 # ---------------------------------------------------------------------------
 # FastMCP instance
@@ -1615,12 +1617,12 @@ def renew_claim(
             lease_expires_at=renewal.claim.lease_expires_at.isoformat(),
             renewed=renewal.renewed,
             actor_identity=actor_identity_data(actor),
-            progress={
-                "source": renewal.progress_source,
-                "digest": renewal.attestation_digest,
-                "generation": renewal.attestation_generation,
-                "trust_mode": renewal.attestation_trust_mode,
-            },
+            progress=RenewProgressReceipt(
+                source=renewal.progress_source,
+                digest=renewal.attestation_digest,
+                generation=renewal.attestation_generation,
+                trust_mode=renewal.attestation_trust_mode,
+            ),
         )
     finally:
         backend.close()
@@ -1801,13 +1803,13 @@ def submit_progress(
                 recorded=True,
                 actor_identity=actor_identity_data(actor),
                 event_action="progress.attested",
-                attestation={
-                    "digest": persisted.semantic_digest,
-                    "generation": persisted.generation,
-                    "trust_mode": persisted.trust_mode,
-                    "kind": persisted.kind,
-                    "issuer_id": persisted.issuer_id,
-                },
+                attestation=ProgressAttestationReceipt(
+                    digest=persisted.semantic_digest,
+                    generation=persisted.generation,
+                    trust_mode=persisted.trust_mode,
+                    kind=persisted.kind,
+                    issuer_id=persisted.issuer_id,
+                ),
             )
 
         if notes is None:
@@ -1913,8 +1915,8 @@ def submit_completion_evidence(
 
         clock = SystemClock()
 
-        claim_bound_proofs = ()
-        loaded_claim_proofs = []
+        claim_bound_proofs: tuple[ClaimCommandProof, ...] = ()
+        loaded_claim_proofs: list[LoadedClaimCommandProof] = []
         proof_project = None
         proof_project_root = None
         if command_proof_artifacts_base64:
@@ -1987,8 +1989,8 @@ def submit_completion_evidence(
         # against its authoritative clock while holding the append lock.
         now = clock.now()
         if command_proof_artifacts_base64:
-            assert proof_project is not None
-            assert proof_project_root is not None
+            if proof_project is None or proof_project_root is None:
+                raise ToolError("command_proof_error[context_missing]: project context missing")
             try:
                 claim_bound_proofs = verify_claim_command_proof_batch(
                     loaded_claim_proofs,
@@ -2062,6 +2064,28 @@ def submit_completion_evidence(
             NextReadyTask(**next_ready_raw) if next_ready_raw is not None else None
         )
 
+        hook_command_proof_receipts: list[dict[str, object]] = []
+        for proof in command_proofs:
+            attribution = proof.attribution
+            if attribution is None or proof.semantic_digest is None:
+                raise ToolError(
+                    "hook_command_proof_error[attribution_missing]: "
+                    "claim-bound hook proof attribution is missing"
+                )
+            hook_command_proof_receipts.append(
+                {
+                    "command": proof.command,
+                    "exit_code": proof.exit_code,
+                    "output_sha256": proof.output_sha256,
+                    "captured_at": proof.captured_at.isoformat(),
+                    "source": "hook_claim_bound",
+                    "claim_id": attribution.claim_id,
+                    "generation": attribution.generation,
+                    "semantic_digest": proof.semantic_digest,
+                    "actor": attribution.claimed_by,
+                }
+            )
+
         return EvidenceResponse(
             evidence_id=evidence_id,
             task_status=task_status,
@@ -2078,20 +2102,7 @@ def submit_completion_evidence(
                 }
                 for proof in claim_bound_proofs
             ],
-            hook_command_proofs=[
-                {
-                    "command": proof.command,
-                    "exit_code": proof.exit_code,
-                    "output_sha256": proof.output_sha256,
-                    "captured_at": proof.captured_at.isoformat(),
-                    "source": "hook_claim_bound",
-                    "claim_id": proof.attribution.claim_id,
-                    "generation": proof.attribution.generation,
-                    "semantic_digest": proof.semantic_digest,
-                    "actor": proof.attribution.claimed_by,
-                }
-                for proof in command_proofs
-            ],
+            hook_command_proofs=hook_command_proof_receipts,
             missing_claim_bound_proofs=missing_claim_bound_proofs,
             missing_legacy_evidence=missing_legacy_evidence,
         )
@@ -2908,16 +2919,10 @@ def parse_prd(
         # status would lie. Re-read the stored status after the revised append.
         effective_status = result.prd.status.value
 
-        new_requirements = [
-            {
-                "id": r.id,
-                "prd_section": r.prd_section,
-                "text": r.text,
-                "source_paragraph": r.source_paragraph,
-                "derived": r.derived,
-            }
-            for r in result.requirements
-        ]
+        # Preserve validated Requirement models through diff construction so
+        # requirement ids remain structurally typed strings. Serialize only at
+        # the event payload boundary.
+        new_requirements = list(result.requirements)
 
         if existing_prd is None:
             # FIRST parse → create-if-absent prd.parsed. Mirrors cli/prd.py.
@@ -2929,7 +2934,10 @@ def parse_prd(
                 "summary": result.prd.summary,
                 "goals": result.prd.goals,
                 "non_goals": result.prd.non_goals,
-                "requirements": new_requirements,
+                "requirements": [
+                    requirement.model_dump(mode="json")
+                    for requirement in new_requirements
+                ],
                 "acceptance_criteria": result.prd.acceptance_criteria,
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
@@ -2973,7 +2981,7 @@ def parse_prd(
                 prd_id=stored_prd_id, include_superseded=True
             )
             all_ids = {r.id for r in all_reqs}
-            new_by_id = {r["id"]: r for r in new_requirements}
+            new_by_id = {requirement.id: requirement for requirement in new_requirements}
 
             # An id retired in a PRIOR revision (in all_ids but NOT live) that
             # reappears in the new parse falls into NO diff bucket and would be
@@ -2995,19 +3003,15 @@ def parse_prd(
                 )
 
             requirements_added = [
-                r for r in new_requirements if r["id"] not in all_ids
+                requirement
+                for requirement in new_requirements
+                if requirement.id not in all_ids
             ]
             requirements_unchanged = [
                 new_by_id[rid] for rid in live_by_id if rid in new_by_id
             ]
             requirements_superseded = [
-                {
-                    "id": r.id,
-                    "prd_section": r.prd_section,
-                    "text": r.text,
-                    "source_paragraph": r.source_paragraph,
-                    "derived": r.derived,
-                }
+                r
                 for r in live_reqs
                 if r.id not in new_by_id
             ]
@@ -3034,9 +3038,18 @@ def parse_prd(
                 "risks": result.prd.risks,
                 "open_questions": result.prd.open_questions,
                 "assumptions": [a.model_dump() for a in result.prd.assumptions],
-                "requirements_added": requirements_added,
-                "requirements_superseded": requirements_superseded,
-                "requirements_unchanged": requirements_unchanged,
+                "requirements_added": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_added
+                ],
+                "requirements_superseded": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_superseded
+                ],
+                "requirements_unchanged": [
+                    requirement.model_dump(mode="json")
+                    for requirement in requirements_unchanged
+                ],
                 **source_binding(new_revision),
             }
 
@@ -3729,7 +3742,12 @@ def score_tasks(
     from anvil.cli._helpers import _scores_complete
     from anvil.clock import SystemClock
     from anvil.config import DEFAULT_AUTO_EXPAND_THRESHOLD
-    from anvil.planning.scoring import build_recursive_expansion_queue, score_task
+    from anvil.planning.scoring import (
+        IncompleteScoreError,
+        build_recursive_expansion_queue,
+        require_complete_score,
+        score_task,
+    )
     from anvil.state.backend import EventRejected
     from anvil.state.models import EventDraft
 
@@ -3786,8 +3804,16 @@ def score_tasks(
 
         clock = SystemClock()
         scored: list[TaskScoreEntry] = []
+        validated_scores = []
         for task in tasks_to_score:
-            computed = score_task(task)
+            try:
+                computed = require_complete_score(score_task(task))
+            except IncompleteScoreError as exc:
+                raise ToolError(f"score_incomplete: {exc}") from exc
+            validated_scores.append((task, computed))
+
+        # Refuse an incomplete batch before the first event append.
+        for task, computed in validated_scores:
             now = clock.now()
             payload: dict[str, Any] = {
                 "task_id": task.id,
