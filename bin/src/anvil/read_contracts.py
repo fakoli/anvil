@@ -471,7 +471,11 @@ class PrdRecordV1(BaseModel):
         pattern=_PRD_ID_PATTERN_TEXT,
         json_schema_extra=_NO_LINE_TERMINATOR_SCHEMA,
     )
-    title: str = Field(min_length=1)
+    # Historical PRDs may legitimately predate canonical-title persistence.
+    # Project reads must preserve that persisted blank rather than inventing a
+    # source-derived fallback; the byte validator below still applies the
+    # public string ceiling.
+    title: str
     revision: int = Field(ge=1, le=WIRE_INT64_MAX)
     status: PrdStatusV1
     target_version: str | None = None
