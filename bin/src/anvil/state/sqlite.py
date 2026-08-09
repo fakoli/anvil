@@ -681,6 +681,126 @@ def read_db_schema_version(db_path: str | os.PathLike[str]) -> int:
         ) from exc
 
 
+@contextmanager
+def query_only_transaction(
+    db_path: str | os.PathLike[str],
+    events_path: str | os.PathLike[str],
+) -> Iterator[tuple[sqlite3.Connection, Any]]:
+    """Yield one transaction and the locked, pre-existing event log.
+
+    This is the read-only counterpart to :meth:`SqliteBackend.initialize`.
+    It deliberately performs no creation, DDL, migration, catch-up, replay,
+    convergence, or lease maintenance.  The event-file lock is acquired before
+    SQLite ``BEGIN`` -- the same order as the writer -- so callers observe a
+    complete pre-write or post-write state, never a log/database mixture.
+
+    The returned event handle is opened only after both state files have been
+    proven to exist and is never written.  Callers may seek/read it while the
+    lock and SQLite snapshot remain held.
+    """
+    database = Path(db_path)
+    events = Path(events_path)
+    if not database.is_file() or not events.is_file():
+        raise FileNotFoundError("project state files are unavailable")
+
+    # Refuse incompatible state before SQLite can create WAL/SHM sidecars or
+    # recover a live journal.  Repeat under the event lock below to close the
+    # probe-to-open race.
+    probed = read_db_schema_version(database)
+    if probed != SCHEMA_VERSION:
+        raise SchemaMismatch(
+            actual=probed,
+            expected=SCHEMA_VERSION,
+            direction="newer" if probed > SCHEMA_VERSION else "older",
+        )
+
+    canonical = os.path.normcase(os.path.realpath(database))
+    with _SCHEMA_INITIALIZATION_LOCK:
+        stack: list[tuple[str, Any | None]] = getattr(
+            _SCHEMA_INITIALIZATION_LOCAL, "stack", []
+        )
+        _SCHEMA_INITIALIZATION_LOCAL.stack = stack
+        if any(owned_path == canonical for owned_path, _ in stack):
+            raise SchemaProbeFailed(
+                "Nested query-only state inspection is not supported."
+            )
+        try:
+            # ``r+b`` is required by Windows mandatory byte-range locking.  No
+            # write is issued, and unlike the initializer this path never uses
+            # ``a+b`` or creates a missing parent/file.
+            lock_fh = events.open("r+b")
+        except OSError as exc:
+            raise SchemaProbeFailed(
+                "State could not be locked for query-only inspection."
+            ) from exc
+
+        conn: sqlite3.Connection | None = None
+        try:
+            deadline = time.monotonic() + _FLOCK_TIMEOUT_S
+            delays = _flock_backoff_delays()
+            while True:
+                try:
+                    _append_lock_acquire_nb(lock_fh)
+                    break
+                except OSError as exc:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SchemaProbeFailed(
+                            "Timed out waiting for query-only state inspection."
+                        ) from exc
+                    time.sleep(min(next(delays), remaining))
+            stack.append((canonical, lock_fh))
+            try:
+                confirmed = read_db_schema_version(database)
+                if confirmed != SCHEMA_VERSION:
+                    raise SchemaMismatch(
+                        actual=confirmed,
+                        expected=SCHEMA_VERSION,
+                        direction=(
+                            "newer" if confirmed > SCHEMA_VERSION else "older"
+                        ),
+                    )
+                uri = f"{database.resolve().as_uri()}?mode=ro"
+                conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+                conn.row_factory = sqlite3.Row
+                if (
+                    hasattr(conn, "setconfig")
+                    and hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE")
+                ):
+                    conn.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+                conn.execute("PRAGMA query_only = ON")
+                conn.execute("PRAGMA busy_timeout = 5000")
+                query_only_row = conn.execute("PRAGMA query_only").fetchone()
+                version_row = conn.execute("PRAGMA user_version").fetchone()
+                if query_only_row is None or int(query_only_row[0]) != 1:
+                    raise SchemaProbeFailed(
+                        "SQLite query-only enforcement could not be established."
+                    )
+                live_version = int(version_row[0]) if version_row else 0
+                if live_version != SCHEMA_VERSION:
+                    raise SchemaMismatch(
+                        actual=live_version,
+                        expected=SCHEMA_VERSION,
+                        direction=(
+                            "newer" if live_version > SCHEMA_VERSION else "older"
+                        ),
+                    )
+                conn.execute("BEGIN")
+                lock_fh.seek(0)
+                yield conn, lock_fh
+            finally:
+                if conn is not None:
+                    try:
+                        if conn.in_transaction:
+                            conn.execute("ROLLBACK")
+                    finally:
+                        conn.close()
+                stack.pop()
+                _append_lock_release(lock_fh)
+        finally:
+            lock_fh.close()
+
+
 class SqliteBackend:
     """Concrete SQLite + JSONL implementation of the Backend protocol.
 
