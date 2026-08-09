@@ -2014,6 +2014,156 @@ class TestGitPrdLifecycleReplay:
             replay.close()
 
     @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_losing_graph_quarantines_expansion_and_feature_task_relations(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-nested-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+            backend.append(
+                _draft(
+                    "feature.created",
+                    {
+                        "id": "F-base",
+                        "prd_id": "default",
+                        "title": "Base feature",
+                        "description": "",
+                        "status": "proposed",
+                        "requirements": [],
+                        "tasks": [],
+                    },
+                    target_kind="feature",
+                    target_id="F-base",
+                )
+            )
+            task_payload = _task_payload("T-base")
+            task_payload["feature_id"] = "F-base"
+            backend.append(
+                _draft(
+                    "task.created",
+                    task_payload,
+                    target_kind="task",
+                    target_id="T-base",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        graph_branch = tmp_path / f"planning-nested-graph-{reverse_physical_order}"
+        shutil.copytree(base, graph_branch)
+        graph_backend = _make_backend(graph_branch)
+        graph = graph_backend.append(
+            _planning_graph_batch(
+                "F-losing",
+                ts=_T0 + timedelta(seconds=10),
+            )
+        )
+        losing_task_payload = _task_payload("T-losing")
+        losing_task_payload["feature_id"] = "F-losing"
+        losing_task = graph_backend.append(
+            _draft(
+                "task.created",
+                losing_task_payload,
+                target_kind="task",
+                target_id="T-losing",
+                ts=_T0 + timedelta(seconds=11),
+            )
+        )
+        related_feature = graph_backend.append(
+            _draft(
+                "feature.created",
+                {
+                    "id": "F-related",
+                    "prd_id": "default",
+                    "title": "References losing task",
+                    "description": "",
+                    "status": "proposed",
+                    "requirements": [],
+                    "tasks": ["T-losing"],
+                },
+                target_kind="feature",
+                target_id="F-related",
+                ts=_T0 + timedelta(seconds=12),
+            )
+        )
+        subtask_payload = _task_payload("T-child")
+        subtask_payload["feature_id"] = "F-base"
+        subtask_payload["dependencies"] = ["T-losing"]
+        expansion = graph_backend.append(
+            _draft(
+                "task.expanded",
+                {
+                    "parent_task_id": "T-base",
+                    "subtasks": [subtask_payload],
+                },
+                target_kind="task",
+                target_id="T-base",
+                ts=_T0 + timedelta(seconds=13),
+            )
+        )
+        child_status = graph_backend.append(
+            _draft(
+                "task.status_changed",
+                {
+                    "task_id": "T-child",
+                    "from": "proposed",
+                    "to": "drafted",
+                    "reason": "descends from skipped expansion",
+                },
+                target_kind="task",
+                target_id="T-child",
+                ts=_T0 + timedelta(seconds=14),
+            )
+        )
+        assert graph is not None and losing_task is not None
+        assert related_feature is not None and expansion is not None
+        assert child_status is not None
+        assert losing_task.parent_event_id == graph.id
+        assert child_status.parent_event_id == expansion.id
+        graph_backend.close()
+
+        revision_branch = tmp_path / f"planning-nested-revision-{reverse_physical_order}"
+        shutil.copytree(base, revision_branch)
+        revision_backend = _make_backend(revision_branch)
+        revision_backend.append(
+            _draft(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Winning revision"),
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=20),
+            )
+        )
+        revision_backend.close()
+
+        suffixes = [
+            (graph_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+            (revision_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+        ]
+        if reverse_physical_order:
+            suffixes.reverse()
+        merged = tmp_path / f"planning-nested-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in suffixes for line in suffix]) + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None and prd.revision == 2
+            assert replay.get_task("T-base") is not None
+            assert replay.get_feature("F-losing") is None
+            assert replay.get_task("T-losing") is None
+            assert replay.get_feature("F-related") is None
+            assert replay.get_task("T-child") is None
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
     def test_current_orphan_revision_lineage_is_ignored_in_full_and_bounded_replay(
         self, tmp_path: Path, reverse_physical_order: bool
     ) -> None:

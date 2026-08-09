@@ -7296,6 +7296,33 @@ class TestPayloadValidation:
         })
         assert obj.evidence_id == "EV001"
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("commands_run", [{"task_id": "T-other"}]),
+            ("files_changed", [{"feature_id": "F-other"}]),
+            ("screenshots", [{"claim_id": "C-other"}]),
+        ],
+    )
+    def test_evidence_submitted_payload_rejects_non_string_metadata(
+        self, field: str, value: list[dict[str, str]]
+    ) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        p = self._import_payload_models()
+        raw: dict[str, Any] = {
+            "task_id": "T001",
+            "claim_id": "C001",
+            "submitted_by": "agent-alpha",
+            "evidence_id": "EV001",
+            "commands_run": [],
+            "files_changed": [],
+            "screenshots": [],
+        }
+        raw[field] = value
+        with pytest.raises(PydanticValidationError):
+            p.EvidenceSubmittedPayload.model_validate(raw)
+
     def test_task_applied_payload_validates_good(self) -> None:
         p = self._import_payload_models()
         obj = p.TaskAppliedPayload.model_validate({

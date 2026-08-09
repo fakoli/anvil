@@ -1123,12 +1123,12 @@ class EvidenceSubmittedPayload(BaseModel):
     claim_id: str
     submitted_by: str
     evidence_id: str
-    commands_run: list[Any] = []
-    files_changed: list[Any] = []
+    commands_run: list[StrictStr] = []
+    files_changed: list[StrictStr] = []
     output_excerpt: str | None = None
     pr_url: str | None = None
     commit_sha: str | None = None
-    screenshots: list[Any] = []
+    screenshots: list[StrictStr] = []
     known_limitations: str | None = None
     # SL-3 / B48: typed proofs, validated at write time (a malformed proof
     # raises here, not silently at replay). Defaults to [] so pre-SL-3 logs

@@ -2174,6 +2174,16 @@ class SqliteBackend:
                     if key is not None:
                         writes.add(key)
                 return writes
+            if event.action == "task.expanded":
+                subtasks = event.payload_json.get("subtasks")
+                if isinstance(subtasks, list):
+                    for subtask in subtasks:
+                        if not isinstance(subtask, dict):
+                            continue
+                        subtask_key = entity_key("task", subtask.get("id"))
+                        if subtask_key is not None:
+                            writes.add(subtask_key)
+                return writes
             if event.action == "bundle.claimed":
                 coordinator = entity_key("claim", event.payload_json.get("id"))
                 if coordinator is not None:
@@ -2191,7 +2201,9 @@ class SqliteBackend:
                 writes.add(key)
             return writes
 
-        def payload_references(payload: dict[str, Any]) -> set[tuple[str, str]]:
+        def payload_references(
+            payload: dict[str, Any], *, action: Any = None
+        ) -> set[tuple[str, str]]:
             references: set[tuple[str, str]] = set()
             for field, kind in (
                 ("feature_id", "feature"),
@@ -2220,6 +2232,25 @@ class SqliteBackend:
                     key = entity_key(kind, value)
                     if key is not None:
                         references.add(key)
+            if action == "feature.created":
+                tasks = payload.get("tasks")
+                if isinstance(tasks, list):
+                    for task_id in tasks:
+                        key = entity_key("task", task_id)
+                        if key is not None:
+                            references.add(key)
+            nested_field = {
+                "task.dependencies_batch_edited": "edits",
+                "task.expanded": "subtasks",
+                "bundle.claimed": "member_claims",
+            }.get(action)
+            nested_values = (
+                payload.get(nested_field) if nested_field is not None else None
+            )
+            if isinstance(nested_values, list):
+                for nested in nested_values:
+                    if isinstance(nested, dict):
+                        references.update(payload_references(nested))
             return references
 
         def event_references(event: Event) -> set[tuple[str, str]]:
@@ -2235,22 +2266,16 @@ class SqliteBackend:
                         continue
                     payload = operation.get("payload_json")
                     if isinstance(payload, dict):
-                        references.update(payload_references(payload))
+                        references.update(
+                            payload_references(
+                                payload,
+                                action=operation.get("action"),
+                            )
+                        )
                 return references
-            references.update(payload_references(event.payload_json))
-            nested_field = {
-                "task.dependencies_batch_edited": "edits",
-                "bundle.claimed": "member_claims",
-            }.get(event.action)
-            nested_values = (
-                event.payload_json.get(nested_field)
-                if nested_field is not None
-                else None
+            references.update(
+                payload_references(event.payload_json, action=event.action)
             )
-            if isinstance(nested_values, list):
-                for nested in nested_values:
-                    if isinstance(nested, dict):
-                        references.update(payload_references(nested))
             return references
 
         # Physical hash ancestry expresses append order, not semantic
