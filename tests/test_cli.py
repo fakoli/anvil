@@ -6562,6 +6562,77 @@ class TestApplyCommand:
             f"Expected drafted (auto-promoted from rejected); got {status!r}"
         )
 
+    def test_apply_rejection_json_reports_engine_provenance_and_metrics(
+        self, tmp_path: Path
+    ) -> None:
+        """Callers provide findings, while the engine supplies category/identity."""
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        self._reach_needs_review(tmp_path, task_id)
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "apply",
+                task_id,
+                "--reject",
+                "--reason",
+                "Security boundary is incomplete.",
+                "--quality-finding",
+                "security",
+                "--reviewer",
+                "reviewer-a",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        rejection = data["rejection"]
+        assert rejection["category"] == "quality"
+        assert rejection["reason_code"] == "quality_findings"
+        assert rejection["counts_toward_accept_rate"] is True
+        assert rejection["review_attempt_id"]
+        assert len(rejection["supporting_evidence_digest"]) == 64
+        assert data["rejection_metrics"]["counts_toward_accept_rate"] is True
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["--reason-code", "not-a-code"],
+            ["--quality-finding", "tests", "--quality-finding", "tests"],
+        ],
+    )
+    def test_apply_invalid_rejection_input_is_pre_mutation(
+        self, tmp_path: Path, arguments: list[str]
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        self._reach_needs_review(tmp_path, task_id)
+        state_dir = tmp_path / ".anvil"
+        events_path = state_dir / "events.jsonl"
+        baseline = events_path.read_bytes()
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "apply",
+                task_id,
+                "--reject",
+                "--reason",
+                "typed refusal",
+                "--reviewer",
+                "reviewer-a",
+                "--json",
+                *arguments,
+            ],
+        )
+        assert result.exit_code == 1
+        envelope = json.loads(result.output)
+        assert envelope["error"]["code"] == "bad_request"
+        assert events_path.read_bytes() == baseline
+
     def test_apply_without_flag_prints_review_summary(
         self, tmp_path: Path
     ) -> None:

@@ -32,10 +32,13 @@ if TYPE_CHECKING:
         ExecutionBundle,
         Feature,
         Project,
+        RejectionQualityFinding,
+        RejectionReasonCode,
         Requirement,
         Review,
         SyncMapping,
         Task,
+        TaskRejectionProvenance,
     )
 
 
@@ -214,6 +217,16 @@ class Backend(Protocol):
     def list_task_review_decisions(self) -> list[tuple[str, str, str]]:
         """(task_id, decision, created_at_iso) for task.applied accepted/rejected
         outcomes, most-recent first. Backs the B49 accept-rate governor."""
+        ...
+
+    def derive_task_rejection_provenance(
+        self,
+        task_id: str,
+        *,
+        reason_code: RejectionReasonCode,
+        quality_findings: list[RejectionQualityFinding],
+    ) -> TaskRejectionProvenance:
+        """Return the engine-derived provenance for a prospective rejection."""
         ...
 
     def list_evidence(self) -> list[Evidence]:

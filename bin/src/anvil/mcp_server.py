@@ -29,6 +29,12 @@ from anvil.cli._actor_output import (
     bundle_continuation_data,
     continuation_data,
 )
+from anvil.state.models import (
+    RejectionQualityFinding,
+    RejectionQualityFindingCode,
+    RejectionReasonCode,
+    TaskRejectionProvenance,
+)
 from anvil.state.rollup import BundleRollupEntry
 
 if TYPE_CHECKING:
@@ -3934,6 +3940,18 @@ def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
 # ---------------------------------------------------------------------------
 
 
+class ApplyRejectionMetricsResponse(BaseModel):
+    """Immediate governor projection after a rejected review attempt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    counts_toward_accept_rate: bool
+    work_actor: str | None = None
+    accept_rate: float | None = None
+    rejection_count: int
+    required_floor: float
+
+
 class ApplyReviewResponse(BaseModel):
     """Result of apply_review_decision."""
 
@@ -3947,6 +3965,8 @@ class ApplyReviewResponse(BaseModel):
     # The next claimable task after this disposition (an approval may unblock
     # dependents); null when none is available.
     next_ready: NextReadyTask | None = None
+    rejection: TaskRejectionProvenance | None = None
+    rejection_metrics: ApplyRejectionMetricsResponse | None = None
 
 
 @mcp.tool(tags={PLANNING_TAG})
@@ -3955,6 +3975,8 @@ def apply_review_decision(
     approve: bool,
     reviewer: str = "human",
     reason: str | None = None,
+    reason_code: RejectionReasonCode | None = None,
+    quality_findings: list[RejectionQualityFindingCode] | None = None,
     strict: bool | None = None,
     cwd: str | None = None,
 ) -> ApplyReviewResponse:
@@ -3973,6 +3995,8 @@ def apply_review_decision(
         approve:  True accepts the work; False rejects it.
         reviewer: Identity recorded in the event payload.
         reason:   Required when approve=False; recorded as review notes.
+        reason_code: Bounded rejection assertion; the backend derives category.
+        quality_findings: Typed quality dimensions; duplicates are refused.
         strict:   Evidence-gate override (approve only). None defers to config.
         cwd:      Project root. Defaults to Path.cwd().
     """
@@ -3992,6 +4016,12 @@ def apply_review_decision(
             "Rejection requires reason= (non-empty). "
             "Pass approve=True to accept, or provide a rejection reason.",
         )
+    if approve and (reason_code is not None or quality_findings):
+        raise ToolError(
+            "Rejection provenance inputs are only valid when approve=False."
+        )
+    if quality_findings and len(quality_findings) != len(set(quality_findings)):
+        raise ToolError("quality_findings must not contain duplicate codes")
 
     backend = _open_backend(state_dir)
     try:
@@ -4097,12 +4127,33 @@ def apply_review_decision(
         decision = "accepted" if approve else "rejected"
         clock = SystemClock()
         now = clock.now()
+        rejection_provenance: TaskRejectionProvenance | None = None
+        if not approve:
+            selected_reason = reason_code or (
+                RejectionReasonCode.quality_findings
+                if quality_findings
+                else RejectionReasonCode.unspecified_quality
+            )
+            typed_findings = [
+                RejectionQualityFinding(code=code)
+                for code in (quality_findings or [])
+            ]
+            try:
+                rejection_provenance = backend.derive_task_rejection_provenance(
+                    task_id,
+                    reason_code=selected_reason,
+                    quality_findings=typed_findings,
+                )
+            except EventRejected as exc:
+                raise ToolError(f"rejection_provenance_invalid: {exc}") from None
         payload: dict[str, Any] = {
             "task_id": task_id,
             "reviewer": reviewer,
             "decision": decision,
             "notes": reason,
         }
+        if rejection_provenance is not None:
+            payload["rejection"] = rejection_provenance.model_dump(mode="json")
 
         try:
             applied_event = backend.append(EventDraft(
@@ -4135,6 +4186,19 @@ def apply_review_decision(
         next_ready = (
             NextReadyTask(**next_ready_raw) if next_ready_raw is not None else None
         )
+        rejection_metrics = None
+        if rejection_provenance is not None:
+            from anvil.cli.packet_apply import _rejection_metrics_block
+
+            rejection_metrics = ApplyRejectionMetricsResponse.model_validate(
+                _rejection_metrics_block(
+                    backend,
+                    state_dir=state_dir,
+                    task_id=task_id,
+                    provenance=rejection_provenance,
+                    clock=clock,
+                )
+            )
 
         return ApplyReviewResponse(
             task_id=task_id,
@@ -4143,6 +4207,8 @@ def apply_review_decision(
             to_status=to_status,
             reviewer=reviewer,
             next_ready=next_ready,
+            rejection=rejection_provenance,
+            rejection_metrics=rejection_metrics,
         )
     finally:
         backend.close()

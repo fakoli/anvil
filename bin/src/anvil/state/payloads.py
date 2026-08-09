@@ -52,6 +52,7 @@ from anvil.state.models import (
     PRDAssumption,
     ProofArtifact,
     ReviewDecision,
+    TaskRejectionProvenance,
 )
 
 
@@ -1186,6 +1187,16 @@ class TaskAppliedPayload(BaseModel):
     reviewer: str
     decision: str
     notes: str | None = None
+    # Additive for replay: historical rejected events omit provenance and are
+    # projected as quality by the writer. New live rejections must carry the
+    # exact engine-derived object validated under the append lock.
+    rejection: TaskRejectionProvenance | None = None
+
+    @model_validator(mode="after")
+    def _validate_rejection_shape(self) -> TaskAppliedPayload:
+        if self.decision != "rejected" and self.rejection is not None:
+            raise ValueError("only a rejected task review may carry provenance")
+        return self
 
 
 class FileChangedPayload(BaseModel):

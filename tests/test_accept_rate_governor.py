@@ -126,6 +126,58 @@ def test_accept_rate_excludes_decisions_outside_window() -> None:
     assert _metrics(decisions, evidence).accept_rate("A") == 1.0
 
 
+def test_non_quality_rejections_do_not_affect_governor_metrics(
+    tmp_path: Path,
+) -> None:
+    """The authoritative review query excludes process/evidence resubmissions."""
+    from anvil.state.sqlite import SqliteBackend
+
+    events_path = tmp_path / "events.jsonl"
+    events_path.touch()
+    backend = SqliteBackend(
+        db_path=str(tmp_path / "state.db"),
+        events_path=str(events_path),
+        clock=FrozenClock(_NOW),
+    )
+    backend.initialize()
+    try:
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        for index, (task_id, decision, category, counts) in enumerate(
+            [
+                ("T-EVIDENCE", "rejected", "evidence_resubmission", 0),
+                ("T-QUALITY", "rejected", "quality", 1),
+                ("T-ACCEPT", "accepted", None, 1),
+            ],
+            start=1,
+        ):
+            timestamp = (_NOW - datetime.timedelta(minutes=index)).isoformat()
+            conn.execute(
+                "INSERT INTO reviews "
+                "(id, target_kind, target_id, reviewed_by, decision, notes, "
+                "rejection_category, counts_toward_accept_rate, created_at) "
+                "VALUES (?, 'task', ?, 'reviewer', ?, NULL, ?, ?, ?)",
+                (f"RV-{index}", task_id, decision, category, counts, timestamp),
+            )
+            conn.execute(
+                "INSERT INTO evidence "
+                "(id, task_id, claim_id, commands_run, output_excerpt, "
+                "files_changed, pr_url, commit_sha, screenshots, "
+                "known_limitations, submitted_at, submitted_by) "
+                "VALUES (?, ?, ?, '[]', NULL, '[]', NULL, NULL, '[]', "
+                "NULL, ?, 'worker-a')",
+                (f"EV-{index}", task_id, f"C-{index}", timestamp),
+            )
+        conn.commit()
+        conn.close()
+
+        metrics = AcceptRateMetrics(backend, FrozenClock(_NOW))
+        assert metrics.accept_rate("worker-a") == 0.5
+        assert metrics.rejection_count("T-EVIDENCE") == 0
+        assert metrics.rejection_count("T-QUALITY") == 1
+    finally:
+        backend.close()
+
+
 # -- review-debt cap ---------------------------------------------------------
 
 

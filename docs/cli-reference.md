@@ -142,7 +142,7 @@ remaining layers.
 
 These appear on the root `anvil` invocation, before any subcommand.
 
-- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 18)`) and exit.
+- `--version`, `-V` — print the version (e.g. `anvil 0.6.4 (schema 19)`) and exit.
 - `--help` — show root help and exit. Listing the registered commands and
   sub-apps; equivalent to `anvil` with no arguments
   (`no_args_is_help=True`).
@@ -1204,7 +1204,8 @@ buffer, descriptive `--output-file` behavior, and claim-bound proof import.
 mode — prints the evidence-gate summary and the current status. With
 `--approve`: transition `needs_review` → `accepted` → `done`. With
 `--reject`: transition `needs_review` → `drafted` (rework path). Emits a
-`task.applied` event with the reviewer, decision, and notes.
+`task.applied` event with the reviewer, decision, notes, and immutable
+engine-derived rejection provenance.
 
 **Positional arguments:**
 
@@ -1219,6 +1220,13 @@ mode — prints the evidence-gate summary and the current status. With
   Requires `--reason`. Mutually exclusive with `--approve`.
 - `--reason TEXT` *(required with `--reject`, optional with `--approve`)* —
   review notes.
+- `--reason-code CODE` *(optional; `--reject` only)* — bounded reviewer
+  assertion. The engine derives `quality`, `evidence_resubmission`, or
+  `process` from persisted evidence and claim state; callers cannot select the
+  category.
+- `--quality-finding CODE` *(repeatable; `--reject` only)* — typed quality
+  finding such as `correctness`, `security`, or `tests`. Any typed quality
+  finding forces the rejection to count as quality.
 - `--reviewer TEXT` *(optional)* — reviewer identity; defaults to `$USER`
   or `human`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
@@ -1313,6 +1321,7 @@ assertion covers — never blocking.
 anvil apply T001                                      # review-only
 anvil apply T001 --approve --reviewer "alex"
 anvil apply T001 --reject --reason "missing tests for edge case X"
+anvil apply T001 --reject --reason "security boundary" --quality-finding security
 ```
 
 **See also:** [`anvil submit`](#submit) for the prior step;

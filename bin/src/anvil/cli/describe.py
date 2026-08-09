@@ -280,7 +280,7 @@ def build_manifest() -> dict[str, Any]:
           "api_version": "9",
           "engine_version": "0.6.4",
           "display_version": "0.6.4",
-          "schema_version": 18,
+          "schema_version": 19,
           "envelope": "v1.24",
           "build_kind": "release_artifact",
           "commit": "abcdef123456",

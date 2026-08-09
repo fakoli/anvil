@@ -81,11 +81,13 @@ Version history
 - v18: exact PRD source provenance — PRD projections persist revision-bound
   UTF-8 source bytes and their digest/size/encoding, while every legacy row is
   explicitly marked unavailable without changing lifecycle or task state.
+- v19: task-rejection provenance — task review rows persist an engine-derived
+  accounting category plus exact evidence/claim/attempt bindings.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 18
+SCHEMA_VERSION: int = 19
 
 
 def get_schema_version() -> int:
@@ -403,13 +405,37 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
-    id           TEXT PRIMARY KEY,
-    target_kind  TEXT NOT NULL,
-    target_id    TEXT NOT NULL,
-    reviewed_by  TEXT NOT NULL,
-    decision     TEXT NOT NULL,
-    notes        TEXT,
-    created_at   TEXT NOT NULL
+    id                         TEXT PRIMARY KEY,
+    target_kind                TEXT NOT NULL,
+    target_id                  TEXT NOT NULL,
+    reviewed_by                TEXT NOT NULL,
+    decision                   TEXT NOT NULL,
+    notes                      TEXT,
+    rejection_category         TEXT CHECK (
+        rejection_category IS NULL OR rejection_category IN
+        ('quality', 'evidence_resubmission', 'process')
+    ),
+    rejection_reason_code      TEXT CHECK (
+        rejection_reason_code IS NULL OR rejection_reason_code IN
+        ('unspecified_quality', 'quality_findings', 'evidence_incomplete',
+         'claim_stale', 'claim_force_released', 'bundle_review_required')
+    ),
+    claim_id                   TEXT,
+    review_attempt_id          TEXT,
+    supporting_evidence_digest TEXT CHECK (
+        supporting_evidence_digest IS NULL OR
+        length(supporting_evidence_digest) = 64
+    ),
+    quality_findings           TEXT NOT NULL DEFAULT '[]',
+    matched_process_predicate  TEXT CHECK (
+        matched_process_predicate IS NULL OR matched_process_predicate IN
+        ('claim_status_stale', 'claim_status_force_released',
+         'bundle_member_claim')
+    ),
+    counts_toward_accept_rate  INTEGER NOT NULL DEFAULT 1 CHECK (
+        counts_toward_accept_rate IN (0, 1)
+    ),
+    created_at                 TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_reviews_target ON reviews (target_kind, target_id);
@@ -460,7 +486,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 18;
+PRAGMA user_version = 19;
 """
 
 

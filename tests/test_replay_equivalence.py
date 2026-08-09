@@ -198,6 +198,97 @@ def test_normal_and_replay_match_each_other_and_the_golden(tmp_path: Path) -> No
         replay.close()
 
 
+def test_rejection_provenance_replays_exactly_and_tampering_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """T009 new-format rejection identity is authoritative during replay."""
+    from anvil.state.backend import TransactionAborted
+    from anvil.state.models import RejectionReasonCode
+    from tests.test_sqlite import (
+        _make_applied_payload,
+        _make_event,
+        _make_evidence_payload,
+        _setup_claimable_task_and_claim,
+    )
+
+    source_dir = tmp_path / "rejection-source"
+    source_dir.mkdir()
+    source = _make_backend(source_dir)
+    try:
+        _setup_claimable_task_and_claim(source)
+        source.append(
+            _make_event(
+                "evidence.submitted",
+                _make_evidence_payload(),
+                target_kind="task",
+                target_id="T001",
+            )
+        )
+        provenance = source.derive_task_rejection_provenance(
+            "T001",
+            reason_code=RejectionReasonCode.unspecified_quality,
+            quality_findings=[],
+        )
+        payload = _make_applied_payload(
+            reviewer="reviewer-a",
+            decision="rejected",
+            notes="needs revision",
+        )
+        payload["rejection"] = provenance.model_dump(mode="json")
+        source.append(
+            _make_event(
+                "task.applied",
+                payload,
+                target_kind="task",
+                target_id="T001",
+                actor="reviewer-a",
+            )
+        )
+        expected = [review.model_dump(mode="json") for review in source.list_reviews()]
+    finally:
+        source.close()
+
+    replay_dir = tmp_path / "rejection-replay"
+    replay_dir.mkdir()
+    replay_log = replay_dir / "events.jsonl"
+    replay_log.write_bytes((source_dir / "events.jsonl").read_bytes())
+    replay = _make_backend(replay_dir)
+    try:
+        replay.replay_from_empty(str(replay_log))
+        assert [
+            review.model_dump(mode="json") for review in replay.list_reviews()
+        ] == expected
+    finally:
+        replay.close()
+
+    raw_events = [
+        json.loads(line)
+        for line in replay_log.read_text(encoding="utf-8").splitlines()
+    ]
+    raw_events[-1]["payload_json"]["rejection"][
+        "supporting_evidence_digest"
+    ] = "0" * 64
+    tampered_dir = tmp_path / "rejection-tampered"
+    tampered_dir.mkdir()
+    tampered_log = tampered_dir / "events.jsonl"
+    tampered_log.write_text(
+        "".join(
+            json.dumps(event, separators=(",", ":")) + "\n" for event in raw_events
+        ),
+        encoding="utf-8",
+    )
+    tampered = SqliteBackend(
+        db_path=str(tampered_dir / "state.db"),
+        events_path=str(tampered_log),
+        clock=FrozenClock(_T0),
+    )
+    try:
+        with pytest.raises(TransactionAborted, match="provenance replay mismatch"):
+            tampered.initialize()
+    finally:
+        tampered.close()
+
+
 def test_replayed_state_is_well_formed(tmp_path: Path) -> None:
     """Sanity: the replayed snapshot has the full canonical shape and content.
 

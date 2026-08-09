@@ -7081,6 +7081,93 @@ class TestApplyReviewDecision:
         with pytest.raises(ToolError, match="needs_review|expected"):
             _run(run())
 
+    @pytest.mark.parametrize(
+        ("reason_code", "required_evidence", "expected_category", "counts"),
+        [
+            ("evidence_incomplete", ["pr_url"], "evidence_resubmission", False),
+            ("evidence_incomplete", [], "quality", True),
+        ],
+    )
+    def test_rejection_provenance_is_engine_derived_from_persisted_gate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reason_code: str,
+        required_evidence: list[str],
+        expected_category: str,
+        counts: bool,
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="needs_review")
+        _add_active_claim(
+            state_dir,
+            claim_id="C001",
+            task_id="T001",
+            claimed_by="worker-a",
+        )
+        _add_evidence(
+            state_dir,
+            evidence_id="EV0001",
+            task_id="T001",
+            claim_id="C001",
+            commands_run=["pytest tests/ -v"],
+        )
+        if required_evidence:
+            _set_required_evidence(state_dir, "T001", required_evidence)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "apply_review_decision",
+                        {
+                            "task_id": "T001",
+                            "approve": False,
+                            "reviewer": "reviewer-a",
+                            "reason": "Evidence needs another pass.",
+                            "reason_code": reason_code,
+                        },
+                    )
+                )
+
+        response = _run(run())
+        rejection = response["rejection"]
+        assert rejection["category"] == expected_category
+        assert rejection["claim_id"] == "C001"
+        assert rejection["review_attempt_id"] == "EV0001"
+        assert rejection["counts_toward_accept_rate"] is counts
+        assert response["rejection_metrics"]["counts_toward_accept_rate"] is counts
+
+    def test_rejection_duplicate_quality_findings_fail_before_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="needs_review")
+        _add_active_claim(state_dir, claim_id="C001", task_id="T001")
+        _add_evidence(state_dir, task_id="T001", claim_id="C001")
+        events_path = state_dir / "events.jsonl"
+        baseline = events_path.read_bytes()
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool(
+                    "apply_review_decision",
+                    {
+                        "task_id": "T001",
+                        "approve": False,
+                        "reason": "Duplicate input.",
+                        "quality_findings": ["tests", "tests"],
+                    },
+                )
+
+        with pytest.raises(ToolError, match="duplicate"):
+            _run(run())
+        assert events_path.read_bytes() == baseline
+
 
 # ===========================================================================
 # Tool 21: apply_review_decision — strict completion-evidence enforcement
@@ -7103,6 +7190,12 @@ class TestApplyReviewDecisionStrictEvidence:
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="needs_review")
         _set_required_evidence(state_dir, "T001", required)
+        _add_active_claim(
+            state_dir,
+            claim_id="C001",
+            task_id="T001",
+            claimed_by="agent-x",
+        )
         _add_evidence(
             state_dir,
             task_id="T001",

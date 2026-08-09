@@ -1315,8 +1315,19 @@ to `drafted` for rework. Mirrors `anvil apply TASK_ID --approve` and `--reject
 | `approve`   | `bool`           | yes      |           |
 | `reviewer`  | `string`         | no       | `"human"` |
 | `reason`    | `string \| null` | no       | `null` (required when `approve=false`) |
+| `reason_code` | rejection reason enum \| null | no | `null` |
+| `quality_findings` | list of quality-finding enums \| null | no | `null` |
 | `strict`    | `bool \| null`   | no       | `null` (defers to config `strict_evidence`) |
 | `cwd`      | `string \| null` | no       | `Path.cwd()` |
+
+For rejection, `reason_code` and `quality_findings` are assertions only. The
+backend derives the category under the append lock from the latest persisted
+review attempt and its claim. Typed findings always produce counting
+`quality`; an incomplete typed-evidence gate with no findings may produce
+non-counting `evidence_resubmission`; `process` requires an exact persisted
+process predicate. Omitted, ambiguous, or falsified assertions remain
+`quality`. The response includes the immutable `rejection` object and the
+immediate `rejection_metrics` projection.
 
 When the task declares an **evidence contract** (named `claims` and/or
 `Artifact assertions`, see [PRD template](prd-template.md)), `approve=true`
@@ -1475,7 +1486,7 @@ None.
   "tag": "v0.6.4",
   "tag_distance": 0,
   "dirty": false,
-  "schema_version": 18,
+  "schema_version": 19,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "...", "prd source-name", "..."],
@@ -1556,7 +1567,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":19,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":18}}
+{"error":{"code":"schema_mismatch","database_schema":20,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":19}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh
