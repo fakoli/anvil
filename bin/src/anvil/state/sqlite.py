@@ -319,6 +319,7 @@ class _GitPrdReplayPolicy(NamedTuple):
     skip_projection: frozenset[str]
     title_overlays: dict[str, tuple[str, str]]
     content_heads: dict[str, tuple[int, str, str | None]]
+    graph_heads: dict[str, tuple[int, str | None, str]]
 
 
 class _ReplayContentSnapshot(NamedTuple):
@@ -881,6 +882,13 @@ class SqliteBackend:
         self._git_prd_content_heads: dict[
             str, tuple[int, str, str | None]
         ] = {}
+        # Latest accepted graph event for the current exact content head.
+        # Values are (revision, source_sha256, event_id). Chaining the next
+        # graph or content revision through this head makes sequential graph
+        # state distinguishable from a sibling branch during union replay.
+        self._git_prd_graph_heads: dict[
+            str, tuple[int, str | None, str]
+        ] = {}
         # Identity of the Git event log after its last complete integrity scan.
         # Every append compares this content-authenticated signature under the
         # global flock. The unchanged path hashes bytes without parsing JSON;
@@ -1231,6 +1239,7 @@ class SqliteBackend:
                         self._git_prd_content_heads = dict(
                             prd_policy.content_heads
                         )
+                        self._git_prd_graph_heads = dict(prd_policy.graph_heads)
                         cached_parent = self._git_prd_cached_parent(
                             materialized_draft
                         )
@@ -2139,21 +2148,118 @@ class SqliteBackend:
                 skip.add(event.id)
                 losing_graphs.add(event.id)
 
-        # Every event causally descended from a rejected graph observed state
-        # that never exists in the selected projection. Quarantine the whole
-        # bounded subtree so a task/status/evidence descendant cannot recreate
-        # the losing graph or abort replay on a missing feature/task row.
-        stack = [
-            child_id
-            for graph_id in losing_graphs
-            for child_id in children.get(graph_id, [])
-        ]
-        while stack:
-            descendant_id = stack.pop()
-            if descendant_id in skip:
-                continue
-            skip.add(descendant_id)
-            stack.extend(children.get(descendant_id, []))
+        def entity_key(kind: Any, entity_id: Any) -> tuple[str, str] | None:
+            if kind not in {"feature", "task", "claim", "evidence", "bundle"}:
+                return None
+            if not isinstance(entity_id, str) or not entity_id:
+                return None
+            return kind, entity_id
+
+        def event_writes(event: Event) -> set[tuple[str, str]]:
+            """Entity identities whose projected value this event mutates."""
+            writes: set[tuple[str, str]] = set()
+            operations = (
+                event.payload_json.get("operations")
+                if event.action == "planning.batch_applied"
+                else None
+            )
+            if isinstance(operations, list):
+                for operation in operations:
+                    if not isinstance(operation, dict):
+                        continue
+                    key = entity_key(
+                        operation.get("target_kind"),
+                        operation.get("target_id"),
+                    )
+                    if key is not None:
+                        writes.add(key)
+                return writes
+            key = entity_key(event.target_kind, event.target_id)
+            if key is not None:
+                writes.add(key)
+            return writes
+
+        def payload_references(payload: dict[str, Any]) -> set[tuple[str, str]]:
+            references: set[tuple[str, str]] = set()
+            for field, kind in (
+                ("feature_id", "feature"),
+                ("task_id", "task"),
+                ("parent_task_id", "task"),
+                ("claim_id", "claim"),
+                ("evidence_id", "evidence"),
+                ("bundle_id", "bundle"),
+            ):
+                key = entity_key(kind, payload.get(field))
+                if key is not None:
+                    references.add(key)
+            for field, kind in (
+                ("dependencies", "task"),
+                ("task_ids", "task"),
+                ("member_task_ids", "task"),
+                ("claim_ids", "claim"),
+            ):
+                values = payload.get(field)
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    key = entity_key(kind, value)
+                    if key is not None:
+                        references.add(key)
+            return references
+
+        def event_references(event: Event) -> set[tuple[str, str]]:
+            references = event_writes(event)
+            operations = (
+                event.payload_json.get("operations")
+                if event.action == "planning.batch_applied"
+                else None
+            )
+            if isinstance(operations, list):
+                for operation in operations:
+                    if not isinstance(operation, dict):
+                        continue
+                    payload = operation.get("payload_json")
+                    if isinstance(payload, dict):
+                        references.update(payload_references(payload))
+                return references
+            references.update(payload_references(event.payload_json))
+            return references
+
+        # Physical hash ancestry expresses append order, not semantic
+        # dependence. Propagate a rejected graph only through events that
+        # reference an entity actually written by that graph (and through
+        # identities written by those skipped descendants). A same- or
+        # cross-PRD transition on pre-existing state remains independent even
+        # when its generic hash parent happens to be the losing graph tail.
+        active_taint: dict[tuple[str, str], int] = {}
+        for root_id in roots:
+            taint_stack: list[
+                tuple[str, bool, tuple[tuple[str, str], ...]]
+            ] = [(root_id, False, ())]
+            while taint_stack:
+                event_id, leaving, additions = taint_stack.pop()
+                if leaving:
+                    for key in additions:
+                        remaining = active_taint[key] - 1
+                        if remaining:
+                            active_taint[key] = remaining
+                        else:
+                            del active_taint[key]
+                    continue
+                event = events_by_id[event_id]
+                added: tuple[tuple[str, str], ...] = ()
+                if event_id in losing_graphs:
+                    added = tuple(event_writes(event))
+                elif active_taint and any(
+                    key in active_taint for key in event_references(event)
+                ):
+                    skip.add(event_id)
+                    added = tuple(event_writes(event))
+                for key in added:
+                    active_taint[key] = active_taint.get(key, 0) + 1
+                taint_stack.append((event_id, True, added))
+                for child_id in reversed(children[event_id]):
+                    taint_stack.append((child_id, False, ()))
 
         current_lifecycle = [
             event
@@ -2261,6 +2367,29 @@ class SqliteBackend:
                 source_sha256 if isinstance(source_sha256, str) else None,
             )
 
+        graph_heads: dict[str, tuple[int, str | None, str]] = {}
+        for event in ordered:
+            if event.id in skip or event.action != "planning.batch_applied":
+                continue
+            prd_id = self._git_prd_id(event)
+            content_head = content_heads.get(prd_id)
+            base = nearest_content_ancestor(event)
+            if content_head is None or base is None or base.id != content_head[1]:
+                continue
+            expected_revision = event.payload_json.get("expected_prd_revision")
+            expected_source = event.payload_json.get(
+                "expected_prd_source_sha256"
+            )
+            if (
+                expected_revision == content_head[0]
+                and expected_source == content_head[2]
+            ):
+                graph_heads[prd_id] = (
+                    content_head[0],
+                    content_head[2],
+                    event.id,
+                )
+
         return _GitPrdReplayPolicy(
             skip_projection=frozenset(skip),
             title_overlays={
@@ -2268,6 +2397,7 @@ class SqliteBackend:
                 for prd_id, rank in overlay_candidates.items()
             },
             content_heads=content_heads,
+            graph_heads=graph_heads,
         )
 
     @staticmethod
@@ -2399,6 +2529,7 @@ class SqliteBackend:
             )
             prd_policy = self._build_git_prd_replay_policy(ordered)
             self._git_prd_content_heads = dict(prd_policy.content_heads)
+            self._git_prd_graph_heads = dict(prd_policy.graph_heads)
 
             max_lamport = 0
             for seq, event in enumerate(ordered, start=1):
@@ -2630,6 +2761,7 @@ class SqliteBackend:
             bounded_ordered = ordered[: stop_index + 1]
             prd_policy = self._build_git_prd_replay_policy(bounded_ordered)
             self._git_prd_content_heads = dict(prd_policy.content_heads)
+            self._git_prd_graph_heads = dict(prd_policy.graph_heads)
 
             max_lamport = 0
             for seq, event in enumerate(bounded_ordered, start=1):
@@ -4663,6 +4795,7 @@ class SqliteBackend:
             )
         policy = self._build_git_prd_replay_policy(ordered)
         self._git_prd_content_heads = dict(policy.content_heads)
+        self._git_prd_graph_heads = dict(policy.graph_heads)
         self._max_lamport = max(
             self._max_lamport,
             max((event.lamport or 0 for event in ordered), default=0),
@@ -4755,26 +4888,70 @@ class SqliteBackend:
             and draft.payload_json.get("expected_prd_source_sha256") != cached[2]
         ):
             return None
+        operation = self._planning_batch_prd_content_operation(draft)
+        action = operation.get("action") if operation is not None else draft.action
+        graph_only = draft.action == "planning.batch_applied" and operation is None
+        if graph_only or action == "prd.revised":
+            graph_head = self._git_prd_graph_heads.get(prd_id)
+            if graph_head is not None and graph_head[:2] == (cached[0], cached[2]):
+                return graph_head[2]
         return cached[1]
 
     def _remember_git_prd_content_head(self, event: Event) -> None:
-        """Advance the head cache only after a successful live projection."""
+        """Advance exact content/graph heads after a successful projection."""
         policy_event = self._git_prd_policy_event(event)
+        prd_id = self._git_prd_id(policy_event)
+        if policy_event.action not in {"prd.parsed", "prd.revised"}:
+            if event.action != "planning.batch_applied":
+                return
+            revision = event.payload_json.get("expected_prd_revision")
+            source_sha256 = event.payload_json.get(
+                "expected_prd_source_sha256"
+            )
+            cached = self._git_prd_content_heads.get(prd_id)
+            if (
+                isinstance(revision, int)
+                and not isinstance(revision, bool)
+                and cached is not None
+                and (revision, source_sha256) == (cached[0], cached[2])
+            ):
+                self._git_prd_graph_heads[prd_id] = (
+                    revision,
+                    source_sha256 if isinstance(source_sha256, str) else None,
+                    event.id,
+                )
+            return
         if policy_event.action == "prd.parsed":
             revision = 1
-        elif policy_event.action == "prd.revised":
+        else:
             revision_raw = policy_event.payload_json.get("revision")
             if not isinstance(revision_raw, int) or isinstance(revision_raw, bool):
                 return
             revision = revision_raw
-        else:
-            return
         source_sha256 = policy_event.payload_json.get("source_sha256")
-        self._git_prd_content_heads[self._git_prd_id(policy_event)] = (
+        normalized_source = source_sha256 if isinstance(source_sha256, str) else None
+        self._git_prd_content_heads[prd_id] = (
             revision,
             event.id,
-            source_sha256 if isinstance(source_sha256, str) else None,
+            normalized_source,
         )
+        operations = (
+            event.payload_json.get("operations")
+            if event.action == "planning.batch_applied"
+            else None
+        )
+        if isinstance(operations, list) and any(
+            isinstance(operation, dict)
+            and operation.get("action") not in {"prd.parsed", "prd.revised"}
+            for operation in operations
+        ):
+            self._git_prd_graph_heads[prd_id] = (
+                revision,
+                normalized_source,
+                event.id,
+            )
+        else:
+            self._git_prd_graph_heads.pop(prd_id, None)
 
     def _scan_log_ids_and_lamport(self) -> tuple[set[str], int]:
         """Full-log scan: every event id + the Lamport high-water mark (git mode).
@@ -4852,6 +5029,7 @@ class SqliteBackend:
         else:
             policy = self._build_git_prd_replay_policy(ordered)
             self._git_prd_content_heads = dict(policy.content_heads)
+            self._git_prd_graph_heads = dict(policy.graph_heads)
         signature_after = self._git_log_signature()
         if signature_before != signature_after:
             raise TransactionAborted(
