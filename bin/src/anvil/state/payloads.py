@@ -1185,7 +1185,7 @@ class TaskAppliedPayload(BaseModel):
 
     task_id: str
     reviewer: str
-    decision: str
+    decision: Literal["accepted", "rejected"]
     notes: str | None = None
     # Present on every new live event. Historical events omit it; replay uses
     # that distinction to preserve legacy unbound reviews without letting a

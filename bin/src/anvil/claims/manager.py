@@ -305,6 +305,7 @@ class ClaimManager:
         max_review_risk: int | None = None,
         metrics: AcceptRateMetrics | None = None,
         prd_id: str | None = None,
+        _as_of: datetime.datetime | None = None,
     ) -> OfferDiagnosis:
         """Select and explain one offer using the same rules on every surface."""
         all_tasks = self._backend.list_tasks()
@@ -321,7 +322,7 @@ class ClaimManager:
         if not ready_tasks:
             return OfferDiagnosis(None, "no_ready_tasks", None, 0)
 
-        now = self._clock.now()
+        now = _as_of if _as_of is not None else self._clock.now()
         active_claims = [
             claim
             for claim in self._backend.list_active_claims()
@@ -422,11 +423,14 @@ class ClaimManager:
 
         Returns None if no task is claimable.
         """
-        base = self.next_claimable(prd_id=prd_id)
+        # One observation instant governs both the base offer and the stricter
+        # file-lock pass. A lease crossing its deadline mid-read must not mix
+        # pre-expiry conflict groups with post-expiry file locks.
+        now = self._clock.now()
+        base = self.diagnose_next_offer(prd_id=prd_id, _as_of=now).task
         if base is None:
             return None
 
-        now = self._clock.now()
         active_claims = [
             claim
             for claim in self._backend.list_active_claims()

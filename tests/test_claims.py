@@ -541,6 +541,52 @@ class TestNextReadyExcludingActiveFiles:
         finally:
             b.close()
 
+    def test_lease_boundary_uses_one_observation_instant(self, tmp_path: Path) -> None:
+        class StepClock:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def now(self) -> datetime:
+                self.calls += 1
+                return _T0 if self.calls == 1 else _T0 + timedelta(minutes=2)
+
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(
+                conn,
+                task_id="TLOCK",
+                status="claimed",
+                conflict_groups=["CG-expiring"],
+            )
+            _insert_active_claim_raw(
+                conn,
+                claim_id="C001",
+                task_id="TLOCK",
+                actor="other-agent",
+                expected_files=["src/locked.py"],
+                lease_expires_at=_T0 + timedelta(minutes=1),
+            )
+            _insert_task_raw(
+                conn,
+                task_id="TA",
+                status="ready",
+                conflict_groups=["CG-expiring"],
+            )
+            conn.execute("UPDATE tasks SET priority = 'high' WHERE id = 'TA'")
+            _insert_task_raw(conn, task_id="TB", status="ready")
+            conn.close()
+
+            clock = StepClock()
+            manager = _make_manager(b, clock=clock)  # type: ignore[arg-type]
+            assert manager.next_ready_excluding_active_files().id == "TB"
+            assert clock.calls == 1
+        finally:
+            b.close()
+
     def test_excludes_task_overlapping_another_agents_claim(
         self, tmp_path: Path
     ) -> None:

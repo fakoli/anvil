@@ -5788,6 +5788,38 @@ class TestTaskRejectionProvenanceState:
                 if event["action"] == "task.applied"
                 and event["payload_json"]["decision"] == "accepted"
             )
+            invalid_decision_events = json.loads(json.dumps(raw_events))
+            invalid_decision = next(
+                event
+                for event in reversed(invalid_decision_events)
+                if event["action"] == "task.applied"
+                and event["payload_json"]["decision"] == "accepted"
+            )
+            invalid_decision["payload_json"]["decision"] = "invalid"
+            invalid_dir = tmp_path / "invalid-review-decision"
+            invalid_dir.mkdir()
+            invalid_log = invalid_dir / "events.jsonl"
+            invalid_log.write_text(
+                "".join(
+                    json.dumps(event, separators=(",", ":")) + "\n"
+                    for event in invalid_decision_events
+                ),
+                encoding="utf-8",
+            )
+            invalid_backend = SqliteBackend(
+                db_path=str(invalid_dir / "state.db"),
+                events_path=str(invalid_log),
+                clock=_make_clock(),
+            )
+            try:
+                with pytest.raises(
+                    TransactionAborted,
+                    match="payload parse failed.*task.applied",
+                ):
+                    invalid_backend.initialize()
+            finally:
+                invalid_backend.close()
+
             for label, remove_version, expected_error in [
                 ("null-version", False, "explicit-null schema_version"),
                 ("missing-version", True, "unversioned review provenance"),
