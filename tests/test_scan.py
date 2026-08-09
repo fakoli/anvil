@@ -1060,8 +1060,10 @@ class TestScanCommand:
 
         assert result.exit_code == 1
         payload = json.loads(result.output)
-        assert payload["error"]["code"] == "seed_rejected"
-        assert "regular contained file" in payload["error"]["message"]
+        assert payload["error"] == {
+            "code": "scan_artifact_error",
+            "message": "scan artifact update failed; prior artifacts were restored",
+        }
         assert prd_path.is_symlink()
         assert outside.read_bytes() == authored
 
@@ -1354,8 +1356,8 @@ class TestScanCommand:
 
         if failure_point == "fsync":
             monkeypatch.setattr(
-                scan_module.os,
-                "fsync",
+                scan_module,
+                "_fsync_prd_staging",
                 lambda _fd: (_ for _ in ()).throw(KeyboardInterrupt()),
             )
         else:
@@ -2437,7 +2439,7 @@ class TestScanCommand:
             def refuse_sync(_fd: int) -> None:
                 raise OSError(5, "synthetic write refusal")
 
-            monkeypatch.setattr(scan_module.os, "fsync", refuse_sync)
+            monkeypatch.setattr(scan_module, "_fsync_prd_staging", refuse_sync)
         else:
             def refuse_publish(
                 path: Path,

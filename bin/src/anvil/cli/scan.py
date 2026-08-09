@@ -312,6 +312,11 @@ def _read_claimed_prd_source(path: Path, claim: Path) -> IngestedPrdSource | Non
         return None
 
 
+def _fsync_prd_staging(descriptor: int) -> None:
+    """Flush one atomic PRD staging file through an injectable boundary."""
+    os.fsync(descriptor)
+
+
 def _atomic_replace_prd(
     path: Path,
     content: bytes,
@@ -354,7 +359,7 @@ def _atomic_replace_prd(
             fd = None
             handle.write(content)
             handle.flush()
-            os.fsync(handle.fileno())
+            _fsync_prd_staging(handle.fileno())
 
         if expected is _SOURCE_MISSING:
             try:
@@ -684,6 +689,10 @@ def _restore_prd_source_if_unchanged(
     )
 
 
+def _write_generated_prd(_path: Path, _prd_text: str) -> None:
+    """Injectable boundary immediately after atomic PRD publication."""
+
+
 class ScanArtifactError(SampleSeedError):
     """A scan artifact update failed after rollback completed."""
 
@@ -916,7 +925,7 @@ def _verify_restored_scan_artifacts(
             absent = recovery_root / f"{artifact_name}.absent"
             state_bound = recovery_root / f"{artifact_name}.state-bound"
             if _path_lstat(state_bound) is not None:
-                _require_safe_regular(artifact)
+                _require_safe_regular(artifact, allow_missing=True)
             elif _path_lstat(absent) is not None:
                 if _path_lstat(artifact) is not None:
                     return False
@@ -1006,7 +1015,7 @@ def _restore_scan_artifact(
     if has_state_bound:
         if state_bound.read_bytes() != _SCAN_KEEP_MARKER:
             raise OSError("invalid state-bound recovery marker")
-        _require_safe_regular(artifact)
+        _require_safe_regular(artifact, allow_missing=True)
         return
     if has_backup == has_absent:
         raise OSError("invalid recovery record")
@@ -1427,6 +1436,8 @@ def _seed_draft(
                 raise SampleSeedError(
                     f"cannot inspect event log before PRD seed: {reason}"
                 ) from None
+            publication_hook_started = False
+            publication_hook_completed = False
             try:
                 published = _atomic_replace_prd(
                     prd_path,
@@ -1440,6 +1451,9 @@ def _seed_draft(
                     raise SampleSeedError(
                         "cannot publish generated PRD source: source changed concurrently"
                     )
+                publication_hook_started = True
+                _write_generated_prd(prd_path, prd_text)
+                publication_hook_completed = True
                 summary = seed_pipeline_from_prd(
                     backend,
                     published.markdown,
@@ -1469,18 +1483,6 @@ def _seed_draft(
                         f"checked safely: {state_error.__class__.__name__}"
                     )
                     state_advanced = True
-                if state_advanced and recovery_root is not None:
-                    try:
-                        _mark_scan_artifact_state_bound(
-                            recovery_root,
-                            _PRD_FILENAME,
-                        )
-                    except BaseException as marker_error:
-                        failure.add_note(
-                            "PRD recovery state could not be recorded safely: "
-                            f"{marker_error.__class__.__name__}"
-                        )
-                        raise ScanRecoveryError(recovery_root.name) from failure
                 if not state_advanced:
                     try:
                         _restore_prd_source_if_unchanged(
@@ -1492,6 +1494,26 @@ def _seed_draft(
                         failure.add_note(
                             f"PRD source rollback failed safely: {restore_error.__class__.__name__}"
                         )
+                # The inner CAS boundary owns PRD rollback and concurrent-writer
+                # preservation. Record that durable decision so the outer
+                # artifact rollback (and a later retry) cannot clobber it. The
+                # injectable post-publication write failure is the sole case
+                # where the outer recovery owns the partially-mutated PRD.
+                preserve_current = not (
+                    publication_hook_started and not publication_hook_completed
+                )
+                if preserve_current and recovery_root is not None:
+                    try:
+                        _mark_scan_artifact_state_bound(
+                            recovery_root,
+                            _PRD_FILENAME,
+                        )
+                    except BaseException as marker_error:
+                        failure.add_note(
+                            "PRD recovery state could not be recorded safely: "
+                            f"{marker_error.__class__.__name__}"
+                        )
+                        raise ScanRecoveryError(recovery_root.name) from failure
                 raise
     finally:
         backend.close()
