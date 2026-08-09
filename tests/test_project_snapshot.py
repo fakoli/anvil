@@ -917,3 +917,37 @@ def test_mixed_visible_aggregate_refuses_before_json_materialization(
     assert isinstance(refusal.value.error, ProviderLimitRefusalV1)
     assert refusal.value.error.limit_name is ProviderLimitNameV1.max_snapshot_bytes
     assert refusal.value.error.actual > refusal.value.error.limit
+
+
+def test_long_named_prd_prefix_does_not_false_refuse_lower_bound(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    populated.close()
+    prd_id = "p" * 128
+    feature_id = f"{prd_id}:F001"
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute("UPDATE prds SET id = ? WHERE id = 'named'", (prd_id,))
+    conn.execute(
+        "UPDATE features SET id = ?, prd_id = ? WHERE id = 'named:F001'",
+        (feature_id, prd_id),
+    )
+    conn.execute(
+        "UPDATE tasks SET id = ?, feature_id = ?, prd_id = ? WHERE id = 'named:T001'",
+        (f"{prd_id}:T001", feature_id, prd_id),
+    )
+    conn.execute(
+        "WITH RECURSIVE seq(n) AS ("
+        "SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000) "
+        "INSERT INTO tasks (id, feature_id, prd_id, title, description, status, "
+        "priority, task_type, dependencies, conflict_groups, scores, "
+        "acceptance_criteria, implementation_notes, verification, likely_files, "
+        "claims, parent_task_id, created_at, updated_at) "
+        "SELECT ? || ':T100.' || n, ?, ?, 't', '', 'ready', 'high', 'feature', "
+        "'[]', '[]', '{}', '[]', '[]', '{}', '[]', '[]', NULL, ?, ? FROM seq",
+        (prd_id, feature_id, prd_id, _NOW.isoformat(), _NOW.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    result = read_project_snapshot(root)
+    assert len(result.payload.tasks) == 20_002

@@ -842,9 +842,10 @@ def _preflight_visible_payload_lower_bound(
     ).fetchone()
     repeated_ref_row = conn.execute(
         "SELECT COALESCE(SUM("
-        "CASE WHEN prd_id = 'default' THEN length(CAST(id AS BLOB)) "
-        "ELSE length(CAST(id AS BLOB)) - length(CAST(prd_id AS BLOB)) - 1 END "
-        "+ 2 * length(CAST(prd_id AS BLOB))), 0) FROM tasks"
+        "CASE WHEN prd_id = 'default' THEN "
+        "length(CAST(id AS BLOB)) + 2 * length(CAST(prd_id AS BLOB)) "
+        "ELSE MAX(length(CAST(id AS BLOB)) - "
+        "length(CAST(prd_id AS BLOB)) - 3, 0) END), 0) FROM tasks"
     ).fetchone()
     summary_row = conn.execute(
         "SELECT COALESCE(SUM("
