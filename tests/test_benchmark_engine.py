@@ -569,6 +569,16 @@ def test_setup_project_rejects_failed_git_init(
     assert not (tmp_path / "fixture" / ".anvil").exists()
 
 
+def test_setup_project_initializes_only_the_workspace_git_repository(
+    tmp_path: Path,
+) -> None:
+    task = engine.TaskSpec("T001", "Benchmark task", files=("workspace/x.txt",))
+    project = engine.setup_project(tmp_path / "fixture", "benchmark", [task])
+
+    assert (project.workspace / ".git").is_dir()
+    assert not (project.root / ".git").exists()
+
+
 def test_report_only_cannot_mask_git_init_infrastructure_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

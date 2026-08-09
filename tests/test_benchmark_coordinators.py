@@ -556,11 +556,45 @@ def test_windows_verification_command_preserves_quoted_arguments() -> None:
     assert parsed == expected
 
 
+def test_verification_proof_runs_in_workspace_repository(tmp_path: Path) -> None:
+    task = _task()
+    project = engine.setup_project(tmp_path, "verification", [task])
+    claim_result = engine.run(
+        ["claim", task.id, "--json"],
+        cwd=project.root,
+        actor="agent",
+    )
+    claim_id = json.loads(claim_result.out)["data"]["claim"]["id"]
+
+    _REAL_RECORD_VERIFICATION_PROOFS(
+        project,
+        "agent",
+        claim_id,
+        ["git diff --check"],
+        deadline=time.monotonic() + 10,
+    )
+
+    record_path = (
+        project.root / ".anvil" / ".evidence-buffer" / f"{claim_id}.json"
+    )
+    record = json.loads(record_path.read_text().strip())
+    assert record["exit_code"] == 0
+    assert record["claim_id"] == claim_id
+    assert record["attribution"]["task_id"] == task.id
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows command-line parsing")
 def test_windows_quoted_failure_is_recorded_with_exact_exit_code(
     tmp_path: Path,
 ) -> None:
-    project = engine.Project(root=tmp_path, tasks=[])
+    task = _task()
+    project = engine.setup_project(tmp_path, "verification", [task])
+    claim_result = engine.run(
+        ["claim", task.id, "--json"],
+        cwd=project.root,
+        actor="agent",
+    )
+    claim_id = json.loads(claim_result.out)["data"]["claim"]["id"]
     command = subprocess.list2cmdline(
         [sys.executable, "-c", "raise SystemExit(7)"]
     )
@@ -568,25 +602,25 @@ def test_windows_quoted_failure_is_recorded_with_exact_exit_code(
     _REAL_RECORD_VERIFICATION_PROOFS(
         project,
         "agent",
-        "C1234ABCD",
+        claim_id,
         [command],
         deadline=time.monotonic() + 10,
     )
 
     record_path = (
-        tmp_path / ".anvil" / ".evidence-buffer" / "C1234ABCD.json"
+        tmp_path / ".anvil" / ".evidence-buffer" / f"{claim_id}.json"
     )
     records = [json.loads(line) for line in record_path.read_text().splitlines()]
-    assert records == [
-        {
-            "kind": "command",
-            "timestamp": records[0]["timestamp"],
-            "command": command,
-            "exit_code": 7,
-            "output_sha256": hashlib.sha256(b"").hexdigest(),
-            "actor": "agent",
-        }
-    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record["kind"] == "command"
+    assert record["command"] == command
+    assert record["exit_code"] == 7
+    assert record["output_sha256"] == hashlib.sha256(b"").hexdigest()
+    assert record["actor"] == "agent"
+    assert record["claim_id"] == claim_id
+    assert record["attribution"]["task_id"] == task.id
+    assert len(record["semantic_digest"]) == 64
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows command-line parsing")
@@ -929,6 +963,11 @@ def test_acquire_rejects_malformed_zero_exit_claim_success(
             "'C1234ABCD' on task 'T002' by 'a1'. Another claim in this group is "
             "active; re-pick a task or use --force to override.",
         ),
+        (
+            "claim_error",
+            "claim.created: generation must equal the next authoritative task "
+            "generation (2).",
+        ),
     ],
 )
 def test_acquire_treats_real_claim_contention_as_retryable_no_work(
@@ -1031,6 +1070,12 @@ def test_acquire_treats_real_claim_contention_as_retryable_no_work(
             "conflict_group overlap (groups: [shared]) with active claim "
             "'C1234ABCD' on task 'T002' by 'a1'. Another claim in this group is "
             "active; re-pick a task or use --force to override.",
+        ),
+        (
+            1,
+            "claim_error",
+            "claim.created: generation must equal the next authoritative task "
+            "generation (2). database corrupt",
         ),
     ],
 )

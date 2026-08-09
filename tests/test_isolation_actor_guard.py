@@ -21,6 +21,7 @@ from anvil.claims.manager import ClaimError, ClaimManager
 from anvil.clock import FrozenClock
 from anvil.naming import session_discriminator
 from anvil.state.models import EventDraft
+from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import SqliteBackend
 
 _T0 = datetime(2026, 7, 9, 18, 0, 0, tzinfo=UTC)
@@ -292,7 +293,7 @@ class TestSchemaV10:
 
     def test_v9_db_migrates_additively(self, tmp_path: Path) -> None:
         # Simulate a v9 claims table (no session_id) and run initialize():
-        # the ladder must add the column and continue through the current v16
+        # the ladder must add the column and continue through the current
         # behavior-first PRD readiness schema.
         db_path = tmp_path / "state.db"
         events_path = tmp_path / "events.jsonl"
@@ -310,7 +311,7 @@ class TestSchemaV10:
         try:
             with sqlite3.connect(db_path) as conn:
                 v = conn.execute("PRAGMA user_version").fetchone()[0]
-            assert v == 16
+            assert v == SCHEMA_VERSION
         finally:
             b2.close()
 

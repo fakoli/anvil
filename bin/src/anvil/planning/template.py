@@ -1887,9 +1887,13 @@ def parse_prd(
                 ParseError(
                     section="# Project",
                     line=proj_block[0],
+                    # The heading is author-controlled and may be arbitrarily
+                    # large.  Keep parser diagnostics bounded and
+                    # non-reflective; CLI/MCP wrappers are not the only
+                    # consumers of ParseResult.
                     message=(
-                        "Could not extract project name from heading "
-                        f"'{proj_line.strip()}'."
+                        "Could not extract project name from the required "
+                        "'# Project: <Name>' heading."
                     ),
                 )
             )

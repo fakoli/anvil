@@ -2085,6 +2085,7 @@ class TestPrdList:
         assert text.exit_code == 0, text.output
         assert "default" in text.output
         assert "*" in text.output  # default-PRD marker
+        assert "CLI Test Project" in text.output
 
         rj = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
         assert rj.exit_code == 0, rj.output
@@ -2094,6 +2095,119 @@ class TestPrdList:
         assert {p["id"] for p in prds} == {"default"}
         assert prds[0]["is_default"] is True
         assert prds[0]["status"] == "draft"
+        assert prds[0]["title"] == "CLI Test Project"
+
+    def test_default_and_named_titles_match_text_and_json_after_reparse(
+        self, tmp_path: Path
+    ) -> None:
+        """Both list surfaces derive titles from the same persisted rows."""
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        assert _invoke_cmd(
+            tmp_path, ["prd", "parse", "--prd", "v0.2"]
+        ).exit_code == 0
+
+        def assert_list_parity(expected_titles: dict[str, str]) -> None:
+            human = _invoke_cmd(tmp_path, ["prd", "list"])
+            machine = _invoke_cmd(tmp_path, ["prd", "list", "--json"])
+            assert human.exit_code == machine.exit_code == 0
+            rows = {
+                item["id"]: item
+                for item in json.loads(machine.output)["data"]["prds"]
+            }
+            assert {prd_id: rows[prd_id]["title"] for prd_id in rows} == (
+                expected_titles
+            )
+            human_lines = human.output.splitlines()
+            for prd_id, title in expected_titles.items():
+                row = rows[prd_id]
+                marker = "*" if row["is_default"] else " "
+                expected_line = (
+                    f"{marker} {prd_id}  "
+                    f"[{row['status']} r{row['revision']}]  {title}"
+                )
+                assert expected_line in human_lines
+
+        assert_list_parity(
+            {"default": "CLI Test Project", "v0.2": "CLI Named PRD"}
+        )
+
+        _write_prd(
+            tmp_path,
+            _MINIMAL_PRD_CONTENT.replace(
+                "# Project: CLI Test Project",
+                "# Project: CLI Test Project Renamed",
+                1,
+            ),
+        )
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        _write_named_prd(
+            tmp_path,
+            "v0.2",
+            _NAMED_PRD_CONTENT.replace(
+                "# Project: CLI Named PRD",
+                "# Project: CLI Named PRD Renamed",
+                1,
+            ),
+        )
+        assert _invoke_cmd(
+            tmp_path, ["prd", "parse", "--prd", "v0.2"]
+        ).exit_code == 0
+
+        assert_list_parity(
+            {
+                "default": "CLI Test Project Renamed",
+                "v0.2": "CLI Named PRD Renamed",
+            }
+        )
+
+    def test_blank_legacy_default_title_requires_explicit_reparse(
+        self, tmp_path: Path
+    ) -> None:
+        """Read-only listing never fabricates a missing historical title."""
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        with sqlite3.connect(str(db)) as conn:
+            conn.execute("UPDATE prds SET title = '' WHERE id = 'default'")
+            conn.commit()
+
+        human_before = _invoke_cmd(tmp_path, ["prd", "list"])
+        machine_before = json.loads(
+            _invoke_cmd(tmp_path, ["prd", "list", "--json"]).output
+        )
+        default_before = next(
+            item
+            for item in machine_before["data"]["prds"]
+            if item["id"] == "default"
+        )
+        assert default_before["title"] == ""
+        assert "* default  [approved r1]\n" in human_before.output
+        assert "CLI Test Project" not in human_before.output
+
+        reparsed = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert reparsed.exit_code == 0, reparsed.output
+        revised = _events_of_action(tmp_path, "prd.revised")[-1]
+        assert revised["prd_id"] == "default"
+        assert revised["revision"] == 2
+        assert revised["title"] == "CLI Test Project"
+
+        human_after = _invoke_cmd(tmp_path, ["prd", "list"])
+        machine_after = json.loads(
+            _invoke_cmd(tmp_path, ["prd", "list", "--json"]).output
+        )
+        default_after = next(
+            item
+            for item in machine_after["data"]["prds"]
+            if item["id"] == "default"
+        )
+        expected_line = (
+            f"* default  [{default_after['status']} "
+            f"r{default_after['revision']}]  {default_after['title']}"
+        )
+        assert expected_line in human_after.output.splitlines()
+        assert default_after["title"] == "CLI Test Project"
 
     def test_blank_legacy_named_title_requires_explicit_reparse(
         self, tmp_path: Path
@@ -2466,6 +2580,90 @@ class TestPrdReparse:
         assert prd.title == "CLI Test Project"
         assert prd.status.value == "approved"
         assert prd.revision == 1
+
+    @pytest.mark.parametrize("prd_id", ("default", "v0.2"))
+    @pytest.mark.parametrize(
+        "invalid_kind", ("missing-h1", "empty-h1", "all-closing-markers")
+    )
+    def test_malformed_h1_reparse_preserves_prior_default_and_named_state(
+        self, tmp_path: Path, prd_id: str, invalid_kind: str
+    ) -> None:
+        """Malformed H1 input is bounded and rejected before any mutation."""
+        from anvil.cli._helpers import _open_backend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _MINIMAL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        _write_named_prd(tmp_path, "v0.2", _NAMED_PRD_CONTENT)
+        assert _invoke_cmd(
+            tmp_path, ["prd", "parse", "--prd", "v0.2"]
+        ).exit_code == 0
+
+        source = (
+            _MINIMAL_PRD_CONTENT
+            if prd_id == "default"
+            else _NAMED_PRD_CONTENT
+        )
+        heading = source.splitlines()[0]
+        if invalid_kind == "missing-h1":
+            invalid = source.removeprefix(heading + "\n")
+        elif invalid_kind == "empty-h1":
+            invalid = source.replace(heading, "# Project:", 1)
+        else:
+            invalid = source.replace(
+                heading, "# Project: " + ("#" * 100_000), 1
+            )
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd_before = backend.get_prd(prd_id)
+            requirements_before = backend.list_requirements(prd_id=prd_id)
+        finally:
+            backend.close()
+        assert prd_before is not None
+        event_bytes_before = (tmp_path / ".anvil" / "events.jsonl").read_bytes()
+
+        if prd_id == "default":
+            _write_prd(tmp_path, invalid)
+            args = ["prd", "parse"]
+        else:
+            _write_named_prd(tmp_path, prd_id, invalid)
+            args = ["prd", "parse", "--prd", prd_id]
+        result = _invoke_cmd(tmp_path, args)
+
+        assert result.exit_code == 1
+        combined = result.output + (
+            result.stderr if hasattr(result, "stderr") and result.stderr else ""
+        )
+        assert len(combined) < 1000
+        assert "#" * 128 not in combined
+        assert (tmp_path / ".anvil" / "events.jsonl").read_bytes() == (
+            event_bytes_before
+        )
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            prd_after = backend.get_prd(prd_id)
+            requirements_after = backend.list_requirements(prd_id=prd_id)
+        finally:
+            backend.close()
+        assert prd_after == prd_before
+        assert requirements_after == requirements_before
+
+        machine = json.loads(
+            _invoke_cmd(tmp_path, ["prd", "list", "--json"]).output
+        )
+        row = next(
+            item for item in machine["data"]["prds"] if item["id"] == prd_id
+        )
+        human = _invoke_cmd(tmp_path, ["prd", "list"])
+        marker = "*" if row["is_default"] else " "
+        expected_line = (
+            f"{marker} {prd_id}  "
+            f"[{row['status']} r{row['revision']}]  {row['title']}"
+        )
+        assert expected_line in human.output.splitlines()
+        assert row["title"] == prd_before.title
 
     def test_title_only_named_reparse_is_partition_isolated_and_replayable(
         self, tmp_path: Path
@@ -10167,8 +10365,8 @@ class TestUnifiedSchemaMismatchBoundary:
         line = lines[0]
         assert len(line.encode("utf-8")) <= 4_096
         assert line.startswith("Error: [schema_mismatch]")
-        assert "Anvil " in line and "supports schema 16" in line
-        assert "database schema 17 is newer" in line
+        assert "Anvil " in line and f"supports schema {SCHEMA_VERSION}" in line
+        assert f"database schema {SCHEMA_VERSION + 1} is newer" in line
         assert "Upgrade anvil-state" in line
         assert "restart" in line
         assert "Do not delete state" in line

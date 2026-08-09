@@ -269,6 +269,27 @@ class TestHappyPath:
         assert any(error.section == "# Project" for error in result.errors)
         assert result.prd.title == ""
 
+    def test_empty_project_title_diagnostic_is_bounded_and_non_reflective(
+        self,
+    ) -> None:
+        """ATX closing markers cannot amplify author bytes into diagnostics."""
+        hostile_heading = "# Project: " + ("#" * 100_000)
+        markdown = _MINIMAL_PRD.replace(
+            "# Project: Minimal Project", hostile_heading, 1
+        )
+
+        result = parse_prd(markdown)
+
+        title_errors = [e for e in result.errors if e.section == "# Project"]
+        assert len(title_errors) == 1
+        assert title_errors[0].message == (
+            "Could not extract project name from the required "
+            "'# Project: <Name>' heading."
+        )
+        assert hostile_heading not in title_errors[0].message
+        assert len(title_errors[0].message) < 100
+        assert result.prd.title == ""
+
     def test_fenced_h1_does_not_replace_canonical_title(self) -> None:
         """H1-like source examples inside Markdown fences are not headings."""
         for opening_fence, closing_fence in (

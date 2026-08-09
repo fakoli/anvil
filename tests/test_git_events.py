@@ -4224,13 +4224,14 @@ class TestDivergentMerge:
                     "progress.noted",
                     {
                         "task_id": "T001",
-                        "actor": "test",
+                        "actor": "agent-b",
                         "notes": "post-merge",
                         "noted_at": ts.isoformat(),
                     },
                     target_kind="task",
                     target_id="T001",
                     ts=ts,
+                    actor="agent-b",
                 )
             )
         finally:

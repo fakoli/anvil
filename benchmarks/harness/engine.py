@@ -888,7 +888,7 @@ def setup_project(
     (root / "workspace").mkdir(exist_ok=True)
     git_init = run_process(
         ["git", "init", "-q"],
-        root,
+        root / "workspace",
         timeout=_setup_timeout(deadline),
         output_limit_bytes=64 * 1024,
     )
