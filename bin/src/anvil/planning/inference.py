@@ -993,24 +993,10 @@ def build_bundle_plan(
         ordered_input,
         project_root=project_root,
     )
-    inferred_dependencies = {
-        task.id: set(task.dependencies) for task in ordered_input
-    }
-    for left in ordered_input:
-        for right in ordered_input:
-            if (
-                left.id != right.id
-                and canonical_files[left.id]
-                and canonical_files[left.id] < canonical_files[right.id]
-                and left.id not in inferred_dependencies[right.id]
-            ):
-                inferred_dependencies[left.id].add(right.id)
-    ordered = [
-        task.model_copy(
-            update={"dependencies": sorted(inferred_dependencies[task.id])}
-        )
-        for task in ordered_input
-    ]
+    # Bundle costing must use the same guarded policy as every persistence
+    # entry point. In particular, an optional strict-subset edge is skipped
+    # when it would close a cycle through an authored dependency.
+    ordered = _infer_dependencies_with_scopes(ordered_input, canonical_files)
     task_ids = {task.id for task in ordered}
     missing_dependencies = sorted(
         {

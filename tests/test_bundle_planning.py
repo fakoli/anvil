@@ -149,6 +149,24 @@ def test_bundle_plan_normalizes_equivalent_project_paths_deterministically() -> 
             build_bundle_plan([_task("T001", [unsafe])])
 
 
+def test_bundle_plan_skips_optional_edge_that_would_close_authored_cycle() -> None:
+    tasks = [
+        _task("T001", ["src/narrow.py"]),
+        _task(
+            "T002",
+            ["src/narrow.py", "src/broad.py"],
+            dependencies=["T001"],
+        ),
+    ]
+
+    first = build_bundle_plan(tasks)
+    second = build_bundle_plan(list(reversed(tasks)))
+
+    assert first.to_dict() == second.to_dict()
+    assert first.serial_depth == 2
+    assert first.proposed_bundles[0].task_ids == ("T001", "T002")
+
+
 def test_review_gate_requires_three_distinct_non_author_angles() -> None:
     policy = BundleReviewPolicy()
     verdicts = [
