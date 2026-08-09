@@ -29,7 +29,9 @@ def test_stop_gate_help_matches_runtime_actor_precedence() -> None:
     result = runner.invoke(app, ["hook", "stop-gate", "--help"])
 
     assert result.exit_code == 0, result.output
-    normalized = " ".join(result.output.split())
+    # Rich help wraps cells with a vertical table border under Typer 0.27.1;
+    # remove the presentation glyph so semantic words remain contiguous.
+    normalized = " ".join(result.output.replace("│", " ").split())
     precedence = normalized[normalized.index("Precedence:") :]
     assert precedence.index("--actor") < precedence.index("ANVIL_ACTOR")
     assert precedence.index("ANVIL_ACTOR") < precedence.index("ANVIL_GATE_ACTOR")
