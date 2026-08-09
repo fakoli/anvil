@@ -65,6 +65,7 @@ _SCAN_LOCK_FILENAME = ".scan.lock"
 _SCAN_LOCK_TIMEOUT_SECONDS = 5.0
 _ABSENT_MARKER = b"absent\n"
 _COPY_BUFFER_SIZE = 1024 * 1024
+_MAX_SCAN_RECOVERY_ENTRIES = 32
 _SCAN_SESSION_LOCKS_GUARD = threading.Lock()
 _SCAN_SESSION_LOCKS: dict[str, threading.RLock] = {}
 _SCAN_SESSION_LOCAL = threading.local()
@@ -893,6 +894,45 @@ def _require_safe_regular(path: Path, *, allow_missing: bool = False) -> bool:
     return True
 
 
+def _read_exact_marker(path: Path, expected: bytes) -> bytes:
+    """Read one fixed marker without allocating attacker-controlled bytes."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            _is_reparse_or_symlink(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size != len(expected)
+        ):
+            raise OSError("invalid recovery marker size or type")
+        chunks: list[bytes] = []
+        remaining = len(expected) + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev != before.st_dev
+            or after.st_ino != before.st_ino
+            or after.st_size != before.st_size
+        ):
+            raise OSError("recovery marker changed while reading")
+        material = b"".join(chunks)
+        if material != expected:
+            raise OSError("invalid recovery marker")
+        return material
+    finally:
+        os.close(descriptor)
+
+
 def _require_direct_child(path: Path, parent: Path) -> None:
     if Path(os.path.abspath(path.parent)) != Path(os.path.abspath(parent)):
         raise OSError("recovery path escaped containment")
@@ -977,10 +1017,8 @@ def _validate_recovery_root(
         _require_safe_regular(entry)
 
     committed = recovery_root / _SCAN_COMMITTED_NAME
-    if _require_safe_regular(committed, allow_missing=True) and (
-        committed.read_bytes() != _SCAN_COMMITTED_MARKER
-    ):
-        raise OSError("invalid committed recovery marker")
+    if _require_safe_regular(committed, allow_missing=True):
+        _read_exact_marker(committed, _SCAN_COMMITTED_MARKER)
 
     if not require_complete:
         return
@@ -992,12 +1030,10 @@ def _validate_recovery_root(
         has_absent = _require_safe_regular(absent, allow_missing=True)
         if has_backup == has_absent:
             raise OSError("invalid recovery record")
-        if has_absent and absent.read_bytes() != _ABSENT_MARKER:
-            raise OSError("invalid recovery marker")
-        if _require_safe_regular(state_bound, allow_missing=True) and (
-            state_bound.read_bytes() != _SCAN_KEEP_MARKER
-        ):
-            raise OSError("invalid state-bound recovery marker")
+        if has_absent:
+            _read_exact_marker(absent, _ABSENT_MARKER)
+        if _require_safe_regular(state_bound, allow_missing=True):
+            _read_exact_marker(state_bound, _SCAN_KEEP_MARKER)
 
 
 def _mark_scan_recovery_committed(recovery_root: Path) -> None:
@@ -1006,8 +1042,7 @@ def _mark_scan_recovery_committed(recovery_root: Path) -> None:
     marker = recovery_root / _SCAN_COMMITTED_NAME
     _require_direct_child(marker, recovery_root)
     if _require_safe_regular(marker, allow_missing=True):
-        if marker.read_bytes() != _SCAN_COMMITTED_MARKER:
-            raise OSError("invalid committed recovery marker")
+        _read_exact_marker(marker, _SCAN_COMMITTED_MARKER)
         return
     with marker.open("xb") as handle:
         handle.write(_SCAN_COMMITTED_MARKER)
@@ -1071,13 +1106,25 @@ def _create_scan_recovery_unlocked(state_dir: Path) -> tuple[str, Path]:
             recovery_parent.mkdir()
             _fsync_directory(state_dir)
         _require_safe_directory(recovery_parent)
+        entry_count = 0
         for entry in recovery_parent.iterdir():
+            entry_count += 1
+            if entry_count > _MAX_SCAN_RECOVERY_ENTRIES:
+                raise OSError("too many recovery entries")
             _require_direct_child(entry, recovery_parent)
             if entry.name.startswith(_SCAN_RECOVERY_PREFIX):
                 if not _is_scan_recovery_token(entry.name):
                     raise OSError("invalid active recovery token")
                 _preflight_scan_recovery(state_dir, entry)
                 raise ScanRecoveryError(entry.name)
+            if entry.name.startswith(_SCAN_RETIRED_PREFIX):
+                suffix = entry.name.removeprefix(_SCAN_RETIRED_PREFIX)
+                if not _is_scan_recovery_token(
+                    f"{_SCAN_RECOVERY_PREFIX}{suffix}"
+                ):
+                    raise OSError("invalid retired recovery token")
+                continue
+            raise OSError("unexpected recovery entry")
     except ScanRecoveryError:
         raise
     except Exception:
@@ -1142,16 +1189,14 @@ def _restore_scan_artifact(
     has_absent = _require_safe_regular(absent, allow_missing=True)
     has_state_bound = _require_safe_regular(state_bound, allow_missing=True)
     if has_state_bound:
-        if state_bound.read_bytes() != _SCAN_KEEP_MARKER:
-            raise OSError("invalid state-bound recovery marker")
+        _read_exact_marker(state_bound, _SCAN_KEEP_MARKER)
         _require_safe_regular(artifact, allow_missing=True)
         return
     if has_backup == has_absent:
         raise OSError("invalid recovery record")
     _require_safe_regular(artifact, allow_missing=True)
     if has_absent:
-        if absent.read_bytes() != _ABSENT_MARKER:
-            raise OSError("invalid recovery marker")
+        _read_exact_marker(absent, _ABSENT_MARKER)
         artifact.unlink(missing_ok=True)
         _fsync_directory(state_dir)
         if _path_lstat(artifact) is not None:
@@ -1229,7 +1274,9 @@ def _restore_scan_recovery(state_dir: Path, recovery_root: Path) -> bool:
         return False
     committed = recovery_root / _SCAN_COMMITTED_NAME
     if _require_safe_regular(committed, allow_missing=True):
-        if committed.read_bytes() != _SCAN_COMMITTED_MARKER:
+        try:
+            _read_exact_marker(committed, _SCAN_COMMITTED_MARKER)
+        except OSError:
             return False
         return _retire_scan_recovery(recovery_root)
     failures = False
@@ -1260,7 +1307,25 @@ def _resume_scan_recovery_unlocked(state_dir: Path) -> None:
         _require_safe_directory(state_dir)
         _require_direct_child(recovery_parent, state_dir)
         _require_safe_directory(recovery_parent)
-        entries = sorted(recovery_parent.iterdir(), key=lambda path: path.name)
+        entries: list[Path] = []
+        for entry in recovery_parent.iterdir():
+            if len(entries) >= _MAX_SCAN_RECOVERY_ENTRIES:
+                raise OSError("too many recovery entries")
+            _require_direct_child(entry, recovery_parent)
+            name = entry.name
+            if name.startswith(_SCAN_RECOVERY_PREFIX):
+                if not _is_scan_recovery_token(name):
+                    raise OSError("invalid active recovery token")
+            elif name.startswith(_SCAN_RETIRED_PREFIX):
+                suffix = name.removeprefix(_SCAN_RETIRED_PREFIX)
+                if not _is_scan_recovery_token(
+                    f"{_SCAN_RECOVERY_PREFIX}{suffix}"
+                ):
+                    raise OSError("invalid retired recovery token")
+            else:
+                raise OSError("unexpected recovery entry")
+            entries.append(entry)
+        entries.sort(key=lambda path: path.name)
     except Exception:
         raise ScanArtifactError() from None
     active_records: list[Path] = []

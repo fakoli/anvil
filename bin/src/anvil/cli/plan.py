@@ -321,9 +321,10 @@ def plan(
 ) -> None:
     """Generate features and tasks from the parsed PRD.
 
-    Re-reads prd.md, emits feature.created and task.created events for each
-    feature and task found.  Then runs dependency and conflict-group inference
-    and promotes all tasks from proposed to drafted.
+    Re-reads prd.md, builds the complete canonical feature/task graph, runs
+    dependency and conflict-group inference, and promotes proposed tasks to
+    drafted. The complete graph persists in one atomic
+    ``planning.batch_applied`` event; a refusal cannot leave a partial plan.
 
     With ``--use-llm`` Task descriptions shorter than
     ``template.DESCRIPTION_SHORT_THRESHOLD`` (currently 50 chars) are
@@ -636,6 +637,17 @@ def plan(
         # all scope to this partition; conflict-group inference (below) does
         # NOT — it spans every PRD so cross-PRD file overlaps are detected.
         scope_prd_id = parsed.prd.id
+        stored_prd = backend.get_prd(scope_prd_id)
+        if stored_prd is None:
+            message = (
+                f"No PRD found in state for '{scope_prd_id}'. Run `anvil prd "
+                "parse` before `anvil plan`."
+            )
+            if json_output:
+                fail("plan", message, code="prd_not_found")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1)
+        expected_prd_revision = stored_prd.revision
 
         # Scope orphan classification to THIS PRD: tasks/features in OTHER
         # PRDs must never be pruned just because they are absent from this
@@ -895,6 +907,7 @@ def plan(
                 actor="anvil-cli",
                 clock=clock,
                 prd_id=scope_prd_id,
+                expected_prd_revision=expected_prd_revision,
             )
         except EventRejected as exc:
             if json_output:

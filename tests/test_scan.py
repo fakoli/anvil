@@ -927,6 +927,39 @@ class TestScanCommand:
         finally:
             backend.close()
 
+    def test_recovery_refuses_oversized_fixed_marker_without_read_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        _token, recovery_root = scan_module._create_scan_recovery(state_dir)
+        marker = recovery_root / "scan.db.absent"
+        with marker.open("r+b") as handle:
+            handle.truncate(32 * 1024 * 1024)
+
+        monkeypatch.setattr(
+            Path,
+            "read_bytes",
+            lambda _self: pytest.fail("fixed recovery markers must be bounded"),
+        )
+        with pytest.raises(scan_module.ScanRecoveryError):
+            scan_module._resume_scan_recovery(state_dir)
+        assert recovery_root.exists()
+
+    def test_recovery_directory_entry_count_is_bounded_before_sort(
+        self, tmp_path: Path
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        recovery_parent = state_dir / "recovery"
+        recovery_parent.mkdir(parents=True)
+        for index in range(scan_module._MAX_SCAN_RECOVERY_ENTRIES + 1):
+            (recovery_parent / f".retired-scan-{index:016x}").mkdir()
+
+        with pytest.raises(scan_module.ScanArtifactError):
+            scan_module._resume_scan_recovery(state_dir)
+
     def test_first_scan_seeds_prd_tasks_and_codebase_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

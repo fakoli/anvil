@@ -455,6 +455,10 @@ class PlanningBatchAppliedPayload(BaseModel):
 
     schema_version: Literal[1]
     prd_id: StrictStr = Field(min_length=1, max_length=512)
+    # Graph-only batches are derived from one already-persisted PRD revision.
+    # Combined parse/seed batches instead carry the content mutation inside the
+    # same atomic event and therefore use ``None``.
+    expected_prd_revision: StrictInt | None
     operations: list[PlanningBatchOperationPayload] = Field(
         min_length=1,
         max_length=_MAX_PLANNING_BATCH_OPERATIONS,
@@ -470,11 +474,23 @@ class PlanningBatchAppliedPayload(BaseModel):
         if len(content_operations) > 1:
             raise ValueError("planning batch may contain at most one PRD content event")
         if content_operations:
+            if self.expected_prd_revision is not None:
+                raise ValueError(
+                    "planning batch with PRD content must not bind a prior revision"
+                )
             nested_prd_id = content_operations[0].payload_json.get(
                 "prd_id", DEFAULT_PRD_ID
             )
             if nested_prd_id != self.prd_id:
                 raise ValueError("planning batch PRD content owner mismatch")
+        elif (
+            self.expected_prd_revision is None
+            or isinstance(self.expected_prd_revision, bool)
+            or self.expected_prd_revision < 1
+        ):
+            raise ValueError(
+                "graph-only planning batch requires a positive expected PRD revision"
+            )
         material = self.model_dump(mode="json")
         canonical_json_bytes(material, max_bytes=_MAX_PLANNING_BATCH_BYTES)
         return self

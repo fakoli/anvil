@@ -20,6 +20,8 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14523,7 +14525,11 @@ class TestDepsNamedBatchAtomicReplayCycleRace:
             backend.close()
 
 
-def _planning_batch_draft(operations: list[EventDraft]) -> EventDraft:
+def _planning_batch_draft(
+    operations: list[EventDraft],
+    *,
+    expected_prd_revision: int = 1,
+) -> EventDraft:
     return EventDraft(
         timestamp=_T0,
         actor="test",
@@ -14533,6 +14539,7 @@ def _planning_batch_draft(operations: list[EventDraft]) -> EventDraft:
         payload_json={
             "schema_version": 1,
             "prd_id": "default",
+            "expected_prd_revision": expected_prd_revision,
             "operations": [
                 {
                     "action": operation.action,
@@ -14574,6 +14581,100 @@ def _planning_graph_operations(*, invalid_status: bool = False) -> list[EventDra
 
 
 class TestPlanningBatchAtomicReplay:
+    def test_graph_batch_refuses_stale_prd_revision_before_log(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_project(backend)
+            backend.append(_make_event("prd.parsed", _make_prd_parsed_payload()))
+            stale = _planning_batch_draft(_planning_graph_operations())
+            backend.append(
+                _make_event(
+                    "prd.revised",
+                    _make_prd_revised_payload(
+                        revision=2,
+                        expected_status="draft",
+                    ),
+                    target_kind="prd",
+                    target_id="default",
+                )
+            )
+            events_path = tmp_path / "events.jsonl"
+            before = events_path.read_bytes()
+
+            with pytest.raises(EventRejected, match="code=stale_prd_revision"):
+                backend.append(stale)
+
+            assert events_path.read_bytes() == before
+            assert backend.get_feature("F-batch") is None
+            assert backend.get_task("T-batch") is None
+        finally:
+            backend.close()
+
+    def test_collection_holds_log_lock_until_outer_batch_commits(
+        self, tmp_path: Path
+    ) -> None:
+        first = _make_backend(tmp_path)
+        _setup_project(first)
+        second = SqliteBackend(
+            db_path=str(tmp_path / "state.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=_make_clock(),
+        )
+        second.initialize()
+        started = threading.Event()
+        outcome: list[BaseException | None] = []
+
+        def append_from_second() -> None:
+            started.set()
+            try:
+                second.append(
+                    _make_event(
+                        "feature.created",
+                        _make_feature_payload(feat_id="F-race-b"),
+                        target_kind="feature",
+                        target_id="F-race-b",
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - assertion below
+                outcome.append(exc)
+            else:
+                outcome.append(None)
+
+        worker = threading.Thread(target=append_from_second)
+        try:
+            with first.collect_planning_batch(actor="test") as collector:
+                collector.append(
+                    _make_event("prd.parsed", _make_prd_parsed_payload())
+                )
+                worker.start()
+                assert started.wait(timeout=2)
+                time.sleep(0.1)
+                assert outcome == []
+                collector.append(
+                    _make_event(
+                        "feature.created",
+                        _make_feature_payload(feat_id="F-race-a"),
+                        target_kind="feature",
+                        target_id="F-race-a",
+                    )
+                )
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+            assert outcome == [None]
+            actions = [event["action"] for event in _read_jsonl(
+                str(tmp_path / "events.jsonl")
+            )]
+            assert actions[-2:] == ["planning.batch_applied", "feature.created"]
+            assert first.get_feature("F-race-a") is not None
+            assert first.get_feature("F-race-b") is not None
+        finally:
+            if worker.is_alive():
+                worker.join(timeout=5)
+            second.close()
+            first.close()
+
     def test_second_operation_refusal_leaves_log_and_graph_unchanged(
         self, tmp_path: Path
     ) -> None:

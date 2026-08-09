@@ -296,8 +296,18 @@ overwriting the seeded graph.
 **Exit codes:**
 
 - `0` — scan completed (first-seed or delta report).
-- `1` — `.anvil/` does not exist (run `init` / `init --from-repo`
-  first), or `ANVIL_ROOT` is set but invalid.
+- `1` — bounded refusal. JSON callers receive a stable code such as
+  `scan_locked` (another scan owns the project), `scan_artifact_error` (unsafe or
+  malformed scan/recovery storage), `scan_recovery_incomplete` (durable recovery
+  could not finish), `path_identity_error`, or a seed/initialization refusal.
+
+Before mutating `scan.db` or `prd.md`, scan creates an opaque
+`.anvil/recovery/scan-<token>` record and holds a project-wide scan lock. A retry
+automatically restores an uncommitted record or retires a state-bound committed
+record. Treat the token as opaque: do not rename, edit, or manually copy its marker
+files. If recovery cannot complete, preserve the directory and retry after removing
+the external lock/contention; the command fails closed instead of guessing which
+artifact is authoritative.
 
 **Example:**
 

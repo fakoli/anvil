@@ -212,6 +212,7 @@ def _planning_prd_batch(action: str, payload: dict[str, Any]) -> EventDraft:
         {
             "schema_version": 1,
             "prd_id": prd_id,
+            "expected_prd_revision": None,
             "operations": [
                 {
                     "action": action,
@@ -223,6 +224,40 @@ def _planning_prd_batch(action: str, payload: dict[str, Any]) -> EventDraft:
         },
         target_kind="prd",
         target_id=prd_id,
+    )
+
+
+def _planning_graph_batch(
+    feature_id: str,
+    *,
+    ts: datetime,
+) -> EventDraft:
+    return _draft(
+        "planning.batch_applied",
+        {
+            "schema_version": 1,
+            "prd_id": "default",
+            "expected_prd_revision": 1,
+            "operations": [
+                {
+                    "action": "feature.created",
+                    "target_kind": "feature",
+                    "target_id": feature_id,
+                    "payload_json": {
+                        "id": feature_id,
+                        "prd_id": "default",
+                        "title": feature_id,
+                        "description": "",
+                        "status": "proposed",
+                        "requirements": [],
+                        "tasks": [],
+                    },
+                }
+            ],
+        },
+        target_kind="prd",
+        target_id="default",
+        ts=ts,
     )
 
 
@@ -1300,6 +1335,73 @@ class TestGitReplayOrdering:
 
 
 class TestGitPrdLifecycleReplay:
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_graph_descending_from_losing_parse_is_skipped(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-lineage-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        backend.append(
+            _draft(
+                "project.created",
+                {
+                    "id": "proj-1",
+                    "name": "Planning lineage",
+                    "description": "",
+                    "created_at": _T0.isoformat(),
+                    "updated_at": _T0.isoformat(),
+                },
+            )
+        )
+        backend.append(_draft("state.initialized", {}))
+        backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        suffixes: list[list[str]] = []
+        for label, offset in (("A", 1), ("B", 2)):
+            branch = tmp_path / f"planning-lineage-{label}-{reverse_physical_order}"
+            shutil.copytree(base, branch)
+            branch_backend = _make_backend(branch)
+            parsed = branch_backend.append(
+                _draft(
+                    "prd.parsed",
+                    _prd_parsed_payload(title=f"PRD {label}"),
+                    target_kind="prd",
+                    target_id="default",
+                    ts=_T0 + timedelta(seconds=offset),
+                )
+            )
+            graph = branch_backend.append(
+                _planning_graph_batch(
+                    f"F-{label}",
+                    ts=_T0 + timedelta(seconds=offset + 10),
+                )
+            )
+            assert parsed is not None and graph is not None
+            assert graph.parent_event_id == parsed.id
+            branch_backend.close()
+            lines = (branch / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            suffixes.append(lines[len(prefix):])
+
+        ordered_suffixes = list(reversed(suffixes)) if reverse_physical_order else suffixes
+        merged = tmp_path / f"planning-lineage-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in ordered_suffixes for line in suffix])
+            + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None and prd.title == "PRD A"
+            assert [feature.id for feature in replay.list_features()] == ["F-A"]
+        finally:
+            replay.close()
+
     def test_atomic_planning_batch_participates_in_prd_causal_replay(
         self, tmp_path: Path
     ) -> None:

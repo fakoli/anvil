@@ -3212,9 +3212,8 @@ def plan_tasks(
         prd_id: PRD partition to plan (multi-PRD, T019). Mirrors the CLI
             ``plan --prd``: a non-default id reads its portable collection source,
             scopes orphan-prune to that partition, and stamps the partition into
-            every feature/task event. ``None`` / 'default' / 'prd' keep the bare
-            ``.anvil/prd.md`` source + default partition, byte-identical to the
-            pre-multi-PRD behaviour.
+            the one atomic ``planning.batch_applied`` event. ``None`` / 'default' /
+            'prd' keep the bare ``.anvil/prd.md`` source + default partition.
     """
     from anvil.cli._helpers import (
         PrdSourceIngestError,
@@ -3405,7 +3404,7 @@ def plan_tasks(
 
         # Guard: `parse_prd` must have run first so the backend has the PRD row
         # THIS run targets. Without this check, an out-of-order call would emit
-        # feature/task events into a backend with no matching PRD row, leaving
+        # a graph batch into a backend with no matching PRD row, leaving
         # downstream tools (review_prd, apply_review_decision) to fail with
         # "No PRD found" after the state was already mutated. Fail loudly here.
         #
@@ -3413,11 +3412,12 @@ def plan_tasks(
         # a multi-PRD project with only named PRDs (no is_default row) can call
         # plan_tasks(prd_id='v0.2') legitimately, and bare get_prd() would wrongly
         # raise even though v0.2 is a real parsed partition.
-        if backend.get_prd(scope_prd_id) is None:
+        stored_prd = backend.get_prd(scope_prd_id)
+        if stored_prd is None:
             raise ToolError(
                 f"No PRD found in state for '{scope_prd_id}'. Call parse_prd "
-                "before plan_tasks so the PRD row exists before feature and "
-                "task events are emitted."
+                "before plan_tasks so the PRD row exists before the atomic "
+                "planning graph is emitted."
             )
 
         # Validate and infer the complete parsed task set before any event is
@@ -3555,6 +3555,7 @@ def plan_tasks(
                 actor="anvil-mcp",
                 clock=clock,
                 prd_id=scope_prd_id,
+                expected_prd_revision=stored_prd.revision,
             )
         except EventRejected as exc:
             raise ToolError(str(exc)) from exc

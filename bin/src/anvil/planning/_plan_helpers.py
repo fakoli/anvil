@@ -275,6 +275,7 @@ def emit_planning_batch(
     actor: str,
     clock: Clock,
     prd_id: str,
+    expected_prd_revision: int,
 ) -> None:
     """Persist a complete ordered planning transition as one atomic event."""
     from anvil.state.models import EventDraft
@@ -293,6 +294,7 @@ def emit_planning_batch(
             payload_json={
                 "schema_version": 1,
                 "prd_id": prd_id,
+                "expected_prd_revision": expected_prd_revision,
                 "operations": [
                     {
                         "action": operation.action,

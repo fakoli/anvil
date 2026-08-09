@@ -893,6 +893,11 @@ class SqliteBackend:
         # ClaimManager.claim() may serialize their pre-append reads on the same
         # lock, then call append(), whose _append_lock() takes it again.
         self._proc_lock = threading.RLock()
+        # Reuse one cross-process append-lock ownership for nested logical
+        # operations. The integer is safe because every access occurs while
+        # ``_proc_lock`` is held; another thread cannot observe a non-zero
+        # depth until the owning thread exits.
+        self._append_lock_depth = 0
         # Set True during replay_from_empty and _forward_catch_up so that
         # _write_* methods with audit side-effects (e.g. _write_evidence_submitted)
         # suppress those writes — audit lines must not be appended during replay.
@@ -2065,6 +2070,37 @@ class SqliteBackend:
                     continue
                 skip.add(candidate.id)
                 losing_content.add(candidate.id)
+
+        # A graph-only planning batch is a derived fact, not independent PRD
+        # content. It may project only when its exact causal content ancestor
+        # survives branch resolution and matches the revision the planner
+        # observed. This prevents a losing parse/revision branch from leaking
+        # its feature/task graph into the winning PRD after a Git union merge.
+        for event in ordered:
+            if event.action != "planning.batch_applied":
+                continue
+            expected_revision = event.payload_json.get("expected_prd_revision")
+            base = nearest_content_ancestor(event)
+            base_revision = (
+                1
+                if base is not None and base.action == "prd.parsed"
+                else (
+                    base.payload_json.get("revision")
+                    if base is not None and base.action == "prd.revised"
+                    else None
+                )
+            )
+            if (
+                base is None
+                or base.id in losing_content
+                or base.id in skip
+                or not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or not isinstance(base_revision, int)
+                or isinstance(base_revision, bool)
+                or expected_revision != base_revision
+            ):
+                skip.add(event.id)
 
         current_lifecycle = [
             event
@@ -4154,6 +4190,13 @@ class SqliteBackend:
         so a coordinated wave of claimants does not poll in lockstep.
         """
         with self._proc_lock:
+            if self._append_lock_depth:
+                self._append_lock_depth += 1
+                try:
+                    yield
+                finally:
+                    self._append_lock_depth -= 1
+                return
             # Ensure the log file exists before we try to flock it.
             log_path = self._events_path
             if not os.path.exists(log_path):
@@ -4185,8 +4228,10 @@ class SqliteBackend:
                         # Clamp so the final sleep cannot overshoot the budget.
                         self._sleep_fn(min(next(delays), remaining))
                 try:
+                    self._append_lock_depth = 1
                     yield
                 finally:
+                    self._append_lock_depth = 0
                     _append_lock_release(_lock_fh)
 
     @contextmanager
@@ -4206,7 +4251,13 @@ class SqliteBackend:
 
     @contextmanager
     def collect_planning_batch(self, *, actor: str) -> Iterator[Any]:
-        """Run legacy planning code on a rollback-only view, then append once."""
+        """Run legacy planning code on a serialized rollback-only view.
+
+        The event-log flock remains owned from the first simulated write until
+        the one outer event commits. This prevents another process from
+        logging an event whose projection is blocked by the collector's open
+        SQLite savepoint.
+        """
         backend = self
         operations: list[EventDraft] = []
         batch_prd_id: str | None = None
@@ -4228,9 +4279,22 @@ class SqliteBackend:
                     "target_id": draft.target_id,
                     "payload_json": draft.payload_json,
                 }
+                is_content = draft.action in {"prd.parsed", "prd.revised"}
+                expected_revision: int | None = None
+                if not is_content:
+                    row = backend._require_conn().execute(  # noqa: SLF001
+                        "SELECT revision FROM prds WHERE id = ?",
+                        (batch_prd_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise EventRejected(
+                            "planning batch refused: code=missing_prd"
+                        )
+                    expected_revision = int(row["revision"])
                 single = PlanningBatchAppliedPayload.model_validate({
                     "schema_version": 1,
                     "prd_id": batch_prd_id,
+                    "expected_prd_revision": expected_revision,
                     "operations": [operation],
                 })
                 outer = EventDraft(
@@ -4251,7 +4315,7 @@ class SqliteBackend:
                 operations.append(draft)
 
         conn = self._require_conn()
-        with self.claim_operation_lock():
+        with self._append_lock():
             conn.execute("SAVEPOINT planning_batch_collection")
             succeeded = False
             try:
@@ -4264,6 +4328,21 @@ class SqliteBackend:
                 if batch_prd_id is None:
                     raise EventRejected("planning batch refused: code=missing_prd")
                 first = operations[0]
+                contains_content = any(
+                    operation.action in {"prd.parsed", "prd.revised"}
+                    for operation in operations
+                )
+                expected_revision: int | None = None
+                if not contains_content:
+                    row = conn.execute(
+                        "SELECT revision FROM prds WHERE id = ?",
+                        (batch_prd_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise EventRejected(
+                            "planning batch refused: code=missing_prd"
+                        )
+                    expected_revision = int(row["revision"])
                 self.append(
                     EventDraft(
                         timestamp=first.timestamp,
@@ -4274,6 +4353,7 @@ class SqliteBackend:
                         payload_json={
                             "schema_version": 1,
                             "prd_id": batch_prd_id,
+                            "expected_prd_revision": expected_revision,
                             "operations": [
                                 {
                                     "action": operation.action,
@@ -4531,6 +4611,9 @@ class SqliteBackend:
     def _uses_git_prd_causal_parent(cls, draft: EventDraft) -> bool:
         """Whether a newly authored PRD fact opts into causal replay policy."""
         operation = cls._planning_batch_prd_content_operation(draft)
+        if draft.action == "planning.batch_applied" and operation is None:
+            revision = draft.payload_json.get("expected_prd_revision")
+            return isinstance(revision, int) and not isinstance(revision, bool)
         action = operation.get("action") if operation is not None else draft.action
         payload = (
             operation.get("payload_json")
@@ -4552,6 +4635,15 @@ class SqliteBackend:
     ) -> tuple[str, int] | None:
         """Return (PRD id, revision observed by a current producer)."""
         operation = cls._planning_batch_prd_content_operation(draft)
+        if draft.action == "planning.batch_applied" and operation is None:
+            revision = draft.payload_json.get("expected_prd_revision")
+            prd_id_raw = draft.payload_json.get("prd_id", DEFAULT_PRD_ID)
+            if not isinstance(revision, int) or isinstance(revision, bool):
+                return None
+            return (
+                prd_id_raw if isinstance(prd_id_raw, str) else DEFAULT_PRD_ID,
+                revision,
+            )
         action = operation.get("action") if operation is not None else draft.action
         payload = (
             operation.get("payload_json")
@@ -6505,6 +6597,21 @@ class SqliteBackend:
             raise EventRejected(
                 "planning batch refused: code=event_identity_mismatch"
             )
+        has_content_operation = any(
+            operation.action in {"prd.parsed", "prd.revised"}
+            for operation in payload.operations
+        )
+        if not has_content_operation:
+            row = conn.execute(
+                "SELECT revision FROM prds WHERE id = ?",
+                (payload.prd_id,),
+            ).fetchone()
+            actual_revision = int(row["revision"]) if row is not None else None
+            if actual_revision != payload.expected_prd_revision:
+                error_type = TransactionAborted if replay else EventRejected
+                raise error_type(
+                    "planning batch refused: code=stale_prd_revision"
+                )
         dispatch = self._get_action_dispatch()
         for relative_index, operation in enumerate(payload.operations):
             index = index_offset + relative_index
