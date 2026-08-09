@@ -1306,7 +1306,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "13"
+        assert API_VERSION == "14"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -5048,6 +5048,12 @@ class TestScore:
     ) -> None:
         """The CLI expansion queue must use the recursive depth-capped frontier."""
         _do_init(tmp_path)
+        _insert_prd_row(
+            tmp_path / ".anvil" / "state.db",
+            prd_id="default",
+            status="approved",
+            is_default=1,
+        )
         self._insert_over_depth_chain(tmp_path)
 
         result = _invoke_cmd(tmp_path, ["score"])
@@ -9182,6 +9188,7 @@ class TestT019PrdScopedCliCommands:
         _seed_two_prd_project(tmp_path)
         result = _invoke_cmd(tmp_path, ["score", "--prd", "v0.2"])
         assert result.exit_code == 0, result.output
+        assert "PRD: v0.2" in result.output
 
         db = tmp_path / ".anvil" / "state.db"
         conn = sqlite3.connect(str(db))
@@ -9194,6 +9201,94 @@ class TestT019PrdScopedCliCommands:
         # Default task untouched; named task scored.
         assert scores["T001"] == "{}", scores["T001"]
         assert scores["v0.2:T900"] != "{}", scores["v0.2:T900"]
+
+    def test_score_prd_default_scope_contains_every_derivative(
+        self, tmp_path: Path
+    ) -> None:
+        """No selector resolves one PRD and cannot leak another PRD's queue."""
+        _seed_two_prd_project(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        high_score = {
+            "complexity": 5,
+            "parallelizability": 2,
+            "context_load": 2,
+            "blast_radius": 2,
+            "review_risk": 2,
+            "agent_suitability": 1,
+            "blast_radius_confirmed": True,
+            "review_risk_confirmed": True,
+        }
+        with sqlite3.connect(str(db)) as connection:
+            connection.execute(
+                "UPDATE tasks SET scores = ?, conflict_groups = ? "
+                "WHERE id = 'v0.2:T900'",
+                (json.dumps(high_score), json.dumps(["CG-global"])),
+            )
+            connection.execute(
+                "UPDATE tasks SET conflict_groups = ? WHERE id = 'T001'",
+                (json.dumps(["CG-global"]),),
+            )
+
+        result = _invoke_cmd(tmp_path, ["score", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] == "default"
+        assert data["all_prds"] is False
+        assert [entry["task_id"] for entry in data["scored"]] == ["T001"]
+        assert data["expansion_queue"] == []
+        with sqlite3.connect(str(db)) as connection:
+            named_score, named_groups = connection.execute(
+                "SELECT scores, conflict_groups FROM tasks WHERE id = 'v0.2:T900'"
+            ).fetchone()
+            default_groups = connection.execute(
+                "SELECT conflict_groups FROM tasks WHERE id = 'T001'"
+            ).fetchone()[0]
+        assert json.loads(named_score) == high_score
+        assert json.loads(named_groups) == ["CG-global"]
+        assert json.loads(default_groups) == ["CG-global"]
+
+    def test_score_prd_all_opt_in_overrides_env_and_conflicts_with_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        result = _invoke_cmd(tmp_path, ["score", "--all-prds", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] is None
+        assert data["all_prds"] is True
+        assert {entry["task_id"] for entry in data["scored"]} == {
+            "T001",
+            "v0.2:T900",
+        }
+
+        conflict = _invoke_cmd(
+            tmp_path,
+            ["score", "--prd", "default", "--all-prds", "--json"],
+        )
+        assert conflict.exit_code == 1
+        assert json.loads(conflict.output)["error"]["code"] == "bad_request"
+
+    def test_score_prd_explicit_task_owner_mismatch_refuses(
+        self, tmp_path: Path
+    ) -> None:
+        _seed_two_prd_project(tmp_path)
+        events = tmp_path / ".anvil" / "events.jsonl"
+        before = events.read_bytes()
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["score", "T001", "--prd", "v0.2", "--json"],
+        )
+
+        assert result.exit_code == 1
+        error = json.loads(result.output)["error"]
+        assert error["code"] == "not_found"
+        assert "belongs to PRD 'default'" in error["message"]
+        assert events.read_bytes() == before
 
     # ---- prd review ---------------------------------------------------------
 

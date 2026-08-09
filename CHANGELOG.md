@@ -29,6 +29,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   durable risk-score confirmation all use the same reported partition scope.
   This advances the public API contract to version 13.
 
+- **PRD-scoped scoring and advisories (#180).** CLI and MCP scoring now resolve
+  one PRD by default and require explicit `--all-prds` / `all_prds=true` for a
+  project-wide run. Scored and skipped counts, task-owner checks, recursive
+  expansion queues, persisted confirmation state, and human/JSON/MCP output all
+  use the same reported scope while global conflict groups remain unchanged.
+  This advances the public API contract to version 14.
+
 - **Truthful task-rejection provenance and governor recovery (#181).** Rejected
   review attempts now persist engine-derived quality, evidence-resubmission, or
   process provenance with exact claim/evidence identity, and new accepted

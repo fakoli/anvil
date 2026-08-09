@@ -1084,6 +1084,14 @@ def score(
         ),
     ),
     prd: str | None = PRD_OPTION,
+    all_prds: bool = typer.Option(  # noqa: B008
+        False,
+        "--all-prds",
+        help=(
+            "Score every PRD partition. Without this explicit flag, scoring is "
+            "limited to the PRD selected by --prd/$ANVIL_PRD/default resolution."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
 ) -> None:
     """Score tasks across six dimensions using rule-based heuristics.
@@ -1091,9 +1099,11 @@ def score(
     Without TASK_ID: scores all tasks whose scores are incomplete.
     With TASK_ID: scores that single task.
 
-    ``--prd`` (T019) scopes the all-tasks (no TASK_ID) scoring pass to one PRD
-    partition via ``list_tasks(prd_id=...)``. Omitting it on a single-PRD
-    project keeps the pre-T019 behaviour (all PRDs scored).
+    By default the command resolves exactly one PRD via ``--prd``,
+    ``$ANVIL_PRD``, or the default/single partition. Pass ``--all-prds`` for an
+    explicit project-wide scoring pass. A command-line ``--prd`` cannot be
+    combined with ``--all-prds``; an environment-only ``ANVIL_PRD`` is ignored
+    when the explicit all-PRD mode is requested.
 
     With ``--use-llm`` the deterministic explanation is appended with a 1-3
     sentence trade-off summary from the LLM.  Numeric scores are unaffected.
@@ -1116,6 +1126,14 @@ def score(
     )
     from anvil.state.models import EventDraft
 
+    prd_from_command_line = current_parameter_source_name("prd") == "COMMANDLINE"
+    if all_prds and prd_from_command_line:
+        message = "--prd and --all-prds are mutually exclusive."
+        if json_output:
+            fail("score", message, code="bad_request")
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=2)
+
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="score", json_output=json_output)
 
@@ -1135,11 +1153,15 @@ def score(
     try:
         clock = SystemClock()
 
-        # T019: only scope the all-tasks pass when a PRD is explicitly named
-        # (flag or $ANVIL_PRD). With no selection we pass prd_id=None so a
-        # single-PRD project scores every task exactly as before. Collapse the
-        # default sentinel ('prd') so `--prd prd` matches stored prd_id='default'.
-        scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd)) if prd else None
+        scoped_prd_id = None
+        if not all_prds:
+            scoped_prd_id = canonical_prd_id(resolve_prd_id(backend, prd))
+            if backend.get_prd(scoped_prd_id) is None:
+                message = "selected PRD was not found in state. Run prd parse first."
+                if json_output:
+                    fail("score", message, code="prd_not_found")
+                typer.echo(f"Error: {message}", err=True)
+                raise typer.Exit(code=1)
 
         if task_id is not None:
             task = backend.get_task(task_id)
@@ -1150,6 +1172,15 @@ def score(
                     f"Error: task '{task_id}' not found.",
                     err=True,
                 )
+                raise typer.Exit(code=1)
+            if scoped_prd_id is not None and task.prd_id != scoped_prd_id:
+                message = (
+                    f"task '{task_id}' belongs to PRD '{task.prd_id}', "
+                    f"not '{scoped_prd_id}'."
+                )
+                if json_output:
+                    fail("score", message, code="not_found")
+                typer.echo(f"Error: {message}", err=True)
                 raise typer.Exit(code=1)
             tasks_to_score = [task]
         else:
@@ -1162,8 +1193,18 @@ def score(
             if json_output:
                 # backend.close() runs in the finally below as the function
                 # returns; the envelope is the only stdout line either way.
-                emit_success("score", {"scored": [], "count": 0, "expansion_queue": []})
+                emit_success(
+                    "score",
+                    {
+                        "prd_id": scoped_prd_id,
+                        "all_prds": all_prds,
+                        "scored": [],
+                        "count": 0,
+                        "expansion_queue": [],
+                    },
+                )
                 return
+            typer.echo("Scope: all PRDs" if all_prds else f"PRD: {scoped_prd_id}")
             typer.echo("No tasks require scoring.")
             return
 
@@ -1213,7 +1254,7 @@ def score(
         auto_expand, expand_threshold = _resolve_auto_expand(config)
         expansion_queue = (
             build_recursive_expansion_queue(
-                backend.list_tasks(), threshold=expand_threshold
+                backend.list_tasks(prd_id=scoped_prd_id), threshold=expand_threshold
             )
             if auto_expand
             else []
@@ -1225,6 +1266,8 @@ def score(
         emit_success(
             "score",
             {
+                "prd_id": scoped_prd_id,
+                "all_prds": all_prds,
                 "scored": [
                     {"task_id": task.id, "scores": dump_model(s)}
                     for task, s in scored_tasks
@@ -1238,6 +1281,7 @@ def score(
         return
 
     # Print summary table.
+    typer.echo("Scope: all PRDs" if all_prds else f"PRD: {scoped_prd_id}")
     header = (
         f"{'TaskID':<12} "
         f"{'Complexity':>10} "

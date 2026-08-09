@@ -1237,21 +1237,27 @@ latest PRD content.
 
 ### `score_tasks`
 
-Runs the rule-based scoring engine on a single task or all unscored tasks. Emits
-`task.scored` per scored task. Mirrors `anvil score [TASK_ID]` in deterministic
-mode.
+Runs the rule-based scoring engine on a single task or all unscored tasks in
+one resolved PRD. Set `all_prds=true` for an explicit project-wide run. Scored
+and skipped counts, ownership checks, and the recursive expansion queue all use
+the same scope. Emits `task.scored` per scored task and mirrors
+`anvil score [TASK_ID]` in deterministic mode.
 
 **Inputs**
 
-| Parameter | Type             | Required | Default      |
-|-----------|------------------|----------|--------------|
-| `task_id` | `string \| null` | no       | `null` (score all unscored) |
-| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+| Parameter  | Type             | Required | Default      |
+|------------|------------------|----------|--------------|
+| `task_id`  | `string \| null` | no       | `null` (score all unscored) |
+| `prd_id`   | `string \| null` | no       | resolved env/default/single PRD |
+| `all_prds` | `boolean`        | no       | `false`      |
+| `cwd`      | `string \| null` | no       | `Path.cwd()` |
 
 **Output**
 
 ```json
 {
+  "prd_id": "default",
+  "all_prds": false,
   "scored": [
     {
       "task_id": "T001",
@@ -1270,6 +1276,8 @@ mode.
 **Failure modes**
 
 - `ToolError` — `task_id` provided but not found.
+- `ToolError` — `prd_id` and `all_prds=true` are combined, the selected PRD
+  does not exist, or an explicit task belongs to another PRD.
 - `ToolError` — project not initialized.
 - `ToolError` with `score_incomplete` — a scoring implementation returned an
   incomplete or out-of-range dimension. The entire request is validated before
@@ -1506,7 +1514,7 @@ None.
 
 ```json
 {
-  "api_version": "13",
+  "api_version": "14",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",

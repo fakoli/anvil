@@ -3711,6 +3711,8 @@ class ScoreTasksResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    prd_id: str | None
+    all_prds: bool
     scored: list[TaskScoreEntry]
     skipped_already_scored: int
     # ``expansion_queue`` lists every task at/above ``auto_expand_threshold``
@@ -3723,6 +3725,8 @@ class ScoreTasksResponse(BaseModel):
 @mcp.tool(tags={PLANNING_TAG})
 def score_tasks(
     task_id: str | None = None,
+    prd_id: str | None = None,
+    all_prds: bool = False,
     cwd: str | None = None,
 ) -> ScoreTasksResponse:
     """Run the rule-based (non-LLM) scoring engine on one task or all unscored
@@ -3730,16 +3734,20 @@ def score_tasks(
 
     Pass task_id to always re-score that one task; pass None to score only
     tasks whose scores are incomplete (the rest count toward
-    skipped_already_scored). The response also carries a deterministic
+    skipped_already_scored). By default exactly one PRD is resolved from
+    prd_id, ANVIL_PRD, or the default/single partition. Set all_prds=true for
+    an explicit project-wide pass. The response also carries a deterministic
     expansion_queue of high-complexity tasks; the LLM-side expansion runs via
     the planner agent, never here.
 
     Args:
         task_id: Specific task to score (always re-scored). None scores all
                  unscored tasks.
+        prd_id:  PRD partition to score. Mutually exclusive with all_prds.
+        all_prds: Explicitly score every PRD partition; ignores ANVIL_PRD.
         cwd:     Project root. Defaults to Path.cwd().
     """
-    from anvil.cli._helpers import _scores_complete
+    from anvil.cli._helpers import _scores_complete, canonical_prd_id
     from anvil.clock import SystemClock
     from anvil.config import DEFAULT_AUTO_EXPAND_THRESHOLD
     from anvil.planning.scoring import (
@@ -3791,14 +3799,29 @@ def score_tasks(
 
     backend = _open_backend(state_dir)
     try:
+        if all_prds and prd_id is not None:
+            raise ToolError("prd_id and all_prds are mutually exclusive")
+        scoped_prd_id = None
+        if not all_prds:
+            scoped_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+            if backend.get_prd(scoped_prd_id) is None:
+                raise ToolError(
+                    "selected PRD was not found in state. Run parse_prd first."
+                )
+
         if task_id is not None:
             task = backend.get_task(task_id)
             if task is None:
                 raise ToolError(f"Task '{task_id}' not found.")
+            if scoped_prd_id is not None and task.prd_id != scoped_prd_id:
+                raise ToolError(
+                    f"Task '{task_id}' belongs to PRD '{task.prd_id}', "
+                    f"not '{scoped_prd_id}'."
+                )
             tasks_to_score = [task]
             skipped = 0
         else:
-            all_tasks = backend.list_tasks()
+            all_tasks = backend.list_tasks(prd_id=scoped_prd_id)
             tasks_to_score = [t for t in all_tasks if not _scores_complete(t)]
             skipped = len(all_tasks) - len(tasks_to_score)
 
@@ -3865,11 +3888,14 @@ def score_tasks(
                     ),
                 )
                 for candidate in build_recursive_expansion_queue(
-                    backend.list_tasks(), threshold=auto_expand_threshold
+                    backend.list_tasks(prd_id=scoped_prd_id),
+                    threshold=auto_expand_threshold,
                 )
             ]
 
         return ScoreTasksResponse(
+            prd_id=scoped_prd_id,
+            all_prds=all_prds,
             scored=scored,
             skipped_already_scored=skipped,
             auto_expand=auto_expand,

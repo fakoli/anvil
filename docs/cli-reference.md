@@ -568,9 +568,12 @@ contract.
 
 **Synopsis:** Score tasks across six rule-based dimensions (complexity,
 parallelizability, context_load, blast_radius, review_risk,
-agent_suitability). Without a task id: scores every task whose scores are
-incomplete. With a task id: scores that single task. Emits one `task.scored`
-event per task and prints a summary table.
+agent_suitability). By default it resolves one PRD through `--prd`,
+`ANVIL_PRD`, or the default/single partition and keeps scoring, skipped work,
+and the expansion queue inside that partition. Pass `--all-prds` for an
+explicit project-wide run. With a task id: scores that single task after
+verifying it belongs to the selected PRD. Emits one `task.scored` event per
+task and prints the effective scope plus a summary table.
 
 **Positional arguments:**
 
@@ -587,6 +590,10 @@ event per task and prints a summary table.
 - `--model NAME` *(default: unset)* — override the LLM model for this run
   (wins over `llm_model` / `llm_tier`). See [`anvil plan`](#plan) for the
   per-provider name conventions.
+- `--prd ID` — select one PRD partition. Precedence is the explicit flag,
+  `ANVIL_PRD`, then default/single-PRD resolution.
+- `--all-prds` — explicitly score every partition. Mutually exclusive with a
+  command-line `--prd`; it overrides an environment-only `ANVIL_PRD`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -601,8 +608,9 @@ event per task and prints a summary table.
 **Example:**
 
 ```bash
-anvil score                # score every unscored task
-anvil score T003
+anvil score                # score unscored tasks in the resolved PRD
+anvil score T003 --prd default
+anvil score --all-prds     # explicit project-wide pass
 anvil score T003 --use-llm
 ```
 
