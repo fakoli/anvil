@@ -2174,6 +2174,18 @@ class SqliteBackend:
                     if key is not None:
                         writes.add(key)
                 return writes
+            if event.action == "bundle.claimed":
+                coordinator = entity_key("claim", event.payload_json.get("id"))
+                if coordinator is not None:
+                    writes.add(coordinator)
+                member_claims = event.payload_json.get("member_claims")
+                if isinstance(member_claims, list):
+                    for member in member_claims:
+                        if not isinstance(member, dict):
+                            continue
+                        member_claim = entity_key("claim", member.get("id"))
+                        if member_claim is not None:
+                            writes.add(member_claim)
             key = entity_key(event.target_kind, event.target_id)
             if key is not None:
                 writes.add(key)
@@ -2181,30 +2193,44 @@ class SqliteBackend:
 
         def payload_references(payload: dict[str, Any]) -> set[tuple[str, str]]:
             references: set[tuple[str, str]] = set()
-            for field, kind in (
-                ("feature_id", "feature"),
-                ("task_id", "task"),
-                ("parent_task_id", "task"),
-                ("claim_id", "claim"),
-                ("evidence_id", "evidence"),
-                ("bundle_id", "bundle"),
-            ):
-                key = entity_key(kind, payload.get(field))
-                if key is not None:
-                    references.add(key)
-            for field, kind in (
-                ("dependencies", "task"),
-                ("task_ids", "task"),
-                ("member_task_ids", "task"),
-                ("claim_ids", "claim"),
-            ):
-                values = payload.get(field)
-                if not isinstance(values, list):
-                    continue
-                for value in values:
-                    key = entity_key(kind, value)
-                    if key is not None:
-                        references.add(key)
+            singular_kinds = {
+                "feature_id": "feature",
+                "task_id": "task",
+                "parent_task_id": "task",
+                "claim_id": "claim",
+                "bundle_claim_id": "claim",
+                "evidence_id": "evidence",
+                "bundle_id": "bundle",
+                "replacement_bundle_id": "bundle",
+            }
+            plural_kinds = {
+                "dependencies": "task",
+                "expected_dependencies": "task",
+                "task_ids": "task",
+                "member_task_ids": "task",
+                "claim_ids": "claim",
+            }
+
+            def visit(value: Any) -> None:
+                if isinstance(value, dict):
+                    for field, nested in value.items():
+                        kind = singular_kinds.get(field)
+                        if kind is not None:
+                            key = entity_key(kind, nested)
+                            if key is not None:
+                                references.add(key)
+                        plural_kind = plural_kinds.get(field)
+                        if plural_kind is not None and isinstance(nested, list):
+                            for item in nested:
+                                key = entity_key(plural_kind, item)
+                                if key is not None:
+                                    references.add(key)
+                        visit(nested)
+                elif isinstance(value, list):
+                    for item in value:
+                        visit(item)
+
+            visit(payload)
             return references
 
         def event_references(event: Event) -> set[tuple[str, str]]:
