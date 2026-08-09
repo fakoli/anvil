@@ -1188,9 +1188,6 @@ def next(  # noqa: A001
                         f"{detail} Remediation: {remediation}"
                     )
             return
-        ready_tasks_for_request = backend.list_tasks(
-            status="ready", task_type=task_type, prd_id=scoped_prd_id
-        )
         scoped_empty_message: str | None = None
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)
@@ -1208,58 +1205,21 @@ def next(  # noqa: A001
             needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
             as_of=clock.now(),
         )
-        task = manager.next_claimable(
+        diagnosis = manager.diagnose_next_offer(
             task_type=task_type,
             max_blast=max_blast,
             max_review_risk=max_review_risk,
             metrics=metrics,
             prd_id=scoped_prd_id,
         )
+        task = diagnosis.task
         # B49 observability: distinguish a governed withhold (review queue
         # saturated / runner below the accept-rate floor) from a genuinely empty
         # queue — otherwise an idle fleet is indistinguishable from a done one.
-        withheld_reason = (
-            metrics.withhold_reason(resolved_actor) if task is None else None
-        )
-        governor_task_id: str | None = None
-        if task is None and withheld_reason is None:
-            ungoverned_task = manager.next_claimable(
-                task_type=task_type,
-                max_blast=None,
-                max_review_risk=None,
-                metrics=None,
-                prd_id=scoped_prd_id,
-            )
-            if ungoverned_task is not None and metrics.task_blocked_for_actor(
-                ungoverned_task.id, resolved_actor
-            ):
-                withheld_reason = "task_accept_rate_floor"
-                governor_task_id = ungoverned_task.id
-        # B45 ceilings can also empty the result (and currently always do, since
-        # confirmation is inert). Distinguish that from a truly empty queue too.
-        if (
-            task is None
-            and withheld_reason is None
-            and (max_blast is not None or max_review_risk is not None)
-        ):
-            without_risk_ceiling = manager.next_claimable(
-                task_type=task_type,
-                max_blast=None,
-                max_review_risk=None,
-                metrics=metrics,
-                prd_id=scoped_prd_id,
-            )
-            if without_risk_ceiling is not None:
-                withheld_reason = "risk_ceiling"
-        if task is None and withheld_reason is None:
-            if not backend.list_tasks():
-                withheld_reason = "no_tasks"
-            elif not ready_tasks_for_request:
-                withheld_reason = "no_ready_tasks"
-            else:
-                withheld_reason = "no_claimable_tasks"
+        withheld_reason = diagnosis.withheld_reason
+        governor_task_id = diagnosis.governor_task_id
         if task is None and scoped_prd_id is not None:
-            if not ready_tasks_for_request:
+            if diagnosis.ready_count == 0:
                 scoped_empty_message = f"No ready tasks in this PRD ({scoped_prd_id})."
             else:
                 scoped_empty_message = (

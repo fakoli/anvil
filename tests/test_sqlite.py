@@ -5771,6 +5771,43 @@ class TestTaskRejectionProvenanceState:
                 ("accepted", "EVAAA", "runner-b"),
                 ("rejected", "EVZZZ", "agent-alpha"),
             ]
+
+            raw_events = [
+                json.loads(line)
+                for line in (tmp_path / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            accepted = next(
+                event
+                for event in reversed(raw_events)
+                if event["action"] == "task.applied"
+                and event["payload_json"]["decision"] == "accepted"
+            )
+            accepted["payload_json"]["review_attempt_id"] = "EVZZZ"
+            tampered_dir = tmp_path / "tampered-accepted-attempt"
+            tampered_dir.mkdir()
+            tampered_log = tampered_dir / "events.jsonl"
+            tampered_log.write_text(
+                "".join(
+                    json.dumps(event, separators=(",", ":")) + "\n"
+                    for event in raw_events
+                ),
+                encoding="utf-8",
+            )
+            tampered = SqliteBackend(
+                db_path=str(tampered_dir / "state.db"),
+                events_path=str(tampered_log),
+                clock=_make_clock(),
+            )
+            try:
+                with pytest.raises(
+                    TransactionAborted,
+                    match="accepted review attempt replay mismatch",
+                ):
+                    tampered.initialize()
+            finally:
+                tampered.close()
         finally:
             backend.close()
 

@@ -118,6 +118,16 @@ class RenewResult:
 
 
 @dataclass(frozen=True)
+class OfferDiagnosis:
+    """One authoritative task-offer decision shared by CLI and MCP."""
+
+    task: Task | None
+    withheld_reason: str | None
+    governor_task_id: str | None
+    ready_count: int
+
+
+@dataclass(frozen=True)
 class ConflictWarning:
     """Returned by check_conflicts when a proposed claim overlaps with an active one."""
 
@@ -279,81 +289,106 @@ class ClaimManager:
 
         Returns None if no task is claimable.
         """
-        ready_tasks = self._backend.list_tasks(
-            status=TaskStatus.ready, task_type=task_type, prd_id=prd_id
-        )
-        if not ready_tasks:
-            return None
+        return self.diagnose_next_offer(
+            task_type=task_type,
+            max_blast=max_blast,
+            max_review_risk=max_review_risk,
+            metrics=metrics,
+            prd_id=prd_id,
+        ).task
 
-        # B49 — accept-rate governor: refuse new work when the human review
-        # queue is saturated, or when THIS runner's recent accept-rate is below
-        # the floor (it stops pulling until its already-submitted work clears
-        # review). A runner with no track record yet is given the benefit of the
-        # doubt for base-floor work (see AcceptRateMetrics).
-        if metrics is not None:
-            if metrics.review_queue_saturated():
-                return None
-            if metrics.actor_below_floor(self._actor):
-                return None
-
-        active_claims = self._backend.list_active_claims()
-        claimed_task_ids: set[str] = {c.task_id for c in active_claims}
-
-        # Build a set of all task_ids that are done, for dep checking.
+    def diagnose_next_offer(
+        self,
+        *,
+        task_type: str | None = None,
+        max_blast: int | None = None,
+        max_review_risk: int | None = None,
+        metrics: AcceptRateMetrics | None = None,
+        prd_id: str | None = None,
+    ) -> OfferDiagnosis:
+        """Select and explain one offer using the same rules on every surface."""
         all_tasks = self._backend.list_tasks()
-        done_task_ids: set[str] = {t.id for t in all_tasks if t.status == TaskStatus.done}
+        if not all_tasks:
+            return OfferDiagnosis(None, "no_tasks", None, 0)
 
-        # Build a set of conflict-group IDs that have an active claim, for
-        # group-level conflict detection.
+        ready_tasks = [
+            task
+            for task in all_tasks
+            if task.status == TaskStatus.ready
+            and (task_type is None or task.task_type.value == task_type)
+            and (prd_id is None or task.prd_id == prd_id)
+        ]
+        if not ready_tasks:
+            return OfferDiagnosis(None, "no_ready_tasks", None, 0)
+
+        if metrics is not None:
+            global_reason = metrics.withhold_reason(self._actor)
+            if global_reason is not None:
+                return OfferDiagnosis(None, global_reason, None, len(ready_tasks))
+
+        now = self._clock.now()
+        active_claims = [
+            claim
+            for claim in self._backend.list_active_claims()
+            if claim.lease_expires_at > now
+        ]
+        claimed_task_ids = {claim.task_id for claim in active_claims}
+        done_task_ids = {
+            task.id for task in all_tasks if task.status == TaskStatus.done
+        }
         active_conflict_groups: set[str] = set()
-        for t in all_tasks:
-            if t.id in claimed_task_ids:
-                for cg_id in t.conflict_groups:
-                    active_conflict_groups.add(cg_id)
-
-        candidates: list[Task] = []
-        for task in ready_tasks:
-            # Skip tasks that are directly claimed.
+        for task in all_tasks:
             if task.id in claimed_task_ids:
-                continue
+                active_conflict_groups.update(task.conflict_groups)
 
-            # Skip tasks with unmet dependencies.
-            if any(dep_id not in done_task_ids for dep_id in task.dependencies):
-                continue
+        structurally_eligible = [
+            task
+            for task in ready_tasks
+            if task.id not in claimed_task_ids
+            and all(dep_id in done_task_ids for dep_id in task.dependencies)
+            and not any(
+                group_id in active_conflict_groups
+                for group_id in task.conflict_groups
+            )
+        ]
 
-            # Skip tasks whose conflict_group already has an active claim.
-            if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
-                continue
+        def sort_key(task: Task) -> tuple[int, int, datetime.datetime, str]:
+            priority_rank = _PRIORITY_ORDER.get(task.priority, 0)
+            complexity = (
+                task.scores.complexity
+                if task.scores.complexity is not None
+                else 6
+            )
+            return (-priority_rank, complexity, task.created_at, task.id)
 
-            # B45/#56 — risk-axis ceilings, safe-by-construction, via the ONE
-            # shared helper so the CLI seam and the MCP get_next_task can't
-            # diverge (the #56 root cause was two independent copies).
-            if not within_risk_ceiling(
-                task, max_blast=max_blast, max_review_risk=max_review_risk
-            ):
-                continue
-
-            # B49 — escalate a chronically-rejected task past a runner whose
-            # accept-rate doesn't meet the (raised) bar, so it goes to a proven
-            # actor or a human instead of recirculating to the same weak runner.
+        structurally_eligible.sort(key=sort_key)
+        candidates: list[Task] = []
+        governor_blocked: list[Task] = []
+        risk_blocked: list[Task] = []
+        for task in structurally_eligible:
             if metrics is not None and metrics.task_blocked_for_actor(
                 task.id, self._actor
             ):
-                continue
+                governor_blocked.append(task)
+            elif not within_risk_ceiling(
+                task, max_blast=max_blast, max_review_risk=max_review_risk
+            ):
+                risk_blocked.append(task)
+            else:
+                candidates.append(task)
 
-            candidates.append(task)
-
-        if not candidates:
-            return None
-
-        def _sort_key(t: Task) -> tuple[int, int, datetime.datetime]:
-            priority_rank = _PRIORITY_ORDER.get(t.priority, 0)
-            # Complexity: lower score = simpler = preferred. None → treat as 6 (worst).
-            complexity = t.scores.complexity if t.scores.complexity is not None else 6
-            return (-priority_rank, complexity, t.created_at)
-
-        candidates.sort(key=_sort_key)
-        return candidates[0]
+        if candidates:
+            return OfferDiagnosis(candidates[0], None, None, len(ready_tasks))
+        if governor_blocked:
+            return OfferDiagnosis(
+                None,
+                "task_accept_rate_floor",
+                governor_blocked[0].id,
+                len(ready_tasks),
+            )
+        if risk_blocked:
+            return OfferDiagnosis(None, "risk_ceiling", None, len(ready_tasks))
+        return OfferDiagnosis(None, "no_claimable_tasks", None, len(ready_tasks))
 
     def next_ready_excluding_active_files(
         self, *, prd_id: str | None = None

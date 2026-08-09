@@ -12371,6 +12371,21 @@ class SqliteBackend:
         )
 
         if decision == "accepted":
+            if review_attempt_id is not None:
+                # Replay/catch-up bypasses ``_check_task_applied``. New-format
+                # accepted events must still bind the causally latest evidence
+                # attempt; only historical events that omitted the field stay
+                # intentionally unbound.
+                attempt_row = self._latest_evidence_row(conn, task_id)
+                current_attempt_id = (
+                    self._row_to_evidence(attempt_row).id
+                    if attempt_row is not None
+                    else None
+                )
+                if review_attempt_id != current_attempt_id:
+                    raise TransactionAborted(
+                        "task.applied: accepted review attempt replay mismatch"
+                    )
             # Transition needs_review → accepted.
             conn.execute(
                 """

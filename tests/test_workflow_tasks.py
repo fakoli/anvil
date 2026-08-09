@@ -90,6 +90,8 @@ def test_full_round_trip_produces_one_evidence_row(backend, frozen_clock):  # ty
 
     rows = [e for e in backend.list_evidence() if e.task_id == tid]
     assert len(rows) == 1
+    review = backend.list_task_review_decisions()[0]
+    assert review[4:] == (rows[0].id, "runner")
 
 
 def test_workflow_tasks_do_not_pollute_the_prd_queue(backend, frozen_clock):  # type: ignore[no-untyped-def]

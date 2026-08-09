@@ -481,7 +481,7 @@ tag-disables them at startup).
 | 2 | `get_project_status` | no | no |
 | 3 | `list_tasks` | no | no |
 | 4 | `get_task` | no | no |
-| 5 | `get_next_task` | no | no |
+| 5 | `get_next_task` | yes (stale-claim sweep only) | yes |
 | 6 | `get_dependency_graph` | no | no |
 | 7 | `claim_task` | yes | yes |
 | 8 | `release_task` | yes | yes |

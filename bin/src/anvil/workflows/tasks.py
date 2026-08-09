@@ -171,6 +171,12 @@ def apply_workflow_task(
     notes: str | None = None,
 ) -> None:
     """Apply a review decision for a workflow task (accepted → done)."""
+    review_attempt_id: str | None = None
+    if decision == "accepted":
+        attempt = backend.get_latest_evidence(task_id)
+        if attempt is None:
+            raise ValueError("accepted workflow task requires submitted evidence")
+        review_attempt_id = attempt.id
     backend.append(
         EventDraft(
             timestamp=clock.now(),
@@ -183,6 +189,7 @@ def apply_workflow_task(
                 "reviewer": reviewer,
                 "decision": decision,
                 "notes": notes,
+                "review_attempt_id": review_attempt_id,
             },
         )
     )

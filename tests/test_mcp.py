@@ -2016,6 +2016,136 @@ class TestGetNextTask:
         assert governor["floor"] == 0.95
         assert governor["offer_throttled"] is True
 
+    def test_cli_mcp_share_split_gate_reason_and_task_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        import anvil.claims.manager as manager_module
+        from anvil.claims.metrics import AcceptRateMetrics
+        from anvil.cli import app
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(
+            state_dir,
+            task_id="T_RISK",
+            status="ready",
+            priority="high",
+            scores={"complexity": 1, "agent_suitability": 5},
+        )
+        _add_task(
+            state_dir,
+            task_id="T_FLOOR",
+            status="ready",
+            priority="low",
+            scores={"complexity": 5, "agent_suitability": 1},
+        )
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "task_blocked_for_actor",
+            lambda _self, task_id, _actor: task_id == "T_FLOOR",
+        )
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "required_floor",
+            lambda _self, _task_id: 0.95,
+        )
+        monkeypatch.setattr(
+            manager_module,
+            "within_risk_ceiling",
+            lambda task, *, max_blast, max_review_risk: (
+                task.id != "T_RISK"
+                or (max_blast is None and max_review_risk is None)
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cli = CliRunner().invoke(
+            app,
+            ["next", "--actor", "newcomer", "--max-blast", "5", "--json"],
+            catch_exceptions=False,
+        )
+        assert cli.exit_code == 0, cli.output
+        cli_data = json.loads(cli.output.strip().splitlines()[-1])["data"]
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "get_next_task",
+                        {"actor": "newcomer", "max_blast": 5},
+                    )
+                )
+
+        mcp_data = _run(run())
+        assert cli_data["withheld_reason"] == "task_accept_rate_floor"
+        assert mcp_data["governor"]["withheld_reason"] == "task_accept_rate_floor"
+        assert cli_data["governor"]["floor"] == mcp_data["governor"]["floor"] == 0.95
+
+    def test_cli_mcp_select_same_complexity_ordered_task(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(
+            state_dir,
+            task_id="T_COMPLEX",
+            status="ready",
+            priority="high",
+            scores={"complexity": 5, "agent_suitability": 5},
+        )
+        _add_task(
+            state_dir,
+            task_id="T_SIMPLE",
+            status="ready",
+            priority="high",
+            scores={"complexity": 1, "agent_suitability": 1},
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cli = CliRunner().invoke(
+            app, ["next", "--json"], catch_exceptions=False
+        )
+        assert cli.exit_code == 0, cli.output
+        cli_task = json.loads(cli.output.strip().splitlines()[-1])["data"]["task"]
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(await client.call_tool("get_next_task", {}))
+
+        mcp_task = _run(run())["task"]
+        assert cli_task["id"] == mcp_task["id"] == "T_SIMPLE"
+
+    def test_get_next_reaps_expired_claim_before_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="claimed")
+        _add_active_claim(
+            state_dir,
+            claim_id="C001",
+            task_id="T001",
+            minutes_until_expiry=-30,
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(await client.call_tool("get_next_task", {}))
+
+        response = _run(run())
+        assert response["task"]["id"] == "T001"
+        with sqlite3.connect(state_dir / "state.db") as conn:
+            assert conn.execute(
+                "SELECT status FROM claims WHERE id = 'C001'"
+            ).fetchone()[0] == "stale"
+
     def test_priority_ordering_high_over_medium_over_low(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """HIGH > MEDIUM > LOW — same feature, different priorities."""
         state_dir = _init_state_dir(tmp_path)
@@ -2049,10 +2179,10 @@ class TestGetNextTask:
         assert task is not None
         assert task["id"] == "T002"
 
-    def test_tiebreak_by_id_asc_when_same_priority_and_suitability(
+    def test_tiebreak_by_id_asc_when_same_priority_and_complexity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Same priority + no scores → tiebreak by id ascending."""
+        """Same priority + no complexity → tiebreak by id ascending."""
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         for task_id in ["T003", "T001", "T002"]:
@@ -2111,7 +2241,7 @@ class TestGetNextTask:
         # wins the UNRESTRICTED pick, proving the ceiling changes the outcome.
         _add_task(state_dir, task_id="C", status="ready", priority="high",
                   scores={"blast_radius": 5, "blast_radius_confirmed": True,
-                          "agent_suitability": 5})
+                          "agent_suitability": 5, "complexity": 1})
         monkeypatch.chdir(tmp_path)
 
         async def run() -> tuple[Any, Any]:
@@ -4368,14 +4498,14 @@ class TestGetNextTaskPriorityOrdering:
         assert results[1] == "T_MED",  f"Expected T_MED second, got {results}"
         assert results[2] == "T_LOW",  f"Expected T_LOW third, got {results}"
 
-    def test_tiebreak_agent_suitability_desc_then_id_asc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Same priority: agent_suitability desc tiebreak, then id asc."""
+    def test_tiebreak_complexity_asc_then_id_asc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Same priority: lower complexity wins before the final ID tiebreak."""
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T_A", status="ready", priority="medium",
-                  scores={"agent_suitability": 5})
+                  scores={"complexity": 2, "agent_suitability": 2})
         _add_task(state_dir, task_id="T_B", status="ready", priority="medium",
-                  scores={"agent_suitability": 2})
+                  scores={"complexity": 5, "agent_suitability": 5})
         monkeypatch.chdir(tmp_path)
 
         async def run() -> Any:
@@ -7174,6 +7304,7 @@ class TestApplyReviewDecision:
         state_dir = _init_state_dir(tmp_path)
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="needs_review")
+        _add_evidence(state_dir, task_id="T001")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> Any:
@@ -7494,6 +7625,7 @@ class TestApplyReviewDecisionStrictEvidence:
         _add_feature(state_dir)
         _add_task(state_dir, task_id="T001", status="needs_review")
         # No required_evidence injected; default verification is empty.
+        _add_evidence(state_dir, task_id="T001")
         monkeypatch.chdir(tmp_path)
 
         async def run() -> Any:

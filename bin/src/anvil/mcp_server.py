@@ -656,13 +656,6 @@ class EditDependenciesResponse(BaseModel):
 
 _STATE_DIR_NAME = ".anvil"
 
-_PRIORITY_ORDER = {
-    "critical": 4,
-    "high": 3,
-    "medium": 2,
-    "low": 1,
-}
-
 # Allowed transitions for update_task_status per spec:
 # "Limited to drafted↔ready and blocked toggle"
 _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
@@ -1182,8 +1175,8 @@ def get_next_task(
     null when no task is claimable; ``governor.withheld_reason`` distinguishes
     throttling from an empty queue.
 
-    Ordering: critical > high > medium > low; tiebreak agent_suitability desc,
-    then id asc.
+    Ordering: critical > high > medium > low; then complexity asc, creation
+    time asc, and id asc.
 
     ``max_blast`` / ``max_review_risk`` (B45/#56) are optional risk-axis ceilings:
     when set, a task is only offered if that dimension is CONFIRMED and within
@@ -1201,14 +1194,13 @@ def get_next_task(
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
-        # Read-only listers don't reap (per module docstring); MCP clients
-        # call get_project_summary or a mutating tool to trigger reaping.
+        _reap_stale(backend)
 
         # T019: resolve which PRD to scope candidates to (explicit > $ANVIL_PRD;
         # None when neither names one -> all PRDs, byte-identical to pre-T019).
         # Collapse the default sentinel ('prd') so prd_id='prd' matches tasks
         # stored with prd_id='default' rather than narrowing to an empty pool.
-        from anvil.claims.manager import within_risk_ceiling
+        from anvil.claims.manager import ClaimManager
         from anvil.claims.metrics import AcceptRateMetrics
         from anvil.cli._helpers import canonical_prd_id, resolve_actor
         from anvil.clock import SystemClock
@@ -1229,98 +1221,21 @@ def get_next_task(
             canonical_prd_id(_resolve_prd_id(backend, prd_id)) if prd_id else None
         )
 
-        # Single full-table fetch + in-memory partition; the EXCLUSION sets are
-        # always built from ALL PRDs (coordination is cross-PRD), then the
-        # candidate pool is narrowed to ``scoped_prd_id`` when one is named.
-        all_tasks = backend.list_tasks()
-        if not all_tasks:
-            projection = metrics.projection(resolved_actor)
-            projection.update(withheld_reason="no_tasks", offer_throttled=False)
-            return GetNextTaskResponse(
-                task=None,
-                governor=GovernorProjectionResponse.model_validate(projection),
-                actor_identity=actor_identity_data(resolved_actor),
+        manager = ClaimManager(backend, clock, actor=resolved_actor)
+        diagnosis = manager.diagnose_next_offer(
+            max_blast=max_blast,
+            max_review_risk=max_review_risk,
+            metrics=metrics,
+            prd_id=scoped_prd_id,
+        )
+        best = diagnosis.task
+        if best is None:
+            projection = metrics.projection(
+                resolved_actor, task_id=diagnosis.governor_task_id
             )
-        ready_tasks = [
-            t
-            for t in all_tasks
-            if t.status.value == "ready"
-            and (scoped_prd_id is None or t.prd_id == scoped_prd_id)
-        ]
-        if not ready_tasks:
-            projection = metrics.projection(resolved_actor)
-            projection.update(withheld_reason="no_ready_tasks", offer_throttled=False)
-            return GetNextTaskResponse(
-                task=None,
-                governor=GovernorProjectionResponse.model_validate(projection),
-                actor_identity=actor_identity_data(resolved_actor),
-            )
-
-        active_claims = backend.list_active_claims()
-        claimed_task_ids: set[str] = {c.task_id for c in active_claims}
-        done_task_ids: set[str] = {
-            t.id for t in all_tasks if t.status.value == "done"
-        }
-
-        # Build active conflict groups from ALL PRDs so a candidate in the
-        # scoped partition still collides with a claim held in another PRD.
-        active_conflict_groups: set[str] = set()
-        for t in all_tasks:
-            if t.id in claimed_task_ids:
-                for cg_id in t.conflict_groups:
-                    active_conflict_groups.add(cg_id)
-
-        candidates = []
-        governor_blocked_candidates = []
-        risk_blocked_candidates = []
-        governor_reason = metrics.withhold_reason(resolved_actor)
-        for task in ready_tasks:
-            if governor_reason is not None:
-                continue
-            if task.id in claimed_task_ids:
-                continue
-            if any(dep_id not in done_task_ids for dep_id in task.dependencies):
-                continue
-            if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
-                continue
-            if metrics.task_blocked_for_actor(task.id, resolved_actor):
-                governor_blocked_candidates.append(task)
-                continue
-            # B45/#56 — risk-axis eligibility ceiling, via the SAME shared helper
-            # as ClaimManager.next_claimable so the two seams can't diverge.
-            if not within_risk_ceiling(
-                task, max_blast=max_blast, max_review_risk=max_review_risk
-            ):
-                risk_blocked_candidates.append(task)
-                continue
-            candidates.append(task)
-
-        def _sort_key(t: Any) -> tuple[int, int, str]:
-            # Priority: higher rank = higher priority = sort first (negate).
-            priority_rank = _PRIORITY_ORDER.get(t.priority.value, 0)
-            # agent_suitability: higher = better = sort first (negate).
-            suitability = (
-                t.scores.agent_suitability
-                if t.scores.agent_suitability is not None
-                else 0
-            )
-            return (-priority_rank, -suitability, t.id)
-
-        if not candidates:
-            withheld_reason = governor_reason
-            governor_task_id: str | None = None
-            if withheld_reason is None and governor_blocked_candidates:
-                governor_blocked_candidates.sort(key=_sort_key)
-                governor_task_id = governor_blocked_candidates[0].id
-                withheld_reason = "task_accept_rate_floor"
-            if withheld_reason is None and risk_blocked_candidates:
-                withheld_reason = "risk_ceiling"
-            if withheld_reason is None:
-                withheld_reason = "no_claimable_tasks"
-            projection = metrics.projection(resolved_actor, task_id=governor_task_id)
             projection.update(
-                withheld_reason=withheld_reason,
-                offer_throttled=withheld_reason
+                withheld_reason=diagnosis.withheld_reason,
+                offer_throttled=diagnosis.withheld_reason
                 in {
                     "review_queue_saturated",
                     "actor_below_floor",
@@ -1333,8 +1248,6 @@ def get_next_task(
                 actor_identity=actor_identity_data(resolved_actor),
             )
 
-        candidates.sort(key=_sort_key)
-        best = candidates[0]
         # retro-opps T003 — derived review tier, same computation as the CLI
         # `next` (identical value for the same task + config).
         from anvil.planning.scoring import review_tier
@@ -1347,10 +1260,6 @@ def get_next_task(
         # ClaimManager.check_conflicts seam as the CLI `next` (read-only).
         conflict_warnings: list[dict[str, Any]] = []
         if best.likely_files:
-            from anvil.claims.manager import ClaimManager
-            manager = ClaimManager(
-                backend, clock, actor=resolved_actor
-            )
             conflict_warnings = [
                 {
                     "claim_id": w.other_claim_id,

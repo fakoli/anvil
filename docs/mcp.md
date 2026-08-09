@@ -227,10 +227,10 @@ criteria and constraints before calling `claim_task`.
 
 Returns the single highest-priority `ready` task that has no active claim and no unsatisfied
 dependencies, together with the complete accept-rate governor calculation. Sort key
-(implemented directly in this tool, not delegated to
-`ClaimManager.next_claimable()`): `priority desc` (`critical` > `high` > `medium` > `low`),
-then `agent_suitability desc` (higher score wins; unscored tasks rank as `0`), then `id asc`
-(stable tiebreak). The response's `task` field is `null` when no claimable task
+is shared with `ClaimManager.next_claimable()`: `priority desc` (`critical` >
+`high` > `medium` > `low`), then `complexity asc` (unscored ranks last),
+creation time asc, and `id asc` as the stable final tiebreak. The response's
+`task` field is `null` when no claimable task
 is available; `governor.withheld_reason` distinguishes a governed withhold from
 an empty queue.
 
@@ -1611,20 +1611,18 @@ before deciding whether to retry, release, or escalate.
 
 ## Stale-claim reaping
 
-`claim_task`, `claim_bundle`, `release_task`, `renew_claim`, `submit_progress`,
+`get_next_task`, `claim_task`, `claim_bundle`, `release_task`, `renew_claim`, `submit_progress`,
 `submit_completion_evidence`, `update_task_status`, and `get_project_summary` call
 `detect_and_release_stale` before performing their operation. Other tools, including
-`get_next_task`, do not promise reaping.
+the remaining read-only listers, do not promise reaping.
 
 Reaping scans all active claims, identifies those whose `lease_expires_at` timestamp has
 passed, marks them stale, and returns the associated tasks to the `ready` pool. If the
 reaper itself throws an exception, the error is swallowed and the main operation proceeds
 (best-effort, never blocking).
 
-For an MCP-only queue loop, call `get_project_summary` before `get_next_task` when lease
-expiry may have occurred. The summary call performs the best-effort reap; the subsequent
-candidate lookup sees the refreshed state. Do not rely on `get_next_task` alone to clear an
-expired claim.
+An MCP-only queue loop may call `get_next_task` directly: it performs the same
+best-effort stale sweep as `anvil next` before selecting a candidate.
 
 ---
 
