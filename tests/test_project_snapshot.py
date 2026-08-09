@@ -322,6 +322,8 @@ def test_project_snapshot_cli_requires_json_without_state_access(
     assert envelope["command"] == "project snapshot"
     assert envelope["error"]["code"] == "invalid_request"
     assert envelope["error"]["field"] == "request"
+    assert envelope["error"]["truncated"] is False
+    Draft202012Validator(_read_error_schema()).validate(envelope["error"])
     assert not (tmp_path / ".anvil").exists()
 
 
@@ -351,6 +353,7 @@ def test_project_snapshot_cli_limit_refusal_has_no_partial_payload(
         "limit": 1,
         "code": "limit_exceeded",
         "message": "A provider read limit was exceeded.",
+        "truncated": False,
     }
     assert "payload" not in result.stdout
     Draft202012Validator(_read_error_schema()).validate(error)

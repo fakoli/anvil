@@ -35,6 +35,7 @@ def _emit_refusal(error: ReadErrorV1 | ProviderLimitRefusalV1) -> NoReturn:
     message = str(
         data.pop("message", "A provider read limit was exceeded.")
     )
+    data["truncated"] = False
     fail_with(_COMMAND, message, code=code, extra=data)
 
 

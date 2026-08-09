@@ -262,6 +262,7 @@ def test_prd_show_expected_digest_and_lowered_limit_are_fail_closed(
     assert refusal["error"]["actual"] == len(SOURCE)
     assert refusal["error"]["limit"] == 12
     assert refusal["error"]["truncated"] is False
+    Draft202012Validator(_read_error_schema()).validate(refusal["error"])
     assert "content" not in refusal["error"]
     assert SOURCE[:12].decode("utf-8", errors="ignore") not in limited.stdout
     assert _manifest(state_dir) == before
