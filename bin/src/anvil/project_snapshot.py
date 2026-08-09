@@ -43,9 +43,6 @@ from anvil.state.sqlite import query_only_transaction
 
 EVENT_FRONTIER_DOMAIN_V1 = b"anvil.project-event-frontier.v1\0"
 _MAX_EVENT_RECORD_BYTES = PROVIDER_LIMITS_V1.max_snapshot_bytes
-_MAX_GIT_DUPLICATE_COPIES_PER_EVENT = 16
-_MAX_EVENT_LOG_BYTES = 256 * 1024 * 1024
-_MAX_RAW_TASK_METADATA_BYTES = PROVIDER_LIMITS_V1.max_snapshot_bytes
 
 
 class ProjectSnapshotError(RuntimeError):
@@ -209,13 +206,8 @@ def _project_payload(
             )
         )
 
-    task_rows = conn.execute(
-        "SELECT id, feature_id, prd_id, title, status, priority, "
-        "dependencies, acceptance_criteria, verification, parent_task_id "
-        "FROM tasks ORDER BY id"
-    ).fetchall()
     task_refs: dict[str, TaskScopedRefV1] = {}
-    for row in task_rows:
+    for row in conn.execute("SELECT id, prd_id FROM tasks ORDER BY id"):
         stored_id = _required_string(row["id"])
         prd_id = _required_string(row["prd_id"])
         if prd_id not in prd_ids:
@@ -224,12 +216,16 @@ def _project_payload(
             prd_id=prd_id,
             task_id=_local_entity_id(stored_id, prd_id),
         )
-    if len(task_refs) != len(task_rows):
+    if len(task_refs) != _table_count(conn, "tasks"):
         _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
 
     tasks: list[TaskRecordV1] = []
     dependency_edges = 0
-    for row in task_rows:
+    for row in conn.execute(
+        "SELECT id, feature_id, prd_id, title, status, priority, "
+        "dependencies, acceptance_criteria, verification, parent_task_id "
+        "FROM tasks ORDER BY id"
+    ):
         stored_id = _required_string(row["id"])
         ref = task_refs[stored_id]
         feature_id = _required_string(row["feature_id"])
@@ -338,8 +334,6 @@ def _event_cursor(
     events_fh: BinaryIO,
 ) -> tuple[EventCursorV1, tuple[int, int, int, int]]:
     start_stat = os.fstat(events_fh.fileno())
-    if start_stat.st_size > _MAX_EVENT_LOG_BYTES:
-        _refuse(ReadErrorCode.projection_not_converged, field="projection")
     events_fh.seek(0)
     with tempfile.TemporaryDirectory(prefix="anvil-project-snapshot-") as temp_dir:
         spool = sqlite3.connect(Path(temp_dir) / "events.db")
@@ -349,7 +343,7 @@ def _event_cursor(
             spool.execute(
                 "CREATE TABLE event_spool ("
                 "id TEXT PRIMARY KEY, record BLOB NOT NULL, parent_id TEXT, "
-                "lamport INTEGER, duplicate_count INTEGER NOT NULL DEFAULT 1)"
+                "lamport INTEGER)"
             )
             spool.execute(
                 "CREATE INDEX event_spool_parent_id ON event_spool(parent_id)"
@@ -431,18 +425,10 @@ def _spool_event_log(
             event_count += 1
         except sqlite3.IntegrityError:
             prior = spool.execute(
-                "SELECT record, duplicate_count FROM event_spool WHERE id = ?",
-                (event.id,),
+                "SELECT record FROM event_spool WHERE id = ?", (event.id,)
             ).fetchone()
             if mode != "git" or prior is None or bytes(prior[0]) != record:
                 _refuse(ReadErrorCode.projection_not_converged, field="projection")
-            duplicate_count = int(prior[1]) + 1
-            if duplicate_count > _MAX_GIT_DUPLICATE_COPIES_PER_EVENT:
-                _refuse(ReadErrorCode.projection_not_converged, field="projection")
-            spool.execute(
-                "UPDATE event_spool SET duplicate_count = ? WHERE id = ?",
-                (duplicate_count, event.id),
-            )
     return mode, event_count
 
 
@@ -761,9 +747,7 @@ def _preflight_storage_limits(
     raw_json_row = conn.execute(
         "SELECT COALESCE(MAX(MAX(length(CAST(dependencies AS BLOB)), "
         "length(CAST(acceptance_criteria AS BLOB)))), 0), "
-        "COALESCE(SUM(length(CAST(dependencies AS BLOB)) + "
-        "length(CAST(acceptance_criteria AS BLOB)) + "
-        "length(CAST(verification AS BLOB))), 0) FROM tasks"
+        "COALESCE(MAX(length(CAST(verification AS BLOB))), 0) FROM tasks"
     ).fetchone()
     visible_json_actual = int(raw_json_row[0])
     if visible_json_actual > limits.max_snapshot_bytes:
@@ -772,8 +756,7 @@ def _preflight_storage_limits(
             visible_json_actual,
             limits.max_snapshot_bytes,
         )
-    raw_actual = int(raw_json_row[1])
-    if raw_actual > _MAX_RAW_TASK_METADATA_BYTES:
+    if int(raw_json_row[1]) > PROVIDER_LIMITS_V1.max_snapshot_bytes:
         _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
 
     malformed = conn.execute(

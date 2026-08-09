@@ -636,7 +636,7 @@ def test_git_lamport_requires_exact_json_integer(
     assert refusal.value.error.code is ReadErrorCode.projection_not_converged
 
 
-def test_git_duplicate_envelope_amplification_is_bounded(
+def test_git_duplicate_envelopes_remain_one_committed_event(
     tmp_path: Path,
     frozen_clock: FrozenClock,
 ) -> None:
@@ -655,10 +655,9 @@ def test_git_duplicate_envelope_amplification_is_bounded(
     backend.append(_event("state.initialized", {}, kind="project", target="project-1"))
     backend.close()
     lines = events_path.read_bytes().splitlines(keepends=True)
+    baseline = read_project_snapshot(tmp_path)
     events_path.write_bytes(b"".join(line * 17 for line in lines))
-    with pytest.raises(ProjectSnapshotError) as refusal:
-        read_project_snapshot(tmp_path)
-    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+    assert read_project_snapshot(tmp_path) == baseline
 
 
 @pytest.mark.parametrize(
@@ -777,6 +776,28 @@ def test_excluded_verification_body_does_not_consume_snapshot_limit(
     assert result.payload.tasks[0].verification_summaries[0].count == 1
 
 
+def test_excluded_verification_bodies_stream_without_aggregate_false_refusal(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    baseline = read_project_snapshot(root)
+    baseline_size = len(snapshot_response_canonical_bytes(baseline))
+    populated.close()
+    verification = json.dumps({"commands": ["x" * 8_500_000]}, separators=(",", ":"))
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute("UPDATE tasks SET verification = ?", (verification,))
+    conn.commit()
+    conn.close()
+    result = read_project_snapshot(
+        root,
+        limits=lowered_limits({"max_snapshot_bytes": baseline_size + 100}),
+    )
+    assert [task.verification_summaries[0].count for task in result.payload.tasks] == [
+        1,
+        1,
+    ]
+
+
 def test_prd_content_cap_precedes_blob_materialization(populated: SqliteBackend) -> None:
     root = _state_path(populated)
     populated.close()
@@ -822,3 +843,22 @@ def test_hard_snapshot_overflow_reports_exact_limit_metadata(
         actual=len(acceptance.encode()),
         limit=16_777_216,
     )
+
+
+def test_aggregate_visible_snapshot_overflow_reports_limit_metadata(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    populated.close()
+    acceptance = json.dumps(["x" * 33_000] * 256, separators=(",", ":"))
+    assert len(acceptance.encode()) < 16_777_216
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute("UPDATE tasks SET acceptance_criteria = ?", (acceptance,))
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert isinstance(refusal.value.error, ProviderLimitRefusalV1)
+    assert refusal.value.error.limit_name is ProviderLimitNameV1.max_snapshot_bytes
+    assert refusal.value.error.actual > 16_777_216
+    assert refusal.value.error.limit == 16_777_216
