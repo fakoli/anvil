@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from anvil.cli import app
 from anvil.prd_content import PRD_CONTENT_DIGEST_DOMAIN, PrdContentRefusal, read_prd_content
 from anvil.state.hashing import canonical_json_bytes
 from anvil.state.schema import SCHEMA_VERSION
+from anvil.state.sqlite import SqliteBackend
 
 runner = CliRunner()
 
@@ -341,6 +343,113 @@ def test_prd_show_refuses_diverged_projection_without_healing(tmp_path: Path) ->
     assert result.exit_code == 1
     assert _payload(result)["error"]["code"] == "projection_not_converged"
     assert _manifest(state_dir) == before
+
+
+@pytest.mark.parametrize("damage", ["torn", "duplicate_key", "actor_drift"])
+def test_prd_show_strictly_refuses_malformed_or_diverged_event_envelopes(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    state_dir = _project(tmp_path)
+    events_path = state_dir / "events.jsonl"
+    original = events_path.read_bytes()
+    lines = original.splitlines(keepends=True)
+    assert lines and lines[0].endswith(b"\n")
+    if damage == "torn":
+        changed = original + b"{"
+    else:
+        document = json.loads(lines[0])
+        actor_field = json.dumps(
+            {"actor": document["actor"]}, separators=(",", ":")
+        )[1:-1].encode("utf-8")
+        if damage == "duplicate_key":
+            lines[0] = lines[0].replace(
+                actor_field,
+                actor_field + b"," + actor_field,
+                1,
+            )
+        else:
+            replacement = json.dumps(
+                {"actor": "diverged-reader"}, separators=(",", ":")
+            )[1:-1].encode("utf-8")
+            lines[0] = lines[0].replace(actor_field, replacement, 1)
+        changed = b"".join(lines)
+    events_path.write_bytes(changed)
+    before = _manifest(state_dir)
+
+    with pytest.raises(PrdContentRefusal) as caught:
+        read_prd_content(state_dir, "default")
+
+    assert caught.value.error.code.value == "projection_not_converged"
+    assert _manifest(state_dir) == before
+
+
+def test_prd_show_bounds_one_oversized_event_record_before_json_decode(
+    tmp_path: Path,
+) -> None:
+    state_dir = _project(tmp_path)
+    events_path = state_dir / "events.jsonl"
+    events_path.write_bytes(events_path.read_bytes() + b" " * (16_777_216 + 2) + b"\n")
+    before = _manifest(state_dir)
+
+    with pytest.raises(PrdContentRefusal) as caught:
+        read_prd_content(state_dir, "default")
+
+    assert caught.value.error.code.value == "projection_not_converged"
+    assert _manifest(state_dir) == before
+
+
+def test_prd_show_waits_for_log_first_writer_and_returns_complete_post_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = _project(tmp_path)
+    revised_source = SOURCE + b"\r\nRevision two.\r\n"
+    (state_dir / "prd.md").write_bytes(revised_source)
+    log_appended = threading.Event()
+    allow_commit = threading.Event()
+    writer_done = threading.Event()
+    reader_done = threading.Event()
+    writer_results: list[object] = []
+    reader_results: list[object] = []
+    original_insert = SqliteBackend._insert_event_row
+
+    def paused_insert(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        log_appended.set()
+        assert allow_commit.wait(5)
+        return original_insert(self, *args, **kwargs)
+
+    monkeypatch.setattr(SqliteBackend, "_insert_event_row", paused_insert)
+
+    def writer() -> None:
+        try:
+            writer_results.append(_invoke(tmp_path, ["prd", "parse", "--json"]))
+        finally:
+            writer_done.set()
+
+    def reader() -> None:
+        try:
+            reader_results.append(read_prd_content(state_dir, "default"))
+        finally:
+            reader_done.set()
+
+    writer_thread = threading.Thread(target=writer)
+    writer_thread.start()
+    assert log_appended.wait(5)
+    reader_thread = threading.Thread(target=reader)
+    reader_thread.start()
+    assert not reader_done.wait(0.1)
+    allow_commit.set()
+    assert writer_done.wait(5)
+    assert reader_done.wait(5)
+    writer_thread.join()
+    reader_thread.join()
+
+    writer_result = writer_results[0]
+    assert writer_result.exit_code == 0  # type: ignore[attr-defined]
+    response = reader_results[0]
+    assert response.prd_revision == 2  # type: ignore[attr-defined]
+    assert response.content.encode("utf-8") == revised_source  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("version", [SCHEMA_VERSION - 1, SCHEMA_VERSION + 1])

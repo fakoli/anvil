@@ -29,6 +29,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from anvil.project_snapshot import (
+    ProjectSnapshotError,
+    validate_converged_event_log,
+    verify_event_log_identity,
+)
 from anvil.read_contracts import (
     PRD_CONTENT_OPERATION_ID,
     PRD_CONTENT_OPERATION_VERSION,
@@ -38,8 +43,9 @@ from anvil.read_contracts import (
     ReadErrorCode,
     ReadErrorV1,
 )
+from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
 from anvil.state.hashing import canonical_json_bytes
-from anvil.state.schema import SCHEMA_VERSION
+from anvil.state.sqlite import query_only_transaction
 
 PRD_CONTENT_DIGEST_DOMAIN = b"anvil.prd-content.v1\0"
 MAX_SECTION_SELECTORS = 128
@@ -199,109 +205,6 @@ def parse_prd_content_limit(value: str | None) -> int | None:
     return parsed
 
 
-def _event_material_digest(
-    action: object,
-    target_kind: object,
-    target_id: object,
-    payload: object,
-) -> bytes:
-    try:
-        material = canonical_json_bytes(
-            {
-                "action": action,
-                "target_kind": target_kind,
-                "target_id": target_id,
-                "payload_json": payload,
-            }
-        )
-    except (TypeError, ValueError) as exc:
-        raise _refuse(ReadErrorCode.projection_not_converged, field="projection") from exc
-    return hashlib.sha256(material).digest()
-
-
-def _log_event_material(events_path: Path) -> dict[str, bytes]:
-    try:
-        signature_before = events_path.stat()
-        events: dict[str, bytes] = {}
-        with events_path.open("rb") as stream:
-            lines = stream.readlines()
-        for index, raw_line in enumerate(lines):
-            if not raw_line.strip():
-                continue
-            try:
-                value = json.loads(raw_line)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                if index == len(lines) - 1 and not raw_line.endswith(b"\n"):
-                    continue
-                raise _refuse(ReadErrorCode.projection_not_converged, field="projection") from exc
-            event_id = value.get("id") if isinstance(value, dict) else None
-            if not isinstance(event_id, str) or not event_id:
-                raise _refuse(ReadErrorCode.projection_not_converged, field="projection")
-            material = _event_material_digest(
-                value.get("action"),
-                value.get("target_kind"),
-                value.get("target_id"),
-                value.get("payload_json"),
-            )
-            prior = events.setdefault(event_id, material)
-            if prior != material:
-                raise _refuse(ReadErrorCode.projection_not_converged, field="projection")
-        signature_after = events_path.stat()
-    except PrdContentRefusal:
-        raise
-    except OSError as exc:
-        raise _refuse(ReadErrorCode.state_unavailable, field="state") from exc
-    if (
-        signature_before.st_size != signature_after.st_size
-        or signature_before.st_mtime_ns != signature_after.st_mtime_ns
-    ):
-        raise _refuse(ReadErrorCode.projection_not_converged, field="projection")
-    return events
-
-
-def _table_event_material(connection: sqlite3.Connection) -> dict[str, bytes]:
-    events: dict[str, bytes] = {}
-    try:
-        rows = connection.execute(
-            "SELECT id, action, target_kind, target_id, payload_json FROM events"
-        ).fetchall()
-        for row in rows:
-            payload = json.loads(row[4])
-            events[row[0]] = _event_material_digest(row[1], row[2], row[3], payload)
-    except PrdContentRefusal:
-        raise
-    except (sqlite3.Error, TypeError, json.JSONDecodeError) as exc:
-        raise _refuse(ReadErrorCode.projection_not_converged, field="projection") from exc
-    return events
-
-
-def _open_readonly(state_dir: Path) -> sqlite3.Connection:
-    db_path = state_dir / "state.db"
-    if not state_dir.is_dir() or not db_path.is_file():
-        raise _refuse(ReadErrorCode.state_unavailable, field="state")
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = sqlite3.connect(
-            f"{db_path.resolve().as_uri()}?mode=ro",
-            uri=True,
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only = ON")
-        version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if type(version) is not int or version != SCHEMA_VERSION:
-            connection.close()
-            raise _refuse(ReadErrorCode.schema_incompatible, field="schema")
-        connection.execute("BEGIN")
-        return connection
-    except PrdContentRefusal:
-        raise
-    except sqlite3.Error as exc:
-        if connection is not None:
-            connection.close()
-        raise _refuse(ReadErrorCode.state_unavailable, field="state") from exc
-
-
 def _validated_source(row: sqlite3.Row) -> tuple[bytes, str, int]:
     revision = row["revision"]
     source = row["source_bytes"]
@@ -346,7 +249,7 @@ def _source_binding_is_projected(
         rows = connection.execute(
             "SELECT action, payload_json FROM events "
             "WHERE action IN ('prd.parsed', 'prd.revised')"
-        ).fetchall()
+        )
         for action, payload_json in rows:
             payload = json.loads(payload_json)
             if not isinstance(payload, dict):
@@ -374,7 +277,7 @@ def _source_binding_is_projected(
                 and payload.get("content_available") is True
             ):
                 return True
-    except (sqlite3.Error, TypeError, json.JSONDecodeError) as exc:
+    except (sqlite3.Error, TypeError, ValueError) as exc:
         raise _refuse(ReadErrorCode.projection_not_converged, field="projection") from exc
     return False
 
@@ -488,66 +391,74 @@ def read_prd_content(
         expected_digest=expected_digest,
         max_bytes=max_bytes,
     )
-    connection = _open_readonly(state_dir)
     try:
-        try:
-            table_events = _table_event_material(connection)
-            if table_events != _log_event_material(state_dir / "events.jsonl"):
-                raise _refuse(
-                    ReadErrorCode.projection_not_converged, field="projection"
-                )
+        with query_only_transaction(
+            state_dir / "state.db",
+            state_dir / "events.jsonl",
+        ) as (connection, events_fh):
+            event_identity = validate_converged_event_log(connection, events_fh)
             row = connection.execute(
                 "SELECT id, revision, source_bytes, source_sha256, "
                 "source_size_bytes, source_encoding, source_revision, "
                 "provenance_state, content_available FROM prds WHERE id = ?",
                 (ref.prd_id,),
             ).fetchone()
-        except PrdContentRefusal:
-            raise
-        except sqlite3.Error as exc:
-            raise _refuse(ReadErrorCode.state_unavailable, field="state") from exc
-        if row is None:
-            raise _refuse(ReadErrorCode.prd_not_found, field="prd_id")
-        source, source_digest, revision = _validated_source(row)
-        try:
-            source.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise _refuse(ReadErrorCode.invalid_utf8, field="content") from exc
-        if not _source_binding_is_projected(
-            connection, ref, source, source_digest, revision
-        ):
-            raise _refuse(
-                ReadErrorCode.projection_not_converged, field="projection"
+            if row is None:
+                raise _refuse(ReadErrorCode.prd_not_found, field="prd_id")
+            source, source_digest, revision = _validated_source(row)
+            try:
+                source.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _refuse(ReadErrorCode.invalid_utf8, field="content") from exc
+            if not _source_binding_is_projected(
+                connection, ref, source, source_digest, revision
+            ):
+                raise _refuse(
+                    ReadErrorCode.projection_not_converged, field="projection"
+                )
+            if expected is not None and expected != source_digest:
+                raise _refuse(ReadErrorCode.stale_digest, field="expected_digest")
+            returned, ordered, canonical_selector = _select(source, requested)
+            if len(returned) > applied_limit:
+                raise _refuse(
+                    ReadErrorCode.limit_exceeded,
+                    field="content",
+                    actual=len(returned),
+                    limit=applied_limit,
+                )
+            try:
+                content = returned.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _refuse(ReadErrorCode.invalid_utf8, field="content") from exc
+            response = PrdContentResponseV1(
+                prd_ref=ref,
+                prd_revision=revision,
+                source_digest=source_digest,
+                content_digest=_content_digest(
+                    source_digest, canonical_selector, returned
+                ),
+                source_size_bytes=len(source),
+                returned_size_bytes=len(returned),
+                selected_sections=ordered,
+                applied_limit_bytes=applied_limit,
+                content=content,
             )
-        if expected is not None and expected != source_digest:
-            raise _refuse(ReadErrorCode.stale_digest, field="expected_digest")
-        returned, ordered, canonical_selector = _select(source, requested)
-        if len(returned) > applied_limit:
-            raise _refuse(
-                ReadErrorCode.limit_exceeded,
-                field="content",
-                actual=len(returned),
-                limit=applied_limit,
-            )
-        try:
-            content = returned.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise _refuse(ReadErrorCode.invalid_utf8, field="content") from exc
-        return PrdContentResponseV1(
-            prd_ref=ref,
-            prd_revision=revision,
-            source_digest=source_digest,
-            content_digest=_content_digest(
-                source_digest, canonical_selector, returned
-            ),
-            source_size_bytes=len(source),
-            returned_size_bytes=len(returned),
-            selected_sections=ordered,
-            applied_limit_bytes=applied_limit,
-            content=content,
-        )
-    finally:
-        connection.close()
+            verify_event_log_identity(events_fh, event_identity)
+            return response
+    except PrdContentRefusal:
+        raise
+    except ProjectSnapshotError as exc:
+        if isinstance(exc.error, ReadErrorV1):
+            raise PrdContentRefusal(exc.error) from exc
+        raise _refuse(ReadErrorCode.projection_not_converged, field="projection") from exc
+    except FileNotFoundError as exc:
+        raise _refuse(ReadErrorCode.state_unavailable, field="state") from exc
+    except SchemaMismatch as exc:
+        raise _refuse(ReadErrorCode.schema_incompatible, field="schema") from exc
+    except SchemaProbeFailed as exc:
+        raise _refuse(ReadErrorCode.projection_not_converged, field="projection") from exc
+    except (sqlite3.Error, OSError) as exc:
+        raise _refuse(ReadErrorCode.state_unavailable, field="state") from exc
 
 
 __all__ = [

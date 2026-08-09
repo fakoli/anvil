@@ -389,6 +389,27 @@ def _event_cursor(
             spool.close()
 
 
+def validate_converged_event_log(
+    conn: sqlite3.Connection,
+    events_fh: BinaryIO,
+) -> tuple[int, int, int, int]:
+    """Validate the complete locked event frontier and return its identity.
+
+    Provider readers share this boundary so event-envelope, Git-material, and
+    resource checks cannot drift between otherwise read-only operations.
+    """
+    _, identity = _event_cursor(conn, events_fh)
+    return identity
+
+
+def verify_event_log_identity(
+    events_fh: BinaryIO,
+    identity: tuple[int, int, int, int],
+) -> None:
+    """Prove that the locked event handle still names the validated bytes."""
+    _verify_event_identity(events_fh, identity)
+
+
 def _spool_event_log(
     events_fh: BinaryIO,
     spool: sqlite3.Connection,
