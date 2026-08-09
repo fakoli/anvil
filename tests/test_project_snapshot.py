@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import anvil.project_snapshot as snapshot_module
 from anvil.clock import FrozenClock
 from anvil.project_snapshot import ProjectSnapshotError, read_project_snapshot
 from anvil.read_contracts import (
@@ -847,6 +848,7 @@ def test_hard_snapshot_overflow_reports_exact_limit_metadata(
 
 def test_aggregate_visible_snapshot_overflow_reports_limit_metadata(
     populated: SqliteBackend,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _state_path(populated)
     populated.close()
@@ -856,6 +858,11 @@ def test_aggregate_visible_snapshot_overflow_reports_limit_metadata(
     conn.execute("UPDATE tasks SET acceptance_criteria = ?", (acceptance,))
     conn.commit()
     conn.close()
+    monkeypatch.setattr(
+        snapshot_module,
+        "_json_string_list",
+        lambda _raw: (_ for _ in ()).throw(AssertionError("materialized task JSON")),
+    )
     with pytest.raises(ProjectSnapshotError) as refusal:
         read_project_snapshot(root)
     assert isinstance(refusal.value.error, ProviderLimitRefusalV1)

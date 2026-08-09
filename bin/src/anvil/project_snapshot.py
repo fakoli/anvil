@@ -747,7 +747,9 @@ def _preflight_storage_limits(
     raw_json_row = conn.execute(
         "SELECT COALESCE(MAX(MAX(length(CAST(dependencies AS BLOB)), "
         "length(CAST(acceptance_criteria AS BLOB)))), 0), "
-        "COALESCE(MAX(length(CAST(verification AS BLOB))), 0) FROM tasks"
+        "COALESCE(MAX(length(CAST(verification AS BLOB))), 0), "
+        "COALESCE(SUM(length(CAST(dependencies AS BLOB)) + "
+        "length(CAST(acceptance_criteria AS BLOB))), 0) FROM tasks"
     ).fetchone()
     visible_json_actual = int(raw_json_row[0])
     if visible_json_actual > limits.max_snapshot_bytes:
@@ -758,6 +760,13 @@ def _preflight_storage_limits(
         )
     if int(raw_json_row[1]) > PROVIDER_LIMITS_V1.max_snapshot_bytes:
         _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+    visible_json_total = int(raw_json_row[2])
+    if visible_json_total > PROVIDER_LIMITS_V1.max_snapshot_bytes:
+        _limit(
+            ProviderLimitNameV1.max_snapshot_bytes,
+            visible_json_total,
+            PROVIDER_LIMITS_V1.max_snapshot_bytes,
+        )
 
     malformed = conn.execute(
         "SELECT 1 FROM tasks WHERE "
