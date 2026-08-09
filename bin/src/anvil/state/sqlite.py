@@ -87,21 +87,28 @@ from anvil.state.models import (
     ConflictGroup,
     Event,
     EventDraft,
+    Evidence,
     EvidenceCategory,
     ExecutionBundle,
     Feature,
     PRDAssumption,
     Project,
     ProofKind,
+    RejectionCategory,
+    RejectionProcessPredicate,
+    RejectionQualityFinding,
+    RejectionReasonCode,
     Requirement,
     Review,
     ReviewDecision,
     Score,
     SyncMapping,
     Task,
+    TaskRejectionProvenance,
     Verification,
     claim_command_semantic_projection,
     hook_command_semantic_digest,
+    supporting_evidence_digest,
     task_snapshot_revision,
 )
 from anvil.state.payloads import (
@@ -154,6 +161,17 @@ _AUDIT_LINE_MAX_UTF8_BYTES = 4096
 _PROGRESS_ATTESTATION_MAX_BYTES = 262_144
 _PROGRESS_SEMANTIC_DOMAIN = b"anvil.progress-attestation.v1\0"
 _COMMAND_PROOF_SEMANTIC_DOMAIN = b"anvil.command-proof.v1\0"
+_PROCESS_REASON_PREDICATES: dict[
+    RejectionReasonCode, RejectionProcessPredicate
+] = {
+    RejectionReasonCode.claim_stale: RejectionProcessPredicate.claim_status_stale,
+    RejectionReasonCode.claim_force_released: (
+        RejectionProcessPredicate.claim_status_force_released
+    ),
+    RejectionReasonCode.bundle_review_required: (
+        RejectionProcessPredicate.bundle_member_claim
+    ),
+}
 _COMMAND_WINDOWS_RESERVED = re.compile(
     r"^(?:CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9\u00b9\u00b2\u00b3]|"
     r"LPT[1-9\u00b9\u00b2\u00b3])(?:\..*)?$",
@@ -3037,14 +3055,23 @@ class SqliteBackend:
         rows = conn.execute(
             # ORDER BY id ASC: lexical order matches numeric only while the
             # zero-padded event/id suffix stays within its digit width.
-            "SELECT id, target_kind, target_id, reviewed_by, decision, notes, created_at "
+            "SELECT id, target_kind, target_id, reviewed_by, decision, notes, "
+            "rejection_category, rejection_reason_code, claim_id, "
+            "review_attempt_id, supporting_evidence_digest, quality_findings, "
+            "matched_process_predicate, counts_toward_accept_rate, created_at "
             "FROM reviews ORDER BY id ASC"
         ).fetchall()
         return [self._row_to_review(row) for row in rows]
 
-    def list_task_review_decisions(self) -> list[tuple[str, str, str]]:
-        """Return (task_id, decision, created_at_iso) for every task.applied
-        review outcome (decision in 'accepted' / 'rejected'), most-recent first.
+    def list_task_review_decisions(
+        self,
+    ) -> list[tuple[str, str, str, str, str | None, str | None]]:
+        """Return stable task review and persisted work-attempt attribution.
+
+        Each item is ``(task_id, decision, created_at_iso, review_id,
+        review_attempt_id, submitted_by)``. Historical rows without an exact
+        attempt binding retain ``None`` and are handled by the metrics legacy
+        fallback.
 
         Reads the raw reviews table rather than the Review model: the
         ``ReviewDecision`` enum covers the PRD/finish-gate vocabulary
@@ -3053,11 +3080,14 @@ class SqliteBackend:
         """
         conn = self._require_conn()
         rows = conn.execute(
-            "SELECT target_id, decision, created_at FROM reviews "
-            "WHERE target_kind = 'task' AND decision IN ('accepted', 'rejected') "
-            "ORDER BY created_at DESC"
+            "SELECT r.target_id, r.decision, r.created_at, r.id, "
+            "r.review_attempt_id, e.submitted_by FROM reviews AS r "
+            "LEFT JOIN evidence AS e ON e.id = r.review_attempt_id "
+            "WHERE r.target_kind = 'task' AND (r.decision = 'accepted' OR "
+            "(r.decision = 'rejected' AND r.counts_toward_accept_rate = 1)) "
+            "ORDER BY r.created_at DESC, r.id DESC"
         ).fetchall()
-        return [(r[0], r[1], r[2]) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows]
 
     def list_evidence(self) -> list[Evidence]:
         """Return all Evidence rows sorted by id ASC.
@@ -3339,22 +3369,154 @@ class SqliteBackend:
         """Return the most recently submitted Evidence for task_id, or None."""
         conn = self._require_conn()
         try:
-            row = conn.execute(
-                "SELECT id, task_id, claim_id, commands_run, output_excerpt, "
-                "files_changed, pr_url, commit_sha, screenshots, "
-                "known_limitations, submitted_at, submitted_by, proofs, "
-                "category "
-                "FROM evidence "
-                "WHERE task_id = ? "
-                "ORDER BY submitted_at DESC "
-                "LIMIT 1",
-                (task_id,),
-            ).fetchone()
+            row = self._latest_evidence_row(conn, task_id)
         except Exception:  # noqa: BLE001
             return None
         if row is None:
             return None
         return self._row_to_evidence(row)
+
+    @staticmethod
+    def _latest_evidence_row(
+        conn: sqlite3.Connection,
+        task_id: str,
+    ) -> sqlite3.Row | None:
+        # Evidence IDs are caller-generated and timestamps can tie under a
+        # frozen/coarse clock. The projected event rowid is the causal append
+        # order, so it must dominate both fields when selecting the review
+        # attempt. The claim generation is a deterministic fallback for old or
+        # test-injected evidence rows with no corresponding projected event.
+        return conn.execute(
+            "SELECT e.id, e.task_id, e.claim_id, e.commands_run, "
+            "e.output_excerpt, e.files_changed, e.pr_url, e.commit_sha, "
+            "e.screenshots, e.known_limitations, e.submitted_at, "
+            "e.submitted_by, e.proofs, e.category FROM evidence AS e "
+            "LEFT JOIN events AS ev ON ev.action = 'evidence.submitted' "
+            "AND ev.target_id = e.task_id "
+            "AND json_extract(ev.payload_json, '$.evidence_id') = e.id "
+            "LEFT JOIN claims AS c ON c.id = e.claim_id "
+            "WHERE e.task_id = ? "
+            "ORDER BY (ev.rowid IS NULL) ASC, ev.rowid DESC, "
+            "c.generation DESC, e.submitted_at DESC, e.id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+
+    def derive_task_rejection_provenance(
+        self,
+        task_id: str,
+        *,
+        reason_code: RejectionReasonCode,
+        quality_findings: list[RejectionQualityFinding],
+    ) -> TaskRejectionProvenance:
+        """Derive a rejection class from current persisted task/evidence state.
+
+        Public adapters call this before constructing ``task.applied``. The
+        append checker repeats the same derivation under the event-log lock, so
+        a concurrent evidence/claim change cannot turn a stale classification
+        into a committed fact.
+        """
+        return self._derive_task_rejection_provenance(
+            self._require_conn(),
+            task_id,
+            reason_code=reason_code,
+            quality_findings=quality_findings,
+        )
+
+    def _derive_task_rejection_provenance(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        *,
+        reason_code: RejectionReasonCode,
+        quality_findings: list[RejectionQualityFinding],
+    ) -> TaskRejectionProvenance:
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if task_row is None:
+            raise EventRejected("task.applied: rejection task not found")
+        task = self._row_to_task(task_row, conn)
+
+        evidence_row = self._latest_evidence_row(conn, task_id)
+        if evidence_row is None:
+            raise EventRejected(
+                "task.applied: rejection requires a persisted review attempt"
+            )
+        evidence = self._row_to_evidence(evidence_row)
+        claim_row = conn.execute(
+            "SELECT * FROM claims WHERE id = ?", (evidence.claim_id,)
+        ).fetchone()
+        if claim_row is None:
+            raise EventRejected(
+                "task.applied: rejection review attempt has no persisted claim"
+            )
+        claim = self._row_to_claim(claim_row)
+        if claim.task_id != task_id:
+            raise EventRejected(
+                "task.applied: rejection claim/task binding is inconsistent"
+            )
+
+        # Finding presence always wins: quality observations must never be
+        # hidden behind an evidence/process assertion. Omission is ambiguous
+        # and therefore also remains quality unless one exact persisted
+        # eligibility predicate below proves a narrower category.
+        category = RejectionCategory.quality
+        matched_process_predicate: RejectionProcessPredicate | None = None
+        if not quality_findings and reason_code is RejectionReasonCode.evidence_incomplete:
+            from anvil.review.gates import evidence_complete
+
+            gate_passed, _missing = evidence_complete(task, evidence)
+            if not gate_passed:
+                category = RejectionCategory.evidence_resubmission
+        elif not quality_findings and reason_code in _PROCESS_REASON_PREDICATES:
+            candidate = _PROCESS_REASON_PREDICATES[reason_code]
+            bundle_review_pending = False
+            if (
+                candidate is RejectionProcessPredicate.bundle_member_claim
+                and claim.bundle_claim_id is not None
+            ):
+                bundle_row = conn.execute(
+                    "SELECT b.id, b.status, b.creation_event_id "
+                    "FROM bundle_claims AS c "
+                    "JOIN execution_bundles AS b ON b.id = c.bundle_id "
+                    "WHERE c.id = ?",
+                    (claim.bundle_claim_id,),
+                ).fetchone()
+                if bundle_row is not None:
+                    review_passed = self._bundle_review_round_passes(
+                        conn, bundle_row[0], bundle_row[2]
+                    ) or self._legacy_bundle_review_round_passes(
+                        conn, bundle_row[0], bundle_row[2]
+                    )
+                    bundle_review_pending = (
+                        bundle_row[1] == BundleStatus.implemented_unreviewed.value
+                        and not review_passed
+                    )
+            predicate_matches = {
+                RejectionProcessPredicate.claim_status_stale: (
+                    claim.status is ClaimStatus.stale
+                ),
+                RejectionProcessPredicate.claim_status_force_released: (
+                    claim.status is ClaimStatus.force_released
+                ),
+                RejectionProcessPredicate.bundle_member_claim: (
+                    bundle_review_pending
+                ),
+            }[candidate]
+            if predicate_matches:
+                category = RejectionCategory.process
+                matched_process_predicate = candidate
+
+        return TaskRejectionProvenance(
+            category=category,
+            reason_code=reason_code,
+            claim_id=claim.id,
+            review_attempt_id=evidence.id,
+            supporting_evidence_digest=supporting_evidence_digest(evidence),
+            quality_findings=quality_findings,
+            matched_process_predicate=matched_process_predicate,
+            counts_toward_accept_rate=(category is RejectionCategory.quality),
+        )
 
     # ------------------------------------------------------------------
     # Phase 8 — sync mapping query helpers
@@ -3577,7 +3739,7 @@ class SqliteBackend:
         """Raise SchemaMismatch if on-disk version is incompatible with SCHEMA_VERSION.
 
         Auto-upgrade follows the ordered, idempotent ``_MIGRATIONS`` chain
-        through the current schema (v18). ``v0`` and ``v1`` are normalized to
+        through the current schema (v19). ``v0`` and ``v1`` are normalized to
         the v2 baseline by current DDL before the explicit ladder runs. The
         early historical transitions remain noteworthy because they repair
         pre-existing tables that ``CREATE TABLE IF NOT EXISTS`` cannot alter:
@@ -3611,7 +3773,7 @@ class SqliteBackend:
         equal to SCHEMA_VERSION) and the migration branches would never
         fire.
 
-        Every later step, v5→v6 through v16→v17, is represented by one
+        Every later step, v5→v6 through v18→v19, is represented by one
         contiguous tuple in ``_MIGRATIONS``. Any gap between the on-disk version
         and ``SCHEMA_VERSION`` fails closed. See docs/migrations.md.
         """
@@ -4335,6 +4497,64 @@ class SqliteBackend:
             raise
         conn.execute("COMMIT")
 
+    def _m_to_v19(self, conn: sqlite3.Connection) -> None:
+        """v18 -> v19: persist engine-derived task-rejection provenance."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(reviews)")}
+            additions = (
+                (
+                    "rejection_category",
+                    "TEXT CHECK (rejection_category IS NULL OR "
+                    "rejection_category IN ('quality', 'evidence_resubmission', "
+                    "'process'))",
+                ),
+                (
+                    "rejection_reason_code",
+                    "TEXT CHECK (rejection_reason_code IS NULL OR "
+                    "rejection_reason_code IN ('unspecified_quality', "
+                    "'quality_findings', 'evidence_incomplete', 'claim_stale', "
+                    "'claim_force_released', 'bundle_review_required'))",
+                ),
+                ("claim_id", "TEXT"),
+                ("review_attempt_id", "TEXT"),
+                (
+                    "supporting_evidence_digest",
+                    "TEXT CHECK (supporting_evidence_digest IS NULL OR "
+                    "length(supporting_evidence_digest) = 64)",
+                ),
+                ("quality_findings", "TEXT NOT NULL DEFAULT '[]'"),
+                (
+                    "matched_process_predicate",
+                    "TEXT CHECK (matched_process_predicate IS NULL OR "
+                    "matched_process_predicate IN ('claim_status_stale', "
+                    "'claim_status_force_released', 'bundle_member_claim'))",
+                ),
+                (
+                    "counts_toward_accept_rate",
+                    "INTEGER NOT NULL DEFAULT 1 CHECK "
+                    "(counts_toward_accept_rate IN (0, 1))",
+                ),
+            )
+            for column, definition in additions:
+                if column not in columns:
+                    conn.execute(
+                        f"ALTER TABLE reviews ADD COLUMN {column} {definition}"
+                    )
+            # Historical task rejections are deliberately conservative: they
+            # had no typed provenance, so migration classifies them as quality
+            # and keeps their existing governor impact.
+            conn.execute(
+                "UPDATE reviews SET rejection_category = 'quality', "
+                "rejection_reason_code = 'unspecified_quality', "
+                "counts_toward_accept_rate = 1 "
+                "WHERE target_kind = 'task' AND decision = 'rejected'"
+            )
+        except BaseException:
+            self._safe_rollback(conn)
+            raise
+        conn.execute("COMMIT")
+
     _MIGRATIONS: list[tuple[int, Any]] = [
         (2, _m_to_v3),
         (3, _m_to_v4),
@@ -4352,6 +4572,7 @@ class SqliteBackend:
         (15, _m_to_v16),
         (16, _m_to_v17),
         (17, _m_to_v18),
+        (18, _m_to_v19),
     ]
 
     @staticmethod
@@ -12036,15 +12257,44 @@ class SqliteBackend:
         defensive 0-row invariant) is a write-phase concern, left in
         ``_write_task_applied``.
         """
-        _ = event
         decision: str = payload.decision
         task_id: str = payload.task_id
 
+        if payload.schema_version != 1:
+            raise EventRejected("task.applied: live event requires schema_version 1")
         if decision not in ("accepted", "rejected"):
             raise EventRejected(
                 f"task.applied: 'decision' must be 'accepted' or 'rejected', "
                 f"got {decision!r}."
             )
+        if decision == "accepted":
+            attempt_row = self._latest_evidence_row(conn, task_id)
+            if attempt_row is None:
+                raise EventRejected(
+                    "task.applied: acceptance requires a persisted review attempt"
+                )
+            current_attempt_id = self._row_to_evidence(attempt_row).id
+            if payload.review_attempt_id != current_attempt_id:
+                raise EventRejected(
+                    "task.applied: accepted review attempt does not match persisted state"
+                )
+        if decision == "rejected":
+            if payload.rejection is None:
+                raise EventRejected(
+                    "task.applied: live rejection requires engine-derived provenance"
+                )
+            if event.actor != payload.reviewer:
+                raise EventRejected("task.applied: event actor must equal reviewer")
+            expected = self._derive_task_rejection_provenance(
+                conn,
+                task_id,
+                reason_code=payload.rejection.reason_code,
+                quality_findings=list(payload.rejection.quality_findings),
+            )
+            if payload.rejection != expected:
+                raise EventRejected(
+                    "task.applied: rejection provenance does not match persisted state"
+                )
 
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (task_id,)
@@ -12054,6 +12304,15 @@ class SqliteBackend:
         actual_status = row[0]
         if actual_status == "needs_review":
             return  # fresh apply — proceed.
+        if decision == "rejected" and payload.rejection is not None:
+            # Replay bypasses ``_check`` and is handled idempotently by the
+            # writer. A second live event would classify the same persisted
+            # review attempt again under a caller-selected reason code.
+            raise EventRejected(
+                f"task.applied: status-drift for task '{task_id}'. "
+                f"Expected 'needs_review', got '{actual_status}'. "
+                "The rejection attempt has already been applied."
+            )
         acceptable = (
             ("accepted", "done")
             if decision == "accepted"
@@ -12104,10 +12363,44 @@ class SqliteBackend:
         reviewer: str = payload.reviewer
         decision: str = payload.decision
         notes: str | None = payload.notes
+        rejection = payload.rejection
         event_id: str = event.id
         timestamp: str = event.timestamp.isoformat()
+        review_attempt_id = (
+            rejection.review_attempt_id
+            if rejection is not None
+            else payload.review_attempt_id
+        )
+
+        if payload.schema_version is None:
+            if "schema_version" in payload.model_fields_set:
+                raise TransactionAborted(
+                    "task.applied: explicit-null schema_version is invalid"
+                )
+            if (
+                "review_attempt_id" in payload.model_fields_set
+                or "rejection" in payload.model_fields_set
+            ):
+                raise TransactionAborted(
+                    "task.applied: unversioned review provenance is invalid"
+                )
 
         if decision == "accepted":
+            if review_attempt_id is not None:
+                # Replay/catch-up bypasses ``_check_task_applied``. New-format
+                # accepted events must still bind the causally latest evidence
+                # attempt; only historical events that omitted the field stay
+                # intentionally unbound.
+                attempt_row = self._latest_evidence_row(conn, task_id)
+                current_attempt_id = (
+                    self._row_to_evidence(attempt_row).id
+                    if attempt_row is not None
+                    else None
+                )
+                if review_attempt_id != current_attempt_id:
+                    raise TransactionAborted(
+                        "task.applied: accepted review attempt replay mismatch"
+                    )
             # Transition needs_review → accepted.
             conn.execute(
                 """
@@ -12157,6 +12450,20 @@ class SqliteBackend:
                     )
 
         else:  # decision == "rejected"
+            if rejection is not None:
+                # Replay/catch-up skips ``_check_task_applied``. Recompute from
+                # the state established by all prior events so a modified new-
+                # format event cannot reclassify its attempt during replay.
+                expected = self._derive_task_rejection_provenance(
+                    conn,
+                    task_id,
+                    reason_code=rejection.reason_code,
+                    quality_findings=list(rejection.quality_findings),
+                )
+                if rejection != expected or event.actor != reviewer:
+                    raise TransactionAborted(
+                        "task.applied: rejection provenance replay mismatch"
+                    )
             # Per spec: needs_review → rejected → drafted (automatic; same txn).
             # The 'rejected' state is a brief audit marker; the task immediately
             # transitions to 'drafted' so it can be re-reviewed and re-promoted.
@@ -12208,14 +12515,62 @@ class SqliteBackend:
 
         # Insert the Review row — INSERT OR REPLACE for replay safety.
         review_id = f"RV-{event_id}"
+        rejection_category = (
+            rejection.category.value if rejection is not None else (
+                RejectionCategory.quality.value if decision == "rejected" else None
+            )
+        )
+        rejection_reason_code = (
+            rejection.reason_code.value if rejection is not None else (
+                RejectionReasonCode.unspecified_quality.value
+                if decision == "rejected"
+                else None
+            )
+        )
+        counts_toward_accept_rate = (
+            rejection.counts_toward_accept_rate if rejection is not None else True
+        )
         conn.execute(
             """
             INSERT OR REPLACE INTO reviews
-                (id, target_kind, target_id, reviewed_by, decision, notes, created_at)
+                (id, target_kind, target_id, reviewed_by, decision, notes,
+                 rejection_category, rejection_reason_code, claim_id,
+                 review_attempt_id, supporting_evidence_digest,
+                 quality_findings, matched_process_predicate,
+                 counts_toward_accept_rate, created_at)
             VALUES
-                (?, 'task', ?, ?, ?, ?, ?)
+                (?, 'task', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (review_id, task_id, reviewer, decision, notes, timestamp),
+            (
+                review_id,
+                task_id,
+                reviewer,
+                decision,
+                notes,
+                rejection_category,
+                rejection_reason_code,
+                rejection.claim_id if rejection is not None else None,
+                review_attempt_id,
+                (
+                    rejection.supporting_evidence_digest
+                    if rejection is not None
+                    else None
+                ),
+                json.dumps(
+                    [finding.model_dump(mode="json") for finding in rejection.quality_findings]
+                    if rejection is not None
+                    else [],
+                    separators=(",", ":"),
+                ),
+                (
+                    rejection.matched_process_predicate.value
+                    if rejection is not None
+                    and rejection.matched_process_predicate is not None
+                    else None
+                ),
+                int(counts_toward_accept_rate),
+                timestamp,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -12664,6 +13019,41 @@ class SqliteBackend:
         """
         d = dict(row)
         raw_decision = d.get("decision")
+        raw_category = d.get("rejection_category")
+        quality_findings_raw = d.pop("quality_findings", "[]")
+        if isinstance(quality_findings_raw, str):
+            quality_findings_raw = json.loads(quality_findings_raw)
+        counts_toward_accept_rate = bool(d.get("counts_toward_accept_rate", 1))
+        if raw_decision == "rejected" and raw_category is None:
+            raw_category = RejectionCategory.quality.value
+        d["rejection_category"] = raw_category
+        d["counts_toward_accept_rate"] = counts_toward_accept_rate
+
+        provenance_fields = (
+            d.get("rejection_reason_code"),
+            d.get("claim_id"),
+            d.get("review_attempt_id"),
+            d.get("supporting_evidence_digest"),
+        )
+        if raw_category is not None and all(value is not None for value in provenance_fields):
+            d["rejection"] = TaskRejectionProvenance(
+                category=raw_category,
+                reason_code=d["rejection_reason_code"],
+                claim_id=d["claim_id"],
+                review_attempt_id=d["review_attempt_id"],
+                supporting_evidence_digest=d["supporting_evidence_digest"],
+                quality_findings=quality_findings_raw,
+                matched_process_predicate=d.get("matched_process_predicate"),
+                counts_toward_accept_rate=counts_toward_accept_rate,
+            )
+        for column in (
+            "rejection_reason_code",
+            "claim_id",
+            "review_attempt_id",
+            "supporting_evidence_digest",
+            "matched_process_predicate",
+        ):
+            d.pop(column, None)
         if raw_decision in _TASK_OUTCOME_TO_REVIEW_DECISION:
             d["decision"] = _TASK_OUTCOME_TO_REVIEW_DECISION[raw_decision]
         elif raw_decision is not None and raw_decision not in {v.value for v in ReviewDecision}:

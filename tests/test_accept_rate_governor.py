@@ -12,6 +12,8 @@ import sqlite3
 import types
 from pathlib import Path
 
+import pytest
+
 from anvil.claims.metrics import AcceptRateMetrics
 from anvil.clock import FrozenClock
 
@@ -54,13 +56,23 @@ def _ev(task_id: str, actor: str, submitted_at=None):  # type: ignore[no-untyped
     )
 
 
-def _metrics(decisions, evidence, *, needs_review=0, floor=0.80, cap=10):  # type: ignore[no-untyped-def]
+def _metrics(
+    decisions,
+    evidence,
+    *,
+    needs_review=0,
+    floor=0.80,
+    cap=10,
+    window_days=7.0,
+    as_of=_NOW,
+):  # type: ignore[no-untyped-def]
     return AcceptRateMetrics(
         _StubBackend(decisions, evidence, needs_review),  # type: ignore[arg-type]
-        FrozenClock(_NOW),
-        window_days=7.0,
+        FrozenClock(as_of),
+        window_days=window_days,
         floor=floor,
         needs_review_cap=cap,
+        as_of=as_of,
     )
 
 
@@ -116,6 +128,17 @@ def test_rework_attributes_each_decision_to_the_runner_who_earned_it() -> None:
     assert m.accept_rate("B") == 1.0  # B's only reviewed submission was accepted
 
 
+def test_each_finalized_quality_attempt_is_one_counting_unit() -> None:
+    decisions = [
+        ("T", "rejected", _iso(3), "R1"),
+        ("T", "rejected", _iso(2), "R2"),
+        ("T", "accepted", _iso(1), "R3"),
+    ]
+    metrics = _metrics(decisions, [_ev("T", "A")])
+    assert metrics.acceptance_counts("A") == (1, 3)
+    assert metrics.accept_rate("A") == 1 / 3
+
+
 def test_accept_rate_excludes_decisions_outside_window() -> None:
     decisions = [
         ("T1", "accepted", _iso(1)),   # in window
@@ -124,6 +147,191 @@ def test_accept_rate_excludes_decisions_outside_window() -> None:
     evidence = [_ev("T1", "A"), _ev("T2", "A")]
     # Only T1 counts -> 1.0, not 0.5.
     assert _metrics(decisions, evidence).accept_rate("A") == 1.0
+
+
+def test_window_is_inclusive_excludes_future_and_orders_equal_timestamps() -> None:
+    cutoff = _NOW - datetime.timedelta(days=7)
+    decisions = [
+        ("T-future", "accepted", (_NOW + datetime.timedelta(microseconds=1)).isoformat(), "R9"),
+        ("T-now", "rejected", _NOW.isoformat(), "R2"),
+        ("T-tie", "accepted", _NOW.isoformat(), "R1"),
+        ("T-cutoff", "accepted", cutoff.isoformat(), "R0"),
+        (
+            "T-outside",
+            "rejected",
+            (cutoff - datetime.timedelta(microseconds=1)).isoformat(),
+            "R8",
+        ),
+    ]
+    evidence = [_ev(task_id, "A") for task_id, *_rest in decisions]
+    metrics = _metrics(decisions, evidence)
+
+    assert metrics.acceptance_counts("A") == (2, 3)
+    assert metrics.accept_rate("A") == 2 / 3
+    assert [item[3] for item in metrics._decisions or []] == ["R0", "R1", "R2"]
+
+
+def test_same_as_of_is_deterministic_across_input_order() -> None:
+    decisions = [
+        ("T1", "accepted", _iso(1), "R1"),
+        ("T2", "rejected", _iso(1), "R2"),
+    ]
+    evidence = [_ev("T1", "A"), _ev("T2", "A")]
+    forward = _metrics(decisions, evidence).projection("A")
+    reverse = _metrics(list(reversed(decisions)), evidence).projection("A")
+    assert forward == reverse
+    assert forward["as_of"] == "2026-06-21T12:00:00Z"
+    assert forward["window_start"] == "2026-06-14T12:00:00Z"
+
+
+def test_projection_reports_truthful_counts_floor_window_and_recovery() -> None:
+    projection = _metrics(
+        [("T1", "accepted", _iso(1)), ("T2", "rejected", _iso(1))],
+        [_ev("T1", "A"), _ev("T2", "A")],
+        floor=0.75,
+        cap=4,
+        needs_review=2,
+        window_days=14,
+    ).projection("A")
+
+    assert projection == {
+        "as_of": "2026-06-21T12:00:00Z",
+        "window_days": 14,
+        "window_start": "2026-06-07T12:00:00Z",
+        "numerator": 1,
+        "denominator": 2,
+        "rate": 0.5,
+        "floor": 0.75,
+        "configured_floor": 0.75,
+        "needs_review_depth": 2,
+        "needs_review_cap": 4,
+        "guidance": projection["guidance"],
+    }
+    guidance = str(projection["guidance"])
+    assert "clearing the review queue alone does not restore" in guidance
+    assert "accepted finalized reviews" in guidance
+    assert "expiry" in guidance
+    assert "configured floor" in guidance
+    assert "direct claim of a known task ID" in guidance
+    assert "ownership, conflict, PRD, risk, and evidence gates" in guidance
+
+
+def test_zero_denominator_and_floor_endpoints_use_exact_comparison() -> None:
+    assert _metrics([], [], floor=1).projection("new")["rate"] is None
+    assert _metrics([], [], floor=1).actor_below_floor("new") is False
+
+    rejected = [("T1", "rejected", _iso(1))]
+    evidence = [_ev("T1", "A")]
+    assert _metrics(rejected, evidence, floor=0).actor_below_floor("A") is False
+    assert _metrics(rejected, evidence, floor=1).actor_below_floor("A") is True
+
+    escalated = [("T9", "rejected", _iso(i)) for i in range(3)]
+    escalated_metrics = _metrics(escalated, [_ev("T9", "A")], floor=1)
+    assert escalated_metrics.required_floor("T9") == 1.0
+
+    one_of_three = [
+        ("T1", "accepted", _iso(1)),
+        ("T2", "rejected", _iso(1)),
+        ("T3", "rejected", _iso(1)),
+    ]
+    one_of_three_evidence = [_ev("T1", "A"), _ev("T2", "A"), _ev("T3", "A")]
+    assert (
+        _metrics(
+            one_of_three,
+            one_of_three_evidence,
+            floor=0.3333333333333333,
+        ).actor_below_floor("A")
+        is False
+    )
+
+
+@pytest.mark.parametrize("floor", [-0.01, 1.01, float("nan"), float("inf")])
+def test_invalid_floor_fails_closed(floor: float) -> None:
+    with pytest.raises(ValueError, match="floor must be between 0 and 1"):
+        _metrics([], [], floor=floor)
+
+
+@pytest.mark.parametrize("window", [0, -1, float("nan"), float("inf")])
+def test_invalid_window_fails_closed(window: float) -> None:
+    with pytest.raises(ValueError, match="window_days must be finite and positive"):
+        _metrics([], [], window_days=window)
+
+
+def test_future_evidence_cannot_backfill_legacy_review_attribution() -> None:
+    decision_at = _NOW - datetime.timedelta(seconds=1)
+    future_submit = _NOW + datetime.timedelta(seconds=1)
+    metrics = _metrics(
+        [("T", "rejected", decision_at.isoformat(), "RV-legacy")],
+        [_ev("T", "future-actor", future_submit)],
+    )
+
+    assert metrics.acceptance_counts("future-actor") == (0, 0)
+
+
+def test_persisted_attempt_actor_wins_same_timestamp_ties() -> None:
+    decisions = [
+        ("T", "rejected", _NOW.isoformat(), "RV-1", "EV-a", "actor-b"),
+    ]
+    evidence = [
+        _ev("T", "actor-a", _NOW),
+        _ev("T", "actor-b", _NOW),
+    ]
+    metrics = _metrics(decisions, evidence)
+
+    assert metrics.acceptance_counts("actor-a") == (0, 0)
+    assert metrics.acceptance_counts("actor-b") == (0, 1)
+
+
+def test_non_quality_rejections_do_not_affect_governor_metrics(
+    tmp_path: Path,
+) -> None:
+    """The authoritative review query excludes process/evidence resubmissions."""
+    from anvil.state.sqlite import SqliteBackend
+
+    events_path = tmp_path / "events.jsonl"
+    events_path.touch()
+    backend = SqliteBackend(
+        db_path=str(tmp_path / "state.db"),
+        events_path=str(events_path),
+        clock=FrozenClock(_NOW),
+    )
+    backend.initialize()
+    try:
+        conn = sqlite3.connect(str(tmp_path / "state.db"))
+        for index, (task_id, decision, category, counts) in enumerate(
+            [
+                ("T-EVIDENCE", "rejected", "evidence_resubmission", 0),
+                ("T-QUALITY", "rejected", "quality", 1),
+                ("T-ACCEPT", "accepted", None, 1),
+            ],
+            start=1,
+        ):
+            timestamp = (_NOW - datetime.timedelta(minutes=index)).isoformat()
+            conn.execute(
+                "INSERT INTO reviews "
+                "(id, target_kind, target_id, reviewed_by, decision, notes, "
+                "rejection_category, counts_toward_accept_rate, created_at) "
+                "VALUES (?, 'task', ?, 'reviewer', ?, NULL, ?, ?, ?)",
+                (f"RV-{index}", task_id, decision, category, counts, timestamp),
+            )
+            conn.execute(
+                "INSERT INTO evidence "
+                "(id, task_id, claim_id, commands_run, output_excerpt, "
+                "files_changed, pr_url, commit_sha, screenshots, "
+                "known_limitations, submitted_at, submitted_by) "
+                "VALUES (?, ?, ?, '[]', NULL, '[]', NULL, NULL, '[]', "
+                "NULL, ?, 'worker-a')",
+                (f"EV-{index}", task_id, f"C-{index}", timestamp),
+            )
+        conn.commit()
+        conn.close()
+
+        metrics = AcceptRateMetrics(backend, FrozenClock(_NOW))
+        assert metrics.accept_rate("worker-a") == 0.5
+        assert metrics.rejection_count("T-EVIDENCE") == 0
+        assert metrics.rejection_count("T-QUALITY") == 1
+    finally:
+        backend.close()
 
 
 # -- review-debt cap ---------------------------------------------------------
@@ -222,6 +430,50 @@ def test_next_claimable_returns_none_when_review_queue_saturated(
         assert mgr.next_claimable(metrics=saturated) is None
     finally:
         b.close()
+
+
+def test_direct_known_task_claim_bypasses_only_offer_throttling(tmp_path: Path) -> None:
+    from tests.test_claims import (
+        _insert_feature_raw,
+        _insert_task_raw,
+        _make_backend,
+        _make_clock,
+        _make_manager,
+        _setup_prd,
+        _setup_project,
+    )
+
+    clock = _make_clock()
+    backend = _make_backend(tmp_path, clock)
+    _setup_project(backend)
+    _setup_prd(backend, approve=True)
+    conn = sqlite3.connect(str(tmp_path / "state.db"))
+    _insert_feature_raw(conn)
+    _insert_task_raw(conn, task_id="T001", status="ready")
+    _insert_task_raw(conn, task_id="T002", status="ready")
+    _insert_task_raw(conn, task_id="T003", status="ready")
+    conn.close()
+    try:
+        other = _make_manager(backend, actor="other", clock=clock)
+        other.claim("T001", expected_files=["src/shared.py"])
+        manager = _make_manager(backend, actor="low", clock=clock)
+        governor = _metrics(
+            [("T-old", "rejected", _iso(1))],
+            [_ev("T-old", "low")],
+        )
+        assert governor.actor_below_floor("low") is True
+        assert manager.next_claimable(metrics=governor) is None
+
+        result = manager.claim("T003")
+        assert result.claim.task_id == "T003"
+        assert result.claim.claimed_by == "low"
+
+        from anvil.claims.manager import ClaimError
+
+        with pytest.raises(ClaimError, match="conflict"):
+            manager.claim("T002", expected_files=["src/shared.py"])
+    finally:
+        backend.close()
 
 
 def test_config_loads_governor_knobs(tmp_path: Path) -> None:

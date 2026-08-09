@@ -1070,8 +1070,13 @@ def next(  # noqa: A001
     (single-PRD projects) keeps the all-PRDs behaviour unchanged.
 
     With ``--json`` emits ``{"ok": true, "command": "next", "data":
-    {"task": {...} | null}}`` — ``task`` is null when nothing is claimable
-    (exit 0, an empty queue is not an error).
+    {"task": {...} | null, "governor": {...}, "withheld_reason": ...}}``.
+    The governor block always reports the exact observation window, rate
+    numerator/denominator, configured or task-escalated floor, review-queue
+    depth/cap, and recovery guidance. ``task`` is null when nothing is
+    claimable (exit 0, an empty queue is not an error); ``withheld_reason`` and
+    ``governor.offer_throttled`` distinguish governed withholding from an
+    empty or otherwise ineligible queue.
 
     With ``-q``/``--quiet`` prints nothing and uses the exit code as the
     signal: 0 if a task is claimable, 3 if the queue is empty (an empty
@@ -1183,13 +1188,6 @@ def next(  # noqa: A001
                         f"{detail} Remediation: {remediation}"
                     )
             return
-        scoped_ready_tasks = (
-            backend.list_tasks(
-                status="ready", task_type=task_type, prd_id=scoped_prd_id
-            )
-            if scoped_prd_id is not None
-            else []
-        )
         scoped_empty_message: str | None = None
 
         manager = ClaimManager(backend, clock, actor=resolved_actor)
@@ -1205,37 +1203,39 @@ def next(  # noqa: A001
             window_days=cfg.accept_rate_window_days if cfg is not None else 7.0,
             floor=cfg.accept_rate_floor if cfg is not None else 0.80,
             needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
+            as_of=clock.now(),
         )
-        task = manager.next_claimable(
+        diagnosis = manager.diagnose_next_offer(
             task_type=task_type,
             max_blast=max_blast,
             max_review_risk=max_review_risk,
             metrics=metrics,
             prd_id=scoped_prd_id,
         )
+        task = diagnosis.task
         # B49 observability: distinguish a governed withhold (review queue
         # saturated / runner below the accept-rate floor) from a genuinely empty
         # queue — otherwise an idle fleet is indistinguishable from a done one.
-        withheld_reason = (
-            metrics.withhold_reason(resolved_actor) if task is None else None
-        )
-        # B45 ceilings can also empty the result (and currently always do, since
-        # confirmation is inert). Distinguish that from a truly empty queue too.
-        if (
-            task is None
-            and withheld_reason is None
-            and (max_blast is not None or max_review_risk is not None)
-        ):
-            withheld_reason = "risk_ceiling"
+        withheld_reason = diagnosis.withheld_reason
+        governor_task_id = diagnosis.governor_task_id
         if task is None and scoped_prd_id is not None:
-            if not scoped_ready_tasks:
+            if diagnosis.ready_count == 0:
                 scoped_empty_message = f"No ready tasks in this PRD ({scoped_prd_id})."
-                withheld_reason = "no_ready_tasks_in_prd"
-            elif withheld_reason is None:
+            else:
                 scoped_empty_message = (
                     f"No claimable tasks in this PRD ({scoped_prd_id})."
                 )
-                withheld_reason = "no_claimable_tasks_in_prd"
+
+        governor_projection = metrics.projection(
+            resolved_actor,
+            task_id=task.id if task is not None else governor_task_id,
+        )
+        governor_projection["withheld_reason"] = withheld_reason
+        governor_projection["offer_throttled"] = withheld_reason in {
+            "review_queue_saturated",
+            "actor_below_floor",
+            "task_accept_rate_floor",
+        }
 
         # retro-opps T009 — ADVISORY collision visibility: the selected task's
         # likely_files intersected with active claims' expected_files, via the
@@ -1275,6 +1275,7 @@ def next(  # noqa: A001
             "review_tier": task_review_tier,
             "conflict_warnings": conflict_warnings,
             "withheld_reason": withheld_reason,
+            "governor": governor_projection,
         }
         if scoped_empty_message is not None:
             data["prd"] = scoped_prd_id
@@ -1285,6 +1286,15 @@ def next(  # noqa: A001
         return
 
     if task is None:
+        typer.echo(
+            "Governor: "
+            f"numerator={governor_projection['numerator']} "
+            f"denominator={governor_projection['denominator']} "
+            f"rate={governor_projection['rate']} "
+            f"floor={governor_projection['floor']} "
+            f"window_days={governor_projection['window_days']} "
+            f"as_of={governor_projection['as_of']}"
+        )
         if scoped_empty_message is not None:
             typer.echo(scoped_empty_message)
             raise typer.Exit(code=3)
@@ -1296,7 +1306,12 @@ def next(  # noqa: A001
         elif withheld_reason == "actor_below_floor":
             typer.echo(
                 f"No work offered: actor {safe_actor_label(resolved_actor)} is below the "
-                "accept-rate floor. Let current work clear review first."
+                "accept-rate floor."
+            )
+        elif withheld_reason == "task_accept_rate_floor":
+            typer.echo(
+                "No work offered: the next eligible task requires accept-rate "
+                f"floor {governor_projection['floor']}."
             )
         elif withheld_reason == "risk_ceiling":
             typer.echo(
@@ -1307,6 +1322,7 @@ def next(  # noqa: A001
             )
         else:
             typer.echo("No claimable tasks available.")
+        typer.echo(f"Recovery: {governor_projection['guidance']}")
         return
 
     typer.echo(f"Next recommended task: {task.id}")
@@ -1315,6 +1331,16 @@ def next(  # noqa: A001
     typer.echo(f"  Review tier: {task_review_tier}")
     if task.scores.complexity is not None:
         typer.echo(f"  Complexity: {task.scores.complexity}")
+    typer.echo(
+        "  Governor: "
+        f"numerator={governor_projection['numerator']} "
+        f"denominator={governor_projection['denominator']} "
+        f"rate={governor_projection['rate']} "
+        f"floor={governor_projection['floor']} "
+        f"window_days={governor_projection['window_days']} "
+        f"as_of={governor_projection['as_of']}"
+    )
+    typer.echo(f"  Recovery: {governor_projection['guidance']}")
     for warning in conflict_warnings:
         typer.echo(
             f"  Conflict warning: files {', '.join(warning['files'])} overlap "

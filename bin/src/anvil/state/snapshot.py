@@ -154,7 +154,18 @@ def serialize_state(backend: Backend) -> dict[str, Any]:
             for c in sorted(backend.list_claims(), key=lambda c: c.id)
         ],
         "reviews": [
-            r.model_dump(mode="json")
+            r.model_dump(
+                mode="json",
+                exclude=(
+                    {
+                        "rejection_category",
+                        "counts_toward_accept_rate",
+                        "rejection",
+                    }
+                    if r.rejection_category is None
+                    else ({"rejection"} if r.rejection is None else set())
+                ),
+            )
             for r in sorted(backend.list_reviews(), key=lambda r: r.id)
         ],
         "evidence": [

@@ -31,6 +31,7 @@ changes don't actually need a migration in the SQL sense; we just bump
 | v16     | Behavior-first PRD readiness | `prds` adds `assumptions TEXT NOT NULL DEFAULT '[]'`, storing typed, stable PRD assumptions alongside the canonical PRD state. The additive default preserves the prior meaning for every existing PRD: no recorded assumptions. |
 | v17     | Claim-bound progress attestations | `claims` adds monotonic `generation` and nullable immutable `attestation_context`; `claim_progress_attestations` records one pending, consumed, invalidated, or quarantined progress fact per claim generation. Legacy claims receive deterministic generations and remain unattestable when their context is NULL. |
 | v18     | Revision-bound PRD source provenance | `prds` adds exact source bytes plus digest, size, UTF-8 encoding, source revision, and explicit availability fields. Existing rows retain their lifecycle and ownership state but migrate as `legacy_unbound` with no fabricated source or digest. |
+| v19     | Task-rejection provenance | `reviews` adds immutable engine-derived category, reason, attempt/claim identity, evidence digest, typed findings, matched process predicate, and accept-rate accounting. Historical task rejections migrate conservatively as counting `quality`; no missing identity is fabricated. |
 
 Canonical PRD titles require no new schema migration: `prds.title` has existed
 since v7. Historical rows and legacy events that have no title remain `""`;
@@ -129,6 +130,27 @@ are otherwise preserved. New provenance-bearing `prd.parsed` and `prd.revised`
 events update the complete source tuple in the same projection transaction as
 the corresponding PRD revision. Because exact PRD source bytes can be stored in
 `state.db`, treat database backups as containing the authored PRD content.
+
+## Engine-derived task-rejection provenance — v18 → v19 auto-upgrade
+
+The v19 migration adds rejection-category, reason-code, claim/review-attempt
+identity, evidence-digest, typed-finding, matched-process-predicate, and
+accept-rate-accounting columns to `reviews`. New rejected `task.applied`
+events carry the exact immutable provenance object derived from persisted
+evidence and claim state; live append and replay independently recompute it.
+
+Historical task rejections had no typed provenance. They migrate and replay as
+counting `quality` rejections with reason `unspecified_quality`; claim,
+attempt, evidence-digest, and process-predicate fields remain NULL rather than
+being inferred. Historical accepted and non-task reviews retain their prior
+shape.
+
+New accepted `task.applied` events also bind the exact evidence attempt that
+was reviewed. Live append validates that binding under the event lock, and
+replay recomputes it before projecting the accepted review. Historical
+accepted events that predate the v1 payload discriminator remain deliberately
+unbound (`review_attempt_id` and submitter stay NULL); migration and replay do
+not guess an identity for them.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 
@@ -229,13 +251,13 @@ migrate the backend. For operators who want the migration to be deliberate,
 explicit, backed-up, dry-run-by-default command. It does **not** introduce a new
 migration framework — it runs the ordered, idempotent `_MIGRATIONS` chain from
 every supported historical version through the current `SCHEMA_VERSION`
-(currently v18, including the final v17→v18 step) that already lives in
+(currently v19, including the final v18→v19 step) that already lives in
 `SqliteBackend._check_schema_version`.
 
 ```bash
 # Inspect what would happen (dry run — mutates nothing):
 $ anvil migrate state
-Schema migration  : v3 -> v18
+Schema migration  : v3 -> v19
 Will back up      : /repo/.anvil/state.db
             to    : /repo/.anvil/state.db.pre-schema-migration.bak
 
@@ -243,7 +265,7 @@ Dry run — nothing written. Re-run with --yes to apply.
 
 # Apply it:
 $ anvil migrate state --yes
-Migrated state.db v3 -> v18.
+Migrated state.db v3 -> v19.
 Backup written to /repo/.anvil/state.db.pre-schema-migration.bak.
 ```
 

@@ -81,6 +81,11 @@ __all__ = [
     "DelegatedAgentStatus",
     "ReviewTargetKind",
     "ReviewDecision",
+    "RejectionCategory",
+    "RejectionReasonCode",
+    "RejectionQualityFinding",
+    "RejectionQualityFindingCode",
+    "RejectionProcessPredicate",
     "ExternalSystem",
     "KNOWN_EXTERNAL_SYSTEMS",
     "SyncState",
@@ -125,6 +130,8 @@ __all__ = [
     "AcceptanceProof",
     "Decision",
     "Review",
+    "TaskRejectionProvenance",
+    "supporting_evidence_digest",
     "EventDraft",
     "Event",
     "SyncMapping",
@@ -289,6 +296,46 @@ class ReviewDecision(enum.StrEnum):
     approve = "approve"
     reject = "reject"
     needs_changes = "needs_changes"
+
+
+class RejectionCategory(enum.StrEnum):
+    """Engine-derived accounting class for a rejected task review."""
+
+    quality = "quality"
+    evidence_resubmission = "evidence_resubmission"
+    process = "process"
+
+
+class RejectionReasonCode(enum.StrEnum):
+    """Bounded reviewer assertion that the engine independently verifies."""
+
+    unspecified_quality = "unspecified_quality"
+    quality_findings = "quality_findings"
+    evidence_incomplete = "evidence_incomplete"
+    claim_stale = "claim_stale"
+    claim_force_released = "claim_force_released"
+    bundle_review_required = "bundle_review_required"
+
+
+class RejectionQualityFindingCode(enum.StrEnum):
+    """Typed quality dimensions; explanatory prose remains in review notes."""
+
+    correctness = "correctness"
+    security = "security"
+    tests = "tests"
+    scope = "scope"
+    maintainability = "maintainability"
+    documentation = "documentation"
+    performance = "performance"
+    other = "other"
+
+
+class RejectionProcessPredicate(enum.StrEnum):
+    """Persisted engine facts eligible for a non-quality process rejection."""
+
+    claim_status_stale = "claim_status_stale"
+    claim_status_force_released = "claim_status_force_released"
+    bundle_member_claim = "bundle_member_claim"
 
 
 class ExternalSystem(enum.StrEnum):
@@ -1860,6 +1907,76 @@ class Evidence(BaseModel):
         return _require_utc(v, "submitted_at")
 
 
+class RejectionQualityFinding(BaseModel):
+    """One bounded typed quality finding attached to a rejected attempt."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: RejectionQualityFindingCode
+
+
+class TaskRejectionProvenance(BaseModel):
+    """Immutable engine-derived provenance for one rejected review attempt."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    category: RejectionCategory
+    reason_code: RejectionReasonCode
+    claim_id: StrictStr = Field(min_length=1, max_length=255)
+    review_attempt_id: StrictStr = Field(min_length=1, max_length=255)
+    supporting_evidence_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    quality_findings: tuple[RejectionQualityFinding, ...] = Field(
+        default_factory=tuple,
+        max_length=32,
+    )
+    matched_process_predicate: RejectionProcessPredicate | None = None
+    counts_toward_accept_rate: StrictBool
+
+    @model_validator(mode="after")
+    def _validate_derived_shape(self) -> TaskRejectionProvenance:
+        finding_codes = [finding.code for finding in self.quality_findings]
+        if len(finding_codes) != len(set(finding_codes)):
+            raise ValueError("rejection quality finding codes must be unique")
+        if self.category is RejectionCategory.quality:
+            if self.matched_process_predicate is not None:
+                raise ValueError("quality rejection cannot carry a process predicate")
+            if not self.counts_toward_accept_rate:
+                raise ValueError("quality rejection must count toward accept rate")
+        elif self.category is RejectionCategory.evidence_resubmission:
+            if self.reason_code is not RejectionReasonCode.evidence_incomplete:
+                raise ValueError(
+                    "evidence-resubmission rejection requires evidence_incomplete"
+                )
+            if self.quality_findings or self.matched_process_predicate is not None:
+                raise ValueError(
+                    "evidence-resubmission rejection cannot carry findings or a "
+                    "process predicate"
+                )
+            if self.counts_toward_accept_rate:
+                raise ValueError(
+                    "evidence-resubmission rejection cannot count toward accept rate"
+                )
+        else:
+            if self.quality_findings:
+                raise ValueError("process rejection cannot carry quality findings")
+            if self.matched_process_predicate is None:
+                raise ValueError("process rejection requires a matched predicate")
+            if self.counts_toward_accept_rate:
+                raise ValueError("process rejection cannot count toward accept rate")
+        return self
+
+
+def supporting_evidence_digest(evidence: Evidence) -> str:
+    """Return the stable digest binding a review to persisted evidence bytes."""
+    from anvil.state.hashing import domain_separated_sha256
+
+    return domain_separated_sha256(
+        b"anvil.task-review-evidence.v1\0",
+        evidence.model_dump(mode="json"),
+    )
+
+
 class EventRange(BaseModel):
     """The inclusive event-id span an ``AcceptanceProof`` attests to."""
 
@@ -1962,7 +2079,26 @@ class Review(BaseModel):
     reviewed_by: str
     decision: ReviewDecision
     notes: str | None = None
+    rejection_category: RejectionCategory | None = None
+    counts_toward_accept_rate: StrictBool = True
+    rejection: TaskRejectionProvenance | None = None
     created_at: datetime.datetime
+
+    @model_validator(mode="after")
+    def _validate_rejection_provenance(self) -> Review:
+        if self.rejection is not None and self.target_kind is not ReviewTargetKind.task:
+            raise ValueError("rejection provenance is task-review-only")
+        if self.rejection is not None and self.decision is not ReviewDecision.needs_changes:
+            raise ValueError("rejection provenance requires a rejected task review")
+        if self.rejection is not None:
+            if self.rejection_category is not self.rejection.category:
+                raise ValueError("review rejection category/provenance mismatch")
+            if (
+                self.counts_toward_accept_rate
+                is not self.rejection.counts_toward_accept_rate
+            ):
+                raise ValueError("review rejection accounting/provenance mismatch")
+        return self
 
     @field_validator("created_at", mode="after")
     @classmethod

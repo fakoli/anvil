@@ -6,6 +6,20 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **Truthful task-rejection provenance and governor recovery (#181).** Rejected
+  review attempts now persist engine-derived quality, evidence-resubmission, or
+  process provenance with exact claim/evidence identity, and new accepted
+  reviews bind the exact evidence attempt under live and replay validation;
+  historical accepted reviews remain explicitly unbound. Only finalized quality
+  attempts count against accept rate, while legacy rejections migrate
+  conservatively as quality. CLI and MCP rejection/offer responses now report
+  the exact numerator, denominator, rate, floor, inclusive window, calculation
+  time, queue depth, withhold reason, and recovery paths. MCP task offers now
+  enforce the same governor as CLI. This adds schema version 19 and advances the
+  public API contract to version 10.
+
 ### Fixed
 
 - **Atomic canonical planning graphs.** CLI, MCP, sample, and scan planning now

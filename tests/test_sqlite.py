@@ -44,6 +44,9 @@ from anvil.state.models import (
     Event,
     EventDraft,
     HookCommandAttribution,
+    RejectionQualityFinding,
+    RejectionQualityFindingCode,
+    RejectionReasonCode,
     claim_command_semantic_projection,
     hook_command_semantic_digest,
     task_snapshot_revision,
@@ -1586,6 +1589,7 @@ def _make_event(
                     "claim.renewed": "renewed_by",
                     "evidence.submitted": "submitted_by",
                     "progress.noted": "actor",
+                    "task.applied": "reviewer",
                 }.get(action, ""),
                 "test",
             )
@@ -4743,13 +4747,46 @@ def _make_applied_payload(
     reviewer: str = "alice",
     decision: str = "accepted",
     notes: str | None = None,
+    review_attempt_id: str = "EV001",
 ) -> dict[str, Any]:
-    return {
+    payload = {
+        "schema_version": 1,
         "task_id": task_id,
         "reviewer": reviewer,
         "decision": decision,
         "notes": notes,
     }
+    if decision == "accepted":
+        payload["review_attempt_id"] = review_attempt_id
+    return payload
+
+
+def _make_rejected_applied_payload(
+    backend: SqliteBackend,
+    *,
+    task_id: str = "T001",
+    reviewer: str = "alice",
+    notes: str | None = None,
+    reason_code: RejectionReasonCode = RejectionReasonCode.unspecified_quality,
+    quality_findings: list[RejectionQualityFindingCode] | None = None,
+) -> dict[str, Any]:
+    """Build the exact engine-derived payload required for a live rejection."""
+    findings = [
+        RejectionQualityFinding(code=code) for code in (quality_findings or [])
+    ]
+    provenance = backend.derive_task_rejection_provenance(
+        task_id,
+        reason_code=reason_code,
+        quality_findings=findings,
+    )
+    payload = _make_applied_payload(
+        task_id=task_id,
+        reviewer=reviewer,
+        decision="rejected",
+        notes=notes,
+    )
+    payload["rejection"] = provenance.model_dump(mode="json")
+    return payload
 
 
 def _setup_claimable_task_and_claim(
@@ -5084,7 +5121,9 @@ class TestPhase5EvidenceAndApplyHandlers:
 
             b.append(_make_event(
                 "task.applied",
-                _make_applied_payload(decision="rejected", reviewer="bob", notes="Needs more tests."),
+                _make_rejected_applied_payload(
+                    b, reviewer="bob", notes="Needs more tests."
+                ),
                 event_id="E000012", target_kind="task", target_id="T001",
             ))
 
@@ -5141,7 +5180,10 @@ class TestPhase5EvidenceAndApplyHandlers:
         try:
             _setup_claimable_task_and_claim(b)
             # Task is 'claimed', not 'needs_review'
-            with pytest.raises((EventRejected, TransactionAborted), match="needs_review|status|T001"):
+            with pytest.raises(
+                (EventRejected, TransactionAborted),
+                match="needs_review|status|T001|review attempt",
+            ):
                 b.append(_make_event(
                     "task.applied",
                     _make_applied_payload(decision="accepted"),
@@ -5214,15 +5256,10 @@ class TestPhase5EvidenceAndApplyHandlers:
         finally:
             b.close()
 
-    def test_task_applied_rejected_replay_idempotent(self, tmp_path: Path) -> None:
-        """Replaying task.applied (rejected) twice is a no-op for the second
-        application.
-
-        After the auto-promote fix, the task ends at 'drafted' after the
-        first apply (rejected → drafted is automatic). The idempotent
-        branch must accept both 'rejected' (transient) and 'drafted'
-        (final) as valid states to encounter on replay.
-        """
+    def test_task_applied_rejected_attempt_cannot_be_replayed_live(
+        self, tmp_path: Path
+    ) -> None:
+        """The same rejected review attempt cannot create a second live event."""
         b = _make_backend(tmp_path)
         try:
             _setup_claimable_task_and_claim(b)
@@ -5233,11 +5270,16 @@ class TestPhase5EvidenceAndApplyHandlers:
 
             reject_event = _make_event(
                 "task.applied",
-                _make_applied_payload(decision="rejected", reviewer="bob", notes="Needs more."),
+                _make_rejected_applied_payload(
+                    b, reviewer="bob", notes="Needs more."
+                ),
                 event_id="E000012", target_kind="task", target_id="T001",
             )
             b.append(reject_event)  # first: needs_review → rejected → drafted
-            b.append(reject_event)  # second: idempotent no-op (already drafted)
+            event_count = len(_read_jsonl(str(tmp_path / "events.jsonl")))
+            with pytest.raises(EventRejected, match="already been applied"):
+                b.append(reject_event)
+            assert len(_read_jsonl(str(tmp_path / "events.jsonl"))) == event_count
 
             task = b.get_task("T001")
             assert task is not None
@@ -5264,7 +5306,7 @@ class TestPhase5EvidenceAndApplyHandlers:
             ))
             b.append(_make_event(
                 "task.applied",
-                _make_applied_payload(decision="rejected", reviewer="bob", notes="Fix it."),
+                _make_rejected_applied_payload(b, reviewer="bob", notes="Fix it."),
                 event_id="E000012", target_kind="task", target_id="T001",
             ))
 
@@ -5471,8 +5513,9 @@ class TestReplayIncludesPhase5Events:
             ))
             b.append(_make_event(
                 "task.applied",
-                _make_applied_payload(task_id="T001", reviewer="bob", decision="rejected",
-                                      notes="Incomplete."),
+                _make_rejected_applied_payload(
+                    b, task_id="T001", reviewer="bob", notes="Incomplete."
+                ),
                 event_id="E000012", target_kind="task", target_id="T001",
             ))
         finally:
@@ -5492,6 +5535,574 @@ class TestReplayIncludesPhase5Events:
         assert original_dump == replayed_dump, (
             "Replayed state.db does not match original after rejected task.applied."
         )
+
+
+class TestTaskRejectionProvenanceState:
+    """T009 authoritative rejection classification and accounting boundary."""
+
+    @staticmethod
+    def _submit_attempt(
+        backend: SqliteBackend,
+        *,
+        required_proof: bool = False,
+    ) -> None:
+        _setup_claimable_task_and_claim(
+            backend,
+            task_id="T001",
+            claim_id="C001",
+        ) if not required_proof else None
+        if required_proof:
+            _setup_claimable_task(
+                backend,
+                verification_required_proofs=[
+                    {
+                        "kind": "command",
+                        "command": "pytest tests/ -v",
+                        "passing_exit_codes": [0],
+                        "label": "tests pass",
+                    }
+                ],
+            )
+            backend.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(),
+                    target_kind="claim",
+                    target_id="C001",
+                )
+            )
+        backend.append(
+            _make_event(
+                "evidence.submitted",
+                _make_evidence_payload(),
+                target_kind="task",
+                target_id="T001",
+            )
+        )
+
+    def test_quality_finding_binds_attempt_and_counts(self, tmp_path: Path) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            self._submit_attempt(backend)
+            payload = _make_rejected_applied_payload(
+                backend,
+                reviewer="reviewer-a",
+                reason_code=RejectionReasonCode.quality_findings,
+                quality_findings=[RejectionQualityFindingCode.security],
+            )
+            provenance = payload["rejection"]
+            assert provenance["category"] == "quality"
+            assert provenance["claim_id"] == "C001"
+            assert provenance["review_attempt_id"] == "EV001"
+            assert len(provenance["supporting_evidence_digest"]) == 64
+            assert provenance["counts_toward_accept_rate"] is True
+
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    payload,
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            review = backend.list_reviews()[-1]
+            assert review.rejection is not None
+            assert review.rejection.category.value == "quality"
+            assert review.reviewed_by == "reviewer-a"
+            assert backend.list_task_review_decisions() == [
+                (
+                    "T001",
+                    "rejected",
+                    _T0.isoformat(),
+                    review.id,
+                    "EV001",
+                    "agent-alpha",
+                )
+            ]
+        finally:
+            backend.close()
+
+    def test_incomplete_typed_gate_is_non_counting_evidence_resubmission(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            self._submit_attempt(backend, required_proof=True)
+            payload = _make_rejected_applied_payload(
+                backend,
+                reviewer="reviewer-a",
+                reason_code=RejectionReasonCode.evidence_incomplete,
+            )
+            assert payload["rejection"]["category"] == "evidence_resubmission"
+            assert payload["rejection"]["counts_toward_accept_rate"] is False
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    payload,
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            assert backend.list_task_review_decisions() == []
+        finally:
+            backend.close()
+
+    def test_accepted_review_persists_exact_attempt_actor(self, tmp_path: Path) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            self._submit_attempt(backend)
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    _make_applied_payload(
+                        task_id="T001",
+                        reviewer="reviewer-a",
+                        decision="accepted",
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            review = backend.list_reviews()[-1]
+            assert backend.list_task_review_decisions() == [
+                (
+                    "T001",
+                    "accepted",
+                    _T0.isoformat(),
+                    review.id,
+                    "EV001",
+                    "agent-alpha",
+                )
+            ]
+        finally:
+            backend.close()
+
+    def test_equal_timestamp_rework_uses_causal_attempt_order(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task_and_claim(
+                backend, task_id="T001", claim_id="C001"
+            )
+            backend.append(
+                _make_event(
+                    "evidence.submitted",
+                    _make_evidence_payload(
+                        evidence_id="EVZZZ",
+                        claim_id="C001",
+                        submitted_by="agent-alpha",
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    _make_rejected_applied_payload(
+                        backend,
+                        reviewer="reviewer-a",
+                        reason_code=RejectionReasonCode.quality_findings,
+                        quality_findings=[RejectionQualityFindingCode.correctness],
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            for from_status, to_status in [
+                ("drafted", "reviewed"),
+                ("reviewed", "ready"),
+            ]:
+                backend.append(
+                    _make_event(
+                        "task.status_changed",
+                        {
+                            "task_id": "T001",
+                            "from": from_status,
+                            "to": to_status,
+                        },
+                        target_kind="task",
+                        target_id="T001",
+                    )
+                )
+            backend.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(
+                        claim_id="C002",
+                        task_id="T001",
+                        actor="runner-b",
+                        generation=2,
+                    ),
+                    target_kind="claim",
+                    target_id="C002",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "evidence.submitted",
+                    _make_evidence_payload(
+                        evidence_id="EVAAA",
+                        claim_id="C002",
+                        submitted_by="runner-b",
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    _make_applied_payload(
+                        task_id="T001",
+                        reviewer="reviewer-b",
+                        decision="accepted",
+                        review_attempt_id="EVAAA",
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+
+            decisions = backend.list_task_review_decisions()
+            assert [(row[1], row[4], row[5]) for row in decisions] == [
+                ("accepted", "EVAAA", "runner-b"),
+                ("rejected", "EVZZZ", "agent-alpha"),
+            ]
+            backend.replay_from_empty(tmp_path / "events.jsonl")
+            assert [(row[1], row[4], row[5]) for row in backend.list_task_review_decisions()] == [
+                ("accepted", "EVAAA", "runner-b"),
+                ("rejected", "EVZZZ", "agent-alpha"),
+            ]
+
+            raw_events = [
+                json.loads(line)
+                for line in (tmp_path / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            accepted = next(
+                event
+                for event in reversed(raw_events)
+                if event["action"] == "task.applied"
+                and event["payload_json"]["decision"] == "accepted"
+            )
+            invalid_decision_events = json.loads(json.dumps(raw_events))
+            invalid_decision = next(
+                event
+                for event in reversed(invalid_decision_events)
+                if event["action"] == "task.applied"
+                and event["payload_json"]["decision"] == "accepted"
+            )
+            invalid_decision["payload_json"]["decision"] = "invalid"
+            invalid_dir = tmp_path / "invalid-review-decision"
+            invalid_dir.mkdir()
+            invalid_log = invalid_dir / "events.jsonl"
+            invalid_log.write_text(
+                "".join(
+                    json.dumps(event, separators=(",", ":")) + "\n"
+                    for event in invalid_decision_events
+                ),
+                encoding="utf-8",
+            )
+            invalid_backend = SqliteBackend(
+                db_path=str(invalid_dir / "state.db"),
+                events_path=str(invalid_log),
+                clock=_make_clock(),
+            )
+            try:
+                with pytest.raises(
+                    TransactionAborted,
+                    match="payload parse failed.*task.applied",
+                ):
+                    invalid_backend.initialize()
+            finally:
+                invalid_backend.close()
+
+            for label, remove_version, expected_error in [
+                ("null-version", False, "explicit-null schema_version"),
+                ("missing-version", True, "unversioned review provenance"),
+            ]:
+                version_events = json.loads(json.dumps(raw_events))
+                version_accepted = next(
+                    event
+                    for event in reversed(version_events)
+                    if event["action"] == "task.applied"
+                    and event["payload_json"]["decision"] == "accepted"
+                )
+                if remove_version:
+                    version_accepted["payload_json"].pop("schema_version")
+                else:
+                    version_accepted["payload_json"]["schema_version"] = None
+                version_dir = tmp_path / label
+                version_dir.mkdir()
+                version_log = version_dir / "events.jsonl"
+                version_log.write_text(
+                    "".join(
+                        json.dumps(event, separators=(",", ":")) + "\n"
+                        for event in version_events
+                    ),
+                    encoding="utf-8",
+                )
+                version_backend = SqliteBackend(
+                    db_path=str(version_dir / "state.db"),
+                    events_path=str(version_log),
+                    clock=_make_clock(),
+                )
+                try:
+                    with pytest.raises(TransactionAborted, match=expected_error):
+                        version_backend.initialize()
+                finally:
+                    version_backend.close()
+
+            stripped_events = json.loads(json.dumps(raw_events))
+            stripped_accepted = next(
+                event
+                for event in reversed(stripped_events)
+                if event["action"] == "task.applied"
+                and event["payload_json"]["decision"] == "accepted"
+            )
+            stripped_accepted["payload_json"].pop("review_attempt_id")
+            stripped_dir = tmp_path / "stripped-accepted-attempt"
+            stripped_dir.mkdir()
+            stripped_log = stripped_dir / "events.jsonl"
+            stripped_log.write_text(
+                "".join(
+                    json.dumps(event, separators=(",", ":")) + "\n"
+                    for event in stripped_events
+                ),
+                encoding="utf-8",
+            )
+            stripped = SqliteBackend(
+                db_path=str(stripped_dir / "state.db"),
+                events_path=str(stripped_log),
+                clock=_make_clock(),
+            )
+            try:
+                with pytest.raises(
+                    TransactionAborted,
+                    match="v1 accepted review requires review_attempt_id",
+                ):
+                    stripped.initialize()
+            finally:
+                stripped.close()
+
+            accepted["payload_json"]["review_attempt_id"] = "EVZZZ"
+            tampered_dir = tmp_path / "tampered-accepted-attempt"
+            tampered_dir.mkdir()
+            tampered_log = tampered_dir / "events.jsonl"
+            tampered_log.write_text(
+                "".join(
+                    json.dumps(event, separators=(",", ":")) + "\n"
+                    for event in raw_events
+                ),
+                encoding="utf-8",
+            )
+            tampered = SqliteBackend(
+                db_path=str(tampered_dir / "state.db"),
+                events_path=str(tampered_log),
+                clock=_make_clock(),
+            )
+            try:
+                with pytest.raises(
+                    TransactionAborted,
+                    match="accepted review attempt replay mismatch",
+                ):
+                    tampered.initialize()
+            finally:
+                tampered.close()
+        finally:
+            backend.close()
+
+    def test_falsified_reason_and_reviewer_change_cannot_promote_category(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            self._submit_attempt(backend)
+            first = backend.derive_task_rejection_provenance(
+                "T001",
+                reason_code=RejectionReasonCode.evidence_incomplete,
+                quality_findings=[],
+            )
+            second = backend.derive_task_rejection_provenance(
+                "T001",
+                reason_code=RejectionReasonCode.evidence_incomplete,
+                quality_findings=[],
+            )
+            assert first.category.value == "quality"
+            assert first == second
+        finally:
+            backend.close()
+
+    def test_matched_persisted_process_predicate_is_non_counting(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            self._submit_attempt(backend)
+            # Model an engine-observed terminal claim fact. The derivation uses
+            # the persisted row and never the reviewer actor or free-text note.
+            backend._require_conn().execute(  # noqa: SLF001
+                "UPDATE claims SET status = 'stale' WHERE id = 'C001'"
+            )
+            provenance = backend.derive_task_rejection_provenance(
+                "T001",
+                reason_code=RejectionReasonCode.claim_stale,
+                quality_findings=[],
+            )
+            assert provenance.category.value == "process"
+            assert provenance.matched_process_predicate is not None
+            assert provenance.matched_process_predicate.value == "claim_status_stale"
+            assert provenance.counts_toward_accept_rate is False
+        finally:
+            backend.close()
+
+    def test_bundle_membership_alone_cannot_suppress_quality_counting(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            self._submit_attempt(backend)
+            conn = backend._require_conn()  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO execution_bundles "
+                "(id, creation_event_id, prd_id, coordinator, status, "
+                "review_policy, throughput_budget, delegated_agents, "
+                "created_at, updated_at) VALUES "
+                "('B001', 'E-B001', 'default', 'agent-alpha', 'planned', "
+                "'{}', '{}', '[]', ?, ?)",
+                (_T0.isoformat(), _T0.isoformat()),
+            )
+            conn.execute(
+                "INSERT INTO bundle_claims "
+                "(id, bundle_id, claimed_by, status, expected_files, "
+                "member_claim_ids, created_at, lease_expires_at, "
+                "last_heartbeat_at) VALUES "
+                "('BC001', 'B001', 'agent-alpha', 'active', '[]', '{}', ?, ?, ?)",
+                (
+                    _T0.isoformat(),
+                    (_T0 + timedelta(hours=1)).isoformat(),
+                    _T0.isoformat(),
+                ),
+            )
+            conn.execute(
+                "UPDATE claims SET bundle_claim_id = 'BC001' WHERE id = 'C001'"
+            )
+
+            membership_only = backend.derive_task_rejection_provenance(
+                "T001",
+                reason_code=RejectionReasonCode.bundle_review_required,
+                quality_findings=[],
+            )
+            assert membership_only.category.value == "quality"
+            assert membership_only.counts_toward_accept_rate is True
+
+            conn.execute(
+                "UPDATE execution_bundles SET status = 'implemented_unreviewed' "
+                "WHERE id = 'B001'"
+            )
+            pending_review = backend.derive_task_rejection_provenance(
+                "T001",
+                reason_code=RejectionReasonCode.bundle_review_required,
+                quality_findings=[],
+            )
+            assert pending_review.category.value == "process"
+            assert pending_review.counts_toward_accept_rate is False
+        finally:
+            backend.close()
+
+    def test_forged_provenance_and_actor_mismatch_are_prelog_refusals(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        events_path = tmp_path / "events.jsonl"
+        try:
+            self._submit_attempt(backend)
+            payload = _make_rejected_applied_payload(
+                backend,
+                reviewer="reviewer-a",
+            )
+            payload["rejection"]["supporting_evidence_digest"] = "0" * 64
+            baseline = events_path.read_bytes()
+            with pytest.raises(EventRejected, match="persisted state"):
+                backend.append(
+                    _make_event(
+                        "task.applied",
+                        payload,
+                        target_kind="task",
+                        target_id="T001",
+                    )
+                )
+            assert events_path.read_bytes() == baseline
+
+            honest = _make_rejected_applied_payload(
+                backend,
+                reviewer="reviewer-a",
+            )
+            with pytest.raises(EventRejected, match="actor must equal reviewer"):
+                backend.append(
+                    _make_event(
+                        "task.applied",
+                        honest,
+                        target_kind="task",
+                        target_id="T001",
+                        actor="claim-owner",
+                    )
+                )
+            assert events_path.read_bytes() == baseline
+        finally:
+            backend.close()
+
+    def test_historical_omitted_provenance_replays_as_quality(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "source"
+        source.mkdir()
+        backend = _make_backend(source)
+        try:
+            self._submit_attempt(backend)
+            payload = _make_rejected_applied_payload(
+                backend,
+                reviewer="reviewer-a",
+            )
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    payload,
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+        finally:
+            backend.close()
+
+        events = _read_jsonl(str(source / "events.jsonl"))
+        assert events[-1]["action"] == "task.applied"
+        events[-1]["payload_json"].pop("rejection")
+        events[-1]["payload_json"].pop("schema_version")
+        replay = tmp_path / "replay"
+        replay.mkdir()
+        replay_log = replay / "events.jsonl"
+        replay_log.write_text(
+            "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        replayed = SqliteBackend(
+            db_path=str(replay / "state.db"),
+            events_path=str(replay_log),
+            clock=_make_clock(),
+        )
+        try:
+            replayed.replay_from_empty(str(replay_log))
+            review = replayed.list_reviews()[-1]
+            assert review.rejection_category is not None
+            assert review.rejection_category.value == "quality"
+            assert review.rejection is None
+            assert review.counts_toward_accept_rate is True
+        finally:
+            replayed.close()
 
 
 # ---------------------------------------------------------------------------
@@ -6390,8 +7001,8 @@ class TestSchemaVersionPhase8:
     TestSchemaAutoUpgrade below and docs/migrations.md).
     """
 
-    def test_schema_version_is_eighteen(self) -> None:
-        """PRD source provenance persistence ships at SCHEMA_VERSION == 18
+    def test_schema_version_is_nineteen(self) -> None:
+        """Rejection provenance persistence ships at SCHEMA_VERSION == 19
         (v7 = multi-PRD foundation; v8 = per-PRD revision counter, T023;
         v9 = tasks.claims + evidence.category, issue #153;
         v10 = claims.session_id, retro-corpus concurrency theme;
@@ -6399,8 +7010,9 @@ class TestSchemaVersionPhase8:
         v12 = coordinator bundle claims; v13 = review dispositions;
         v14 = delivery lineage; v15 = authoritative result time, issue #171;
         v16 = typed PRD assumptions; v17 = claim generations + attestations;
-        v18 = exact revision-bound PRD source provenance)."""
-        assert SCHEMA_VERSION == 18
+        v18 = exact revision-bound PRD source provenance;
+        v19 = engine-derived task-rejection provenance)."""
+        assert SCHEMA_VERSION == 19
         assert f"PRAGMA user_version = {SCHEMA_VERSION};" in DDL
 
     def test_initialize_creates_sync_mappings_table_on_empty_db(
@@ -6418,7 +7030,6 @@ class TestSchemaVersionPhase8:
             conn.close()
             assert row is not None, "sync_mappings table missing after initialize()"
             assert row[0] == "sync_mappings"
-
             # And user_version matches the bump.
             conn = sqlite3.connect(str(tmp_path / "state.db"))
             v = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -6426,6 +7037,65 @@ class TestSchemaVersionPhase8:
             assert v == SCHEMA_VERSION
         finally:
             b.close()
+
+
+class TestV18ToV19RejectionProvenanceMigration:
+    """T009 — v18 historical task rejections remain conservative quality."""
+
+    def test_historical_rejection_backfills_quality_without_identity(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        backend.close()
+        db_path = tmp_path / "state.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO reviews "
+                "(id, target_kind, target_id, reviewed_by, decision, notes, "
+                "created_at) VALUES "
+                "('RV-OLD-R', 'task', 'T001', 'legacy', 'rejected', NULL, ?), "
+                "('RV-OLD-A', 'task', 'T002', 'legacy', 'accepted', NULL, ?)",
+                (_T0.isoformat(), _T0.isoformat()),
+            )
+            for column in (
+                "rejection_category",
+                "rejection_reason_code",
+                "claim_id",
+                "review_attempt_id",
+                "supporting_evidence_digest",
+                "quality_findings",
+                "matched_process_predicate",
+                "counts_toward_accept_rate",
+            ):
+                conn.execute(f"ALTER TABLE reviews DROP COLUMN {column}")
+            conn.execute("PRAGMA user_version = 18")
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated = _make_backend(tmp_path)
+        try:
+            assert migrated.get_schema_version() == SCHEMA_VERSION == 19
+            rows = {
+                row.id: row
+                for row in migrated.list_reviews()
+                if row.target_kind.value == "task"
+            }
+            rejected = rows["RV-OLD-R"]
+            assert rejected.rejection_category is not None
+            assert rejected.rejection_category.value == "quality"
+            assert rejected.rejection is None
+            assert rejected.counts_toward_accept_rate is True
+            accepted = rows["RV-OLD-A"]
+            assert accepted.rejection_category is None
+            assert accepted.rejection is None
+            assert migrated.list_task_review_decisions() == [
+                ("T001", "rejected", _T0.isoformat(), "RV-OLD-R", None, None),
+                ("T002", "accepted", _T0.isoformat(), "RV-OLD-A", None, None),
+            ]
+        finally:
+            migrated.close()
 
 
 # ---------------------------------------------------------------------------
@@ -8955,7 +9625,7 @@ class TestV8ToV9Migration:
 
         b = _make_backend(tmp_path)  # initialize() runs the ladder
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 18
+            assert b.get_schema_version() == SCHEMA_VERSION == 19
             task = b.get_task("T001")
             assert task is not None
             assert task.claims == []  # row preserved, backfilled to "no claims"
@@ -9134,7 +9804,7 @@ class TestV7ToV8Migration:
         b = SqliteBackend(db_path=db_path, events_path=events_path, clock=clock)
         b.initialize()  # must migrate v7 -> v8
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 18
+            assert b.get_schema_version() == SCHEMA_VERSION == 19
             conn = sqlite3.connect(db_path)
             try:
                 # The column now exists and backfilled to 1 for the existing row.
@@ -12559,8 +13229,7 @@ class TestDecideApplyContract:
             b.append(_make_event("evidence.submitted", _make_evidence_payload(),
                                  target_kind="task", target_id="T001"))
             b.append(_make_event("task.applied",
-                                 {"task_id": "T001", "reviewer": "alice",
-                                  "decision": "accepted", "notes": None},
+                                 _make_applied_payload(),
                                  target_kind="task", target_id="T001"))
             from anvil.state.models import TaskStatus
             task = b.get_task("T001")
@@ -12648,8 +13317,9 @@ class TestDecideApplyContract:
 
             b.append(_make_event(
                 "task.applied",
-                {"task_id": "T001", "reviewer": "bob",
-                 "decision": "rejected", "notes": "needs more tests"},
+                _make_rejected_applied_payload(
+                    b, reviewer="bob", notes="needs more tests"
+                ),
                 target_kind="task", target_id="T001",
             ))
 
@@ -12692,8 +13362,7 @@ class TestDecideApplyContract:
                                  target_kind="task", target_id="T001"))
             b.append(_make_event(
                 "task.applied",
-                {"task_id": "T001", "reviewer": "carol",
-                 "decision": "accepted", "notes": "LGTM"},
+                _make_applied_payload(reviewer="carol", notes="LGTM"),
                 target_kind="task", target_id="T001",
             ))
             task = b.get_task("T001")
@@ -13140,7 +13809,7 @@ class TestClaimProgressAttestationState:
         )
         b.initialize()
         try:
-            assert b.get_schema_version() == SCHEMA_VERSION == 18
+            assert b.get_schema_version() == SCHEMA_VERSION == 19
             assert b.get_claim("C001").generation == 1  # type: ignore[union-attr]
             assert b.get_claim("C002").generation == 2  # type: ignore[union-attr]
             assert b.get_claim("C001").attestation_context is None  # type: ignore[union-attr]

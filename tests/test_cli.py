@@ -1306,7 +1306,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "9"
+        assert API_VERSION == "10"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -3571,14 +3571,53 @@ class TestSinglePrdBackcompat:
             == {"T001", "T002"}
         )
 
-        # `next` is a single-pick, so its output IS byte-identical across the two
-        # paths: the highest-priority claimable task is the same either way.
+        # `next` is a single-pick, so the selected task and governor calculation
+        # are identical across the two paths. Each invocation truthfully reports
+        # its own observation time, so normalize only that timestamp pair.
         next_bare = json.loads(_invoke_cmd(tmp_path, ["next", "--json"]).output)
         next_def = json.loads(
             _invoke_cmd(tmp_path, ["next", "--json", "--prd", "default"]).output
         )
+        observed: list[datetime] = []
+        for response in (next_bare, next_def):
+            governor = response["data"]["governor"]
+            as_of = datetime.fromisoformat(governor["as_of"].replace("Z", "+00:00"))
+            window_start = datetime.fromisoformat(
+                governor["window_start"].replace("Z", "+00:00")
+            )
+            assert (as_of - window_start).total_seconds() == (
+                governor["window_days"] * 86_400
+            )
+            observed.append(as_of)
+            governor["as_of"] = "<observed>"
+            governor["window_start"] = "<window-start>"
+        assert observed[0] <= observed[1]
         assert next_bare == next_def
         assert next_bare["data"]["task"]["id"] == "T001"
+
+    def test_next_does_not_blame_risk_ceiling_for_unmet_dependency(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        _seed_default_prd(tmp_path, approve=True)
+        db = tmp_path / ".anvil" / "state.db"
+        _insert_task_row(db, task_id="T001", status="ready")
+        _insert_task_row(db, task_id="T002", status="blocked")
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE tasks SET dependencies = ? WHERE id = 'T001'",
+                (json.dumps(["T002"]),),
+            )
+
+        result = _invoke_cmd(
+            tmp_path, ["next", "--max-blast", "5", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["task"] is None
+        assert data["withheld_reason"] == "no_claimable_tasks"
+        assert data["governor"]["withheld_reason"] == "no_claimable_tasks"
+        assert data["governor"]["offer_throttled"] is False
 
     def test_single_prd_backcompat_prd_review_no_flag_transitions(
         self, tmp_path: Path
@@ -5868,6 +5907,21 @@ class TestNextCommand:
         # Should mention a task or 'Next recommended'
         combined = result.output
         assert "T0" in combined or "task" in combined.lower() or "No claimable" in combined
+        assert "Governor: numerator=0 denominator=0 rate=None floor=0.8" in combined
+        assert "window_days=7.0" in combined
+        assert "clearing the review queue alone does not restore" in combined
+
+        structured = _invoke_cmd(
+            tmp_path, ["next", "--actor", "agent-test", "--json"]
+        )
+        assert structured.exit_code == 0, structured.output
+        governor = json.loads(structured.output)["data"]["governor"]
+        assert governor["numerator"] == 0
+        assert governor["denominator"] == 0
+        assert governor["rate"] is None
+        assert governor["floor"] == 0.8
+        assert governor["window_days"] == 7.0
+        assert governor["offer_throttled"] is False
 
     def test_next_prints_no_tasks_message_when_empty(self, tmp_path: Path) -> None:
         """next prints 'No claimable tasks' when no ready tasks exist."""
@@ -5876,6 +5930,100 @@ class TestNextCommand:
         result = _invoke_cmd(tmp_path, ["next", "--actor", "agent-test"])
         assert result.exit_code == 0, f"next (empty) failed: {result.output}"
         assert "No claimable" in result.output or "no" in result.output.lower()
+        assert "Governor: numerator=0 denominator=0 rate=None floor=0.8" in result.output
+        assert "clearing the review queue alone does not restore" in result.output
+
+    def test_next_governor_withhold_reports_truth_and_recovery(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        config = tmp_path / ".anvil" / "config.yaml"
+        with config.open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\nneeds_review_cap: 0\n"
+                "accept_rate_floor: 0.75\n"
+                "accept_rate_window_days: 14\n"
+            )
+
+        structured = _invoke_cmd(
+            tmp_path, ["next", "--actor", "worker-a", "--json"]
+        )
+        assert structured.exit_code == 0, structured.output
+        data = json.loads(structured.output)["data"]
+        assert data["task"] is None
+        assert data["withheld_reason"] == "review_queue_saturated"
+        assert data["governor"]["offer_throttled"] is True
+        assert data["governor"]["floor"] == 0.75
+        assert data["governor"]["window_days"] == 14.0
+        assert "accepted finalized reviews" in data["governor"]["guidance"]
+
+        human = _invoke_cmd(tmp_path, ["next", "--actor", "worker-a"])
+        assert human.exit_code == 0, human.output
+        assert "numerator=0 denominator=0 rate=None floor=0.75" in human.output
+        assert "window_days=14.0" in human.output
+        assert "clearing the review queue alone does not restore" in human.output
+        assert "direct claim of a known task ID" in human.output
+
+    def test_next_reports_task_escalation_as_offer_throttle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.claims.metrics import AcceptRateMetrics
+
+        _do_init_and_plan(tmp_path, with_git=False)
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "task_blocked_for_actor",
+            lambda _self, _task_id, _actor: True,
+        )
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "required_floor",
+            lambda _self, _task_id: 0.95,
+        )
+
+        result = _invoke_cmd(
+            tmp_path, ["next", "--actor", "newcomer", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["task"] is None
+        assert data["withheld_reason"] == "task_accept_rate_floor"
+        assert data["governor"]["floor"] == 0.95
+        assert data["governor"]["offer_throttled"] is True
+
+    def test_task_floor_precedes_risk_reason_when_both_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.claims.manager as manager_module
+        from anvil.claims.metrics import AcceptRateMetrics
+
+        _do_init_and_plan(tmp_path, with_git=False)
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "task_blocked_for_actor",
+            lambda _self, _task_id, _actor: True,
+        )
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "required_floor",
+            lambda _self, _task_id: 0.95,
+        )
+        monkeypatch.setattr(
+            manager_module,
+            "within_risk_ceiling",
+            lambda _task, *, max_blast, max_review_risk: (
+                max_blast is None and max_review_risk is None
+            ),
+        )
+
+        result = _invoke_cmd(
+            tmp_path,
+            ["next", "--actor", "newcomer", "--max-blast", "5", "--json"],
+        )
+        data = json.loads(result.output)["data"]
+        assert data["withheld_reason"] == "task_accept_rate_floor"
+        assert data["governor"]["floor"] == 0.95
+        assert data["governor"]["offer_throttled"] is True
 
     def test_next_quiet_exits_3_on_empty_queue(self, tmp_path: Path) -> None:
         """next -q exits 3 and prints nothing when the queue is empty."""
@@ -6561,6 +6709,96 @@ class TestApplyCommand:
         assert status == "drafted", (
             f"Expected drafted (auto-promoted from rejected); got {status!r}"
         )
+
+    def test_apply_rejection_json_reports_engine_provenance_and_metrics(
+        self, tmp_path: Path
+    ) -> None:
+        """Callers provide findings, while the engine supplies category/identity."""
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        self._reach_needs_review(tmp_path, task_id)
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "apply",
+                task_id,
+                "--reject",
+                "--reason",
+                "Security boundary is incomplete.",
+                "--quality-finding",
+                "security",
+                "--reviewer",
+                "reviewer-a",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        rejection = data["rejection"]
+        assert rejection["category"] == "quality"
+        assert rejection["reason_code"] == "quality_findings"
+        assert rejection["counts_toward_accept_rate"] is True
+        assert rejection["review_attempt_id"]
+        assert len(rejection["supporting_evidence_digest"]) == 64
+        metrics = data["rejection_metrics"]
+        assert metrics["counts_toward_accept_rate"] is True
+        assert metrics["numerator"] == 0
+        assert metrics["denominator"] == 1
+        assert metrics["rate"] == 0.0
+        assert metrics["floor"] == 0.8
+        assert metrics["window_days"] == 7.0
+        assert "clearing the review queue alone does not restore" in metrics["guidance"]
+        with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
+            created_at = conn.execute(
+                "SELECT created_at FROM reviews WHERE target_kind='task' "
+                "AND target_id=? ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()[0]
+        assert metrics["as_of"] == (
+            datetime.fromisoformat(created_at)
+            .astimezone(UTC)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["--reason-code", "not-a-code"],
+            ["--quality-finding", "tests", "--quality-finding", "tests"],
+        ],
+    )
+    def test_apply_invalid_rejection_input_is_pre_mutation(
+        self, tmp_path: Path, arguments: list[str]
+    ) -> None:
+        _do_init_and_plan(tmp_path, with_git=False)
+        task_id = _get_first_ready_task_id(tmp_path)
+        assert task_id is not None
+        self._reach_needs_review(tmp_path, task_id)
+        state_dir = tmp_path / ".anvil"
+        events_path = state_dir / "events.jsonl"
+        baseline = events_path.read_bytes()
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "apply",
+                task_id,
+                "--reject",
+                "--reason",
+                "typed refusal",
+                "--reviewer",
+                "reviewer-a",
+                "--json",
+                *arguments,
+            ],
+        )
+        assert result.exit_code == 1
+        envelope = json.loads(result.output)
+        assert envelope["error"]["code"] == "bad_request"
+        assert events_path.read_bytes() == baseline
 
     def test_apply_without_flag_prints_review_summary(
         self, tmp_path: Path

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:
+    from anvil.clock import Clock
+    from anvil.state.backend import Backend
 
 from anvil.cli._actor_output import (
     actor_identity_data,
@@ -34,7 +40,49 @@ from anvil.state.models import (
     CommandProof,
     EventDraft,
     HookCommandAttribution,
+    RejectionQualityFinding,
+    RejectionQualityFindingCode,
+    RejectionReasonCode,
+    TaskRejectionProvenance,
 )
+
+
+def _rejection_metrics_block(
+    backend: Backend,
+    *,
+    state_dir: Path,
+    task_id: str,
+    provenance: TaskRejectionProvenance,
+    clock: Clock,
+    as_of: datetime.datetime,
+) -> dict[str, object]:
+    """Return the immediate governor projection for one rejected attempt."""
+    from anvil.claims.metrics import AcceptRateMetrics
+
+    latest_evidence = backend.get_latest_evidence(task_id)
+    actor = latest_evidence.submitted_by if latest_evidence is not None else None
+    cfg = _load_config_optional(state_dir)
+    metrics = AcceptRateMetrics(
+        backend,
+        clock,
+        window_days=cfg.accept_rate_window_days if cfg is not None else 7.0,
+        floor=cfg.accept_rate_floor if cfg is not None else 0.80,
+        needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
+        as_of=as_of,
+    )
+    projection = metrics.projection(actor, task_id=task_id) if actor is not None else {
+        **metrics.projection("", task_id=task_id),
+        "numerator": 0,
+        "denominator": 0,
+        "rate": None,
+    }
+    return {
+        **projection,
+        "counts_toward_accept_rate": provenance.counts_toward_accept_rate,
+        "work_actor": actor,
+        "rejection_count": metrics.rejection_count(task_id),
+        "required_floor": metrics.required_floor(task_id),
+    }
 
 
 def _read_command_proofs(state_dir: Path, claim_id: str) -> list[CommandProof]:
@@ -1187,6 +1235,19 @@ def apply(
         "--reason",
         help="Review notes; required when using --reject.",
     ),
+    reason_code: str | None = typer.Option(  # noqa: B008
+        None,
+        "--reason-code",
+        help=(
+            "Enumerated rejection assertion. The engine derives the accounting "
+            "category from persisted evidence/claim state; callers never choose it."
+        ),
+    ),
+    quality_finding: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--quality-finding",
+        help="Typed quality finding code; repeat for multiple findings.",
+    ),
     reviewer: str | None = typer.Option(  # noqa: B008
         None,
         "--reviewer",
@@ -1215,7 +1276,11 @@ def apply(
     With ``--json`` emits ``{"ok": true, "command": "apply", "data": {...}}``.
     Both modes return the SAME ``data`` key set so a consumer can read the
     outcome uniformly: ``{task_id, status, decision, reviewer, reason,
-    has_evidence, evidence_gate, task, next_ready}``. ``next_ready`` (T014)
+    has_evidence, evidence_gate, task, next_ready, merge_check, claim_verdict,
+    intent_warnings, proof_path, rejection, rejection_metrics}``.
+    ``rejection`` contains immutable engine-derived rejection provenance and
+    ``rejection_metrics`` contains the exact post-decision governor projection
+    (both null outside a rejection). ``next_ready`` (T014)
     names the next claimable task — dependency-, claim-, conflict-group- and
     file-overlap-aware — or null when none is available. In review-only mode
     (neither
@@ -1338,6 +1403,8 @@ def apply(
                         # No decision in review-only mode, so no proof is emitted;
                         # carry the key (null) to keep the apply envelope uniform.
                         "proof_path": None,
+                        "rejection": None,
+                        "rejection_metrics": None,
                     },
                 )
                 return
@@ -1395,6 +1462,46 @@ def apply(
                 err=True,
             )
             raise typer.Exit(code=1)
+        if not reject and (reason_code is not None or quality_finding):
+            message = (
+                "--reason-code and --quality-finding are valid only with --reject."
+            )
+            if json_output:
+                fail("apply", message, code="bad_request")
+            typer.echo(f"Error: {message}", err=True)
+            raise typer.Exit(code=1)
+
+        rejection_reason_code = RejectionReasonCode.unspecified_quality
+        rejection_quality_findings: list[RejectionQualityFinding] = []
+        if reject:
+            try:
+                if reason_code is not None:
+                    rejection_reason_code = RejectionReasonCode(reason_code)
+                elif quality_finding:
+                    rejection_reason_code = RejectionReasonCode.quality_findings
+                rejection_quality_findings = [
+                    RejectionQualityFinding(code=RejectionQualityFindingCode(code))
+                    for code in (quality_finding or [])
+                ]
+                # Revalidate the collection invariant (unique, bounded) through
+                # the provenance model later; reject obvious duplicates here so
+                # adapters return a stable pre-mutation request error.
+                finding_codes = [finding.code for finding in rejection_quality_findings]
+                if len(finding_codes) != len(set(finding_codes)):
+                    raise ValueError("quality finding codes must be unique")
+            except ValueError:
+                allowed_reasons = ", ".join(code.value for code in RejectionReasonCode)
+                allowed_findings = ", ".join(
+                    code.value for code in RejectionQualityFindingCode
+                )
+                message = (
+                    "invalid rejection provenance input; reason codes: "
+                    f"{allowed_reasons}; quality finding codes: {allowed_findings}."
+                )
+                if json_output:
+                    fail("apply", message, code="bad_request")
+                typer.echo(f"Error: {message}", err=True)
+                raise typer.Exit(code=1) from None
 
         # T025/B25 — completion-evidence ENFORCEMENT. Only --approve is gated;
         # --reject is never blocked (rejecting a task with missing evidence is
@@ -1540,11 +1647,32 @@ def apply(
             decision = "rejected"
 
         payload: dict[str, object] = {
+            "schema_version": 1,
             "task_id": task_id,
             "reviewer": resolved_reviewer,
             "decision": decision,
             "notes": reason,
         }
+        if approve:
+            current_attempt = backend.get_latest_evidence(task_id)
+            if current_attempt is not None:
+                payload["review_attempt_id"] = current_attempt.id
+        rejection_provenance: TaskRejectionProvenance | None = None
+        if reject:
+            from anvil.state.backend import EventRejected
+
+            try:
+                rejection_provenance = backend.derive_task_rejection_provenance(
+                    task_id,
+                    reason_code=rejection_reason_code,
+                    quality_findings=rejection_quality_findings,
+                )
+            except EventRejected as exc:
+                if json_output:
+                    fail("apply", str(exc), code="rejection_provenance_invalid")
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from None
+            payload["rejection"] = rejection_provenance.model_dump(mode="json")
 
         draft = EventDraft(
             timestamp=now,
@@ -1587,6 +1715,18 @@ def apply(
         # task to done can unblock dependents). Computed while the backend is
         # open; the JSON envelope below is emitted after the finally closes it.
         apply_next_ready = _compute_next_ready(backend, resolved_reviewer)
+        rejection_metrics = (
+            _rejection_metrics_block(
+                backend,
+                state_dir=state_dir,
+                task_id=task_id,
+                provenance=rejection_provenance,
+                clock=clock,
+                as_of=now,
+            )
+            if rejection_provenance is not None
+            else None
+        )
     finally:
         backend.close()
 
@@ -1613,6 +1753,12 @@ def apply(
                 "merge_check": merge_block,  # T007 — null when mode off/probe failed
                 "claim_verdict": _verdict_json(contract_verdict),  # T005
                 "intent_warnings": intent_warnings,  # T008
+                "rejection": (
+                    rejection_provenance.model_dump(mode="json")
+                    if rejection_provenance is not None
+                    else None
+                ),
+                "rejection_metrics": rejection_metrics,
             },
         )
         return
@@ -1631,3 +1777,22 @@ def apply(
         )
         if reason:
             typer.echo(f"  Reason: {reason}")
+        if rejection_provenance is not None:
+            typer.echo(
+                "  Classification: "
+                f"{rejection_provenance.category.value} "
+                f"(reason_code={rejection_provenance.reason_code.value}, "
+                "counts_toward_accept_rate="
+                f"{str(rejection_provenance.counts_toward_accept_rate).lower()})"
+            )
+            if rejection_metrics is not None:
+                typer.echo(
+                    "  Projected metrics: "
+                    f"rate={rejection_metrics['rate']} "
+                    f"numerator={rejection_metrics['numerator']} "
+                    f"denominator={rejection_metrics['denominator']} "
+                    f"window_days={rejection_metrics['window_days']} "
+                    f"rejections={rejection_metrics['rejection_count']} "
+                    f"required_floor={rejection_metrics['required_floor']}"
+                )
+                typer.echo(f"  Recovery: {rejection_metrics['guidance']}")

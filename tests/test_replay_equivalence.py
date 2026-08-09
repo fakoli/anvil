@@ -114,6 +114,7 @@ def _build_normal(state_dir: Path) -> SqliteBackend:
     the same state as the replay path for the same event sequence.
     """
     b = _make_backend(state_dir)
+    latest_attempt_by_task: dict[str, str] = {}
     for raw in _load_committed_events():
         # Strip the id: EventDraft has no id field (the backend assigns it).
         draft_data = {k: v for k, v in raw.items() if k != "id"}
@@ -131,6 +132,16 @@ def _build_normal(state_dir: Path) -> SqliteBackend:
             draft_data["actor"] = raw["payload_json"].get(
                 identity_field, draft_data["actor"]
             )
+        payload = dict(raw["payload_json"])
+        if raw["action"] == "evidence.submitted":
+            latest_attempt_by_task[payload["task_id"]] = payload["evidence_id"]
+        elif raw["action"] == "task.applied" and payload["decision"] == "accepted":
+            # The committed fixture is a legacy event and intentionally omits
+            # the attempt binding. A current live producer must supply it; the
+            # replay path below preserves the omitted legacy shape.
+            payload["review_attempt_id"] = latest_attempt_by_task[payload["task_id"]]
+            payload["schema_version"] = 1
+        draft_data["payload_json"] = payload
         draft = EventDraft.model_validate(draft_data)
         b.append(draft)
     return b
@@ -166,6 +177,11 @@ def test_normal_and_replay_match_each_other_and_the_golden(tmp_path: Path) -> No
     try:
         replay.replay_from_empty(str(_EVENTS_PATH))
 
+        accepted = [
+            row for row in replay.list_task_review_decisions() if row[1] == "accepted"
+        ]
+        assert accepted and accepted[0][4:] == (None, None)
+
         normal_snap = _serialize(normal)
         replay_snap = _serialize(replay)
         golden = _load_golden()
@@ -196,6 +212,153 @@ def test_normal_and_replay_match_each_other_and_the_golden(tmp_path: Path) -> No
     finally:
         normal.close()
         replay.close()
+
+
+def test_rejection_provenance_replays_exactly_and_tampering_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """T009 new-format rejection identity is authoritative during replay."""
+    from anvil.state.backend import TransactionAborted
+    from anvil.state.models import RejectionReasonCode
+    from tests.test_sqlite import (
+        _make_applied_payload,
+        _make_event,
+        _make_evidence_payload,
+        _setup_claimable_task_and_claim,
+    )
+
+    source_dir = tmp_path / "rejection-source"
+    source_dir.mkdir()
+    source = _make_backend(source_dir)
+    try:
+        _setup_claimable_task_and_claim(source)
+        source.append(
+            _make_event(
+                "evidence.submitted",
+                _make_evidence_payload(),
+                target_kind="task",
+                target_id="T001",
+            )
+        )
+        provenance = source.derive_task_rejection_provenance(
+            "T001",
+            reason_code=RejectionReasonCode.unspecified_quality,
+            quality_findings=[],
+        )
+        payload = _make_applied_payload(
+            reviewer="reviewer-a",
+            decision="rejected",
+            notes="needs revision",
+        )
+        payload["rejection"] = provenance.model_dump(mode="json")
+        source.append(
+            _make_event(
+                "task.applied",
+                payload,
+                target_kind="task",
+                target_id="T001",
+                actor="reviewer-a",
+            )
+        )
+        expected = [review.model_dump(mode="json") for review in source.list_reviews()]
+    finally:
+        source.close()
+
+    replay_dir = tmp_path / "rejection-replay"
+    replay_dir.mkdir()
+    replay_log = replay_dir / "events.jsonl"
+    replay_log.write_bytes((source_dir / "events.jsonl").read_bytes())
+    replay = _make_backend(replay_dir)
+    try:
+        replay.replay_from_empty(str(replay_log))
+        assert [
+            review.model_dump(mode="json") for review in replay.list_reviews()
+        ] == expected
+    finally:
+        replay.close()
+
+    raw_events = [
+        json.loads(line)
+        for line in replay_log.read_text(encoding="utf-8").splitlines()
+    ]
+    for label, remove_version, expected_error in [
+        ("rejection-null-version", False, "explicit-null schema_version"),
+        ("rejection-missing-version", True, "unversioned review provenance"),
+    ]:
+        version_events = json.loads(json.dumps(raw_events))
+        if remove_version:
+            version_events[-1]["payload_json"].pop("schema_version")
+        else:
+            version_events[-1]["payload_json"]["schema_version"] = None
+        version_dir = tmp_path / label
+        version_dir.mkdir()
+        version_log = version_dir / "events.jsonl"
+        version_log.write_text(
+            "".join(
+                json.dumps(event, separators=(",", ":")) + "\n"
+                for event in version_events
+            ),
+            encoding="utf-8",
+        )
+        version_backend = SqliteBackend(
+            db_path=str(version_dir / "state.db"),
+            events_path=str(version_log),
+            clock=FrozenClock(_T0),
+        )
+        try:
+            with pytest.raises(TransactionAborted, match=expected_error):
+                version_backend.initialize()
+        finally:
+            version_backend.close()
+
+    null_events = json.loads(json.dumps(raw_events))
+    null_events[-1]["payload_json"]["rejection"] = None
+    null_dir = tmp_path / "rejection-null"
+    null_dir.mkdir()
+    null_log = null_dir / "events.jsonl"
+    null_log.write_text(
+        "".join(
+            json.dumps(event, separators=(",", ":")) + "\n"
+            for event in null_events
+        ),
+        encoding="utf-8",
+    )
+    null_backend = SqliteBackend(
+        db_path=str(null_dir / "state.db"),
+        events_path=str(null_log),
+        clock=FrozenClock(_T0),
+    )
+    try:
+        with pytest.raises(
+            TransactionAborted,
+            match="v1 rejected review requires provenance",
+        ):
+            null_backend.initialize()
+    finally:
+        null_backend.close()
+
+    raw_events[-1]["payload_json"]["rejection"][
+        "supporting_evidence_digest"
+    ] = "0" * 64
+    tampered_dir = tmp_path / "rejection-tampered"
+    tampered_dir.mkdir()
+    tampered_log = tampered_dir / "events.jsonl"
+    tampered_log.write_text(
+        "".join(
+            json.dumps(event, separators=(",", ":")) + "\n" for event in raw_events
+        ),
+        encoding="utf-8",
+    )
+    tampered = SqliteBackend(
+        db_path=str(tampered_dir / "state.db"),
+        events_path=str(tampered_log),
+        clock=FrozenClock(_T0),
+    )
+    try:
+        with pytest.raises(TransactionAborted, match="provenance replay mismatch"):
+            tampered.initialize()
+    finally:
+        tampered.close()
 
 
 def test_replayed_state_is_well_formed(tmp_path: Path) -> None:

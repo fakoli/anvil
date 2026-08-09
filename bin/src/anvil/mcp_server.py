@@ -29,6 +29,12 @@ from anvil.cli._actor_output import (
     bundle_continuation_data,
     continuation_data,
 )
+from anvil.state.models import (
+    RejectionQualityFinding,
+    RejectionQualityFindingCode,
+    RejectionReasonCode,
+    TaskRejectionProvenance,
+)
 from anvil.state.rollup import BundleRollupEntry
 
 if TYPE_CHECKING:
@@ -522,6 +528,36 @@ class NextReadyTask(BaseModel):
     priority: str
 
 
+class GovernorProjectionResponse(BaseModel):
+    """Complete, deterministic accept-rate governor calculation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    as_of: str
+    window_days: float
+    window_start: str
+    numerator: int
+    denominator: int
+    rate: float | None
+    floor: float
+    configured_floor: float
+    needs_review_depth: int
+    needs_review_cap: int
+    guidance: str
+    withheld_reason: str | None = None
+    offer_throttled: bool = False
+
+
+class GetNextTaskResponse(BaseModel):
+    """Next task plus truthful governor state, including empty/withheld queues."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task: dict[str, Any] | None
+    governor: GovernorProjectionResponse
+    actor_identity: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvidenceResponse(BaseModel):
     """Result of submit_completion_evidence."""
 
@@ -619,13 +655,6 @@ class EditDependenciesResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 _STATE_DIR_NAME = ".anvil"
-
-_PRIORITY_ORDER = {
-    "critical": 4,
-    "high": 3,
-    "medium": 2,
-    "low": 1,
-}
 
 # Allowed transitions for update_task_status per spec:
 # "Limited to drafted↔ready and blocked toggle"
@@ -1140,12 +1169,14 @@ def get_next_task(
     prd_id: str | None = None,
     max_blast: int | None = None,
     max_review_risk: int | None = None,
-) -> dict[str, Any] | None:
+) -> GetNextTaskResponse:
     """Return the single highest-priority ready task that has no overlapping
-    active claim, or null if none is claimable.
+    active claim, plus the complete offer-governor calculation. ``task`` is
+    null when no task is claimable; ``governor.withheld_reason`` distinguishes
+    throttling from an empty queue.
 
-    Ordering: critical > high > medium > low; tiebreak agent_suitability desc,
-    then id asc.
+    Ordering: critical > high > medium > low; then complexity asc, creation
+    time asc, and id asc.
 
     ``max_blast`` / ``max_review_risk`` (B45/#56) are optional risk-axis ceilings:
     when set, a task is only offered if that dimension is CONFIRMED and within
@@ -1158,87 +1189,65 @@ def get_next_task(
     exclusion sets (active claims, done-deps, active conflict groups) still span
     ALL PRDs — cross-PRD coordination, same contract as ``next --prd`` / the CLI
     ``ClaimManager.next_claimable(prd_id=...)``. ``None`` keeps the all-PRDs
-    behaviour. ``actor`` is currently unused by the ranking (the file-overlap
-    exclusion lives on the stricter finish-surface helper).
+    behaviour. ``actor`` selects the accept-rate history used by the governor.
     """
     state_dir = _resolve_state_dir()
     backend = _open_backend(state_dir)
     try:
-        # Read-only listers don't reap (per module docstring); MCP clients
-        # call get_project_summary or a mutating tool to trigger reaping.
+        _reap_stale(backend)
 
         # T019: resolve which PRD to scope candidates to (explicit > $ANVIL_PRD;
         # None when neither names one -> all PRDs, byte-identical to pre-T019).
         # Collapse the default sentinel ('prd') so prd_id='prd' matches tasks
         # stored with prd_id='default' rather than narrowing to an empty pool.
-        from anvil.claims.manager import within_risk_ceiling
-        from anvil.cli._helpers import canonical_prd_id
+        from anvil.claims.manager import ClaimManager
+        from anvil.claims.metrics import AcceptRateMetrics
+        from anvil.cli._helpers import canonical_prd_id, resolve_actor
+        from anvil.clock import SystemClock
+
+        resolved_actor = resolve_actor(actor)
+        clock = SystemClock()
+        cfg = _load_merged_config_optional(state_dir)
+        metrics = AcceptRateMetrics(
+            backend,
+            clock,
+            window_days=cfg.accept_rate_window_days if cfg is not None else 7.0,
+            floor=cfg.accept_rate_floor if cfg is not None else 0.80,
+            needs_review_cap=cfg.needs_review_cap if cfg is not None else 10,
+            as_of=clock.now(),
+        )
 
         scoped_prd_id = (
             canonical_prd_id(_resolve_prd_id(backend, prd_id)) if prd_id else None
         )
 
-        # Single full-table fetch + in-memory partition; the EXCLUSION sets are
-        # always built from ALL PRDs (coordination is cross-PRD), then the
-        # candidate pool is narrowed to ``scoped_prd_id`` when one is named.
-        all_tasks = backend.list_tasks()
-        if not all_tasks:
-            return None
-        ready_tasks = [
-            t
-            for t in all_tasks
-            if t.status.value == "ready"
-            and (scoped_prd_id is None or t.prd_id == scoped_prd_id)
-        ]
-        if not ready_tasks:
-            return None
-
-        active_claims = backend.list_active_claims()
-        claimed_task_ids: set[str] = {c.task_id for c in active_claims}
-        done_task_ids: set[str] = {
-            t.id for t in all_tasks if t.status.value == "done"
-        }
-
-        # Build active conflict groups from ALL PRDs so a candidate in the
-        # scoped partition still collides with a claim held in another PRD.
-        active_conflict_groups: set[str] = set()
-        for t in all_tasks:
-            if t.id in claimed_task_ids:
-                for cg_id in t.conflict_groups:
-                    active_conflict_groups.add(cg_id)
-
-        candidates = []
-        for task in ready_tasks:
-            if task.id in claimed_task_ids:
-                continue
-            if any(dep_id not in done_task_ids for dep_id in task.dependencies):
-                continue
-            if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
-                continue
-            # B45/#56 — risk-axis eligibility ceiling, via the SAME shared helper
-            # as ClaimManager.next_claimable so the two seams can't diverge.
-            if not within_risk_ceiling(
-                task, max_blast=max_blast, max_review_risk=max_review_risk
-            ):
-                continue
-            candidates.append(task)
-
-        if not candidates:
-            return None
-
-        def _sort_key(t: Any) -> tuple[int, int, str]:
-            # Priority: higher rank = higher priority = sort first (negate).
-            priority_rank = _PRIORITY_ORDER.get(t.priority.value, 0)
-            # agent_suitability: higher = better = sort first (negate).
-            suitability = (
-                t.scores.agent_suitability
-                if t.scores.agent_suitability is not None
-                else 0
+        manager = ClaimManager(backend, clock, actor=resolved_actor)
+        diagnosis = manager.diagnose_next_offer(
+            max_blast=max_blast,
+            max_review_risk=max_review_risk,
+            metrics=metrics,
+            prd_id=scoped_prd_id,
+        )
+        best = diagnosis.task
+        if best is None:
+            projection = metrics.projection(
+                resolved_actor, task_id=diagnosis.governor_task_id
             )
-            return (-priority_rank, -suitability, t.id)
+            projection.update(
+                withheld_reason=diagnosis.withheld_reason,
+                offer_throttled=diagnosis.withheld_reason
+                in {
+                    "review_queue_saturated",
+                    "actor_below_floor",
+                    "task_accept_rate_floor",
+                },
+            )
+            return GetNextTaskResponse(
+                task=None,
+                governor=GovernorProjectionResponse.model_validate(projection),
+                actor_identity=actor_identity_data(resolved_actor),
+            )
 
-        candidates.sort(key=_sort_key)
-        best = candidates[0]
         # retro-opps T003 — derived review tier, same computation as the CLI
         # `next` (identical value for the same task + config).
         from anvil.planning.scoring import review_tier
@@ -1251,12 +1260,6 @@ def get_next_task(
         # ClaimManager.check_conflicts seam as the CLI `next` (read-only).
         conflict_warnings: list[dict[str, Any]] = []
         if best.likely_files:
-            from anvil.claims.manager import ClaimManager
-            from anvil.clock import SystemClock
-
-            manager = ClaimManager(
-                backend, SystemClock(), actor=actor or "mcp"
-            )
             conflict_warnings = [
                 {
                     "claim_id": w.other_claim_id,
@@ -1268,7 +1271,13 @@ def get_next_task(
                 )
             ]
         data["conflict_warnings"] = conflict_warnings
-        return data
+        projection = metrics.projection(resolved_actor, task_id=best.id)
+        projection.update(withheld_reason=None, offer_throttled=False)
+        return GetNextTaskResponse(
+            task=data,
+            governor=GovernorProjectionResponse.model_validate(projection),
+            actor_identity=actor_identity_data(resolved_actor),
+        )
     finally:
         backend.close()
 
@@ -3934,6 +3943,28 @@ def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
 # ---------------------------------------------------------------------------
 
 
+class ApplyRejectionMetricsResponse(BaseModel):
+    """Immediate governor projection after a rejected review attempt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    counts_toward_accept_rate: bool
+    work_actor: str | None = None
+    as_of: str
+    window_days: float
+    window_start: str
+    numerator: int
+    denominator: int
+    rate: float | None = None
+    floor: float
+    configured_floor: float
+    needs_review_depth: int
+    needs_review_cap: int
+    guidance: str
+    rejection_count: int
+    required_floor: float
+
+
 class ApplyReviewResponse(BaseModel):
     """Result of apply_review_decision."""
 
@@ -3947,6 +3978,8 @@ class ApplyReviewResponse(BaseModel):
     # The next claimable task after this disposition (an approval may unblock
     # dependents); null when none is available.
     next_ready: NextReadyTask | None = None
+    rejection: TaskRejectionProvenance | None = None
+    rejection_metrics: ApplyRejectionMetricsResponse | None = None
 
 
 @mcp.tool(tags={PLANNING_TAG})
@@ -3955,6 +3988,8 @@ def apply_review_decision(
     approve: bool,
     reviewer: str = "human",
     reason: str | None = None,
+    reason_code: RejectionReasonCode | None = None,
+    quality_findings: list[RejectionQualityFindingCode] | None = None,
     strict: bool | None = None,
     cwd: str | None = None,
 ) -> ApplyReviewResponse:
@@ -3973,6 +4008,8 @@ def apply_review_decision(
         approve:  True accepts the work; False rejects it.
         reviewer: Identity recorded in the event payload.
         reason:   Required when approve=False; recorded as review notes.
+        reason_code: Bounded rejection assertion; the backend derives category.
+        quality_findings: Typed quality dimensions; duplicates are refused.
         strict:   Evidence-gate override (approve only). None defers to config.
         cwd:      Project root. Defaults to Path.cwd().
     """
@@ -3992,6 +4029,12 @@ def apply_review_decision(
             "Rejection requires reason= (non-empty). "
             "Pass approve=True to accept, or provide a rejection reason.",
         )
+    if approve and (reason_code is not None or quality_findings):
+        raise ToolError(
+            "Rejection provenance inputs are only valid when approve=False."
+        )
+    if quality_findings and len(quality_findings) != len(set(quality_findings)):
+        raise ToolError("quality_findings must not contain duplicate codes")
 
     backend = _open_backend(state_dir)
     try:
@@ -4097,12 +4140,38 @@ def apply_review_decision(
         decision = "accepted" if approve else "rejected"
         clock = SystemClock()
         now = clock.now()
+        rejection_provenance: TaskRejectionProvenance | None = None
+        if not approve:
+            selected_reason = reason_code or (
+                RejectionReasonCode.quality_findings
+                if quality_findings
+                else RejectionReasonCode.unspecified_quality
+            )
+            typed_findings = [
+                RejectionQualityFinding(code=code)
+                for code in (quality_findings or [])
+            ]
+            try:
+                rejection_provenance = backend.derive_task_rejection_provenance(
+                    task_id,
+                    reason_code=selected_reason,
+                    quality_findings=typed_findings,
+                )
+            except EventRejected as exc:
+                raise ToolError(f"rejection_provenance_invalid: {exc}") from None
         payload: dict[str, Any] = {
+            "schema_version": 1,
             "task_id": task_id,
             "reviewer": reviewer,
             "decision": decision,
             "notes": reason,
         }
+        if approve:
+            current_attempt = backend.get_latest_evidence(task_id)
+            if current_attempt is not None:
+                payload["review_attempt_id"] = current_attempt.id
+        if rejection_provenance is not None:
+            payload["rejection"] = rejection_provenance.model_dump(mode="json")
 
         try:
             applied_event = backend.append(EventDraft(
@@ -4135,6 +4204,20 @@ def apply_review_decision(
         next_ready = (
             NextReadyTask(**next_ready_raw) if next_ready_raw is not None else None
         )
+        rejection_metrics = None
+        if rejection_provenance is not None:
+            from anvil.cli.packet_apply import _rejection_metrics_block
+
+            rejection_metrics = ApplyRejectionMetricsResponse.model_validate(
+                _rejection_metrics_block(
+                    backend,
+                    state_dir=state_dir,
+                    task_id=task_id,
+                    provenance=rejection_provenance,
+                    clock=clock,
+                    as_of=now,
+                )
+            )
 
         return ApplyReviewResponse(
             task_id=task_id,
@@ -4143,6 +4226,8 @@ def apply_review_decision(
             to_status=to_status,
             reviewer=reviewer,
             next_ready=next_ready,
+            rejection=rejection_provenance,
+            rejection_metrics=rejection_metrics,
         )
     finally:
         backend.close()

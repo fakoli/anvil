@@ -417,6 +417,8 @@ _APPLY_KEYS = {
     "merge_check",  # retro-opps T007 — base-freshness block (or null)
     "claim_verdict",  # evidence-contracts T005 — per-claim gate verdict (or null)
     "intent_warnings",  # evidence-contracts T008 — advisory intent linter
+    "rejection",  # immutable engine-derived rejection provenance (or null)
+    "rejection_metrics",  # post-decision accept-rate governor projection (or null)
 }
 
 

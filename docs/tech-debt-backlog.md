@@ -51,11 +51,11 @@ beyond the engine; pick one once the bake-off (B50) shows whether strict-evidenc
 is being relied on for adversarial (not just honest-but-sloppy) agents.
 
 ### E13-2 · MCP `get_next_task` bypasses the B45 ceilings and B49 governor
-**Status**: OPEN. `get_next_task` has its own inline candidate logic and does not
-call `next_claimable`, so neither the risk-axis ceilings nor the accept-rate
-governor apply on the MCP pull path (only the CLI `anvil next` is gated). Close by
-unifying `get_next_task` onto `ClaimManager.next_claimable` (passing metrics +
-ceilings) so both pull seams share one gate.
+**Status**: RESOLVED (autonomous-lifecycle-hardening T010). MCP and CLI now use
+the same `within_risk_ceiling` helper and `AcceptRateMetrics` calculation at the
+same pull boundary. MCP returns the full governor projection even when no task
+is offered, so clients can distinguish an empty queue from review saturation or
+an actor below the configured floor.
 
 ### E13-3 · B45 risk-confirmation source (makes `--max-blast/--max-review-risk` functional)
 **Status**: RESOLVED (v0.4.0 T009) — with a documented caveat. The
