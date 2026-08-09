@@ -69,8 +69,11 @@ class AcceptRateMetrics:
         self._floor_fraction = Fraction(str(floor))
         self.floor = float(self._floor_fraction)
         self.needs_review_cap = needs_review_cap
-        # (task_id, decision, decision_dt, stable review/event id) in window.
-        self._decisions: list[tuple[str, str, datetime.datetime, str]] | None = None
+        # (task_id, decision, decision_dt, stable review/event id, exact runner)
+        # in window. Historical reviews may have no exact runner binding.
+        self._decisions: list[
+            tuple[str, str, datetime.datetime, str, str | None]
+        ] | None = None
         # task_id -> sorted [(submitted_at, evidence id, submitter)] so a decision can be
         # attributed to the submission that was actually current when it landed.
         self._submissions: dict[
@@ -83,13 +86,17 @@ class AcceptRateMetrics:
         if self._decisions is not None:
             return
         cutoff = self.as_of - self._window
-        decisions: list[tuple[str, str, datetime.datetime, str]] = []
+        decisions: list[tuple[str, str, datetime.datetime, str, str | None]] = []
         for index, raw in enumerate(self._backend.list_task_review_decisions()):
-            if len(raw) == 4:
+            if len(raw) >= 6:
+                task_id, decision, created_at_iso, event_id, _attempt_id, actor = raw
+            elif len(raw) == 4:
                 task_id, decision, created_at_iso, event_id = raw
+                actor = None
             else:  # compatibility for small test/provider stubs
                 task_id, decision, created_at_iso = raw
                 event_id = f"legacy-{index:020d}"
+                actor = None
             try:
                 ts = datetime.datetime.fromisoformat(created_at_iso)
             except ValueError:
@@ -98,7 +105,7 @@ class AcceptRateMetrics:
                 ts = ts.replace(tzinfo=datetime.UTC)
             ts = ts.astimezone(datetime.UTC)
             if cutoff <= ts <= self.as_of:
-                decisions.append((task_id, decision, ts, event_id))
+                decisions.append((task_id, decision, ts, event_id, actor))
         decisions.sort(key=lambda item: (item[2], item[3]))
         self._decisions = decisions
         # task -> chronologically-sorted submissions, so under a rework cycle
@@ -107,9 +114,12 @@ class AcceptRateMetrics:
         # task's latest submitter.
         submissions: dict[str, list[tuple[datetime.datetime, str, str]]] = {}
         for index, ev in enumerate(self._backend.list_evidence()):
+            submitted_at = ev.submitted_at.astimezone(datetime.UTC)
+            if submitted_at > self.as_of:
+                continue
             submissions.setdefault(ev.task_id, []).append(
                 (
-                    ev.submitted_at.astimezone(datetime.UTC),
+                    submitted_at,
                     getattr(ev, "id", f"legacy-{index:020d}"),
                     ev.submitted_by,
                 )
@@ -152,8 +162,9 @@ class AcceptRateMetrics:
         self._load()
         assert self._decisions is not None
         accepted = total = 0
-        for task_id, decision, when, _event_id in self._decisions:
-            if self._submitter_at(task_id, when) != actor:
+        for task_id, decision, when, _event_id, exact_actor in self._decisions:
+            work_actor = exact_actor or self._submitter_at(task_id, when)
+            if work_actor != actor:
                 continue
             total += 1
             if decision == "accepted":
@@ -175,7 +186,7 @@ class AcceptRateMetrics:
         assert self._decisions is not None
         return sum(
             1
-            for tid, decision, _when, _event_id in self._decisions
+            for tid, decision, _when, _event_id, _actor in self._decisions
             if tid == task_id and decision == "rejected"
         )
 
@@ -198,8 +209,9 @@ class AcceptRateMetrics:
             "needs_review_depth": self.needs_review_depth(),
             "needs_review_cap": self.needs_review_cap,
             "guidance": (
-                "Clearing the review queue alone does not restore offer eligibility. "
-                "Eligibility recovers through accepted finalized reviews, expiry of "
+                "When the accept rate is below the required floor, clearing the "
+                "review queue alone does not restore offer eligibility. Rate "
+                "eligibility recovers through accepted finalized reviews, expiry of "
                 "older reviews from the configured window, or a configured floor "
                 "change. A direct claim of a known task ID bypasses only offer "
                 "throttling; ownership, conflict, PRD, risk, and evidence gates "
@@ -234,7 +246,7 @@ class AcceptRateMetrics:
         once it has been rejected >= the threshold, so a chronically-rejected
         task goes to a proven actor (or a human) instead of recirculating."""
         if self.rejection_count(task_id) >= _ESCALATION_REJECT_THRESHOLD:
-            return _ESCALATION_FLOOR
+            return max(self.floor, _ESCALATION_FLOOR)
         return self.floor
 
     def task_blocked_for_actor(self, task_id: str, actor: str) -> bool:

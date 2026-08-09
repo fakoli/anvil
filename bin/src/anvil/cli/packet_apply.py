@@ -1276,7 +1276,11 @@ def apply(
     With ``--json`` emits ``{"ok": true, "command": "apply", "data": {...}}``.
     Both modes return the SAME ``data`` key set so a consumer can read the
     outcome uniformly: ``{task_id, status, decision, reviewer, reason,
-    has_evidence, evidence_gate, task, next_ready}``. ``next_ready`` (T014)
+    has_evidence, evidence_gate, task, next_ready, merge_check, claim_verdict,
+    intent_warnings, proof_path, rejection, rejection_metrics}``.
+    ``rejection`` contains immutable engine-derived rejection provenance and
+    ``rejection_metrics`` contains the exact post-decision governor projection
+    (both null outside a rejection). ``next_ready`` (T014)
     names the next claimable task — dependency-, claim-, conflict-group- and
     file-overlap-aware — or null when none is available. In review-only mode
     (neither

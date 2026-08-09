@@ -1271,6 +1271,8 @@ def get_next_task(
                     active_conflict_groups.add(cg_id)
 
         candidates = []
+        governor_blocked_candidates = []
+        risk_blocked_candidates = []
         governor_reason = metrics.withhold_reason(resolved_actor)
         for task in ready_tasks:
             if governor_reason is not None:
@@ -1281,35 +1283,17 @@ def get_next_task(
                 continue
             if any(cg_id in active_conflict_groups for cg_id in task.conflict_groups):
                 continue
+            if metrics.task_blocked_for_actor(task.id, resolved_actor):
+                governor_blocked_candidates.append(task)
+                continue
             # B45/#56 — risk-axis eligibility ceiling, via the SAME shared helper
             # as ClaimManager.next_claimable so the two seams can't diverge.
             if not within_risk_ceiling(
                 task, max_blast=max_blast, max_review_risk=max_review_risk
             ):
-                continue
-            if metrics.task_blocked_for_actor(task.id, resolved_actor):
+                risk_blocked_candidates.append(task)
                 continue
             candidates.append(task)
-
-        if not candidates:
-            withheld_reason = governor_reason
-            if withheld_reason is None and (
-                max_blast is not None or max_review_risk is not None
-            ):
-                withheld_reason = "risk_ceiling"
-            if withheld_reason is None:
-                withheld_reason = "no_claimable_tasks"
-            projection = metrics.projection(resolved_actor)
-            projection.update(
-                withheld_reason=withheld_reason,
-                offer_throttled=withheld_reason
-                in {"review_queue_saturated", "actor_below_floor"},
-            )
-            return GetNextTaskResponse(
-                task=None,
-                governor=GovernorProjectionResponse.model_validate(projection),
-                actor_identity=actor_identity_data(resolved_actor),
-            )
 
         def _sort_key(t: Any) -> tuple[int, int, str]:
             # Priority: higher rank = higher priority = sort first (negate).
@@ -1321,6 +1305,33 @@ def get_next_task(
                 else 0
             )
             return (-priority_rank, -suitability, t.id)
+
+        if not candidates:
+            withheld_reason = governor_reason
+            governor_task_id: str | None = None
+            if withheld_reason is None and governor_blocked_candidates:
+                governor_blocked_candidates.sort(key=_sort_key)
+                governor_task_id = governor_blocked_candidates[0].id
+                withheld_reason = "task_accept_rate_floor"
+            if withheld_reason is None and risk_blocked_candidates:
+                withheld_reason = "risk_ceiling"
+            if withheld_reason is None:
+                withheld_reason = "no_claimable_tasks"
+            projection = metrics.projection(resolved_actor, task_id=governor_task_id)
+            projection.update(
+                withheld_reason=withheld_reason,
+                offer_throttled=withheld_reason
+                in {
+                    "review_queue_saturated",
+                    "actor_below_floor",
+                    "task_accept_rate_floor",
+                },
+            )
+            return GetNextTaskResponse(
+                task=None,
+                governor=GovernorProjectionResponse.model_validate(projection),
+                actor_identity=actor_identity_data(resolved_actor),
+            )
 
         candidates.sort(key=_sort_key)
         best = candidates[0]

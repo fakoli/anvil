@@ -1070,8 +1070,13 @@ def next(  # noqa: A001
     (single-PRD projects) keeps the all-PRDs behaviour unchanged.
 
     With ``--json`` emits ``{"ok": true, "command": "next", "data":
-    {"task": {...} | null}}`` — ``task`` is null when nothing is claimable
-    (exit 0, an empty queue is not an error).
+    {"task": {...} | null, "governor": {...}, "withheld_reason": ...}}``.
+    The governor block always reports the exact observation window, rate
+    numerator/denominator, configured or task-escalated floor, review-queue
+    depth/cap, and recovery guidance. ``task`` is null when nothing is
+    claimable (exit 0, an empty queue is not an error); ``withheld_reason`` and
+    ``governor.offer_throttled`` distinguish governed withholding from an
+    empty or otherwise ineligible queue.
 
     With ``-q``/``--quiet`` prints nothing and uses the exit code as the
     signal: 0 if a task is claimable, 3 if the queue is empty (an empty
@@ -1220,6 +1225,20 @@ def next(  # noqa: A001
         withheld_reason = (
             metrics.withhold_reason(resolved_actor) if task is None else None
         )
+        governor_task_id: str | None = None
+        if task is None and withheld_reason is None:
+            ungoverned_task = manager.next_claimable(
+                task_type=task_type,
+                max_blast=max_blast,
+                max_review_risk=max_review_risk,
+                metrics=None,
+                prd_id=scoped_prd_id,
+            )
+            if ungoverned_task is not None and metrics.task_blocked_for_actor(
+                ungoverned_task.id, resolved_actor
+            ):
+                withheld_reason = "task_accept_rate_floor"
+                governor_task_id = ungoverned_task.id
         # B45 ceilings can also empty the result (and currently always do, since
         # confirmation is inert). Distinguish that from a truly empty queue too.
         if (
@@ -1227,7 +1246,15 @@ def next(  # noqa: A001
             and withheld_reason is None
             and (max_blast is not None or max_review_risk is not None)
         ):
-            withheld_reason = "risk_ceiling"
+            without_risk_ceiling = manager.next_claimable(
+                task_type=task_type,
+                max_blast=None,
+                max_review_risk=None,
+                metrics=metrics,
+                prd_id=scoped_prd_id,
+            )
+            if without_risk_ceiling is not None:
+                withheld_reason = "risk_ceiling"
         if task is None and scoped_prd_id is not None:
             if not scoped_ready_tasks:
                 scoped_empty_message = f"No ready tasks in this PRD ({scoped_prd_id})."
@@ -1240,12 +1267,13 @@ def next(  # noqa: A001
 
         governor_projection = metrics.projection(
             resolved_actor,
-            task_id=task.id if task is not None else None,
+            task_id=task.id if task is not None else governor_task_id,
         )
         governor_projection["withheld_reason"] = withheld_reason
         governor_projection["offer_throttled"] = withheld_reason in {
             "review_queue_saturated",
             "actor_below_floor",
+            "task_accept_rate_floor",
         }
 
         # retro-opps T009 — ADVISORY collision visibility: the selected task's
@@ -1318,6 +1346,11 @@ def next(  # noqa: A001
             typer.echo(
                 f"No work offered: actor {safe_actor_label(resolved_actor)} is below the "
                 "accept-rate floor."
+            )
+        elif withheld_reason == "task_accept_rate_floor":
+            typer.echo(
+                "No work offered: the next eligible task requires accept-rate "
+                f"floor {governor_projection['floor']}."
             )
         elif withheld_reason == "risk_ceiling":
             typer.echo(

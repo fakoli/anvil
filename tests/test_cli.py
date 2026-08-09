@@ -3595,6 +3595,29 @@ class TestSinglePrdBackcompat:
         assert next_bare == next_def
         assert next_bare["data"]["task"]["id"] == "T001"
 
+    def test_next_does_not_blame_risk_ceiling_for_unmet_dependency(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        _seed_default_prd(tmp_path, approve=True)
+        db = tmp_path / ".anvil" / "state.db"
+        _insert_task_row(db, task_id="T001", status="ready")
+        _insert_task_row(db, task_id="T002", status="blocked")
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE tasks SET dependencies = ? WHERE id = 'T001'",
+                (json.dumps(["T002"]),),
+            )
+
+        result = _invoke_cmd(
+            tmp_path, ["next", "--max-blast", "5", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["task"] is None
+        assert data["withheld_reason"] is None
+        assert data["governor"]["offer_throttled"] is False
+
     def test_single_prd_backcompat_prd_review_no_flag_transitions(
         self, tmp_path: Path
     ) -> None:
@@ -5885,7 +5908,7 @@ class TestNextCommand:
         assert "T0" in combined or "task" in combined.lower() or "No claimable" in combined
         assert "Governor: numerator=0 denominator=0 rate=None floor=0.8" in combined
         assert "window_days=7.0" in combined
-        assert "Recovery: Clearing the review queue alone does not restore" in combined
+        assert "clearing the review queue alone does not restore" in combined
 
         structured = _invoke_cmd(
             tmp_path, ["next", "--actor", "agent-test", "--json"]
@@ -5907,7 +5930,7 @@ class TestNextCommand:
         assert result.exit_code == 0, f"next (empty) failed: {result.output}"
         assert "No claimable" in result.output or "no" in result.output.lower()
         assert "Governor: numerator=0 denominator=0 rate=None floor=0.8" in result.output
-        assert "Recovery: Clearing the review queue alone does not restore" in result.output
+        assert "clearing the review queue alone does not restore" in result.output
 
     def test_next_governor_withhold_reports_truth_and_recovery(
         self, tmp_path: Path
@@ -5937,8 +5960,35 @@ class TestNextCommand:
         assert human.exit_code == 0, human.output
         assert "numerator=0 denominator=0 rate=None floor=0.75" in human.output
         assert "window_days=14.0" in human.output
-        assert "Clearing the review queue alone does not restore" in human.output
+        assert "clearing the review queue alone does not restore" in human.output
         assert "direct claim of a known task ID" in human.output
+
+    def test_next_reports_task_escalation_as_offer_throttle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.claims.metrics import AcceptRateMetrics
+
+        _do_init_and_plan(tmp_path, with_git=False)
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "task_blocked_for_actor",
+            lambda _self, _task_id, _actor: True,
+        )
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "required_floor",
+            lambda _self, _task_id: 0.95,
+        )
+
+        result = _invoke_cmd(
+            tmp_path, ["next", "--actor", "newcomer", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["task"] is None
+        assert data["withheld_reason"] == "task_accept_rate_floor"
+        assert data["governor"]["floor"] == 0.95
+        assert data["governor"]["offer_throttled"] is True
 
     def test_next_quiet_exits_3_on_empty_queue(self, tmp_path: Path) -> None:
         """next -q exits 3 and prints nothing when the queue is empty."""
@@ -6664,7 +6714,7 @@ class TestApplyCommand:
         assert metrics["rate"] == 0.0
         assert metrics["floor"] == 0.8
         assert metrics["window_days"] == 7.0
-        assert "Clearing the review queue alone does not restore" in metrics["guidance"]
+        assert "clearing the review queue alone does not restore" in metrics["guidance"]
         with sqlite3.connect(tmp_path / ".anvil" / "state.db") as conn:
             created_at = conn.execute(
                 "SELECT created_at FROM reviews WHERE target_kind='task' "

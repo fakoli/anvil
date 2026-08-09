@@ -214,9 +214,15 @@ class Backend(Protocol):
         """
         ...
 
-    def list_task_review_decisions(self) -> list[tuple[str, str, str, str]]:
-        """(task_id, decision, created_at_iso) for task.applied accepted/rejected
-        outcomes, most-recent first. Backs the B49 accept-rate governor."""
+    def list_task_review_decisions(
+        self,
+    ) -> list[tuple[str, str, str, str, str | None, str | None]]:
+        """Task review outcomes with stable review/attempt/runner attribution.
+
+        Returns ``(task_id, decision, created_at_iso, review_id,
+        review_attempt_id, submitted_by)`` most-recent first. Historical rows
+        may have no attempt/runner binding.
+        """
         ...
 
     def derive_task_rejection_provenance(

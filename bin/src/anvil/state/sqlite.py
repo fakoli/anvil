@@ -3063,9 +3063,15 @@ class SqliteBackend:
         ).fetchall()
         return [self._row_to_review(row) for row in rows]
 
-    def list_task_review_decisions(self) -> list[tuple[str, str, str, str]]:
-        """Return (task_id, decision, created_at_iso, review_id) for task.applied
-        review outcome (decision in 'accepted' / 'rejected'), most-recent first.
+    def list_task_review_decisions(
+        self,
+    ) -> list[tuple[str, str, str, str, str | None, str | None]]:
+        """Return stable task review and persisted work-attempt attribution.
+
+        Each item is ``(task_id, decision, created_at_iso, review_id,
+        review_attempt_id, submitted_by)``. Historical rows without an exact
+        attempt binding retain ``None`` and are handled by the metrics legacy
+        fallback.
 
         Reads the raw reviews table rather than the Review model: the
         ``ReviewDecision`` enum covers the PRD/finish-gate vocabulary
@@ -3074,12 +3080,14 @@ class SqliteBackend:
         """
         conn = self._require_conn()
         rows = conn.execute(
-            "SELECT target_id, decision, created_at, id FROM reviews "
-            "WHERE target_kind = 'task' AND (decision = 'accepted' OR "
-            "(decision = 'rejected' AND counts_toward_accept_rate = 1)) "
-            "ORDER BY created_at DESC, id DESC"
+            "SELECT r.target_id, r.decision, r.created_at, r.id, "
+            "r.review_attempt_id, e.submitted_by FROM reviews AS r "
+            "LEFT JOIN evidence AS e ON e.id = r.review_attempt_id "
+            "WHERE r.target_kind = 'task' AND (r.decision = 'accepted' OR "
+            "(r.decision = 'rejected' AND r.counts_toward_accept_rate = 1)) "
+            "ORDER BY r.created_at DESC, r.id DESC"
         ).fetchall()
-        return [(r[0], r[1], r[2], r[3]) for r in rows]
+        return [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows]
 
     def list_evidence(self) -> list[Evidence]:
         """Return all Evidence rows sorted by id ASC.
@@ -3451,6 +3459,28 @@ class SqliteBackend:
                 category = RejectionCategory.evidence_resubmission
         elif not quality_findings and reason_code in _PROCESS_REASON_PREDICATES:
             candidate = _PROCESS_REASON_PREDICATES[reason_code]
+            bundle_review_pending = False
+            if (
+                candidate is RejectionProcessPredicate.bundle_member_claim
+                and claim.bundle_claim_id is not None
+            ):
+                bundle_row = conn.execute(
+                    "SELECT b.id, b.status, b.creation_event_id "
+                    "FROM bundle_claims AS c "
+                    "JOIN execution_bundles AS b ON b.id = c.bundle_id "
+                    "WHERE c.id = ?",
+                    (claim.bundle_claim_id,),
+                ).fetchone()
+                if bundle_row is not None:
+                    review_passed = self._bundle_review_round_passes(
+                        conn, bundle_row[0], bundle_row[2]
+                    ) or self._legacy_bundle_review_round_passes(
+                        conn, bundle_row[0], bundle_row[2]
+                    )
+                    bundle_review_pending = (
+                        bundle_row[1] == BundleStatus.implemented_unreviewed.value
+                        and not review_passed
+                    )
             predicate_matches = {
                 RejectionProcessPredicate.claim_status_stale: (
                     claim.status is ClaimStatus.stale
@@ -3459,7 +3489,7 @@ class SqliteBackend:
                     claim.status is ClaimStatus.force_released
                 ),
                 RejectionProcessPredicate.bundle_member_claim: (
-                    claim.bundle_claim_id is not None
+                    bundle_review_pending
                 ),
             }[candidate]
             if predicate_matches:
@@ -12312,6 +12342,16 @@ class SqliteBackend:
         rejection = payload.rejection
         event_id: str = event.id
         timestamp: str = event.timestamp.isoformat()
+        review_attempt_id = rejection.review_attempt_id if rejection is not None else None
+
+        # Accepted reviews did not historically persist the evidence attempt
+        # they finalized. Bind new/replayed accepted reviews to the exact
+        # latest persisted attempt so actor attribution never depends on
+        # timestamp guesses. Legacy logs without evidence remain nullable.
+        if decision == "accepted":
+            attempt_row = self._latest_evidence_row(conn, task_id)
+            if attempt_row is not None:
+                review_attempt_id = self._row_to_evidence(attempt_row).id
 
         if decision == "accepted":
             # Transition needs_review → accepted.
@@ -12463,7 +12503,7 @@ class SqliteBackend:
                 rejection_category,
                 rejection_reason_code,
                 rejection.claim_id if rejection is not None else None,
-                rejection.review_attempt_id if rejection is not None else None,
+                review_attempt_id,
                 (
                     rejection.supporting_evidence_digest
                     if rejection is not None

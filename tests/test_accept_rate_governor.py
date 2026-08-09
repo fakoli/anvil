@@ -208,7 +208,7 @@ def test_projection_reports_truthful_counts_floor_window_and_recovery() -> None:
         "guidance": projection["guidance"],
     }
     guidance = str(projection["guidance"])
-    assert "Clearing the review queue alone does not restore" in guidance
+    assert "clearing the review queue alone does not restore" in guidance
     assert "accepted finalized reviews" in guidance
     assert "expiry" in guidance
     assert "configured floor" in guidance
@@ -224,6 +224,10 @@ def test_zero_denominator_and_floor_endpoints_use_exact_comparison() -> None:
     evidence = [_ev("T1", "A")]
     assert _metrics(rejected, evidence, floor=0).actor_below_floor("A") is False
     assert _metrics(rejected, evidence, floor=1).actor_below_floor("A") is True
+
+    escalated = [("T9", "rejected", _iso(i)) for i in range(3)]
+    escalated_metrics = _metrics(escalated, [_ev("T9", "A")], floor=1)
+    assert escalated_metrics.required_floor("T9") == 1.0
 
     one_of_three = [
         ("T1", "accepted", _iso(1)),
@@ -251,6 +255,31 @@ def test_invalid_floor_fails_closed(floor: float) -> None:
 def test_invalid_window_fails_closed(window: float) -> None:
     with pytest.raises(ValueError, match="window_days must be finite and positive"):
         _metrics([], [], window_days=window)
+
+
+def test_future_evidence_cannot_backfill_legacy_review_attribution() -> None:
+    decision_at = _NOW - datetime.timedelta(seconds=1)
+    future_submit = _NOW + datetime.timedelta(seconds=1)
+    metrics = _metrics(
+        [("T", "rejected", decision_at.isoformat(), "RV-legacy")],
+        [_ev("T", "future-actor", future_submit)],
+    )
+
+    assert metrics.acceptance_counts("future-actor") == (0, 0)
+
+
+def test_persisted_attempt_actor_wins_same_timestamp_ties() -> None:
+    decisions = [
+        ("T", "rejected", _NOW.isoformat(), "RV-1", "EV-a", "actor-b"),
+    ]
+    evidence = [
+        _ev("T", "actor-a", _NOW),
+        _ev("T", "actor-b", _NOW),
+    ]
+    metrics = _metrics(decisions, evidence)
+
+    assert metrics.acceptance_counts("actor-a") == (0, 0)
+    assert metrics.acceptance_counts("actor-b") == (0, 1)
 
 
 def test_non_quality_rejections_do_not_affect_governor_metrics(

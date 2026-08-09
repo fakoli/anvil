@@ -1912,8 +1912,66 @@ class TestGetNextTask:
         assert governor["window_days"] == 14.0
         assert governor["withheld_reason"] == "review_queue_saturated"
         assert governor["offer_throttled"] is True
-        assert "Clearing the review queue alone does not restore" in governor["guidance"]
+        assert "clearing the review queue alone does not restore" in governor["guidance"]
         assert response["actor_identity"]["actor"] == "worker-a"
+
+    def test_task_escalation_is_structured_as_offer_throttle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.claims.metrics import AcceptRateMetrics
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "task_blocked_for_actor",
+            lambda _self, _task_id, _actor: True,
+        )
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "required_floor",
+            lambda _self, _task_id: 0.95,
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool("get_next_task", {"actor": "newcomer"})
+                )
+
+        response = _run(run())
+        assert response["task"] is None
+        governor = response["governor"]
+        assert governor["withheld_reason"] == "task_accept_rate_floor"
+        assert governor["floor"] == 0.95
+        assert governor["offer_throttled"] is True
+
+    def test_risk_ceiling_is_not_reported_for_unmet_dependency(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(
+            state_dir,
+            task_id="T001",
+            status="ready",
+            dependencies=["T002"],
+        )
+        _add_task(state_dir, task_id="T002", status="blocked")
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool("get_next_task", {"max_blast": 5})
+                )
+
+        response = _run(run())
+        assert response["task"] is None
+        assert response["governor"]["withheld_reason"] == "no_claimable_tasks"
+        assert response["governor"]["offer_throttled"] is False
 
     def test_priority_ordering_high_over_medium_over_low(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """HIGH > MEDIUM > LOW — same feature, different priorities."""

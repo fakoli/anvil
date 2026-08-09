@@ -5602,7 +5602,14 @@ class TestTaskRejectionProvenanceState:
             assert review.rejection.category.value == "quality"
             assert review.reviewed_by == "reviewer-a"
             assert backend.list_task_review_decisions() == [
-                ("T001", "rejected", _T0.isoformat(), review.id)
+                (
+                    "T001",
+                    "rejected",
+                    _T0.isoformat(),
+                    review.id,
+                    "EV001",
+                    "agent-alpha",
+                )
             ]
         finally:
             backend.close()
@@ -5629,6 +5636,36 @@ class TestTaskRejectionProvenanceState:
                 )
             )
             assert backend.list_task_review_decisions() == []
+        finally:
+            backend.close()
+
+    def test_accepted_review_persists_exact_attempt_actor(self, tmp_path: Path) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            self._submit_attempt(backend)
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    _make_applied_payload(
+                        task_id="T001",
+                        reviewer="reviewer-a",
+                        decision="accepted",
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            review = backend.list_reviews()[-1]
+            assert backend.list_task_review_decisions() == [
+                (
+                    "T001",
+                    "accepted",
+                    _T0.isoformat(),
+                    review.id,
+                    "EV001",
+                    "agent-alpha",
+                )
+            ]
         finally:
             backend.close()
 
@@ -5673,6 +5710,60 @@ class TestTaskRejectionProvenanceState:
             assert provenance.matched_process_predicate is not None
             assert provenance.matched_process_predicate.value == "claim_status_stale"
             assert provenance.counts_toward_accept_rate is False
+        finally:
+            backend.close()
+
+    def test_bundle_membership_alone_cannot_suppress_quality_counting(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            self._submit_attempt(backend)
+            conn = backend._require_conn()  # noqa: SLF001
+            conn.execute(
+                "INSERT INTO execution_bundles "
+                "(id, creation_event_id, prd_id, coordinator, status, "
+                "review_policy, throughput_budget, delegated_agents, "
+                "created_at, updated_at) VALUES "
+                "('B001', 'E-B001', 'default', 'agent-alpha', 'planned', "
+                "'{}', '{}', '[]', ?, ?)",
+                (_T0.isoformat(), _T0.isoformat()),
+            )
+            conn.execute(
+                "INSERT INTO bundle_claims "
+                "(id, bundle_id, claimed_by, status, expected_files, "
+                "member_claim_ids, created_at, lease_expires_at, "
+                "last_heartbeat_at) VALUES "
+                "('BC001', 'B001', 'agent-alpha', 'active', '[]', '{}', ?, ?, ?)",
+                (
+                    _T0.isoformat(),
+                    (_T0 + timedelta(hours=1)).isoformat(),
+                    _T0.isoformat(),
+                ),
+            )
+            conn.execute(
+                "UPDATE claims SET bundle_claim_id = 'BC001' WHERE id = 'C001'"
+            )
+
+            membership_only = backend.derive_task_rejection_provenance(
+                "T001",
+                reason_code=RejectionReasonCode.bundle_review_required,
+                quality_findings=[],
+            )
+            assert membership_only.category.value == "quality"
+            assert membership_only.counts_toward_accept_rate is True
+
+            conn.execute(
+                "UPDATE execution_bundles SET status = 'implemented_unreviewed' "
+                "WHERE id = 'B001'"
+            )
+            pending_review = backend.derive_task_rejection_provenance(
+                "T001",
+                reason_code=RejectionReasonCode.bundle_review_required,
+                quality_findings=[],
+            )
+            assert pending_review.category.value == "process"
+            assert pending_review.counts_toward_accept_rate is False
         finally:
             backend.close()
 
@@ -6753,8 +6844,8 @@ class TestV18ToV19RejectionProvenanceMigration:
             assert accepted.rejection_category is None
             assert accepted.rejection is None
             assert migrated.list_task_review_decisions() == [
-                ("T001", "rejected", _T0.isoformat(), "RV-OLD-R"),
-                ("T002", "accepted", _T0.isoformat(), "RV-OLD-A"),
+                ("T001", "rejected", _T0.isoformat(), "RV-OLD-R", None, None),
+                ("T002", "accepted", _T0.isoformat(), "RV-OLD-A", None, None),
             ]
         finally:
             migrated.close()
