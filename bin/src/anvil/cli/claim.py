@@ -270,9 +270,6 @@ def claim(
                         apply_claim_plan(
                             plan, cwd=resolved_cwd, tracker=mutation_tracker
                         )
-                        finalize_claim_plan_tracker(
-                            mutation_tracker, cwd=resolved_cwd
-                        )
                     except BaseException:
                         try:
                             bundle_manager.release(
@@ -284,6 +281,9 @@ def claim(
                                 mutation_tracker, cwd=resolved_cwd
                             )
                         raise
+                    finalize_claim_plan_tracker(
+                        mutation_tracker, cwd=resolved_cwd
+                    )
             except ClaimPlanError as exc:
                 if json_output:
                     fail("claim", str(exc), code=exc.code)
@@ -518,9 +518,6 @@ def claim(
                 )
                 try:
                     apply_claim_plan(plan, cwd=resolved_cwd, tracker=mutation_tracker)
-                    finalize_claim_plan_tracker(
-                        mutation_tracker, cwd=resolved_cwd
-                    )
                 except BaseException:
                     try:
                         manager.release(
@@ -532,6 +529,9 @@ def claim(
                             mutation_tracker, cwd=resolved_cwd
                         )
                     raise
+                finalize_claim_plan_tracker(
+                    mutation_tracker, cwd=resolved_cwd
+                )
         except ClaimPlanError as exc:
             if json_output:
                 fail("claim", str(exc), code=exc.code)

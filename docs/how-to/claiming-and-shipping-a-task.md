@@ -68,7 +68,16 @@ What happens, in order, inside the CLI ([`cli/claim.py::claim`](https://github.c
 2. **Pre-claim conflict check.** `manager.check_conflicts()` compares the task's `likely_files` against the `expected_files` of every active claim by another actor. Any overlap is printed to stderr; without `--force` the command exits non-zero before mutating state.
 3. **Atomic claim transaction.** `manager.claim()` emits a `claim.created` event; the backend's SQLite handler inserts the `Claim` row and flips the task to `claimed` inside one `BEGIN IMMEDIATE` transaction.
 4. **Deterministic Git plan.** The CLI freezes the canonical repository root, selected local/upstream base, exact claim-start commit, branch owner, target path, caller cleanliness, and worktree topology before state mutation.
-5. **Transactional state + Git apply.** Under one cross-process lock, the CLI revalidates that plan, records the claim, and then checks out the shared branch or creates/reuses the isolated worktree. A Git failure or interruption releases state and compensates only artifacts created by that invocation.
+5. **Transactional state + Git apply.** Under one cross-process lock, the CLI revalidates that plan, records the claim, and then checks out the shared branch or creates/reuses the isolated worktree. A Git failure or interruption releases state and compensates invocation-owned artifacts. Temporary ownership refs keep that cleanup reliable across normal ref packing, reftable compaction, and reflog expiry; successful claims retire them.
+
+This is a local coordination guarantee, not protection from another process
+deliberately erasing Git's ownership history. Anvil preserves external branch
+replacements whenever a distinct ref, reflog, or filesystem-identity witness
+remains. If another actor deletes and recreates the exact branch at the exact
+same commit and then removes every continuity witness (for example by both
+packing refs and expiring reflogs) before compensation, Git exposes no way to
+distinguish the replacement from the invocation-owned ref. Do not run that
+destructive sequence concurrently with a claim transaction.
 
 Sample output:
 

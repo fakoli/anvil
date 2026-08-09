@@ -12,8 +12,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   and persist the selected local base, exact claim-start ref and commit, branch,
   canonical repository root, and shared or isolated target before Git mutation.
   The engine revalidates those observations under one cross-process claim lock;
-  branch/worktree failures release state and remove only artifacts created by
-  that invocation. Historical claims keep nullable Git metadata. This adds
+  branch/worktree failures release state and remove invocation-owned artifacts,
+  including after normal ref packing, reftable compaction, or reflog expiry.
+  External replacements are preserved while Git retains any distinct ref,
+  reflog, or filesystem-identity witness. A same-SHA delete/recreate followed
+  by destruction of every continuity witness is intentionally outside this
+  local coordination guarantee because Git no longer exposes which generation
+  owns the indistinguishable ref. Historical claims keep nullable Git metadata. This adds
   schema version 20 and advances the public API contract to version 11.
 
 - **PRD-scoped decision discovery and resolution (#180).** CLI decision reads

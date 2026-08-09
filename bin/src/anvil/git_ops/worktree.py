@@ -1180,7 +1180,7 @@ def compensate_claim_plan(
     *,
     cwd: Path | None = None,
 ) -> None:
-    """Remove only branch/worktree/checkout artifacts owned by ``mutation``."""
+    """Remove artifacts with retained invocation ownership evidence."""
     _compensate_values(
         mutation.plan,
         branch_created=mutation.branch_created,
@@ -1322,15 +1322,19 @@ def finalize_claim_plan_tracker(
     tracker: ClaimGitMutationTracker,
     *,
     cwd: Path | None = None,
-) -> None:
-    """Retire temporary ownership evidence after the state claim is durable."""
+) -> bool:
+    """Best-effort retirement after state and Git claim are already durable."""
     if tracker.branch_marker_created:
-        _remove_branch_marker(
-            tracker.ownership_token,
-            tracker.plan,
-            Path(cwd or tracker.plan.caller_path),
-        )
+        try:
+            _remove_branch_marker(
+                tracker.ownership_token,
+                tracker.plan,
+                Path(cwd or tracker.plan.caller_path),
+            )
+        except ClaimPlanError:
+            return False
     tracker.branch_marker_created = False
+    return True
 
 
 def _working_tree_dirty(

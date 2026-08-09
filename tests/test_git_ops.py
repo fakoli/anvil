@@ -1532,10 +1532,49 @@ class TestApplyClaimPlan:
         marker_ref = f"refs/anvil/claim-ownership/{tracker.ownership_token}"
         assert _ref_exists(git_repo, marker_ref)
 
-        finalize_claim_plan_tracker(tracker, cwd=git_repo)
+        assert finalize_claim_plan_tracker(tracker, cwd=git_repo) is True
 
         assert not _ref_exists(git_repo, marker_ref)
         assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+
+    def test_finalize_interrupt_keeps_completed_claim(
+        self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plan = resolve_claim_plan("T011MI", "Finalize interrupt", cwd=git_repo)
+        tracker = ClaimGitMutationTracker(plan)
+        apply_claim_plan(plan, cwd=git_repo, tracker=tracker)
+        _git(git_repo, "pack-refs", "--all")
+        _git(git_repo, "reflog", "expire", "--expire=now", "--all")
+        run = worktree_mod.subprocess.run
+
+        class InterruptedResult:
+            @property
+            def returncode(self) -> int:
+                raise KeyboardInterrupt
+
+        def interrupt_marker_cleanup(*args, **kwargs):  # type: ignore[no-untyped-def]
+            result = run(*args, **kwargs)
+            command = args[0]
+            if command[1:3] == ["update-ref", "-d"]:
+                assert result.returncode == 0
+                return InterruptedResult()
+            return result
+
+        monkeypatch.setattr(worktree_mod.subprocess, "run", interrupt_marker_cleanup)
+        with pytest.raises(KeyboardInterrupt):
+            finalize_claim_plan_tracker(tracker, cwd=git_repo)
+
+        assert _default_branch(git_repo) == plan.branch
+        assert _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+        assert (
+            _git(
+                git_repo,
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/anvil/claim-ownership",
+            )
+            == ""
+        )
 
     def test_external_branch_winner_is_never_compensated(
         self, git_repo: Path, monkeypatch: pytest.MonkeyPatch

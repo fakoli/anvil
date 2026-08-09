@@ -1411,9 +1411,6 @@ def claim_task(
                 )
                 try:
                     apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
-                    finalize_claim_plan_tracker(
-                        mutation_tracker, cwd=project_dir
-                    )
                 except BaseException:
                     try:
                         manager.release(
@@ -1425,6 +1422,9 @@ def claim_task(
                             mutation_tracker, cwd=project_dir
                         )
                     raise
+                finalize_claim_plan_tracker(
+                    mutation_tracker, cwd=project_dir
+                )
         except ClaimPlanError as exc:
             raise ToolError(f"{exc.code}: {exc}") from exc
         except ClaimError as exc:
@@ -4746,9 +4746,6 @@ def claim_bundle(
                 )
                 try:
                     apply_claim_plan(plan, cwd=project_dir, tracker=mutation_tracker)
-                    finalize_claim_plan_tracker(
-                        mutation_tracker, cwd=project_dir
-                    )
                 except BaseException:
                     try:
                         manager.release(
@@ -4760,6 +4757,9 @@ def claim_bundle(
                             mutation_tracker, cwd=project_dir
                         )
                     raise
+                finalize_claim_plan_tracker(
+                    mutation_tracker, cwd=project_dir
+                )
         except ClaimPlanError as exc:
             raise ToolError(f"bundle_error: {exc.code}: {exc}") from exc
         except (BundleError, ValueError) as exc:
