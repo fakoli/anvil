@@ -860,6 +860,11 @@ worktree at `../wt-<task_id>/`.
 **Flags:**
 
 - `--worktree` *(flag)* — also create a git worktree at `../wt-<task_id>/`.
+  For a repository created with `--separate-git-dir`, invoke this flag from
+  the main checkout so Anvil can preserve project-adjacent placement. A linked
+  caller cannot reconstruct that unrecorded main-checkout path and refuses
+  with `worktree_placement_unavailable`; use the main checkout or an explicit
+  shared-tree claim instead.
 - `--shared-tree` *(flag)* — claim into the shared checkout even under `worktree_isolation: require` (read-only/docs work); also silences the advisory shared-checkout warning.
   A compatible existing branch/worktree is revalidated and reused; an occupied,
   dirty, stale, or differently owned target is refused before mutation.

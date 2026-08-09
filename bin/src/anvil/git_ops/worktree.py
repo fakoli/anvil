@@ -112,6 +112,7 @@ class ClaimGitPlan:
     caller_path: str
     caller_worktree_path: str | None
     canonical_root: str | None
+    worktree_placement_root: str | None
     git_common_dir: str | None
     linked_worktree: bool | None
     caller_dirty: bool | None
@@ -146,6 +147,9 @@ class ClaimGitMutation:
     worktree_created: bool
     caller_checkout_changed: bool
     ownership_token: str | None = None
+    branch_identity: tuple[int, int, int] | None = None
+    worktree_identity: tuple[int, int, int] | None = None
+    checkout_identity: tuple[int, int, int] | None = None
 
 
 @dataclass
@@ -159,6 +163,9 @@ class ClaimGitMutationTracker:
     branch_created: bool = False
     worktree_created: bool = False
     caller_checkout_changed: bool = False
+    branch_identity: tuple[int, int, int] | None = None
+    worktree_identity: tuple[int, int, int] | None = None
+    checkout_identity: tuple[int, int, int] | None = None
 
 
 def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
@@ -569,6 +576,7 @@ def resolve_claim_plan(
             caller_path=str(caller_path),
             caller_worktree_path=None,
             canonical_root=None,
+            worktree_placement_root=None,
             git_common_dir=None,
             linked_worktree=None,
             caller_dirty=None,
@@ -615,6 +623,13 @@ def resolve_claim_plan(
             "Git directory identity cannot be resolved",
         )
     linked = _path_key(caller_git_dir) != _path_key(common_dir)
+    separate_git_dir = _path_key(canonical_root) == _path_key(common_dir)
+    if separate_git_dir and linked and isolated:
+        raise ClaimPlanError(
+            "worktree_placement_unavailable",
+            "A linked separate-git-dir caller cannot resolve the main checkout placement",
+        )
+    worktree_placement_root = caller_root if separate_git_dir else canonical_root
     normalized_ignored_paths = tuple(
         str(path.resolve(strict=False)) for path in ignored_worktree_paths
     )
@@ -721,19 +736,19 @@ def resolve_claim_plan(
         target_candidate = (
             target_path
             if target_path.is_absolute()
-            else canonical_root.parent / target_path
+            else worktree_placement_root.parent / target_path
         )
         canonical_target = target_candidate.resolve(strict=False)
     else:
         canonical_target = None if isolated else caller_root
     if isolated and canonical_target is None:
         canonical_target = (
-            canonical_root.parent
+            worktree_placement_root.parent
             / f"wt-{safe_path_component(task_id).lower()}"
         ).resolve(strict=False)
 
     if isolated:
-        _validate_isolated_target(canonical_root, canonical_target)
+        _validate_isolated_target(worktree_placement_root, canonical_target)
 
     if branch_exists:
         if branch_sha is None:  # Defensive narrowing; branch_exists implies this.
@@ -833,6 +848,7 @@ def resolve_claim_plan(
         caller_path=str(caller_path),
         caller_worktree_path=str(caller_root),
         canonical_root=str(canonical_root),
+        worktree_placement_root=str(worktree_placement_root),
         git_common_dir=str(common_dir),
         linked_worktree=linked,
         caller_dirty=caller_dirty,
@@ -985,21 +1001,55 @@ def apply_claim_plan(
     if plan.branch is None or plan.claim_start_sha is None:
         raise ClaimPlanError("claim_plan_incomplete", "Git claim plan is incomplete")
     branch_ref = f"refs/heads/{plan.branch}"
+
+    def record_branch() -> None:
+        identity = _branch_identity(plan)
+        if identity is None:
+            raise ClaimPlanError(
+                "mutation_ownership_unavailable",
+                "Created branch ownership cannot be proven",
+            )
+        ownership.branch_created = True
+        ownership.branch_identity = identity
+
+    def record_checkout() -> None:
+        identity = _checkout_identity(plan, root)
+        if identity is None:
+            raise ClaimPlanError(
+                "mutation_ownership_unavailable",
+                "Checkout ownership cannot be proven",
+            )
+        ownership.caller_checkout_changed = True
+        ownership.checkout_identity = identity
+
+    def record_worktree() -> None:
+        identity = _worktree_identity(plan)
+        if identity is None:
+            raise ClaimPlanError(
+                "mutation_ownership_unavailable",
+                "Created worktree ownership cannot be proven",
+            )
+        ownership.worktree_created = True
+        ownership.worktree_identity = identity
+
     try:
         if not plan.branch_exists:
+            branch_action = _ownership_action(ownership.ownership_token, "branch")
             _mutate_git(
                 [
                     "update-ref",
                     "--create-reflog",
                     "-m",
-                    _ownership_action(ownership.ownership_token, "branch"),
+                    branch_action,
                     branch_ref,
                     plan.claim_start_sha,
                     "",
                 ],
                 root,
                 code="branch_create_failed",
-                on_success=lambda: setattr(ownership, "branch_created", True),
+                on_success=record_branch,
+                success_probe=lambda: _reflog_message(branch_ref, root)
+                == branch_action,
             )
         if _ref_oid(branch_ref, root) != plan.claim_start_sha:
             raise ClaimPlanError(
@@ -1014,22 +1064,28 @@ def apply_claim_plan(
                 code="caller_head_unavailable",
             )
             if current_ref != branch_ref or current_sha != plan.claim_start_sha:
+                checkout_action = _ownership_action(
+                    ownership.ownership_token, "checkout"
+                )
                 _mutate_git(
                     ["checkout", "--no-guess", plan.branch],
                     root,
                     code="branch_checkout_failed",
-                    on_success=lambda: setattr(
-                        ownership, "caller_checkout_changed", True
-                    ),
-                    reflog_action=_ownership_action(
-                        ownership.ownership_token, "checkout"
-                    ),
+                    on_success=record_checkout,
+                    success_probe=lambda: _reflog_message("HEAD", root)
+                    == checkout_action,
+                    reflog_action=checkout_action,
                 )
         elif plan.mode == "isolated":
-            if plan.canonical_root is None or plan.target_path is None:
+            if (
+                plan.canonical_root is None
+                or plan.worktree_placement_root is None
+                or plan.target_path is None
+            ):
                 raise ClaimPlanError("claim_plan_incomplete", "Worktree plan is incomplete")
             target = Path(plan.target_path)
-            _validate_isolated_target(Path(plan.canonical_root), target)
+            placement_root = Path(plan.worktree_placement_root)
+            _validate_isolated_target(placement_root, target)
             topology = _worktree_topology(root)
             owner = next(
                 (item for item in topology if _path_key(item.path) == _path_key(target)),
@@ -1040,16 +1096,20 @@ def apply_claim_plan(
                     raise ClaimPlanError(
                         "target_path_occupied", "Claim worktree target is occupied"
                     )
+                worktree_action = _ownership_action(
+                    ownership.ownership_token, "worktree"
+                )
                 _mutate_git(
                     ["worktree", "add", "--no-guess", str(target), plan.branch],
                     root,
                     code="worktree_create_failed",
-                    on_success=lambda: setattr(ownership, "worktree_created", True),
-                    reflog_action=_ownership_action(
-                        ownership.ownership_token, "worktree"
-                    ),
+                    on_success=record_worktree,
+                    success_probe=lambda: (
+                        _reflog_message("HEAD", target) or ""
+                    ).startswith(worktree_action),
+                    reflog_action=worktree_action,
                 )
-            _validate_isolated_target(Path(plan.canonical_root), target, must_exist=True)
+            _validate_isolated_target(placement_root, target, must_exist=True)
             owner = next(
                 (
                     item
@@ -1073,6 +1133,9 @@ def apply_claim_plan(
             worktree_created=ownership.worktree_created,
             caller_checkout_changed=ownership.caller_checkout_changed,
             ownership_token=ownership.ownership_token,
+            branch_identity=ownership.branch_identity,
+            worktree_identity=ownership.worktree_identity,
+            checkout_identity=ownership.checkout_identity,
         )
         if _ref_oid(branch_ref, root) != plan.claim_start_sha:
             raise ClaimPlanError("branch_moved", "Claim branch moved during mutation")
@@ -1093,7 +1156,9 @@ def compensate_claim_plan(
         branch_created=mutation.branch_created,
         worktree_created=mutation.worktree_created,
         caller_checkout_changed=mutation.caller_checkout_changed,
-        ownership_token=mutation.ownership_token,
+        branch_identity=mutation.branch_identity,
+        worktree_identity=mutation.worktree_identity,
+        checkout_identity=mutation.checkout_identity,
         cwd=Path(cwd or mutation.plan.caller_path),
     )
 
@@ -1113,12 +1178,17 @@ def compensate_claim_plan_tracker(
         branch_created=tracker.branch_created,
         worktree_created=tracker.worktree_created,
         caller_checkout_changed=tracker.caller_checkout_changed,
-        ownership_token=tracker.ownership_token,
+        branch_identity=tracker.branch_identity,
+        worktree_identity=tracker.worktree_identity,
+        checkout_identity=tracker.checkout_identity,
         cwd=root,
     )
     tracker.branch_created = False
     tracker.worktree_created = False
     tracker.caller_checkout_changed = False
+    tracker.branch_identity = None
+    tracker.worktree_identity = None
+    tracker.checkout_identity = None
 
 
 def _compensate_values(
@@ -1127,27 +1197,19 @@ def _compensate_values(
     branch_created: bool,
     worktree_created: bool,
     caller_checkout_changed: bool,
-    ownership_token: str | None = None,
+    branch_identity: tuple[int, int, int] | None = None,
+    worktree_identity: tuple[int, int, int] | None = None,
+    checkout_identity: tuple[int, int, int] | None = None,
     cwd: Path,
 ) -> None:
     if not plan.git_metadata_available or plan.branch is None or plan.claim_start_sha is None:
         return
     branch_ref = f"refs/heads/{plan.branch}"
-    worktree_marker = (
-        _reflog_message("HEAD", Path(plan.target_path))
-        if ownership_token is not None
-        and plan.target_path is not None
-        and Path(plan.target_path).is_dir()
-        else None
-    )
     owns_worktree = bool(
-        ownership_token is not None
-        and worktree_marker is not None
-        and worktree_marker.startswith(
-            _ownership_action(ownership_token, "worktree")
-        )
+        worktree_identity is not None
+        and _worktree_identity(plan) == worktree_identity
     )
-    if (worktree_created or owns_worktree) and owns_worktree and plan.target_path is not None:
+    if worktree_created and owns_worktree and plan.target_path is not None:
         owner = next(
             (
                 item
@@ -1168,14 +1230,11 @@ def _compensate_values(
                 code="worktree_compensation_failed",
             )
     caller = Path(plan.caller_worktree_path or cwd)
-    checkout_marker = (
-        _reflog_message("HEAD", caller) if ownership_token is not None else None
-    )
     owns_checkout = bool(
-        ownership_token is not None
-        and checkout_marker == _ownership_action(ownership_token, "checkout")
+        checkout_identity is not None
+        and _checkout_identity(plan, cwd) == checkout_identity
     )
-    if (caller_checkout_changed or owns_checkout) and owns_checkout:
+    if caller_checkout_changed and owns_checkout:
         if plan.caller_head_ref is not None:
             restore_name = plan.caller_head_ref.removeprefix("refs/heads/")
             _mutate_git(
@@ -1189,16 +1248,10 @@ def _compensate_values(
                 caller,
                 code="checkout_compensation_failed",
             )
-    branch_marker = (
-        _reflog_message(branch_ref, cwd) if ownership_token is not None else None
-    )
     owns_branch = bool(
-        ownership_token is not None
-        and branch_marker == _ownership_action(ownership_token, "branch")
+        branch_identity is not None and _branch_identity(plan) == branch_identity
     )
-    if (branch_created or owns_branch) and owns_branch and _ref_oid(
-        branch_ref, cwd
-    ) == plan.claim_start_sha:
+    if branch_created and owns_branch and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
         branch_owner = next(
             (item for item in _worktree_topology(cwd) if item.branch_ref == branch_ref),
             None,
@@ -1249,6 +1302,32 @@ def _ownership_action(token: str, kind: str) -> str:
     return f"anvil-claim:{token}:{kind}"
 
 
+def _artifact_identity(path: Path) -> tuple[int, int, int] | None:
+    try:
+        info = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    return (int(info.st_dev), int(info.st_ino), int(info.st_ctime_ns))
+
+
+def _branch_identity(plan: ClaimGitPlan) -> tuple[int, int, int] | None:
+    if plan.git_common_dir is None or plan.branch is None:
+        return None
+    return _artifact_identity(Path(plan.git_common_dir) / "refs" / "heads" / plan.branch)
+
+
+def _worktree_identity(plan: ClaimGitPlan) -> tuple[int, int, int] | None:
+    if plan.target_path is None:
+        return None
+    git_dir = _git_dir(Path(plan.target_path))
+    return _artifact_identity(git_dir) if git_dir is not None else None
+
+
+def _checkout_identity(plan: ClaimGitPlan, cwd: Path) -> tuple[int, int, int] | None:
+    git_dir = _git_dir(Path(plan.caller_worktree_path or cwd))
+    return _artifact_identity(git_dir / "HEAD") if git_dir is not None else None
+
+
 def _reflog_message(ref: str, cwd: Path) -> str | None:
     result = _run_git(["reflog", "show", "-1", "--format=%gs", ref], cwd)
     if result is None or result.returncode != 0:
@@ -1262,12 +1341,19 @@ def _mutate_git(
     *,
     code: str,
     on_success: Callable[[], None] | None = None,
+    success_probe: Callable[[], bool] | None = None,
     reflog_action: str | None = None,
 ) -> None:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     if reflog_action is not None:
         env["GIT_REFLOG_ACTION"] = reflog_action
+        # HEAD/worktree reflogs are optional repository policy. Ownership
+        # markers must remain durable even when core.logAllRefUpdates=false;
+        # override only this child process and never mutate repository config.
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "core.logAllRefUpdates"
+        env["GIT_CONFIG_VALUE_0"] = "always"
     try:
         result = subprocess.run(
             ["git", *args],
@@ -1280,6 +1366,10 @@ def _mutate_git(
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ClaimPlanError(code, "Git mutation timed out or is unavailable") from exc
+    except BaseException:
+        if success_probe is not None and success_probe() and on_success is not None:
+            on_success()
+        raise
     if result.returncode != 0:
         raise ClaimPlanError(code, "Git mutation failed")
     if on_success is not None:

@@ -1048,6 +1048,8 @@ class TestResolveClaimPlan:
         assert canonical_git_root(project) == metadata.resolve()
         plan = resolve_claim_plan("T004", "Separate gitdir", cwd=project, worktree=True)
         assert plan.canonical_root == str(metadata.resolve())
+        assert plan.worktree_placement_root == str(project.resolve())
+        assert Path(plan.target_path or "").parent == project.resolve().parent
         mutation = apply_claim_plan(plan, cwd=project)
         try:
             assert mutation.worktree_created is True
@@ -1057,15 +1059,16 @@ class TestResolveClaimPlan:
         linked = tmp_path / "linked"
         _git(project, "worktree", "add", "-b", "linked-separate", str(linked), "HEAD")
         assert canonical_git_root(linked) == metadata.resolve()
-        linked_plan = resolve_claim_plan(
-            "T004B", "Linked separate gitdir", cwd=linked, worktree=True
+        with pytest.raises(ClaimPlanError) as exc:
+            resolve_claim_plan(
+                "T004B", "Linked separate gitdir", cwd=linked, worktree=True
+            )
+        assert exc.value.code == "worktree_placement_unavailable"
+        shared_plan = resolve_claim_plan(
+            "T004C", "Linked separate shared", cwd=linked, shared_tree=True
         )
-        assert linked_plan.canonical_root == str(metadata.resolve())
-        linked_mutation = apply_claim_plan(linked_plan, cwd=linked)
-        try:
-            assert linked_mutation.worktree_created is True
-        finally:
-            compensate_claim_plan(linked_mutation, cwd=linked)
+        assert shared_plan.canonical_root == str(metadata.resolve())
+        assert shared_plan.target_path == str(linked.resolve())
 
     def test_git_observation_refuses_output_over_internal_cap(
         self,
@@ -1090,13 +1093,20 @@ class TestResolveClaimPlan:
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
         def interrupt_after(  # type: ignore[no-untyped-def]
-            args, cwd, *, code, on_success=None, reflog_action=None
+            args,
+            cwd,
+            *,
+            code,
+            on_success=None,
+            success_probe=None,
+            reflog_action=None,
         ):
             mutate(
                 args,
                 cwd,
                 code=code,
                 on_success=on_success,
+                success_probe=success_probe,
                 reflog_action=reflog_action,
             )
             if args[:2] == ["worktree", "add"]:
@@ -1436,7 +1446,13 @@ class TestApplyClaimPlan:
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
         def external_wins(  # type: ignore[no-untyped-def]
-            args, cwd, *, code, on_success=None, reflog_action=None
+            args,
+            cwd,
+            *,
+            code,
+            on_success=None,
+            success_probe=None,
+            reflog_action=None,
         ):
             if args[0] == "update-ref" and args[-3].startswith("refs/heads/"):
                 _git(cwd, "update-ref", args[-3], args[-2], args[-1])
@@ -1445,6 +1461,7 @@ class TestApplyClaimPlan:
                 cwd,
                 code=code,
                 on_success=on_success,
+                success_probe=success_probe,
                 reflog_action=reflog_action,
             )
 
@@ -1464,7 +1481,13 @@ class TestApplyClaimPlan:
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
         def external_wins(  # type: ignore[no-untyped-def]
-            args, cwd, *, code, on_success=None, reflog_action=None
+            args,
+            cwd,
+            *,
+            code,
+            on_success=None,
+            success_probe=None,
+            reflog_action=None,
         ):
             if args[:2] == ["worktree", "add"]:
                 _git(cwd, *args)
@@ -1473,6 +1496,7 @@ class TestApplyClaimPlan:
                 cwd,
                 code=code,
                 on_success=on_success,
+                success_probe=success_probe,
                 reflog_action=reflog_action,
             )
 
@@ -1491,7 +1515,13 @@ class TestApplyClaimPlan:
         mutate = worktree_mod._mutate_git  # noqa: SLF001
 
         def external_wins(  # type: ignore[no-untyped-def]
-            args, cwd, *, code, on_success=None, reflog_action=None
+            args,
+            cwd,
+            *,
+            code,
+            on_success=None,
+            success_probe=None,
+            reflog_action=None,
         ):
             if args[:2] == ["checkout", "--no-guess"]:
                 _git(cwd, *args)
@@ -1501,6 +1531,7 @@ class TestApplyClaimPlan:
                 cwd,
                 code=code,
                 on_success=on_success,
+                success_probe=success_probe,
                 reflog_action=reflog_action,
             )
 
@@ -1573,6 +1604,50 @@ class TestApplyClaimPlan:
             assert plan.target_path is not None
             assert not Path(plan.target_path).exists()
 
+    @pytest.mark.parametrize("isolated", [False, True])
+    def test_ownership_markers_override_disabled_repository_reflogs(
+        self, git_repo: Path, isolated: bool
+    ) -> None:
+        _git(git_repo, "config", "core.logAllRefUpdates", "false")
+        original_branch = _default_branch(git_repo)
+        plan = resolve_claim_plan(
+            "T011D4" if isolated else "T011D3",
+            "Disabled reflogs",
+            cwd=git_repo,
+            worktree=isolated,
+        )
+
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert _default_branch(git_repo) == original_branch
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+        if isolated:
+            assert plan.target_path is not None
+            assert not Path(plan.target_path).exists()
+
+    @pytest.mark.parametrize("isolated", [False, True])
+    def test_ownership_survives_reflog_expiration(
+        self, git_repo: Path, isolated: bool
+    ) -> None:
+        original_branch = _default_branch(git_repo)
+        plan = resolve_claim_plan(
+            "T011D6" if isolated else "T011D5",
+            "Expired reflogs",
+            cwd=git_repo,
+            worktree=isolated,
+        )
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+        _git(git_repo, "reflog", "expire", "--expire=now", "--all")
+
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert _default_branch(git_repo) == original_branch
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+        if isolated:
+            assert plan.target_path is not None
+            assert not Path(plan.target_path).exists()
+
     def test_branch_aba_invalidates_durable_ownership_marker(
         self, git_repo: Path
     ) -> None:
@@ -1580,7 +1655,18 @@ class TestApplyClaimPlan:
         mutation = apply_claim_plan(plan, cwd=git_repo)
         branch_ref = f"refs/heads/{plan.branch}"
         _git(git_repo, "update-ref", "-d", branch_ref, plan.claim_start_sha or "")
-        _git(git_repo, "update-ref", branch_ref, plan.claim_start_sha or "", "")
+        _git(
+            git_repo,
+            "update-ref",
+            "--create-reflog",
+            "-m",
+            worktree_mod._ownership_action(  # noqa: SLF001
+                mutation.ownership_token or "", "branch"
+            ),
+            branch_ref,
+            plan.claim_start_sha or "",
+            "",
+        )
 
         compensate_claim_plan(mutation, cwd=git_repo)
 

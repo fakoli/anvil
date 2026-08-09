@@ -541,6 +541,9 @@ and the project-level override is read from `.anvil/config.yaml`.
 The immutable attestation context binds external progress to this claim generation,
 repository, PRD/task revisions, and canonical expected-path baselines. `git_metadata`
 records the exact selected base, claim-start commit, branch, canonical root, and target.
+Here `canonical_root` is the stable Git repository identity shared by all linked
+callers; for `--separate-git-dir` repositories that identity is the common Git
+directory, while CLI isolated-worktree placement remains main-checkout-adjacent.
 `branch`, `worktree_path`, and `git_metadata` are nullable on the state-only path. In a
 non-Git project the claim still succeeds with `attestation_context: null` and an
 additive warning; legacy hook-observed file progress remains available.

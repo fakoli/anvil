@@ -88,7 +88,7 @@ Run `anvil renew C9F3A210 --actor alice` to extend the lease before it expires.
 
 | Flag | Effect |
 |---|---|
-| `--worktree` | Create or safely reuse the planned isolated worktree at `../wt-<task_id>/`. A dirty caller is allowed because isolated mode never moves it; an existing target worktree must be clean and bound to the planned branch. |
+| `--worktree` | Create or safely reuse the planned isolated worktree at `../wt-<task_id>/`. A dirty caller is allowed because isolated mode never moves it; an existing target worktree must be clean and bound to the planned branch. For `--separate-git-dir`, run this from the main checkout; a linked caller safely refuses because Git does not record the main checkout path. |
 | `--force` | Override file-overlap and conflict-group warnings; the conflict event is still logged. Use sparingly. |
 | `--actor <name>` | Local audit identity recorded on the claim. Precedence is explicit `--actor` > `ANVIL_ACTOR` > legacy `ANVIL_GATE_ACTOR` > derived `$USER`/signing fingerprint/`agent` plus a session discriminator. It is not cryptographic authentication. Claim output returns exact structured continuation argv/environment data. |
 | `--lease <minutes>` | Lease duration for this claim, overriding `default_lease_minutes` from project/global `config.yaml` (precedence: this flag > project config > global config > built-in default of `240`). |
