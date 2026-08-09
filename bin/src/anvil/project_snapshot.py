@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn
@@ -37,7 +38,7 @@ from anvil.read_contracts import (
 )
 from anvil.state.backend import SchemaMismatch, SchemaProbeFailed
 from anvil.state.hashing import CanonicalJsonRefusal, canonical_json_bytes
-from anvil.state.models import Event, Verification
+from anvil.state.models import Event
 from anvil.state.sqlite import query_only_transaction
 
 EVENT_FRONTIER_DOMAIN_V1 = b"anvil.project-event-frontier.v1\0"
@@ -130,6 +131,7 @@ def _project_payload(
         ProviderLimitNameV1.max_features,
     )
     _gate_count(conn, "tasks", limits.max_tasks, ProviderLimitNameV1.max_tasks)
+    _preflight_storage_limits(conn, limits)
 
     project_row = conn.execute("SELECT id, name FROM projects").fetchone()
     if project_row is None:
@@ -206,7 +208,17 @@ def _project_payload(
 
     task_rows = conn.execute(
         "SELECT id, feature_id, prd_id, title, status, priority, "
-        "dependencies, acceptance_criteria, verification, parent_task_id "
+        "dependencies, acceptance_criteria, parent_task_id, "
+        "COALESCE(json_array_length(json_extract(verification, '$.commands')), 0) "
+        "AS command_count, "
+        "COALESCE(json_array_length(json_extract(verification, '$.manual_steps')), 0) "
+        "AS manual_count, "
+        "COALESCE(json_array_length(json_extract(verification, '$.required_evidence')), 0) "
+        "AS evidence_count, "
+        "COALESCE(json_array_length(json_extract(verification, '$.required_proofs')), 0) "
+        "AS proof_count, "
+        "COALESCE(json_array_length(json_extract(verification, '$.artifact_assertions')), 0) "
+        "AS assertion_count "
         "FROM tasks ORDER BY id"
     ).fetchall()
     task_refs: dict[str, TaskScopedRefV1] = {}
@@ -265,14 +277,13 @@ def _project_payload(
                 len(acceptance),
                 limits.max_acceptance_criteria_per_task,
             )
-        verification = _verification(row["verification"])
-        summaries = _verification_summaries(verification)
-        if len(summaries) > limits.max_verification_summaries_per_task:
-            _limit(
-                ProviderLimitNameV1.max_verification_summaries_per_task,
-                len(summaries),
-                limits.max_verification_summaries_per_task,
-            )
+        summaries = _verification_summaries(
+            _required_int(row["command_count"], minimum=0),
+            _required_int(row["manual_count"], minimum=0),
+            _required_int(row["evidence_count"], minimum=0),
+            _required_int(row["proof_count"], minimum=0),
+            _required_int(row["assertion_count"], minimum=0),
+        )
         parent_id = _optional_string(row["parent_task_id"])
         parent_ref = None
         if parent_id is not None:
@@ -297,6 +308,21 @@ def _project_payload(
             )
         )
 
+    payload_document = {
+        "project": project.model_dump(mode="json"),
+        "prds": [item.model_dump(mode="json") for item in prds],
+        "features": [item.model_dump(mode="json") for item in features],
+        "tasks": [item.model_dump(mode="json") for item in tasks],
+        "schema_id": "anvil.state.project-snapshot.v1",
+        "operation_version": 1,
+    }
+    payload_size = _canonical_size(payload_document)
+    if payload_size > limits.max_snapshot_bytes:
+        _limit(
+            ProviderLimitNameV1.max_snapshot_bytes,
+            payload_size,
+            limits.max_snapshot_bytes,
+        )
     try:
         payload = ProjectSnapshotPayloadV1(
             project=project,
@@ -319,9 +345,54 @@ def _event_cursor(
 ) -> tuple[EventCursorV1, tuple[int, int, int, int]]:
     start_stat = os.fstat(events_fh.fileno())
     events_fh.seek(0)
-    by_id: dict[str, tuple[Event, bytes]] = {}
-    local_last = -1
+    with tempfile.TemporaryDirectory(prefix="anvil-project-snapshot-") as temp_dir:
+        spool = sqlite3.connect(Path(temp_dir) / "events.db")
+        spool.row_factory = sqlite3.Row
+        try:
+            spool.execute("PRAGMA journal_mode = OFF")
+            spool.execute(
+                "CREATE TABLE event_spool ("
+                "id TEXT PRIMARY KEY, record BLOB NOT NULL, parent_id TEXT, "
+                "lamport INTEGER)"
+            )
+            spool.execute(
+                "CREATE INDEX event_spool_parent_id ON event_spool(parent_id)"
+            )
+            mode, event_count = _spool_event_log(events_fh, spool)
+            identity = (
+                start_stat.st_dev,
+                start_stat.st_ino,
+                start_stat.st_size,
+                start_stat.st_mtime_ns,
+            )
+            _verify_event_identity(events_fh, identity)
+            _validate_event_projection(conn, spool, event_count)
+            if mode == "git":
+                _validate_git_graph(spool, event_count)
+                _validate_git_material(conn, spool, event_count)
+            hasher = hashlib.sha256(EVENT_FRONTIER_DOMAIN_V1)
+            for row in spool.execute("SELECT record FROM event_spool ORDER BY id"):
+                record = bytes(row[0])
+                hasher.update(len(record).to_bytes(8, "big"))
+                hasher.update(record)
+            return (
+                EventCursorV1(
+                    event_count=event_count,
+                    event_frontier_sha256=hasher.hexdigest(),
+                ),
+                identity,
+            )
+        finally:
+            spool.close()
+
+
+def _spool_event_log(
+    events_fh: BinaryIO,
+    spool: sqlite3.Connection,
+) -> tuple[str | None, int]:
+    local_last = 0
     mode: str | None = None
+    event_count = 0
     while True:
         line = events_fh.readline(_MAX_EVENT_RECORD_BYTES + 2)
         if not line:
@@ -330,10 +401,8 @@ def _event_cursor(
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
         if not line.endswith(b"\n") or line.startswith(b"\xef\xbb\xbf"):
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
-        raw = line[:-1]
         try:
-            document = _strict_json(raw)
-            event = Event.model_validate(document)
+            event = Event.model_validate(_strict_json(line[:-1]))
             record = canonical_json_bytes(
                 event.model_dump(mode="json"),
                 max_bytes=_MAX_EVENT_RECORD_BYTES,
@@ -341,73 +410,90 @@ def _event_cursor(
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError):
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
-        is_git = event.id.startswith("E-")
-        current_mode = "git" if is_git else "local"
+        current_mode = "git" if event.id.startswith("E-") else "local"
         if mode is None:
             mode = current_mode
         elif mode != current_mode:
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
-        prior = by_id.get(event.id)
-        if prior is not None:
-            if mode != "git" or prior[1] != record:
-                _refuse(ReadErrorCode.projection_not_converged, field="projection")
-            continue
         if mode == "local":
             if event.parent_event_id is not None or event.lamport is not None:
                 _refuse(ReadErrorCode.projection_not_converged, field="projection")
             sequence = int(event.id[1:])
-            if sequence <= local_last:
+            if sequence != local_last + 1:
                 _refuse(ReadErrorCode.projection_not_converged, field="projection")
             local_last = sequence
         elif event.lamport is None:
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
-        by_id[event.id] = (event, record)
+        try:
+            spool.execute(
+                "INSERT INTO event_spool (id, record, parent_id, lamport) "
+                "VALUES (?, ?, ?, ?)",
+                (event.id, record, event.parent_event_id, event.lamport),
+            )
+            event_count += 1
+        except sqlite3.IntegrityError:
+            prior = spool.execute(
+                "SELECT record FROM event_spool WHERE id = ?", (event.id,)
+            ).fetchone()
+            if mode != "git" or prior is None or bytes(prior[0]) != record:
+                _refuse(ReadErrorCode.projection_not_converged, field="projection")
+    return mode, event_count
 
-    identity = (start_stat.st_dev, start_stat.st_ino, start_stat.st_size, start_stat.st_mtime_ns)
-    _verify_event_identity(events_fh, identity)
 
-    rows = conn.execute(
+def _validate_event_projection(
+    conn: sqlite3.Connection,
+    spool: sqlite3.Connection,
+    event_count: int,
+) -> None:
+    db_count = _table_count(conn, "events")
+    if db_count != event_count:
+        _refuse(ReadErrorCode.projection_not_converged, field="projection")
+    for row in conn.execute(
         "SELECT id, timestamp, actor, action, target_kind, target_id, "
         "payload_json FROM events ORDER BY id"
-    ).fetchall()
-    if len(rows) != len(by_id):
-        _refuse(ReadErrorCode.projection_not_converged, field="projection")
-    for row in rows:
-        event_entry = by_id.get(_required_string(row["id"]))
-        if event_entry is None:
+    ):
+        event_id = row["id"]
+        if not isinstance(event_id, str) or not event_id:
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
-        event_json = event_entry[0].model_dump(mode="json")
+        spooled = spool.execute(
+            "SELECT record FROM event_spool WHERE id = ?", (event_id,)
+        ).fetchone()
+        if spooled is None:
+            _refuse(ReadErrorCode.projection_not_converged, field="projection")
         try:
-            payload_json = _strict_json(
+            event = Event.model_validate_json(bytes(spooled[0]))
+            payload = _strict_json(
                 _required_string(row["payload_json"], allow_empty=True).encode("utf-8")
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            db_material = canonical_json_bytes(
+                {
+                    "timestamp": row["timestamp"],
+                    "actor": row["actor"],
+                    "action": row["action"],
+                    "target_kind": row["target_kind"],
+                    "target_id": row["target_id"],
+                    "payload_json": payload,
+                },
+                max_bytes=_MAX_EVENT_RECORD_BYTES,
+                max_string_bytes=_MAX_EVENT_RECORD_BYTES,
+            )
+            event_json = event.model_dump(mode="json")
+            log_material = canonical_json_bytes(
+                {
+                    "timestamp": event_json["timestamp"],
+                    "actor": event_json["actor"],
+                    "action": event_json["action"],
+                    "target_kind": event_json["target_kind"],
+                    "target_id": event_json["target_id"],
+                    "payload_json": event_json["payload_json"],
+                },
+                max_bytes=_MAX_EVENT_RECORD_BYTES,
+                max_string_bytes=_MAX_EVENT_RECORD_BYTES,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError):
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
-        if (
-            row["timestamp"] != event_json["timestamp"]
-            or row["actor"] != event_json["actor"]
-            or row["action"] != event_json["action"]
-            or row["target_kind"] != event_json["target_kind"]
-            or row["target_id"] != event_json["target_id"]
-            or payload_json != event_json["payload_json"]
-        ):
+        if db_material != log_material:
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
-
-    if mode == "git":
-        _validate_git_material(conn, by_id)
-
-    hasher = hashlib.sha256(EVENT_FRONTIER_DOMAIN_V1)
-    records = sorted(record for _, record in by_id.values())
-    for record in records:
-        hasher.update(len(record).to_bytes(8, "big"))
-        hasher.update(record)
-    return (
-        EventCursorV1(
-            event_count=len(records),
-            event_frontier_sha256=hasher.hexdigest(),
-        ),
-        identity,
-    )
 
 
 def _verify_event_identity(
@@ -433,28 +519,87 @@ def _verify_event_identity(
         _refuse(ReadErrorCode.projection_not_converged, field="projection")
 
 
+def _validate_git_graph(spool: sqlite3.Connection, event_count: int) -> None:
+    """Reject parent cycles without retaining the event graph in process memory."""
+    spool.execute(
+        "CREATE TABLE graph_indegree AS "
+        "SELECT child.id AS id, "
+        "CASE WHEN parent.id IS NULL THEN 0 ELSE 1 END AS degree "
+        "FROM event_spool AS child "
+        "LEFT JOIN event_spool AS parent ON parent.id = child.parent_id"
+    )
+    spool.execute("CREATE UNIQUE INDEX graph_indegree_id ON graph_indegree(id)")
+    spool.execute("CREATE TABLE graph_queue (id TEXT PRIMARY KEY)")
+    spool.execute(
+        "INSERT INTO graph_queue SELECT id FROM graph_indegree WHERE degree = 0"
+    )
+    processed = 0
+    while True:
+        queued = spool.execute(
+            "SELECT id FROM graph_queue ORDER BY id LIMIT 1024"
+        ).fetchall()
+        if not queued:
+            break
+        ids = [str(row[0]) for row in queued]
+        placeholders = ",".join("?" for _ in ids)
+        spool.execute(
+            f"DELETE FROM graph_queue WHERE id IN ({placeholders})",  # noqa: S608
+            ids,
+        )
+        for event_id in ids:
+            processed += 1
+            for child in spool.execute(
+                "SELECT id FROM event_spool WHERE parent_id = ?", (event_id,)
+            ):
+                child_id = str(child[0])
+                spool.execute(
+                    "UPDATE graph_indegree SET degree = degree - 1 WHERE id = ?",
+                    (child_id,),
+                )
+                degree = spool.execute(
+                    "SELECT degree FROM graph_indegree WHERE id = ?", (child_id,)
+                ).fetchone()
+                if degree is not None and degree[0] == 0:
+                    spool.execute(
+                        "INSERT OR IGNORE INTO graph_queue (id) VALUES (?)", (child_id,)
+                    )
+    if processed != event_count:
+        _refuse(ReadErrorCode.projection_not_converged, field="projection")
+
+
 def _validate_git_material(
     conn: sqlite3.Connection,
-    by_id: dict[str, tuple[Event, bytes]],
+    spool: sqlite3.Connection,
+    event_count: int,
 ) -> None:
     state = conn.execute(
         "SELECT initialized FROM git_event_material_state WHERE singleton = 1"
     ).fetchone()
     if state is None or state[0] != 1:
         _refuse(ReadErrorCode.projection_not_converged, field="projection")
-    rows = conn.execute(
-        "SELECT event_id, fingerprint FROM git_event_material"
-    ).fetchall()
-    if len(rows) != len(by_id):
+    if _table_count(conn, "git_event_material") != event_count:
         _refuse(ReadErrorCode.projection_not_converged, field="projection")
-    fingerprints = {row["event_id"]: row["fingerprint"] for row in rows}
-    for event_id, (event, _) in by_id.items():
-        material = json.dumps(
-            event.model_dump(mode="json", exclude={"id"}),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        if fingerprints.get(event_id) != hashlib.sha256(material).hexdigest():
+    for row in conn.execute(
+        "SELECT event_id, fingerprint FROM git_event_material ORDER BY event_id"
+    ):
+        event_id = row["event_id"]
+        if not isinstance(event_id, str) or not isinstance(row["fingerprint"], str):
+            _refuse(ReadErrorCode.projection_not_converged, field="projection")
+        spooled = spool.execute(
+            "SELECT record FROM event_spool WHERE id = ?", (event_id,)
+        ).fetchone()
+        if spooled is None:
+            _refuse(ReadErrorCode.projection_not_converged, field="projection")
+        try:
+            event = Event.model_validate_json(bytes(spooled[0]))
+            material = json.dumps(
+                event.model_dump(mode="json", exclude={"id"}),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (UnicodeDecodeError, ValidationError, ValueError):
+            _refuse(ReadErrorCode.projection_not_converged, field="projection")
+        if row["fingerprint"] != hashlib.sha256(material).hexdigest():
             _refuse(ReadErrorCode.projection_not_converged, field="projection")
 
 
@@ -496,30 +641,25 @@ def _validated_source_binding(
     return source_sha, source_size, encoding
 
 
-def _verification(raw: Any) -> Verification:
-    try:
-        if not isinstance(raw, str):
-            raise TypeError
-        return Verification.model_validate(_strict_json(raw.encode("utf-8")))
-    except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError):
-        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
-
-
 def _verification_summaries(
-    verification: Verification,
+    commands: int,
+    manual_steps: int,
+    required_evidence: int,
+    required_proofs: int,
+    artifact_assertions: int,
 ) -> tuple[VerificationSummaryV1, ...]:
     groups = (
-        (VerificationKindV1.command, "Automated checks", len(verification.commands)),
-        (VerificationKindV1.manual_step, "Manual checks", len(verification.manual_steps)),
+        (VerificationKindV1.command, "Automated checks", commands),
+        (VerificationKindV1.manual_step, "Manual checks", manual_steps),
         (
             VerificationKindV1.required_evidence,
             "Required evidence",
-            len(verification.required_evidence),
+            required_evidence,
         ),
         (
             VerificationKindV1.typed_proof,
             "Typed proofs",
-            len(verification.required_proofs) + len(verification.artifact_assertions),
+            required_proofs + artifact_assertions,
         ),
     )
     return tuple(
@@ -529,6 +669,191 @@ def _verification_summaries(
     )
 
 
+def _preflight_storage_limits(
+    conn: sqlite3.Connection,
+    limits: ProviderReadLimitsV1,
+) -> None:
+    """Bound raw storage before selecting BLOBs or decoding JSON collections."""
+    visible_columns = {
+        "projects": ("id", "name"),
+        "prds": (
+            "id",
+            "project_id",
+            "title",
+            "status",
+            "target_version",
+            "target_tag",
+            "source_sha256",
+            "source_encoding",
+            "provenance_state",
+        ),
+        "features": ("id", "prd_id", "title", "status"),
+        "tasks": (
+            "id",
+            "feature_id",
+            "prd_id",
+            "title",
+            "status",
+            "priority",
+            "parent_task_id",
+        ),
+    }
+    for table, columns in visible_columns.items():
+        expressions = ", ".join(
+            f"COALESCE(MAX(length(CAST({column} AS BLOB))), 0)" for column in columns
+        )
+        row = conn.execute(f"SELECT {expressions} FROM {table}").fetchone()  # noqa: S608
+        actual = max((int(value) for value in row), default=0)
+        if actual > limits.max_string_bytes:
+            _limit(
+                ProviderLimitNameV1.max_string_bytes,
+                actual,
+                limits.max_string_bytes,
+            )
+
+    source_row = conn.execute(
+        "SELECT COALESCE(MAX(length(source_bytes)), 0), "
+        "COALESCE(MAX(source_size_bytes), 0) FROM prds"
+    ).fetchone()
+    source_actual = max(int(source_row[0]), int(source_row[1]))
+    if source_actual > limits.max_prd_content_bytes:
+        _limit(
+            ProviderLimitNameV1.max_prd_content_bytes,
+            source_actual,
+            limits.max_prd_content_bytes,
+        )
+
+    raw_json_row = conn.execute(
+        "SELECT COALESCE(MAX(length(CAST(dependencies AS BLOB))), 0), "
+        "COALESCE(MAX(length(CAST(acceptance_criteria AS BLOB))), 0), "
+        "COALESCE(MAX(length(CAST(verification AS BLOB))), 0) FROM tasks"
+    ).fetchone()
+    raw_actual = max(int(value) for value in raw_json_row)
+    if raw_actual > limits.max_snapshot_bytes:
+        _limit(
+            ProviderLimitNameV1.max_snapshot_bytes,
+            raw_actual,
+            limits.max_snapshot_bytes,
+        )
+
+    malformed = conn.execute(
+        "SELECT 1 FROM tasks WHERE "
+        "json_valid(dependencies) != 1 OR json_type(dependencies) != 'array' OR "
+        "json_valid(acceptance_criteria) != 1 OR "
+        "json_type(acceptance_criteria) != 'array' OR "
+        "json_valid(verification) != 1 OR json_type(verification) != 'object' "
+        "LIMIT 1"
+    ).fetchone()
+    if malformed is not None:
+        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+
+    _preflight_json_string_array(
+        conn,
+        "dependencies",
+        limits.max_dependencies_per_task,
+        ProviderLimitNameV1.max_dependencies_per_task,
+        limits.max_string_bytes,
+    )
+    _preflight_json_string_array(
+        conn,
+        "acceptance_criteria",
+        limits.max_acceptance_criteria_per_task,
+        ProviderLimitNameV1.max_acceptance_criteria_per_task,
+        limits.max_string_bytes,
+    )
+    dependency_total = conn.execute(
+        "SELECT COALESCE(SUM(json_array_length(dependencies)), 0) FROM tasks"
+    ).fetchone()[0]
+    if int(dependency_total) > limits.max_dependency_edges:
+        _limit(
+            ProviderLimitNameV1.max_dependency_edges,
+            int(dependency_total),
+            limits.max_dependency_edges,
+        )
+    _preflight_verification(conn, limits)
+
+
+def _preflight_json_string_array(
+    conn: sqlite3.Connection,
+    column: str,
+    item_limit: int,
+    limit_name: ProviderLimitNameV1,
+    string_limit: int,
+) -> None:
+    counts = conn.execute(
+        f"SELECT COALESCE(MAX(json_array_length({column})), 0) FROM tasks"  # noqa: S608
+    ).fetchone()
+    actual = int(counts[0])
+    if actual > item_limit:
+        _limit(limit_name, actual, item_limit)
+    invalid = conn.execute(
+        f"SELECT 1 FROM tasks, json_each(tasks.{column}) "  # noqa: S608
+        "WHERE json_each.type != 'text' LIMIT 1"
+    ).fetchone()
+    if invalid is not None:
+        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+    maximum = conn.execute(
+        f"SELECT COALESCE(MAX(length(CAST(json_each.value AS BLOB))), 0) "  # noqa: S608
+        f"FROM tasks, json_each(tasks.{column})"  # noqa: S608
+    ).fetchone()
+    actual_string = int(maximum[0])
+    if actual_string > string_limit:
+        _limit(
+            ProviderLimitNameV1.max_string_bytes,
+            actual_string,
+            string_limit,
+        )
+
+
+def _preflight_verification(
+    conn: sqlite3.Connection,
+    limits: ProviderReadLimitsV1,
+) -> None:
+    fields = (
+        "commands",
+        "manual_steps",
+        "required_evidence",
+        "required_proofs",
+        "artifact_assertions",
+    )
+    allowed = ",".join("?" for _ in fields)
+    unknown = conn.execute(
+        "SELECT 1 FROM tasks, json_each(tasks.verification) "
+        f"WHERE json_each.key NOT IN ({allowed}) LIMIT 1",  # noqa: S608
+        fields,
+    ).fetchone()
+    if unknown is not None:
+        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+    for field in fields:
+        invalid = conn.execute(
+            "SELECT 1 FROM tasks WHERE "
+            f"json_type(verification, '$.{field}') IS NOT NULL AND "  # noqa: S608
+            f"json_type(verification, '$.{field}') != 'array' LIMIT 1"  # noqa: S608
+        ).fetchone()
+        if invalid is not None:
+            _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+        expected_type = "text" if field in fields[:3] else "object"
+        invalid_item = conn.execute(
+            "SELECT 1 FROM tasks, "
+            f"json_each(tasks.verification, '$.{field}') "  # noqa: S608
+            f"WHERE json_each.type != '{expected_type}' LIMIT 1"  # noqa: S608
+        ).fetchone()
+        if invalid_item is not None:
+            _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+    expression = " + ".join(
+        f"COALESCE(json_array_length(json_extract(verification, '$.{field}')), 0)"
+        for field in fields
+    )
+    maximum = conn.execute(
+        f"SELECT COALESCE(MAX({expression}), 0) FROM tasks"  # noqa: S608
+    ).fetchone()
+    actual = int(maximum[0])
+    if actual > limits.max_verification_summaries_per_task:
+        _limit(
+            ProviderLimitNameV1.max_verification_summaries_per_task,
+            actual,
+            limits.max_verification_summaries_per_task,
+        )
 def _local_entity_id(stored_id: str, prd_id: str) -> str:
     if prd_id == "default":
         if ":" in stored_id:
@@ -613,17 +938,11 @@ def _enforce_serialized_limits(
             max_label_bytes,
             limits.max_verification_summary_label_bytes,
         )
-    payload_bytes = canonical_json_bytes(
-        payload_document,
-        max_depth=PROVIDER_LIMITS_V1.max_canonical_json_depth,
-        max_nodes=PROVIDER_LIMITS_V1.max_snapshot_bytes,
-        max_bytes=PROVIDER_LIMITS_V1.max_snapshot_bytes,
-        max_string_bytes=PROVIDER_LIMITS_V1.max_string_bytes,
-    )
-    if len(payload_bytes) > limits.max_snapshot_bytes:
+    payload_size = _canonical_size(payload_document)
+    if payload_size > limits.max_snapshot_bytes:
         _limit(
             ProviderLimitNameV1.max_snapshot_bytes,
-            len(payload_bytes),
+            payload_size,
             limits.max_snapshot_bytes,
         )
     response_document = {
@@ -649,19 +968,23 @@ def _enforce_serialized_limits(
             depth,
             limits.max_canonical_json_depth,
         )
-    response_bytes = canonical_json_bytes(
-        response_document,
-        max_depth=PROVIDER_LIMITS_V1.max_canonical_json_depth,
-        max_nodes=PROVIDER_LIMITS_V1.max_response_bytes,
-        max_bytes=PROVIDER_LIMITS_V1.max_response_bytes,
-        max_string_bytes=PROVIDER_LIMITS_V1.max_string_bytes,
-    )
-    if len(response_bytes) > limits.max_response_bytes:
+    response_size = _canonical_size(response_document)
+    if response_size > limits.max_response_bytes:
         _limit(
             ProviderLimitNameV1.max_response_bytes,
-            len(response_bytes),
+            response_size,
             limits.max_response_bytes,
         )
+
+
+def _canonical_size(value: Any) -> int:
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sum(len(chunk.encode("utf-8")) for chunk in encoder.iterencode(value))
 
 
 def _walk_strings(value: Any) -> Iterator[str]:

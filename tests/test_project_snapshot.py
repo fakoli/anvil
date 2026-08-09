@@ -21,7 +21,7 @@ from anvil.read_contracts import (
     lowered_limits,
     snapshot_response_canonical_bytes,
 )
-from anvil.state.models import EventDraft
+from anvil.state.models import Event, EventDraft
 from anvil.state.sqlite import SqliteBackend
 
 _NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
@@ -268,6 +268,10 @@ def test_repeat_read_is_deterministic_and_does_not_mutate_state(
     after = (database.read_bytes(), events.read_bytes(), sorted(p.name for p in root.iterdir()))
     assert first == second
     assert first.event_cursor.event_count == 8
+    assert (
+        first.event_cursor.event_frontier_sha256
+        == "0417dbd4b57bf51d7b975425931f0f4f2391e1ef0082e8ca4f132f0857e5b3af"
+    )
     assert before == after
 
 
@@ -513,3 +517,209 @@ def test_git_event_reorder_is_stable_and_envelope_tamper_refuses(
         read_project_snapshot(tmp_path)
     assert isinstance(refusal.value.error, ReadErrorV1)
     assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+
+
+def test_db_event_json_scalar_type_drift_refuses(populated: SqliteBackend) -> None:
+    root = _state_path(populated)
+    populated.close()
+    conn = sqlite3.connect(root / "state.db")
+    row = conn.execute(
+        "SELECT payload_json FROM events WHERE action = 'prd.parsed' ORDER BY id LIMIT 1"
+    ).fetchone()
+    payload = json.loads(row[0])
+    assert payload["is_default"] is True
+    payload["is_default"] = 1
+    conn.execute(
+        "UPDATE events SET payload_json = ? WHERE action = 'prd.parsed' "
+        "AND id = (SELECT id FROM events WHERE action = 'prd.parsed' ORDER BY id LIMIT 1)",
+        (json.dumps(payload, separators=(",", ":")),),
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+
+
+def test_local_event_sequence_gap_refuses(populated: SqliteBackend) -> None:
+    root = _state_path(populated)
+    populated.close()
+    events = root / "events.jsonl"
+    lines = events.read_bytes().splitlines(keepends=True)
+    removed_id = json.loads(lines[1])["id"]
+    events.write_bytes(b"".join((lines[0], *lines[2:])))
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute("DELETE FROM events WHERE id = ?", (removed_id,))
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+
+
+def test_git_parent_cycle_refuses_even_with_matching_fingerprints(
+    tmp_path: Path,
+    frozen_clock: FrozenClock,
+) -> None:
+    events_path = tmp_path / "events.jsonl"
+    events_path.touch()
+    backend = SqliteBackend(
+        db_path=str(tmp_path / "state.db"),
+        events_path=str(events_path),
+        clock=frozen_clock,
+        events_storage="git",
+    )
+    backend.initialize()
+    backend.append(
+        _event("project.created", _project_payload(), kind="project", target="project-1")
+    )
+    backend.append(_event("state.initialized", {}, kind="project", target="project-1"))
+    backend.close()
+    documents = [json.loads(line) for line in events_path.read_bytes().splitlines()]
+    documents[0]["parent_event_id"] = documents[1]["id"]
+    documents[1]["parent_event_id"] = documents[0]["id"]
+    events_path.write_bytes(
+        b"".join(
+            (json.dumps(document, separators=(",", ":")) + "\n").encode()
+            for document in documents
+        )
+    )
+    conn = sqlite3.connect(tmp_path / "state.db")
+    for document in documents:
+        event = Event.model_validate(document)
+        material = json.dumps(
+            event.model_dump(mode="json", exclude={"id"}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        conn.execute(
+            "UPDATE git_event_material SET fingerprint = ? WHERE event_id = ?",
+            (hashlib.sha256(material).hexdigest(), event.id),
+        )
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(tmp_path)
+    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+
+
+@pytest.mark.parametrize(
+    ("statement", "parameters", "expected_code"),
+    [
+        ("DELETE FROM prds WHERE id = ?", ("named",), ReadErrorCode.missing_target),
+        ("DELETE FROM features WHERE id = ?", ("named:F001",), ReadErrorCode.missing_target),
+        (
+            "UPDATE tasks SET parent_task_id = ? WHERE id = ?",
+            ("named:T999", "named:T001"),
+            ReadErrorCode.missing_target,
+        ),
+        (
+            "UPDATE tasks SET dependencies = ? WHERE id = ?",
+            ('["named:T999"]', "named:T001"),
+            ReadErrorCode.missing_target,
+        ),
+    ],
+)
+def test_missing_hierarchy_relations_refuse(
+    populated: SqliteBackend,
+    statement: str,
+    parameters: tuple[str, ...],
+    expected_code: ReadErrorCode,
+) -> None:
+    root = _state_path(populated)
+    populated.close()
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute(statement, parameters)
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert refusal.value.error.code is expected_code
+
+
+def test_raw_storage_limits_refuse_with_exact_metadata(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    populated.close()
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute("UPDATE tasks SET title = ? WHERE id = 'T001'", ("x" * 65_537,))
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert refusal.value.error == ProviderLimitRefusalV1(
+        operation_id="state.project.snapshot",
+        limit_name=ProviderLimitNameV1.max_string_bytes,
+        actual=65_537,
+        limit=65_536,
+    )
+
+
+def test_verification_item_cap_precedes_body_materialization(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    populated.close()
+    verification = json.dumps({"commands": ["x"] * 257}, separators=(",", ":"))
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute(
+        "UPDATE tasks SET verification = ? WHERE id = 'T001'", (verification,)
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert refusal.value.error == ProviderLimitRefusalV1(
+        operation_id="state.project.snapshot",
+        limit_name=ProviderLimitNameV1.max_verification_summaries_per_task,
+        actual=257,
+        limit=256,
+    )
+
+
+def test_prd_content_cap_precedes_blob_materialization(populated: SqliteBackend) -> None:
+    root = _state_path(populated)
+    populated.close()
+    source = b"x" * 2_097_153
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute("PRAGMA ignore_check_constraints = ON")
+    conn.execute(
+        "UPDATE prds SET source_bytes = ?, source_sha256 = ?, source_size_bytes = ?, "
+        "source_encoding = 'utf-8', source_revision = revision, "
+        "provenance_state = 'available', content_available = 1 WHERE id = 'named'",
+        (source, hashlib.sha256(source).hexdigest(), len(source)),
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert refusal.value.error == ProviderLimitRefusalV1(
+        operation_id="state.project.snapshot",
+        limit_name=ProviderLimitNameV1.max_prd_content_bytes,
+        actual=len(source),
+        limit=2_097_152,
+    )
+
+
+def test_hard_snapshot_overflow_reports_exact_limit_metadata(
+    populated: SqliteBackend,
+) -> None:
+    root = _state_path(populated)
+    populated.close()
+    acceptance = json.dumps(["x" * 65_536] * 256, separators=(",", ":"))
+    assert len(acceptance.encode()) > 16_777_216
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute(
+        "UPDATE tasks SET acceptance_criteria = ? WHERE id = 'T001'", (acceptance,)
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert refusal.value.error == ProviderLimitRefusalV1(
+        operation_id="state.project.snapshot",
+        limit_name=ProviderLimitNameV1.max_snapshot_bytes,
+        actual=len(acceptance.encode()),
+        limit=16_777_216,
+    )
