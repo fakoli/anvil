@@ -920,28 +920,51 @@ def _canonical_file_scopes(
 
 def _serial_depth(tasks: list[Task]) -> int:
     by_id = {task.id: task for task in tasks}
-    visiting: list[str] = []
+    state: dict[str, int] = {}
     memo: dict[str, int] = {}
+    active: list[str] = []
+    active_index: dict[str, int] = {}
 
-    def visit(task_id: str) -> int:
-        if task_id in memo:
-            return memo[task_id]
-        if task_id in visiting:
-            start = visiting.index(task_id)
-            cycle = visiting[start:] + [task_id]
-            raise BundlePlanningError(
-                "bundle planning found a dependency cycle: " + " -> ".join(cycle)
+    for root in sorted(by_id):
+        if state.get(root) == 2:
+            continue
+        stack: list[tuple[str, int]] = [(root, 0)]
+        while stack:
+            task_id, dependency_index = stack[-1]
+            if state.get(task_id, 0) == 0:
+                state[task_id] = 1
+                active_index[task_id] = len(active)
+                active.append(task_id)
+
+            dependencies = [
+                dependency
+                for dependency in by_id[task_id].dependencies
+                if dependency in by_id
+            ]
+            if dependency_index < len(dependencies):
+                dependency = dependencies[dependency_index]
+                stack[-1] = (task_id, dependency_index + 1)
+                dependency_state = state.get(dependency, 0)
+                if dependency_state == 0:
+                    stack.append((dependency, 0))
+                elif dependency_state == 1:
+                    cycle = active[active_index[dependency] :] + [dependency]
+                    raise BundlePlanningError(
+                        "bundle planning found a dependency cycle: "
+                        + " -> ".join(cycle)
+                    )
+                continue
+
+            memo[task_id] = 1 + max(
+                (memo[dependency] for dependency in dependencies),
+                default=0,
             )
-        visiting.append(task_id)
-        depth = 1 + max(
-            (visit(dep) for dep in by_id[task_id].dependencies if dep in by_id),
-            default=0,
-        )
-        visiting.pop()
-        memo[task_id] = depth
-        return depth
+            state[task_id] = 2
+            stack.pop()
+            active_index.pop(task_id)
+            active.pop()
 
-    return max((visit(task_id) for task_id in sorted(by_id)), default=0)
+    return max(memo.values(), default=0)
 
 
 def _risk_angles(tasks: list[Task]) -> tuple[tuple[str, ...], tuple[str, ...]]:

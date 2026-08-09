@@ -167,6 +167,40 @@ def test_bundle_plan_skips_optional_edge_that_would_close_authored_cycle() -> No
     assert first.proposed_bundles[0].task_ids == ("T001", "T002")
 
 
+def test_bundle_plan_computes_maximum_chain_iteratively() -> None:
+    tasks = [
+        _task(
+            f"T{index:03d}",
+            [f"src/task-{index:03d}.py"],
+            dependencies=[f"T{index - 1:03d}"] if index > 1 else [],
+        )
+        for index in range(1, 501)
+    ]
+
+    report = build_bundle_plan(
+        tasks,
+        max_tasks=500,
+        max_serial_stages=500,
+    )
+
+    assert report.task_count == 500
+    assert report.serial_depth == 500
+    assert report.limit_breaches == ()
+
+
+def test_bundle_plan_serial_depth_is_exact_for_branched_dag() -> None:
+    tasks = [
+        _task("T001", ["src/one.py"]),
+        _task("T002", ["src/two.py"], dependencies=["T001"]),
+        _task("T003", ["src/three.py"], dependencies=["T001"]),
+        _task("T004", ["src/four.py"], dependencies=["T002", "T003"]),
+    ]
+
+    report = build_bundle_plan(tasks)
+
+    assert report.serial_depth == 3
+
+
 def test_review_gate_requires_three_distinct_non_author_angles() -> None:
     policy = BundleReviewPolicy()
     verdicts = [
