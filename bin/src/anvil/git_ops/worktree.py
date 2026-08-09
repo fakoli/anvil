@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,16 +27,22 @@ from anvil.git_ops.branch import (
     is_git_repo,
 )
 from anvil.naming import safe_path_component
+from anvil.state.models import ClaimGitMetadata
 
 __all__ = [
     "ClaimGitPlan",
+    "ClaimGitMutation",
     "ClaimPlanError",
     "ClaimPlanPrecondition",
     "GitWorktree",
     "WorktreeResult",
+    "apply_claim_plan",
     "canonical_git_root",
+    "claim_git_metadata",
+    "compensate_claim_plan",
     "create_worktree_for_task",
     "resolve_claim_plan",
+    "revalidate_claim_plan",
     "tree_state",
 ]
 
@@ -74,7 +81,14 @@ class GitWorktree:
 class ClaimPlanPrecondition:
     """One exact observation T012 must revalidate immediately before mutation."""
 
-    kind: Literal["ref_oid", "caller_head", "caller_clean", "topology", "path"]
+    kind: Literal[
+        "ref_oid",
+        "caller_head",
+        "caller_clean",
+        "target_clean",
+        "topology",
+        "path",
+    ]
     subject: str
     expected: str
 
@@ -109,6 +123,16 @@ class ClaimGitPlan:
     worktrees: tuple[GitWorktree, ...]
     warnings: tuple[str, ...]
     revalidation_preconditions: tuple[ClaimPlanPrecondition, ...]
+
+
+@dataclass(frozen=True)
+class ClaimGitMutation:
+    """External Git artifacts owned by one successfully applied claim plan."""
+
+    plan: ClaimGitPlan
+    branch_created: bool
+    worktree_created: bool
+    caller_checkout_changed: bool
 
 
 def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
@@ -537,6 +561,9 @@ def resolve_claim_plan(
             / f"wt-{safe_path_component(task_id).lower()}"
         ).resolve(strict=False)
 
+    if isolated:
+        _validate_isolated_target(canonical_root, canonical_target)
+
     if branch_exists:
         if branch_sha is None:  # Defensive narrowing; branch_exists implies this.
             raise ClaimPlanError("branch_disappeared", "Named branch disappeared")
@@ -618,6 +645,16 @@ def resolve_claim_plan(
         preconditions.append(
             ClaimPlanPrecondition("caller_clean", str(caller_root), "clean")
         )
+    elif target_owner is not None:
+        target_dirty = _working_tree_dirty(Path(target_owner.path))
+        if target_dirty:
+            raise ClaimPlanError(
+                "target_worktree_dirty",
+                "An existing claim worktree must be clean before reuse",
+            )
+        preconditions.append(
+            ClaimPlanPrecondition("target_clean", target_owner.path, "clean")
+        )
 
     return ClaimGitPlan(
         mode=mode,
@@ -649,6 +686,328 @@ def resolve_claim_plan(
         warnings=tuple(warnings),
         revalidation_preconditions=tuple(preconditions),
     )
+
+
+def claim_git_metadata(plan: ClaimGitPlan) -> ClaimGitMetadata | None:
+    """Project a Git-backed plan into the durable state contract."""
+    if not plan.git_metadata_available:
+        return None
+    required = {
+        "canonical_root": plan.canonical_root,
+        "selected_default_base_ref": plan.selected_default_base_ref,
+        "selected_default_base_sha": plan.selected_default_base_sha,
+        "claim_start_ref": plan.claim_start_ref,
+        "claim_start_sha": plan.claim_start_sha,
+        "branch": plan.branch,
+        "target_path": plan.target_path,
+    }
+    if any(value is None for value in required.values()):
+        raise ClaimPlanError("claim_plan_incomplete", "Git claim plan is incomplete")
+    return ClaimGitMetadata(
+        mode=plan.mode,
+        canonical_root=str(required["canonical_root"]),
+        selected_default_base_ref=str(required["selected_default_base_ref"]),
+        selected_default_base_sha=str(required["selected_default_base_sha"]),
+        claim_start_ref=str(required["claim_start_ref"]),
+        claim_start_sha=str(required["claim_start_sha"]),
+        branch=str(required["branch"]),
+        target_path=str(required["target_path"]),
+        worktree_path=plan.target_path if plan.mode == "isolated" else None,
+    )
+
+
+def revalidate_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> None:
+    """Refuse when any exact T011 observation changed after planning."""
+    if not plan.git_metadata_available:
+        return
+    root = Path(cwd or plan.caller_path)
+    topology: tuple[GitWorktree, ...] | None = None
+    for condition in plan.revalidation_preconditions:
+        if condition.kind == "ref_oid":
+            actual = _ref_oid(condition.subject, root)
+            value = actual if actual is not None else "absent"
+        elif condition.kind == "caller_head":
+            value = _git_value(
+                ["rev-parse", "--verify", "HEAD^{commit}"],
+                Path(condition.subject),
+                code="claim_plan_changed",
+            )
+        elif condition.kind in {"caller_clean", "target_clean"}:
+            value = "dirty" if _working_tree_dirty(Path(condition.subject)) else "clean"
+        elif condition.kind == "topology":
+            topology = topology or _worktree_topology(root)
+            value = _topology_digest(topology)
+        else:
+            topology = topology or _worktree_topology(root)
+            owner = next(
+                (
+                    item
+                    for item in topology
+                    if _path_key(item.path) == _path_key(condition.subject)
+                ),
+                None,
+            )
+            if owner is not None:
+                value = f"worktree:{owner.branch_ref or 'detached'}"
+            elif Path(condition.subject).exists():
+                value = "occupied"
+            else:
+                value = "absent"
+        if value != condition.expected:
+            raise ClaimPlanError(
+                "claim_plan_changed",
+                "Git claim preconditions changed after planning",
+            )
+
+
+def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGitMutation:
+    """Apply one revalidated plan and roll back only artifacts created here."""
+    if not plan.git_metadata_available:
+        return ClaimGitMutation(plan, False, False, False)
+    root = Path(cwd or plan.caller_path)
+    revalidate_claim_plan(plan, cwd=root)
+    if plan.branch is None or plan.claim_start_sha is None:
+        raise ClaimPlanError("claim_plan_incomplete", "Git claim plan is incomplete")
+    branch_ref = f"refs/heads/{plan.branch}"
+    branch_created = False
+    worktree_created = False
+    checkout_changed = False
+    try:
+        if not plan.branch_exists:
+            _mutate_git(
+                ["update-ref", branch_ref, plan.claim_start_sha, ""],
+                root,
+                code="branch_create_failed",
+            )
+            branch_created = True
+        if _ref_oid(branch_ref, root) != plan.claim_start_sha:
+            raise ClaimPlanError(
+                "branch_moved", "Claim branch no longer identifies the planned start"
+            )
+
+        if plan.mode == "shared":
+            current_ref = _symbolic_head(root)
+            current_sha = _git_value(
+                ["rev-parse", "--verify", "HEAD^{commit}"],
+                root,
+                code="caller_head_unavailable",
+            )
+            if current_ref != branch_ref or current_sha != plan.claim_start_sha:
+                _mutate_git(
+                    ["checkout", "--no-guess", plan.branch],
+                    root,
+                    code="branch_checkout_failed",
+                )
+                checkout_changed = True
+        elif plan.mode == "isolated":
+            if plan.canonical_root is None or plan.target_path is None:
+                raise ClaimPlanError("claim_plan_incomplete", "Worktree plan is incomplete")
+            target = Path(plan.target_path)
+            _validate_isolated_target(Path(plan.canonical_root), target)
+            topology = _worktree_topology(root)
+            owner = next(
+                (item for item in topology if _path_key(item.path) == _path_key(target)),
+                None,
+            )
+            if owner is None:
+                if target.exists():
+                    raise ClaimPlanError(
+                        "target_path_occupied", "Claim worktree target is occupied"
+                    )
+                _mutate_git(
+                    ["worktree", "add", "--no-guess", str(target), plan.branch],
+                    root,
+                    code="worktree_create_failed",
+                )
+                worktree_created = True
+            _validate_isolated_target(Path(plan.canonical_root), target, must_exist=True)
+            owner = next(
+                (
+                    item
+                    for item in _worktree_topology(root)
+                    if _path_key(item.path) == _path_key(target)
+                ),
+                None,
+            )
+            if (
+                owner is None
+                or owner.branch_ref != branch_ref
+                or owner.head_sha != plan.claim_start_sha
+            ):
+                raise ClaimPlanError(
+                    "worktree_verification_failed",
+                    "Created worktree does not match the claim plan",
+                )
+        mutation = ClaimGitMutation(
+            plan=plan,
+            branch_created=branch_created,
+            worktree_created=worktree_created,
+            caller_checkout_changed=checkout_changed,
+        )
+        if _ref_oid(branch_ref, root) != plan.claim_start_sha:
+            raise ClaimPlanError("branch_moved", "Claim branch moved during mutation")
+        return mutation
+    except BaseException:
+        _compensate_values(
+            plan,
+            branch_created=branch_created,
+            worktree_created=worktree_created,
+            caller_checkout_changed=checkout_changed,
+            cwd=root,
+        )
+        raise
+
+
+def compensate_claim_plan(
+    mutation: ClaimGitMutation,
+    *,
+    cwd: Path | None = None,
+) -> None:
+    """Remove only branch/worktree/checkout artifacts owned by ``mutation``."""
+    _compensate_values(
+        mutation.plan,
+        branch_created=mutation.branch_created,
+        worktree_created=mutation.worktree_created,
+        caller_checkout_changed=mutation.caller_checkout_changed,
+        cwd=Path(cwd or mutation.plan.caller_path),
+    )
+
+
+def _compensate_values(
+    plan: ClaimGitPlan,
+    *,
+    branch_created: bool,
+    worktree_created: bool,
+    caller_checkout_changed: bool,
+    cwd: Path,
+) -> None:
+    if not plan.git_metadata_available or plan.branch is None or plan.claim_start_sha is None:
+        return
+    branch_ref = f"refs/heads/{plan.branch}"
+    if worktree_created and plan.target_path is not None:
+        owner = next(
+            (
+                item
+                for item in _worktree_topology(cwd)
+                if _path_key(item.path) == _path_key(plan.target_path)
+            ),
+            None,
+        )
+        if (
+            owner is not None
+            and owner.branch_ref == branch_ref
+            and owner.head_sha == plan.claim_start_sha
+        ):
+            _mutate_git(
+                ["worktree", "remove", "--force", plan.target_path],
+                cwd,
+                code="worktree_compensation_failed",
+            )
+    if caller_checkout_changed and plan.caller_worktree_path is not None:
+        caller = Path(plan.caller_worktree_path)
+        if plan.caller_head_ref is not None:
+            restore_name = plan.caller_head_ref.removeprefix("refs/heads/")
+            _mutate_git(
+                ["checkout", "--no-guess", restore_name],
+                caller,
+                code="checkout_compensation_failed",
+            )
+        elif plan.caller_head_sha is not None:
+            _mutate_git(
+                ["checkout", "--detach", plan.caller_head_sha],
+                caller,
+                code="checkout_compensation_failed",
+            )
+    if branch_created and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
+        _mutate_git(
+            ["update-ref", "-d", branch_ref, plan.claim_start_sha],
+            cwd,
+            code="branch_compensation_failed",
+        )
+
+
+def _working_tree_dirty(cwd: Path) -> bool:
+    result = _run_git(["status", "--porcelain=v1", "--untracked-files=all"], cwd)
+    if result is None or result.returncode != 0:
+        raise ClaimPlanError("caller_dirty_unavailable", "Worktree dirtiness is unknown")
+    return bool(result.stdout)
+
+
+def _symbolic_head(cwd: Path) -> str | None:
+    result = _run_git(["symbolic-ref", "--quiet", "HEAD"], cwd)
+    if result is None:
+        raise ClaimPlanError("caller_head_unavailable", "Caller HEAD is unavailable")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _mutate_git(args: list[str], cwd: Path, *, code: str) -> None:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ClaimPlanError(code, "Git mutation timed out or is unavailable") from exc
+    if result.returncode != 0:
+        raise ClaimPlanError(code, "Git mutation failed")
+
+
+def _validate_isolated_target(
+    canonical_root: Path,
+    target: Path,
+    *,
+    must_exist: bool = False,
+) -> None:
+    placement = canonical_root.resolve(strict=True).parent
+    candidate = target.resolve(strict=False)
+    try:
+        common = Path(os.path.commonpath((str(placement), str(candidate))))
+    except ValueError as exc:
+        raise ClaimPlanError(
+            "target_outside_root", "Claim target is outside its placement root"
+        ) from exc
+    if (
+        _path_key(common) != _path_key(placement)
+        or _path_key(candidate) == _path_key(placement)
+    ):
+        raise ClaimPlanError("target_outside_root", "Claim target is outside its placement root")
+    relative = candidate.relative_to(placement)
+    current = placement
+    for part in relative.parts:
+        if current.exists():
+            matches = [
+                entry
+                for entry in current.iterdir()
+                if entry.name.casefold() == part.casefold()
+            ]
+            if matches and all(entry.name != part for entry in matches):
+                raise ClaimPlanError(
+                    "target_case_collision", "Claim target has a case-insensitive collision"
+                )
+        current = current / part
+        if current.exists() or current.is_symlink():
+            try:
+                info = current.lstat()
+            except OSError as exc:
+                raise ClaimPlanError(
+                    "target_path_unavailable", "Claim target is unavailable"
+                ) from exc
+            attributes = getattr(info, "st_file_attributes", 0)
+            if stat.S_ISLNK(info.st_mode) or bool(
+                attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            ):
+                raise ClaimPlanError(
+                    "target_reparse_point", "Claim target cannot traverse a reparse point"
+                )
+    if must_exist and not candidate.is_dir():
+        raise ClaimPlanError("target_path_unavailable", "Claim target worktree is unavailable")
 
 
 def _is_dirty(cwd: Path) -> bool:

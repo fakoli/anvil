@@ -264,6 +264,7 @@ class ClaimResponse(BaseModel):
     lease_expires_at: str
     branch: str | None
     worktree_path: str | None
+    git_metadata: dict[str, Any] | None = None
     expected_files: list[str]
     # Advisory notes (e.g. the worktree_isolation shared-checkout warning);
     # additive with a default so existing readers are unaffected.
@@ -416,6 +417,7 @@ class BundleClaimRecord(BaseModel):
     status: str
     branch: str | None = None
     worktree_path: str | None = None
+    git_metadata: dict[str, Any] | None = None
     session_id: str | None = None
     expected_files: list[str]
     member_claim_ids: dict[str, str]
@@ -1316,6 +1318,13 @@ def claim_task(
     try:
         from anvil.claims.manager import ClaimError, ClaimManager
         from anvil.clock import SystemClock
+        from anvil.git_ops import (
+            ClaimPlanError,
+            apply_claim_plan,
+            claim_git_metadata,
+            resolve_claim_plan,
+            revalidate_claim_plan,
+        )
 
         _reap_stale(backend)
 
@@ -1358,18 +1367,50 @@ def claim_task(
         # pre-check on the global get_prd() lived here pre-T012; it resolved the
         # default PRD and so disagreed with the per-PRD gate under multi-PRD.)
         lease_minutes = max(1, lease_duration_seconds // 60)
+        project_dir = _resolve_project_dir(Path(cwd) if cwd else None)
         manager = ClaimManager(
             backend,
             SystemClock(),
             actor=claimed_by,
             default_lease_minutes=lease_minutes,
-            project_root=_resolve_project_dir(Path(cwd) if cwd else None),
+            project_root=project_dir,
         )
 
         files = expected_files or []
+        task = backend.get_task(task_id)
+        if task is None:
+            raise ToolError(f"Task '{task_id}' not found.")
 
         try:
-            result = manager.claim(task_id, expected_files=files)
+            plan = resolve_claim_plan(
+                task_id,
+                task.title,
+                cwd=project_dir,
+                branch_prefix=cfg.branch_prefix if cfg is not None else "agent",
+                shared_tree=shared_tree,
+            )
+            metadata = claim_git_metadata(plan)
+            with backend.claim_operation_lock():
+                revalidate_claim_plan(plan, cwd=project_dir)
+                result = manager.claim(
+                    task_id,
+                    expected_files=files,
+                    branch=metadata.branch if metadata is not None else None,
+                    worktree_path=(
+                        metadata.worktree_path if metadata is not None else None
+                    ),
+                    git_metadata=metadata,
+                    operation_locked=True,
+                )
+                try:
+                    apply_claim_plan(plan, cwd=project_dir)
+                except ClaimPlanError:
+                    manager.release(
+                        result.claim.id, reason="transactional Git claim failed"
+                    )
+                    raise
+        except ClaimPlanError as exc:
+            raise ToolError(f"{exc.code}: {exc}") from exc
         except ClaimError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -1386,6 +1427,11 @@ def claim_task(
             lease_expires_at=claim.lease_expires_at.isoformat(),
             branch=claim.branch,
             worktree_path=claim.worktree_path,
+            git_metadata=(
+                claim.git_metadata.model_dump(mode="json")
+                if claim.git_metadata is not None
+                else None
+            ),
             expected_files=claim.expected_files,
             warnings=isolation_warnings,
             actor_identity=actor_identity_data(claim.claimed_by),
@@ -4516,6 +4562,14 @@ def claim_bundle(
 ) -> BundleClaimResponse:
     """Atomically claim a bundle and create internal member authorizations."""
     from anvil.bundles.manager import BundleError
+    from anvil.cli._helpers import _resolve_project_dir
+    from anvil.git_ops import (
+        ClaimPlanError,
+        apply_claim_plan,
+        claim_git_metadata,
+        resolve_claim_plan,
+        revalidate_claim_plan,
+    )
 
     state_dir = _resolve_state_dir(cwd)
     backend = _open_backend(state_dir)
@@ -4542,15 +4596,43 @@ def claim_bundle(
                     f"{len(shared)} active task claim(s) share this checkout; "
                     "prefer the CLI worktree claim path."
                 )
+        project_dir = _resolve_project_dir(Path(cwd) if cwd else None)
+        manager = _bundle_manager(
+            backend,
+            state_dir,
+            actor,
+            lease_minutes=lease_minutes,
+            cwd=cwd,
+            new_claim=True,
+        )
         try:
-            result = _bundle_manager(
-                backend,
-                state_dir,
-                actor,
-                lease_minutes=lease_minutes,
-                cwd=cwd,
-                new_claim=True,
-            ).claim(bundle_id)
+            plan = resolve_claim_plan(
+                bundle_id,
+                f"Bundle {bundle_id}",
+                cwd=project_dir,
+                branch_prefix=cfg.branch_prefix if cfg is not None else "agent",
+                shared_tree=shared_tree,
+            )
+            metadata = claim_git_metadata(plan)
+            with backend.claim_operation_lock():
+                revalidate_claim_plan(plan, cwd=project_dir)
+                result = manager.claim(
+                    bundle_id,
+                    branch=metadata.branch if metadata is not None else None,
+                    worktree_path=(
+                        metadata.worktree_path if metadata is not None else None
+                    ),
+                    git_metadata=metadata,
+                )
+                try:
+                    apply_claim_plan(plan, cwd=project_dir)
+                except ClaimPlanError:
+                    manager.release(
+                        bundle_id, reason="transactional Git claim failed"
+                    )
+                    raise
+        except ClaimPlanError as exc:
+            raise ToolError(f"bundle_error: {exc.code}: {exc}") from exc
         except (BundleError, ValueError) as exc:
             raise ToolError(f"bundle_error: {exc}") from exc
         return BundleClaimResponse(

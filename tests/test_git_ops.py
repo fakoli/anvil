@@ -27,9 +27,13 @@ from anvil.git_ops.freshness import BaseRef, check_freshness, resolve_base
 from anvil.git_ops.worktree import (
     ClaimPlanError,
     WorktreeResult,
+    apply_claim_plan,
     canonical_git_root,
+    claim_git_metadata,
+    compensate_claim_plan,
     create_worktree_for_task,
     resolve_claim_plan,
+    revalidate_claim_plan,
 )
 
 # ---------------------------------------------------------------------------
@@ -539,6 +543,50 @@ class TestWorkspaceLayoutGitOps:
         assert data["branch"], data
         assert data["worktree"], data
         assert data["warnings"] == [], data
+        git_metadata = data["claim"]["git_metadata"]
+        assert git_metadata["mode"] == "isolated"
+        assert git_metadata["branch"] == data["branch"]
+        assert git_metadata["worktree_path"] == data["worktree"]
+        assert git_metadata["claim_start_sha"] == subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert data["claim"]["attestation_context"]["claim_start_sha"] == (
+            git_metadata["claim_start_sha"]
+        )
+        from anvil.cli._helpers import _open_backend, _resolve_state_dir
+
+        state_dir = _resolve_state_dir(project)
+        persisted_backend = _open_backend(state_dir)
+        try:
+            persisted = persisted_backend.get_claim(data["claim"]["id"])
+            assert persisted is not None
+            assert persisted.git_metadata is not None
+            assert persisted.git_metadata.model_dump(mode="json") == git_metadata
+        finally:
+            persisted_backend.close()
+        from anvil.clock import SystemClock
+        from anvil.state.sqlite import SqliteBackend
+
+        replay_dir = tmp_path / "replay"
+        replay_dir.mkdir()
+        replay = SqliteBackend(
+            db_path=str(replay_dir / "state.db"),
+            events_path=str(replay_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        replay.initialize()
+        try:
+            replay.replay_from_empty(str(state_dir / "events.jsonl"))
+            replayed = replay.get_claim(data["claim"]["id"])
+            assert replayed is not None
+            assert replayed.git_metadata is not None
+            assert replayed.git_metadata.model_dump(mode="json") == git_metadata
+        finally:
+            replay.close()
         assert Path(data["worktree"]).exists()
 
         after = subprocess.run(
@@ -591,6 +639,147 @@ class TestWorkspaceLayoutGitOps:
         ).stdout.strip()
         assert after == before, "main must not move onto the named branch"
 
+    def test_claim_git_failure_releases_state_and_leaves_no_branch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        import anvil.git_ops as git_ops
+        from anvil.cli import app
+
+        project = _init_git_repo(tmp_path / "proj")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+        assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
+        plan = resolve_claim_plan("T001", "Set up project structure", cwd=project)
+        original_ref = _default_branch(project)
+        original_sha = _git(project, "rev-parse", "HEAD")
+
+        def refuse(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
+            raise ClaimPlanError("injected_git_failure", "injected Git failure")
+
+        monkeypatch.setattr(git_ops, "apply_claim_plan", refuse)
+        result = runner.invoke(app, ["claim", "T001", "--json"])
+
+        assert result.exit_code == 1
+        error = _json.loads(result.stdout)["error"]
+        assert error["code"] == "injected_git_failure"
+        listing = runner.invoke(app, ["list", "--json"])
+        assert listing.exit_code == 0, listing.output
+        tasks = _json.loads(listing.stdout)["data"]["tasks"]
+        assert next(task for task in tasks if task["id"] == "T001")["status"] == "ready"
+        assert not _ref_exists(project, f"refs/heads/{plan.branch}")
+        assert _default_branch(project) == original_ref
+        assert _git(project, "rev-parse", "HEAD") == original_sha
+
+    def test_bundle_claim_worktree_persists_same_git_binding_on_members(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+        from anvil.cli._helpers import _open_backend, _resolve_state_dir
+
+        project = _init_git_repo(tmp_path / "proj")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+        assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
+        created = runner.invoke(
+            app,
+            ["bundle", "create", "B001", "T001", "--prd", "default", "--json"],
+        )
+        assert created.exit_code == 0, created.output
+
+        result = runner.invoke(
+            app, ["claim", "B001", "--bundle", "--worktree", "--json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.stdout)["data"]
+        metadata = data["claim"]["git_metadata"]
+        assert metadata["mode"] == "isolated"
+        assert metadata["branch"] == data["branch"]
+        assert metadata["worktree_path"] == data["worktree"]
+        assert _default_branch(project) != data["branch"]
+        backend = _open_backend(_resolve_state_dir(project))
+        try:
+            bundle_claim = backend.get_bundle_claim("B001")
+            assert bundle_claim is not None
+            assert bundle_claim.git_metadata is not None
+            assert bundle_claim.git_metadata.model_dump(mode="json") == metadata
+            member = backend.get_claim(bundle_claim.member_claim_ids["T001"])
+            assert member is not None
+            assert member.git_metadata is not None
+            assert member.git_metadata.model_dump(mode="json") == metadata
+        finally:
+            backend.close()
+
+    def test_bundle_git_failure_releases_state_and_owned_ref(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        import anvil.git_ops as git_ops
+        from anvil.cli import app
+        from anvil.cli._helpers import _open_backend, _resolve_state_dir
+
+        project = _init_git_repo(tmp_path / "proj")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+        assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
+        created = runner.invoke(
+            app,
+            ["bundle", "create", "B001", "T001", "--prd", "default", "--json"],
+        )
+        assert created.exit_code == 0, created.output
+        plan = resolve_claim_plan("B001", "Bundle B001", cwd=project)
+
+        def refuse(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
+            raise ClaimPlanError("injected_git_failure", "injected Git failure")
+
+        monkeypatch.setattr(git_ops, "apply_claim_plan", refuse)
+        result = runner.invoke(app, ["claim", "B001", "--bundle", "--json"])
+
+        assert result.exit_code == 1
+        assert _json.loads(result.stdout)["error"]["code"] == "injected_git_failure"
+        backend = _open_backend(_resolve_state_dir(project))
+        try:
+            bundle = backend.get_bundle("B001")
+            assert bundle is not None and bundle.status == "replan_required"
+            bundle_claim = backend.get_bundle_claim("B001")
+            assert bundle_claim is not None
+            assert bundle_claim.status.value == "released"
+            assert bundle_claim.release_reason == "transactional Git claim failed"
+            task = backend.get_task("T001")
+            assert task is not None and task.status.value == "ready"
+        finally:
+            backend.close()
+        assert not _ref_exists(project, f"refs/heads/{plan.branch}")
+
 
 # ---------------------------------------------------------------------------
 # TestFreshness (retro-opps:T005) — base resolution + freshness/conflict report
@@ -601,6 +790,14 @@ def _git(repo: Path, *args: str) -> str:
         ["git", *args], cwd=str(repo), check=True, capture_output=True, text=True
     )
     return result.stdout.strip()
+
+
+def _ref_exists(repo: Path, ref: str) -> bool:
+    return subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", ref],
+        cwd=str(repo),
+        check=False,
+    ).returncode == 0
 
 
 def _default_branch(repo: Path) -> str:
@@ -957,6 +1154,95 @@ class TestResolveClaimPlan:
         assert plan.branch == created.branch
         assert plan.branch is not None and plan.branch.endswith("-2")
         assert len(plan.branch) <= 80
+
+
+@pytest.mark.slow
+class TestApplyClaimPlan:
+    def test_isolated_apply_preserves_caller_and_compensates_owned_artifacts(
+        self, git_repo: Path
+    ) -> None:
+        original_ref = _default_branch(git_repo)
+        original_sha = _git(git_repo, "rev-parse", "HEAD")
+        plan = resolve_claim_plan(
+            "T012", "Transactional", cwd=git_repo, worktree=True
+        )
+
+        metadata = claim_git_metadata(plan)
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+
+        assert metadata is not None
+        assert metadata.claim_start_sha == original_sha
+        assert metadata.worktree_path == plan.target_path
+        assert _default_branch(git_repo) == original_ref
+        assert _git(git_repo, "rev-parse", "HEAD") == original_sha
+        assert Path(plan.target_path or "").is_dir()
+        assert _git(Path(plan.target_path or ""), "rev-parse", "HEAD") == original_sha
+
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert not Path(plan.target_path or "").exists()
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+        assert _default_branch(git_repo) == original_ref
+        assert _git(git_repo, "rev-parse", "HEAD") == original_sha
+
+    def test_shared_apply_restores_checkout_and_branch_on_compensation(
+        self, git_repo: Path
+    ) -> None:
+        original_ref = _default_branch(git_repo)
+        original_sha = _git(git_repo, "rev-parse", "HEAD")
+        plan = resolve_claim_plan("T013", "Shared", cwd=git_repo)
+
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+
+        assert _default_branch(git_repo) == plan.branch
+        assert _git(git_repo, "rev-parse", "HEAD") == plan.claim_start_sha
+
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert _default_branch(git_repo) == original_ref
+        assert _git(git_repo, "rev-parse", "HEAD") == original_sha
+
+    def test_ref_or_target_change_refuses_before_mutation(
+        self, git_repo: Path
+    ) -> None:
+        plan = resolve_claim_plan("T014", "Race", cwd=git_repo, worktree=True)
+        assert plan.branch is not None
+        _git(git_repo, "branch", plan.branch)
+
+        with pytest.raises(ClaimPlanError) as exc:
+            revalidate_claim_plan(plan, cwd=git_repo)
+
+        assert exc.value.code == "claim_plan_changed"
+        assert not Path(plan.target_path or "").exists()
+
+    def test_occupied_target_after_plan_refuses_without_branch(
+        self, git_repo: Path
+    ) -> None:
+        plan = resolve_claim_plan("T015", "Occupied", cwd=git_repo, worktree=True)
+        target = Path(plan.target_path or "")
+        target.mkdir()
+
+        with pytest.raises(ClaimPlanError) as exc:
+            apply_claim_plan(plan, cwd=git_repo)
+
+        assert exc.value.code == "claim_plan_changed"
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+
+    def test_explicit_target_outside_placement_root_refuses(
+        self, git_repo: Path, tmp_path: Path
+    ) -> None:
+        outside = tmp_path.parent / "outside-claim-worktree"
+
+        with pytest.raises(ClaimPlanError) as exc:
+            resolve_claim_plan(
+                "T016",
+                "Outside",
+                cwd=git_repo,
+                worktree=True,
+                target_path=outside,
+            )
+
+        assert exc.value.code == "target_outside_root"
 
 
 @pytest.mark.slow

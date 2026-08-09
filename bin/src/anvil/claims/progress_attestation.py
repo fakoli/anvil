@@ -352,14 +352,29 @@ def capture_claim_progress_context(
     actor: str,
     claim_created_at: dt.datetime,
     expected_paths: Sequence[str],
+    claim_start_sha: str | None = None,
 ) -> ClaimProgressContext:
     """Capture immutable claim-start Git, task, and expected-path identities."""
     local = _local_repository(project_root, project_id=project_id)
+    planned_start = claim_start_sha or local.head_oid
+    _validate_oid(planned_start, local.object_format)
+    resolved_start = _git_text(
+        local.root, "rev-parse", "--verify", f"{planned_start}^{{commit}}"
+    )
+    if resolved_start != planned_start:
+        raise ProgressAttestationError(
+            "claim_start_invalid", "planned claim start does not resolve exactly"
+        )
     paths = _canonical_expected_paths(expected_paths)
     baselines = tuple(
         PathBaseline(
             path=path,
-            baseline_sha256=_capture_expected_baseline(local, path),
+            baseline_sha256=_capture_expected_baseline(
+                local,
+                path,
+                claim_start_sha=planned_start,
+                check_worktree=claim_start_sha is None,
+            ),
         )
         for path in paths
     )
@@ -384,7 +399,7 @@ def capture_claim_progress_context(
         claimed_by=_bounded_identity(actor, "actor", max_bytes=4096),
         claim_created_at=_require_aware_utc(claim_created_at, "claim_created_at"),
         repository_id=local.repository_id,
-        claim_start_sha=local.head_oid,
+        claim_start_sha=planned_start,
         object_format=local.object_format,
         prd_id=_bounded_identity(prd_id, "prd_id"),
         prd_revision=_positive_int(prd_revision, "prd_revision"),
@@ -931,9 +946,24 @@ def _verify_commit_payload(
     )
 
 
-def _capture_expected_baseline(local: _LocalRepository, path: str) -> str | None:
+def _capture_expected_baseline(
+    local: _LocalRepository,
+    path: str,
+    *,
+    claim_start_sha: str | None = None,
+    check_worktree: bool = True,
+) -> str | None:
     """Capture a clean claim-start Git blob identity without line-ending drift."""
-    entry = _git_tree_entry(local.root, local.head_oid, path)
+    baseline_sha = claim_start_sha or local.head_oid
+    entry = _git_tree_entry(local.root, baseline_sha, path)
+    if not check_worktree:
+        if entry is None:
+            return None
+        if entry[0] not in {"100644", "100755"}:
+            raise ProgressAttestationError(
+                "baseline_not_blob", "claim-start path is not a regular Git blob"
+            )
+        return _hash_git_blob(local.root, entry[1])
     working_digest = _hash_contained_regular_file(local.root, path)
     if entry is None:
         if working_digest is not None:
@@ -949,7 +979,7 @@ def _capture_expected_baseline(local: _LocalRepository, path: str) -> str | None
         raise ProgressAttestationError(
             "claim_path_dirty", "tracked expected file is absent at claim start"
         )
-    if _git_path_changed(local.root, local.head_oid, path):
+    if _git_path_changed(local.root, baseline_sha, path):
         raise ProgressAttestationError(
             "claim_path_dirty", "expected file is modified at claim start"
         )

@@ -1491,7 +1491,7 @@ None.
 
 ```json
 {
-  "api_version": "10",
+  "api_version": "11",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",
@@ -1499,7 +1499,7 @@ None.
   "tag": "v0.6.4",
   "tag_distance": 0,
   "dirty": false,
-  "schema_version": 19,
+  "schema_version": 20,
   "envelope": "v1.24",
   "cli": {
     "commands": ["apply", "...", "prd source-name", "..."],

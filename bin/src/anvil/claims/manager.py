@@ -34,6 +34,7 @@ from anvil.state import transitions
 from anvil.state.backend import BackendError
 from anvil.state.models import (
     Claim,
+    ClaimGitMetadata,
     ClaimStatus,
     ClaimType,
     EventDraft,
@@ -501,6 +502,9 @@ class ClaimManager:
         claim_type: ClaimType = ClaimType.task,
         force: bool = False,
         branch: str | None = None,
+        worktree_path: str | None = None,
+        git_metadata: ClaimGitMetadata | None = None,
+        operation_locked: bool = False,
     ) -> ClaimResult:
         """Atomically claim a task.
 
@@ -564,7 +568,7 @@ class ClaimManager:
                         or conflict with force=False).
         """
         lock_factory = getattr(self._backend, "claim_operation_lock", None)
-        if lock_factory is not None:
+        if lock_factory is not None and not operation_locked:
             with lock_factory():
                 return self._claim_unlocked(
                     task_id,
@@ -572,6 +576,8 @@ class ClaimManager:
                     claim_type=claim_type,
                     force=force,
                     branch=branch,
+                    worktree_path=worktree_path,
+                    git_metadata=git_metadata,
                 )
         return self._claim_unlocked(
             task_id,
@@ -579,6 +585,8 @@ class ClaimManager:
             claim_type=claim_type,
             force=force,
             branch=branch,
+            worktree_path=worktree_path,
+            git_metadata=git_metadata,
         )
 
     def _claim_unlocked(
@@ -589,6 +597,8 @@ class ClaimManager:
         claim_type: ClaimType = ClaimType.task,
         force: bool = False,
         branch: str | None = None,
+        worktree_path: str | None = None,
+        git_metadata: ClaimGitMetadata | None = None,
     ) -> ClaimResult:
         """Claim implementation; caller owns same-backend serialization."""
 
@@ -743,12 +753,17 @@ class ClaimManager:
                     actor=self._actor,
                     claim_created_at=now,
                     expected_paths=files,
+                    claim_start_sha=(
+                        git_metadata.claim_start_sha
+                        if git_metadata is not None
+                        else None
+                    ),
                 )
             except ProgressAttestationError as exc:
                 if exc.code in {
                     "repository_unavailable",
                     "git_unavailable",
-                }:
+                } and git_metadata is None:
                     context = None
                 else:
                     raise ClaimError(
@@ -764,6 +779,8 @@ class ClaimManager:
             claim_type=claim_type,
             now=now,
             branch=branch,
+            worktree_path=worktree_path,
+            git_metadata=git_metadata,
             generation=generation,
             attestation_context=attestation_context,
         )
@@ -813,8 +830,8 @@ class ClaimManager:
         return ClaimResult(
             claim=claim,
             task=task,
-            branch=branch,
-            worktree_path=None,
+            branch=claim.branch,
+            worktree_path=claim.worktree_path,
         )
 
     def release(
@@ -1289,6 +1306,8 @@ class ClaimManager:
         claim_type: ClaimType,
         now: datetime.datetime,
         branch: str | None = None,
+        worktree_path: str | None = None,
+        git_metadata: ClaimGitMetadata | None = None,
         generation: int = 1,
         attestation_context: dict[str, object] | None = None,
     ) -> Claim:
@@ -1301,7 +1320,8 @@ class ClaimManager:
             claim_type=claim_type,
             status=ClaimStatus.active,
             branch=branch,
-            worktree_path=None,
+            worktree_path=worktree_path,
+            git_metadata=git_metadata,
             session_id=self._session_id,
             expected_files=expected_files,
             generation=generation,

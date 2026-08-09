@@ -142,8 +142,13 @@ def claim(
 
     from anvil.claims.manager import ClaimError, ClaimManager, ConflictWarning
     from anvil.clock import SystemClock
-    from anvil.git_ops.branch import create_branch_for_task, use_named_branch
-    from anvil.git_ops.worktree import create_worktree_for_task
+    from anvil.git_ops import (
+        ClaimPlanError,
+        apply_claim_plan,
+        claim_git_metadata,
+        resolve_claim_plan,
+        revalidate_claim_plan,
+    )
 
     resolved_actor = resolve_actor(actor)
     # Git ops run in the user's PROJECT dir, not the state base dir: in the
@@ -224,78 +229,63 @@ def claim(
                     fail("claim", str(exc), code="bundle_claim_error")
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
-            from anvil.naming import safe_path_component
-
             branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
             isolation = cfg.worktree_isolation if cfg is not None else "advisory"
             if isolation == "require" and not shared_tree:
                 worktree = True
-            recorded_branch = branch or (
-                f"{branch_prefix}/{safe_path_component(task_id).lower()}-bundle"[:80]
-            )
-            worktree_path = (
-                str(
-                    resolved_cwd.parent
-                    / f"wt-{safe_path_component(task_id).lower()}"
-                )
-                if worktree
-                else None
-            )
-            # Reserve state before external Git mutation. This closes the
-            # preflight->append race: once this succeeds, competing claims see
-            # the internal member authorizations and lose cleanly.
             try:
-                bundle_result = bundle_manager.claim(
+                plan = resolve_claim_plan(
                     task_id,
-                    branch=recorded_branch,
-                    worktree_path=worktree_path,
+                    f"Bundle {task_id}",
+                    cwd=resolved_cwd,
+                    branch=branch,
+                    branch_prefix=branch_prefix,
+                    worktree=worktree,
+                    isolation_required=isolation == "require" and not shared_tree,
+                    shared_tree=shared_tree,
                 )
+                metadata = claim_git_metadata(plan)
+            except ClaimPlanError as exc:
+                if json_output:
+                    fail("claim", str(exc), code=exc.code)
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            try:
+                with backend.claim_operation_lock():
+                    revalidate_claim_plan(plan, cwd=resolved_cwd)
+                    bundle_result = bundle_manager.claim(
+                        task_id,
+                        branch=metadata.branch if metadata is not None else None,
+                        worktree_path=(
+                            metadata.worktree_path if metadata is not None else None
+                        ),
+                        git_metadata=metadata,
+                    )
+                    try:
+                        apply_claim_plan(plan, cwd=resolved_cwd)
+                    except ClaimPlanError:
+                        bundle_manager.release(
+                            task_id, reason="transactional Git claim failed"
+                        )
+                        raise
+            except ClaimPlanError as exc:
+                if json_output:
+                    fail("claim", str(exc), code=exc.code)
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             except BundleError as exc:
                 if json_output:
                     fail("claim", str(exc), code="bundle_claim_error")
                 typer.echo(f"Error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
-            branch_result = use_named_branch(
-                recorded_branch, cwd=resolved_cwd, checkout=not worktree
-            )
-            if not branch_result.created or branch_result.branch is None:
-                bundle_manager.release(task_id, reason="git branch creation failed")
-                message = f"git branch not created — {branch_result.reason}"
-                if json_output:
-                    fail("claim", message, code="git_branch_failed")
-                typer.echo(f"Error: {message}", err=True)
-                raise typer.Exit(code=1)
-            if worktree:
-                wt_result = create_worktree_for_task(
-                    task_id, branch_result.branch, cwd=resolved_cwd
-                )
-                if not wt_result.created:
-                    bundle_manager.release(task_id, reason="git worktree creation failed")
-                    # A freshly-created, unchecked branch is safe to remove as
-                    # compensation; an existing branch is never deleted.
-                    if branch_result.reason is None:
-                        import subprocess
-
-                        subprocess.run(
-                            ["git", "branch", "-D", branch_result.branch],
-                            cwd=str(resolved_cwd),
-                            capture_output=True,
-                            timeout=10,
-                            check=False,
-                        )
-                    message = f"worktree not created — {wt_result.reason}"
-                    if json_output:
-                        fail("claim", message, code="git_worktree_failed")
-                    typer.echo(f"Error: {message}", err=True)
-                    raise typer.Exit(code=1)
             if json_output:
                 emit_success(
                     "claim",
                     {
                         "bundle": dump_model(bundle_result.bundle),
                         "claim": dump_model(bundle_result.claim),
-                        "branch": recorded_branch,
-                        "worktree": worktree_path,
+                        "branch": bundle_result.claim.branch,
+                        "worktree": bundle_result.claim.worktree_path,
                         "warnings": warnings,
                         "actor_identity": actor_identity_data(
                             bundle_result.claim.claimed_by
@@ -311,8 +301,8 @@ def claim(
                 f"{safe_actor_label(bundle_result.claim.claimed_by)} with "
                 f"coordinator claim {bundle_result.claim.id}."
             )
-            typer.echo(f"  Branch: {recorded_branch or '—'}")
-            typer.echo(f"  Worktree: {worktree_path or '—'}")
+            typer.echo(f"  Branch: {bundle_result.claim.branch or '-'}")
+            typer.echo(f"  Worktree: {bundle_result.claim.worktree_path or '-'}")
             for line in bundle_continuation_lines(
                 task_id, bundle_result.claim.claimed_by
             ):
@@ -440,30 +430,13 @@ def claim(
                         err=True,
                     )
 
-        # T027: a caller-supplied --branch attaches the claim to an existing or
-        # named branch instead of generating agent/<task>-<slug>. We resolve the
-        # branch FIRST (git checkout / checkout -b) so the resolved name can be
-        # recorded on the claim itself. The default (auto-generated) path is
-        # unchanged: the branch is created AFTER the claim and is not stored on
-        # the claim row (it is reported in the JSON envelope / human output).
-        # retro corpus (concurrency theme) — worktree isolation policy.
-        # Applied BEFORE branch/claim so both checkout decisions see the
-        # final `worktree` value.
-        #   require  — write-capable claims are isolated by default: behave
-        #              as if --worktree was passed unless the operator
-        #              explicitly opts out with --shared-tree.
-        #   advisory — warn when this claim would share the working tree
-        #              with another ACTIVE claim (neither isolated).
-        #   off      — flag-only behavior, as before.
+        # Freeze every Git observation before reserving state. The same plan is
+        # revalidated under the cross-process claim lock immediately before the
+        # claim event and again before Git mutation.
         isolation = cfg.worktree_isolation if cfg is not None else "advisory"
-        isolation_required = False
         if not shared_tree and not worktree:
             if isolation == "require":
-                # Isolation by default is the feature (unlike refuse-style
-                # gates, acting IS what the operator opted into); failure to
-                # actually isolate fails the claim below (fail-closed).
                 worktree = True
-                isolation_required = True
                 note = (
                     "worktree_isolation: require — claiming into an isolated "
                     "worktree (pass --shared-tree for read-only/shared work)."
@@ -492,33 +465,51 @@ def claim(
                         warnings.append(note)
                     else:
                         typer.echo(f"Warning: {note}", err=True)
-
-        recorded_branch: str | None = None
-        if branch is not None:
-            # checkout=not worktree: with --worktree, don't move main's HEAD onto
-            # the named branch — the worktree add checks it out (#104, same fix as
-            # the auto-generated path below).
-            branch_result = use_named_branch(
-                branch, cwd=resolved_cwd, checkout=not worktree
+        try:
+            branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
+            plan = resolve_claim_plan(
+                task_id,
+                task.title,
+                cwd=resolved_cwd,
+                branch=branch,
+                branch_prefix=branch_prefix,
+                worktree=worktree,
+                isolation_required=isolation == "require" and not shared_tree,
+                shared_tree=shared_tree,
             )
-            if branch_result.created and branch_result.branch:
-                # Record the branch on the claim so state reflects the user's
-                # own git workflow (the whole point of T027).
-                recorded_branch = branch_result.branch
-            elif not branch_result.created:
-                # git unavailable / not a repo / invalid name — fall back to
-                # recording the requested name on the claim so the intent is
-                # preserved even when the working tree is not a git repo. The
-                # branch warning is surfaced below exactly like the default path.
-                recorded_branch = branch
+            metadata = claim_git_metadata(plan)
+        except ClaimPlanError as exc:
+            if json_output:
+                fail("claim", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
         try:
-            result = manager.claim(
-                task_id,
-                expected_files=expected_files,
-                force=force,
-                branch=recorded_branch,
-            )
+            with backend.claim_operation_lock():
+                revalidate_claim_plan(plan, cwd=resolved_cwd)
+                result = manager.claim(
+                    task_id,
+                    expected_files=expected_files,
+                    force=force,
+                    branch=metadata.branch if metadata is not None else None,
+                    worktree_path=(
+                        metadata.worktree_path if metadata is not None else None
+                    ),
+                    git_metadata=metadata,
+                    operation_locked=True,
+                )
+                try:
+                    apply_claim_plan(plan, cwd=resolved_cwd)
+                except ClaimPlanError:
+                    manager.release(
+                        result.claim.id, reason="transactional Git claim failed"
+                    )
+                    raise
+        except ClaimPlanError as exc:
+            if json_output:
+                fail("claim", str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         except ClaimError as exc:
             if json_output:
                 fail("claim", str(exc), code="claim_error")
@@ -530,105 +521,12 @@ def claim(
                 warnings.append(cross_prd_warning)
             else:
                 typer.echo(f"Warning: {cross_prd_warning}", err=True)
-
-        # Git branch creation — non-blocking; warnings go to stderr.
-        # v1.15.0: branch_prefix is host-project-configurable so claims
-        # respect `feature/` / `fix/` conventions instead of forcing
-        # `agent/` everywhere. Reuses the config loaded up front (cfg);
-        # falls back to the default prefix when config.yaml is missing or
-        # failed to load (cfg is None).
-        #
-        # T027: when --branch was supplied the branch was already resolved
-        # above (branch_result is set); skip auto-generation.
-        if branch is None:
-            branch_prefix = cfg.branch_prefix if cfg is not None else "agent"
-
-            branch_result = create_branch_for_task(
-                task_id,
-                task.title,
-                cwd=resolved_cwd,
-                branch_prefix=branch_prefix,
-                # For --worktree, create the branch WITHOUT checking it out in
-                # the main repo (#104). `git worktree add` then checks it out in
-                # the NEW worktree — a branch already checked out in the main
-                # worktree can't be added to another one ("already used by
-                # worktree"). The main checkout stays on its original branch.
-                checkout=not worktree,
-            )
-        if branch_result.created and branch_result.reason:
-            if json_output:
-                warnings.append(f"branch: {branch_result.reason}")
-            else:
-                typer.echo(f"Warning (branch): {branch_result.reason}", err=True)
-        elif not branch_result.created:
-            if json_output:
-                warnings.append(f"git branch not created — {branch_result.reason}")
-            else:
-                typer.echo(
-                    f"Warning: git branch not created — {branch_result.reason}",
-                    err=True,
-                )
-
-        # Optional worktree creation.
-        worktree_path: str | None = None
-        worktree_failure: str | None = None
-        if worktree:
-            if branch_result.created and branch_result.branch:
-                wt_result = create_worktree_for_task(
-                    task_id,
-                    branch_result.branch,
-                    cwd=resolved_cwd,
-                )
-                if wt_result.created:
-                    worktree_path = wt_result.path
-                else:
-                    worktree_failure = wt_result.reason or "unknown"
-                    if json_output:
-                        warnings.append(f"worktree not created — {wt_result.reason}")
-                    else:
-                        typer.echo(
-                            f"Warning: worktree not created — {wt_result.reason}",
-                            err=True,
-                        )
-            else:
-                worktree_failure = "no branch was created"
-                if json_output:
-                    warnings.append("--worktree skipped because no branch was created.")
-                else:
-                    typer.echo(
-                        "Warning: --worktree skipped because no branch was created.",
-                        err=True,
-                    )
-
-        # worktree_isolation: require is FAIL-CLOSED: when isolation was the
-        # configured default and could not actually be established, a
-        # write-capable claim must not silently proceed in the shared
-        # checkout — release the claim and refuse with the escape hatches
-        # spelled out. (--force keeps the claim, matching the other gates.)
-        if isolation_required and worktree_path is None and not force:
-            manager.release(result.claim.id, reason="worktree_isolation_failed")
-            message = (
-                f"worktree_isolation: require, but no worktree could be "
-                f"created ({worktree_failure}); claim released. Fix the git "
-                "state, or pass --shared-tree (read-only work) or --force "
-                "(keep the claim in the shared checkout)."
-            )
-            if json_output:
-                fail("claim", message, code="worktree_isolation_failed")
-            typer.echo(f"Error: {message}", err=True)
-            raise typer.Exit(code=1)
-
         claim_obj = result.claim
     finally:
         backend.close()
 
-    # T027: prefer the branch recorded on the claim (set when --branch is
-    # supplied) so the reported branch reflects what state actually holds, even
-    # when git is unavailable. Falls back to the auto-generated branch from the
-    # checkout result for the default path (claim_obj.branch is None there).
-    reported_branch = claim_obj.branch or (
-        branch_result.branch if branch_result.created else None
-    )
+    reported_branch = claim_obj.branch
+    worktree_path = claim_obj.worktree_path
     if claim_obj.attestation_context is None:
         warnings.append(
             "Progress attestation unavailable: this project is not an accessible "

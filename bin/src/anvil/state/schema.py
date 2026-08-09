@@ -83,11 +83,13 @@ Version history
   explicitly marked unavailable without changing lifecycle or task state.
 - v19: task-rejection provenance — task review rows persist an engine-derived
   accounting category plus exact evidence/claim/attempt bindings.
+- v20: transactional claim Git bindings — task and bundle claims retain the
+  validated selected base, exact claim start, branch, and canonical target.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION: int = 19
+SCHEMA_VERSION: int = 20
 
 
 def get_schema_version() -> int:
@@ -288,6 +290,7 @@ CREATE TABLE IF NOT EXISTS bundle_claims (
     status             TEXT NOT NULL DEFAULT 'active',
     branch             TEXT,
     worktree_path      TEXT,
+    git_metadata       TEXT,
     session_id         TEXT,
     expected_files     TEXT NOT NULL DEFAULT '[]',
     member_claim_ids   TEXT NOT NULL DEFAULT '{}',
@@ -310,6 +313,7 @@ CREATE TABLE IF NOT EXISTS claims (
     status             TEXT NOT NULL DEFAULT 'active',
     branch             TEXT,
     worktree_path      TEXT,
+    git_metadata       TEXT,
     session_id         TEXT,
     bundle_claim_id    TEXT REFERENCES bundle_claims(id) ON DELETE RESTRICT,
     expected_files     TEXT NOT NULL DEFAULT '[]',
@@ -486,7 +490,7 @@ CREATE TABLE IF NOT EXISTS conflict_groups (
 -- Informational only: ``_apply_ddl`` strips this line and stamps the version
 -- from ``SCHEMA_VERSION`` at runtime, but keep it in lockstep with the constant
 -- so anyone running this DDL by hand gets the right version.
-PRAGMA user_version = 19;
+PRAGMA user_version = 20;
 """
 
 

@@ -8,6 +8,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Added
 
+- **Transactional task and bundle claim Git wiring (#180).** Claims now freeze
+  and persist the selected local base, exact claim-start ref and commit, branch,
+  canonical repository root, and shared or isolated target before Git mutation.
+  The engine revalidates those observations under one cross-process claim lock;
+  branch/worktree failures release state and remove only artifacts created by
+  that invocation. Historical claims keep nullable Git metadata. This adds
+  schema version 20 and advances the public API contract to version 11.
+
 - **Truthful task-rejection provenance and governor recovery (#181).** Rejected
   review attempts now persist engine-derived quality, evidence-resubmission, or
   process provenance with exact claim/evidence identity, and new accepted
