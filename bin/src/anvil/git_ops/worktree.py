@@ -14,7 +14,8 @@ import os
 import shutil
 import stat
 import subprocess
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -28,6 +29,9 @@ from anvil.git_ops.branch import (
 )
 from anvil.naming import safe_path_component
 from anvil.state.models import ClaimGitMetadata
+
+_MAX_GIT_OBSERVATION_BYTES = 8 * 1024 * 1024
+_GIT_OBSERVATION_CHUNK_BYTES = 64 * 1024
 
 __all__ = [
     "ClaimGitPlan",
@@ -102,6 +106,7 @@ class ClaimGitPlan:
     caller_path: str
     caller_worktree_path: str | None
     canonical_root: str | None
+    git_common_dir: str | None
     linked_worktree: bool | None
     caller_dirty: bool | None
     caller_head_ref: str | None
@@ -121,6 +126,7 @@ class ClaimGitPlan:
     target_path: str | None
     target_owner_branch: str | None
     worktrees: tuple[GitWorktree, ...]
+    ignored_worktree_paths: tuple[str, ...]
     warnings: tuple[str, ...]
     revalidation_preconditions: tuple[ClaimPlanPrecondition, ...]
 
@@ -136,22 +142,91 @@ class ClaimGitMutation:
 
 
 def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
+    """Run a read-only Git probe with bounded stdout and stderr capture."""
     env = os.environ.copy()
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    command = ["git", *args]
+    process: subprocess.Popen[bytes] | None = None
     try:
-        return subprocess.run(
-            ["git", *args],
+        process = subprocess.Popen(
+            command,
             cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="strict",
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
-            timeout=_GIT_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        if process.stdout is None or process.stderr is None:  # pragma: no cover
+            process.kill()
+            process.wait()
+            return None
+
+        stdout = bytearray()
+        stderr = bytearray()
+        total = [0]
+        guard = threading.Lock()
+        overflow = threading.Event()
+        read_failed = threading.Event()
+
+        def drain(stream: object, sink: bytearray) -> None:
+            try:
+                while True:
+                    chunk = stream.read(_GIT_OBSERVATION_CHUNK_BYTES)  # type: ignore[attr-defined]
+                    if not chunk:
+                        return
+                    with guard:
+                        remaining = _MAX_GIT_OBSERVATION_BYTES - total[0]
+                        if remaining > 0:
+                            sink.extend(chunk[:remaining])
+                        total[0] += len(chunk)
+                        if total[0] > _MAX_GIT_OBSERVATION_BYTES:
+                            overflow.set()
+                            try:
+                                process.kill()
+                            except OSError:
+                                pass
+            except OSError:
+                read_failed.set()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+
+        readers = [
+            threading.Thread(target=drain, args=(process.stdout, stdout), daemon=True),
+            threading.Thread(target=drain, args=(process.stderr, stderr), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+
+        timed_out = False
+        try:
+            process.wait(timeout=_GIT_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            process.wait()
+        for reader in readers:
+            reader.join()
+        if timed_out or overflow.is_set() or read_failed.is_set():
+            return None
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout.decode("utf-8", errors="strict"),
+            stderr.decode("utf-8", errors="strict"),
+        )
+    except (OSError, UnicodeError):
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
         return None
+    except BaseException:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
 
 
 def _git_value(args: list[str], cwd: Path, *, code: str) -> str:
@@ -167,17 +242,49 @@ def _path_key(path: Path | str) -> str:
     return os.path.normcase(str(Path(path).resolve(strict=False)))
 
 
-def canonical_git_root(cwd: Path) -> Path | None:
-    """Return the main worktree root shared by linked/nested callers."""
-    if shutil.which("git") is None:
-        return None
+def _git_common_dir(cwd: Path) -> Path | None:
     result = _run_git(
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
         cwd,
     )
     if result is None or result.returncode != 0 or not result.stdout.strip():
         return None
-    return Path(result.stdout.strip()).resolve(strict=False).parent
+    return Path(result.stdout.strip()).resolve(strict=False)
+
+
+def canonical_git_root(cwd: Path) -> Path | None:
+    """Return the main worktree root shared by linked/nested callers."""
+    if shutil.which("git") is None:
+        return None
+    common_dir = _git_common_dir(cwd)
+    if common_dir is None:
+        return None
+    try:
+        topology = _worktree_topology(cwd)
+    except ClaimPlanError:
+        return None
+    if not topology:
+        return None
+    registered = {_path_key(item.path): Path(item.path) for item in topology}
+    conventional = common_dir.parent
+    if _path_key(conventional) in registered:
+        return conventional.resolve(strict=False)
+
+    # Absorbed submodules store their common directory below the superproject's
+    # ``.git/modules`` tree. Their config's core.worktree points back to the
+    # actual submodule checkout; git-common-dir.parent does not.
+    core_worktree = _run_git(
+        ["config", "--file", str(common_dir / "config"), "--get", "core.worktree"],
+        cwd,
+    )
+    if core_worktree is not None and core_worktree.returncode == 0:
+        raw_path = Path(core_worktree.stdout.strip())
+        configured = (
+            raw_path if raw_path.is_absolute() else common_dir / raw_path
+        ).resolve(strict=False)
+        if configured.is_dir():
+            return configured
+    return None
 
 
 def _ref_oid(ref: str, cwd: Path) -> str | None:
@@ -261,6 +368,25 @@ def _worktree_topology(cwd: Path) -> tuple[GitWorktree, ...]:
     if not records:
         raise ClaimPlanError("worktree_topology_invalid", "Git reported no worktrees")
     return tuple(sorted(records, key=lambda item: _path_key(item.path)))
+
+
+def _normalize_topology_root(
+    topology: tuple[GitWorktree, ...],
+    *,
+    canonical_root: Path | None,
+    common_dir: Path | None,
+) -> tuple[GitWorktree, ...]:
+    """Project an absorbed submodule's common-dir record to its checkout."""
+    if canonical_root is None or common_dir is None:
+        return topology
+    if any(_path_key(item.path) == _path_key(canonical_root) for item in topology):
+        return topology
+    return tuple(
+        replace(item, path=str(canonical_root))
+        if _path_key(item.path) == _path_key(common_dir)
+        else item
+        for item in topology
+    )
 
 
 def _topology_digest(worktrees: tuple[GitWorktree, ...]) -> str:
@@ -387,6 +513,7 @@ def resolve_claim_plan(
     isolation_required: bool = False,
     shared_tree: bool = False,
     target_path: Path | None = None,
+    ignored_worktree_paths: tuple[Path, ...] = (),
 ) -> ClaimGitPlan:
     """Resolve a complete claim Git plan without fetching or mutating anything."""
     caller_path = cwd.resolve(strict=False)
@@ -416,6 +543,7 @@ def resolve_claim_plan(
             caller_path=str(caller_path),
             caller_worktree_path=None,
             canonical_root=None,
+            git_common_dir=None,
             linked_worktree=None,
             caller_dirty=None,
             caller_head_ref=None,
@@ -435,6 +563,7 @@ def resolve_claim_plan(
             target_path=None,
             target_owner_branch=None,
             worktrees=(),
+            ignored_worktree_paths=(),
             warnings=tuple(warnings),
             revalidation_preconditions=(),
         )
@@ -453,6 +582,15 @@ def resolve_claim_plan(
             "Canonical Git root cannot be resolved",
         )
     linked = _path_key(caller_root) != _path_key(canonical_root)
+    common_dir = _git_common_dir(caller_path)
+    if common_dir is None:
+        raise ClaimPlanError(
+            "caller_topology_unavailable",
+            "Git common directory cannot be resolved",
+        )
+    normalized_ignored_paths = tuple(
+        str(path.resolve(strict=False)) for path in ignored_worktree_paths
+    )
     caller_head_sha = _git_value(
         ["rev-parse", "--verify", "HEAD^{commit}"],
         caller_path,
@@ -467,13 +605,10 @@ def resolve_claim_plan(
         if head_ref_result is not None and head_ref_result.returncode == 0
         else None
     )
-    dirty_result = _run_git(
-        ["status", "--porcelain=v1", "--untracked-files=all"],
-        caller_path,
+    caller_dirty = _working_tree_dirty(
+        caller_root,
+        ignored_paths=normalized_ignored_paths,
     )
-    if dirty_result is None or dirty_result.returncode != 0:
-        raise ClaimPlanError("caller_dirty_unavailable", "Caller dirtiness is unknown")
-    caller_dirty = bool(dirty_result.stdout)
     if not isolated and caller_dirty:
         raise ClaimPlanError(
             "dirty_shared_tree",
@@ -489,7 +624,11 @@ def resolve_claim_plan(
             "dirty caller is permitted because isolated planning never moves it"
         )
 
-    topology = _worktree_topology(caller_path)
+    topology = _normalize_topology_root(
+        _worktree_topology(caller_path),
+        canonical_root=canonical_root,
+        common_dir=common_dir,
+    )
     caller_record = next(
         (item for item in topology if _path_key(item.path) == _path_key(caller_root)),
         None,
@@ -662,6 +801,7 @@ def resolve_claim_plan(
         caller_path=str(caller_path),
         caller_worktree_path=str(caller_root),
         canonical_root=str(canonical_root),
+        git_common_dir=str(common_dir),
         linked_worktree=linked,
         caller_dirty=caller_dirty,
         caller_head_ref=caller_head_ref,
@@ -683,6 +823,7 @@ def resolve_claim_plan(
             target_owner.branch_ref if target_owner is not None else None
         ),
         worktrees=topology,
+        ignored_worktree_paths=normalized_ignored_paths,
         warnings=tuple(warnings),
         revalidation_preconditions=tuple(preconditions),
     )
@@ -733,12 +874,47 @@ def revalidate_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> Non
                 code="claim_plan_changed",
             )
         elif condition.kind in {"caller_clean", "target_clean"}:
-            value = "dirty" if _working_tree_dirty(Path(condition.subject)) else "clean"
+            ignored_paths = (
+                plan.ignored_worktree_paths
+                if condition.kind == "caller_clean"
+                else ()
+            )
+            value = (
+                "dirty"
+                if _working_tree_dirty(
+                    Path(condition.subject), ignored_paths=ignored_paths
+                )
+                else "clean"
+            )
         elif condition.kind == "topology":
-            topology = topology or _worktree_topology(root)
+            topology = topology or _normalize_topology_root(
+                _worktree_topology(root),
+                canonical_root=(
+                    Path(plan.canonical_root)
+                    if plan.canonical_root is not None
+                    else None
+                ),
+                common_dir=(
+                    Path(plan.git_common_dir)
+                    if plan.git_common_dir is not None
+                    else None
+                ),
+            )
             value = _topology_digest(topology)
         else:
-            topology = topology or _worktree_topology(root)
+            topology = topology or _normalize_topology_root(
+                _worktree_topology(root),
+                canonical_root=(
+                    Path(plan.canonical_root)
+                    if plan.canonical_root is not None
+                    else None
+                ),
+                common_dir=(
+                    Path(plan.git_common_dir)
+                    if plan.git_common_dir is not None
+                    else None
+                ),
+            )
             owner = next(
                 (
                     item
@@ -926,8 +1102,28 @@ def _compensate_values(
         )
 
 
-def _working_tree_dirty(cwd: Path) -> bool:
-    result = _run_git(["status", "--porcelain=v1", "--untracked-files=all"], cwd)
+def _working_tree_dirty(
+    cwd: Path,
+    *,
+    ignored_paths: tuple[str, ...] = (),
+) -> bool:
+    root = cwd.resolve(strict=False)
+    exclusions: list[str] = []
+    for raw_path in ignored_paths:
+        try:
+            relative = Path(raw_path).resolve(strict=False).relative_to(root)
+        except ValueError:
+            continue
+        portable = relative.as_posix()
+        if portable in {"", "."}:
+            continue
+        exclusions.extend(
+            [f":(exclude,top){portable}", f":(exclude,top){portable}/**"]
+        )
+    args = ["status", "--porcelain=v1", "--untracked-files=all"]
+    if exclusions:
+        args.extend(["--", ".", *exclusions])
+    result = _run_git(args, root)
     if result is None or result.returncode != 0:
         raise ClaimPlanError("caller_dirty_unavailable", "Worktree dirtiness is unknown")
     return bool(result.stdout)

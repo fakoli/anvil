@@ -32,11 +32,10 @@ The toolset is organized by lifecycle phase:
 - **Decision resolution** (`find_decisions`)
 - **Introspection** (`describe_surface`)
 
-The nine workflow tools — `init_project`, `get_project_status`,
-`parse_prd`, `assess_prd`, `review_prd`, `plan_tasks`, `score_tasks`, `review_tasks`,
-`apply_review_decision` — deliberately omit git operations (branch / worktree creation),
-matching `claim_task`'s long-standing behavior: remote agents may have no git access, so
-the MCP surface stays git-free. Git side-effects remain CLI-only.
+Planning tools do not create branches or worktrees. `claim_task` and `claim_bundle`,
+however, use the same transactional Git claim plan as the CLI when `cwd` resolves to a
+Git repository: they may create/check out a claim branch or create/reuse the planned
+worktree. If Git is unavailable, the non-isolated state-only claim path remains usable.
 
 ---
 
@@ -492,9 +491,11 @@ edge, drop a spurious one) before promoting tasks to `ready`, without hand-editi
 
 ### `claim_task`
 
-Acquires an exclusive lease on a task for the given actor. Delegates to
-`ClaimManager.claim`, which writes the `Claim` row in an atomic SQLite transaction.
-Stale-claim reaping runs first.
+Acquires an exclusive lease on a task for the given actor. It first resolves a
+read-only Git plan, then revalidates that plan under the same cross-process lock used
+by `ClaimManager.claim`. State and the planned branch/worktree mutation therefore
+succeed together; a Git failure or interruption releases the claim and compensates
+only Git artifacts created by that invocation. Stale-claim reaping runs first.
 
 **Gate**: the task's owning PRD must be in `reviewed` or `approved` status. If the PRD is in
 any other status (e.g. `draft`) or missing, the tool raises a `ToolError` and no claim is
@@ -527,6 +528,7 @@ and the project-level override is read from `.anvil/config.yaml`.
   "lease_expires_at": "2026-05-25T14:15:00+00:00",
   "branch": "agent/t012-implement-auth",
   "worktree_path": null,
+  "git_metadata": {"mode": "shared", "canonical_root": "...", "claim_start_sha": "...", "branch": "agent/t012-implement-auth", "target_path": "..."},
   "expected_files": ["src/auth/middleware.py", "tests/test_auth.py"],
   "generation": 2,
   "attestation_context": {"repository_id": "...", "claim_start_sha": "...", "expected_paths": [{"path": "src/auth/middleware.py", "baseline_sha256": "..."}]},
@@ -535,15 +537,17 @@ and the project-level override is read from `.anvil/config.yaml`.
 ```
 
 The immutable attestation context binds external progress to this claim generation,
-repository, PRD/task revisions, and canonical expected-path baselines. `branch` and
-`worktree_path` are `null` when git ops are not configured. In a non-Git project the
-claim still succeeds with `attestation_context: null` and an additive warning; legacy
-hook-observed file progress remains available.
+repository, PRD/task revisions, and canonical expected-path baselines. `git_metadata`
+records the exact selected base, claim-start commit, branch, canonical root, and target.
+`branch`, `worktree_path`, and `git_metadata` are nullable on the state-only path. In a
+non-Git project the claim still succeeds with `attestation_context: null` and an
+additive warning; legacy hook-observed file progress remains available.
 
 **Failure modes**
 
 - `ToolError` — PRD is not in `reviewed` or `approved` status, or missing.
 - `ToolError` — `ClaimError` from `ClaimManager` (task already claimed, task not in claimable state, etc.).
+- `ToolError` — bounded Git-plan refusal; no active claim or invocation-owned Git artifact remains.
 - `ToolError` — state directory not found.
 
 **When to call**: after `get_next_task` or `get_task` confirms the task is ready and
@@ -1603,7 +1607,7 @@ Schema compatibility failures are the exception: their `ToolError` message is a 
 path-free JSON object so clients can act on stable fields without parsing backend text:
 
 ```json
-{"error":{"code":"schema_mismatch","database_schema":20,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":19}}
+{"error":{"code":"schema_mismatch","database_schema":21,"direction":"newer","engine_version":"0.6.4","guidance":"Upgrade anvil-state, then restart the CLI, harness, and MCP server. Do not delete state.","remediation_code":"upgrade_engine","restart_required":true,"supported_schema":20}}
 ```
 
 The server closes a backend that fails initialization. Because each tool call opens fresh

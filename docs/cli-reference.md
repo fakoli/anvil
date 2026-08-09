@@ -266,7 +266,7 @@ anvil project snapshot --json
 anvil project snapshot --json --limit max_tasks=1000 --limit max_dependency_edges=5000
 ```
 
-Consumers must first pin describe API 10, operation version 1, and the exact
+Consumers must first pin describe API 14, operation version 1, and the exact
 packaged schema resource. See [Provider read contracts](contracts/provider-reads-v1.md)
 for limits, digest framing, fixtures, and the Workbench mapping.
 
@@ -861,8 +861,8 @@ worktree at `../wt-<task_id>/`.
 
 - `--worktree` *(flag)* — also create a git worktree at `../wt-<task_id>/`.
 - `--shared-tree` *(flag)* — claim into the shared checkout even under `worktree_isolation: require` (read-only/docs work); also silences the advisory shared-checkout warning.
-  Skipped with a stderr warning when no branch was created (e.g. when the
-  branch already exists).
+  A compatible existing branch/worktree is revalidated and reused; an occupied,
+  dirty, stale, or differently owned target is refused before mutation.
 - `--force` *(flag)* — override the pre-claim conflict warnings. Without
   `--force`, file overlap or group conflicts cause the command to exit 1
   after listing every conflicting claim.

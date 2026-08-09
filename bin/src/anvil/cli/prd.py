@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import stat
+import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -22,6 +26,7 @@ from anvil.cli._helpers import (
     ingest_prd_source,
     ingest_prd_source_for_id,
     prd_source_filename,
+    replace_prd_source_for_id,
     resolve_prd_id,
     selected_prd_source_path,
     validate_prd_id,
@@ -37,6 +42,7 @@ prd_app = typer.Typer(
 )
 
 _ALLOWED_TERMINAL_TITLE_FORMAT_CONTROLS = {"\u200c", "\u200d"}
+_MAX_DECISION_SOURCE_BYTES = 2_097_152
 
 
 def _decision_prd_id(
@@ -82,6 +88,74 @@ def _decision_source(
     source_path = selected_prd_source_path(state_dir, prd_id)
     source = ingest_prd_source_for_id(state_dir, prd_id)
     return source_path, source.markdown, prd_id
+
+
+def _replace_custom_decision_source(
+    source_path: Path,
+    *,
+    expected_sha256: str,
+    markdown: str,
+) -> str:
+    """CAS-replace one custom decision source through a same-directory temp."""
+    source_bytes = markdown.encode("utf-8", errors="strict")
+    if len(source_bytes) > _MAX_DECISION_SOURCE_BYTES:
+        raise PrdSourceIngestError(
+            "source_limit_exceeded",
+            "PRD source exceeds the configured byte limit",
+        )
+    current = ingest_prd_source(source_path)
+    if current.source_sha256 != expected_sha256:
+        raise PrdSourceIngestError(
+            "source_changed",
+            "PRD source changed before verified replacement",
+        )
+    resolved = source_path.resolve(strict=True)
+    opened = os.stat(resolved, follow_symlinks=False)
+    if not stat.S_ISREG(opened.st_mode):
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "custom PRD source is not a regular file",
+        )
+
+    descriptor = -1
+    temp_path: Path | None = None
+    try:
+        descriptor, raw_temp = tempfile.mkstemp(
+            prefix=f".{resolved.name}.",
+            suffix=".tmp",
+            dir=resolved.parent,
+        )
+        temp_path = Path(raw_temp)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            stream.write(source_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+        latest = ingest_prd_source(resolved)
+        if latest.source_sha256 != expected_sha256:
+            raise PrdSourceIngestError(
+                "source_changed",
+                "PRD source changed before verified replacement",
+            )
+        os.chmod(temp_path, stat.S_IMODE(opened.st_mode))
+        os.replace(temp_path, resolved)
+        temp_path = None
+    except PrdSourceIngestError:
+        raise
+    except OSError as exc:
+        raise PrdSourceIngestError(
+            "source_unavailable",
+            "cannot replace verified custom PRD source",
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return hashlib.sha256(source_bytes).hexdigest()
 
 
 @prd_app.command("show")
@@ -1200,6 +1274,7 @@ def prd_resolve_decision(
             file=file,
             prd_id=effective_prd_id,
         )
+        source_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
     except (PrdAmbiguityError, PrdSourceIngestError) as exc:
         backend.close()
         code = exc.code if isinstance(exc, PrdSourceIngestError) else "prd_ambiguous"
@@ -1272,16 +1347,6 @@ def prd_resolve_decision(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
-        # Write the file first, then record the event. If the write fails we
-        # never record a transition that does not match the file.
-        try:
-            prd_path.write_text(resolution_result.markdown, encoding="utf-8")
-        except OSError as exc:
-            if json_output:
-                fail(cmd, f"cannot write {prd_path}: {exc}", code="io_error")
-            typer.echo(f"Error: cannot write {prd_path}: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
-
         payload: dict[str, object] = {
             "project_id": project_id,
             "prd_id": effective_prd_id,
@@ -1302,7 +1367,49 @@ def prd_resolve_decision(
             target_id=effective_prd_id,
             payload_json=payload,
         )
-        event = backend.append(draft)
+        try:
+            with backend.claim_operation_lock():
+                if file is None:
+                    updated = replace_prd_source_for_id(
+                        state_dir,
+                        effective_prd_id,
+                        expected_sha256=source_sha256,
+                        markdown=resolution_result.markdown,
+                    )
+                    updated_sha256 = updated.source_sha256
+                else:
+                    updated_sha256 = _replace_custom_decision_source(
+                        prd_path,
+                        expected_sha256=source_sha256,
+                        markdown=resolution_result.markdown,
+                    )
+                try:
+                    event = backend.append(draft)
+                except BaseException:
+                    try:
+                        if file is None:
+                            replace_prd_source_for_id(
+                                state_dir,
+                                effective_prd_id,
+                                expected_sha256=updated_sha256,
+                                markdown=markdown,
+                            )
+                        else:
+                            _replace_custom_decision_source(
+                                prd_path,
+                                expected_sha256=updated_sha256,
+                                markdown=markdown,
+                            )
+                    except Exception as rollback_exc:
+                        raise RuntimeError(
+                            "decision source rollback failed after event refusal"
+                        ) from rollback_exc
+                    raise
+        except PrdSourceIngestError as exc:
+            if json_output:
+                fail(cmd, str(exc), code=exc.code)
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
     finally:
         backend.close()
 

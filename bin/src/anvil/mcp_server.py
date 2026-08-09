@@ -5,9 +5,9 @@ State resolves per call from the cwd arg (workflow tools), else ANVIL_ROOT,
 else Path.cwd(); the no-cwd tools are pinned to the server's launch directory.
 
 Stale-claim reaping runs at the top of every mutating tool and on
-get_project_summary; read-only listers skip it for latency. No tool touches
-git — branch/worktree creation stays in the CLI so remote agents without git
-access can still drive the PRD → plan → review → claim → apply lifecycle.
+get_project_summary; read-only listers skip it for latency. Claim tools use the
+same transactional Git plan as the CLI when the resolved project is a Git
+repository; non-Git projects continue through the state-only claim path.
 """
 
 from __future__ import annotations
@@ -1390,6 +1390,7 @@ def claim_task(
                 cwd=project_dir,
                 branch_prefix=cfg.branch_prefix if cfg is not None else "agent",
                 shared_tree=shared_tree,
+                ignored_worktree_paths=(state_dir,),
             )
             metadata = claim_git_metadata(plan)
             with backend.claim_operation_lock():
@@ -1406,9 +1407,10 @@ def claim_task(
                 )
                 try:
                     apply_claim_plan(plan, cwd=project_dir)
-                except ClaimPlanError:
+                except BaseException:
                     manager.release(
-                        result.claim.id, reason="transactional Git claim failed"
+                        result.claim.id,
+                        reason="transactional Git claim failed",
                     )
                     raise
         except ClaimPlanError as exc:
@@ -4713,6 +4715,7 @@ def claim_bundle(
                 cwd=project_dir,
                 branch_prefix=cfg.branch_prefix if cfg is not None else "agent",
                 shared_tree=shared_tree,
+                ignored_worktree_paths=(state_dir,),
             )
             metadata = claim_git_metadata(plan)
             with backend.claim_operation_lock():
@@ -4727,9 +4730,10 @@ def claim_bundle(
                 )
                 try:
                     apply_claim_plan(plan, cwd=project_dir)
-                except ClaimPlanError:
+                except BaseException:
                     manager.release(
-                        bundle_id, reason="transactional Git claim failed"
+                        bundle_id,
+                        reason="transactional Git claim failed",
                     )
                     raise
         except ClaimPlanError as exc:

@@ -680,6 +680,43 @@ class TestWorkspaceLayoutGitOps:
         assert _default_branch(project) == original_ref
         assert _git(project, "rev-parse", "HEAD") == original_sha
 
+    def test_claim_cancellation_releases_state_and_leaves_no_branch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        import anvil.git_ops as git_ops
+        from anvil.cli import app
+        from anvil.cli._helpers import _open_backend, _resolve_state_dir
+
+        project = _init_git_repo(tmp_path / "proj")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+        assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
+        plan = resolve_claim_plan("T001", "Set up project structure", cwd=project)
+
+        def cancel(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(git_ops, "apply_claim_plan", cancel)
+        result = runner.invoke(app, ["claim", "T001", "--json"])
+
+        assert result.exit_code != 0
+        backend = _open_backend(_resolve_state_dir(project))
+        try:
+            task = backend.get_task("T001")
+            assert task is not None and task.status.value == "ready"
+            assert backend.list_active_claims() == []
+        finally:
+            backend.close()
+        assert not _ref_exists(project, f"refs/heads/{plan.branch}")
+
     def test_bundle_claim_worktree_persists_same_git_binding_on_members(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -780,6 +817,48 @@ class TestWorkspaceLayoutGitOps:
             backend.close()
         assert not _ref_exists(project, f"refs/heads/{plan.branch}")
 
+    def test_bundle_cancellation_releases_coordinator_and_member_claims(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        import anvil.git_ops as git_ops
+        from anvil.cli import app
+        from anvil.cli._helpers import _open_backend, _resolve_state_dir
+
+        project = _init_git_repo(tmp_path / "proj")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+        assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
+        created = runner.invoke(
+            app,
+            ["bundle", "create", "B001", "T001", "--prd", "default", "--json"],
+        )
+        assert created.exit_code == 0, created.output
+
+        def cancel(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(git_ops, "apply_claim_plan", cancel)
+        result = runner.invoke(app, ["claim", "B001", "--bundle", "--json"])
+
+        assert result.exit_code != 0
+        backend = _open_backend(_resolve_state_dir(project))
+        try:
+            claim = backend.get_bundle_claim("B001")
+            assert claim is not None and claim.status.value == "released"
+            assert backend.list_active_claims() == []
+            task = backend.get_task("T001")
+            assert task is not None and task.status.value == "ready"
+        finally:
+            backend.close()
+
 
 # ---------------------------------------------------------------------------
 # TestFreshness (retro-opps:T005) — base resolution + freshness/conflict report
@@ -838,6 +917,78 @@ class TestResolveClaimPlan:
         with pytest.raises(ClaimPlanError, match="isolated claim") as exc:
             resolve_claim_plan("T001", "Needs Git", cwd=non_repo, worktree=True)
         assert exc.value.code == "git_required"
+
+    def test_claim_plan_ignores_only_explicit_local_state_path(
+        self, git_repo: Path
+    ) -> None:
+        state_dir = git_repo / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "state.db").write_bytes(b"state")
+        (state_dir / "events.jsonl").write_text("event\n", encoding="utf-8")
+
+        plan = resolve_claim_plan(
+            "T001",
+            "Local state",
+            cwd=git_repo,
+            ignored_worktree_paths=(state_dir,),
+        )
+
+        assert plan.caller_dirty is False
+        assert plan.ignored_worktree_paths == (str(state_dir.resolve()),)
+        (git_repo / "real-change.txt").write_text("dirty\n", encoding="utf-8")
+        with pytest.raises(ClaimPlanError) as exc:
+            resolve_claim_plan(
+                "T002",
+                "Real change",
+                cwd=git_repo,
+                ignored_worktree_paths=(state_dir,),
+            )
+        assert exc.value.code == "dirty_shared_tree"
+
+    def test_absorbed_submodule_uses_real_submodule_worktree_root(
+        self, tmp_path: Path
+    ) -> None:
+        child = _init_git_repo(tmp_path / "child")
+        parent = _init_git_repo(tmp_path / "parent")
+        _git(
+            parent,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            str(child),
+            "deps/child",
+        )
+        _git(parent, "commit", "-am", "add submodule")
+        submodule = parent / "deps" / "child"
+        linked = tmp_path / "linked-submodule"
+        _git(submodule, "worktree", "add", "-b", "linked-submodule", str(linked), "HEAD")
+
+        assert canonical_git_root(submodule) == submodule.resolve()
+        assert canonical_git_root(linked) == submodule.resolve()
+        plan = resolve_claim_plan("T003", "Submodule", cwd=submodule, worktree=True)
+        assert plan.canonical_root == str(submodule.resolve())
+        assert plan.caller_worktree_path == str(submodule.resolve())
+        mutation = apply_claim_plan(plan, cwd=submodule)
+        try:
+            assert mutation.worktree_created is True
+            assert plan.target_path is not None and Path(plan.target_path).is_dir()
+        finally:
+            compensate_claim_plan(mutation, cwd=submodule)
+
+    def test_git_observation_refuses_output_over_internal_cap(
+        self,
+        git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (git_repo / "a-very-long-untracked-file-name.txt").write_text(
+            "untracked\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(worktree_mod, "_MAX_GIT_OBSERVATION_BYTES", 16)
+
+        assert worktree_mod._run_git(  # noqa: SLF001
+            ["status", "--porcelain=v1", "--untracked-files=all"], git_repo
+        ) is None
 
     def test_claim_plan_dirty_isolated_is_read_only(self, git_repo: Path) -> None:
         dirty = git_repo / "untracked.txt"

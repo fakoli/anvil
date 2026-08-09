@@ -50,6 +50,14 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ### Fixed
 
+- **Transactional claim and decision recovery (#180).** Task and bundle claims
+  now release state on cancellation as well as ordinary Git errors, absorbed
+  submodules resolve their real worktree root, and the supported local `.anvil`
+  layout is excluded from claim cleanliness checks without hiding unrelated
+  changes. Git observation output is bounded. PRD decision resolution now uses
+  a locked compare-and-swap source replacement and restores exact source bytes
+  when the matching audit append is refused.
+
 - **Total, mutation-atomic planning contracts.** CLI and MCP PRD revisions keep
   requirement identifiers structurally typed through diff construction, and
   scoring validates all six bounded dimensions for the entire request before

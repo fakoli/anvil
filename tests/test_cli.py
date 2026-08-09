@@ -4077,6 +4077,73 @@ def _events_text(tmp_path: Path) -> str:
 
 
 class TestPrdResolveDecisionBackprop:
+    def test_append_refusal_restores_exact_source_and_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        source = tmp_path / ".anvil" / "prd.md"
+        log = tmp_path / ".anvil" / "events.jsonl"
+        source_before = source.read_bytes()
+        log_before = log.read_bytes()
+        append = SqliteBackend.append
+
+        def refuse_decision(self, draft):  # type: ignore[no-untyped-def]
+            if draft.action == "prd.decision_resolved":
+                raise RuntimeError("injected append refusal")
+            return append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", refuse_decision)
+        with pytest.raises(RuntimeError, match="injected append refusal"):
+            _invoke_cmd(
+                tmp_path,
+                ["prd", "resolve-decision", "ND-001", "--resolution", "JSON"],
+            )
+
+        assert source.read_bytes() == source_before
+        assert log.read_bytes() == log_before
+
+    def test_source_change_before_locked_replace_refuses_without_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        source = tmp_path / ".anvil" / "prd.md"
+        log = tmp_path / ".anvil" / "events.jsonl"
+        log_before = log.read_bytes()
+        from anvil.planning import decisions as decisions_module
+
+        apply_decision = decisions_module.apply_decision_to_markdown
+
+        def race(markdown, *, decision, resolution):  # type: ignore[no-untyped-def]
+            result = apply_decision(
+                markdown, decision=decision, resolution=resolution
+            )
+            source.write_text(markdown + "\nexternal edit\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(decisions_module, "apply_decision_to_markdown", race)
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "prd",
+                "resolve-decision",
+                "ND-001",
+                "--resolution",
+                "JSON",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["error"]["code"] == "source_changed"
+        assert source.read_text(encoding="utf-8").endswith("external edit\n")
+        assert log.read_bytes() == log_before
+
     def test_resolve_decision_anvil_prd_mutates_only_selected_source(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

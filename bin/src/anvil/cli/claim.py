@@ -243,6 +243,7 @@ def claim(
                     worktree=worktree,
                     isolation_required=isolation == "require" and not shared_tree,
                     shared_tree=shared_tree,
+                    ignored_worktree_paths=(state_dir,),
                 )
                 metadata = claim_git_metadata(plan)
             except ClaimPlanError as exc:
@@ -263,9 +264,10 @@ def claim(
                     )
                     try:
                         apply_claim_plan(plan, cwd=resolved_cwd)
-                    except ClaimPlanError:
+                    except BaseException:
                         bundle_manager.release(
-                            task_id, reason="transactional Git claim failed"
+                            task_id,
+                            reason="transactional Git claim failed",
                         )
                         raise
             except ClaimPlanError as exc:
@@ -476,6 +478,7 @@ def claim(
                 worktree=worktree,
                 isolation_required=isolation == "require" and not shared_tree,
                 shared_tree=shared_tree,
+                ignored_worktree_paths=(state_dir,),
             )
             metadata = claim_git_metadata(plan)
         except ClaimPlanError as exc:
@@ -500,9 +503,10 @@ def claim(
                 )
                 try:
                     apply_claim_plan(plan, cwd=resolved_cwd)
-                except ClaimPlanError:
+                except BaseException:
                     manager.release(
-                        result.claim.id, reason="transactional Git claim failed"
+                        result.claim.id,
+                        reason="transactional Git claim failed",
                     )
                     raise
         except ClaimPlanError as exc:
