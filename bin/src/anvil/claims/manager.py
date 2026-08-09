@@ -321,11 +321,6 @@ class ClaimManager:
         if not ready_tasks:
             return OfferDiagnosis(None, "no_ready_tasks", None, 0)
 
-        if metrics is not None:
-            global_reason = metrics.withhold_reason(self._actor)
-            if global_reason is not None:
-                return OfferDiagnosis(None, global_reason, None, len(ready_tasks))
-
         now = self._clock.now()
         active_claims = [
             claim
@@ -351,6 +346,13 @@ class ClaimManager:
                 for group_id in task.conflict_groups
             )
         ]
+        if not structurally_eligible:
+            return OfferDiagnosis(None, "no_claimable_tasks", None, len(ready_tasks))
+
+        if metrics is not None:
+            global_reason = metrics.withhold_reason(self._actor)
+            if global_reason is not None:
+                return OfferDiagnosis(None, global_reason, None, len(ready_tasks))
 
         def sort_key(task: Task) -> tuple[int, int, datetime.datetime, str]:
             priority_rank = _PRIORITY_ORDER.get(task.priority, 0)

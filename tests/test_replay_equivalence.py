@@ -140,6 +140,7 @@ def _build_normal(state_dir: Path) -> SqliteBackend:
             # the attempt binding. A current live producer must supply it; the
             # replay path below preserves the omitted legacy shape.
             payload["review_attempt_id"] = latest_attempt_by_task[payload["task_id"]]
+            payload["schema_version"] = 1
         draft_data["payload_json"] = payload
         draft = EventDraft.model_validate(draft_data)
         b.append(draft)
@@ -280,6 +281,32 @@ def test_rejection_provenance_replays_exactly_and_tampering_fails_closed(
         json.loads(line)
         for line in replay_log.read_text(encoding="utf-8").splitlines()
     ]
+    null_events = json.loads(json.dumps(raw_events))
+    null_events[-1]["payload_json"]["rejection"] = None
+    null_dir = tmp_path / "rejection-null"
+    null_dir.mkdir()
+    null_log = null_dir / "events.jsonl"
+    null_log.write_text(
+        "".join(
+            json.dumps(event, separators=(",", ":")) + "\n"
+            for event in null_events
+        ),
+        encoding="utf-8",
+    )
+    null_backend = SqliteBackend(
+        db_path=str(null_dir / "state.db"),
+        events_path=str(null_log),
+        clock=FrozenClock(_T0),
+    )
+    try:
+        with pytest.raises(
+            TransactionAborted,
+            match="v1 rejected review requires provenance",
+        ):
+            null_backend.initialize()
+    finally:
+        null_backend.close()
+
     raw_events[-1]["payload_json"]["rejection"][
         "supporting_evidence_digest"
     ] = "0" * 64

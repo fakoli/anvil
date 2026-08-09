@@ -1187,6 +1187,10 @@ class TaskAppliedPayload(BaseModel):
     reviewer: str
     decision: str
     notes: str | None = None
+    # Present on every new live event. Historical events omit it; replay uses
+    # that distinction to preserve legacy unbound reviews without letting a
+    # single removed/null provenance field downgrade a v1 event.
+    schema_version: Literal[1] | None = None
     # New accepted events bind the exact finalized evidence attempt. Historical
     # events omit this field and replay to the legacy unbound review shape.
     review_attempt_id: str | None = None
@@ -1201,6 +1205,11 @@ class TaskAppliedPayload(BaseModel):
             raise ValueError("only a rejected task review may carry provenance")
         if self.decision == "rejected" and self.review_attempt_id is not None:
             raise ValueError("rejected review attempt is carried by provenance")
+        if self.schema_version == 1:
+            if self.decision == "accepted" and self.review_attempt_id is None:
+                raise ValueError("v1 accepted review requires review_attempt_id")
+            if self.decision == "rejected" and self.rejection is None:
+                raise ValueError("v1 rejected review requires provenance")
         return self
 
 

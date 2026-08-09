@@ -1647,6 +1647,7 @@ def apply(
             decision = "rejected"
 
         payload: dict[str, object] = {
+            "schema_version": 1,
             "task_id": task_id,
             "reviewer": resolved_reviewer,
             "decision": decision,

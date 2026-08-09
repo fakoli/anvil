@@ -20,7 +20,14 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from anvil.state.models import EventDraft, Feature, Task, TaskStatus, Verification
+from anvil.state.models import (
+    EventDraft,
+    Feature,
+    RejectionReasonCode,
+    Task,
+    TaskStatus,
+    Verification,
+)
 
 if TYPE_CHECKING:
     from anvil.clock import Clock
@@ -171,12 +178,25 @@ def apply_workflow_task(
     notes: str | None = None,
 ) -> None:
     """Apply a review decision for a workflow task (accepted → done)."""
-    review_attempt_id: str | None = None
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "reviewer": reviewer,
+        "decision": decision,
+        "notes": notes,
+    }
     if decision == "accepted":
         attempt = backend.get_latest_evidence(task_id)
         if attempt is None:
             raise ValueError("accepted workflow task requires submitted evidence")
-        review_attempt_id = attempt.id
+        payload["review_attempt_id"] = attempt.id
+    elif decision == "rejected":
+        provenance = backend.derive_task_rejection_provenance(
+            task_id,
+            reason_code=RejectionReasonCode.unspecified_quality,
+            quality_findings=[],
+        )
+        payload["rejection"] = provenance.model_dump(mode="json")
     backend.append(
         EventDraft(
             timestamp=clock.now(),
@@ -184,12 +204,6 @@ def apply_workflow_task(
             action="task.applied",
             target_kind="task",
             target_id=task_id,
-            payload_json={
-                "task_id": task_id,
-                "reviewer": reviewer,
-                "decision": decision,
-                "notes": notes,
-                "review_attempt_id": review_attempt_id,
-            },
+            payload_json=payload,
         )
     )

@@ -94,6 +94,41 @@ def test_full_round_trip_produces_one_evidence_row(backend, frozen_clock):  # ty
     assert review[4:] == (rows[0].id, "runner")
 
 
+def test_workflow_rejection_records_typed_quality_provenance(backend, frozen_clock):  # type: ignore[no-untyped-def]
+    _setup_approved_prd(backend)
+    tid = create_workflow_task(
+        backend,
+        title="step retry",
+        description="retry the workflow step",
+        actor="runner",
+        clock=frozen_clock,
+    )
+    result = ClaimManager(backend, frozen_clock, actor="runner").claim(tid)
+    submit_workflow_evidence(
+        backend,
+        task_id=tid,
+        claim_id=result.claim.id,
+        actor="runner",
+        clock=frozen_clock,
+        commands=["workflow step"],
+    )
+
+    apply_workflow_task(
+        backend,
+        task_id=tid,
+        reviewer="reviewer",
+        clock=frozen_clock,
+        decision="rejected",
+        notes="retry required",
+    )
+
+    review = backend.list_reviews()[-1]
+    assert review.decision.value == "needs_changes"
+    assert review.rejection_category.value == "quality"
+    assert review.rejection is not None
+    assert review.rejection.review_attempt_id is not None
+
+
 def test_workflow_tasks_do_not_pollute_the_prd_queue(backend, frozen_clock):  # type: ignore[no-untyped-def]
     _setup_approved_prd(backend)
     tid = create_workflow_task(

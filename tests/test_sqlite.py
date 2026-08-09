@@ -4750,6 +4750,7 @@ def _make_applied_payload(
     review_attempt_id: str = "EV001",
 ) -> dict[str, Any]:
     payload = {
+        "schema_version": 1,
         "task_id": task_id,
         "reviewer": reviewer,
         "decision": decision,
@@ -5179,7 +5180,10 @@ class TestPhase5EvidenceAndApplyHandlers:
         try:
             _setup_claimable_task_and_claim(b)
             # Task is 'claimed', not 'needs_review'
-            with pytest.raises((EventRejected, TransactionAborted), match="needs_review|status|T001"):
+            with pytest.raises(
+                (EventRejected, TransactionAborted),
+                match="needs_review|status|T001|review attempt",
+            ):
                 b.append(_make_event(
                     "task.applied",
                     _make_applied_payload(decision="accepted"),
@@ -5784,6 +5788,38 @@ class TestTaskRejectionProvenanceState:
                 if event["action"] == "task.applied"
                 and event["payload_json"]["decision"] == "accepted"
             )
+            stripped_events = json.loads(json.dumps(raw_events))
+            stripped_accepted = next(
+                event
+                for event in reversed(stripped_events)
+                if event["action"] == "task.applied"
+                and event["payload_json"]["decision"] == "accepted"
+            )
+            stripped_accepted["payload_json"].pop("review_attempt_id")
+            stripped_dir = tmp_path / "stripped-accepted-attempt"
+            stripped_dir.mkdir()
+            stripped_log = stripped_dir / "events.jsonl"
+            stripped_log.write_text(
+                "".join(
+                    json.dumps(event, separators=(",", ":")) + "\n"
+                    for event in stripped_events
+                ),
+                encoding="utf-8",
+            )
+            stripped = SqliteBackend(
+                db_path=str(stripped_dir / "state.db"),
+                events_path=str(stripped_log),
+                clock=_make_clock(),
+            )
+            try:
+                with pytest.raises(
+                    TransactionAborted,
+                    match="v1 accepted review requires review_attempt_id",
+                ):
+                    stripped.initialize()
+            finally:
+                stripped.close()
+
             accepted["payload_json"]["review_attempt_id"] = "EVZZZ"
             tampered_dir = tmp_path / "tampered-accepted-attempt"
             tampered_dir.mkdir()
@@ -5977,6 +6013,7 @@ class TestTaskRejectionProvenanceState:
         events = _read_jsonl(str(source / "events.jsonl"))
         assert events[-1]["action"] == "task.applied"
         events[-1]["payload_json"].pop("rejection")
+        events[-1]["payload_json"].pop("schema_version")
         replay = tmp_path / "replay"
         replay.mkdir()
         replay_log = replay / "events.jsonl"
@@ -13124,8 +13161,7 @@ class TestDecideApplyContract:
             b.append(_make_event("evidence.submitted", _make_evidence_payload(),
                                  target_kind="task", target_id="T001"))
             b.append(_make_event("task.applied",
-                                 {"task_id": "T001", "reviewer": "alice",
-                                  "decision": "accepted", "notes": None},
+                                 _make_applied_payload(),
                                  target_kind="task", target_id="T001"))
             from anvil.state.models import TaskStatus
             task = b.get_task("T001")
@@ -13258,8 +13294,7 @@ class TestDecideApplyContract:
                                  target_kind="task", target_id="T001"))
             b.append(_make_event(
                 "task.applied",
-                {"task_id": "T001", "reviewer": "carol",
-                 "decision": "accepted", "notes": "LGTM"},
+                _make_applied_payload(reviewer="carol", notes="LGTM"),
                 target_kind="task", target_id="T001",
             ))
             task = b.get_task("T001")

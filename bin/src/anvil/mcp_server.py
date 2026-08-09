@@ -4160,6 +4160,7 @@ def apply_review_decision(
             except EventRejected as exc:
                 raise ToolError(f"rejection_provenance_invalid: {exc}") from None
         payload: dict[str, Any] = {
+            "schema_version": 1,
             "task_id": task_id,
             "reviewer": reviewer,
             "decision": decision,

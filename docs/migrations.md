@@ -142,7 +142,15 @@ evidence and claim state; live append and replay independently recompute it.
 Historical task rejections had no typed provenance. They migrate and replay as
 counting `quality` rejections with reason `unspecified_quality`; claim,
 attempt, evidence-digest, and process-predicate fields remain NULL rather than
-being inferred. Accepted and non-task reviews retain their prior shape.
+being inferred. Historical accepted and non-task reviews retain their prior
+shape.
+
+New accepted `task.applied` events also bind the exact evidence attempt that
+was reviewed. Live append validates that binding under the event lock, and
+replay recomputes it before projecting the accepted review. Historical
+accepted events that predate the v1 payload discriminator remain deliberately
+unbound (`review_attempt_id` and submitter stay NULL); migration and replay do
+not guess an identity for them.
 
 ## Phase 8 (v1.8.0) — v1 / v2 → v3 auto-upgrade
 

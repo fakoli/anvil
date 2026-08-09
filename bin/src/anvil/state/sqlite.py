@@ -12260,6 +12260,8 @@ class SqliteBackend:
         decision: str = payload.decision
         task_id: str = payload.task_id
 
+        if payload.schema_version != 1:
+            raise EventRejected("task.applied: live event requires schema_version 1")
         if decision not in ("accepted", "rejected"):
             raise EventRejected(
                 f"task.applied: 'decision' must be 'accepted' or 'rejected', "
@@ -12369,6 +12371,18 @@ class SqliteBackend:
             if rejection is not None
             else payload.review_attempt_id
         )
+
+        if payload.schema_version is None:
+            if (
+                "review_attempt_id" in payload.model_fields_set
+                and payload.review_attempt_id is None
+            ) or (
+                "rejection" in payload.model_fields_set
+                and payload.rejection is None
+            ):
+                raise TransactionAborted(
+                    "task.applied: explicit-null review provenance is invalid"
+                )
 
         if decision == "accepted":
             if review_attempt_id is not None:

@@ -2083,6 +2083,48 @@ class TestGetNextTask:
         assert mcp_data["governor"]["withheld_reason"] == "task_accept_rate_floor"
         assert cli_data["governor"]["floor"] == mcp_data["governor"]["floor"] == 0.95
 
+    def test_cli_mcp_do_not_blame_governor_for_dependency_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(
+            state_dir,
+            task_id="T001",
+            status="ready",
+            dependencies=["T002"],
+        )
+        _add_task(state_dir, task_id="T002", status="blocked")
+        (state_dir / "config.yaml").write_text(
+            'project_name: "Governor Test"\n'
+            'project_id: "governor-test"\n'
+            "needs_review_cap: 0\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        cli = CliRunner().invoke(
+            app, ["next", "--actor", "worker", "--json"], catch_exceptions=False
+        )
+        assert cli.exit_code == 0, cli.output
+        cli_data = json.loads(cli.output.strip().splitlines()[-1])["data"]
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool("get_next_task", {"actor": "worker"})
+                )
+
+        mcp_data = _run(run())
+        assert cli_data["withheld_reason"] == "no_claimable_tasks"
+        assert mcp_data["governor"]["withheld_reason"] == "no_claimable_tasks"
+        assert cli_data["governor"]["offer_throttled"] is False
+        assert mcp_data["governor"]["offer_throttled"] is False
+
     def test_cli_mcp_select_same_complexity_ordered_task(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
