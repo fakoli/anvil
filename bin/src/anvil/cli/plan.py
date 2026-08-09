@@ -27,6 +27,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
     _scores_complete,
     canonical_prd_id,
+    current_parameter_source_name,
     display_path,
     ingest_prd_source_for_id,
     replace_prd_source_for_id,
@@ -1643,6 +1644,15 @@ def confirm_task_risk_scores(backend: Any, task: Any, now: Any, actor: str) -> N
 
 @review_app.command("tasks")
 def review_tasks(
+    prd: str | None = PRD_OPTION,
+    all_prds: bool = typer.Option(  # noqa: B008
+        False,
+        "--all-prds",
+        help=(
+            "Review every PRD partition. Without this explicit flag, review is "
+            "limited to the PRD selected by --prd/$ANVIL_PRD/default resolution."
+        ),
+    ),
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1653,7 +1663,11 @@ def review_tasks(
 ) -> None:
     """Promote tasks through the review lifecycle.
 
-    Attempts to promote drafted → reviewed → ready for each eligible task.
+    Attempts to promote drafted → reviewed → ready for each eligible task
+    in one resolved PRD. Pass ``--all-prds`` for an explicit project-wide
+    mutation. A command-line ``--prd`` cannot be combined with ``--all-prds``;
+    an environment-only ``ANVIL_PRD`` is ignored when the explicit all-PRD mode
+    is requested.
     Gate for drafted → reviewed: acceptance_criteria non-empty AND
     verification.commands non-empty.
 
@@ -1672,24 +1686,45 @@ def review_tasks(
         task_reviewed_to_ready,
     )
 
+    prd_from_command_line = current_parameter_source_name("prd") == "COMMANDLINE"
+    if all_prds and prd_from_command_line:
+        message = "--prd and --all-prds are mutually exclusive."
+        if json_output:
+            fail("review tasks", message, code="bad_request")
+        typer.echo(f"Error: {message}", err=True)
+        raise typer.Exit(code=2)
+
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="review tasks", json_output=json_output)
 
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
-        all_tasks = backend.list_tasks()
+        selected_prd_id = None
+        if not all_prds:
+            selected_prd_id = canonical_prd_id(resolve_prd_id(backend, prd))
+            if backend.get_prd(selected_prd_id) is None:
+                message = "selected PRD was not found in state. Run prd parse first."
+                if json_output:
+                    fail("review tasks", message, code="prd_not_found")
+                typer.echo(f"Error: {message}", err=True)
+                raise typer.Exit(code=1)
+        all_tasks = backend.list_tasks(prd_id=selected_prd_id)
 
         # GAP-09: capture the PRD status while the backend is open so we can
         # nudge the user to approve a still-draft PRD after promotion (a hint,
         # not a gate — tasks are still promoted regardless).
         #
-        # T021 audit (get_prd no-arg): default-only-correct. `review tasks`
-        # promotes drafted/reviewed tasks across ALL PRDs (it is not --prd
-        # scoped); the PRD status here only feeds a post-promotion approval
-        # hint, so reading the default PRD's status is the right summary signal.
-        prd = backend.get_prd()
-        prd_status = prd.status.value if prd is not None else None
+        scoped_prds = (
+            backend.list_prds()
+            if all_prds
+            else [backend.get_prd(selected_prd_id)]
+        )
+        prd_status = (
+            "draft"
+            if any(item is not None and item.status.value == "draft" for item in scoped_prds)
+            else None
+        )
 
         drafted_tasks = [t for t in all_tasks if t.status.value == "drafted"]
         reviewed_tasks = [t for t in all_tasks if t.status.value == "reviewed"]
@@ -1725,7 +1760,7 @@ def review_tasks(
 
         # reviewed → ready (includes tasks that just moved to reviewed above)
         # Re-query to get current state after the drafted → reviewed promotions.
-        all_tasks_now = backend.list_tasks()
+        all_tasks_now = backend.list_tasks(prd_id=selected_prd_id)
         newly_reviewed = [
             t for t in all_tasks_now
             if t.status.value == "reviewed"
@@ -1773,10 +1808,13 @@ def review_tasks(
                 "blocked": [
                     {"task_id": tid, "reason": reason} for tid, reason in blocked
                 ],
+                "prd_id": selected_prd_id,
+                "all_prds": all_prds,
             },
         )
         return
 
+    typer.echo("Scope: all PRDs" if all_prds else f"PRD: {selected_prd_id}")
     total_promoted = len(promoted_to_reviewed) + len(promoted_to_ready)
     typer.echo(f"Promoted {len(promoted_to_reviewed)} task(s) to reviewed.")
     typer.echo(f"Promoted {len(promoted_to_ready)} task(s) to ready.")

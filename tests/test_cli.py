@@ -1306,7 +1306,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "12"
+        assert API_VERSION == "13"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -5034,6 +5034,122 @@ class TestReviewTasks:
         _invoke_cmd(tmp_path, ["prd", "parse"])
         _invoke_cmd(tmp_path, ["plan"])
         _invoke_cmd(tmp_path, ["score"])
+
+    def _setup_scoped_review(self, tmp_path: Path) -> None:
+        """Seed three valid drafted partitions without exercising review itself."""
+        _do_init(tmp_path)
+        db = tmp_path / ".anvil" / "state.db"
+        scores = json.dumps(
+            {
+                "complexity": 2,
+                "parallelizability": 2,
+                "context_load": 2,
+                "blast_radius": 2,
+                "review_risk": 2,
+                "agent_suitability": 4,
+            }
+        )
+        verification = json.dumps({"commands": ["pytest -q"]})
+        with sqlite3.connect(str(db)) as conn:
+            project_id = conn.execute("SELECT id FROM projects").fetchone()[0]
+            for prd_id, task_id, feature_id, is_default in (
+                ("default", "T001", "F001", 1),
+                ("v0.1", "v0.1:T001", "v0.1:F001", 0),
+                ("v0.2", "v0.2:T001", "v0.2:F001", 0),
+            ):
+                conn.execute(
+                    "INSERT INTO prds (id, project_id, status, is_default) "
+                    "VALUES (?, ?, 'draft', ?)",
+                    (prd_id, project_id, is_default),
+                )
+                conn.execute(
+                    "INSERT INTO features "
+                    "(id, prd_id, title, description, status, requirements, tasks) "
+                    "VALUES (?, ?, 'Feature', 'desc', 'proposed', '[]', '[]')",
+                    (feature_id, prd_id),
+                )
+                conn.execute(
+                    """INSERT INTO tasks
+                    (id, feature_id, prd_id, title, description, status, priority,
+                     task_type, dependencies, conflict_groups, scores,
+                     acceptance_criteria, implementation_notes, verification,
+                     likely_files, created_at, updated_at)
+                    VALUES (?, ?, ?, 'Task', 'desc', 'drafted', 'medium',
+                            'feature', '[]', '[]', ?, '["done"]', '[]', ?, '[]',
+                            '2026-01-01T00:00:00+00:00',
+                            '2026-01-01T00:00:00+00:00')""",
+                    (task_id, feature_id, prd_id, scores, verification),
+                )
+
+    def test_review_tasks_scopes_default_flag_env_and_human_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.cli._helpers import _open_backend
+
+        self._setup_scoped_review(tmp_path)
+
+        default_result = _invoke_cmd(tmp_path, ["review", "tasks", "--json"])
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.output)["data"]
+        assert default_data["prd_id"] == "default"
+        assert default_data["all_prds"] is False
+        assert default_data["promoted_to_ready"] == ["T001"]
+
+        explicit = _invoke_cmd(
+            tmp_path, ["review", "tasks", "--prd", "v0.2", "--json"]
+        )
+        assert explicit.exit_code == 0, explicit.output
+        explicit_data = json.loads(explicit.output)["data"]
+        assert explicit_data["prd_id"] == "v0.2"
+        assert explicit_data["promoted_to_ready"] == ["v0.2:T001"]
+
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+        selected = _invoke_cmd(tmp_path, ["review", "tasks", "--json"])
+        assert selected.exit_code == 0, selected.output
+        selected_data = json.loads(selected.output)["data"]
+        assert selected_data["prd_id"] == "v0.1"
+        assert selected_data["promoted_to_ready"] == ["v0.1:T001"]
+
+        human = _invoke_cmd(tmp_path, ["review", "tasks", "--prd", "v0.2"])
+        assert human.exit_code == 0, human.output
+        assert "PRD: v0.2" in human.output
+
+        backend = _open_backend(tmp_path / ".anvil")
+        try:
+            tasks = {task.id: task for task in backend.list_tasks()}
+        finally:
+            backend.close()
+        assert all(task.status.value == "ready" for task in tasks.values())
+        assert all(task.scores.blast_radius_confirmed for task in tasks.values())
+        assert all(task.scores.review_risk_confirmed for task in tasks.values())
+
+    def test_review_tasks_requires_explicit_all_prds_and_reports_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._setup_scoped_review(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.2")
+
+        result = _invoke_cmd(tmp_path, ["review", "tasks", "--all-prds", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] is None
+        assert data["all_prds"] is True
+        assert set(data["promoted_to_ready"]) == {
+            "T001",
+            "v0.1:T001",
+            "v0.2:T001",
+        }
+        human = _invoke_cmd(tmp_path, ["review", "tasks", "--all-prds"])
+        assert human.exit_code == 0, human.output
+        assert "Scope: all PRDs" in human.output
+
+        conflict = _invoke_cmd(
+            tmp_path,
+            ["review", "tasks", "--prd", "v0.1", "--all-prds", "--json"],
+        )
+        assert conflict.exit_code == 1
+        assert json.loads(conflict.output)["error"]["code"] == "bad_request"
 
     def test_review_tasks_promotes_complete_tasks(self, tmp_path: Path) -> None:
         """Tasks with acceptance_criteria + verification → promoted to ready."""

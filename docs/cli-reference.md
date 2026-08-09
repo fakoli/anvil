@@ -658,14 +658,21 @@ complexity score); [`docs/llm.md`](llm.md);
 
 ### `anvil review tasks` { #review-tasks }
 
-**Synopsis:** Promote tasks through the review lifecycle in two stages:
+**Synopsis:** Promote tasks in one resolved PRD through the review lifecycle in two stages:
 `drafted` → `reviewed`, then `reviewed` → `ready`. The `drafted` → `reviewed`
 gate requires non-empty `acceptance_criteria` AND non-empty
 `verification.commands`. Prints a summary of how many tasks were promoted at
-each stage and lists any blocked tasks with the gate-failure reason.
+each stage and lists any blocked tasks with the gate-failure reason. Selection
+uses `--prd`, then `ANVIL_PRD`, then the single/default PRD. Project-wide
+mutation requires the explicit `--all-prds` flag. Both promotion passes and
+risk-score confirmation remain inside the reported scope.
 
 **Flags:**
 
+- `--prd ID` — review one PRD partition. Also reads `ANVIL_PRD`.
+- `--all-prds` — explicitly review every PRD partition. This overrides an
+  environment-only `ANVIL_PRD` but cannot be combined with a command-line
+  `--prd`.
 - `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
 
 **Exit codes:**
@@ -678,6 +685,8 @@ each stage and lists any blocked tasks with the gate-failure reason.
 
 ```bash
 anvil review tasks
+anvil review tasks --prd v0.2
+anvil review tasks --all-prds
 ```
 
 **See also:** [`anvil list`](#list) to inspect the current statuses;

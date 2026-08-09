@@ -7285,6 +7285,97 @@ class TestScoreTasks:
 
 
 class TestReviewTasks:
+    def _setup_scoped_review(self, tmp_path: Path) -> Path:
+        state_dir = _init_state_dir(tmp_path)
+        scores = {
+            "complexity": 2,
+            "parallelizability": 2,
+            "context_load": 2,
+            "blast_radius": 2,
+            "review_risk": 2,
+            "agent_suitability": 4,
+        }
+        for prd_id, task_id, feature_id, is_default in (
+            ("default", "T001", "F001", 1),
+            ("v0.1", "v0.1:T001", "v0.1:F001", 0),
+            ("v0.2", "v0.2:T001", "v0.2:F001", 0),
+        ):
+            _add_prd(state_dir, prd_id=prd_id, is_default=is_default)
+            _add_feature(state_dir, feature_id, prd_id=prd_id)
+            _add_task(
+                state_dir,
+                task_id=task_id,
+                feature_id=feature_id,
+                prd_id=prd_id,
+                status="drafted",
+                scores=scores,
+            )
+        with sqlite3.connect(str(state_dir / "state.db")) as connection:
+            connection.execute(
+                "UPDATE tasks SET verification = ?",
+                (json.dumps({"commands": ["pytest -q"]}),),
+            )
+        return state_dir
+
+    def test_scoped_review_parity_and_risk_confirmation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.cli._helpers import _open_backend
+
+        state_dir = self._setup_scoped_review(tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool("review_tasks", {"prd_id": "v0.2"})
+                )
+
+        response = _run(run())
+        assert response["prd_id"] == "v0.2"
+        assert response["all_prds"] is False
+        assert response["promoted_to_ready"] == ["v0.2:T001"]
+
+        backend = _open_backend(state_dir)
+        try:
+            tasks = {task.id: task for task in backend.list_tasks()}
+        finally:
+            backend.close()
+        assert tasks["v0.2:T001"].status.value == "ready"
+        assert tasks["v0.2:T001"].scores.blast_radius_confirmed is True
+        assert tasks["v0.2:T001"].scores.review_risk_confirmed is True
+        assert tasks["T001"].status.value == "drafted"
+        assert tasks["v0.1:T001"].status.value == "drafted"
+
+    def test_explicit_all_prds_overrides_env_and_reports_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._setup_scoped_review(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+
+        async def run() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("review_tasks", {"all_prds": True}))
+
+        response = _run(run())
+        assert response["prd_id"] is None
+        assert response["all_prds"] is True
+        assert set(response["promoted_to_ready"]) == {
+            "T001",
+            "v0.1:T001",
+            "v0.2:T001",
+        }
+
+        async def conflict() -> None:
+            async with Client(mcp) as c:
+                await c.call_tool(
+                    "review_tasks", {"prd_id": "v0.1", "all_prds": True}
+                )
+
+        with pytest.raises(ToolError, match="mutually exclusive"):
+            _run(conflict())
+
     def test_promotes_drafted_to_ready_when_gates_pass(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

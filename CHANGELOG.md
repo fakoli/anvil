@@ -23,6 +23,12 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   human guidance, continuation argv, and audit events report the effective
   partition. This advances the public API contract to version 12.
 
+- **PRD-scoped task review (#180).** CLI and MCP task-review passes now resolve
+  one PRD by default and require an explicit `--all-prds` / `all_prds=true`
+  opt-in for project-wide mutation. Drafted-to-reviewed, reviewed-to-ready, and
+  durable risk-score confirmation all use the same reported partition scope.
+  This advances the public API contract to version 13.
+
 - **Truthful task-rejection provenance and governor recovery (#181).** Rejected
   review attempts now persist engine-derived quality, evidence-resubmission, or
   process provenance with exact claim/evidence identity, and new accepted

@@ -1277,14 +1277,18 @@ mode.
 ### `review_tasks`
 
 Promotes tasks through `drafted → reviewed → ready` using the gate functions in
-`anvil.state.transitions`. Mirrors `anvil review tasks`. Returns the lists
-of promoted task IDs and any tasks blocked by a gate (with the gate's failure reason).
+`anvil.state.transitions`. By default it resolves one PRD using explicit
+`prd_id`, `ANVIL_PRD`, then single/default selection. Set `all_prds=true` for
+an explicit project-wide mutation. Both promotion passes and durable risk-score
+confirmation stay inside the reported scope. Mirrors `anvil review tasks`.
 
 **Inputs**
 
-| Parameter | Type             | Required | Default      |
-|-----------|------------------|----------|--------------|
-| `cwd`     | `string \| null` | no       | `Path.cwd()` |
+| Parameter  | Type             | Required | Default      |
+|------------|------------------|----------|--------------|
+| `cwd`      | `string \| null` | no       | `Path.cwd()` |
+| `prd_id`   | `string \| null` | no       | resolved     |
+| `all_prds` | `boolean`        | no       | `false`      |
 
 **Output**
 
@@ -1292,7 +1296,9 @@ of promoted task IDs and any tasks blocked by a gate (with the gate's failure re
 {
   "promoted_to_reviewed": ["T001", "T002"],
   "promoted_to_ready":    ["T001", "T002"],
-  "blocked": []
+  "blocked": [],
+  "prd_id": "default",
+  "all_prds": false
 }
 ```
 
@@ -1301,7 +1307,8 @@ verification commands) appears in `blocked` instead of either promotion list.
 
 **Failure modes**
 
-- `ToolError` — project not initialized.
+- `ToolError` — project not initialized, selected PRD is missing, or
+  `prd_id` is combined with `all_prds=true`.
 
 ---
 
@@ -1495,7 +1502,7 @@ None.
 
 ```json
 {
-  "api_version": "12",
+  "api_version": "13",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",

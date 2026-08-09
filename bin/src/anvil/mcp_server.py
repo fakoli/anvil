@@ -3876,16 +3876,26 @@ class ReviewTasksResponse(BaseModel):
     promoted_to_reviewed: list[str]
     promoted_to_ready: list[str]
     blocked: list[BlockedTaskEntry]
+    prd_id: str | None
+    all_prds: bool
 
 
 @mcp.tool(tags={PLANNING_TAG})
-def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
+def review_tasks(
+    cwd: str | None = None,
+    prd_id: str | None = None,
+    all_prds: bool = False,
+) -> ReviewTasksResponse:
     """Promote tasks through drafted → reviewed → ready, applying the review
     gates. Returns the promoted task IDs per stage plus any tasks a gate
     blocked (with reasons).
 
     Args:
         cwd: Project root. Defaults to Path.cwd().
+        prd_id: PRD partition. Precedence is explicit value, ``ANVIL_PRD``,
+            then single/default resolution. Mutually exclusive with all_prds.
+        all_prds: Explicitly review every PRD partition. When true, an ambient
+            ``ANVIL_PRD`` is ignored.
     """
     from anvil.clock import SystemClock
     from anvil.state.backend import EventRejected
@@ -3906,7 +3916,16 @@ def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
     backend = _open_backend(state_dir)
     try:
         clock = SystemClock()
-        all_tasks = backend.list_tasks()
+        if all_prds and prd_id is not None:
+            raise ToolError("prd_id and all_prds are mutually exclusive.")
+        selected_prd_id = None
+        if not all_prds:
+            from anvil.cli._helpers import canonical_prd_id
+
+            selected_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+            if backend.get_prd(selected_prd_id) is None:
+                raise ToolError("selected PRD was not found in state. Run parse_prd first.")
+        all_tasks = backend.list_tasks(prd_id=selected_prd_id)
 
         drafted = [t for t in all_tasks if t.status.value == "drafted"]
         already_reviewed_ids = {
@@ -3944,7 +3963,7 @@ def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
             promoted_to_reviewed.append(task.id)
 
         # reviewed → ready (covers tasks promoted just above plus pre-existing reviewed)
-        candidates = backend.list_tasks()
+        candidates = backend.list_tasks(prd_id=selected_prd_id)
         promoted_set = set(promoted_to_reviewed)
         for task in candidates:
             if task.status.value != "reviewed":
@@ -3973,12 +3992,20 @@ def review_tasks(cwd: str | None = None) -> ReviewTasksResponse:
                 ))
             except EventRejected as exc:
                 raise ToolError(str(exc)) from exc
+            try:
+                from anvil.cli.plan import confirm_task_risk_scores
+
+                confirm_task_risk_scores(backend, task, now, "anvil-mcp")
+            except EventRejected as exc:
+                raise ToolError(str(exc)) from exc
             promoted_to_ready.append(task.id)
 
         return ReviewTasksResponse(
             promoted_to_reviewed=promoted_to_reviewed,
             promoted_to_ready=promoted_to_ready,
             blocked=blocked,
+            prd_id=selected_prd_id,
+            all_prds=all_prds,
         )
     finally:
         backend.close()
