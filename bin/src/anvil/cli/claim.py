@@ -1188,12 +1188,8 @@ def next(  # noqa: A001
                         f"{detail} Remediation: {remediation}"
                     )
             return
-        scoped_ready_tasks = (
-            backend.list_tasks(
-                status="ready", task_type=task_type, prd_id=scoped_prd_id
-            )
-            if scoped_prd_id is not None
-            else []
+        ready_tasks_for_request = backend.list_tasks(
+            status="ready", task_type=task_type, prd_id=scoped_prd_id
         )
         scoped_empty_message: str | None = None
 
@@ -1229,8 +1225,8 @@ def next(  # noqa: A001
         if task is None and withheld_reason is None:
             ungoverned_task = manager.next_claimable(
                 task_type=task_type,
-                max_blast=max_blast,
-                max_review_risk=max_review_risk,
+                max_blast=None,
+                max_review_risk=None,
                 metrics=None,
                 prd_id=scoped_prd_id,
             )
@@ -1255,15 +1251,20 @@ def next(  # noqa: A001
             )
             if without_risk_ceiling is not None:
                 withheld_reason = "risk_ceiling"
+        if task is None and withheld_reason is None:
+            if not backend.list_tasks():
+                withheld_reason = "no_tasks"
+            elif not ready_tasks_for_request:
+                withheld_reason = "no_ready_tasks"
+            else:
+                withheld_reason = "no_claimable_tasks"
         if task is None and scoped_prd_id is not None:
-            if not scoped_ready_tasks:
+            if not ready_tasks_for_request:
                 scoped_empty_message = f"No ready tasks in this PRD ({scoped_prd_id})."
-                withheld_reason = "no_ready_tasks_in_prd"
-            elif withheld_reason is None:
+            else:
                 scoped_empty_message = (
                     f"No claimable tasks in this PRD ({scoped_prd_id})."
                 )
-                withheld_reason = "no_claimable_tasks_in_prd"
 
         governor_projection = metrics.projection(
             resolved_actor,

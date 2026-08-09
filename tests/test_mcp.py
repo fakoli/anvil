@@ -1973,6 +1973,49 @@ class TestGetNextTask:
         assert response["governor"]["withheld_reason"] == "no_claimable_tasks"
         assert response["governor"]["offer_throttled"] is False
 
+    def test_task_floor_precedes_risk_reason_when_both_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anvil.claims.manager as manager_module
+        from anvil.claims.metrics import AcceptRateMetrics
+
+        state_dir = _init_state_dir(tmp_path)
+        _add_feature(state_dir)
+        _add_task(state_dir, task_id="T001", status="ready")
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "task_blocked_for_actor",
+            lambda _self, _task_id, _actor: True,
+        )
+        monkeypatch.setattr(
+            AcceptRateMetrics,
+            "required_floor",
+            lambda _self, _task_id: 0.95,
+        )
+        monkeypatch.setattr(
+            manager_module,
+            "within_risk_ceiling",
+            lambda _task, *, max_blast, max_review_risk: (
+                max_blast is None and max_review_risk is None
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+
+        async def run() -> Any:
+            async with Client(mcp) as client:
+                return _data(
+                    await client.call_tool(
+                        "get_next_task",
+                        {"actor": "newcomer", "max_blast": 5},
+                    )
+                )
+
+        response = _run(run())
+        governor = response["governor"]
+        assert governor["withheld_reason"] == "task_accept_rate_floor"
+        assert governor["floor"] == 0.95
+        assert governor["offer_throttled"] is True
+
     def test_priority_ordering_high_over_medium_over_low(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """HIGH > MEDIUM > LOW — same feature, different priorities."""
         state_dir = _init_state_dir(tmp_path)

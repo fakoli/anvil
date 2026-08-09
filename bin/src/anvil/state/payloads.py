@@ -1187,6 +1187,9 @@ class TaskAppliedPayload(BaseModel):
     reviewer: str
     decision: str
     notes: str | None = None
+    # New accepted events bind the exact finalized evidence attempt. Historical
+    # events omit this field and replay to the legacy unbound review shape.
+    review_attempt_id: str | None = None
     # Additive for replay: historical rejected events omit provenance and are
     # projected as quality by the writer. New live rejections must carry the
     # exact engine-derived object validated under the append lock.
@@ -1196,6 +1199,8 @@ class TaskAppliedPayload(BaseModel):
     def _validate_rejection_shape(self) -> TaskAppliedPayload:
         if self.decision != "rejected" and self.rejection is not None:
             raise ValueError("only a rejected task review may carry provenance")
+        if self.decision == "rejected" and self.review_attempt_id is not None:
+            raise ValueError("rejected review attempt is carried by provenance")
         return self
 
 

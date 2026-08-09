@@ -3381,12 +3381,23 @@ class SqliteBackend:
         conn: sqlite3.Connection,
         task_id: str,
     ) -> sqlite3.Row | None:
+        # Evidence IDs are caller-generated and timestamps can tie under a
+        # frozen/coarse clock. The projected event rowid is the causal append
+        # order, so it must dominate both fields when selecting the review
+        # attempt. The claim generation is a deterministic fallback for old or
+        # test-injected evidence rows with no corresponding projected event.
         return conn.execute(
-            "SELECT id, task_id, claim_id, commands_run, output_excerpt, "
-            "files_changed, pr_url, commit_sha, screenshots, "
-            "known_limitations, submitted_at, submitted_by, proofs, category "
-            "FROM evidence WHERE task_id = ? "
-            "ORDER BY submitted_at DESC, id DESC LIMIT 1",
+            "SELECT e.id, e.task_id, e.claim_id, e.commands_run, "
+            "e.output_excerpt, e.files_changed, e.pr_url, e.commit_sha, "
+            "e.screenshots, e.known_limitations, e.submitted_at, "
+            "e.submitted_by, e.proofs, e.category FROM evidence AS e "
+            "LEFT JOIN events AS ev ON ev.action = 'evidence.submitted' "
+            "AND ev.target_id = e.task_id "
+            "AND json_extract(ev.payload_json, '$.evidence_id') = e.id "
+            "LEFT JOIN claims AS c ON c.id = e.claim_id "
+            "WHERE e.task_id = ? "
+            "ORDER BY (ev.rowid IS NULL) ASC, ev.rowid DESC, "
+            "c.generation DESC, e.submitted_at DESC, e.id DESC LIMIT 1",
             (task_id,),
         ).fetchone()
 
@@ -12254,6 +12265,17 @@ class SqliteBackend:
                 f"task.applied: 'decision' must be 'accepted' or 'rejected', "
                 f"got {decision!r}."
             )
+        if decision == "accepted":
+            attempt_row = self._latest_evidence_row(conn, task_id)
+            if attempt_row is None:
+                raise EventRejected(
+                    "task.applied: acceptance requires a persisted review attempt"
+                )
+            current_attempt_id = self._row_to_evidence(attempt_row).id
+            if payload.review_attempt_id != current_attempt_id:
+                raise EventRejected(
+                    "task.applied: accepted review attempt does not match persisted state"
+                )
         if decision == "rejected":
             if payload.rejection is None:
                 raise EventRejected(
@@ -12342,16 +12364,11 @@ class SqliteBackend:
         rejection = payload.rejection
         event_id: str = event.id
         timestamp: str = event.timestamp.isoformat()
-        review_attempt_id = rejection.review_attempt_id if rejection is not None else None
-
-        # Accepted reviews did not historically persist the evidence attempt
-        # they finalized. Bind new/replayed accepted reviews to the exact
-        # latest persisted attempt so actor attribution never depends on
-        # timestamp guesses. Legacy logs without evidence remain nullable.
-        if decision == "accepted":
-            attempt_row = self._latest_evidence_row(conn, task_id)
-            if attempt_row is not None:
-                review_attempt_id = self._row_to_evidence(attempt_row).id
+        review_attempt_id = (
+            rejection.review_attempt_id
+            if rejection is not None
+            else payload.review_attempt_id
+        )
 
         if decision == "accepted":
             # Transition needs_review → accepted.

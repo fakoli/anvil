@@ -4256,6 +4256,10 @@ def apply_review_decision(
             "decision": decision,
             "notes": reason,
         }
+        if approve:
+            current_attempt = backend.get_latest_evidence(task_id)
+            if current_attempt is not None:
+                payload["review_attempt_id"] = current_attempt.id
         if rejection_provenance is not None:
             payload["rejection"] = rejection_provenance.model_dump(mode="json")
 

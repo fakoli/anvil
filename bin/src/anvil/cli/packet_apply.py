@@ -1652,6 +1652,10 @@ def apply(
             "decision": decision,
             "notes": reason,
         }
+        if approve:
+            current_attempt = backend.get_latest_evidence(task_id)
+            if current_attempt is not None:
+                payload["review_attempt_id"] = current_attempt.id
         rejection_provenance: TaskRejectionProvenance | None = None
         if reject:
             from anvil.state.backend import EventRejected

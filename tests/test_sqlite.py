@@ -4747,13 +4747,17 @@ def _make_applied_payload(
     reviewer: str = "alice",
     decision: str = "accepted",
     notes: str | None = None,
+    review_attempt_id: str = "EV001",
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "task_id": task_id,
         "reviewer": reviewer,
         "decision": decision,
         "notes": notes,
     }
+    if decision == "accepted":
+        payload["review_attempt_id"] = review_attempt_id
+    return payload
 
 
 def _make_rejected_applied_payload(
@@ -5665,6 +5669,107 @@ class TestTaskRejectionProvenanceState:
                     "EV001",
                     "agent-alpha",
                 )
+            ]
+        finally:
+            backend.close()
+
+    def test_equal_timestamp_rework_uses_causal_attempt_order(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_claimable_task_and_claim(
+                backend, task_id="T001", claim_id="C001"
+            )
+            backend.append(
+                _make_event(
+                    "evidence.submitted",
+                    _make_evidence_payload(
+                        evidence_id="EVZZZ",
+                        claim_id="C001",
+                        submitted_by="agent-alpha",
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    _make_rejected_applied_payload(
+                        backend,
+                        reviewer="reviewer-a",
+                        reason_code=RejectionReasonCode.quality_findings,
+                        quality_findings=[RejectionQualityFindingCode.correctness],
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            for from_status, to_status in [
+                ("drafted", "reviewed"),
+                ("reviewed", "ready"),
+            ]:
+                backend.append(
+                    _make_event(
+                        "task.status_changed",
+                        {
+                            "task_id": "T001",
+                            "from": from_status,
+                            "to": to_status,
+                        },
+                        target_kind="task",
+                        target_id="T001",
+                    )
+                )
+            backend.append(
+                _make_event(
+                    "claim.created",
+                    _make_claim_payload(
+                        claim_id="C002",
+                        task_id="T001",
+                        actor="runner-b",
+                        generation=2,
+                    ),
+                    target_kind="claim",
+                    target_id="C002",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "evidence.submitted",
+                    _make_evidence_payload(
+                        evidence_id="EVAAA",
+                        claim_id="C002",
+                        submitted_by="runner-b",
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+            backend.append(
+                _make_event(
+                    "task.applied",
+                    _make_applied_payload(
+                        task_id="T001",
+                        reviewer="reviewer-b",
+                        decision="accepted",
+                        review_attempt_id="EVAAA",
+                    ),
+                    target_kind="task",
+                    target_id="T001",
+                )
+            )
+
+            decisions = backend.list_task_review_decisions()
+            assert [(row[1], row[4], row[5]) for row in decisions] == [
+                ("accepted", "EVAAA", "runner-b"),
+                ("rejected", "EVZZZ", "agent-alpha"),
+            ]
+            backend.replay_from_empty(tmp_path / "events.jsonl")
+            assert [(row[1], row[4], row[5]) for row in backend.list_task_review_decisions()] == [
+                ("accepted", "EVAAA", "runner-b"),
+                ("rejected", "EVZZZ", "agent-alpha"),
             ]
         finally:
             backend.close()

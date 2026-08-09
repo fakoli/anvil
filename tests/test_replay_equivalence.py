@@ -114,6 +114,7 @@ def _build_normal(state_dir: Path) -> SqliteBackend:
     the same state as the replay path for the same event sequence.
     """
     b = _make_backend(state_dir)
+    latest_attempt_by_task: dict[str, str] = {}
     for raw in _load_committed_events():
         # Strip the id: EventDraft has no id field (the backend assigns it).
         draft_data = {k: v for k, v in raw.items() if k != "id"}
@@ -131,6 +132,15 @@ def _build_normal(state_dir: Path) -> SqliteBackend:
             draft_data["actor"] = raw["payload_json"].get(
                 identity_field, draft_data["actor"]
             )
+        payload = dict(raw["payload_json"])
+        if raw["action"] == "evidence.submitted":
+            latest_attempt_by_task[payload["task_id"]] = payload["evidence_id"]
+        elif raw["action"] == "task.applied" and payload["decision"] == "accepted":
+            # The committed fixture is a legacy event and intentionally omits
+            # the attempt binding. A current live producer must supply it; the
+            # replay path below preserves the omitted legacy shape.
+            payload["review_attempt_id"] = latest_attempt_by_task[payload["task_id"]]
+        draft_data["payload_json"] = payload
         draft = EventDraft.model_validate(draft_data)
         b.append(draft)
     return b
@@ -165,6 +175,11 @@ def test_normal_and_replay_match_each_other_and_the_golden(tmp_path: Path) -> No
     replay = _make_backend(replay_dir)
     try:
         replay.replay_from_empty(str(_EVENTS_PATH))
+
+        accepted = [
+            row for row in replay.list_task_review_decisions() if row[1] == "accepted"
+        ]
+        assert accepted and accepted[0][4:] == (None, None)
 
         normal_snap = _serialize(normal)
         replay_snap = _serialize(replay)
