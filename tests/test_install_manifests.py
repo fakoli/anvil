@@ -316,6 +316,7 @@ def test_pyproject_readme_is_inside_the_build_root() -> None:
 def test_built_wheel_runs_at_declared_dependency_floors(tmp_path: Path) -> None:
     """Keep published floors installable and compatible with Anvil's MCP types."""
     dependencies = _pyproject()["project"]["dependencies"]
+    assert "typer>=0.13,<0.28" in dependencies
     assert "pydantic>=2.11.7" in dependencies
     assert "fastmcp>=3.0.0,<4" in dependencies
 

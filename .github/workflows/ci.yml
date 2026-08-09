@@ -47,6 +47,12 @@ jobs:
           tests/test_release_artifact_contract.py
           -q
 
+      - name: Qualify installed provider discovery across the Typer range
+        run: >-
+          uv run --project bin --locked pytest
+          tests/test_installed_wheel.py
+          -q
+
   test:
     name: test (python 3.11)
     runs-on: ubuntu-latest
