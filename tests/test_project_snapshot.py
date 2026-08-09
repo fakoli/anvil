@@ -869,3 +869,38 @@ def test_aggregate_visible_snapshot_overflow_reports_limit_metadata(
     assert refusal.value.error.limit_name is ProviderLimitNameV1.max_snapshot_bytes
     assert refusal.value.error.actual > 16_777_216
     assert refusal.value.error.limit == 16_777_216
+
+
+def test_mixed_visible_aggregate_refuses_before_json_materialization(
+    populated: SqliteBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _state_path(populated)
+    populated.close()
+    conn = sqlite3.connect(root / "state.db")
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(tasks)")]
+    template = list(conn.execute("SELECT * FROM tasks WHERE id = 'T001'").fetchone())
+    indexes = {name: columns.index(name) for name in columns}
+    placeholders = ",".join("?" for _ in columns)
+    statement = f"INSERT INTO tasks ({','.join(columns)}) VALUES ({placeholders})"
+    acceptance = json.dumps(["a" * 60_000], separators=(",", ":"))
+    for number in range(100, 260):
+        values = list(template)
+        values[indexes["id"]] = f"T{number}"
+        values[indexes["title"]] = "t" * 60_000
+        values[indexes["dependencies"]] = "[]"
+        values[indexes["acceptance_criteria"]] = acceptance
+        values[indexes["parent_task_id"]] = None
+        conn.execute(statement, values)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        snapshot_module,
+        "_json_string_list",
+        lambda _raw: (_ for _ in ()).throw(AssertionError("materialized task JSON")),
+    )
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(root)
+    assert isinstance(refusal.value.error, ProviderLimitRefusalV1)
+    assert refusal.value.error.limit_name is ProviderLimitNameV1.max_snapshot_bytes
+    assert refusal.value.error.actual > refusal.value.error.limit

@@ -761,10 +761,11 @@ def _preflight_storage_limits(
     if int(raw_json_row[1]) > PROVIDER_LIMITS_V1.max_snapshot_bytes:
         _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
     visible_json_total = int(raw_json_row[2])
-    if visible_json_total > PROVIDER_LIMITS_V1.max_snapshot_bytes:
+    visible_preflight_total = visible_total + visible_json_total
+    if visible_preflight_total > PROVIDER_LIMITS_V1.max_snapshot_bytes:
         _limit(
             ProviderLimitNameV1.max_snapshot_bytes,
-            visible_json_total,
+            visible_preflight_total,
             PROVIDER_LIMITS_V1.max_snapshot_bytes,
         )
 
