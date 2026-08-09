@@ -148,6 +148,7 @@ class ClaimGitMutation:
     caller_checkout_changed: bool
     ownership_token: str | None = None
     branch_identity: tuple[int, int, int] | None = None
+    branch_reflog_state: tuple[int, str] | None = None
     worktree_identity: tuple[int, int, int] | None = None
     checkout_identity: tuple[int, int, int] | None = None
 
@@ -164,6 +165,7 @@ class ClaimGitMutationTracker:
     worktree_created: bool = False
     caller_checkout_changed: bool = False
     branch_identity: tuple[int, int, int] | None = None
+    branch_reflog_state: tuple[int, str] | None = None
     worktree_identity: tuple[int, int, int] | None = None
     checkout_identity: tuple[int, int, int] | None = None
 
@@ -1004,13 +1006,15 @@ def apply_claim_plan(
 
     def record_branch() -> None:
         identity = _branch_identity(plan)
-        if identity is None:
+        reflog_state = _branch_reflog_state(plan, root)
+        if identity is None and reflog_state is None:
             raise ClaimPlanError(
                 "mutation_ownership_unavailable",
                 "Created branch ownership cannot be proven",
             )
         ownership.branch_created = True
         ownership.branch_identity = identity
+        ownership.branch_reflog_state = reflog_state
 
     def record_checkout() -> None:
         identity = _checkout_identity(plan, root)
@@ -1134,6 +1138,7 @@ def apply_claim_plan(
             caller_checkout_changed=ownership.caller_checkout_changed,
             ownership_token=ownership.ownership_token,
             branch_identity=ownership.branch_identity,
+            branch_reflog_state=ownership.branch_reflog_state,
             worktree_identity=ownership.worktree_identity,
             checkout_identity=ownership.checkout_identity,
         )
@@ -1157,6 +1162,7 @@ def compensate_claim_plan(
         worktree_created=mutation.worktree_created,
         caller_checkout_changed=mutation.caller_checkout_changed,
         branch_identity=mutation.branch_identity,
+        branch_reflog_state=mutation.branch_reflog_state,
         worktree_identity=mutation.worktree_identity,
         checkout_identity=mutation.checkout_identity,
         cwd=Path(cwd or mutation.plan.caller_path),
@@ -1179,6 +1185,7 @@ def compensate_claim_plan_tracker(
         worktree_created=tracker.worktree_created,
         caller_checkout_changed=tracker.caller_checkout_changed,
         branch_identity=tracker.branch_identity,
+        branch_reflog_state=tracker.branch_reflog_state,
         worktree_identity=tracker.worktree_identity,
         checkout_identity=tracker.checkout_identity,
         cwd=root,
@@ -1187,6 +1194,7 @@ def compensate_claim_plan_tracker(
     tracker.worktree_created = False
     tracker.caller_checkout_changed = False
     tracker.branch_identity = None
+    tracker.branch_reflog_state = None
     tracker.worktree_identity = None
     tracker.checkout_identity = None
 
@@ -1198,6 +1206,7 @@ def _compensate_values(
     worktree_created: bool,
     caller_checkout_changed: bool,
     branch_identity: tuple[int, int, int] | None = None,
+    branch_reflog_state: tuple[int, str] | None = None,
     worktree_identity: tuple[int, int, int] | None = None,
     checkout_identity: tuple[int, int, int] | None = None,
     cwd: Path,
@@ -1248,9 +1257,13 @@ def _compensate_values(
                 caller,
                 code="checkout_compensation_failed",
             )
-    owns_branch = bool(
-        branch_identity is not None and _branch_identity(plan) == branch_identity
-    )
+    current_reflog_state = _branch_reflog_state(plan, cwd)
+    if branch_reflog_state is not None and current_reflog_state is not None:
+        owns_branch = current_reflog_state == branch_reflog_state
+    else:
+        owns_branch = bool(
+            branch_identity is not None and _branch_identity(plan) == branch_identity
+        )
     if branch_created and owns_branch and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
         branch_owner = next(
             (item for item in _worktree_topology(cwd) if item.branch_ref == branch_ref),
@@ -1313,7 +1326,29 @@ def _artifact_identity(path: Path) -> tuple[int, int, int] | None:
 def _branch_identity(plan: ClaimGitPlan) -> tuple[int, int, int] | None:
     if plan.git_common_dir is None or plan.branch is None:
         return None
-    return _artifact_identity(Path(plan.git_common_dir) / "refs" / "heads" / plan.branch)
+    identity = _artifact_identity(
+        Path(plan.git_common_dir) / "refs" / "heads" / plan.branch
+    )
+    return (identity[0], identity[1], 0) if identity is not None else None
+
+
+def _branch_reflog_state(plan: ClaimGitPlan, cwd: Path) -> tuple[int, str] | None:
+    if plan.branch is None:
+        return None
+    branch_ref = f"refs/heads/{plan.branch}"
+    message = _reflog_message(branch_ref, cwd)
+    count_result = _run_git(
+        ["rev-list", "--walk-reflogs", "--count", branch_ref], cwd
+    )
+    if (
+        not message
+        or count_result is None
+        or count_result.returncode != 0
+        or not count_result.stdout.strip().isdigit()
+    ):
+        return None
+    count = int(count_result.stdout.strip())
+    return (count, message) if count > 0 else None
 
 
 def _worktree_identity(plan: ClaimGitPlan) -> tuple[int, int, int] | None:
@@ -1364,16 +1399,18 @@ def _mutate_git(
             env=env,
             timeout=_GIT_TIMEOUT_SECONDS,
         )
+        if result.returncode != 0:
+            raise ClaimPlanError(code, "Git mutation failed")
+        if on_success is not None:
+            on_success()
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ClaimPlanError(code, "Git mutation timed out or is unavailable") from exc
+    except ClaimPlanError:
+        raise
     except BaseException:
         if success_probe is not None and success_probe() and on_success is not None:
             on_success()
         raise
-    if result.returncode != 0:
-        raise ClaimPlanError(code, "Git mutation failed")
-    if on_success is not None:
-        on_success()
 
 
 def _validate_isolated_target(

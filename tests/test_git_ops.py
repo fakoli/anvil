@@ -1439,6 +1439,31 @@ class TestResolveClaimPlan:
 
 @pytest.mark.slow
 class TestApplyClaimPlan:
+    def test_reftable_backend_uses_logical_branch_continuity(
+        self, tmp_path: Path
+    ) -> None:
+        project = tmp_path / "reftable"
+        initialized = subprocess.run(
+            ["git", "init", "--ref-format=reftable", str(project)],
+            check=False,
+            capture_output=True,
+        )
+        if initialized.returncode != 0:
+            pytest.skip("installed Git does not support the reftable ref backend")
+        _git(project, "config", "user.email", "test@example.com")
+        _git(project, "config", "user.name", "Test User")
+        (project / "README.md").write_text("initial\n", encoding="utf-8")
+        _git(project, "add", ".")
+        _git(project, "commit", "-m", "initial")
+        original_branch = _default_branch(project)
+        plan = resolve_claim_plan("T011RT", "Reftable", cwd=project)
+
+        mutation = apply_claim_plan(plan, cwd=project)
+        compensate_claim_plan(mutation, cwd=project)
+
+        assert _default_branch(project) == original_branch
+        assert not _ref_exists(project, f"refs/heads/{plan.branch}")
+
     def test_external_branch_winner_is_never_compensated(
         self, git_repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1566,6 +1591,54 @@ class TestApplyClaimPlan:
         assert interrupted is True
         assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
 
+    @pytest.mark.parametrize("stage", ["branch", "checkout", "worktree"])
+    def test_result_inspection_interrupt_uses_durable_identity(
+        self,
+        git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: str,
+    ) -> None:
+        plan = resolve_claim_plan(
+            f"T011R-{stage}",
+            "Result inspection interrupt",
+            cwd=git_repo,
+            worktree=stage == "worktree",
+        )
+        original_branch = _default_branch(git_repo)
+        run = worktree_mod.subprocess.run
+        interrupted = False
+
+        class InterruptedResult:
+            @property
+            def returncode(self) -> int:
+                raise KeyboardInterrupt
+
+        def interrupt_result(*args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal interrupted
+            result = run(*args, **kwargs)
+            command = args[0]
+            matches = (
+                (stage == "branch" and command[1] == "update-ref")
+                or (stage == "checkout" and command[1:3] == ["checkout", "--no-guess"])
+                or (stage == "worktree" and command[1:3] == ["worktree", "add"])
+            )
+            if not interrupted and matches:
+                assert result.returncode == 0
+                interrupted = True
+                return InterruptedResult()
+            return result
+
+        monkeypatch.setattr(worktree_mod.subprocess, "run", interrupt_result)
+        with pytest.raises(KeyboardInterrupt):
+            apply_claim_plan(plan, cwd=git_repo)
+
+        assert interrupted is True
+        assert _default_branch(git_repo) == original_branch
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+        if stage == "worktree":
+            assert plan.target_path is not None
+            assert not Path(plan.target_path).exists()
+
     @pytest.mark.parametrize("isolated", [False, True])
     def test_child_success_then_interrupt_uses_durable_checkout_marker(
         self,
@@ -1648,6 +1721,28 @@ class TestApplyClaimPlan:
             assert plan.target_path is not None
             assert not Path(plan.target_path).exists()
 
+    @pytest.mark.parametrize("isolated", [False, True])
+    def test_ownership_survives_pack_refs(
+        self, git_repo: Path, isolated: bool
+    ) -> None:
+        original_branch = _default_branch(git_repo)
+        plan = resolve_claim_plan(
+            "T011D8" if isolated else "T011D7",
+            "Packed refs",
+            cwd=git_repo,
+            worktree=isolated,
+        )
+        mutation = apply_claim_plan(plan, cwd=git_repo)
+        _git(git_repo, "pack-refs", "--all")
+
+        compensate_claim_plan(mutation, cwd=git_repo)
+
+        assert _default_branch(git_repo) == original_branch
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
+        if isolated:
+            assert plan.target_path is not None
+            assert not Path(plan.target_path).exists()
+
     def test_branch_aba_invalidates_durable_ownership_marker(
         self, git_repo: Path
     ) -> None:
@@ -1655,18 +1750,7 @@ class TestApplyClaimPlan:
         mutation = apply_claim_plan(plan, cwd=git_repo)
         branch_ref = f"refs/heads/{plan.branch}"
         _git(git_repo, "update-ref", "-d", branch_ref, plan.claim_start_sha or "")
-        _git(
-            git_repo,
-            "update-ref",
-            "--create-reflog",
-            "-m",
-            worktree_mod._ownership_action(  # noqa: SLF001
-                mutation.ownership_token or "", "branch"
-            ),
-            branch_ref,
-            plan.claim_start_sha or "",
-            "",
-        )
+        _git(git_repo, "update-ref", branch_ref, plan.claim_start_sha or "", "")
 
         compensate_claim_plan(mutation, cwd=git_repo)
 
