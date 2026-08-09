@@ -1,0 +1,93 @@
+{
+  "compatibility": {
+    "on_mismatch": "refuse_without_state_access",
+    "rejected_examples": [
+      {
+        "reason": "describe_api_absent",
+        "supported": false
+      },
+      {
+        "api_version": "10",
+        "reason": "describe_api_incompatible",
+        "supported": false
+      },
+      {
+        "operation_id": "state.project.snapshot",
+        "operation_version": 2,
+        "reason": "operation_version_incompatible",
+        "supported": false
+      },
+      {
+        "output_schema_resource": "contracts/provider-reads/v2/project-snapshot-output.schema.json",
+        "reason": "schema_version_incompatible",
+        "supported": false
+      }
+    ],
+    "required": {
+      "api_version": "9",
+      "operation_catalog_version": 1,
+      "operations": {
+        "state.prd.content": {
+          "operation_version": 1,
+          "output_schema_resource": "contracts/provider-reads/v1/prd-content-output.schema.json"
+        },
+        "state.project.snapshot": {
+          "operation_version": 1,
+          "output_schema_resource": "contracts/provider-reads/v1/project-snapshot-output.schema.json"
+        }
+      }
+    }
+  },
+  "hierarchy_mapping": {
+    "feature": {
+      "fields": {
+        "id": "payload.features[].local_id",
+        "prd_ref": "payload.features[].prd_ref",
+        "ref": "payload.features[].ref",
+        "status": "payload.features[].status",
+        "title": "payload.features[].title"
+      },
+      "identity": "payload.features[].ref"
+    },
+    "prd": {
+      "fields": {
+        "content_available": "payload.prds[].content_available",
+        "id": "payload.prds[].local_id",
+        "provenance_state": "payload.prds[].provenance_state",
+        "ref": "payload.prds[].ref",
+        "revision": "payload.prds[].revision",
+        "source_sha256": "payload.prds[].source_sha256",
+        "source_encoding": "payload.prds[].source_encoding",
+        "source_size_bytes": "payload.prds[].source_size_bytes",
+        "status": "payload.prds[].status",
+        "target_tag": "payload.prds[].target_tag",
+        "target_version": "payload.prds[].target_version",
+        "title": "payload.prds[].title"
+      },
+      "identity": "payload.prds[].ref"
+    },
+    "run": {
+      "availability": "consumer_owned",
+      "provider_path": null,
+      "reason": "Provider read v1 exposes project planning state, not Workbench runtime runs."
+    },
+    "task": {
+      "fields": {
+        "acceptance_criteria": "payload.tasks[].acceptance_criteria",
+        "dependency_refs": "payload.tasks[].dependency_refs",
+        "feature_ref": "payload.tasks[].feature_ref",
+        "id": "payload.tasks[].local_id",
+        "parent_ref": "payload.tasks[].parent_ref",
+        "prd_ref": "payload.tasks[].prd_ref",
+        "priority": "payload.tasks[].priority",
+        "ref": "payload.tasks[].ref",
+        "status": "payload.tasks[].status",
+        "title": "payload.tasks[].title",
+        "verification_summaries": "payload.tasks[].verification_summaries"
+      },
+      "identity": "payload.tasks[].ref"
+    }
+  },
+  "provider": "anvil-state",
+  "schema_id": "anvil.consumer.workbench-provider-map.v1"
+}

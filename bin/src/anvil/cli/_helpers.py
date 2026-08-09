@@ -24,6 +24,14 @@ import click
 import typer
 from typer.core import TyperGroup
 
+try:
+    # Typer 0.27.1 vendors Click. Exceptions raised by callbacks must inherit
+    # from the Click implementation Typer is actually running, while older
+    # supported Typer releases still use the external ``click`` package.
+    from typer._click.exceptions import ClickException as _TyperClickException
+except ImportError:  # pragma: no cover - exercised in installed-wheel floor cells
+    _TyperClickException = click.ClickException
+
 if TYPE_CHECKING:
     from anvil.config import Config
     from anvil.state.models import Task
@@ -366,7 +374,7 @@ PRD_OPTION = typer.Option(  # noqa: B008
 )
 
 
-class PrdAmbiguityError(click.ClickException):
+class PrdAmbiguityError(_TyperClickException):
     """No PRD could be resolved unambiguously (T018).
 
     Raised when neither an explicit ``--prd``/arg nor ``$ANVIL_PRD`` names a
@@ -378,7 +386,7 @@ class PrdAmbiguityError(click.ClickException):
     exit_code = 1
 
 
-class PrdSourceIngestError(click.ClickException):
+class PrdSourceIngestError(_TyperClickException):
     """Bounded, path-safe refusal from PRD source identity or ingestion."""
 
     exit_code = 1
@@ -650,7 +658,7 @@ def _is_local_layout() -> bool:
     return os.environ.get(_STATE_LAYOUT_ENV, "workspace").strip().lower() == "local"
 
 
-class StateRootError(click.ClickException):
+class StateRootError(_TyperClickException):
     """ANVIL_ROOT is set but does not point at a valid project root.
 
     A ``click.ClickException`` so Typer/Click print a clean ``Error: ...`` line
@@ -659,6 +667,27 @@ class StateRootError(click.ClickException):
     """
 
     exit_code = 1
+
+
+def current_parameter_source_name(name: str) -> str | None:
+    """Return the active Typer/Click parameter-source enum name.
+
+    Typer 0.27.1 moved its context stack into the vendored ``typer._click``
+    namespace. Query that stack when present and fall back to external Click
+    for older supported Typer releases. Returning the enum name avoids leaking
+    either implementation's distinct ``ParameterSource`` class to callers.
+    """
+
+    try:
+        from typer._click.globals import get_current_context
+    except ImportError:  # pragma: no cover - installed-wheel floor cells
+        get_current_context = click.get_current_context
+
+    context = get_current_context(silent=True)
+    if context is None:
+        return None
+    source = context.get_parameter_source(name)
+    return source.name if source is not None else None
 
 
 # ---------------------------------------------------------------------------

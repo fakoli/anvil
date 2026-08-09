@@ -38,6 +38,86 @@ prd_app = typer.Typer(
 _ALLOWED_TERMINAL_TITLE_FORMAT_CONTROLS = {"\u200c", "\u200d"}
 
 
+@prd_app.command("show")
+def prd_show(
+    prd_id: str = typer.Argument(..., help="Exact PRD partition identifier."),
+    json_output: bool = JSON_OPTION,
+    section: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--section",
+        help=(
+            "Exact case-sensitive slash-delimited ATX heading path; repeat to "
+            "select multiple non-overlapping sections in source order."
+        ),
+    ),
+    expected_digest: str | None = typer.Option(  # noqa: B008
+        None,
+        "--expected-digest",
+        help="Require this exact lowercase SHA-256 persisted-source digest.",
+    ),
+    limit: str | None = typer.Option(  # noqa: B008
+        None,
+        "--limit",
+        "--max-bytes",
+        help="Lower the immutable 2 MiB returned-content ceiling.",
+    ),
+    cwd: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--cwd",
+        hidden=True,
+    ),
+) -> None:
+    """Return exact persisted PRD source bytes through the JSON-only v1 read."""
+    from anvil.prd_content import (
+        PrdContentRefusal,
+        parse_prd_content_limit,
+        read_prd_content,
+        validate_prd_content_request,
+    )
+    from anvil.read_contracts import ReadErrorCode
+
+    command = "prd show"
+    if not json_output:
+        fail(
+            command,
+            "The read request is invalid.",
+            code=ReadErrorCode.invalid_request.value,
+    )
+    try:
+        max_bytes = parse_prd_content_limit(limit)
+        validate_prd_content_request(
+            prd_id,
+            sections=section,
+            expected_digest=expected_digest,
+            max_bytes=max_bytes,
+        )
+        state_dir = _resolve_state_dir(cwd)
+        response = read_prd_content(
+            state_dir,
+            prd_id,
+            sections=section,
+            expected_digest=expected_digest,
+            max_bytes=max_bytes,
+        )
+    except (StateRootError, OSError):
+        fail(
+            command,
+            "Project state is unavailable.",
+            code=ReadErrorCode.state_unavailable.value,
+            exit_code=1,
+        )
+    except PrdContentRefusal as exc:
+        error = exc.error.model_dump(mode="json", exclude={"code", "message"})
+        error["truncated"] = False
+        fail_with(
+            command,
+            exc.error.message,
+            code=exc.error.code.value,
+            extra=error,
+        )
+    emit_success(command, response.model_dump(mode="json"))
+
+
 def _escape_legacy_title_for_terminal(title: str) -> str:
     """Escape terminal-active legacy title code points without changing data.
 

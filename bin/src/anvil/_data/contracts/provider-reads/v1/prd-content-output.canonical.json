@@ -1,0 +1,19 @@
+{
+  "applied_limit_bytes": 2097152,
+  "content": "# Project: X\r\n\r\n## Summary\r\ncaf\u00e9\r\n## Goals\r\n- ship\r\n",
+  "content_digest": "f5e22d65e4df03b1f3a935f3aa049831d0399b87d04196dbacc48633354af72d",
+  "digest_algorithm": "sha256",
+  "encoding": "utf-8",
+  "operation_id": "state.prd.content",
+  "operation_version": 1,
+  "prd_ref": {
+    "prd_id": "default"
+  },
+  "prd_revision": 1,
+  "returned_size_bytes": 53,
+  "schema_id": "anvil.state.prd-content.v1",
+  "selected_sections": [],
+  "source_digest": "2b1b3fab185e4627f05131d808c1844c1a0b1ac908b5c2495a9a4f0afe323b49",
+  "source_size_bytes": 53,
+  "truncated": false
+}

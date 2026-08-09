@@ -62,6 +62,16 @@ def test_every_mcp_tool_listed() -> None:
     )
 
 
+def test_cli_only_provider_reads_are_listed_and_not_claimed_as_mcp_equivalents() -> None:
+    """Installed guidance must name the deliberate provider transport boundary."""
+    text = _agents_md().read_text(encoding="utf-8")
+    assert "anvil project snapshot --json" in text
+    assert "anvil prd show <id> --json" in text
+    assert text.count("discover via `describe_surface` (CLI-only execution)") == 2
+    assert "Two\ncomplementary surfaces" in text
+    assert "they are equivalent" not in text
+
+
 @pytest.mark.parametrize("path_fn", [_agents_md, _how_to])
 def test_no_claude_plugin_root_token(path_fn) -> None:  # type: ignore[no-untyped-def]
     """Cross-harness files must be token-free (no ${CLAUDE_PLUGIN_ROOT})."""

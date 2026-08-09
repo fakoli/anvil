@@ -8,7 +8,7 @@ per-project workspace in your HOME (`~/.anvil/workspaces/<key>/.anvil/`), shared
 across every git worktree of the repo; opt into the legacy in-repo `<cwd>/.anvil`
 with `ANVIL_STATE_LAYOUT=local`. Either way, let the CLI resolve the path: run a
 command and read the location it echoes; never assume an in-repo `.anvil/`. Two
-equivalent surfaces:
+complementary surfaces:
 
 - **CLI** — `anvil <command>` (single mutator, no harness dependency; on PATH
   after `uv tool install anvil-state`).
@@ -19,7 +19,9 @@ equivalent surfaces:
 Both resolve the project via `ANVIL_ROOT` env var, else the current directory.
 Every read command supports `--json` for a `{"ok":…,"command":…,"data":…}`
 envelope. **Prefer the MCP tool if your harness has MCP; otherwise use the CLI
-command in the same row — they are equivalent.**
+command in the same row.** The two provider-read operations are intentionally
+CLI-only execution surfaces; MCP clients discover their versioned contracts and
+schemas through `describe_surface`, then execute the documented CLI command.
 
 ## The standalone loop
 
@@ -47,6 +49,8 @@ anvil apply T001           # apply the review verdict
 | Init project | `init_project` | `anvil init` |
 | Project status | `get_project_status` | `anvil status` |
 | Project summary | `get_project_summary` | `anvil status --json` |
+| Provider project snapshot | discover via `describe_surface` (CLI-only execution) | `anvil project snapshot --json` |
+| Provider PRD content | discover via `describe_surface` (CLI-only execution) | `anvil prd show <id> --json` |
 | Parse PRD | `parse_prd` | `anvil prd parse` |
 | Assess PRD readiness | `assess_prd` | `anvil prd assess` |
 | Review PRD | `review_prd` | `anvil prd review …` |

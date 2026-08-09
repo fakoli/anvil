@@ -12,6 +12,8 @@ repo root (matching ``test_agents_md.py`` / ``test_version_sync.py``).
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -20,11 +22,14 @@ import sys
 import tomllib
 import zipfile
 from collections import Counter
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
 import yaml
+from jsonschema import Draft202012Validator
 
+from anvil.cli.describe import build_manifest
 from anvil.state.schema import SCHEMA_VERSION
 
 
@@ -56,6 +61,106 @@ def _faq() -> str:
 
 def _pyproject() -> dict:
     return tomllib.loads((_repo_root() / "bin" / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def _provider_resource(relative: str) -> bytes:
+    return files("anvil._data").joinpath(relative).read_bytes()
+
+
+def _provider_document(relative: str) -> dict:
+    return json.loads(_provider_resource(relative))
+
+
+def test_described_provider_schemas_and_fixtures_are_packaged_and_canonical() -> None:
+    catalog = build_manifest()["operation_catalog"]
+    advertised = [
+        resource
+        for operation in catalog["operations"]
+        for group in ("schema_resources", "fixture_resources")
+        for resource in operation[group].values()
+    ]
+    assert len(set(advertised)) < len(advertised), "shared resources should be reused"
+
+    for relative in sorted(set(advertised)):
+        raw = _provider_resource(relative)
+        document = json.loads(raw)
+        if relative.endswith(".schema.json"):
+            rendered = json.dumps(
+                document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+        else:
+            rendered = json.dumps(
+                document, sort_keys=True, indent=2, ensure_ascii=True
+            )
+        canonical_fixture = (rendered + "\n").encode("ascii")
+        assert raw == canonical_fixture, relative
+
+    for operation in catalog["operations"]:
+        schemas = operation["schema_resources"]
+        fixtures = operation["fixture_resources"]
+        for kind in ("input", "output", "error"):
+            schema = _provider_document(schemas[kind])
+            Draft202012Validator.check_schema(schema)
+            Draft202012Validator(schema).validate(_provider_document(fixtures[kind]))
+
+
+def test_provider_schemas_reject_unknown_and_incompatible_wire_fields() -> None:
+    for operation in build_manifest()["operation_catalog"]["operations"]:
+        schemas = operation["schema_resources"]
+        fixtures = operation["fixture_resources"]
+        for kind in ("input", "output"):
+            schema = _provider_document(schemas[kind])
+            fixture = _provider_document(fixtures[kind])
+            validator = Draft202012Validator(schema)
+
+            unknown = {**fixture, "unknown_contract_field": True}
+            assert list(validator.iter_errors(unknown)), (operation, kind)
+
+            incompatible = {**fixture, "operation_version": 2}
+            assert list(validator.iter_errors(incompatible)), (operation, kind)
+
+
+def test_packaged_provider_digest_vectors_are_exact() -> None:
+    fixture = _provider_document(
+        "contracts/provider-reads/v1/provider-read-digests.v1.json"
+    )
+    snapshot = fixture["project_snapshot"]
+    snapshot_digest = hashlib.sha256(
+        base64.b64decode(snapshot["domain_base64"])
+        + base64.b64decode(snapshot["canonical_payload_utf8_base64"])
+    ).hexdigest()
+    assert snapshot_digest == snapshot["snapshot_digest"]
+
+    content = fixture["prd_content"]
+    domain = base64.b64decode(content["domain_base64"])
+    source = base64.b64decode(content["source_utf8_base64"])
+    source_digest = hashlib.sha256(source).hexdigest()
+    assert source_digest == content["source_digest"]
+
+    def digest(selector: dict, returned: bytes) -> str:
+        selector_bytes = json.dumps(
+            selector, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("ascii")
+        return hashlib.sha256(
+            domain
+            + source_digest.encode("ascii")
+            + b"\0"
+            + selector_bytes
+            + b"\0"
+            + returned
+        ).hexdigest()
+
+    assert content["full_content_digest"] == (
+        "f5e22d65e4df03b1f3a935f3aa049831d0399b87d04196dbacc48633354af72d"
+    )
+    assert digest(content["full_selector"], source) == content["full_content_digest"]
+    summary = base64.b64decode(content["summary_utf8_base64"])
+    assert content["summary_content_digest"] == (
+        "c7418b66a23c89794c79a02c9f325f100ddc0534659d666297afa26a7a60a99c"
+    )
+    assert digest(content["summary_selector"], summary) == (
+        content["summary_content_digest"]
+    )
 
 
 def _assert_uv_mcp_spec(spec: dict, project_var: str) -> None:
@@ -211,6 +316,7 @@ def test_pyproject_readme_is_inside_the_build_root() -> None:
 def test_built_wheel_runs_at_declared_dependency_floors(tmp_path: Path) -> None:
     """Keep published floors installable and compatible with Anvil's MCP types."""
     dependencies = _pyproject()["project"]["dependencies"]
+    assert "typer>=0.13,<0.28" in dependencies
     assert "pydantic>=2.11.7" in dependencies
     assert "fastmcp>=3.0.0,<4" in dependencies
 
@@ -390,6 +496,16 @@ def test_built_wheel_is_self_sufficient(tmp_path: Path) -> None:
     assert any(
         n.startswith("anvil/_data/packaging/codex/automations/") for n in names
     ), "codex automation templates not shipped as package data"
+    provider_resources = {
+        resource
+        for operation in build_manifest()["operation_catalog"]["operations"]
+        for group in ("schema_resources", "fixture_resources")
+        for resource in operation[group].values()
+    }
+    for resource in provider_resources:
+        archived = f"anvil/_data/{resource}"
+        assert archived in names, f"provider contract resource not shipped: {archived}"
+        assert sum(name == archived for name in names) == 1
     assert "anvil-mcp = anvil.mcp_server:main" in entry
 
 

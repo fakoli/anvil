@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
+from typer.testing import CliRunner
 
 import anvil.project_snapshot as snapshot_module
+from anvil.cli import app
 from anvil.clock import FrozenClock
 from anvil.project_snapshot import ProjectSnapshotError, read_project_snapshot
 from anvil.read_contracts import (
@@ -22,10 +26,12 @@ from anvil.read_contracts import (
     lowered_limits,
     snapshot_response_canonical_bytes,
 )
+from anvil.state.backend import SchemaProbeFailed
 from anvil.state.models import Event, EventDraft
 from anvil.state.sqlite import SqliteBackend
 
 _NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+_RUNNER = CliRunner()
 
 
 def _event(
@@ -209,6 +215,169 @@ def _state_path(backend: SqliteBackend) -> Path:
     return Path(backend._db_path).parent  # noqa: SLF001 - test boundary
 
 
+@pytest.fixture
+def cli_populated(
+    tmp_path: Path,
+    frozen_clock: FrozenClock,
+) -> tuple[Path, Path]:
+    state_dir = tmp_path / ".anvil"
+    state_dir.mkdir()
+    events_path = state_dir / "events.jsonl"
+    events_path.touch()
+    backend = SqliteBackend(
+        db_path=str(state_dir / "state.db"),
+        events_path=str(events_path),
+        clock=frozen_clock,
+    )
+    backend.initialize()
+    _seed(backend)
+    backend.close()
+    return tmp_path, state_dir
+
+
+def _invoke_project_snapshot(root: Path, *args: str):  # type: ignore[no-untyped-def]
+    original_cwd = os.getcwd()
+    os.chdir(root)
+    try:
+        return _RUNNER.invoke(
+            app,
+            ["project", "snapshot", *args],
+            catch_exceptions=False,
+        )
+    finally:
+        os.chdir(original_cwd)
+
+
+def _state_bytes(root: Path) -> tuple[bytes, bytes]:
+    return (
+        root.joinpath("state.db").read_bytes(),
+        root.joinpath("events.jsonl").read_bytes(),
+    )
+
+
+def _read_error_schema() -> dict[str, object]:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "bin/src/anvil/_data/contracts/provider-reads/v1/read-error.schema.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_project_snapshot_cli_success_is_closed_json_and_read_only(
+    cli_populated: tuple[Path, Path],
+) -> None:
+    root, state_dir = cli_populated
+    before = _state_bytes(state_dir)
+
+    result = _invoke_project_snapshot(root, "--json")
+
+    assert result.exit_code == 0, result.output
+    assert not result.stderr
+    assert len(result.stdout.strip().splitlines()) == 1
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["command"] == "project snapshot"
+    data = envelope["data"]
+    assert data["operation_id"] == "state.project.snapshot"
+    assert data["operation_version"] == 1
+    assert data["output_schema_id"] == "anvil.state.project-snapshot.v1"
+    assert data["api_version"] == "9"
+    assert data["schema_version"] == 18
+    assert data["digest_algorithm"] == "sha256"
+    assert data["truncated"] is False
+    assert data["payload"]["schema_id"] == data["output_schema_id"]
+    assert data["payload"]["project"] == {
+        "project_id": "project-1",
+        "name": "Snapshot Project",
+    }
+    assert len(data["payload"]["prds"]) == 2
+    assert len(data["payload"]["features"]) == 2
+    assert len(data["payload"]["tasks"]) == 2
+    wire = result.stdout.encode("utf-8")
+    for secret in (
+        b"PROJECT_DESCRIPTION_SECRET",
+        b"SOURCE_SUMMARY_SECRET",
+        b"FEATURE_DESCRIPTION_SECRET",
+        b"TASK_DESCRIPTION_SECRET",
+        b"COMMAND_SECRET",
+        b"MANUAL_SECRET",
+        b"EVIDENCE_SECRET",
+        b"PROOF_COMMAND_SECRET",
+        b"PATH_SECRET",
+    ):
+        assert secret not in wire
+    assert _state_bytes(state_dir) == before
+
+
+def test_project_snapshot_cli_requires_json_without_state_access(
+    tmp_path: Path,
+) -> None:
+    result = _invoke_project_snapshot(tmp_path)
+
+    assert result.exit_code == 1
+    assert not result.stderr
+    assert len(result.stdout.strip().splitlines()) == 1
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["command"] == "project snapshot"
+    assert envelope["error"]["code"] == "invalid_request"
+    assert envelope["error"]["field"] == "request"
+    assert envelope["error"]["truncated"] is False
+    Draft202012Validator(_read_error_schema()).validate(envelope["error"])
+    assert not (tmp_path / ".anvil").exists()
+
+
+def test_project_snapshot_cli_limit_refusal_has_no_partial_payload(
+    cli_populated: tuple[Path, Path],
+) -> None:
+    root, state_dir = cli_populated
+    before = _state_bytes(state_dir)
+
+    result = _invoke_project_snapshot(
+        root,
+        "--json",
+        "--limit",
+        "max_tasks=1",
+    )
+
+    assert result.exit_code == 1
+    assert not result.stderr
+    envelope = json.loads(result.stdout)
+    assert "data" not in envelope
+    error = envelope["error"]
+    assert error == {
+        "operation_id": "state.project.snapshot",
+        "operation_version": 1,
+        "limit_name": "max_tasks",
+        "actual": 2,
+        "limit": 1,
+        "code": "limit_exceeded",
+        "message": "A provider read limit was exceeded.",
+        "truncated": False,
+    }
+    assert "payload" not in result.stdout
+    Draft202012Validator(_read_error_schema()).validate(error)
+    assert _state_bytes(state_dir) == before
+
+
+def test_project_snapshot_cli_rejects_malformed_or_duplicate_limits_prelookup(
+    tmp_path: Path,
+) -> None:
+    for arguments in (
+        ("--limit", "unknown=1"),
+        ("--limit", "max_tasks=+1"),
+        ("--limit", "max_tasks=1", "--limit", "max_tasks=1"),
+    ):
+        result = _invoke_project_snapshot(tmp_path, "--json", *arguments)
+        assert result.exit_code == 1
+        assert not result.stderr
+        envelope = json.loads(result.stdout)
+        assert envelope["error"]["code"] == "invalid_request"
+        assert envelope["error"]["field"] == "request"
+        assert str(tmp_path.resolve()) not in result.stdout
+        assert not (tmp_path / ".anvil").exists()
+
+
 def test_projects_default_named_blank_title_provenance_and_redaction(
     populated: SqliteBackend,
 ) -> None:
@@ -335,6 +504,21 @@ def test_missing_and_incompatible_state_return_closed_errors(
         read_project_snapshot(root)
     assert isinstance(incompatible.value.error, ReadErrorV1)
     assert incompatible.value.error.code is ReadErrorCode.schema_incompatible
+
+
+def test_schema_probe_failure_is_projection_refusal_not_schema_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_probe(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise SchemaProbeFailed("bounded test refusal")
+
+    monkeypatch.setattr(snapshot_module, "query_only_transaction", fail_probe)
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(tmp_path)
+    assert isinstance(refusal.value.error, ReadErrorV1)
+    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+    assert refusal.value.error.field == "projection"
 
 
 def test_log_ahead_refuses_without_healing(populated: SqliteBackend) -> None:

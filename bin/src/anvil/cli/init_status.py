@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import click
 import typer
 
 from anvil.cli._actor_output import safe_actor_label
@@ -21,6 +20,7 @@ from anvil.cli._helpers import (
     _resolve_state_dir,
     _slug,
     canonical_prd_id,
+    current_parameter_source_name,
     resolve_prd_id,
 )
 from anvil.cli._json import JSON_OPTION, dump_model, emit_success, fail
@@ -475,11 +475,10 @@ def status(
         # Hook output is a project-level compatibility surface consumed by
         # SessionStart hooks; do not let ANVIL_PRD silently change its shape.
         # Still honor an explicit `status --hook-format --prd X` request.
-        ctx = click.get_current_context(silent=True)
-        prd_source = ctx.get_parameter_source("prd") if ctx is not None else None
+        prd_source = current_parameter_source_name("prd")
         status_prd = (
             None
-            if hook_format and prd_source is click.core.ParameterSource.ENVIRONMENT
+            if hook_format and prd_source == "ENVIRONMENT"
             else prd
         )
         scoped_prd_id = (

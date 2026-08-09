@@ -1,0 +1,8 @@
+{
+  "expected_digest": "2b1b3fab185e4627f05131d808c1844c1a0b1ac908b5c2495a9a4f0afe323b49",
+  "max_bytes": 2097152,
+  "operation_id": "state.prd.content",
+  "operation_version": 1,
+  "prd_id": "default",
+  "sections": []
+}

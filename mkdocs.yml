@@ -119,6 +119,7 @@ nav:
   - Reference:
       - CLI: cli-reference.md
       - MCP server (36 tools): mcp.md
+      - Provider read contracts: contracts/provider-reads-v1.md
       - Agents: agents-reference.md
       - Skills: skills-reference.md
       - Hooks: hooks-reference.md

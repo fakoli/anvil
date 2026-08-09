@@ -28,7 +28,9 @@ keywords = [
     "terraform-for-work",
 ]
 dependencies = [
-    "typer>=0.12",
+    # Structural command discovery is qualified at the 0.13 floor and 0.27.0.
+    # Keep the upper bound honest until the next Typer series is tested.
+    "typer>=0.13,<0.28",
     # These are the lowest versions that both resolve and register Anvil's MCP
     # type surface successfully; keep the wheel metadata truthful.
     "pydantic>=2.11.7",
