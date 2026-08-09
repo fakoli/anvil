@@ -1447,7 +1447,8 @@ the sibling of `anvil describe` and needs no initialized project.
 
 Returns a machine-readable manifest of the anvil command surface: the CLI subcommands,
 their exact root/group/leaf long options, and the MCP tool names this engine exposes, plus build
-identity, engine version, schema version, and a stable `api_version` to pin against.
+identity, engine version, schema version, a stable `api_version` to pin against,
+and the versioned provider-read operation catalog with packaged schema and fixture resources.
 Introspected live from the same builder the CLI `anvil
 describe` uses — the CLI and MCP surfaces can never disagree — so it never needs a project
 to be initialized. This tool is planning-gated (hidden from the wire unless
@@ -1463,7 +1464,7 @@ None.
 
 ```json
 {
-  "api_version": "8",
+  "api_version": "9",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",
@@ -1481,12 +1482,39 @@ None.
       {"path": ["prd"], "kind": "group", "flags": []},
       {"path": ["prd", "source-name"], "kind": "command", "flags": ["--cwd", "--json", "--prd"]}
     ],
-    "contract_count": 76,
-    "count": 68
+    "contract_count": 79,
+    "count": 70
   },
   "mcp": {
     "tools": ["claim_task", "..."],
     "count": 36
+  },
+  "operation_catalog": {
+    "catalog_version": 1,
+    "operations": [
+      {
+        "operation_id": "state.prd.content",
+        "operation_version": 1,
+        "effect": "read",
+        "transport": {"kind": "cli", "command": "prd show", "json_required": true},
+        "schema_resources": {
+          "input": "contracts/provider-reads/v1/prd-content-input.schema.json",
+          "output": "contracts/provider-reads/v1/prd-content-output.schema.json",
+          "error": "contracts/provider-reads/v1/read-error.schema.json"
+        }
+      },
+      {
+        "operation_id": "state.project.snapshot",
+        "operation_version": 1,
+        "effect": "read",
+        "transport": {"kind": "cli", "command": "project snapshot", "json_required": true},
+        "schema_resources": {
+          "input": "contracts/provider-reads/v1/project-snapshot-input.schema.json",
+          "output": "contracts/provider-reads/v1/project-snapshot-output.schema.json",
+          "error": "contracts/provider-reads/v1/read-error.schema.json"
+        }
+      }
+    ]
   }
 }
 ```
@@ -1496,6 +1524,15 @@ Grouped CLI commands render space-joined (e.g. `"prd parse"`) so the exact invoc
 is visible. Each contract records long options owned by that exact node; a group does not
 inherit options from its descendants. Short aliases such as `-V` are intentionally outside
 this skill/release contract.
+
+Provider consumers must fail closed before reading state unless the manifest
+contains API version 9, operation-catalog version 1, the required operation at
+version 1, and the exact version-1 schema resource paths. Do not infer
+compatibility from the engine version. The provider reads use their cataloged
+CLI transports; an MCP-only host can still discover and pin the same contract
+with `describe_surface`. See [Provider read contracts](contracts/provider-reads-v1.md)
+for packaged fixtures, limits, digests, refusal behavior, and the Workbench
+hierarchy mapping.
 
 **Failure modes**
 

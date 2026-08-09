@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import UserDict
+from copy import deepcopy
 from importlib import resources
+from pathlib import Path
 from types import MappingProxyType
 
 import pytest
@@ -58,6 +60,113 @@ from anvil.state.hashing import (
 
 _A_SHA = "a" * 64
 _B_SHA = "b" * 64
+
+
+def test_workbench_consumer_fixture_maps_v1_and_fails_closed_on_drift() -> None:
+    from anvil.cli.describe import build_manifest
+
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "contracts"
+            / "workbench-provider-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    def compatible(manifest: dict) -> bool:  # type: ignore[type-arg]
+        required = fixture["compatibility"]["required"]
+        if manifest.get("api_version") != required["api_version"]:
+            return False
+        catalog = manifest.get("operation_catalog")
+        if not isinstance(catalog, dict) or (
+            catalog.get("catalog_version")
+            != required["operation_catalog_version"]
+        ):
+            return False
+        actual = {
+            operation["operation_id"]: operation
+            for operation in catalog.get("operations", [])
+            if isinstance(operation, dict) and "operation_id" in operation
+        }
+        for operation_id, expected in required["operations"].items():
+            operation = actual.get(operation_id)
+            if operation is None or (
+                operation.get("operation_version")
+                != expected["operation_version"]
+            ):
+                return False
+            if (
+                operation.get("schema_resources", {}).get("output")
+                != expected["output_schema_resource"]
+            ):
+                return False
+        return True
+
+    manifest = build_manifest()
+    assert compatible(manifest)
+    assert fixture["compatibility"]["on_mismatch"] == (
+        "refuse_without_state_access"
+    )
+    assert set(fixture["hierarchy_mapping"]) == {"prd", "feature", "task", "run"}
+    assert fixture["hierarchy_mapping"]["run"]["provider_path"] is None
+    assert set(fixture["hierarchy_mapping"]["prd"]["fields"].values()) == {
+        f"payload.prds[].{field}"
+        for field in {
+            "content_available",
+            "local_id",
+            "provenance_state",
+            "ref",
+            "revision",
+            "source_encoding",
+            "source_sha256",
+            "source_size_bytes",
+            "status",
+            "target_tag",
+            "target_version",
+            "title",
+        }
+    }
+    assert set(fixture["hierarchy_mapping"]["feature"]["fields"].values()) == {
+        f"payload.features[].{field}"
+        for field in {"local_id", "prd_ref", "ref", "status", "title"}
+    }
+    assert set(fixture["hierarchy_mapping"]["task"]["fields"].values()) == {
+        f"payload.tasks[].{field}"
+        for field in {
+            "acceptance_criteria",
+            "dependency_refs",
+            "feature_ref",
+            "local_id",
+            "parent_ref",
+            "prd_ref",
+            "priority",
+            "ref",
+            "status",
+            "title",
+            "verification_summaries",
+        }
+    }
+
+    absent = deepcopy(manifest)
+    absent.pop("api_version")
+    assert not compatible(absent)
+
+    wrong_api = deepcopy(manifest)
+    wrong_api["api_version"] = "10"
+    assert not compatible(wrong_api)
+
+    wrong_operation = deepcopy(manifest)
+    wrong_operation["operation_catalog"]["operations"][0][
+        "operation_version"
+    ] = 2
+    assert not compatible(wrong_operation)
+
+    wrong_schema = deepcopy(manifest)
+    wrong_schema["operation_catalog"]["operations"][1]["schema_resources"][
+        "output"
+    ] = "contracts/provider-reads/v2/project-snapshot-output.schema.json"
+    assert not compatible(wrong_schema)
 
 
 def _prd(

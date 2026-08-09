@@ -39,6 +39,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   exact bounded UTF-8 source bytes, digest, size, encoding, and revision across
   CLI, MCP, migration, and events-only replay. Legacy rows remain explicitly
   unavailable rather than receiving fabricated provenance; schema version is 18.
+- **Versioned provider reads.** JSON-only `anvil project snapshot` and
+  `anvil prd show` expose bounded, non-mutating version-1 read contracts with
+  packaged draft-2020-12 schemas, canonical fixtures, digest vectors, and a
+  fail-closed Workbench hierarchy mapping. `anvil describe` now publishes the
+  operation catalog and advances the public API contract to version 9. The
+  supported Typer range is now explicit (`>=0.13,<0.28`) and installed-wheel
+  qualification runs at both dependency floors.
 
 ### Fixed
 

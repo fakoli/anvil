@@ -2,7 +2,7 @@
 
 > **Audience:** users running `anvil` day-to-day — flags, exit codes, and command behavior.
 
-> Single-page reference for the `anvil` CLI: 68 executable leaf commands,
+> Single-page reference for the `anvil` CLI: 70 executable leaf commands,
 > including the milestone bundle lifecycle. The most-used lifecycle
 > commands get full Synopsis/Flags/Exit-codes treatment below;
 > [Additional commands (index)](#additional-commands) covers the rest with a
@@ -19,9 +19,11 @@
 - Project lifecycle
   - [`anvil init`](#init)
   - [`anvil status`](#status)
+  - [`anvil project snapshot`](#project-snapshot)
   - [`anvil scan`](#scan)
 - PRD authoring
   - [`anvil prd parse`](#prd-parse)
+  - [`anvil prd show`](#prd-show)
   - [`anvil prd source-name`](#prd-source-name)
   - [`anvil prd assess`](#prd-assess)
   - [`anvil prd review`](#prd-review)
@@ -234,6 +236,40 @@ anvil status --hook-format     # for SessionStart hooks
 **See also:** [`anvil init`](#init) to create the directory;
 [`anvil list`](#list) for the per-task view.
 
+### `anvil project snapshot` { #project-snapshot }
+
+**Synopsis:** Return one atomic, bounded, allowlisted project hierarchy through
+provider operation `state.project.snapshot` version 1. This command is
+JSON-only and read-only: it never initializes, migrates, repairs, catches up, or
+mutates state. The response includes exact PRD/feature/task references,
+provider-owned verification summaries, the event frontier, applied limits, and
+a deterministic payload digest. It excludes full PRD Markdown, source paths,
+raw commands/manual steps, proof/evidence bodies, claims, and secrets.
+
+**Flags:**
+
+- `--json` *(required)* — emit the one-line success/error envelope.
+- `--limit NAME=VALUE` *(repeatable)* — lower a published version-1 ceiling.
+  Unknown names, malformed values, and attempts to raise a ceiling refuse.
+- `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
+
+**Exit codes:**
+
+- `0` — a complete snapshot was returned with `truncated: false`.
+- `1` — state/schema/convergence/hierarchy/limit validation refused; no partial
+  snapshot is returned.
+
+**Examples:**
+
+```bash
+anvil project snapshot --json
+anvil project snapshot --json --limit max_tasks=1000 --limit max_dependency_edges=5000
+```
+
+Consumers must first pin describe API 9, operation version 1, and the exact
+packaged schema resource. See [Provider read contracts](contracts/provider-reads-v1.md)
+for limits, digest framing, fixtures, and the Workbench mapping.
+
 ### `anvil scan` { #scan }
 
 **Synopsis:** Brownfield ingest of an existing repository. Walks the working
@@ -330,6 +366,46 @@ anvil prd parse --prd v0.2 --json
 **See also:** [`how-to/authoring-a-prd.md`](how-to/authoring-a-prd.md);
 [`docs/prd-template.md`](prd-template.md) for the required section structure;
 [`anvil prd review`](#prd-review) for the next step.
+
+### `anvil prd show` { #prd-show }
+
+**Synopsis:** Return exact revision-bound persisted PRD source through provider
+operation `state.prd.content` version 1. This command is JSON-only and never
+rereads the mutable authoring file. A full or selected read that exceeds its
+limit refuses without returning a prefix and reports `truncated: false`.
+
+**Arguments and flags:**
+
+- `PRD_ID` *(required)* — exact default or named PRD partition identifier.
+- `--json` *(required)* — emit the one-line success/error envelope.
+- `--section PATH` *(repeatable)* — exact case-sensitive slash-delimited ATX
+  heading path. Sections must be known, unique, and non-overlapping; output is
+  returned in source order. JSON-Pointer escapes are `~0` for `~` and `~1` for
+  `/`.
+- `--expected-digest HEX` — require the exact lowercase 64-hex persisted source
+  digest; mismatch returns `stale_digest` and no content.
+- `--limit BYTES`, `--max-bytes BYTES` — lower the immutable 2 MiB content
+  ceiling.
+- `--cwd PATH` *(hidden)* — project directory. Defaults to cwd.
+
+**Exit codes:**
+
+- `0` — exact persisted UTF-8 bytes were returned in JSON with digests,
+  revision, selector, sizes, applied limit, and `truncated: false`.
+- `1` — invalid ID/digest/selector, missing or legacy-unbound content, source
+  drift, schema/convergence failure, stale digest, or limit refusal; no content
+  or prefix is returned.
+
+**Examples:**
+
+```bash
+anvil prd show default --json
+anvil prd show default --json --section Summary --section Goals
+anvil prd show default --json --expected-digest 2b1b3fab185e4627f05131d808c1844c1a0b1ac908b5c2495a9a4f0afe323b49
+```
+
+See [Provider read contracts](contracts/provider-reads-v1.md) for exact selector
+grammar, digest framing, schemas, fixtures, and refusal behavior.
 
 ### `anvil prd source-name` { #prd-source-name }
 
@@ -1533,7 +1609,7 @@ format, descriptive output attachment, and claim-bound proof import;
 ## Additional commands (index) { #additional-commands }
 
 The sections above give full Synopsis/Flags/Exit-codes treatment to the core
-lifecycle commands. anvil ships 25 more — every one real,
+lifecycle commands. Anvil ships additional commands — every one real,
 `--help`-documented, and exercised by the test suite — indexed here one line
 at a time so this page's single-reference claim holds. Run
 `anvil <command> --help` (or `anvil <group> <command> --help`) for the live
@@ -1542,7 +1618,9 @@ flag list; full prose treatment may follow in a later pass.
 **Self-description and cross-harness delivery**
 
 - `anvil describe` — Emit a machine-readable manifest of the CLI/MCP command
-  surface: release and source-build identity, schema/API versions, every
+  surface: release and source-build identity, schema/API versions, the
+  versioned provider-read operation catalog with packaged schema/fixture
+  resources, every
   command/tool name, and the exact long options owned by the root, each group, and
   each leaf command (`--human`, `--json`); read-only, needs no project. Release
   tooling uses the node-level `cli.contracts` inventory to validate shipped
