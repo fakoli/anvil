@@ -2193,44 +2193,33 @@ class SqliteBackend:
 
         def payload_references(payload: dict[str, Any]) -> set[tuple[str, str]]:
             references: set[tuple[str, str]] = set()
-            singular_kinds = {
-                "feature_id": "feature",
-                "task_id": "task",
-                "parent_task_id": "task",
-                "claim_id": "claim",
-                "bundle_claim_id": "claim",
-                "evidence_id": "evidence",
-                "bundle_id": "bundle",
-                "replacement_bundle_id": "bundle",
-            }
-            plural_kinds = {
-                "dependencies": "task",
-                "expected_dependencies": "task",
-                "task_ids": "task",
-                "member_task_ids": "task",
-                "claim_ids": "claim",
-            }
-
-            def visit(value: Any) -> None:
-                if isinstance(value, dict):
-                    for field, nested in value.items():
-                        kind = singular_kinds.get(field)
-                        if kind is not None:
-                            key = entity_key(kind, nested)
-                            if key is not None:
-                                references.add(key)
-                        plural_kind = plural_kinds.get(field)
-                        if plural_kind is not None and isinstance(nested, list):
-                            for item in nested:
-                                key = entity_key(plural_kind, item)
-                                if key is not None:
-                                    references.add(key)
-                        visit(nested)
-                elif isinstance(value, list):
-                    for item in value:
-                        visit(item)
-
-            visit(payload)
+            for field, kind in (
+                ("feature_id", "feature"),
+                ("task_id", "task"),
+                ("parent_task_id", "task"),
+                ("claim_id", "claim"),
+                ("bundle_claim_id", "claim"),
+                ("evidence_id", "evidence"),
+                ("bundle_id", "bundle"),
+                ("replacement_bundle_id", "bundle"),
+            ):
+                key = entity_key(kind, payload.get(field))
+                if key is not None:
+                    references.add(key)
+            for field, kind in (
+                ("dependencies", "task"),
+                ("expected_dependencies", "task"),
+                ("task_ids", "task"),
+                ("member_task_ids", "task"),
+                ("claim_ids", "claim"),
+            ):
+                values = payload.get(field)
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    key = entity_key(kind, value)
+                    if key is not None:
+                        references.add(key)
             return references
 
         def event_references(event: Event) -> set[tuple[str, str]]:
@@ -2249,6 +2238,19 @@ class SqliteBackend:
                         references.update(payload_references(payload))
                 return references
             references.update(payload_references(event.payload_json))
+            nested_field = {
+                "task.dependencies_batch_edited": "edits",
+                "bundle.claimed": "member_claims",
+            }.get(event.action)
+            nested_values = (
+                event.payload_json.get(nested_field)
+                if nested_field is not None
+                else None
+            )
+            if isinstance(nested_values, list):
+                for nested in nested_values:
+                    if isinstance(nested, dict):
+                        references.update(payload_references(nested))
             return references
 
         # Physical hash ancestry expresses append order, not semantic

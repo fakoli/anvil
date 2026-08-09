@@ -1901,6 +1901,119 @@ class TestGitPrdLifecycleReplay:
             replay.close()
 
     @pytest.mark.parametrize("reverse_physical_order", [False, True])
+    def test_losing_graph_ignores_identity_keys_in_opaque_metadata(
+        self, tmp_path: Path, reverse_physical_order: bool
+    ) -> None:
+        base = tmp_path / f"planning-opaque-base-{reverse_physical_order}"
+        base.mkdir()
+        backend = _make_backend(base)
+        try:
+            _seed_prd(backend)
+            backend.append(
+                _draft(
+                    "feature.created",
+                    {
+                        "id": "F-base",
+                        "prd_id": "default",
+                        "title": "Base feature",
+                        "description": "",
+                        "status": "proposed",
+                        "requirements": [],
+                        "tasks": [],
+                    },
+                    target_kind="feature",
+                    target_id="F-base",
+                )
+            )
+            task_payload = _task_payload("T-base")
+            task_payload["feature_id"] = "F-base"
+            backend.append(
+                _draft(
+                    "task.created",
+                    task_payload,
+                    target_kind="task",
+                    target_id="T-base",
+                )
+            )
+        finally:
+            backend.close()
+        prefix = (base / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+        graph_branch = tmp_path / f"planning-opaque-graph-{reverse_physical_order}"
+        shutil.copytree(base, graph_branch)
+        graph_backend = _make_backend(graph_branch)
+        graph = graph_backend.append(
+            _planning_graph_batch(
+                "F-losing",
+                ts=_T0 + timedelta(seconds=10),
+            )
+        )
+        mapping = graph_backend.append(
+            _draft(
+                "sync_mapping.upserted",
+                {
+                    "task_id": "T-base",
+                    "external_system": "opaque-provider",
+                    "external_id": "opaque-1",
+                    "external_url": None,
+                    "last_synced_at": (_T0 + timedelta(seconds=11)).isoformat(),
+                    "sync_state": "in_sync",
+                    "conflict_resolution_strategy": "prompt",
+                    "provider_metadata": {
+                        "feature_id": "F-losing",
+                        "note": "provider-owned data is not an Anvil relation",
+                    },
+                    "prd_id": "default",
+                    "entity_kind": "task",
+                },
+                target_kind="task",
+                target_id="T-base",
+                ts=_T0 + timedelta(seconds=11),
+            )
+        )
+        assert graph is not None and mapping is not None
+        assert mapping.parent_event_id == graph.id
+        graph_backend.close()
+
+        revision_branch = tmp_path / f"planning-opaque-revision-{reverse_physical_order}"
+        shutil.copytree(base, revision_branch)
+        revision_backend = _make_backend(revision_branch)
+        revision_backend.append(
+            _draft(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Winning revision"),
+                target_kind="prd",
+                target_id="default",
+                ts=_T0 + timedelta(seconds=20),
+            )
+        )
+        revision_backend.close()
+
+        suffixes = [
+            (graph_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+            (revision_branch / "events.jsonl").read_text(encoding="utf-8").splitlines()[len(prefix):],
+        ]
+        if reverse_physical_order:
+            suffixes.reverse()
+        merged = tmp_path / f"planning-opaque-merged-{reverse_physical_order}"
+        merged.mkdir()
+        (merged / "events.jsonl").write_text(
+            "\n".join(prefix + [line for suffix in suffixes for line in suffix]) + "\n",
+            encoding="utf-8",
+        )
+        replay = _make_backend(merged)
+        try:
+            prd = replay.get_prd("default")
+            sync_mapping = replay.get_sync_mapping("T-base")
+            assert prd is not None and prd.revision == 2
+            assert replay.get_feature("F-losing") is None
+            assert sync_mapping is not None
+            assert sync_mapping.external_id == "opaque-1"
+            assert sync_mapping.provider_metadata["feature_id"] == "F-losing"
+        finally:
+            replay.close()
+
+    @pytest.mark.parametrize("reverse_physical_order", [False, True])
     def test_current_orphan_revision_lineage_is_ignored_in_full_and_bounded_replay(
         self, tmp_path: Path, reverse_physical_order: bool
     ) -> None:
