@@ -4308,6 +4308,51 @@ def _write_prd_file(state_dir: Path, content: str = _MINIMAL_PRD) -> Path:
     return prd_path
 
 
+def _inference_persistence_prd(narrow: str, broad_narrow: str) -> str:
+    """Return one acyclic planner fixture with an authored dependency chain."""
+    return f"""# Project: MCP Inference Persistence
+
+## Summary
+Persist one canonical dependency graph.
+
+## Goals
+- Keep planning surfaces equivalent.
+
+## Requirements
+- R001: Persist inferred and authored dependencies.
+
+## Features
+### F001: Planner
+**Requirements:** R001
+
+## Tasks
+### T001: Narrow change
+**Feature:** F001
+**Likely files:** {narrow}
+**Acceptance criteria:**
+- Narrow change works.
+**Verification:**
+- `pytest -q`
+
+### T002: Broad change
+**Feature:** F001
+**Likely files:** {broad_narrow}, src/broad.py
+**Acceptance criteria:**
+- Broad change works.
+**Verification:**
+- `pytest -q`
+
+### T003: Authored dependent
+**Feature:** F001
+**Dependencies:** T001
+**Likely files:** src/authored.py
+**Acceptance criteria:**
+- Authored dependency is preserved.
+**Verification:**
+- `pytest -q`
+"""
+
+
 # A re-parse of ``_MINIMAL_PRD``: R001 dropped (→ superseded), R002 carried
 # forward (→ unchanged), R003 added — a material change that exercises the
 # prd.revised diff and the approved→draft status demotion.
@@ -5862,6 +5907,66 @@ class TestMcpPrdAmbiguityAndEnv:
 
 
 class TestPlanTasks:
+    @staticmethod
+    def _run_inference_plan(
+        root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        narrow: str,
+        broad_narrow: str,
+        prd_id: str | None = None,
+    ) -> tuple[dict[str, list[str]], int, int]:
+        from anvil.clock import SystemClock
+        from anvil.planning.inference import build_bundle_plan
+        from anvil.state.sqlite import SqliteBackend
+
+        root.mkdir()
+        state_dir = _init_state_dir(root)
+        content = _inference_persistence_prd(narrow, broad_narrow)
+        arguments: dict[str, str] = {}
+        if prd_id is None:
+            _write_prd_file(state_dir, content)
+        else:
+            source = state_dir / "prds" / f"{prd_id}.md"
+            source.parent.mkdir()
+            source.write_text(content, encoding="utf-8")
+            arguments["prd_id"] = prd_id
+        monkeypatch.chdir(root)
+
+        async def plan() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("parse_prd", arguments)
+                await client.call_tool("plan_tasks", arguments)
+
+        _run(plan())
+        backend = SqliteBackend(
+            db_path=str(state_dir / "state.db"),
+            events_path=str(state_dir / "events.jsonl"),
+            clock=SystemClock(),
+        )
+        backend.initialize()
+        try:
+            owner = prd_id or "default"
+            tasks = backend.list_tasks(prd_id=owner)
+            dependency_graph = {
+                task.id: list(task.dependencies)
+                for task in tasks
+            }
+            serial_depth = build_bundle_plan(
+                tasks,
+                project_root=root,
+            ).serial_depth
+        finally:
+            backend.close()
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            task_event_count = connection.execute(
+                "SELECT COUNT(*) FROM events WHERE action = 'task.created'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        return dependency_graph, serial_depth, task_event_count
+
     def test_happy_path_emits_features_and_tasks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5885,7 +5990,49 @@ class TestPlanTasks:
         assert statuses.get("T001") == "drafted"
         assert statuses.get("T002") == "drafted"
 
-    def test_native_path_failure_is_tool_error_and_atomic_before_task_creation(
+    @pytest.mark.parametrize("prd_id", [None, "release"], ids=["default", "named"])
+    def test_plan_dependency_persistence_preserves_authored_acyclic_graph(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        prd_id: str | None,
+    ) -> None:
+        graph, serial_depth, task_event_count = self._run_inference_plan(
+            tmp_path / (prd_id or "default"),
+            monkeypatch,
+            narrow="src/core.py",
+            broad_narrow="./src/core.py",
+            prd_id=prd_id,
+        )
+        prefix = f"{prd_id}:" if prd_id else ""
+        assert graph == {
+            f"{prefix}T001": [f"{prefix}T002"],
+            f"{prefix}T002": [],
+            f"{prefix}T003": [f"{prefix}T001"],
+        }
+        assert serial_depth == 3
+        # One canonical task event per task: no transient raw graph is logged.
+        assert task_event_count == 3
+
+    def test_plan_inference_dependency_graph_matches_bundle_for_equivalent_paths(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        slash_graph, slash_depth, _ = self._run_inference_plan(
+            tmp_path / "slash",
+            monkeypatch,
+            narrow="src/core.py",
+            broad_narrow="src/core.py",
+        )
+        alternate_graph, alternate_depth, _ = self._run_inference_plan(
+            tmp_path / "alternate",
+            monkeypatch,
+            narrow=r".\src\core.py",
+            broad_narrow="./src/./core.py",
+        )
+        assert slash_graph == alternate_graph
+        assert slash_depth == alternate_depth == 3
+
+    def test_plan_inference_failure_is_typed_and_atomic_before_task_creation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_dir = _init_state_dir(tmp_path)

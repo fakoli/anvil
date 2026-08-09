@@ -38,6 +38,7 @@ from anvil.cli._helpers import (
     ingest_prd_source,
 )
 from anvil.cli._json import JSON_OPTION, emit_success, fail
+from anvil.cli._sample import SampleSeedError
 
 if TYPE_CHECKING:
     from anvil.cli._helpers import IngestedPrdSource
@@ -720,7 +721,8 @@ def scan(
         result = _run_scan(state_dir, project_root, force=force)
     except SampleSeedError as exc:
         if json_output:
-            fail(_COMMAND, str(exc), code=exc.code)
+            code = exc.code if exc.code != "sample_seed_error" else "seed_rejected"
+            fail(_COMMAND, str(exc), code=code)
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from None
 

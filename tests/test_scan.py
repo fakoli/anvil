@@ -15,7 +15,6 @@ Tests run in isolated tmp directories and never touch the real cwd state.
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import sqlite3

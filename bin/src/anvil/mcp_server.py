@@ -3505,23 +3505,10 @@ def plan_tasks(
             except EventRejected as exc:
                 raise ToolError(str(exc)) from exc
 
-        # Emit task.created per task.
-        for task in result.tasks:
-            now = clock.now()
-            try:
-                backend.append(EventDraft(
-                    timestamp=now,
-                    actor="anvil-mcp",
-                    action="task.created",
-                    target_kind="task",
-                    target_id=task.id,
-                    payload_json=_with_prd_id(
-                        task.model_dump(mode="json"), task.prd_id
-                    ),
-                ))
-            except EventRejected as exc:
-                raise ToolError(str(exc)) from exc
-
+        # Persist only the validated canonical inference result. Previously the
+        # MCP path first appended every raw parsed task and then upserted the
+        # inferred copy. That exposed a transient/raw graph in the event log and
+        # could leave it behind when a later inference append was refused.
         for inferred_task in inference_result.tasks:
             now = clock.now()
             try:
