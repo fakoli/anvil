@@ -420,6 +420,66 @@ class TaskCreatedPayload(BaseModel):
     updated_at: str = ""
 
 
+_PLANNING_BATCH_ACTIONS = Literal[
+    "prd.parsed",
+    "prd.revised",
+    "prd.reviewed",
+    "prd.approved",
+    "feature.created",
+    "feature.deleted",
+    "task.created",
+    "task.deleted",
+    "task.scored",
+    "task.status_changed",
+    "conflict_group.upserted",
+]
+_MAX_PLANNING_BATCH_OPERATIONS = 10_000
+_MAX_PLANNING_BATCH_BYTES = 16 * 1024 * 1024
+
+
+class PlanningBatchOperationPayload(BaseModel):
+    """One ordered mutation embedded in an atomic planning event."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: _PLANNING_BATCH_ACTIONS
+    target_kind: StrictStr = Field(min_length=1, max_length=64)
+    target_id: StrictStr = Field(min_length=1, max_length=512)
+    payload_json: dict[str, Any]
+
+
+class PlanningBatchAppliedPayload(BaseModel):
+    """A complete parse/plan/seed graph transition persisted as one event."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    prd_id: StrictStr = Field(min_length=1, max_length=512)
+    operations: list[PlanningBatchOperationPayload] = Field(
+        min_length=1,
+        max_length=_MAX_PLANNING_BATCH_OPERATIONS,
+    )
+
+    @model_validator(mode="after")
+    def _validate_batch_size(self) -> PlanningBatchAppliedPayload:
+        content_operations = [
+            operation
+            for operation in self.operations
+            if operation.action in {"prd.parsed", "prd.revised"}
+        ]
+        if len(content_operations) > 1:
+            raise ValueError("planning batch may contain at most one PRD content event")
+        if content_operations:
+            nested_prd_id = content_operations[0].payload_json.get(
+                "prd_id", DEFAULT_PRD_ID
+            )
+            if nested_prd_id != self.prd_id:
+                raise ValueError("planning batch PRD content owner mismatch")
+        material = self.model_dump(mode="json")
+        canonical_json_bytes(material, max_bytes=_MAX_PLANNING_BATCH_BYTES)
+        return self
+
+
 _MAX_DEPENDENCY_BATCH_ENTRIES = 10_000
 
 
@@ -1770,6 +1830,8 @@ __all__ = [
     "PrdParsedPayload",
     "PrdReviewedPayload",
     "PrdRevisedPayload",
+    "PlanningBatchAppliedPayload",
+    "PlanningBatchOperationPayload",
     "ProgressNotedPayload",
     "ProgressAttestedPayload",
     "ProjectCreatedPayload",

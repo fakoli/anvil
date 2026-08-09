@@ -3448,8 +3448,9 @@ def plan_tasks(
         # was missing the TransactionAborted catch that the MCP had).
         # --------------------------------------------------------------
         from anvil.planning._plan_helpers import (
+            build_prune_event_drafts,
             classify_orphans,
-            emit_prune_events,
+            emit_planning_batch,
         )
 
         classification = classify_orphans(
@@ -3474,25 +3475,20 @@ def plan_tasks(
                 "history is preserved either way)."
             )
 
-        try:
-            prune_result = emit_prune_events(
-                backend,
-                classification,
-                actor="anvil-mcp",
-                clock=clock,
-                prune_force=prune_force,
-            )
-        except EventRejected as exc:
-            raise ToolError(str(exc)) from exc
+        operations, prune_result = build_prune_event_drafts(
+            classification,
+            actor="anvil-mcp",
+            clock=clock,
+            prune_force=prune_force,
+        )
 
         pruned_task_ids = prune_result.pruned_task_ids
         pruned_feature_ids = prune_result.pruned_feature_ids
 
-        # Emit feature.created per feature.
+        # Build one atomic canonical graph transition.
         for feature in result.features:
             now = clock.now()
-            try:
-                backend.append(EventDraft(
+            operations.append(EventDraft(
                     timestamp=now,
                     actor="anvil-mcp",
                     action="feature.created",
@@ -3502,8 +3498,6 @@ def plan_tasks(
                         feature.model_dump(mode="json"), feature.prd_id
                     ),
                 ))
-            except EventRejected as exc:
-                raise ToolError(str(exc)) from exc
 
         # Persist only the validated canonical inference result. Previously the
         # MCP path first appended every raw parsed task and then upserted the
@@ -3511,8 +3505,7 @@ def plan_tasks(
         # could leave it behind when a later inference append was refused.
         for inferred_task in inference_result.tasks:
             now = clock.now()
-            try:
-                backend.append(EventDraft(
+            operations.append(EventDraft(
                     timestamp=now,
                     actor="anvil-mcp",
                     action="task.created",
@@ -3522,14 +3515,11 @@ def plan_tasks(
                         inferred_task.model_dump(mode="json"), inferred_task.prd_id
                     ),
                 ))
-            except EventRejected as exc:
-                raise ToolError(str(exc)) from exc
 
             current = backend.get_task(inferred_task.id)
-            if current is not None and current.status.value == "proposed":
+            if current is None or current.status.value == "proposed":
                 now = clock.now()
-                try:
-                    backend.append(EventDraft(
+                operations.append(EventDraft(
                         timestamp=now,
                         actor="anvil-mcp",
                         action="task.status_changed",
@@ -3542,8 +3532,6 @@ def plan_tasks(
                             "reason": "plan_tasks: initial draft after inference",
                         },
                     ))
-                except EventRejected as exc:
-                    raise ToolError(str(exc)) from exc
 
         # CL-4 — persist the inferred ConflictGroups so the conflict_groups
         # table round-trips them (parity with `anvil plan`). The task rows
@@ -3551,8 +3539,7 @@ def plan_tasks(
         # table with the full group records.
         for cg in inference_result.conflict_groups:
             now = clock.now()
-            try:
-                backend.append(EventDraft(
+            operations.append(EventDraft(
                     timestamp=now,
                     actor="anvil-mcp",
                     action="conflict_group.upserted",
@@ -3560,8 +3547,17 @@ def plan_tasks(
                     target_id=cg.id,
                     payload_json=cg.model_dump(mode="json"),
                 ))
-            except EventRejected as exc:
-                raise ToolError(str(exc)) from exc
+
+        try:
+            emit_planning_batch(
+                backend,
+                operations,
+                actor="anvil-mcp",
+                clock=clock,
+                prd_id=scope_prd_id,
+            )
+        except EventRejected as exc:
+            raise ToolError(str(exc)) from exc
 
         return PlanTasksResponse(
             feature_count=len(result.features),

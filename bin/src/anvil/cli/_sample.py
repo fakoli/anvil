@@ -31,6 +31,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from anvil.state.backend import EventRejected
+
 if TYPE_CHECKING:
     from anvil.state.sqlite import SqliteBackend
 
@@ -225,6 +227,30 @@ def seed_pipeline_from_prd(
     parse_error_hint: str = "Fix the PRD and re-run.",
     project_root: Path | None = None,
 ) -> dict[str, Any]:
+    """Persist the complete deterministic seed pipeline as one atomic event."""
+    try:
+        with backend.collect_planning_batch(actor=actor) as atomic_backend:
+            return _seed_pipeline_from_prd_unbatched(
+                atomic_backend,
+                prd_text,
+                actor=actor,
+                review_notes=review_notes,
+                parse_error_hint=parse_error_hint,
+                project_root=project_root,
+            )
+    except EventRejected as exc:
+        raise SampleSeedError(f"the PRD seed was rejected: {exc}") from None
+
+
+def _seed_pipeline_from_prd_unbatched(
+    backend: SqliteBackend,
+    prd_text: str,
+    *,
+    actor: str = "anvil-cli",
+    review_notes: str = "auto-seeded",
+    parse_error_hint: str = "Fix the PRD and re-run.",
+    project_root: Path | None = None,
+) -> dict[str, Any]:
     """Drive parse → plan → score → review offline for an *arbitrary* PRD text.
 
     This is the generalised engine behind :func:`seed_sample_pipeline` and the
@@ -360,8 +386,6 @@ def seed_pipeline_from_prd(
                 if item.id not in new_by_id
             ],
         }
-    from anvil.state.backend import EventRejected
-
     try:
         backend.append(
             EventDraft(
@@ -428,19 +452,6 @@ def seed_pipeline_from_prd(
                 target_kind="feature",
                 target_id=feature.id,
                 payload_json=feature.model_dump(mode="json"),
-            )
-        )
-
-    for task in parsed.tasks:
-        now = clock.now()
-        backend.append(
-            EventDraft(
-                timestamp=now,
-                actor=actor,
-                action="task.created",
-                target_kind="task",
-                target_id=task.id,
-                payload_json=task.model_dump(mode="json"),
             )
         )
 

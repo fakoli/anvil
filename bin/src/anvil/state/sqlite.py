@@ -127,6 +127,7 @@ from anvil.state.payloads import (
     FeatureCreatedPayload,
     FeatureDeletedPayload,
     FileChangedPayload,
+    PlanningBatchAppliedPayload,
     PrdApprovedPayload,
     PrdDecisionResolvedPayload,
     PrdParsedPayload,
@@ -1603,6 +1604,50 @@ class SqliteBackend:
         value = event.payload_json.get("prd_id", DEFAULT_PRD_ID)
         return value if isinstance(value, str) else DEFAULT_PRD_ID
 
+    @staticmethod
+    def _planning_batch_prd_content_operation(
+        event: EventDraft | Event,
+    ) -> dict[str, Any] | None:
+        """Return the sole embedded PRD content operation, when present."""
+        if event.action != "planning.batch_applied":
+            return None
+        operations = event.payload_json.get("operations")
+        if not isinstance(operations, list):
+            return None
+        content = [
+            operation
+            for operation in operations
+            if isinstance(operation, dict)
+            and operation.get("action") in {"prd.parsed", "prd.revised"}
+        ]
+        return content[0] if len(content) == 1 else None
+
+    @classmethod
+    def _git_prd_policy_event(cls, event: Event) -> Event:
+        """Expose an atomic batch's PRD content to the Git lineage resolver."""
+        operation = cls._planning_batch_prd_content_operation(event)
+        if operation is None:
+            return event
+        payload = operation.get("payload_json")
+        target_kind = operation.get("target_kind")
+        target_id = operation.get("target_id")
+        action = operation.get("action")
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(target_kind, str)
+            or not isinstance(target_id, str)
+            or action not in {"prd.parsed", "prd.revised"}
+        ):
+            return event
+        return event.model_copy(
+            update={
+                "action": action,
+                "target_kind": target_kind,
+                "target_id": target_id,
+                "payload_json": payload,
+            }
+        )
+
     def _build_git_prd_replay_policy(
         self, ordered: list[Event]
     ) -> _GitPrdReplayPolicy:
@@ -1614,6 +1659,11 @@ class SqliteBackend:
         ``expected_revision``.  Missing markers retain their original replay
         semantics.
         """
+        # One atomic planning event may contain the PRD content transition plus
+        # its complete graph. Resolve branch competition using a virtual view of
+        # that content operation while retaining the outer event id/ancestry;
+        # replay still applies or skips the complete batch as one unit.
+        ordered = [self._git_prd_policy_event(event) for event in ordered]
         events_by_id = {event.id: event for event in ordered}
         order_index = {event.id: index for index, event in enumerate(ordered)}
 
@@ -4154,6 +4204,89 @@ class SqliteBackend:
         with self._proc_lock:
             yield
 
+    @contextmanager
+    def collect_planning_batch(self, *, actor: str) -> Iterator[Any]:
+        """Run legacy planning code on a rollback-only view, then append once."""
+        backend = self
+        operations: list[EventDraft] = []
+        batch_prd_id: str | None = None
+
+        class _Collector:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(backend, name)
+
+            def append(self, draft: EventDraft) -> None:
+                nonlocal batch_prd_id
+                if draft.actor != actor:
+                    raise EventRejected("planning batch refused: code=actor_mismatch")
+                candidate = draft.payload_json.get("prd_id", DEFAULT_PRD_ID)
+                if batch_prd_id is None:
+                    batch_prd_id = str(candidate)
+                operation = {
+                    "action": draft.action,
+                    "target_kind": draft.target_kind,
+                    "target_id": draft.target_id,
+                    "payload_json": draft.payload_json,
+                }
+                single = PlanningBatchAppliedPayload.model_validate({
+                    "schema_version": 1,
+                    "prd_id": batch_prd_id,
+                    "operations": [operation],
+                })
+                outer = EventDraft(
+                    timestamp=draft.timestamp,
+                    actor=actor,
+                    action="planning.batch_applied",
+                    target_kind="prd",
+                    target_id=batch_prd_id,
+                    payload_json={},
+                )
+                backend._apply_planning_batch_operations(  # noqa: SLF001
+                    backend._require_conn(),  # noqa: SLF001
+                    single,
+                    outer,
+                    check=True,
+                    index_offset=len(operations),
+                )
+                operations.append(draft)
+
+        conn = self._require_conn()
+        with self.claim_operation_lock():
+            conn.execute("SAVEPOINT planning_batch_collection")
+            succeeded = False
+            try:
+                yield _Collector()
+                succeeded = True
+            finally:
+                conn.execute("ROLLBACK TO planning_batch_collection")
+                conn.execute("RELEASE planning_batch_collection")
+            if succeeded and operations:
+                if batch_prd_id is None:
+                    raise EventRejected("planning batch refused: code=missing_prd")
+                first = operations[0]
+                self.append(
+                    EventDraft(
+                        timestamp=first.timestamp,
+                        actor=actor,
+                        action="planning.batch_applied",
+                        target_kind="prd",
+                        target_id=batch_prd_id,
+                        payload_json={
+                            "schema_version": 1,
+                            "prd_id": batch_prd_id,
+                            "operations": [
+                                {
+                                    "action": operation.action,
+                                    "target_kind": operation.target_kind,
+                                    "target_id": operation.target_id,
+                                    "payload_json": operation.payload_json,
+                                }
+                                for operation in operations
+                            ],
+                        },
+                    )
+                )
+
     def _read_tail_window(self) -> list[bytes]:
         """Return candidate raw lines from the end of events.jsonl, oldest first.
 
@@ -4394,25 +4527,45 @@ class SqliteBackend:
         # sample and cache a later, unvalidated version of the file.
         self._git_validated_log_signature = signature_after
 
-    @staticmethod
-    def _uses_git_prd_causal_parent(draft: EventDraft) -> bool:
+    @classmethod
+    def _uses_git_prd_causal_parent(cls, draft: EventDraft) -> bool:
         """Whether a newly authored PRD fact opts into causal replay policy."""
-        payload = draft.payload_json
-        if draft.action == "prd.revised":
+        operation = cls._planning_batch_prd_content_operation(draft)
+        action = operation.get("action") if operation is not None else draft.action
+        payload = (
+            operation.get("payload_json")
+            if operation is not None
+            else draft.payload_json
+        )
+        if not isinstance(payload, dict):
+            return False
+        if action == "prd.revised":
             return payload.get("expected_status") is not None
-        if draft.action in {"prd.reviewed", "prd.approved"}:
+        if action in {"prd.reviewed", "prd.approved"}:
             return payload.get("expected_revision") is not None
         return False
 
-    @staticmethod
+    @classmethod
     def _git_prd_observed_revision(
+        cls,
         draft: EventDraft,
     ) -> tuple[str, int] | None:
         """Return (PRD id, revision observed by a current producer)."""
-        payload = draft.payload_json
-        prd_id_raw = payload.get("prd_id", DEFAULT_PRD_ID)
+        operation = cls._planning_batch_prd_content_operation(draft)
+        action = operation.get("action") if operation is not None else draft.action
+        payload = (
+            operation.get("payload_json")
+            if operation is not None
+            else draft.payload_json
+        )
+        if not isinstance(payload, dict):
+            return None
+        prd_id_raw = payload.get(
+            "prd_id",
+            draft.payload_json.get("prd_id", DEFAULT_PRD_ID),
+        )
         prd_id = prd_id_raw if isinstance(prd_id_raw, str) else DEFAULT_PRD_ID
-        if draft.action == "prd.revised":
+        if action == "prd.revised":
             revision_raw = payload.get("revision")
             observed_revision = (
                 revision_raw - 1
@@ -4445,16 +4598,17 @@ class SqliteBackend:
 
     def _remember_git_prd_content_head(self, event: Event) -> None:
         """Advance the head cache only after a successful live projection."""
-        if event.action == "prd.parsed":
+        policy_event = self._git_prd_policy_event(event)
+        if policy_event.action == "prd.parsed":
             revision = 1
-        elif event.action == "prd.revised":
-            revision_raw = event.payload_json.get("revision")
+        elif policy_event.action == "prd.revised":
+            revision_raw = policy_event.payload_json.get("revision")
             if not isinstance(revision_raw, int) or isinstance(revision_raw, bool):
                 return
             revision = revision_raw
         else:
             return
-        self._git_prd_content_heads[self._git_prd_id(event)] = (
+        self._git_prd_content_heads[self._git_prd_id(policy_event)] = (
             revision,
             event.id,
         )
@@ -4882,6 +5036,11 @@ class SqliteBackend:
                 FeatureCreatedPayload,
                 self._check_feature_created,
                 self._write_feature_created,
+            ),
+            "planning.batch_applied": ActionSpec(
+                PlanningBatchAppliedPayload,
+                self._check_planning_batch_applied,
+                self._write_planning_batch_applied,
             ),
             "task.created": ActionSpec(
                 TaskCreatedPayload, self._check_task_created, self._write_task_created
@@ -6304,6 +6463,129 @@ class SqliteBackend:
                 (?, 'prd', ?, ?, 'approve', NULL, ?)
             """,
             (review_id, project_id, approver, timestamp),
+        )
+
+    @staticmethod
+    def _planning_batch_nested_event(
+        event: EventDraft | Event,
+        *,
+        index: int,
+        action: str,
+        target_kind: str,
+        target_id: str,
+        payload_json: dict[str, Any],
+    ) -> Event:
+        """Materialize one deterministic internal event for projection handlers."""
+        outer_id = getattr(event, "id", "pending")
+        digest = hashlib.sha256(
+            f"{outer_id}\0{index}\0{action}".encode()
+        ).hexdigest()[:12]
+        return Event(
+            id=f"E-{digest}",
+            timestamp=event.timestamp,
+            actor=event.actor,
+            action=action,
+            target_kind=target_kind,
+            target_id=target_id,
+            payload_json=payload_json,
+        )
+
+    def _apply_planning_batch_operations(
+        self,
+        conn: sqlite3.Connection,
+        payload: PlanningBatchAppliedPayload,
+        event: EventDraft | Event,
+        *,
+        check: bool,
+        replay: bool = False,
+        index_offset: int = 0,
+    ) -> None:
+        """Validate and project one ordered planning batch on the current view."""
+        if event.target_kind != "prd" or event.target_id != payload.prd_id:
+            raise EventRejected(
+                "planning batch refused: code=event_identity_mismatch"
+            )
+        dispatch = self._get_action_dispatch()
+        for relative_index, operation in enumerate(payload.operations):
+            index = index_offset + relative_index
+            spec = dispatch.get(operation.action)
+            if spec is None or operation.action == "planning.batch_applied":
+                raise EventRejected(
+                    f"planning batch refused: code=unsupported_action index={index}"
+                )
+            try:
+                typed_payload = spec.payload_model.model_validate(operation.payload_json)
+                canonical_payload = typed_payload.model_dump(
+                    mode="json", exclude_unset=True, by_alias=True
+                )
+                typed_payload = spec.payload_model.model_validate(canonical_payload)
+                draft = EventDraft(
+                    timestamp=event.timestamp,
+                    actor=event.actor,
+                    action=operation.action,
+                    target_kind=operation.target_kind,
+                    target_id=operation.target_id,
+                    payload_json=canonical_payload,
+                )
+                if check:
+                    spec.check(conn, typed_payload, draft)
+                nested = self._planning_batch_nested_event(
+                    event,
+                    index=index,
+                    action=operation.action,
+                    target_kind=operation.target_kind,
+                    target_id=operation.target_id,
+                    payload_json=canonical_payload,
+                )
+                spec.write(conn, typed_payload, nested)
+            except IdempotentNoOp:
+                continue
+            except (EventRejected, TransactionAborted) as exc:
+                error_type = TransactionAborted if replay else EventRejected
+                raise error_type(
+                    f"planning batch refused: code=operation_rejected "
+                    f"index={index} action={operation.action}"
+                ) from exc
+            except Exception as exc:
+                error_type = TransactionAborted if replay else EventRejected
+                raise error_type(
+                    f"planning batch refused: code=invalid_operation "
+                    f"index={index} action={operation.action}"
+                ) from exc
+
+    def _check_planning_batch_applied(
+        self,
+        conn: sqlite3.Connection,
+        payload: PlanningBatchAppliedPayload,
+        event: EventDraft,
+    ) -> None:
+        """Simulate the complete batch and roll it back before log append."""
+        savepoint = "planning_batch_preflight"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            self._apply_planning_batch_operations(
+                conn,
+                payload,
+                event,
+                check=True,
+            )
+        finally:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+
+    def _write_planning_batch_applied(
+        self,
+        conn: sqlite3.Connection,
+        payload: PlanningBatchAppliedPayload,
+        event: Event,
+    ) -> None:
+        """Apply every nested mutation inside the outer event transaction."""
+        self._apply_planning_batch_operations(
+            conn,
+            payload,
+            event,
+            check=True,
+            replay=self._replaying,
         )
 
     def _check_feature_created(

@@ -6,6 +6,18 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- **Atomic canonical planning graphs.** CLI, MCP, sample, and scan planning now
+  persist one validated canonical graph event and one SQLite transaction, so a
+  later operation failure cannot leave a partial or transient raw graph in the
+  audit log or projection.
+- **Crash-safe scan recovery.** Scan sessions now serialize across threads and
+  processes, reject competing recovery journals, and durably mark artifacts
+  whose corresponding state commit succeeded before retiring recovery data.
+  A retry therefore preserves authoritative PRD/scan artifacts after a crash or
+  retirement failure instead of rolling them back beneath committed state.
+
 ## [0.6.4] - 2026-08-08
 
 ### Added

@@ -624,8 +624,9 @@ def plan(
         # TransactionAborted catch that the MCP version had).
         # --------------------------------------------------------------
         from anvil.planning._plan_helpers import (
+            build_prune_event_drafts,
             classify_orphans,
-            emit_prune_events,
+            emit_planning_batch,
         )
 
         # T017: the partition this plan run owns. ``parsed.prd.id`` is the
@@ -750,19 +751,12 @@ def plan(
         # the most accessible trigger was "user removes a feature heading
         # from prd.md while keeping its referencing tasks": the feature
         # becomes an orphan, the handler refuses, the CLI crashed.
-        try:
-            prune_result = emit_prune_events(
-                backend,
+        operations, prune_result = build_prune_event_drafts(
                 classification,
                 actor="anvil-cli",
                 clock=clock,
                 prune_force=prune_force,
             )
-        except EventRejected as exc:
-            if json_output:
-                fail("plan", f"orphan cleanup refused — {exc}", code="event_rejected")
-            typer.echo(f"Error: orphan cleanup refused - {exc}", err=True)
-            raise typer.Exit(code=1) from exc
 
         deleted_task_ids = prune_result.pruned_task_ids
         deleted_feature_ids = prune_result.pruned_feature_ids
@@ -789,21 +783,7 @@ def plan(
                 target_id=feature.id,
                 payload_json=feature_data,
             )
-            backend.append(draft)
-
-        # Emit task.created for each task (status proposed at creation time).
-        for task in parsed.tasks:
-            now = clock.now()
-            task_data = _with_prd_id(task.model_dump(mode="json"), task.prd_id)
-            draft = EventDraft(
-                timestamp=now,
-                actor="anvil-cli",
-                action="task.created",
-                target_kind="task",
-                target_id=task.id,
-                payload_json=task_data,
-            )
-            backend.append(draft)
+            operations.append(draft)
 
         # ------------------------------------------------------------------
         # Inference (T017): dependency inference + proposed->drafted promotion
@@ -834,7 +814,7 @@ def plan(
                 target_id=inferred_task.id,
                 payload_json=task_data,
             )
-            backend.append(upsert_draft)
+            operations.append(upsert_draft)
 
             # Promote proposed → drafted, but ONLY if the task is currently
             # at 'proposed'. On re-plan, existing tasks may have advanced
@@ -844,7 +824,7 @@ def plan(
             # touch status (Greptile PR #38 fix), so existing-task status
             # is preserved; we only need to promote fresh proposed tasks.
             current = backend.get_task(inferred_task.id)
-            if current is not None and current.status.value == "proposed":
+            if current is None or current.status.value == "proposed":
                 now = clock.now()
                 status_draft = EventDraft(
                     timestamp=now,
@@ -859,7 +839,7 @@ def plan(
                         "reason": "plan: initial draft after inference",
                     },
                 )
-                backend.append(status_draft)
+                operations.append(status_draft)
 
         # Re-upsert OTHER-PRD tasks whose conflict_groups changed because a
         # cross-PRD overlap with this PRD pulled them into a new CG-* group.
@@ -875,7 +855,7 @@ def plan(
             task_data = _with_prd_id(
                 inferred_task.model_dump(mode="json"), inferred_task.prd_id
             )
-            backend.append(
+            operations.append(
                 EventDraft(
                     timestamp=now,
                     actor="anvil-cli",
@@ -897,7 +877,7 @@ def plan(
         # these events populate the dedicated table with the full group records.
         for cg in inference_result.conflict_groups:
             now = clock.now()
-            backend.append(
+            operations.append(
                 EventDraft(
                     timestamp=now,
                     actor="anvil-cli",
@@ -907,6 +887,20 @@ def plan(
                     payload_json=cg.model_dump(mode="json"),
                 )
             )
+
+        try:
+            emit_planning_batch(
+                backend,
+                operations,
+                actor="anvil-cli",
+                clock=clock,
+                prd_id=scope_prd_id,
+            )
+        except EventRejected as exc:
+            if json_output:
+                fail("plan", f"planning graph refused — {exc}", code="event_rejected")
+            typer.echo(f"Error: planning graph refused - {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
         # Echo summary inside the try block so it only runs on full success;
         # otherwise inference_result may be unbound (if append raised

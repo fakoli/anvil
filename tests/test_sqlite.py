@@ -14522,6 +14522,147 @@ class TestDepsNamedBatchAtomicReplayCycleRace:
         finally:
             backend.close()
 
+
+def _planning_batch_draft(operations: list[EventDraft]) -> EventDraft:
+    return EventDraft(
+        timestamp=_T0,
+        actor="test",
+        action="planning.batch_applied",
+        target_kind="prd",
+        target_id="default",
+        payload_json={
+            "schema_version": 1,
+            "prd_id": "default",
+            "operations": [
+                {
+                    "action": operation.action,
+                    "target_kind": operation.target_kind,
+                    "target_id": operation.target_id,
+                    "payload_json": operation.payload_json,
+                }
+                for operation in operations
+            ],
+        },
+    )
+
+
+def _planning_graph_operations(*, invalid_status: bool = False) -> list[EventDraft]:
+    feature = _make_event(
+        "feature.created",
+        _make_feature_payload(feat_id="F-batch"),
+        target_kind="feature",
+        target_id="F-batch",
+    )
+    task = _make_event(
+        "task.created",
+        _make_task_payload(task_id="T-batch", feature_id="F-batch"),
+        target_kind="task",
+        target_id="T-batch",
+    )
+    status = _make_event(
+        "task.status_changed",
+        {
+            "task_id": "T-batch",
+            "from": "ready" if invalid_status else "proposed",
+            "to": "drafted",
+            "reason": "atomic planning regression",
+        },
+        target_kind="task",
+        target_id="T-batch",
+    )
+    return [feature, task, status]
+
+
+class TestPlanningBatchAtomicReplay:
+    def test_second_operation_refusal_leaves_log_and_graph_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        try:
+            _setup_project(backend)
+            backend.append(_make_event("prd.parsed", _make_prd_parsed_payload()))
+            events_path = tmp_path / "events.jsonl"
+            before = events_path.read_bytes()
+
+            with pytest.raises(EventRejected, match=r"index=2 action=task.status_changed"):
+                backend.append(
+                    _planning_batch_draft(
+                        _planning_graph_operations(invalid_status=True)
+                    )
+                )
+
+            assert events_path.read_bytes() == before
+            assert backend.get_feature("F-batch") is None
+            assert backend.get_task("T-batch") is None
+        finally:
+            backend.close()
+
+    def test_one_event_round_trips_the_complete_graph(self, tmp_path: Path) -> None:
+        from anvil.state.snapshot import serialize_state
+
+        events_path = str(tmp_path / "events.jsonl")
+        backend = _make_backend(tmp_path)
+        _setup_project(backend)
+        backend.append(_make_event("prd.parsed", _make_prd_parsed_payload()))
+        backend.append(_planning_batch_draft(_planning_graph_operations()))
+        expected = serialize_state(backend)
+
+        recorded = _read_jsonl(events_path)
+        assert [event["action"] for event in recorded].count(
+            "planning.batch_applied"
+        ) == 1
+        assert not any(
+            event["action"] in {
+                "feature.created",
+                "task.created",
+                "task.status_changed",
+            }
+            and event["target_id"] in {"F-batch", "T-batch"}
+            for event in recorded
+        )
+        assert backend.get_task("T-batch").status.value == "drafted"  # type: ignore[union-attr]
+        backend.close()
+
+        replay = SqliteBackend(
+            db_path=str(tmp_path / "replayed.db"),
+            events_path=events_path,
+            clock=_make_clock(),
+        )
+        replay.replay_from_empty(events_path)
+        try:
+            assert serialize_state(replay) == expected
+        finally:
+            replay.close()
+
+    def test_replay_refuses_a_tampered_nested_transition(self, tmp_path: Path) -> None:
+        events_path = str(tmp_path / "events.jsonl")
+        backend = _make_backend(tmp_path)
+        _setup_project(backend)
+        backend.append(_make_event("prd.parsed", _make_prd_parsed_payload()))
+        backend.append(_planning_batch_draft(_planning_graph_operations()))
+        backend.close()
+
+        events = _read_jsonl(events_path)
+        batch = next(
+            event for event in events if event["action"] == "planning.batch_applied"
+        )
+        batch["payload_json"]["operations"][2]["payload_json"]["from"] = "ready"
+        poisoned_path = tmp_path / "poisoned-planning-batch.jsonl"
+        poisoned_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        replay = SqliteBackend(
+            db_path=str(tmp_path / "poisoned.db"),
+            events_path=str(poisoned_path),
+            clock=_make_clock(),
+        )
+        with pytest.raises(TransactionAborted, match="index=2 action=task.status_changed"):
+            replay.replay_from_empty(str(poisoned_path))
+
+
+class TestDepsNamedBatchAtomicReplayCycleRaceContinued:
+
     def test_cycle_and_invalid_final_sets_reject_before_log(
         self, tmp_path: Path
     ) -> None:

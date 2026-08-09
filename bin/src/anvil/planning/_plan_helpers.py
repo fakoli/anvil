@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from anvil.clock import Clock
     from anvil.state.backend import Backend
-    from anvil.state.models import Feature, Task
+    from anvil.state.models import EventDraft, Feature, Task
 
 __all__ = [
     "SAFE_DELETE_STATUSES",
@@ -53,7 +53,9 @@ __all__ = [
     "OrphanClassification",
     "PruneResult",
     "classify_orphans",
+    "build_prune_event_drafts",
     "emit_batch_dep_events",
+    "emit_planning_batch",
     "emit_prune_events",
     "has_tasks_section",
     "parse_dep_edge",
@@ -196,8 +198,28 @@ def emit_prune_events(
             layer-appropriate way — the handler's message is
             user-actionable as-is.
     """
+    drafts, result = build_prune_event_drafts(
+        classification,
+        actor=actor,
+        clock=clock,
+        prune_force=prune_force,
+    )
+    for draft in drafts:
+        backend.append(draft)
+    return result
+
+
+def build_prune_event_drafts(
+    classification: OrphanClassification,
+    *,
+    actor: str,
+    clock: Clock,
+    prune_force: bool,
+) -> tuple[list[EventDraft], PruneResult]:
+    """Build the ordered orphan deletions without mutating state."""
     from anvil.state.models import EventDraft
 
+    drafts: list[EventDraft] = []
     pruned_task_ids: list[str] = []
     to_delete = classification.safe_task_orphans + (
         classification.unsafe_task_orphans if prune_force else []
@@ -219,7 +241,7 @@ def emit_prune_events(
                 "reason": "plan: removed from prd.md (orphan cleanup)",
             },
         )
-        backend.append(draft)
+        drafts.append(draft)
         pruned_task_ids.append(task.id)
 
     pruned_feature_ids: list[str] = []
@@ -237,12 +259,51 @@ def emit_prune_events(
                 "reason": "plan: removed from prd.md (orphan cleanup)",
             },
         )
-        backend.append(draft)
+        drafts.append(draft)
         pruned_feature_ids.append(feature_id)
 
-    return PruneResult(
+    return drafts, PruneResult(
         pruned_task_ids=pruned_task_ids,
         pruned_feature_ids=pruned_feature_ids,
+    )
+
+
+def emit_planning_batch(
+    backend: Backend,
+    operations: list[EventDraft],
+    *,
+    actor: str,
+    clock: Clock,
+    prd_id: str,
+) -> None:
+    """Persist a complete ordered planning transition as one atomic event."""
+    from anvil.state.models import EventDraft
+
+    if not operations:
+        return
+    if any(operation.actor != actor for operation in operations):
+        raise ValueError("planning batch operation actor mismatch")
+    backend.append(
+        EventDraft(
+            timestamp=clock.now(),
+            actor=actor,
+            action="planning.batch_applied",
+            target_kind="prd",
+            target_id=prd_id,
+            payload_json={
+                "schema_version": 1,
+                "prd_id": prd_id,
+                "operations": [
+                    {
+                        "action": operation.action,
+                        "target_kind": operation.target_kind,
+                        "target_id": operation.target_id,
+                        "payload_json": operation.payload_json,
+                    }
+                    for operation in operations
+                ],
+            },
+        )
     )
 
 
@@ -263,12 +324,10 @@ def emit_prune_events(
 #     reject the entire batch with NO partial application.
 #
 # Atomicity boundary: ``plan_batch_dep_edits`` validates the entire requested
-# graph before mutation, so a validation rejection never partially applies.
-# The SQLite backend still commits one event per ``append`` call, however, so a
-# failure while emitting an already-validated multi-task plan can leave earlier
-# task upserts committed. True whole-batch atomicity requires a single batch
-# event whose write handler revalidates the prior dependencies/graph cursor and
-# applies every task update in one SQLite transaction.
+# graph before mutation, and ``emit_batch_dep_events`` persists the changed
+# sources in one ``task.dependencies_batch_edited`` event. Its write handler
+# revalidates the prior dependencies and applies every task update in one
+# SQLite transaction.
 
 DEPENDENCY_EVENT_REJECTED_CODE = "event_rejected"
 DEPENDENCY_EVENT_REJECTED_MESSAGE = (

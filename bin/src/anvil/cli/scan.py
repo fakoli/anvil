@@ -25,6 +25,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,8 +59,15 @@ _SCAN_RECOVERY_PREFIX = "scan-"
 _SCAN_RETIRED_PREFIX = ".retired-scan-"
 _SCAN_ARTIFACT_NAMES = ("scan.db", _PRD_FILENAME)
 _SCAN_KEEP_MARKER = b"state-bound\n"
+_SCAN_COMMITTED_MARKER = b"committed\n"
+_SCAN_COMMITTED_NAME = "committed"
+_SCAN_LOCK_FILENAME = ".scan.lock"
+_SCAN_LOCK_TIMEOUT_SECONDS = 5.0
 _ABSENT_MARKER = b"absent\n"
 _COPY_BUFFER_SIZE = 1024 * 1024
+_SCAN_SESSION_LOCKS_GUARD = threading.Lock()
+_SCAN_SESSION_LOCKS: dict[str, threading.RLock] = {}
+_SCAN_SESSION_LOCAL = threading.local()
 
 
 def _canonical_requirement_index(identifier: str) -> str | None:
@@ -715,6 +723,88 @@ class ScanRecoveryError(SampleSeedError):
         )
 
 
+class ScanLockedError(SampleSeedError):
+    """Another process or thread already owns this project's scan session."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "another scan is already running; retry after it finishes",
+            code="scan_locked",
+        )
+
+
+def _scan_process_lock(state_dir: Path) -> tuple[str, threading.RLock]:
+    """Return the same-process lock for one canonical state directory."""
+    canonical = os.path.normcase(os.path.realpath(state_dir))
+    with _SCAN_SESSION_LOCKS_GUARD:
+        return canonical, _SCAN_SESSION_LOCKS.setdefault(canonical, threading.RLock())
+
+
+@contextmanager
+def _exclusive_scan_session(state_dir: Path) -> Iterator[None]:
+    """Serialize scan recovery and mutation across threads and processes."""
+    canonical, process_lock = _scan_process_lock(state_dir)
+    owned: set[str] = getattr(_SCAN_SESSION_LOCAL, "owned", set())
+    _SCAN_SESSION_LOCAL.owned = owned
+    if canonical in owned:
+        yield
+        return
+
+    with process_lock:
+        lock_path = state_dir / _SCAN_LOCK_FILENAME
+        descriptor: int | None = None
+        handle: Any | None = None
+        try:
+            _require_safe_directory(state_dir)
+            _require_direct_child(lock_path, state_dir)
+            flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(lock_path, flags, stat.S_IRUSR | stat.S_IWUSR)
+            path_metadata = lock_path.lstat()
+            descriptor_metadata = os.fstat(descriptor)
+            if (
+                _is_reparse_or_symlink(path_metadata)
+                or not stat.S_ISREG(path_metadata.st_mode)
+                or not stat.S_ISREG(descriptor_metadata.st_mode)
+                or (path_metadata.st_dev, path_metadata.st_ino)
+                != (descriptor_metadata.st_dev, descriptor_metadata.st_ino)
+            ):
+                raise OSError("unsafe scan lock")
+            handle = os.fdopen(descriptor, "r+b")
+            descriptor = None
+        except OSError:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise ScanArtifactError() from None
+
+        from anvil.state import sqlite as sqlite_module
+
+        try:
+            deadline = time.monotonic() + _SCAN_LOCK_TIMEOUT_SECONDS
+            delays = sqlite_module._flock_backoff_delays()  # noqa: SLF001
+            while True:
+                try:
+                    sqlite_module._append_lock_acquire_nb(handle)  # noqa: SLF001
+                    break
+                except OSError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ScanLockedError() from None
+                    time.sleep(min(next(delays), remaining))
+            owned.add(canonical)
+            try:
+                yield
+            finally:
+                owned.remove(canonical)
+                sqlite_module._append_lock_release(handle)  # noqa: SLF001
+        finally:
+            handle.close()
+
+
 def _new_scan_recovery_token() -> str:
     """Return one opaque, filesystem-safe recovery token."""
     return _SCAN_RECOVERY_PREFIX + secrets.token_hex(8)
@@ -755,6 +845,7 @@ def _mark_scan_artifact_state_bound(
         handle.write(_SCAN_KEEP_MARKER)
         handle.flush()
         os.fsync(handle.fileno())
+    _fsync_directory(recovery_root)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -869,7 +960,7 @@ def _allowed_recovery_names() -> set[str]:
         f"{artifact_name}.{suffix}"
         for artifact_name in _SCAN_ARTIFACT_NAMES
         for suffix in ("backup", "absent", "restore", "state-bound")
-    }
+    } | {_SCAN_COMMITTED_NAME}
 
 
 def _validate_recovery_root(
@@ -884,6 +975,12 @@ def _validate_recovery_root(
         if entry.name not in allowed_names:
             raise OSError("unexpected recovery entry")
         _require_safe_regular(entry)
+
+    committed = recovery_root / _SCAN_COMMITTED_NAME
+    if _require_safe_regular(committed, allow_missing=True) and (
+        committed.read_bytes() != _SCAN_COMMITTED_MARKER
+    ):
+        raise OSError("invalid committed recovery marker")
 
     if not require_complete:
         return
@@ -901,6 +998,23 @@ def _validate_recovery_root(
             state_bound.read_bytes() != _SCAN_KEEP_MARKER
         ):
             raise OSError("invalid state-bound recovery marker")
+
+
+def _mark_scan_recovery_committed(recovery_root: Path) -> None:
+    """Durably record that every live scan artifact is now authoritative."""
+    _validate_recovery_root(recovery_root, require_complete=True)
+    marker = recovery_root / _SCAN_COMMITTED_NAME
+    _require_direct_child(marker, recovery_root)
+    if _require_safe_regular(marker, allow_missing=True):
+        if marker.read_bytes() != _SCAN_COMMITTED_MARKER:
+            raise OSError("invalid committed recovery marker")
+        return
+    with marker.open("xb") as handle:
+        handle.write(_SCAN_COMMITTED_MARKER)
+        handle.flush()
+        os.fsync(handle.fileno())
+    _fsync_directory(recovery_root)
+    _validate_recovery_root(recovery_root, require_complete=True)
 
 
 def _preflight_scan_recovery(state_dir: Path, recovery_root: Path) -> None:
@@ -937,6 +1051,12 @@ def _verify_restored_scan_artifacts(
 
 
 def _create_scan_recovery(state_dir: Path) -> tuple[str, Path]:
+    """Create one recovery record while owning the project scan session."""
+    with _exclusive_scan_session(state_dir):
+        return _create_scan_recovery_unlocked(state_dir)
+
+
+def _create_scan_recovery_unlocked(state_dir: Path) -> tuple[str, Path]:
     """Persist pre-mutation backups and return their opaque recovery token."""
     recovery_parent = state_dir / _SCAN_RECOVERY_DIRECTORY
     try:
@@ -951,6 +1071,15 @@ def _create_scan_recovery(state_dir: Path) -> tuple[str, Path]:
             recovery_parent.mkdir()
             _fsync_directory(state_dir)
         _require_safe_directory(recovery_parent)
+        for entry in recovery_parent.iterdir():
+            _require_direct_child(entry, recovery_parent)
+            if entry.name.startswith(_SCAN_RECOVERY_PREFIX):
+                if not _is_scan_recovery_token(entry.name):
+                    raise OSError("invalid active recovery token")
+                _preflight_scan_recovery(state_dir, entry)
+                raise ScanRecoveryError(entry.name)
+    except ScanRecoveryError:
+        raise
     except Exception:
         raise ScanArtifactError() from None
 
@@ -1098,6 +1227,11 @@ def _restore_scan_recovery(state_dir: Path, recovery_root: Path) -> bool:
         _preflight_scan_recovery(state_dir, recovery_root)
     except (OSError, ValueError):
         return False
+    committed = recovery_root / _SCAN_COMMITTED_NAME
+    if _require_safe_regular(committed, allow_missing=True):
+        if committed.read_bytes() != _SCAN_COMMITTED_MARKER:
+            return False
+        return _retire_scan_recovery(recovery_root)
     failures = False
     for artifact_name in _SCAN_ARTIFACT_NAMES:
         try:
@@ -1112,6 +1246,12 @@ def _restore_scan_recovery(state_dir: Path, recovery_root: Path) -> bool:
 
 
 def _resume_scan_recovery(state_dir: Path) -> None:
+    """Resume durable recovery while owning the project scan session."""
+    with _exclusive_scan_session(state_dir):
+        _resume_scan_recovery_unlocked(state_dir)
+
+
+def _resume_scan_recovery_unlocked(state_dir: Path) -> None:
     """Finish any durable rollback before reading or mutating scan artifacts."""
     recovery_parent = state_dir / _SCAN_RECOVERY_DIRECTORY
     if _path_lstat(recovery_parent) is None:
@@ -1247,6 +1387,16 @@ def _run_scan(
     *,
     force: bool,
 ) -> dict[str, Any]:
+    with _exclusive_scan_session(state_dir):
+        return _run_scan_locked(state_dir, project_root, force=force)
+
+
+def _run_scan_locked(
+    state_dir: Path,
+    project_root: Path,
+    *,
+    force: bool,
+) -> dict[str, Any]:
     from anvil.cli._sample import SampleSeedError
     from anvil.scan.model import (
         SCAN_DB_NAME,
@@ -1279,6 +1429,7 @@ def _run_scan(
                 revalidate_first_seed=seed_reason == "no_prd",
                 recovery_root=recovery_root,
             )
+        _mark_scan_recovery_committed(recovery_root)
     except BaseException as exc:
         if not _restore_scan_recovery(state_dir, recovery_root):
             raise ScanRecoveryError(token) from None
@@ -1465,6 +1616,8 @@ def _seed_draft(
                         "anvil bug; please report it."
                     ),
                 )
+                if recovery_root is not None:
+                    _mark_scan_recovery_committed(recovery_root)
             except BaseException as failure:
                 # The same state lock that covers every append remains held for
                 # this comparison and file restoration. A concurrent state

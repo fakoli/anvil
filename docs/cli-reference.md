@@ -492,11 +492,12 @@ anvil prd review --approve --reviewer "alex"
 ### `anvil plan` { #plan }
 
 **Synopsis:** Generate features and tasks from the parsed PRD. Re-reads
-`prd.md`, emits `feature.created` and `task.created` events for each feature
-and task found, runs dependency and conflict-group inference, then promotes
-all freshly-`proposed` tasks to `drafted`. Idempotent — re-running does not
-duplicate tasks (INSERT OR REPLACE semantics) and never regresses status of
-tasks that have already advanced past `drafted`.
+`prd.md`, runs dependency and conflict-group inference, then persists the
+complete canonical graph as one `planning.batch_applied` event and SQLite
+transaction. The batch contains the ordered feature/task/status/conflict
+operations, so a later refusal cannot expose a partial raw graph. Freshly
+`proposed` tasks advance to `drafted`; re-running does not duplicate tasks or
+regress tasks that have already advanced past `drafted`.
 
 **Flags:**
 

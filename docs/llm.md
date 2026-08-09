@@ -253,10 +253,11 @@ LLM enrichment is layered on top.
 
 ### `anvil plan --use-llm`
 
-Re-parses `prd.md` and emits `feature.created` / `task.created` events as usual. With
-`--use-llm`, short task descriptions (under 50 characters) are extended by the LLM after the
-deterministic parse. The structural fields (id, dependencies, conflict groups, status
-transitions) are never touched by the model.
+Re-parses `prd.md` and builds the same atomic `planning.batch_applied` graph as a
+non-LLM plan. With `--use-llm`, short task descriptions (under 50 characters)
+are extended by the LLM after the deterministic parse. The structural fields
+(id, dependencies, conflict groups, status transitions) are never touched by
+the model.
 
 ```text
 $ anvil plan --use-llm

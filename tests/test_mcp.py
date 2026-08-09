@@ -5960,9 +5960,18 @@ class TestPlanTasks:
             backend.close()
         connection = sqlite3.connect(state_dir / "state.db")
         try:
-            task_event_count = connection.execute(
+            assert connection.execute(
                 "SELECT COUNT(*) FROM events WHERE action = 'task.created'"
-            ).fetchone()[0]
+            ).fetchone()[0] == 0
+            batch_rows = connection.execute(
+                "SELECT payload_json FROM events "
+                "WHERE action = 'planning.batch_applied'"
+            ).fetchall()
+            assert len(batch_rows) == 1
+            task_event_count = sum(
+                operation["action"] == "task.created"
+                for operation in json.loads(batch_rows[0][0])["operations"]
+            )
         finally:
             connection.close()
         return dependency_graph, serial_depth, task_event_count
@@ -6011,7 +6020,7 @@ class TestPlanTasks:
             f"{prefix}T003": [f"{prefix}T001"],
         }
         assert serial_depth == 3
-        # One canonical task event per task: no transient raw graph is logged.
+        # One canonical nested task mutation per task in one atomic graph event.
         assert task_event_count == 3
 
     def test_plan_inference_dependency_graph_matches_bundle_for_equivalent_paths(
@@ -6074,6 +6083,51 @@ class TestPlanTasks:
         async def list_tasks() -> Any:
             async with Client(mcp) as c:
                 return _data(await c.call_tool("list_tasks", {}))
+
+        assert _run(list_tasks()) == []
+
+    def test_plan_injected_second_task_failure_is_typed_and_atomic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        state_dir = _init_state_dir(tmp_path)
+        _write_prd_file(state_dir)
+        monkeypatch.chdir(tmp_path)
+
+        async def parse() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("parse_prd", {})
+
+        _run(parse())
+        events_path = state_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        original = SqliteBackend._write_task_created  # noqa: SLF001
+        task_writes = 0
+
+        def fail_second_task(
+            backend: SqliteBackend, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal task_writes
+            task_writes += 1
+            if task_writes == 2:
+                raise RuntimeError("injected second task failure")
+            original(backend, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(SqliteBackend, "_write_task_created", fail_second_task)
+
+        async def plan() -> None:
+            async with Client(mcp) as client:
+                await client.call_tool("plan_tasks", {})
+
+        with pytest.raises(ToolError, match="planning batch refused"):
+            _run(plan())
+
+        assert events_path.read_bytes() == before
+
+        async def list_tasks() -> Any:
+            async with Client(mcp) as client:
+                return _data(await client.call_tool("list_tasks", {}))
 
         assert _run(list_tasks()) == []
 

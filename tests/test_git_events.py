@@ -205,6 +205,27 @@ def _seed_prd(b: SqliteBackend, *, prd_id: str = "default") -> None:
     )
 
 
+def _planning_prd_batch(action: str, payload: dict[str, Any]) -> EventDraft:
+    prd_id = str(payload.get("prd_id", "default"))
+    return _draft(
+        "planning.batch_applied",
+        {
+            "schema_version": 1,
+            "prd_id": prd_id,
+            "operations": [
+                {
+                    "action": action,
+                    "target_kind": "prd",
+                    "target_id": prd_id,
+                    "payload_json": payload,
+                }
+            ],
+        },
+        target_kind="prd",
+        target_id=prd_id,
+    )
+
+
 def _handcrafted_git_event(
     *,
     event_id: str,
@@ -1279,6 +1300,70 @@ class TestGitReplayOrdering:
 
 
 class TestGitPrdLifecycleReplay:
+    def test_atomic_planning_batch_participates_in_prd_causal_replay(
+        self, tmp_path: Path
+    ) -> None:
+        backend = _make_backend(tmp_path)
+        backend.append(
+            _draft(
+                "project.created",
+                {
+                    "id": "proj-1",
+                    "name": "Git planning batch",
+                    "description": "",
+                    "created_at": _T0.isoformat(),
+                    "updated_at": _T0.isoformat(),
+                },
+            )
+        )
+        backend.append(_draft("state.initialized", {}))
+        parsed = backend.append(
+            _planning_prd_batch("prd.parsed", _prd_parsed_payload())
+        )
+        assert parsed is not None
+        unrelated = backend.append(
+            _draft(
+                "feature.created",
+                {
+                    "id": "F001",
+                    "prd_id": "default",
+                    "title": "Unrelated tail",
+                    "description": "",
+                    "status": "proposed",
+                    "requirements": [],
+                    "tasks": [],
+                },
+                target_kind="feature",
+                target_id="F001",
+            )
+        )
+        assert unrelated is not None and unrelated.id != parsed.id
+        revised = backend.append(
+            _planning_prd_batch(
+                "prd.revised",
+                _prd_revised_payload(revision=2, title="Atomic revision"),
+            )
+        )
+        assert revised is not None
+        assert revised.parent_event_id == parsed.id
+        assert backend.get_prd("default").revision == 2  # type: ignore[union-attr]
+        backend.close()
+
+        replay = SqliteBackend(
+            db_path=str(tmp_path / "replayed.db"),
+            events_path=str(tmp_path / "events.jsonl"),
+            clock=FrozenClock(_T0),
+            events_storage="git",
+        )
+        replay.replay_from_empty(str(tmp_path / "events.jsonl"))
+        try:
+            prd = replay.get_prd("default")
+            assert prd is not None
+            assert prd.revision == 2
+            assert prd.title == "Atomic revision"
+        finally:
+            replay.close()
+
     @pytest.mark.parametrize("reverse_physical_order", [False, True])
     def test_current_orphan_revision_lineage_is_ignored_in_full_and_bounded_replay(
         self, tmp_path: Path, reverse_physical_order: bool

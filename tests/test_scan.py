@@ -15,8 +15,8 @@ Tests run in isolated tmp directories and never touch the real cwd state.
 
 from __future__ import annotations
 
-import json
 import importlib
+import json
 import os
 import sqlite3
 import threading
@@ -811,6 +811,121 @@ class TestScanCommand:
         assert not retired[0].exists()
         assert (state_dir / "scan.db").read_bytes() == b"scan-before"
         assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
+    def test_concurrent_recovery_creation_leaves_one_resumable_record(
+        self, tmp_path: Path
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        (state_dir / "scan.db").write_bytes(b"scan-before")
+        (state_dir / "prd.md").write_bytes(b"prd-before")
+        barrier = threading.Barrier(2)
+        outcome_lock = threading.Lock()
+        created: list[Path] = []
+        errors: list[BaseException] = []
+
+        def create() -> None:
+            barrier.wait(timeout=5)
+            try:
+                _token, recovery_root = scan_module._create_scan_recovery(state_dir)
+                with outcome_lock:
+                    created.append(recovery_root)
+            except BaseException as exc:
+                with outcome_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=create) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert not any(thread.is_alive() for thread in threads)
+        assert len(created) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], scan_module.ScanRecoveryError)
+        active = list((state_dir / "recovery").glob("scan-*"))
+        assert active == created
+
+        scan_module._resume_scan_recovery(state_dir)
+        assert not active[0].exists()
+        assert (state_dir / "scan.db").read_bytes() == b"scan-before"
+        assert (state_dir / "prd.md").read_bytes() == b"prd-before"
+
+    def test_cross_process_scan_recovery_session_refuses_second_writer(
+        self, tmp_path: Path
+    ) -> None:
+        import subprocess
+        import sys
+
+        scan_module = importlib.import_module("anvil.cli.scan")
+        state_dir = tmp_path / ".anvil"
+        state_dir.mkdir()
+        probe = (
+            "import importlib, pathlib, sys\n"
+            "scan = importlib.import_module('anvil.cli.scan')\n"
+            "scan._SCAN_LOCK_TIMEOUT_SECONDS = 0.1\n"
+            "try:\n"
+            "    with scan._exclusive_scan_session(pathlib.Path(sys.argv[1])):\n"
+            "        print('acquired')\n"
+            "except scan.ScanLockedError:\n"
+            "    print('locked')\n"
+        )
+
+        with scan_module._exclusive_scan_session(state_dir):
+            completed = subprocess.run(  # noqa: S603
+                [sys.executable, "-c", probe, str(state_dir)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        assert completed.stdout.strip() == "locked"
+
+    def test_successful_seed_retirement_failure_preserves_committed_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scan_module = importlib.import_module("anvil.cli.scan")
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        with monkeypatch.context() as injected:
+            injected.setattr(
+                scan_module,
+                "_retire_scan_recovery",
+                lambda *_args, **_kwargs: False,
+            )
+            with pytest.raises(scan_module.ScanRecoveryError):
+                scan_module.run_scan_and_report(state_dir, tmp_path)
+
+        prd_bytes = (state_dir / "prd.md").read_bytes()
+        scan_bytes = (state_dir / "scan.db").read_bytes()
+        active = list((state_dir / "recovery").glob("scan-*"))
+        assert len(active) == 1
+        assert (active[0] / "committed").read_bytes() == b"committed\n"
+        backend = scan_module._open_backend(state_dir)
+        try:
+            assert len(backend.list_prds()) == 1
+            assert len(backend.list_tasks()) == 4
+        finally:
+            backend.close()
+
+        scan_module._resume_scan_recovery(state_dir)
+        assert not active[0].exists()
+        assert (state_dir / "prd.md").read_bytes() == prd_bytes
+        assert (state_dir / "scan.db").read_bytes() == scan_bytes
+        retried = scan_module.run_scan_and_report(state_dir, tmp_path)
+
+        assert retried["seeded"] is None
+        assert (state_dir / "prd.md").read_bytes() == prd_bytes
+        backend = scan_module._open_backend(state_dir)
+        try:
+            assert len(backend.list_prds()) == 1
+            assert len(backend.list_tasks()) == 4
+        finally:
+            backend.close()
 
     def test_first_scan_seeds_prd_tasks_and_codebase_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2664,6 +2779,58 @@ class TestScanCommand:
         assert json.loads(result.output)["error"]["code"] == "seed_rejected"
         assert not prd_path.exists()
         assert list(state_dir.glob(".prd.md.*.tmp")) == []
+
+    def test_first_scan_atomic_planning_failure_leaves_no_partial_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        _make_fixture_repo(tmp_path)
+        _init(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        state_dir = tmp_path / ".anvil"
+        events_path = state_dir / "events.jsonl"
+        before = events_path.read_bytes()
+        original = SqliteBackend._write_task_created  # noqa: SLF001
+        task_writes = 0
+
+        def fail_second_task(
+            backend: SqliteBackend, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal task_writes
+            task_writes += 1
+            if task_writes == 2:
+                raise RuntimeError("injected second task failure")
+            original(backend, *args, **kwargs)  # type: ignore[arg-type]
+
+        with monkeypatch.context() as injected:
+            injected.setattr(
+                SqliteBackend,
+                "_write_task_created",
+                fail_second_task,
+            )
+            failed = runner.invoke(
+                app,
+                ["scan", "--json"],
+                catch_exceptions=False,
+            )
+
+        assert failed.exit_code == 1
+        assert json.loads(failed.output)["error"]["code"] == "seed_rejected"
+        assert events_path.read_bytes() == before
+        assert not (state_dir / "prd.md").exists()
+        assert not (state_dir / "scan.db").exists()
+        connection = sqlite3.connect(state_dir / "state.db")
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM prds").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM features").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+        finally:
+            connection.close()
+
+        retried = runner.invoke(app, ["scan", "--json"], catch_exceptions=False)
+        assert retried.exit_code == 0, retried.output
+        assert json.loads(retried.output)["data"]["seeded"] is not None
 
 
 class TestInitFromRepo:

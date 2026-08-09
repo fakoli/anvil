@@ -381,6 +381,24 @@ class TestInitWithSample:
         """Seeded events.jsonl replays to an identical DB (audit invariant)."""
         assert self._run(["init", "--with-sample"], tmp_path).exit_code == 0
         state_dir = tmp_path / ".anvil"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert [event["action"] for event in events].count(
+            "planning.batch_applied"
+        ) == 1
+        assert not any(
+            event["action"] in {
+                "prd.parsed",
+                "feature.created",
+                "task.created",
+                "task.status_changed",
+            }
+            for event in events
+        )
         scratch = tmp_path / "scratch.db"
         replay_result = self._run(
             [
@@ -4084,6 +4102,36 @@ class TestPlan:
         assert "T001" in list_result.output
         assert "T002" in list_result.output
 
+    def test_plan_inference_persists_one_atomic_canonical_event(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _FULL_PRD_CONTENT)
+        assert _invoke_cmd(tmp_path, ["prd", "parse"]).exit_code == 0
+        result = _invoke_cmd(tmp_path, ["plan"])
+        assert result.exit_code == 0, result.output
+
+        events = [
+            json.loads(line)
+            for line in (tmp_path / ".anvil" / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        batches = [
+            event for event in events if event["action"] == "planning.batch_applied"
+        ]
+        assert len(batches) == 1
+        operations = batches[0]["payload_json"]["operations"]
+        assert sum(item["action"] == "task.created" for item in operations) == 2
+        assert not any(
+            event["action"] in {
+                "feature.created",
+                "task.created",
+                "task.status_changed",
+            }
+            for event in events
+        )
+
     def test_plan_is_idempotent(self, tmp_path: Path) -> None:
         """Running plan twice does not duplicate tasks and does not trip
         ON DELETE RESTRICT foreign keys. Regression test for the bug
@@ -4119,6 +4167,41 @@ class TestPlan:
         # No prd.md file written
         result = _invoke_cmd(tmp_path, ["plan"])
         assert result.exit_code == 1
+
+    def test_plan_inference_injected_second_task_failure_writes_no_partial_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _FULL_PRD_CONTENT)
+        parsed = _invoke_cmd(tmp_path, ["prd", "parse"])
+        assert parsed.exit_code == 0, parsed.output
+        events_path = tmp_path / ".anvil" / "events.jsonl"
+        before = events_path.read_bytes()
+        original = SqliteBackend._write_task_created  # noqa: SLF001
+        task_writes = 0
+
+        def fail_second_task(
+            backend: SqliteBackend, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal task_writes
+            task_writes += 1
+            if task_writes == 2:
+                raise RuntimeError("injected second task failure")
+            original(backend, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(SqliteBackend, "_write_task_created", fail_second_task)
+        result = _invoke_cmd(tmp_path, ["plan", "--json"])
+
+        assert result.exit_code == 1
+        refusal = json.loads(result.output)
+        assert refusal["error"]["code"] == "event_rejected"
+        assert "planning batch refused" in refusal["error"]["message"]
+        assert events_path.read_bytes() == before
+        listed = _invoke_cmd(tmp_path, ["list", "--json"])
+        assert listed.exit_code == 0, listed.output
+        assert json.loads(listed.output)["data"]["tasks"] == []
 
 
 # ---------------------------------------------------------------------------
