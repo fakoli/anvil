@@ -823,13 +823,12 @@ def test_prd_content_cap_precedes_blob_materialization(populated: SqliteBackend)
     )
 
 
-def test_hard_snapshot_overflow_reports_exact_limit_metadata(
+def test_raw_json_cell_cap_refuses_before_unbounded_json_parsing(
     populated: SqliteBackend,
 ) -> None:
     root = _state_path(populated)
     populated.close()
-    acceptance = json.dumps(["x" * 65_536] * 256, separators=(",", ":"))
-    assert len(acceptance.encode()) > 16_777_216
+    acceptance = "[" + (" " * 16_777_217) + '"Visible criterion"]'
     conn = sqlite3.connect(root / "state.db")
     conn.execute(
         "UPDATE tasks SET acceptance_criteria = ? WHERE id = 'T001'", (acceptance,)
@@ -838,10 +837,11 @@ def test_hard_snapshot_overflow_reports_exact_limit_metadata(
     conn.close()
     with pytest.raises(ProjectSnapshotError) as refusal:
         read_project_snapshot(root)
-    assert isinstance(refusal.value.error, ProviderLimitRefusalV1)
-    assert refusal.value.error.limit_name is ProviderLimitNameV1.max_snapshot_bytes
-    assert refusal.value.error.actual > 16_777_216
-    assert refusal.value.error.limit == 16_777_216
+    assert isinstance(refusal.value.error, ReadErrorV1)
+    assert refusal.value.error.code is ReadErrorCode.invalid_hierarchy
+    assert refusal.value.error.field == "tasks"
+    assert refusal.value.error.actual is None
+    assert refusal.value.error.limit is None
 
 
 def test_aggregate_visible_snapshot_overflow_reports_limit_metadata(

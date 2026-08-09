@@ -753,6 +753,14 @@ def _preflight_storage_limits(
             limits.max_prd_content_bytes,
         )
 
+    raw_cell_row = conn.execute(
+        "SELECT COALESCE(MAX(MAX(length(CAST(dependencies AS BLOB)), "
+        "length(CAST(acceptance_criteria AS BLOB)), "
+        "length(CAST(verification AS BLOB)))), 0) FROM tasks"
+    ).fetchone()
+    if int(raw_cell_row[0]) > PROVIDER_LIMITS_V1.max_snapshot_bytes:
+        _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
+
     raw_json_row = conn.execute(
         "SELECT COALESCE(MAX(length(CAST(json(verification) AS BLOB))), 0) FROM tasks"
     ).fetchone()
