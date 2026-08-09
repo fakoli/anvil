@@ -16,6 +16,13 @@ All notable changes to anvil are documented here. This project adheres to [Keep 
   that invocation. Historical claims keep nullable Git metadata. This adds
   schema version 20 and advances the public API contract to version 11.
 
+- **PRD-scoped decision discovery and resolution (#180).** CLI decision reads
+  and writes now resolve an explicit `--prd`, `ANVIL_PRD`, or the unambiguous
+  default/single partition; `--file` selects content without changing that
+  state scope. MCP discovery accepts the same PRD selector, and CLI/MCP JSON,
+  human guidance, continuation argv, and audit events report the effective
+  partition. This advances the public API contract to version 12.
+
 - **Truthful task-rejection provenance and governor recovery (#181).** Rejected
   review attempts now persist engine-derived quality, evidence-resubmission, or
   process provenance with exact claim/evidence identity, and new accepted

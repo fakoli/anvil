@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 import typer
 
 from anvil.cli._helpers import (
     _DEFAULT_PRD_IDS,
-    _PRD_FILENAME,
     PRD_OPTION,
+    PrdAmbiguityError,
     PrdSourceIngestError,
     StateRootError,
     _get_project_id,
@@ -36,6 +37,51 @@ prd_app = typer.Typer(
 )
 
 _ALLOWED_TERMINAL_TITLE_FORMAT_CONTROLS = {"\u200c", "\u200d"}
+
+
+def _decision_prd_id(
+    backend: Any,
+    requested: str | None,
+    *,
+    require_existing: bool = True,
+) -> str:
+    """Resolve one existing PRD partition for decision operations."""
+    try:
+        resolved = canonical_prd_id(resolve_prd_id(backend, requested))
+    except PrdAmbiguityError:
+        if backend.list_prds():
+            raise
+        # Decision discovery historically runs before the first parse. Keep
+        # that source-only workflow while still making an explicit id/env the
+        # authoritative future partition.
+        resolved = canonical_prd_id(requested or "default")
+    validated = canonical_prd_id(validate_prd_id(resolved))
+    if require_existing and backend.get_prd(validated) is None:
+        raise PrdSourceIngestError(
+            "prd_not_found",
+            f"PRD partition {validated!r} does not exist",
+        )
+    return validated
+
+
+def _decision_source(
+    state_dir: Path,
+    *,
+    cwd: Path | None,
+    file: Path | None,
+    prd_id: str,
+) -> tuple[Path, str, str]:
+    """Read one exact decision source while keeping content and scope separate."""
+    if file is not None:
+        source_path = file
+        if not source_path.is_absolute():
+            base = cwd.resolve() if cwd is not None else Path.cwd().resolve()
+            source_path = base / source_path
+        source = ingest_prd_source(source_path)
+        return source_path, source.markdown, "custom"
+    source_path = selected_prd_source_path(state_dir, prd_id)
+    source = ingest_prd_source_for_id(state_dir, prd_id)
+    return source_path, source.markdown, prd_id
 
 
 @prd_app.command("show")
@@ -888,6 +934,7 @@ def prd_find_decisions(
             "Defaults to .anvil/prd.md in the current directory."
         ),
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -923,35 +970,31 @@ def prd_find_decisions(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command="prd find-decisions", json_output=json_output)
 
-    prd_path = file if file is not None else state_dir / _PRD_FILENAME
-    if not prd_path.exists():
-        if json_output:
-            fail(
-                "prd find-decisions",
-                f"PRD file not found at {prd_path}. "
-                "Author your PRD there or pass --file PATH.",
-                code="not_found",
-            )
-        typer.echo(
-            f"Error: PRD file not found at {prd_path}. "
-            "Author your PRD there or pass --file PATH.",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
+    backend = _open_backend(state_dir)
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        effective_prd_id = _decision_prd_id(backend, prd, require_existing=False)
+        prd_path, markdown, source_identity = _decision_source(
+            state_dir,
+            cwd=cwd,
+            file=file,
+            prd_id=effective_prd_id,
+        )
+        backend_tasks = backend.list_tasks(prd_id=effective_prd_id)
+        tasks_or_none = backend_tasks or None
+    except (PrdAmbiguityError, PrdSourceIngestError) as exc:
+        code = exc.code if isinstance(exc, PrdSourceIngestError) else "prd_ambiguous"
         if json_output:
             fail(
                 "prd find-decisions",
-                f"cannot read {prd_path}: {exc}",
-                code="io_error",
+                str(exc),
+                code=code,
             )
-        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+    finally:
+        backend.close()
 
-    result = parse_prd(markdown, prd_id="prd")
+    result = parse_prd(markdown, prd_id=effective_prd_id)
 
     if result.errors:
         if json_output:
@@ -980,20 +1023,6 @@ def prd_find_decisions(
         )
         raise typer.Exit(code=1)
 
-    # Pull tasks from the backend so missing_field detection has data to
-    # walk. The backend may be empty (no plan run yet) — pass None in that
-    # case so the detector skips the missing_field check rather than
-    # synthesising decisions from PRD-tasks that aren't in state yet.
-    tasks_or_none = None
-    if state_dir.exists():
-        backend = _open_backend(state_dir)
-        try:
-            backend_tasks = backend.list_tasks()
-            if backend_tasks:
-                tasks_or_none = backend_tasks
-        finally:
-            backend.close()
-
     decisions = find_unresolved_decisions(
         markdown,
         prd=result.prd,
@@ -1002,7 +1031,6 @@ def prd_find_decisions(
 
     if json_output:
         import dataclasses
-        from typing import Any
 
         decisions_data: list[dict[str, Any]] = []
         for d in decisions:
@@ -1025,7 +1053,8 @@ def prd_find_decisions(
         emit_success(
             "prd find-decisions",
             {
-                "prd_source": str(prd_path),
+                "prd_id": effective_prd_id,
+                "prd_source": source_identity,
                 "decisions": decisions_data,
                 "count": len(decisions),
                 "counts_by_kind": counts,
@@ -1050,7 +1079,8 @@ def prd_find_decisions(
         DecisionKind.missing_field: "Missing fields",
     }
 
-    typer.echo(f"PRD source: {prd_path}")
+    typer.echo(f"PRD: {effective_prd_id}")
+    typer.echo(f"PRD source: {source_identity}")
 
     for kind in (
         DecisionKind.needs_decision,
@@ -1070,6 +1100,12 @@ def prd_find_decisions(
             if d.context_paragraph:
                 typer.echo(f"    context:  {_truncate(d.context_paragraph)}")
             typer.echo(f"    resolve:  {d.suggested_resolution_field}")
+            file_arg = " --file <same-file>" if file is not None else ""
+            typer.echo(
+                "    command:  anvil prd resolve-decision "
+                f"{d.id} --prd {effective_prd_id}{file_arg} "
+                "--resolution <answer>"
+            )
 
     typer.echo("")
     typer.echo(
@@ -1114,6 +1150,7 @@ def prd_resolve_decision(
             "Defaults to .anvil/prd.md in the current directory."
         ),
     ),
+    prd: str | None = PRD_OPTION,
     json_output: bool = JSON_OPTION,
     cwd: Path | None = typer.Option(  # noqa: B008
         None,
@@ -1151,27 +1188,26 @@ def prd_resolve_decision(
     state_dir = _resolve_state_dir(cwd)
     _require_state_dir(state_dir, command=cmd, json_output=json_output)
 
-    prd_path = file if file is not None else state_dir / _PRD_FILENAME
-    if not prd_path.exists():
-        if json_output:
-            fail(
-                cmd,
-                f"PRD file not found at {prd_path}.",
-                code="not_found",
-            )
-        typer.echo(f"Error: PRD file not found at {prd_path}.", err=True)
-        raise typer.Exit(code=1)
-
+    backend = _open_backend(state_dir)
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        effective_prd_id = _decision_prd_id(backend, prd)
+        prd_path, markdown, source_identity = _decision_source(
+            state_dir,
+            cwd=cwd,
+            file=file,
+            prd_id=effective_prd_id,
+        )
+    except (PrdAmbiguityError, PrdSourceIngestError) as exc:
+        backend.close()
+        code = exc.code if isinstance(exc, PrdSourceIngestError) else "prd_ambiguous"
         if json_output:
-            fail(cmd, f"cannot read {prd_path}: {exc}", code="io_error")
-        typer.echo(f"Error: cannot read {prd_path}: {exc}", err=True)
+            fail(cmd, str(exc), code=code)
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    result = parse_prd(markdown, prd_id="prd")
+    result = parse_prd(markdown, prd_id=effective_prd_id)
     if result.errors:
+        backend.close()
         msg = f"PRD parse failed with {len(result.errors)} error(s)."
         if json_output:
             fail(cmd, msg, code="parse_error")
@@ -1179,9 +1215,8 @@ def prd_resolve_decision(
         raise typer.Exit(code=1)
 
     # Pull tasks from the backend so MF-* decisions can be located.
-    backend = _open_backend(state_dir)
     try:
-        backend_tasks = backend.list_tasks()
+        backend_tasks = backend.list_tasks(prd_id=effective_prd_id)
         tasks_or_none = backend_tasks or None
         decisions = find_unresolved_decisions(
             markdown,
@@ -1206,12 +1241,7 @@ def prd_resolve_decision(
         clock = SystemClock()
         now = clock.now()
         project_id = _get_project_id(backend)
-        # T021 audit (get_prd no-arg): default-only-correct. `resolve-decision`
-        # (like `find-decisions`) operates on the default PRD's markdown source
-        # (.anvil/prd.md, or --file) and is NOT --prd scoped, so the transition
-        # is validated against the default PRD. ``or result.prd`` covers the
-        # pre-parse case where no PRD row exists yet.
-        prd_model = backend.get_prd() or result.prd
+        prd_model = backend.get_prd(effective_prd_id) or result.prd
 
         try:
             transition_payload = prd_decision_resolved(
@@ -1251,6 +1281,7 @@ def prd_resolve_decision(
 
         payload: dict[str, object] = {
             "project_id": project_id,
+            "prd_id": effective_prd_id,
             "decision_id": target.id,
             "decision_kind": target.kind.value,
             "prd_ref": transition_payload["prd_ref"],
@@ -1265,7 +1296,7 @@ def prd_resolve_decision(
             actor="anvil-cli",
             action="prd.decision_resolved",
             target_kind="prd",
-            target_id=project_id,
+            target_id=effective_prd_id,
             payload_json=payload,
         )
         event = backend.append(draft)
@@ -1276,7 +1307,8 @@ def prd_resolve_decision(
         emit_success(
             cmd,
             {
-                "prd_source": str(prd_path),
+                "prd_id": effective_prd_id,
+                "prd_source": source_identity,
                 "decision_id": target.id,
                 "decision_kind": target.kind.value,
                 "prd_ref": target.prd_ref,
@@ -1284,14 +1316,31 @@ def prd_resolve_decision(
                 "before": resolution_result.before,
                 "after": resolution_result.after,
                 "event_id": event.id if event is not None else None,
+                "continuation": {
+                    "parse_argv": [
+                        "anvil",
+                        "prd",
+                        "parse",
+                        *(["--file", str(file)] if file is not None else []),
+                        "--prd",
+                        effective_prd_id,
+                    ]
+                },
             },
         )
         return
 
-    typer.echo(f"Resolved {target.id} ({target.kind.value}) in {prd_path}.")
+    typer.echo(
+        f"Resolved {target.id} ({target.kind.value}) in PRD "
+        f"{effective_prd_id} ({source_identity})."
+    )
     typer.echo(f"  section:  {resolution_result.section}")
     typer.echo(f"  before:   {_truncate(resolution_result.before)}")
     typer.echo(f"  after:    {_truncate(resolution_result.after)}")
     if event is not None:
         typer.echo(f"  recorded: {event.id} (prd.decision_resolved)")
-    typer.echo("Run `anvil prd parse` to refresh state.db.")
+    file_arg = " --file <same-file>" if file is not None else ""
+    typer.echo(
+        "Run `anvil prd parse"
+        f"{file_arg} --prd {effective_prd_id}` to refresh state.db."
+    )

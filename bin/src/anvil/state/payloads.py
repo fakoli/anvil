@@ -363,6 +363,9 @@ class PrdDecisionResolvedPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
+    # T013 selected-partition binding. Historical decision events predate
+    # multi-PRD scoping and therefore replay as the default partition.
+    prd_id: str = DEFAULT_PRD_ID
     decision_id: str
     decision_kind: str
     prd_ref: str

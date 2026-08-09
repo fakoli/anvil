@@ -1,7 +1,7 @@
 {
   "engine_version": "0.6.4",
-  "api_version": "11",
+  "api_version": "12",
   "command_count": 70,
   "contract_count": 79,
-  "sha256": "e33a26944e6a4a3edb24d9a389623408d45f3a6b96f688a703968a93f66e345b"
+  "sha256": "836a6529c6f66263119923afde93d68bbb84872751ce524f8d7fc4f34f49fbe6"
 }

@@ -7732,6 +7732,58 @@ A clean PRD.
 
 
 class TestFindDecisions:
+    def test_find_decisions_three_prd_collision_scoped_mcp_and_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_dir = _init_state_dir(tmp_path)
+        source_dir = state_dir / "prds"
+        source_dir.mkdir()
+        for prd_id, label in (
+            ("default", "default-choice"),
+            ("v0.1", "first-choice"),
+            ("v0.2", "second-choice"),
+        ):
+            _add_prd(
+                state_dir,
+                status="draft",
+                prd_id=prd_id,
+                is_default=1 if prd_id == "default" else 0,
+            )
+            path = (
+                state_dir / "prd.md"
+                if prd_id == "default"
+                else source_dir / f"{prd_id}.md"
+            )
+            path.write_text(
+                _PRD_WITH_NEEDS_DECISION.replace("which format?", label),
+                encoding="utf-8",
+            )
+        monkeypatch.chdir(tmp_path)
+
+        async def explicit() -> Any:
+            async with Client(mcp) as c:
+                return _data(
+                    await c.call_tool("find_decisions", {"prd_id": "v0.2"})
+                )
+
+        selected = _run(explicit())
+        assert selected["prd_id"] == "v0.2"
+        assert selected["prd_source"] == "v0.2"
+        assert "second-choice" in str(selected["decisions"])
+        assert "default-choice" not in str(selected["decisions"])
+        assert "first-choice" not in str(selected["decisions"])
+
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+
+        async def from_env() -> Any:
+            async with Client(mcp) as c:
+                return _data(await c.call_tool("find_decisions", {}))
+
+        env_selected = _run(from_env())
+        assert env_selected["prd_id"] == "v0.1"
+        assert "first-choice" in str(env_selected["decisions"])
+        assert "second-choice" not in str(env_selected["decisions"])
+
     def test_clean_prd_returns_total_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

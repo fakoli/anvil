@@ -4311,13 +4311,18 @@ class FindDecisionsResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    prd_id: str
+    prd_source: str
     decisions: list[UnresolvedDecisionEntry]
     counts_by_kind: dict[str, int]
     total: int
 
 
 @mcp.tool(tags={PLANNING_TAG})
-def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
+def find_decisions(
+    cwd: str | None = None,
+    prd_id: str | None = None,
+) -> FindDecisionsResponse:
     """Scan the PRD for items needing a human decision (read-only; emits no
     events). Walks three sources: inline ``[NEEDS DECISION]`` markers,
     ``## Open Questions`` items, and tasks with empty acceptance_criteria or
@@ -4329,7 +4334,17 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
 
     Args:
         cwd: Project root. Defaults to ``Path.cwd()``.
+        prd_id: PRD partition. Precedence is explicit value, ``ANVIL_PRD``,
+            then the single/default partition.
     """
+    import os
+
+    from anvil.cli._helpers import (
+        PrdSourceIngestError,
+        canonical_prd_id,
+        ingest_prd_source_for_id,
+        validate_prd_id,
+    )
     from anvil.planning.decisions import find_unresolved_decisions
     from anvil.planning.template import parse_prd as _parse_prd_impl
 
@@ -4340,19 +4355,31 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
             "Call init_project first.",
         )
 
-    prd_path = state_dir / _PRD_FILENAME
-    if not prd_path.exists():
-        raise ToolError(
-            f"PRD file not found at {prd_path}. "
-            "Author your PRD and call parse_prd before find_decisions.",
-        )
-
+    backend = _open_backend(state_dir)
     try:
-        markdown = prd_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ToolError(f"Cannot read {prd_path}: {exc}") from exc
+        has_prds = bool(backend.list_prds())
+        if has_prds:
+            effective_prd_id = canonical_prd_id(_resolve_prd_id(backend, prd_id))
+        else:
+            effective_prd_id = canonical_prd_id(
+                validate_prd_id(prd_id or os.environ.get("ANVIL_PRD") or "default")
+            )
+        if has_prds and backend.get_prd(effective_prd_id) is None:
+            raise ToolError(f"PRD partition {effective_prd_id!r} does not exist")
+        try:
+            source = ingest_prd_source_for_id(state_dir, effective_prd_id)
+        except PrdSourceIngestError as exc:
+            if exc.code == "source_not_found":
+                raise ToolError(
+                    f"PRD file not found for partition {effective_prd_id!r}"
+                ) from exc
+            raise ToolError(f"{exc.code}: {exc.message}") from exc
+        backend_tasks = backend.list_tasks(prd_id=effective_prd_id)
+        tasks_or_none = backend_tasks if backend_tasks else None
+    finally:
+        backend.close()
 
-    result = _parse_prd_impl(markdown, prd_id="prd")
+    result = _parse_prd_impl(source.markdown, prd_id=effective_prd_id)
     # Match the CLI's behavior: if the parse failed, surface the errors
     # rather than silently returning a deceptive 0-open_questions count
     # (the PRD model exists but with empty sections). The needs_decision
@@ -4369,15 +4396,8 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
             f"fix prd.md and call parse_prd before find_decisions. {error_summary}"
         )
 
-    backend = _open_backend(state_dir)
-    try:
-        backend_tasks = backend.list_tasks()
-        tasks_or_none = backend_tasks if backend_tasks else None
-    finally:
-        backend.close()
-
     decisions = find_unresolved_decisions(
-        markdown,
+        source.markdown,
         prd=result.prd,
         tasks=tasks_or_none,
     )
@@ -4403,6 +4423,8 @@ def find_decisions(cwd: str | None = None) -> FindDecisionsResponse:
         counts[d.kind.value] = counts.get(d.kind.value, 0) + 1
 
     return FindDecisionsResponse(
+        prd_id=effective_prd_id,
+        prd_source=effective_prd_id,
         decisions=entries,
         counts_by_kind=counts,
         total=len(entries),

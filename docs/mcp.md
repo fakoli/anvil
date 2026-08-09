@@ -984,6 +984,7 @@ counts when `.anvil/` is absent — does **not** raise. Use this as the canonica
 | Parameter | Type             | Required | Default      |
 |-----------|------------------|----------|--------------|
 | `cwd`     | `string \| null` | no       | `Path.cwd()` |
+| `prd_id`  | `string \| null` | no       | explicit value, `ANVIL_PRD`, then single/default PRD |
 
 **Output**
 
@@ -1421,6 +1422,8 @@ power the `resolve-decisions` skill's Q&A loop. Mirrors `anvil prd find-decision
 
 ```json
 {
+  "prd_id": "v0.2",
+  "prd_source": "v0.2",
   "decisions": [
     {
       "id": "ND-001",
@@ -1454,7 +1457,8 @@ agent walks the list and drives one Q&A per entry, so ordering shapes the conver
 
 ```bash
 anvil prd find-decisions
-anvil prd find-decisions --file path/to/prd.md
+anvil prd find-decisions --prd v0.2
+anvil prd find-decisions --file path/to/prd.md --prd v0.2
 ```
 
 **When to call**: after `parse_prd` succeeds but before `review_prd` or `plan_tasks`, so
@@ -1491,7 +1495,7 @@ None.
 
 ```json
 {
-  "api_version": "11",
+  "api_version": "12",
   "engine_version": "0.6.4",
   "display_version": "0.6.4",
   "build_kind": "release_artifact",

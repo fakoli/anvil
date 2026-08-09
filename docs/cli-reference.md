@@ -1680,10 +1680,14 @@ flag list; full prose treatment may follow in a later pass.
   `prd parse` explicitly to persist a canonical title.
 - `anvil prd find-decisions` — Scan a PRD for `[NEEDS DECISION]` markers,
   open questions, and missing acceptance-criteria/verification fields
-  (`--file`, `--json`); read-only, always exits 0.
+  (`--prd`/`ANVIL_PRD`, `--file`, `--json`); read-only, always exits 0.
+  `--file` selects markdown content while `--prd` remains the task/state
+  partition used for missing-field detection and reported scope.
 - `anvil prd resolve-decision DECISION_ID` — Back-propagate a resolved
   decision into the PRD source and record a `prd.decision_resolved` event
-  (`--resolution`/`-r`, `--by`, `--file`, `--json`).
+  bound to the effective partition (`--resolution`/`-r`, `--by`,
+  `--prd`/`ANVIL_PRD`, `--file`, `--json`). The returned parse continuation
+  repeats both the effective PRD and custom file selection.
 
 **Planning extras**
 

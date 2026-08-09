@@ -1306,7 +1306,7 @@ class TestDescribe:
         assert env["ok"] is True
         assert env["command"] == "describe"
         data = env["data"]
-        assert API_VERSION == "11"
+        assert API_VERSION == "12"
         assert data["api_version"] == API_VERSION
         assert data["engine_version"] == __version__
         assert data["display_version"].startswith(__version__)
@@ -3929,7 +3929,90 @@ The system must serialize inputs [NEEDS DECISION: which format?].
 """
 
 
+def _seed_three_decision_prds(tmp_path: Path) -> dict[str, Path]:
+    """Create three parsed sources whose local decision IDs deliberately collide."""
+    _do_init(tmp_path)
+    state_dir = tmp_path / ".anvil"
+    sources: dict[str, Path] = {}
+    for prd_id, label in (
+        ("default", "default-choice"),
+        ("v0.1", "first-choice"),
+        ("v0.2", "second-choice"),
+    ):
+        markdown = _PRD_WITH_DECISIONS.replace(
+            "CLI Decisions Test", f"Decisions {prd_id}"
+        ).replace("which format?", label)
+        if prd_id == "default":
+            path = state_dir / "prd.md"
+            path.write_text(markdown, encoding="utf-8")
+            result = _invoke_cmd(tmp_path, ["prd", "parse"])
+        else:
+            source_dir = state_dir / "prds"
+            source_dir.mkdir(exist_ok=True)
+            path = source_dir / f"{prd_id}.md"
+            path.write_text(markdown, encoding="utf-8")
+            result = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", prd_id])
+        assert result.exit_code == 0, result.output
+        sources[prd_id] = path
+    return sources
+
+
 class TestPrdFindDecisions:
+    def test_find_decisions_three_prd_collision_scoped_cli_json_and_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_three_decision_prds(tmp_path)
+
+        explicit = _invoke_cmd(
+            tmp_path, ["prd", "find-decisions", "--prd", "v0.2", "--json"]
+        )
+
+        assert explicit.exit_code == 0, explicit.output
+        data = json.loads(explicit.output)["data"]
+        assert data["prd_id"] == "v0.2"
+        assert data["prd_source"] == "v0.2"
+        assert {item["id"] for item in data["decisions"]} >= {"ND-001"}
+        assert "second-choice" in next(
+            item["text"] for item in data["decisions"] if item["id"] == "ND-001"
+        )
+        assert "default-choice" not in explicit.output
+        assert "first-choice" not in explicit.output
+
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+        selected = _invoke_cmd(tmp_path, ["prd", "find-decisions", "--json"])
+        assert selected.exit_code == 0, selected.output
+        selected_data = json.loads(selected.output)["data"]
+        assert selected_data["prd_id"] == "v0.1"
+        assert "first-choice" in selected.output
+        assert "second-choice" not in selected.output
+
+        human = _invoke_cmd(
+            tmp_path, ["prd", "find-decisions", "--prd", "v0.2"]
+        )
+        assert human.exit_code == 0, human.output
+        assert "PRD: v0.2" in human.output
+        assert "--prd v0.2" in human.output
+
+    def test_find_decisions_single_named_prd_resolves_without_flag(
+        self, tmp_path: Path
+    ) -> None:
+        _do_init(tmp_path)
+        source_dir = tmp_path / ".anvil" / "prds"
+        source_dir.mkdir()
+        (source_dir / "solo.md").write_text(
+            _PRD_WITH_DECISIONS.replace("which format?", "solo-choice"),
+            encoding="utf-8",
+        )
+        parsed = _invoke_cmd(tmp_path, ["prd", "parse", "--prd", "solo"])
+        assert parsed.exit_code == 0, parsed.output
+
+        result = _invoke_cmd(tmp_path, ["prd", "find-decisions", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] == "solo"
+        assert "solo-choice" in result.output
+
     def test_clean_prd_exits_zero_with_zero_total(self, tmp_path: Path) -> None:
         """A PRD with no markers, no open questions, no missing fields →
         exit 0 with a summary line that mentions 0 total."""
@@ -3994,6 +4077,80 @@ def _events_text(tmp_path: Path) -> str:
 
 
 class TestPrdResolveDecisionBackprop:
+    def test_resolve_decision_anvil_prd_mutates_only_selected_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sources = _seed_three_decision_prds(tmp_path)
+        before = {prd_id: path.read_bytes() for prd_id, path in sources.items()}
+        monkeypatch.setenv("ANVIL_PRD", "v0.1")
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "prd",
+                "resolve-decision",
+                "ND-001",
+                "--resolution",
+                "YAML",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] == "v0.1"
+        assert data["continuation"]["parse_argv"][-2:] == ["--prd", "v0.1"]
+        assert sources["default"].read_bytes() == before["default"]
+        assert sources["v0.2"].read_bytes() == before["v0.2"]
+        assert sources["v0.1"].read_bytes() != before["v0.1"]
+        assert "YAML" in sources["v0.1"].read_text(encoding="utf-8")
+
+    def test_resolve_decision_custom_file_records_selected_prd_and_continuation(
+        self, tmp_path: Path
+    ) -> None:
+        sources = _seed_three_decision_prds(tmp_path)
+        before = {prd_id: path.read_bytes() for prd_id, path in sources.items()}
+        custom = tmp_path / "custom-v02.md"
+        custom.write_text(
+            _PRD_WITH_DECISIONS.replace("which format?", "custom-choice"),
+            encoding="utf-8",
+        )
+
+        result = _invoke_cmd(
+            tmp_path,
+            [
+                "prd",
+                "resolve-decision",
+                "ND-001",
+                "--resolution",
+                "CBOR",
+                "--file",
+                str(custom),
+                "--prd",
+                "v0.2",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)["data"]
+        assert data["prd_id"] == "v0.2"
+        assert data["prd_source"] == "custom"
+        assert data["continuation"]["parse_argv"][-2:] == ["--prd", "v0.2"]
+        assert data["continuation"]["parse_argv"][3:5] == ["--file", str(custom)]
+        assert "custom-choice" not in custom.read_text(encoding="utf-8")
+        assert "CBOR" in custom.read_text(encoding="utf-8")
+        assert all(path.read_bytes() == before[prd_id] for prd_id, path in sources.items())
+        events = [
+            json.loads(line)
+            for line in (tmp_path / ".anvil" / "events.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        event = next(e for e in reversed(events) if e["action"] == "prd.decision_resolved")
+        assert event["target_id"] == "v0.2"
+        assert event["payload_json"]["prd_id"] == "v0.2"
+
     def test_backprop_marker_updates_prd_and_records_event(
         self, tmp_path: Path
     ) -> None:

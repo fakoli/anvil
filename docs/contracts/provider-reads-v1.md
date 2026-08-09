@@ -22,7 +22,7 @@ anvil describe --json
 The response must contain all of the following before a version-1 consumer
 continues:
 
-- `api_version == "11"`;
+- `api_version == "12"`;
 - `operation_catalog.catalog_version == 1`;
 - the required `operation_id` with `operation_version == 1`;
 - the exact version-1 input, output, and error schema resource paths published
