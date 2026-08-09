@@ -43,6 +43,10 @@ from anvil.state.sqlite import query_only_transaction
 
 EVENT_FRONTIER_DOMAIN_V1 = b"anvil.project-event-frontier.v1\0"
 _MAX_EVENT_RECORD_BYTES = PROVIDER_LIMITS_V1.max_snapshot_bytes
+_MAX_RAW_TASK_JSON_CELL_BYTES = (
+    PROVIDER_LIMITS_V1.max_snapshot_bytes
+    + PROVIDER_LIMITS_V1.max_snapshot_bytes // 2
+)
 _MIN_TASK_RECORD_CANONICAL_BYTES = 245
 _SUMMARY_CANONICAL_BYTES = {
     "commands": 55,
@@ -758,7 +762,7 @@ def _preflight_storage_limits(
         "length(CAST(acceptance_criteria AS BLOB)), "
         "length(CAST(verification AS BLOB)))), 0) FROM tasks"
     ).fetchone()
-    if int(raw_cell_row[0]) > PROVIDER_LIMITS_V1.max_snapshot_bytes:
+    if int(raw_cell_row[0]) > _MAX_RAW_TASK_JSON_CELL_BYTES:
         _refuse(ReadErrorCode.invalid_hierarchy, field="tasks")
 
     raw_json_row = conn.execute(
