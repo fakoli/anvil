@@ -1246,9 +1246,29 @@ def _compensate_values(
     if not plan.git_metadata_available or plan.branch is None or plan.claim_start_sha is None:
         return
     branch_ref = f"refs/heads/{plan.branch}"
+    current_reflog_state = _branch_reflog_state(plan, cwd)
+    current_reflog_count = _branch_reflog_entry_count(plan, cwd)
+    marker_matches = bool(
+        branch_marker_created
+        and ownership_token is not None
+        and _branch_marker_matches(ownership_token, plan, cwd)
+    )
+    if branch_reflog_state is not None and current_reflog_state is not None:
+        owns_branch = current_reflog_state == branch_reflog_state
+    elif branch_reflog_state is not None:
+        # Expiring a reflog leaves a zero-entry log and is compatible with the
+        # invocation's durable marker. A delete/recreate ABA creates a fresh
+        # entry (often with an empty message), so it must not fall back to the
+        # marker merely because the original state tuple no longer parses.
+        owns_branch = current_reflog_count == 0 and marker_matches
+    elif branch_identity is not None and _branch_identity(plan) is not None:
+        owns_branch = _branch_identity(plan) == branch_identity
+    else:
+        owns_branch = marker_matches
     owns_worktree = bool(
         worktree_identity is not None
         and _worktree_identity(plan) == worktree_identity
+        and owns_branch
     )
     if worktree_created and owns_worktree and plan.target_path is not None:
         owner = next(
@@ -1289,20 +1309,6 @@ def _compensate_values(
                 caller,
                 code="checkout_compensation_failed",
             )
-    current_reflog_state = _branch_reflog_state(plan, cwd)
-    marker_matches = bool(
-        branch_marker_created
-        and ownership_token is not None
-        and _branch_marker_matches(ownership_token, plan, cwd)
-    )
-    if branch_reflog_state is not None and current_reflog_state is not None:
-        owns_branch = current_reflog_state == branch_reflog_state
-    elif branch_identity is not None and _branch_identity(plan) is not None:
-        owns_branch = bool(
-            _branch_identity(plan) == branch_identity
-        )
-    else:
-        owns_branch = marker_matches
     if branch_created and owns_branch and _ref_oid(branch_ref, cwd) == plan.claim_start_sha:
         branch_owner = next(
             (item for item in _worktree_topology(cwd) if item.branch_ref == branch_ref),
@@ -1435,11 +1441,33 @@ def _branch_reflog_state(plan: ClaimGitPlan, cwd: Path) -> tuple[int, str] | Non
     return (count, message) if count > 0 else None
 
 
+def _branch_reflog_entry_count(plan: ClaimGitPlan, cwd: Path) -> int | None:
+    """Return the current branch reflog entry count, including zero."""
+    if plan.branch is None:
+        return None
+    result = _run_git(
+        ["rev-list", "--walk-reflogs", "--count", f"refs/heads/{plan.branch}"],
+        cwd,
+    )
+    if (
+        result is None
+        or result.returncode != 0
+        or not result.stdout.strip().isdigit()
+    ):
+        return None
+    return int(result.stdout.strip())
+
+
 def _worktree_identity(plan: ClaimGitPlan) -> tuple[int, int, int] | None:
     if plan.target_path is None:
         return None
     git_dir = _git_dir(Path(plan.target_path))
-    return _artifact_identity(git_dir) if git_dir is not None else None
+    identity = _artifact_identity(git_dir) if git_dir is not None else None
+    # POSIX ctime changes when Git maintains files inside the administrative
+    # directory (notably `reflog expire`). Device + inode identify the same
+    # directory across that maintenance; branch continuity is checked
+    # independently before any worktree removal.
+    return (identity[0], identity[1], 0) if identity is not None else None
 
 
 def _checkout_identity(plan: ClaimGitPlan, cwd: Path) -> tuple[int, int, int] | None:

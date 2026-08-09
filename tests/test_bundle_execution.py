@@ -63,6 +63,31 @@ def _backend(root: Path) -> SqliteBackend:
     return backend
 
 
+def _init_git_repo_with_commit(root: Path) -> None:
+    subprocess.run(
+        ["git", "init", "-q"], cwd=root, check=True, capture_output=True
+    )
+    (root / "README.md").write_text("bundle fixture\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=root, check=True, capture_output=True
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Bundle Test",
+            "-c",
+            "user.email=bundle-test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+
+
 def _append_raw(root: Path, event: Event) -> None:
     with (root / "events.jsonl").open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(event.model_dump_json() + "\n")
@@ -2184,9 +2209,7 @@ def test_bundle_claim_packet_and_progress_cli_share_coordinator_flow(
 ) -> None:
     state_dir = tmp_path / ".anvil"
     state_dir.mkdir()
-    subprocess.run(
-        ["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True
-    )
+    _init_git_repo_with_commit(tmp_path)
     backend = _backend(state_dir)
     try:
         _seed(backend)
@@ -2307,9 +2330,7 @@ def test_top_level_bundle_claim_human_lists_complete_continuation(
 ) -> None:
     state_dir = tmp_path / ".anvil"
     state_dir.mkdir()
-    subprocess.run(
-        ["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True
-    )
+    _init_git_repo_with_commit(tmp_path)
     backend = _backend(state_dir)
     try:
         _seed(backend)
