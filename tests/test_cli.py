@@ -4077,6 +4077,63 @@ def _events_text(tmp_path: Path) -> str:
 
 
 class TestPrdResolveDecisionBackprop:
+    def test_post_log_projection_failure_keeps_resolved_source_for_catchup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sqlite3
+
+        from anvil.state.backend import TransactionAborted
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        source = tmp_path / ".anvil" / "prd.md"
+        insert = SqliteBackend._insert_event_row
+
+        def fail_insert(self, conn, event, *, seq):  # type: ignore[no-untyped-def]
+            if event.action == "prd.decision_resolved":
+                raise sqlite3.OperationalError("injected post-log failure")
+            return insert(self, conn, event, seq=seq)
+
+        monkeypatch.setattr(SqliteBackend, "_insert_event_row", fail_insert)
+        with pytest.raises(TransactionAborted, match="log line remains"):
+            _invoke_cmd(
+                tmp_path,
+                ["prd", "resolve-decision", "ND-001", "--resolution", "JSON"],
+            )
+
+        assert "serialize inputs JSON" in source.read_text(encoding="utf-8")
+        assert b'"action":"prd.decision_resolved"' in (
+            tmp_path / ".anvil" / "events.jsonl"
+        ).read_bytes()
+
+    def test_concurrent_source_replace_during_append_is_reconciled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from anvil.state.sqlite import SqliteBackend
+
+        _do_init(tmp_path)
+        _write_prd(tmp_path, _PRD_WITH_DECISIONS)
+        _invoke_cmd(tmp_path, ["prd", "parse"])
+        source = tmp_path / ".anvil" / "prd.md"
+        append = SqliteBackend.append
+
+        def replace_during_append(self, draft):  # type: ignore[no-untyped-def]
+            source.write_text("external concurrent replacement\n", encoding="utf-8")
+            return append(self, draft)
+
+        monkeypatch.setattr(SqliteBackend, "append", replace_during_append)
+        result = _invoke_cmd(
+            tmp_path,
+            ["prd", "resolve-decision", "ND-001", "--resolution", "JSON"],
+        )
+
+        assert result.exit_code == 0, result.output
+        final_source = source.read_text(encoding="utf-8")
+        assert "serialize inputs JSON" in final_source
+        assert "external concurrent replacement" not in final_source
+
     def test_append_refusal_restores_exact_source_and_log(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

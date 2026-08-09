@@ -32,6 +32,7 @@ from anvil.state.models import ClaimGitMetadata
 
 _MAX_GIT_OBSERVATION_BYTES = 8 * 1024 * 1024
 _GIT_OBSERVATION_CHUNK_BYTES = 64 * 1024
+_GIT_PIPE_DRAIN_SECONDS = 0.25
 
 __all__ = [
     "ClaimGitPlan",
@@ -44,6 +45,7 @@ __all__ = [
     "canonical_git_root",
     "claim_git_metadata",
     "compensate_claim_plan",
+    "compensate_claim_plan_intent",
     "create_worktree_for_task",
     "resolve_claim_plan",
     "revalidate_claim_plan",
@@ -208,8 +210,13 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | N
             process.kill()
             process.wait()
         for reader in readers:
-            reader.join()
-        if timed_out or overflow.is_set() or read_failed.is_set():
+            reader.join(timeout=_GIT_PIPE_DRAIN_SECONDS)
+        if (
+            timed_out
+            or overflow.is_set()
+            or read_failed.is_set()
+            or any(reader.is_alive() for reader in readers)
+        ):
             return None
         return subprocess.CompletedProcess(
             command,
@@ -252,6 +259,16 @@ def _git_common_dir(cwd: Path) -> Path | None:
     return Path(result.stdout.strip()).resolve(strict=False)
 
 
+def _git_dir(cwd: Path) -> Path | None:
+    result = _run_git(
+        ["rev-parse", "--path-format=absolute", "--git-dir"],
+        cwd,
+    )
+    if result is None or result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip()).resolve(strict=False)
+
+
 def canonical_git_root(cwd: Path) -> Path | None:
     """Return the main worktree root shared by linked/nested callers."""
     if shutil.which("git") is None:
@@ -259,6 +276,22 @@ def canonical_git_root(cwd: Path) -> Path | None:
     common_dir = _git_common_dir(cwd)
     if common_dir is None:
         return None
+    git_dir = _git_dir(cwd)
+    root_result = _run_git(["rev-parse", "--show-toplevel"], cwd)
+    if (
+        git_dir is None
+        or root_result is None
+        or root_result.returncode != 0
+        or not root_result.stdout.strip()
+    ):
+        return None
+    caller_root = Path(root_result.stdout.strip()).resolve(strict=False)
+    # A main worktree may use a conventional .git directory, an absorbed
+    # submodule gitdir, or an arbitrary --separate-git-dir. In all three cases
+    # its absolute git-dir equals the common dir and show-toplevel is the real
+    # canonical checkout. Linked worktrees have a distinct per-worktree gitdir.
+    if _path_key(git_dir) == _path_key(common_dir):
+        return caller_root
     try:
         topology = _worktree_topology(cwd)
     except ClaimPlanError:
@@ -950,12 +983,12 @@ def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGit
     checkout_changed = False
     try:
         if not plan.branch_exists:
+            branch_created = True
             _mutate_git(
                 ["update-ref", branch_ref, plan.claim_start_sha, ""],
                 root,
                 code="branch_create_failed",
             )
-            branch_created = True
         if _ref_oid(branch_ref, root) != plan.claim_start_sha:
             raise ClaimPlanError(
                 "branch_moved", "Claim branch no longer identifies the planned start"
@@ -969,12 +1002,12 @@ def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGit
                 code="caller_head_unavailable",
             )
             if current_ref != branch_ref or current_sha != plan.claim_start_sha:
+                checkout_changed = True
                 _mutate_git(
                     ["checkout", "--no-guess", plan.branch],
                     root,
                     code="branch_checkout_failed",
                 )
-                checkout_changed = True
         elif plan.mode == "isolated":
             if plan.canonical_root is None or plan.target_path is None:
                 raise ClaimPlanError("claim_plan_incomplete", "Worktree plan is incomplete")
@@ -990,12 +1023,12 @@ def apply_claim_plan(plan: ClaimGitPlan, *, cwd: Path | None = None) -> ClaimGit
                     raise ClaimPlanError(
                         "target_path_occupied", "Claim worktree target is occupied"
                     )
+                worktree_created = True
                 _mutate_git(
                     ["worktree", "add", "--no-guess", str(target), plan.branch],
                     root,
                     code="worktree_create_failed",
                 )
-                worktree_created = True
             _validate_isolated_target(Path(plan.canonical_root), target, must_exist=True)
             owner = next(
                 (
@@ -1046,6 +1079,70 @@ def compensate_claim_plan(
         worktree_created=mutation.worktree_created,
         caller_checkout_changed=mutation.caller_checkout_changed,
         cwd=Path(cwd or mutation.plan.caller_path),
+    )
+
+
+def compensate_claim_plan_intent(
+    plan: ClaimGitPlan,
+    *,
+    cwd: Path | None = None,
+) -> None:
+    """Compensate exact plan-owned artifacts when no mutation result was returned."""
+    if not plan.git_metadata_available or plan.branch is None:
+        return
+    root = Path(cwd or plan.caller_path)
+    branch_ref = f"refs/heads/{plan.branch}"
+    branch_created = (
+        not plan.branch_exists
+        and plan.claim_start_sha is not None
+        and _ref_oid(branch_ref, root) == plan.claim_start_sha
+    )
+    topology = _normalize_topology_root(
+        _worktree_topology(root),
+        canonical_root=(
+            Path(plan.canonical_root) if plan.canonical_root is not None else None
+        ),
+        common_dir=(
+            Path(plan.git_common_dir) if plan.git_common_dir is not None else None
+        ),
+    )
+    target_owner = next(
+        (
+            item
+            for item in topology
+            if plan.target_path is not None
+            and _path_key(item.path) == _path_key(plan.target_path)
+        ),
+        None,
+    )
+    worktree_created = (
+        plan.mode == "isolated"
+        and plan.target_owner_branch is None
+        and target_owner is not None
+        and target_owner.branch_ref == branch_ref
+        and target_owner.head_sha == plan.claim_start_sha
+    )
+    current_ref = _symbolic_head(Path(plan.caller_worktree_path or root))
+    current_sha = _git_value(
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+        Path(plan.caller_worktree_path or root),
+        code="caller_head_unavailable",
+    )
+    checkout_changed = (
+        plan.mode == "shared"
+        and current_ref == branch_ref
+        and current_sha == plan.claim_start_sha
+        and (
+            plan.caller_head_ref != current_ref
+            or plan.caller_head_sha != current_sha
+        )
+    )
+    _compensate_values(
+        plan,
+        branch_created=branch_created,
+        worktree_created=worktree_created,
+        caller_checkout_changed=checkout_changed,
+        cwd=root,
     )
 
 

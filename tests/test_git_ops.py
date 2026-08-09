@@ -701,11 +701,14 @@ class TestWorkspaceLayoutGitOps:
         assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
         plan = resolve_claim_plan("T001", "Set up project structure", cwd=project)
 
+        real_apply = git_ops.apply_claim_plan
+
         def cancel(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
+            real_apply(_plan, cwd=cwd)
             raise KeyboardInterrupt
 
         monkeypatch.setattr(git_ops, "apply_claim_plan", cancel)
-        result = runner.invoke(app, ["claim", "T001", "--json"])
+        result = runner.invoke(app, ["claim", "T001", "--worktree", "--json"])
 
         assert result.exit_code != 0
         backend = _open_backend(_resolve_state_dir(project))
@@ -842,11 +845,16 @@ class TestWorkspaceLayoutGitOps:
         )
         assert created.exit_code == 0, created.output
 
+        real_apply = git_ops.apply_claim_plan
+
         def cancel(_plan, *, cwd=None):  # type: ignore[no-untyped-def]
+            real_apply(_plan, cwd=cwd)
             raise KeyboardInterrupt
 
         monkeypatch.setattr(git_ops, "apply_claim_plan", cancel)
-        result = runner.invoke(app, ["claim", "B001", "--bundle", "--json"])
+        result = runner.invoke(
+            app, ["claim", "B001", "--bundle", "--worktree", "--json"]
+        )
 
         assert result.exit_code != 0
         backend = _open_backend(_resolve_state_dir(project))
@@ -856,6 +864,54 @@ class TestWorkspaceLayoutGitOps:
             assert backend.list_active_claims() == []
             task = backend.get_task("T001")
             assert task is not None and task.status.value == "ready"
+        finally:
+            backend.close()
+
+    def test_non_git_bundle_preserves_explicit_branch_intent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        from anvil.cli import app
+        from anvil.cli._helpers import _open_backend, _resolve_state_dir
+
+        project = tmp_path / "project"
+        project.mkdir()
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("ANVIL_STATE_LAYOUT", "workspace")
+        monkeypatch.delenv("ANVIL_ROOT", raising=False)
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+        assert runner.invoke(app, ["init", "--with-sample"]).exit_code == 0
+        created = runner.invoke(
+            app,
+            ["bundle", "create", "B001", "T001", "--prd", "default", "--json"],
+        )
+        assert created.exit_code == 0, created.output
+
+        result = runner.invoke(
+            app,
+            [
+                "claim",
+                "B001",
+                "--bundle",
+                "--branch",
+                "my-bundle-branch",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert _json.loads(result.stdout)["data"]["branch"] == "my-bundle-branch"
+        backend = _open_backend(_resolve_state_dir(project))
+        try:
+            claim = backend.get_bundle_claim("B001")
+            assert claim is not None and claim.branch == "my-bundle-branch"
         finally:
             backend.close()
 
@@ -976,6 +1032,27 @@ class TestResolveClaimPlan:
         finally:
             compensate_claim_plan(mutation, cwd=submodule)
 
+    def test_separate_git_dir_uses_real_main_worktree_root(
+        self, tmp_path: Path
+    ) -> None:
+        project = tmp_path / "repo"
+        metadata = tmp_path / "metadata"
+        project.mkdir()
+        _git(project, "init", "--separate-git-dir", str(metadata), ".")
+        _git(project, "config", "user.email", "test@example.com")
+        _git(project, "config", "user.name", "Test User")
+        (project / "README.md").write_text("initial\n", encoding="utf-8")
+        _git(project, "add", ".")
+        _git(project, "commit", "-m", "initial")
+
+        assert canonical_git_root(project) == project.resolve()
+        plan = resolve_claim_plan("T004", "Separate gitdir", cwd=project, worktree=True)
+        mutation = apply_claim_plan(plan, cwd=project)
+        try:
+            assert mutation.worktree_created is True
+        finally:
+            compensate_claim_plan(mutation, cwd=project)
+
     def test_git_observation_refuses_output_over_internal_cap(
         self,
         git_repo: Path,
@@ -989,6 +1066,27 @@ class TestResolveClaimPlan:
         assert worktree_mod._run_git(  # noqa: SLF001
             ["status", "--porcelain=v1", "--untracked-files=all"], git_repo
         ) is None
+
+    def test_interrupt_after_worktree_subprocess_compensates_attempted_artifacts(
+        self,
+        git_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        plan = resolve_claim_plan("T005", "Interrupt", cwd=git_repo, worktree=True)
+        mutate = worktree_mod._mutate_git  # noqa: SLF001
+
+        def interrupt_after(args, cwd, *, code):  # type: ignore[no-untyped-def]
+            mutate(args, cwd, code=code)
+            if args[:2] == ["worktree", "add"]:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(worktree_mod, "_mutate_git", interrupt_after)
+        with pytest.raises(KeyboardInterrupt):
+            apply_claim_plan(plan, cwd=git_repo)
+
+        assert plan.target_path is not None
+        assert not Path(plan.target_path).exists()
+        assert not _ref_exists(git_repo, f"refs/heads/{plan.branch}")
 
     def test_claim_plan_dirty_isolated_is_read_only(self, git_repo: Path) -> None:
         dirty = git_repo / "untracked.txt"

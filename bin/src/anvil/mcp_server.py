@@ -1324,6 +1324,7 @@ def claim_task(
             ClaimPlanError,
             apply_claim_plan,
             claim_git_metadata,
+            compensate_claim_plan_intent,
             resolve_claim_plan,
             revalidate_claim_plan,
         )
@@ -1408,10 +1409,13 @@ def claim_task(
                 try:
                     apply_claim_plan(plan, cwd=project_dir)
                 except BaseException:
-                    manager.release(
-                        result.claim.id,
-                        reason="transactional Git claim failed",
-                    )
+                    try:
+                        manager.release(
+                            result.claim.id,
+                            reason="transactional Git claim failed",
+                        )
+                    finally:
+                        compensate_claim_plan_intent(plan, cwd=project_dir)
                     raise
         except ClaimPlanError as exc:
             raise ToolError(f"{exc.code}: {exc}") from exc
@@ -4670,6 +4674,7 @@ def claim_bundle(
         ClaimPlanError,
         apply_claim_plan,
         claim_git_metadata,
+        compensate_claim_plan_intent,
         resolve_claim_plan,
         revalidate_claim_plan,
     )
@@ -4731,10 +4736,13 @@ def claim_bundle(
                 try:
                     apply_claim_plan(plan, cwd=project_dir)
                 except BaseException:
-                    manager.release(
-                        bundle_id,
-                        reason="transactional Git claim failed",
-                    )
+                    try:
+                        manager.release(
+                            bundle_id,
+                            reason="transactional Git claim failed",
+                        )
+                    finally:
+                        compensate_claim_plan_intent(plan, cwd=project_dir)
                     raise
         except ClaimPlanError as exc:
             raise ToolError(f"bundle_error: {exc.code}: {exc}") from exc

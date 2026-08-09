@@ -146,6 +146,7 @@ def claim(
         ClaimPlanError,
         apply_claim_plan,
         claim_git_metadata,
+        compensate_claim_plan_intent,
         resolve_claim_plan,
         revalidate_claim_plan,
     )
@@ -256,7 +257,7 @@ def claim(
                     revalidate_claim_plan(plan, cwd=resolved_cwd)
                     bundle_result = bundle_manager.claim(
                         task_id,
-                        branch=metadata.branch if metadata is not None else None,
+                        branch=metadata.branch if metadata is not None else branch,
                         worktree_path=(
                             metadata.worktree_path if metadata is not None else None
                         ),
@@ -265,10 +266,13 @@ def claim(
                     try:
                         apply_claim_plan(plan, cwd=resolved_cwd)
                     except BaseException:
-                        bundle_manager.release(
-                            task_id,
-                            reason="transactional Git claim failed",
-                        )
+                        try:
+                            bundle_manager.release(
+                                task_id,
+                                reason="transactional Git claim failed",
+                            )
+                        finally:
+                            compensate_claim_plan_intent(plan, cwd=resolved_cwd)
                         raise
             except ClaimPlanError as exc:
                 if json_output:
@@ -494,7 +498,7 @@ def claim(
                     task_id,
                     expected_files=expected_files,
                     force=force,
-                    branch=metadata.branch if metadata is not None else None,
+                    branch=metadata.branch if metadata is not None else branch,
                     worktree_path=(
                         metadata.worktree_path if metadata is not None else None
                     ),
@@ -504,10 +508,13 @@ def claim(
                 try:
                     apply_claim_plan(plan, cwd=resolved_cwd)
                 except BaseException:
-                    manager.release(
-                        result.claim.id,
-                        reason="transactional Git claim failed",
-                    )
+                    try:
+                        manager.release(
+                            result.claim.id,
+                            reason="transactional Git claim failed",
+                        )
+                    finally:
+                        compensate_claim_plan_intent(plan, cwd=resolved_cwd)
                     raise
         except ClaimPlanError as exc:
             if json_output:

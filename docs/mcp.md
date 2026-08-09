@@ -33,9 +33,10 @@ The toolset is organized by lifecycle phase:
 - **Introspection** (`describe_surface`)
 
 Planning tools do not create branches or worktrees. `claim_task` and `claim_bundle`,
-however, use the same transactional Git claim plan as the CLI when `cwd` resolves to a
-Git repository: they may create/check out a claim branch or create/reuse the planned
-worktree. If Git is unavailable, the non-isolated state-only claim path remains usable.
+however, use the same transactional shared-branch claim plan as the CLI when `cwd`
+resolves to a Git repository: they may create or check out the claim branch. Isolated
+worktree creation remains CLI-only. If Git is unavailable, the non-isolated state-only
+claim path remains usable.
 
 ---
 
@@ -492,10 +493,11 @@ edge, drop a spurious one) before promoting tasks to `ready`, without hand-editi
 ### `claim_task`
 
 Acquires an exclusive lease on a task for the given actor. It first resolves a
-read-only Git plan, then revalidates that plan under the same cross-process lock used
-by `ClaimManager.claim`. State and the planned branch/worktree mutation therefore
-succeed together; a Git failure or interruption releases the claim and compensates
-only Git artifacts created by that invocation. Stale-claim reaping runs first.
+read-only shared-branch Git plan, then revalidates that plan under the same
+cross-process lock used by `ClaimManager.claim`. State and the planned branch mutation
+therefore succeed together; a Git failure or interruption releases the claim and
+compensates only Git artifacts created by that invocation. Isolated worktrees require
+the CLI. Stale-claim reaping runs first.
 
 **Gate**: the task's owning PRD must be in `reviewed` or `approved` status. If the PRD is in
 any other status (e.g. `draft`) or missing, the tool raises a `ToolError` and no claim is

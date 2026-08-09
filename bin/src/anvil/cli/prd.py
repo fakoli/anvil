@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import tempfile
@@ -43,6 +44,7 @@ prd_app = typer.Typer(
 
 _ALLOWED_TERMINAL_TITLE_FORMAT_CONTROLS = {"\u200c", "\u200d"}
 _MAX_DECISION_SOURCE_BYTES = 2_097_152
+_MAX_DECISION_EVENT_BYTES = 16 * 1024 * 1024
 
 
 def _decision_prd_id(
@@ -156,6 +158,40 @@ def _replace_custom_decision_source(
             except OSError:
                 pass
     return hashlib.sha256(source_bytes).hexdigest()
+
+
+def _decision_event_was_appended(
+    events_path: Path,
+    *,
+    previous_size: int,
+    draft: EventDraft,
+) -> bool:
+    """Return whether one complete matching event became durable after an error."""
+    try:
+        with events_path.open("rb") as stream:
+            stream.seek(previous_size)
+            appended = stream.read(_MAX_DECISION_EVENT_BYTES + 1)
+    except OSError:
+        return False
+    if (
+        not appended
+        or len(appended) > _MAX_DECISION_EVENT_BYTES
+        or not appended.endswith(b"\n")
+        or appended.count(b"\n") != 1
+    ):
+        return False
+    try:
+        record = json.loads(appended.decode("utf-8", errors="strict"))
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(record, dict)
+        and record.get("actor") == draft.actor
+        and record.get("action") == draft.action
+        and record.get("target_kind") == draft.target_kind
+        and record.get("target_id") == draft.target_id
+        and record.get("payload_json") == draft.payload_json
+    )
 
 
 @prd_app.command("show")
@@ -1367,44 +1403,65 @@ def prd_resolve_decision(
             target_id=effective_prd_id,
             payload_json=payload,
         )
+
+        def replace_source(expected_sha256: str, replacement: str) -> str:
+            if file is None:
+                return replace_prd_source_for_id(
+                    state_dir,
+                    effective_prd_id,
+                    expected_sha256=expected_sha256,
+                    markdown=replacement,
+                ).source_sha256
+            return _replace_custom_decision_source(
+                prd_path,
+                expected_sha256=expected_sha256,
+                markdown=replacement,
+            )
+
+        def current_source_sha256() -> str:
+            current = (
+                ingest_prd_source_for_id(state_dir, effective_prd_id)
+                if file is None
+                else ingest_prd_source(prd_path)
+            )
+            return current.source_sha256
+
+        def ensure_source(expected_sha256: str, replacement: str) -> None:
+            observed = current_source_sha256()
+            if observed != expected_sha256:
+                replace_source(observed, replacement)
+            if current_source_sha256() != expected_sha256:
+                raise RuntimeError(
+                    "decision source changed during the locked event commit"
+                )
+
         try:
             with backend.claim_operation_lock():
-                if file is None:
-                    updated = replace_prd_source_for_id(
-                        state_dir,
-                        effective_prd_id,
-                        expected_sha256=source_sha256,
-                        markdown=resolution_result.markdown,
-                    )
-                    updated_sha256 = updated.source_sha256
-                else:
-                    updated_sha256 = _replace_custom_decision_source(
-                        prd_path,
-                        expected_sha256=source_sha256,
-                        markdown=resolution_result.markdown,
-                    )
+                events_path = state_dir / "events.jsonl"
+                log_size_before = events_path.stat().st_size
+                updated_sha256 = replace_source(
+                    source_sha256, resolution_result.markdown
+                )
                 try:
                     event = backend.append(draft)
                 except BaseException:
-                    try:
-                        if file is None:
-                            replace_prd_source_for_id(
-                                state_dir,
-                                effective_prd_id,
-                                expected_sha256=updated_sha256,
-                                markdown=markdown,
-                            )
-                        else:
-                            _replace_custom_decision_source(
-                                prd_path,
-                                expected_sha256=updated_sha256,
-                                markdown=markdown,
-                            )
-                    except Exception as rollback_exc:
-                        raise RuntimeError(
-                            "decision source rollback failed after event refusal"
-                        ) from rollback_exc
+                    if _decision_event_was_appended(
+                        events_path,
+                        previous_size=log_size_before,
+                        draft=draft,
+                    ):
+                        ensure_source(
+                            updated_sha256, resolution_result.markdown
+                        )
+                    else:
+                        try:
+                            replace_source(updated_sha256, markdown)
+                        except Exception as rollback_exc:
+                            raise RuntimeError(
+                                "decision source rollback failed after event refusal"
+                            ) from rollback_exc
                     raise
+                ensure_source(updated_sha256, resolution_result.markdown)
         except PrdSourceIngestError as exc:
             if json_output:
                 fail(cmd, str(exc), code=exc.code)
