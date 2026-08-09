@@ -48,6 +48,33 @@ def _slug(text: str) -> str:
     return (stripped or "task")[:40]
 
 
+def branch_name_for_task(
+    task_id: str,
+    title: str,
+    *,
+    branch_prefix: str = "agent",
+) -> str:
+    """Return the canonical unsuffixed branch name without touching Git."""
+    safe_id = safe_path_component(task_id).lower()
+    if branch_prefix:
+        name = f"{branch_prefix}/{safe_id}-{_slug(title)}"
+    else:
+        name = f"{safe_id}-{_slug(title)}"
+    return name[:80]
+
+
+def _branch_name_candidate(base_name: str, collision: int) -> str:
+    """Return one bounded branch candidate while preserving its suffix.
+
+    ``collision=0`` is the unsuffixed name.  Positive values map to the
+    existing ``-2`` through ``-21`` collision convention.
+    """
+    if collision == 0:
+        return base_name
+    suffix = f"-{collision + 1}"
+    return f"{base_name[: 80 - len(suffix)]}{suffix}"
+
+
 def is_git_available() -> bool:
     """True if the `git` binary is on PATH."""
     return shutil.which("git") is not None
@@ -138,23 +165,23 @@ def create_branch_for_task(
     if not is_git_repo(cwd):
         return BranchResult(None, False, "not a git repository")
 
-    safe_id = safe_path_component(task_id).lower()
-    if branch_prefix:
-        base_name = f"{branch_prefix}/{safe_id}-{_slug(title)}"
-    else:
-        base_name = f"{safe_id}-{_slug(title)}"
-    # Truncate to 80 chars total to stay well under git's 250-byte limit
-    # while keeping branch names scannable.
-    base_name = base_name[:80]
+    # Keep generation pure so the claim planner can freeze the same candidate
+    # without creating a ref or moving HEAD.
+    base_name = branch_name_for_task(
+        task_id,
+        title,
+        branch_prefix=branch_prefix,
+    )
 
     # Resolve a unique branch name (handle collisions with -2, -3, …).
     # Capped at _MAX_COLLISION_ATTEMPTS to prevent an unbounded loop on a
     # corrupted repo (critic flagged this).
-    branch = base_name
-    collision_suffix = 2
+    branch = _branch_name_candidate(base_name, 0)
+    collision = 0
     renamed = False
     while _branch_exists(branch, cwd):
-        if collision_suffix > _MAX_COLLISION_ATTEMPTS + 1:
+        collision += 1
+        if collision > _MAX_COLLISION_ATTEMPTS:
             return BranchResult(
                 None,
                 False,
@@ -163,8 +190,7 @@ def create_branch_for_task(
                     f"(tried up to suffix -{_MAX_COLLISION_ATTEMPTS})"
                 ),
             )
-        branch = f"{base_name}-{collision_suffix}"[:80]
-        collision_suffix += 1
+        branch = _branch_name_candidate(base_name, collision)
         renamed = True
 
     # Build the git command: check out onto the branch (checkout -b) or just

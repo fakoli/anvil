@@ -24,6 +24,8 @@ import click
 import typer
 from typer.core import TyperGroup
 
+from anvil.git_ops.worktree import canonical_git_root
+
 try:
     # Typer 0.27.1 vendors Click. Exceptions raised by callbacks must inherit
     # from the Click implementation Typer is actually running, while older
@@ -579,20 +581,9 @@ _STATE_LAYOUT_ENV = "ANVIL_STATE_LAYOUT"
 def _canonical_project_root(loc: Path) -> Path:
     """The shared project root for a location: the MAIN git worktree root (so all
     worktrees of one repo map to the same workspace), else ``loc`` itself."""
-    import subprocess
-
-    try:
-        r = subprocess.run(
-            ["git", "-C", str(loc), "rev-parse",
-             "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            # --git-common-dir points at the MAIN worktree's `.git`; its parent is
-            # the canonical repo root shared by every worktree.
-            return Path(r.stdout.strip()).parent.resolve()
-    except (OSError, subprocess.SubprocessError):
-        pass
+    root = canonical_git_root(loc)
+    if root is not None:
+        return root
     return loc.resolve()
 
 
