@@ -102,10 +102,10 @@ def read_project_snapshot(
         raise
     except FileNotFoundError:
         _refuse(ReadErrorCode.state_unavailable, field="state")
-    except SchemaMismatch:
-        _refuse(ReadErrorCode.schema_incompatible, field="schema")
     except SchemaProbeFailed:
         _refuse(ReadErrorCode.projection_not_converged, field="projection")
+    except SchemaMismatch:
+        _refuse(ReadErrorCode.schema_incompatible, field="schema")
     except (sqlite3.Error, OSError):
         _refuse(ReadErrorCode.state_unavailable, field="state")
     except (CanonicalJsonRefusal, ValidationError, TypeError, ValueError):

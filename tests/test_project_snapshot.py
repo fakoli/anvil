@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 from typer.testing import CliRunner
 
 import anvil.project_snapshot as snapshot_module
@@ -25,6 +26,7 @@ from anvil.read_contracts import (
     lowered_limits,
     snapshot_response_canonical_bytes,
 )
+from anvil.state.backend import SchemaProbeFailed
 from anvil.state.models import Event, EventDraft
 from anvil.state.sqlite import SqliteBackend
 
@@ -253,6 +255,14 @@ def _state_bytes(root: Path) -> tuple[bytes, bytes]:
     )
 
 
+def _read_error_schema() -> dict[str, object]:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "bin/src/anvil/_data/contracts/provider-reads/v1/read-error.schema.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_project_snapshot_cli_success_is_closed_json_and_read_only(
     cli_populated: tuple[Path, Path],
 ) -> None:
@@ -343,6 +353,7 @@ def test_project_snapshot_cli_limit_refusal_has_no_partial_payload(
         "message": "A provider read limit was exceeded.",
     }
     assert "payload" not in result.stdout
+    Draft202012Validator(_read_error_schema()).validate(error)
     assert _state_bytes(state_dir) == before
 
 
@@ -490,6 +501,21 @@ def test_missing_and_incompatible_state_return_closed_errors(
         read_project_snapshot(root)
     assert isinstance(incompatible.value.error, ReadErrorV1)
     assert incompatible.value.error.code is ReadErrorCode.schema_incompatible
+
+
+def test_schema_probe_failure_is_projection_refusal_not_schema_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_probe(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise SchemaProbeFailed("bounded test refusal")
+
+    monkeypatch.setattr(snapshot_module, "query_only_transaction", fail_probe)
+    with pytest.raises(ProjectSnapshotError) as refusal:
+        read_project_snapshot(tmp_path)
+    assert isinstance(refusal.value.error, ReadErrorV1)
+    assert refusal.value.error.code is ReadErrorCode.projection_not_converged
+    assert refusal.value.error.field == "projection"
 
 
 def test_log_ahead_refuses_without_healing(populated: SqliteBackend) -> None:

@@ -10,10 +10,13 @@ import threading
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 from typer.testing import CliRunner
 
+import anvil.prd_content as content_module
 from anvil.cli import app
 from anvil.prd_content import PRD_CONTENT_DIGEST_DOMAIN, PrdContentRefusal, read_prd_content
+from anvil.state.backend import SchemaProbeFailed
 from anvil.state.hashing import canonical_json_bytes
 from anvil.state.schema import SCHEMA_VERSION
 from anvil.state.sqlite import SqliteBackend
@@ -91,6 +94,14 @@ def _digest(source_digest: str, selector: dict, returned: bytes) -> str:  # type
         + b"\0"
         + returned
     ).hexdigest()
+
+
+def _read_error_schema() -> dict[str, object]:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "bin/src/anvil/_data/contracts/provider-reads/v1/read-error.schema.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_prd_show_full_preserves_exact_persisted_bytes_and_digest(
@@ -242,6 +253,7 @@ def test_prd_show_expected_digest_and_lowered_limit_are_fail_closed(
     stale = _show(tmp_path, "--expected-digest", "0" * 64)
     assert stale.exit_code == 1
     assert _payload(stale)["error"]["code"] == "stale_digest"
+    Draft202012Validator(_read_error_schema()).validate(_payload(stale)["error"])
 
     limited = _show(tmp_path, "--limit", "12")
     refusal = _payload(limited)
@@ -468,6 +480,20 @@ def test_prd_content_refuses_incompatible_schema_without_migration(
         read_prd_content(state_dir, "default")
     assert caught.value.error.code.value == "schema_incompatible"
     assert _manifest(state_dir) == before
+
+
+def test_prd_content_schema_probe_failure_is_projection_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_probe(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise SchemaProbeFailed("bounded test refusal")
+
+    monkeypatch.setattr(content_module, "query_only_transaction", fail_probe)
+    with pytest.raises(PrdContentRefusal) as caught:
+        read_prd_content(tmp_path, "default")
+    assert caught.value.error.code.value == "projection_not_converged"
+    assert caught.value.error.field == "projection"
 
 
 def test_prd_show_malformed_database_never_exposes_raw_exception_or_path(

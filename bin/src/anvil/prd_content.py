@@ -453,10 +453,10 @@ def read_prd_content(
         raise _refuse(ReadErrorCode.projection_not_converged, field="projection") from exc
     except FileNotFoundError as exc:
         raise _refuse(ReadErrorCode.state_unavailable, field="state") from exc
-    except SchemaMismatch as exc:
-        raise _refuse(ReadErrorCode.schema_incompatible, field="schema") from exc
     except SchemaProbeFailed as exc:
         raise _refuse(ReadErrorCode.projection_not_converged, field="projection") from exc
+    except SchemaMismatch as exc:
+        raise _refuse(ReadErrorCode.schema_incompatible, field="schema") from exc
     except (sqlite3.Error, OSError) as exc:
         raise _refuse(ReadErrorCode.state_unavailable, field="state") from exc
 
