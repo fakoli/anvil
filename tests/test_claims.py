@@ -474,6 +474,73 @@ class TestNextReadyExcludingActiveFiles:
     next_claimable's filters — the helper behind the finish/submit next_ready
     field (T014)."""
 
+    def test_expired_foreign_lock_matches_primary_offer(self, tmp_path: Path) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(
+                conn,
+                task_id="T001",
+                status="claimed",
+                likely_files=["src/shared.py"],
+            )
+            _insert_active_claim_raw(
+                conn,
+                claim_id="C001",
+                task_id="T001",
+                actor="other-agent",
+                expected_files=["src/shared.py"],
+                lease_expires_at=_T0 - timedelta(minutes=1),
+            )
+            _insert_task_raw(
+                conn,
+                task_id="T002",
+                status="ready",
+                likely_files=["src/shared.py"],
+            )
+            conn.close()
+
+            manager = _make_manager(b)
+            assert manager.next_claimable().id == "T002"
+            assert manager.next_ready_excluding_active_files().id == "T002"
+        finally:
+            b.close()
+
+    def test_full_tie_uses_same_id_tiebreak_as_primary_offer(
+        self, tmp_path: Path
+    ) -> None:
+        b = _make_backend(tmp_path)
+        try:
+            _setup_project(b)
+            _setup_prd(b)
+            conn = sqlite3.connect(str(tmp_path / "state.db"))
+            _insert_feature_raw(conn)
+            _insert_task_raw(
+                conn,
+                task_id="TLOCK",
+                status="claimed",
+                likely_files=["src/locked.py"],
+            )
+            _insert_active_claim_raw(
+                conn,
+                claim_id="C001",
+                task_id="TLOCK",
+                actor="other-agent",
+                expected_files=["src/locked.py"],
+            )
+            _insert_task_raw(conn, task_id="TZZZ", status="ready")
+            _insert_task_raw(conn, task_id="TAAA", status="ready")
+            conn.close()
+
+            manager = _make_manager(b)
+            assert manager.next_claimable().id == "TAAA"
+            assert manager.next_ready_excluding_active_files().id == "TAAA"
+        finally:
+            b.close()
+
     def test_excludes_task_overlapping_another_agents_claim(
         self, tmp_path: Path
     ) -> None:

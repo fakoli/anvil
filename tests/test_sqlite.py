@@ -5788,6 +5788,42 @@ class TestTaskRejectionProvenanceState:
                 if event["action"] == "task.applied"
                 and event["payload_json"]["decision"] == "accepted"
             )
+            for label, remove_version, expected_error in [
+                ("null-version", False, "explicit-null schema_version"),
+                ("missing-version", True, "unversioned review provenance"),
+            ]:
+                version_events = json.loads(json.dumps(raw_events))
+                version_accepted = next(
+                    event
+                    for event in reversed(version_events)
+                    if event["action"] == "task.applied"
+                    and event["payload_json"]["decision"] == "accepted"
+                )
+                if remove_version:
+                    version_accepted["payload_json"].pop("schema_version")
+                else:
+                    version_accepted["payload_json"]["schema_version"] = None
+                version_dir = tmp_path / label
+                version_dir.mkdir()
+                version_log = version_dir / "events.jsonl"
+                version_log.write_text(
+                    "".join(
+                        json.dumps(event, separators=(",", ":")) + "\n"
+                        for event in version_events
+                    ),
+                    encoding="utf-8",
+                )
+                version_backend = SqliteBackend(
+                    db_path=str(version_dir / "state.db"),
+                    events_path=str(version_log),
+                    clock=_make_clock(),
+                )
+                try:
+                    with pytest.raises(TransactionAborted, match=expected_error):
+                        version_backend.initialize()
+                finally:
+                    version_backend.close()
+
             stripped_events = json.loads(json.dumps(raw_events))
             stripped_accepted = next(
                 event

@@ -281,6 +281,36 @@ def test_rejection_provenance_replays_exactly_and_tampering_fails_closed(
         json.loads(line)
         for line in replay_log.read_text(encoding="utf-8").splitlines()
     ]
+    for label, remove_version, expected_error in [
+        ("rejection-null-version", False, "explicit-null schema_version"),
+        ("rejection-missing-version", True, "unversioned review provenance"),
+    ]:
+        version_events = json.loads(json.dumps(raw_events))
+        if remove_version:
+            version_events[-1]["payload_json"].pop("schema_version")
+        else:
+            version_events[-1]["payload_json"]["schema_version"] = None
+        version_dir = tmp_path / label
+        version_dir.mkdir()
+        version_log = version_dir / "events.jsonl"
+        version_log.write_text(
+            "".join(
+                json.dumps(event, separators=(",", ":")) + "\n"
+                for event in version_events
+            ),
+            encoding="utf-8",
+        )
+        version_backend = SqliteBackend(
+            db_path=str(version_dir / "state.db"),
+            events_path=str(version_log),
+            clock=FrozenClock(_T0),
+        )
+        try:
+            with pytest.raises(TransactionAborted, match=expected_error):
+                version_backend.initialize()
+        finally:
+            version_backend.close()
+
     null_events = json.loads(json.dumps(raw_events))
     null_events[-1]["payload_json"]["rejection"] = None
     null_dir = tmp_path / "rejection-null"

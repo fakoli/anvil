@@ -426,7 +426,12 @@ class ClaimManager:
         if base is None:
             return None
 
-        active_claims = self._backend.list_active_claims()
+        now = self._clock.now()
+        active_claims = [
+            claim
+            for claim in self._backend.list_active_claims()
+            if claim.lease_expires_at > now
+        ]
         # Files locked by an active claim, keyed by owning actor so we can skip
         # our own claims (re-suggesting work we already hold is not a conflict).
         # Spans ALL PRDs: a foreign lock in another partition still excludes a
@@ -476,10 +481,10 @@ class ClaimManager:
         if not candidates:
             return None
 
-        def _sort_key(t: Task) -> tuple[int, int, datetime.datetime]:
+        def _sort_key(t: Task) -> tuple[int, int, datetime.datetime, str]:
             priority_rank = _PRIORITY_ORDER.get(t.priority, 0)
             complexity = t.scores.complexity if t.scores.complexity is not None else 6
-            return (-priority_rank, complexity, t.created_at)
+            return (-priority_rank, complexity, t.created_at, t.id)
 
         candidates.sort(key=_sort_key)
         return candidates[0]

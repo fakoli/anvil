@@ -12373,15 +12373,16 @@ class SqliteBackend:
         )
 
         if payload.schema_version is None:
+            if "schema_version" in payload.model_fields_set:
+                raise TransactionAborted(
+                    "task.applied: explicit-null schema_version is invalid"
+                )
             if (
                 "review_attempt_id" in payload.model_fields_set
-                and payload.review_attempt_id is None
-            ) or (
-                "rejection" in payload.model_fields_set
-                and payload.rejection is None
+                or "rejection" in payload.model_fields_set
             ):
                 raise TransactionAborted(
-                    "task.applied: explicit-null review provenance is invalid"
+                    "task.applied: unversioned review provenance is invalid"
                 )
 
         if decision == "accepted":
